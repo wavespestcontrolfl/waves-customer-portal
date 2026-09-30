@@ -1809,6 +1809,82 @@ describe('r25 (round 25): bare "come back" re-entry forms; hyphen / dot month-da
   });
 });
 
+describe('r26 (round 26): relative dates in historical thread rows resolve against the row\'s own date', () => {
+  const FACTS = { serviceDate: '2026-09-29', products: [], unverifiedCount: 0 };
+  const forInbound = (rows, today = '2026-09-30', inbound = ['Can the dogs go out now?']) => labelFactsLib.labelFactsForInbound(FACTS, inbound, today, rows);
+  test('a Sep 15 row "you sprayed yesterday" meant Sep 14: another visit than the Sep 29 facts', () => {
+    expect(forInbound([{ text: 'You sprayed yesterday', date: '2026-09-15T15:00:00Z' }])).toBeNull();
+  });
+  test('a Sep 30 row "you sprayed yesterday" meant Sep 29: the facts are kept', () => {
+    expect(forInbound([{ text: 'You sprayed yesterday', date: '2026-09-30T15:00:00Z' }])).toBe(FACTS);
+    expect(forInbound([{ text: 'You sprayed yesterday', date: new Date('2026-09-30T15:00:00Z') }])).toBe(FACTS);
+    // ET date, not UTC: 00:30 UTC on Oct 1 is still Sep 30 in New York
+    expect(forInbound([{ text: 'You sprayed yesterday', date: '2026-10-01T00:30:00Z' }], '2026-10-01')).toBe(FACTS);
+  });
+  test('an unknown / unparseable timestamp with a relative reference is another visit; without one the row is fine', () => {
+    for (const date of [null, undefined, 'not a date', '']) {
+      expect([date, forInbound([{ text: 'You sprayed yesterday', date }])]).toEqual([date, null]);
+      expect([date, forInbound([{ text: 'this morning?', date }])]).toEqual([date, null]);
+      expect([date, forInbound([{ text: 'it was Friday', date }])]).toEqual([date, null]);
+      expect([date, forInbound([{ text: '3 days ago', date }])]).toEqual([date, null]);
+      expect(forInbound([{ text: 'Thanks, see you soon', date }])).toBe(FACTS);
+    }
+  });
+  test('today / this morning / N days ago / a bare weekday in a dated row resolve against that row\'s date', () => {
+    expect(forInbound([{ text: 'sprayed this morning', date: '2026-09-29T14:00:00Z' }])).toBe(FACTS); // a Sep 29 row: the visit day
+    expect(forInbound([{ text: 'sprayed this morning', date: '2026-09-30T14:00:00Z' }])).toBeNull();
+    expect(forInbound([{ text: 'that was 2 days ago', date: '2026-10-01T14:00:00Z' }], '2026-10-01')).toBe(FACTS);
+    expect(forInbound([{ text: 'that was 2 days ago', date: '2026-09-20T14:00:00Z' }])).toBeNull();
+    expect(forInbound([{ text: 'you came Tuesday', date: '2026-10-01T14:00:00Z' }], '2026-10-01')).toBe(FACTS); // Sep 29 is a Tuesday, 2 days before the row
+    expect(forInbound([{ text: 'you came Tuesday', date: '2026-09-20T14:00:00Z' }])).toBeNull();
+    expect(forInbound([{ text: 'last week you sprayed', date: '2026-09-30T14:00:00Z' }])).toBeNull();
+  });
+  test('the CURRENT inbound still resolves against today; an inherited elliptical row uses its own date', () => {
+    expect(forInbound([], '2026-09-30', ['you sprayed yesterday, can the dogs go out?'])).toBe(FACTS);
+    expect(forInbound([], '2026-10-05', ['you sprayed yesterday, can the dogs go out?'])).toBeNull();
+    const dates = [null, '2026-09-15T15:00:00Z'];
+    expect(labelFactsLib.labelFactsForInbound(FACTS, ['is it ok now?', 'you sprayed yesterday'], '2026-09-30', [], dates)).toBeNull();
+    expect(labelFactsLib.labelFactsForInbound(FACTS, ['is it ok now?', 'you sprayed yesterday'], '2026-09-30', [], [null, '2026-09-30T15:00:00Z'])).toBe(FACTS);
+    expect(labelFactsLib.labelFactsForInbound(FACTS, ['is it ok now?', 'you sprayed yesterday'], '2026-09-30', [], [null, null])).toBeNull();
+  });
+  test('inboundRefersToOtherVisit with today null: relative words are unresolvable, dates and other text are read as usual', () => {
+    expect(labelFactsLib.inboundRefersToOtherVisit('yesterday', '2026-09-29', null)).toBe(true);
+    expect(labelFactsLib.inboundRefersToOtherVisit('Thanks!', '2026-09-29', null)).toBe(false);
+    expect(labelFactsLib.inboundRefersToOtherVisit('the 9/29 treatment', '2026-09-29', null)).toBe(false);
+    expect(labelFactsLib.inboundRefersToOtherVisit('the 8/15 treatment', '2026-09-29', null)).toBe(true);
+  });
+  describe('through generateGroundedDraft: the rows keep their timestamps', () => {
+    const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
+    const { etDateString } = require('../utils/datetime-et');
+    const PHONE = '+19415550100';
+    const NONE = 'LABEL FACTS (none on file for the last visit):';
+    const makeClient = (scripted) => { const queue = [...scripted]; return { messages: { create: () => Promise.resolve({ content: [{ text: JSON.stringify(queue.shift()) }] }) } }; };
+    const draft = (reply) => ({ reply, intended_actions: [], missing_info: null, offered_times: [] });
+    const yesterday = etDateString(new Date(Date.now() - 86400000));
+    const run = (smsHistory) => generateGroundedDraft({
+      client: makeClient([draft('Thanks!'), draft('Thanks!'), draft('Thanks!'), { supported: true, violations: [] }]),
+      context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], smsHistory },
+      inboundMessage: 'Can the dogs go out now?', inboundPhone: PHONE, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+    });
+    beforeEach(() => {
+      process.env[GATE] = 'true';
+      mockFetchLabelFacts.mockReset();
+      mockFetchLabelFacts.mockResolvedValue({ ...labelFacts([product()]), serviceDate: yesterday, customerId: 'cust-1', recordIds: ['r2'] });
+    });
+    const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
+    test('a row from today saying "yesterday" keeps the facts; one from 15 days ago, or with no timestamp, voids them (inbound and outbound rows)', async () => {
+      const row = (over) => ({ direction: 'inbound', body: 'You sprayed yesterday', fromPhone: PHONE, ...over });
+      expect((await run([row({ date: days(0) })])).factsBlock).not.toContain(NONE);
+      expect((await run([row({ date: days(15) })])).factsBlock).toContain(NONE);
+      expect((await run([row({})])).factsBlock).toContain(NONE);
+      expect((await run([row({ date: 'garbage' })])).factsBlock).toContain(NONE);
+      const out = (over) => ({ direction: 'outbound', body: 'We sprayed yesterday', toPhone: PHONE, ...over });
+      expect((await run([out({ date: days(0) })])).factsBlock).not.toContain(NONE);
+      expect((await run([out({ date: days(15) })])).factsBlock).toContain(NONE);
+    });
+  });
+});
+
 describe('r26: the follow-up deadline the real-answers prompt requires may trail a hand-off (the exact SLA_PHRASES of sms-followup-sla)', () => {
   const { SLA_PHRASES } = require('../services/sms-followup-sla');
   const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');

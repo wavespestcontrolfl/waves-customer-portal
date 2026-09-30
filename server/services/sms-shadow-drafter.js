@@ -1425,8 +1425,9 @@ function readInboundThread(context, inboundMessage, inboundPhone) {
   // and an outbound row is judged whoever it was sent to (a reply to another number is shown in the same thread), so any other-visit
   // reference in it means none on file.
   const rendered = (context?.smsHistory || []).slice(0, 10).filter((m) => m && typeof m.body === 'string' && m.body.trim());
-  const shown = rendered.filter((m) => m.direction === 'outbound' || (m.direction === 'inbound' && sender && phoneIdentityKey(m.fromPhone) === sender)).map((m) => m.body);
-  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], shown, unreadable: !sender || (recent.length > 0 && !mine.length), mixed, noSender: !sender, hasInboundRows: (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound') };
+  // Each row keeps its own timestamp: its relative words ("you sprayed yesterday") mean the day IT was sent, not today.
+  const shown = rendered.filter((m) => m.direction === 'outbound' || (m.direction === 'inbound' && sender && phoneIdentityKey(m.fromPhone) === sender)).map((m) => ({ text: m.body, date: m.date ?? null }));
+  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], dates: [null, ...mine.map((m) => m.date ?? null)], shown, unreadable: !sender || (recent.length > 0 && !mine.length), mixed, noSender: !sender, hasInboundRows: (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound') };
 }
 
 // A thread that cannot be read for this sender fails closed silently, so say so once per draft (ids and a reason only - no message text).
@@ -2378,7 +2379,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // A rendered thread with another number's (or an unattributable) inbound message gets none on file whatever the
   // current message says: the model reads that message too.
   const labelFacts = thread.mixed || (thread.unreadable && labelFactsLib.inboundIsElliptical(askedTexts))
-    ? null : labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts, undefined, thread.shown);
+    ? null : labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts, undefined, thread.shown, thread.dates);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole

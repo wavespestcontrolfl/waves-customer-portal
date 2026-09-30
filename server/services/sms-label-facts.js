@@ -1450,6 +1450,9 @@ const otherYmd = (v, month, day, year) => month !== v.month || day !== v.day || 
 // Year captured after a month-name date: a four-digit year (group a) or an apostrophe'd two-digit one (group b).
 const tailYear = (a, b) => a || b;
 
+// The patterns whose meaning depends on the day the message was sent.
+const RELATIVE_REFERENCES = [YESTERDAY_RE, SAME_DAY_RE, DAYS_AGO_RE, QUALIFIED_WEEKDAY_RE, WEEKDAY_ABBR_RE];
+
 // Every way a message can point at a visit: a pattern, and a resolver that says
 // whether ONE match names a visit other than the facts' own. The message refers
 // to another visit when any match of any pattern does. `v` = { date, today,
@@ -1495,14 +1498,22 @@ const VISIT_REFERENCES = [
  * The facts a draft may render for `inboundText`: null (none on file) when the
  * text points at another visit or is not in English (the sentences are English).
  */
-function labelFactsForInbound(labelFacts, inbound, today = etDateString(), renderedTexts = []) {
-  if (labelFacts && (inboundOverCap(inbound) || inboundOverCap(renderedTexts))) return null;
+function labelFactsForInbound(labelFacts, inbound, today = etDateString(), renderedTexts = [], inboundDates = []) {
+  const renderedText = (r) => (r && typeof r === 'object' ? r.text : r);
+  if (labelFacts && (inboundOverCap(inbound) || inboundOverCap(renderedTexts.map(renderedText)))) return null;
   if (!labelFacts) return null;
   const texts = Array.isArray(inbound) ? inbound : [inbound];
+  // A historical row's relative words ("you sprayed yesterday", "this morning", "3 days ago", "Friday") mean the day the row was SENT, so a row
+  // with a known timestamp resolves them against its own ET date and one with an unknown / unparseable timestamp (null) cannot be resolved at
+  // all: a relative reference in it names another visit. The CURRENT message (index 0) and a row given without a date resolve against `today`.
+  const rowToday = (date) => { const d = date instanceof Date ? date : new Date(date ?? NaN); return Number.isNaN(d.getTime()) ? null : etDateString(d); };
   // a short follow-up ("is it okay now?") is about whatever the thread was, so the thread's visit references count too;
   // and every earlier message the model is SHOWN (`renderedTexts`, any age) is read for a visit reference as well
-  const refs = [...(inboundIsElliptical(texts) ? texts : texts.slice(0, 1)), ...renderedTexts];
-  const otherVisit = refs.some((text) => inboundRefersToOtherVisit(text, labelFacts.serviceDate, today));
+  const refs = [
+    ...(inboundIsElliptical(texts) ? texts : texts.slice(0, 1)).map((text, i) => ({ text, today: i > 0 && i < inboundDates.length ? rowToday(inboundDates[i]) : today })),
+    ...renderedTexts.map((r) => (r && typeof r === 'object' ? { text: r.text, today: rowToday(r.date) } : { text: r, today })),
+  ];
+  const otherVisit = refs.some((r) => inboundRefersToOtherVisit(r.text, labelFacts.serviceDate, r.today));
   return otherVisit || looksNonEnglish(texts[0]) || !isVerifiablyEnglish(texts[0]) || isUnverifiedLanguageInbound(texts) ? null : labelFacts;
 }
 
@@ -1516,11 +1527,17 @@ function inboundRefersToOtherVisit(inboundText, visitDate, today = etDateString(
   if (!text || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDate || ''))) return false;
   const visit = new Date(`${visitDate}T12:00:00Z`);
   const [year, month, day] = visitDate.split('-').map(Number);
+  const rawText = canonText(inboundText);
+  // `today` null = the message's own date is unknown: a relative reference (yesterday, today, this morning, N days / hours ago, a weekday)
+  // cannot be resolved, so it names another visit; with none present nothing below reads `today`.
+  if (today === null) {
+    if (RELATIVE_REFERENCES.some((re) => [...text.matchAll(re)].length)) return true;
+    today = visitDate;
+  }
   const v = {
     date: visitDate, today, weekday: WEEKDAYS[visit.getUTCDay()], year, month, day,
     sinceVisit: Math.round((new Date(`${today}T12:00:00Z`) - visit) / 86400000),
   };
-  const rawText = canonText(inboundText);
   return VISIT_REFERENCES.some((ref) => [...(ref.raw ? rawText : text).matchAll(ref.re)].some((m) => ref.differs(m, v)));
 }
 
