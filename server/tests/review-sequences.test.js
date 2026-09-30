@@ -7069,6 +7069,15 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
       expect(out).toMatchObject({ ok: true, sent: true });
     });
 
+    test('a manual create() WITHOUT a visit anchors at the newest completed visit: a click after that visit refuses the SMS even though the row is brand new', async () => {
+      const mock = makeMock({ customers: [customer], service_records: [{ ...record, status: 'completed' }], review_requests: [click({ sms_sent_at: null })] });
+      db.mockImplementation(mock);
+      const row = await ReviewService.create({ customerId: 'clk-1', triggeredBy: 'admin', delayMinutes: 0 }).catch((e) => ({ err: e }));
+      if (row.err) return expect(row.err.message).not.toBeUndefined(); // a gate refusal precedes the send in this harness
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(row.sendOutcome).toMatchObject({ sent: false, failed: 'review_link_clicked' });
+    });
+
     test('the operator send path reports why: a suppressed create() carries sendOutcome.failed = review_link_clicked', async () => {
       const mock = makeMock({ customers: [customer], service_records: [record], review_requests: [click({ sms_sent_at: null })] });
       db.mockImplementation(mock);

@@ -78,13 +78,23 @@ async function newestCompletedVisitAnchor(customerId, database = db) {
 }
 
 // The guard for an ask described by a review_requests row (sendSMS, follow-ups,
-// the inline email leg, the composer seam). The visit anchor always wins; the
-// row's own creation is only the fallback when it has no visit.
+// the inline email leg, the composer seam). The visit anchor always wins. A row
+// with no visit (a manual create(), an Intelligence Bar or composer ask) is about
+// the customer's newest completed visit, or about whatever led to it being
+// minted, so it anchors at the EARLIER of that visit and the row's own creation:
+// a click since either point means the customer already went to Google.
 async function askSuppressedByClick(request, database = db) {
   if (!request?.customer_id) return false;
-  const anchor = (await visitAnchor({
+  let anchor = await visitAnchor({
     serviceRecordId: request.service_record_id, scheduledServiceId: request.scheduled_service_id,
-  }, database)) || (request.created_at ? new Date(request.created_at) : null);
+  }, database);
+  if (!anchor) {
+    const candidates = [
+      await newestCompletedVisitAnchor(request.customer_id, database),
+      request.created_at ? new Date(request.created_at) : null,
+    ].filter((d) => d && !Number.isNaN(d.getTime()));
+    anchor = candidates.length ? new Date(Math.min(...candidates.map((d) => d.getTime()))) : null;
+  }
   return reviewLinkClickedSince(request.customer_id, anchor, database);
 }
 
