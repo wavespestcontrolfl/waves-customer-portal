@@ -36,6 +36,8 @@ function chain(firstImpl) {
 }
 
 let mockLastSvcChain = null;
+// Order of lock vs. the liveness read, per test.
+let mockEvents = [];
 let mockLastTechChain = null;
 
 // scheduled_services.technician_id and technicians rows are independently
@@ -48,9 +50,12 @@ function prime({
 } = {}) {
   // The card is written inside db.transaction; the trx is the same stub.
   db.transaction = jest.fn(async (fn) => fn(db));
+  // SET LOCAL lock_timeout + the per-visit advisory lock (push transaction).
+  db.raw = jest.fn(async (sql) => { mockEvents.push(/pg_advisory_xact_lock/.test(sql) ? 'lock' : 'raw'); });
   db.mockImplementation((table) => {
     if (table === 'scheduled_services as s') {
       // The last check right before the push.
+      mockEvents.push('liveness');
       const c = {};
       for (const m of ['join', 'where', 'whereNotIn']) c[m] = jest.fn(() => c);
       c.first = jest.fn(async () => (alertableAtPush ? { id: 'svc-1' } : null));
@@ -132,8 +137,12 @@ describe('notifyTechVisitPrepPhotos', () => {
       }));
       // Delivered through the visit's shared queue, keyed by the service id.
       expect(mockEnqueue).toHaveBeenCalledWith('svc-1', expect.any(Function));
-      // The visit row is read FOR SHARE inside the card's transaction.
-      expect(db.transaction).toHaveBeenCalledTimes(1);
+      // Two transactions: the card's (visit row read FOR SHARE inside it),
+      // then the push's, which only holds the visit's advisory lock.
+      expect(db.transaction).toHaveBeenCalledTimes(2);
+      // Same lock key as a visit notice's push for this stop, so a photo
+      // alert and a move/cancel push never interleave across instances.
+      expect(db.raw).toHaveBeenCalledWith('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', ['tech-visit-push:svc-1']);
       expect(mockLastSvcChain.forShare).toHaveBeenCalled();
       // The technician row too, so an office-only edit can't slip in.
       expect(mockLastTechChain.forShare).toHaveBeenCalled();
@@ -178,6 +187,23 @@ describe('notifyTechVisitPrepPhotos', () => {
       await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(mockInsertCard).not.toHaveBeenCalled();
       expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    });
+
+    test('the liveness check runs UNDER the visit push lock, just before the send', async () => {
+      mockEvents = [];
+      prime();
+      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
+      expect(mockEvents.indexOf('lock')).toBeGreaterThan(-1);
+      expect(mockEvents.lastIndexOf('liveness')).toBeGreaterThan(mockEvents.indexOf('lock'));
+      expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    });
+
+    test('a lock error still sends the alert (fail open) and never throws', async () => {
+      prime();
+      db.raw = jest.fn(async (sql) => { if (/pg_advisory_xact_lock/.test(sql)) throw new Error('lock timeout'); });
+      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
+      expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sending unordered'));
     });
 
     test('a reassignment before the provider handoff (beforeDispatch) → card written, NO push', async () => {

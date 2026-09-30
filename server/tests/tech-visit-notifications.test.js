@@ -18,13 +18,33 @@ const db = require('../models/db');
 const transactions = [];
 db.transaction = (fn) => { transactions.push(fn); return fn(db); };
 db.raw = jest.fn((sql) => sql);
+let cardSeq = 0;
 function cardsTable() {
   return {
-    insert: jest.fn(async (row) => {
-      const ok = await mockWriteCard(row.technician_id, { ...row, payload: JSON.parse(row.payload) });
-      if (ok === false) throw new Error('insert failed');
-    }),
+    insert: jest.fn((row) => ({
+      returning: jest.fn(async () => {
+        const ok = await mockWriteCard(row.technician_id, { ...row, payload: JSON.parse(row.payload) });
+        if (ok === false) throw new Error('insert failed');
+        cardSeq += 1;
+        return [{ id: `card-${cardSeq}` }];
+      }),
+    })),
   };
+}
+// The push recheck's "is there a NEWER card for this tech + visit?" query,
+// answered by newerCard (null = this notice's card is still the newest).
+let newerCard = null;
+let lastNewerChain = null;
+function newerCardsQuery() {
+  const c = {};
+  for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot']) c[m] = jest.fn(() => c);
+  c.first = jest.fn(async () => newerCard);
+  lastNewerChain = c;
+  return c;
+}
+// The advisory-lock statements the push ran, in order.
+function lockCalls() {
+  return db.raw.mock.calls.filter(([sql]) => /pg_advisory_xact_lock/.test(sql));
 }
 const logger = require('../services/logger');
 const notices = require('../services/tech-visit-notifications');
@@ -46,6 +66,7 @@ function chain(first, firstImpl = null) {
 
 // technicians rows by id; one visit row for scheduled_services.
 function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT } = {}) {
+  newerCard = null;
   db.mockImplementation((table) => {
     if (table === 'technicians') {
       const c = chain(null);
@@ -54,6 +75,7 @@ function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT } = 
     }
     if (table === 'scheduled_services as s') return chain(visit);
     if (table === 'tech_notifications') return cardsTable();
+    if (table === 'tech_notifications as n') return newerCardsQuery();
     throw new Error(`unexpected table ${table}`);
   });
 }
@@ -263,6 +285,83 @@ describe('notifyTechVisitChange', () => {
     expect(out).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('push failed'));
+  });
+
+  test('the push runs under the visit\'s cross-instance advisory lock, and a current push is sent', async () => {
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    expect(lockCalls()).toEqual([['SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', ['tech-visit-push:visit-1']]]);
+    // The newer-card check compares against the card this notice wrote.
+    expect(lastNewerChain.whereNot).toHaveBeenCalledWith('n.id', 'card-' + cardSeq);
+    expect(lastNewerChain.whereRaw).toHaveBeenCalledWith("n.payload->>'visit_id' = ?", ['visit-1']);
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+  });
+
+  test('a stale push is skipped when a NEWER card exists for the same tech and visit (the newer push lands)', async () => {
+    newerCard = { id: 'card-newer' };
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    // The card is durable; only the push is withheld.
+    expect(out).toEqual({ sent: true });
+    expect(mockWriteCard).toHaveBeenCalledTimes(1);
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('stale assigned push skipped'));
+  });
+
+  test('the push is skipped when the visit row no longer satisfies cardStands at send time', async () => {
+    // The card's own read (FOR SHARE, in its transaction) sees tech-1; the
+    // plain read under the push lock sees the visit already moved to tech-2.
+    db.mockImplementation((table) => {
+      if (table === 'technicians') {
+        const c = chain(null);
+        c.where = jest.fn((arg) => { c.first = jest.fn(async () => ({ 'tech-1': TECH, [ADAM_ID]: ADAM })[arg.id] || null); return c; });
+        return c;
+      }
+      if (table === 'scheduled_services as s') {
+        const c = chain(null);
+        c.first = jest.fn(async () => (c.forShare.mock.calls.length ? VISIT : { ...VISIT, technician_id: 'tech-2' }));
+        return c;
+      }
+      if (table === 'tech_notifications') return cardsTable();
+      if (table === 'tech_notifications as n') return newerCardsQuery();
+      throw new Error(`unexpected table ${table}`);
+    });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    expect(mockWriteCard).toHaveBeenCalledTimes(1);
+    expect(lockCalls()).toHaveLength(1);
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test('a recheck ERROR still sends (a missed alert is worse than a rare misordered one) and never throws', async () => {
+    newerCard = null;
+    const realFirst = newerCardsQuery;
+    db.mockImplementation((table) => {
+      if (table === 'tech_notifications as n') { const c = realFirst(); c.first = jest.fn(async () => { throw new Error('boom'); }); return c; }
+      if (table === 'technicians') {
+        const c = chain(null);
+        c.where = jest.fn((arg) => { c.first = jest.fn(async () => ({ 'tech-1': TECH, [ADAM_ID]: ADAM })[arg.id] || null); return c; });
+        return c;
+      }
+      if (table === 'scheduled_services as s') return chain(VISIT);
+      if (table === 'tech_notifications') return cardsTable();
+      throw new Error(`unexpected table ${table}`);
+    });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
+  });
+
+  test('a lock ERROR still sends, unordered, and never throws', async () => {
+    db.raw.mockImplementation((sql) => { if (/pg_advisory_xact_lock/.test(sql)) throw new Error('lock timeout'); return sql; });
+    try {
+      const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+      expect(out).toEqual({ sent: true });
+      expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sending unordered'));
+    } finally {
+      db.raw.mockImplementation((sql) => sql);
+    }
   });
 
   test('a read failure never throws to the writer', async () => {

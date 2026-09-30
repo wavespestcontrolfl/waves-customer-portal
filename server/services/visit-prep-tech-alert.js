@@ -35,6 +35,15 @@
  * technician resolves the stop's — one card per submission, never one per
  * member.
  *
+ * Ordering: the push is delivered under the SAME per-visit advisory lock as
+ * a visit notice's push (utils/tech-visit-push-lock.js, keyed on the
+ * scheduled_services id both use), so a photo alert and a move/cancel notice
+ * for one stop can never interleave across app instances; the in-process
+ * chain (enqueueForVisit) only orders within one instance. The staleness
+ * rules (still that tech's stop, still on the route, still assignable) run
+ * under the lock as the sender's beforeDispatch, immediately before the
+ * provider handoff.
+ *
  * Never throws; every failure is caught and logged so a card or push
  * problem can never surface to (or block) the customer's request.
  */
@@ -45,6 +54,7 @@ const { isAssignable, applyAssignable } = require('./technician-eligibility');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { dateOnlyString } = require('../utils/datetime-et');
 const { techAccessCutoff } = require('./technician-visit-scope');
+const { sendUnderVisitPushLock } = require('../utils/tech-visit-push-lock');
 
 const TYPE = 'customer_visit_photos';
 
@@ -148,13 +158,17 @@ async function sendPhotoAlert(scheduledServiceId) {
       // reassignment, cancellation or office-only edit committed up to
       // that point sends nothing. The card itself is re-scoped on every
       // feed read.
-      await PushService.sendToAdminUsers([technicianId], {
-        title: PUSH_TITLE,
-        body: '',
-        url: '/tech',
-        tag: `visit-prep-${scheduledServiceId}`,
-        priority: 'high',
-      }, { beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId) });
+      // Under the visit's cross-instance push lock (see the header). The
+      // liveness check stays in beforeDispatch, so it runs under the lock.
+      await sendUnderVisitPushLock(scheduledServiceId, {
+        send: () => PushService.sendToAdminUsers([technicianId], {
+          title: PUSH_TITLE,
+          body: '',
+          url: '/tech',
+          tag: `visit-prep-${scheduledServiceId}`,
+          priority: 'high',
+        }, { beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId) }),
+      });
     } catch (pushErr) {
       // The card is already durable — a push failure never loses it.
       logger.warn(`[visit-prep-tech-alert] push failed for tech ${technicianId} (card already written): ${pushErr.message}`);

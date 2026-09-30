@@ -22,6 +22,15 @@
  *   - a failure here never fails the write it follows: every hook runs after
  *     the caller's outermost commit and swallows its own errors.
  *
+ * Ordering: the feed row is written under a FOR SHARE recheck of the visit
+ * row (writeCard), so it is safe across app instances. The push is ordered
+ * per visit by a Postgres advisory lock (utils/tech-visit-push-lock.js) and
+ * re-checked under it (pushStillCurrent): a push the visit row now
+ * contradicts, or one a NEWER card for the same tech and visit has
+ * overtaken, is skipped — the newer change's own push is the one that lands.
+ * The in-process per-visit chain (enqueueForVisit) still orders notices
+ * within one instance.
+ *
  * Not covered here (deliberately): route-order shuffles (whole tech-day
  * rewrites, see route-reorder.js's zero-communication note) and series-scope
  * moves (rescheduleSeries) — both would fan out one card per stop.
@@ -33,6 +42,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 const { isAssignable } = require('./technician-eligibility');
 const { parseETDateTime, TZ, etParts, etDateString } = require('../utils/datetime-et');
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION } = require('./call-booking-source-actions');
+const { sendUnderVisitPushLock } = require('../utils/tech-visit-push-lock');
 
 const GATE = 'GATE_TECH_VISIT_NOTIFICATIONS';
 
@@ -261,7 +271,8 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
 // overlap (cron-lock.js), so an A→B card prepared on the old instance can
 // run after B→C committed through the new one. A card the row already
 // contradicts is dropped — the writer of the later change tells the tech
-// the current state, and the newest feed row is never stale. Returns the
+// the current state, and the newest feed row is never stale. The same rules
+// gate the PUSH again, under the visit's push lock (pushStillCurrent). Returns the
 // row's holder (technicians.id or null) when the card stands, else false.
 function cardStands({ kind, technicianId, snapshot, previousStatus }, row) {
   // A voice-agent booking is silent until the office confirms it
@@ -363,27 +374,59 @@ async function writeCard(notice) {
       newTechnicianName = next?.name || null;
     }
     const card = composeCard({ kind: notice.kind, visit, actorText: notice.actorText, previous: notice.previous, newTechnicianName, ended: stands.ended || null });
-    await trx('tech_notifications').insert({
+    const [inserted] = await trx('tech_notifications').insert({
       technician_id: notice.technicianId,
       type: notice.type,
       message: card.message,
       payload: JSON.stringify(card.payload),
-    });
-    return true;
+    }).returning('id');
+    // The inserted row's id: the push recheck asks whether a NEWER card for
+    // the same tech and visit exists (pushStillCurrent).
+    return { id: inserted && typeof inserted === 'object' ? inserted.id : inserted };
   });
 }
 
-// Best-effort push; the card is already durable when this runs.
-async function pushCard(notice) {
+// Is the push still the tech's current news, read UNDER the visit's push
+// lock? Two questions: (1) the visit row still satisfies cardStands for this
+// notice (the same rules that admitted the card — reused, not forked); (2) no
+// NEWER card exists for this tech and visit than the one this notice wrote
+// (a later change's card means its push is the one to land). Read plainly,
+// never FOR SHARE: a push in flight must not block a schedule write. The
+// newer-card test compares against the row's own created_at in SQL — a JS
+// Date would truncate its microseconds and mistake an older neighbour for a
+// newer one. Rejects on a DB error (the lock helper then sends anyway).
+async function pushStillCurrent(notice, conn) {
+  const row = await loadVisit(notice.visitId, conn);
+  if (!row || !cardStands(notice, row)) return false;
+  if (!notice.cardId) return true;
+  const newer = await conn('tech_notifications as n')
+    .where('n.technician_id', notice.technicianId)
+    .whereIn('n.type', Object.values(TYPE_BY_KIND))
+    .whereRaw("n.payload->>'visit_id' = ?", [String(notice.visitId)])
+    .whereNot('n.id', notice.cardId)
+    .whereRaw('(n.created_at, n.id) > (SELECT o.created_at, o.id FROM tech_notifications o WHERE o.id = ?)', [notice.cardId])
+    .first('n.id');
+  return !newer;
+}
+
+// Best-effort push; the card is already durable when this runs. Delivered
+// under the visit's cross-instance push lock; `checkCurrent(trx)` is the
+// recheck under it (a visit_* card passes pushStillCurrent; a tracking
+// notice, already re-verified by its detector, takes the lock alone).
+async function pushCard(notice, { checkCurrent = null } = {}) {
   try {
     const PushService = require('./push-notifications');
-    await PushService.sendToAdminUser(notice.technicianId, {
-      title: notice.pushTitle,
-      body: '',
-      url: '/tech',
-      tag: `visit-${notice.visitId}`,
-      priority: 'high',
+    const out = await sendUnderVisitPushLock(notice.visitId, {
+      isCurrent: checkCurrent,
+      send: () => PushService.sendToAdminUser(notice.technicianId, {
+        title: notice.pushTitle,
+        body: '',
+        url: '/tech',
+        tag: `visit-${notice.visitId}`,
+        priority: 'high',
+      }),
     });
+    if (out.stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
   }
@@ -397,13 +440,14 @@ async function deliver(notices) {
   let dropped = 0;
   for (const n of notices.filter((x) => x && x.ok)) {
     try {
-      if (await writeCard(n)) written.push(n);
+      const card = await writeCard(n);
+      if (card) written.push({ ...n, cardId: card.id || null });
       else dropped += 1;
     } catch (err) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
     }
   }
-  for (const n of written) await pushCard(n);
+  for (const n of written) await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
   return { written: written.length, dropped };
 }
 
@@ -448,9 +492,12 @@ async function notifyTechVisitChange(args = {}) {
 // hooks for the same visit (A→B, then B→C seconds later) each read the
 // tech, the visit, and the actor before writing; without a queue the later
 // change's reads can finish first and B would see "moved off" before its
-// stale "new visit". A per-visit promise chain (in-process — the portal
-// runs as one server) makes each visit's batch write, then push, before
-// the next batch starts. Entries clear themselves when the chain drains.
+// stale "new visit". A per-visit promise chain makes each visit's batch
+// write, then push, before the next batch starts. The chain is IN-PROCESS: it
+// orders notices within one app instance only. Across instances (two overlap
+// during a deploy) the cards are protected by writeCard's FOR SHARE recheck
+// and the pushes by the per-visit advisory lock + recheck in pushCard. Entries
+// clear themselves when the chain drains.
 const visitQueues = new Map();
 function enqueueForVisit(visitId, fn) {
   const key = String(visitId);
@@ -581,7 +628,7 @@ module.exports = {
   // commit order (one queue, not two).
   enqueueForVisit,
   recordTrackingNotice,
-  pushTrackingNotice: pushCard,
+  pushTrackingNotice: (notice) => pushCard(notice),
   // Reused by no-show-detector.js so a tracking notice reads the same "who
   // / when" a visit_* card does, instead of a second date formatter.
   formatWhen,
@@ -596,5 +643,5 @@ module.exports = {
   notifyAssignmentChange,
   notifyVisitRescheduled,
   notifyVisitCancelled,
-  _test: { formatWhen, composeCard, describeActor, visitQueues },
+  _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent },
 };
