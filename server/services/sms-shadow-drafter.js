@@ -927,8 +927,16 @@ function reserviceExcludedSpecialtyInPromise(text) {
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
-  if (!isReserviceOfferPromise(text)) return { ok: true, violations: [] };
   const actions = Array.isArray(intendedActions) ? intendedActions : [];
+  // Codex round-16 P2 (PR #5336): a draft whose intended_actions carry the re-service link action is
+  // ALWAYS validated, whether or not the detector recognizes the wording — otherwise a card the model
+  // worded in a way the detector misses ("have someone stop by again … no cost to you") skips this
+  // function, stores no promisedLanes snapshot, and the new-version send check then rejects it even
+  // while the customer is eligible. Such a draft derives its lane below (named → reported → the single
+  // bookable lane) or is rejected. Non-promise wording contributes no lanes/specialties (promiseText).
+  const promise = isReserviceOfferPromise(text);
+  if (!promise && !reserviceCarriesLinkAction(actions)) return { ok: true, violations: [] };
+  const promiseText = promise ? text : '';
   // Codex round-5 P2 (finding #3): the re-service link page shows the
   // customer its OWN real availability — a promise that ALSO offers or
   // books a specific slot right here is a second, conflicting offer (and a
@@ -960,13 +968,13 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   if (reportedReserviceExcludedSpecialty(inboundMessage)) {
     return { ok: false, violations: ['the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'] };
   }
-  if (reserviceExcludedSpecialtyInPromise(text)) {
+  if (reserviceExcludedSpecialtyInPromise(promiseText)) {
     return { ok: false, violations: ['the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'] };
   }
   const reportedLane = reportedReserviceLane(inboundMessage);
   // Codex r7: eligibility is per service line — a pest-only customer must
   // not be offered a free LAWN re-service (or the reverse).
-  const named = namedReserviceLanesInText(text);
+  const named = namedReserviceLanesInText(promiseText);
   if (named.length && reportedLane && !named.includes(reportedLane)) {
     return { ok: false, violations: [`the reply offers a free ${named.join(' and ')} re-service but the customer reported a ${reportedLane} issue`] };
   }
@@ -991,10 +999,14 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     if (reportedLane && !lanes.includes(reportedLane)) {
       return { ok: false, violations: [`the reply offers a free re-service but the customer reported a ${reportedLane} issue and FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
     }
-    if (!reportedLane) {
+    // Lane for a promise naming none: the customer's reported lane; for an action-only draft (wording
+    // the detector missed) also the single bookable lane, since no other lane exists to be ambiguous
+    // with. Nothing derivable → reject rather than publish a card with no snapshot.
+    const derivedLane = reportedLane || (!promise && lanes.length === 1 ? lanes[0] : null);
+    if (!derivedLane) {
       return { ok: false, violations: ['the reply offers a free re-service without naming which service line it covers, and the reported issue\'s service line could not be resolved from the customer\'s text — name the covered service line explicitly'] };
     }
-    promisedLanes = [reportedLane];
+    promisedLanes = [derivedLane];
   }
   // Codex round-1 P2 (c): a free-re-service PROMISE with no
   // {"type":"escalate","note":"send_reservice_link"} in intended_actions is

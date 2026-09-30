@@ -2706,6 +2706,54 @@ describe('free re-service is an entitlement resolved through the existing mechan
       });
     });
 
+    // Codex round-16 P2: an action-carrying draft is always validated and gets a snapshot.
+    describe('a draft carrying send_reservice_link with wording the detector misses', () => {
+      const missed = 'We will have someone stop by again for the ants, no cost to you.';
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const facts = (lanes) => `X\n${require('../services/sms-shadow-drafter').reserviceFactLine(lanes)}\nBILLING:`;
+
+      test('the phrasing really is one the body detector misses', () => {
+        expect(require('../services/sms-shadow-drafter').isReserviceOfferPromise(missed)).toBe(false);
+      });
+
+      test('action + pest report + pest bookable → snapshot [pest], and the card is then sendable', async () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const out = validateReserviceOffer({ reply: missed, factsBlock: facts(['pest']), intendedActions: sendLink, inboundMessage: 'the ants are back' });
+        expect(out.ok).toBe(true);
+        expect(out.promisedLanes).toEqual(['pest']);
+        loadWith({ lanes: ['pest'] });
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(agentDecisionSendBlockReason({
+          decision: { id: 'd1', customer_id: 'cust-1', suggested_message: missed, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: out.promisedLanes, intended_actions: sendLink }), prompt_version: 'house_voice_v12_real_answers2' },
+          outgoingBody: missed,
+        })).resolves.toBeNull();
+      });
+
+      test('no reported lane but a single bookable lane → that lane', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const out = validateReserviceOffer({ reply: missed, factsBlock: facts(['lawn']), intendedActions: sendLink, inboundMessage: '' });
+        expect(out.ok).toBe(true);
+        expect(out.promisedLanes).toEqual(['lawn']);
+      });
+
+      test('no derivable lane (two bookable lanes, unresolved report) → rejected, not published', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const out = validateReserviceOffer({ reply: missed, factsBlock: facts(['pest', 'lawn']), intendedActions: sendLink, inboundMessage: 'hello' });
+        expect(out.ok).toBe(false);
+      });
+
+      test('action but the customer is not eligible / reported a different lane → rejected', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        expect(validateReserviceOffer({ reply: missed, factsBlock: facts([]), intendedActions: sendLink, inboundMessage: 'the ants are back' }).ok).toBe(false);
+        expect(validateReserviceOffer({ reply: missed, factsBlock: facts(['lawn']), intendedActions: sendLink, inboundMessage: 'the ants are back' }).ok).toBe(false);
+      });
+
+      test('no action and a non-promise body is untouched', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        expect(validateReserviceOffer({ reply: missed, factsBlock: facts([]), intendedActions: [], inboundMessage: 'hello' }).ok).toBe(true);
+      });
+    });
+
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,
     // conjunctions, purpose clauses, new nouns, plurals, waive/comp wording), denials
     // and idioms. [sentence, isPromise, promisedLanes].
