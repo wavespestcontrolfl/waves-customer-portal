@@ -17,6 +17,9 @@ const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-cu
 const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
 
 const LIMIT = 50;
+// email_reply reads this many raw candidates before resolving them to the
+// customer, then applies LIMIT to what survives.
+const EMAIL_REPLY_RAW_LIMIT = LIMIT * 4;
 // A logged move: both dates present and either the date or the window
 // changed. Windows are logged as "start-end" text; compare on HH:MM.
 const LOGGED_MOVE_SQL = (t) => `${t}.original_date IS NOT NULL AND ${t}.new_date IS NOT NULL
@@ -328,7 +331,10 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
           `LOWER(er.to_address) LIKE '%' || (SELECT LOWER(TRIM(email)) FROM customers WHERE id = ? AND deleted_at IS NULL AND email IS NOT NULL) || '%'`,
           [customerId],
         ))
-        .orderBy('er.received_at', 'desc').limit(LIMIT + 1)
+        // A wider raw window than LIMIT: rows the resolver rejects below
+        // (internal forwards, mixed-recipient sends) must not crowd out an
+        // older valid reply, and raw overflow is reported as truncation.
+        .orderBy('er.received_at', 'desc').limit(EMAIL_REPLY_RAW_LIMIT + 1)
         .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
       const resolved = await Promise.all(candidates.map(async (row) => ({
         row, linkedCustomerId: await resolveEmailCustomerLink(conn, row),
@@ -339,12 +345,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // 16000-char body cap for the whole check).
       // A send with no words of its own (only quoted history, only a
       // signature) is no reply at all, so it never witnesses one.
-      return resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId))
+      const rows = resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId))
         .map(({ row }) => {
           const { body_html: _html, ...rest } = row;
           return { ...rest, body_text: stripQuotedAndSignature(emailPlainText(row)) };
         })
         .filter((row) => row.body_text);
+      rows.truncated = candidates.length > EMAIL_REPLY_RAW_LIMIT || rows.length > LIMIT;
+      return rows;
     })(),
     // Unowned commercial proposals are sent to the lead, not the customer
     // row; their delivery emails are reached through the estimate they name.
@@ -628,7 +636,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     // LIMIT); the combined array legitimately runs longer than LIMIT with
     // no leg having lost a row, so it carries its own `.truncated` flag
     // instead of the generic per-source length check (Codex round 1 P2).
-    const overflowed = type === 'payment' ? result.value.truncated : result.value.length > LIMIT;
+    const overflowed = typeof result.value.truncated === 'boolean' ? result.value.truncated : result.value.length > LIMIT;
     if (overflowed) failures.push(`${type}_truncated`);
     for (const row of type === 'payment' ? result.value : result.value.slice(0, LIMIT)) {
       const visitText = type === 'visit' ? `${row.service_type} on ${row.scheduled_date} at ${row.window_start}; status ${row.status}${row.moved_at ? '; moved after the request' : ''}${row.progressed_at ? '; en route/on site/completed after the request' : ''}${row.cancelled_at ? '; cancelled after the request' : ''}` : '';

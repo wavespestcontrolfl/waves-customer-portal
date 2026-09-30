@@ -394,6 +394,53 @@ postgres('Email commitments on PostgreSQL', () => {
     expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
   });
 
+  test('an inbound email keeps only asks made of Waves — the customer\'s own promise is not tracked', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: "Please schedule Friday; I'll send the photos", subject: 'Schedule' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [
+      { party: 'waves', kind: 'schedule_visit', description: 'Please schedule Friday', quote: 'Please schedule Friday',
+        basis: 'request', property_id: null, due_text: 'Friday', due_at: null, due_date: null, promise_firm: false, answered_by_payment: false },
+      { party: 'customer', kind: 'send_photos', description: "I'll send the photos", quote: "I'll send the photos",
+        basis: 'promise', property_id: null, due_text: null, due_at: null, due_date: null, promise_firm: true, answered_by_payment: false },
+    ], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    const rows = await mockPg('call_commitments').where({ email_id: email.id });
+    expect(rows.map((r) => r.party)).toEqual(['waves']);
+  });
+
+  test('a property added while the model reads the email leaves it for the next tick (no stale scope stamped)', async () => {
+    const [property] = await mockPg('customer_properties').insert({ customer_id: customerId,
+      address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('*');
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: 'Can I get a quote please', subject: 'Quote' });
+    dispatchWithFallback.mockImplementationOnce(async () => {
+      await mockPg('customer_properties').insert({ customer_id: customerId, address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true });
+      return { ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate', description: 'a quote',
+        quote: 'Can I get a quote please', basis: 'request', property_id: property.id, due_text: null, due_at: null,
+        due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } };
+    });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(await mockPg('call_commitments').where({ email_id: email.id })).toHaveLength(0);
+    expect((await mockPg('emails').where({ id: email.id }).first()).operational_analysis).toBeNull();
+  });
+
+  test('rejected thread sends never crowd a valid older staff reply out of the evidence window', async () => {
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const sourceAt = new Date(Date.now() - 3 * 3600000);
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', received_at: new Date(sourceAt.getTime() - 60000) });
+    const reply = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null, body_text: 'Yes, booked you for Friday',
+      label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + 60000) });
+    await mockPg('emails').insert(Array.from({ length: 55 }, (_, i) => ({ id: randomUUID(), gmail_id: gmailId(),
+      gmail_thread_id: inbound.gmail_thread_id, from_address: 'contact@wavespestcontrol.com', to_address: 'office@wavespestcontrol.com',
+      subject: 'Fwd', body_text: `internal note ${i}`, label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + (2 + i) * 60000) })));
+    const message = { id: randomUUID(), customer_id: customerId, direction: 'inbound', created_at: sourceAt,
+      from_phone: '+12025550101', to_phone: '+12025550101', any_customer_phone: true };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, { kind: 'other', party: 'waves', sms_context: { basis: 'request' } }, message, new Date());
+    expect(evidence.records.filter((r) => r.type === 'email_reply').map((r) => r.id)).toEqual([reply.id]);
+    expect(evidence.failures).not.toContain('email_reply_truncated');
+  });
+
   test('a staff promise follows a customer merge (email_customer_id is repointed; the jsonb snapshot is not)', async () => {
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
     const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',

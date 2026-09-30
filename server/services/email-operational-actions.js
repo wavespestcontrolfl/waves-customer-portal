@@ -133,7 +133,15 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     if (!stillOwned) return { skipped: 'source_changed' };
     const since = gateEnvTimestamp('GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE');
     if (!since || new Date(email.received_at) < since) return { skipped: 'outside_activation_window' };
-    const obligations = extracted.obligations;
+    // The properties the model was shown must still be the customer's active
+    // set under the lock: a property added or retired mid-extraction would
+    // stamp a stale scope, so leave the email for the next tick.
+    const liveProperties = await trx('customer_properties').where({ customer_id: customer.id, active: true }).pluck('id');
+    const shown = new Set(properties.map((p) => p.id));
+    if (liveProperties.length !== shown.size || liveProperties.some((id) => !shown.has(id))) return { skipped: 'source_changed' };
+    // This lane tracks asks made of Waves and Waves' own promises; a
+    // customer's own promise ("I'll send photos") is never refreshed here.
+    const obligations = extracted.obligations.filter((item) => item.party === 'waves');
     if (obligations.length) {
       await trx('call_commitments').insert(obligations.map((item) => {
         // Mirrors sms-operational-actions.js's own belt-and-suspenders check
