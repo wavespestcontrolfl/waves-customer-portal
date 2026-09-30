@@ -124,7 +124,9 @@ const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bz
 // same words maintained independently here — plus THANKS_FOR_PAYMENT_RE, so
 // "Thanks for processing my Zelle payment!" / "Thank you, the Zelle payment
 // cleared" read as a historical RECEIPT exactly like a bare verb does.
-const { RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus } = require('./payment-receipt-vocabulary');
+const {
+  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim,
+} = require('./payment-receipt-vocabulary');
 const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
 function classifyZelleClause(clause) {
@@ -140,7 +142,14 @@ function classifyZelleClause(clause) {
   // "For your Zelle payment, use old@example.com" names no offer VERB, but
   // a contact address is never something a historical receipt states.
   if (zelleBodyContacts(text).length) return 'offer';
-  if ((RECEIPT_VERB_RE.test(text) || THANKS_FOR_PAYMENT_RE.test(text)) && !ZELLE_INSTRUCTION_MARKER_RE.test(text)) return 'receipt';
+  // Codex round-7 P1 (PR #5331): receipt wording must identify an actual PAST
+  // PAYMENT — a receipt verb PLUS a payment noun / an amount / "your" / a date.
+  // A bare verb ("Yes, we've got Zelle", "we have Zelle") is an OFFER and gets
+  // the recipient + invoice recheck.
+  const namesPastPayment = /\b(?:payments?|transfers?|deposits?|your)\b/i.test(text)
+    || bodyAmountCents(text).length > 0
+    || /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\b\d{1,2}\/\d{1,2}\b/i.test(text);
+  if (((RECEIPT_VERB_RE.test(text) && namesPastPayment) || THANKS_FOR_PAYMENT_RE.test(text)) && !ZELLE_INSTRUCTION_MARKER_RE.test(text)) return 'receipt';
   // Ambiguous — mentions Zelle affirmatively but matches neither pattern —
   // fails closed as an OFFER (the stricter path).
   return 'offer';
@@ -269,7 +278,8 @@ async function amountFreeStatusClaimStale({
   // entirely (gratitude/scheduling copy on the auto-send lane).
   if (!mayAssertPaymentStatus(text)) return { stale: false };
   const hasStatusClaim = text.split(CLAUSE_SPLIT_RE)
-    .some((clause) => drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null);
+    .some((clause) => drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null
+      || paymentStatusPhraseClaim(clause) != null);
   if (!hasStatusClaim) return { stale: false };
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {

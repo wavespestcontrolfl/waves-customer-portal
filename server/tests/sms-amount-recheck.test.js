@@ -685,3 +685,30 @@ describe('Codex round-6 pre-push audit P1: a missing customer row / context is n
       .resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
   });
 });
+
+describe('Codex round-7 P1 #3: receipt wording must identify an actual past payment', () => {
+  test('"Yes, we\'ve got Zelle" / "we have Zelle" / "we take Zelle" are OFFERS (recipient + invoice rechecked)', () => {
+    for (const c of ["Yes, we've got Zelle", 'We have Zelle', 'Yes, we got Zelle set up', 'We take Zelle']) {
+      expect(classifyZelleClause(c)).toBe('offer');
+      expect(hasAffirmativeZelleMention(c)).toBe(true);
+    }
+    delete process.env.ZELLE_RECIPIENT;
+    expect(outgoingZelleStale("Yes, we've got Zelle")).toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+  });
+
+  test('real receipt wording still classifies as a receipt', () => {
+    for (const c of ['We got your Zelle payment.', 'We received your $120 Zelle from Sep 12.', "We've got your Zelle transfer.", 'Got your Zelle payment - thanks!']) {
+      expect(classifyZelleClause(c)).toBe('receipt');
+    }
+  });
+
+  test('a status phrase with no dollar figure ("still processing") reaches the strict binder at send time', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    const ctx = { billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid' }] } };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
+    replyQuotesUngroundedAmount.mockReturnValue(true);
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your payment is still processing.', strict: true, dbh: dbWithCustomer({ id: 'c1' }) }))
+      .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
+  });
+});

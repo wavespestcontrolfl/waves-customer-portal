@@ -1058,7 +1058,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1444,6 +1444,27 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     // r4 P1) or the same one (r8 P1: "$95 plus a fee of fifty dollars").
     if (suggestMode.hasPriceQuote(masked)) return true;
     const amounts = amountsIn(text);
+    // Codex round-7 P1 (PR #5331): every payment-status phrase the prompt
+    // permits (PAYMENT_STATUS_VOCABULARY — the SAME table the prompt line is
+    // built from) is bound to a CURRENT row with the status it requires. The
+    // paid family is the ack/receipt path below; the processing/pending and
+    // failed/declined families bind here, before the ack rules (so "is being
+    // processed" is a PENDING claim, never a paid "processed" ack). Rechecked
+    // at send time: outgoingAmountsStale / amountFreeStatusClaimStale call this
+    // function with FRESH context, so a row that has since settled or failed no
+    // longer backs "still processing".
+    const phraseClaim = paymentStatusPhraseClaim(masked, amounts.length > 0);
+    if (phraseClaim) {
+      if (billingUnavailable) return true;
+      const wanted = new Set(PAYMENT_STATUS_VOCABULARY[phraseClaim].rowStatuses);
+      const rows = (context?.billing?.recentPayments || []).filter((p) => p && wanted.has(String(p.status || '').toLowerCase()));
+      if (amounts.length) {
+        if (amounts.some((a) => !rows.some((p) => Math.round(Number(p.amount) * 100) === a))) return true;
+      } else if (!rows.length) {
+        return true;
+      }
+      continue;
+    }
     if (!amounts.length) {
       // An affirmative payment-received claim with no amount in THIS clause
       // names no specific payment — reject, not converged (see comment
@@ -1654,7 +1675,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const paymentMoneyExtra = realAnswersOn
     ? `
 - Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. A line marked failed or refunded means it did NOT go through — never say it was received. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
+- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. ${paymentStatusPromptLine()} A line marked failed or refunded means it did NOT go through — never say it was received. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
     : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.

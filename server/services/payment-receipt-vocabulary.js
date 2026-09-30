@@ -24,7 +24,7 @@
 // my Zelle payment!"/"Thank you, the payment cleared" is historical receipt
 // wording exactly like "we received your payment" is, whichever side typed
 // it and whichever of the two callers above is asking.
-const RECEIPT_VERBS = ['received', 'processed', 'went through', 'got', 'came through', 'cleared', 'posted', 'arrived'];
+const RECEIPT_VERBS = ['received', 'processed', 'went through', 'got', 'came through', 'cleared', 'posted', 'arrived', 'applied'];
 
 // Escapes the one thing that varies between entries — internal whitespace in
 // a two-word verb ("went through") — into a `\s+` gap so the pattern still
@@ -59,6 +59,54 @@ function paymentAckPatternSource() {
   ].join('|');
 }
 
+// ONE table of every payment-STATUS phrase a reply may use, and the Recent
+// payments row status(es) that phrase requires (Codex round-7 P1, PR #5331).
+// The drafter's system prompt is BUILT from this table (paymentStatusPromptLine)
+// and the classifier that validates a drafted/queued reply is BUILT from the
+// same table (pendingClaimRe / failedClaimRe / the paid list feeding
+// paymentAckPatternSource) — so the prompt can never permit a status phrase the
+// guard does not know: adding a phrase here adds it to both.
+//   paid    -> a row marked paid                      (received/applied/cleared/…)
+//   pending -> a row marked pending/processing        ("still processing", …)
+//   failed  -> a row marked failed/declined/refunded  ("didn't go through", …)
+const PAYMENT_STATUS_VOCABULARY = Object.freeze({
+  paid: Object.freeze({
+    rowStatuses: Object.freeze(['paid']),
+    phrases: Object.freeze([...RECEIPT_VERBS, 'all set', 'all paid', 'paid in full']),
+  }),
+  pending: Object.freeze({
+    rowStatuses: Object.freeze(['pending', 'processing', 'requires_action']),
+    phrases: Object.freeze(['still processing', 'is processing', 'currently processing', 'being processed', 'in process', 'pending', 'processing']),
+  }),
+  failed: Object.freeze({
+    rowStatuses: Object.freeze(['failed', 'declined', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed']),
+    phrases: Object.freeze(['failed', 'declined', "didn't go through", 'did not go through', 'was returned', 'bounced', 'unsuccessful']),
+  }),
+});
+const phrasePattern = (list) => list.map((v) => v.replace(/\s+/g, '\\s+').replace(/'/g, "['\u2019]")).join('|');
+// A status claim is only a PAYMENT claim when the clause also names a payment
+// noun (or a tender/amount handled by the caller) — "your invoice is pending"
+// or "we're processing your request" are not.
+const PAYMENT_NOUN_RE = /\b(?:payments?|transfers?|deposits?|charges?|zelle|ach|paid)\b/i;
+const PENDING_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY.pending.phrases)})\\b`, 'i');
+const FAILED_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY.failed.phrases)})\\b`, 'i');
+// null | 'pending' | 'failed' for a clause that asserts a payment is
+// processing / did not go through.
+function paymentStatusPhraseClaim(clause, hasAmount = false) {
+  const text = String(clause || '');
+  if (/\?/.test(text)) return null;
+  if (!hasAmount && !PAYMENT_NOUN_RE.test(text)) return null;
+  if (PENDING_PHRASE_RE.test(text)) return 'pending';
+  if (FAILED_PHRASE_RE.test(text)) return 'failed';
+  return null;
+}
+// The prompt sentence derived from the table above.
+function paymentStatusPromptLine() {
+  const q = (list) => list.map((p) => `"${p}"`).join(', ');
+  const V = PAYMENT_STATUS_VOCABULARY;
+  return `Payment-status wording and the Recent payments status each requires: say a payment was ${q(V.paid.phrases)} ONLY for a line marked ${V.paid.rowStatuses.join('/')}; say it is ${q(V.pending.phrases)} ONLY for a line marked ${V.pending.rowStatuses.join(' or ')}; say it ${q(V.failed.phrases)} ONLY for a line marked ${V.failed.rowStatuses.slice(0, 3).join(', ')}. Any other wording about a payment's status is not allowed.`;
+}
+
 // Cheap, drafter-free PRE-SCREEN for "could this body assert a payment
 // status/receipt fact at all?" (Codex round-6, PR #5331 — CI regression on
 // the gratitude auto-send lane). Every claim the drafter's
@@ -74,12 +122,15 @@ function paymentAckPatternSource() {
 // MUST stay a strict SUPERSET of those two drafter predicates — if either
 // gains a status phrase that avoids all three words, add its anchor here
 // (payment-receipt-vocabulary.test.js pins the current claim examples).
-const PAYMENT_STATUS_PRESCREEN_RE = /\b(?:payments?|paid|account)\b/i;
+const PAYMENT_STATUS_PRESCREEN_RE = /\b(?:payments?|paid|account|transfers?|deposits?|charges?|zelle|ach|processing|pending)\b/i;
 function mayAssertPaymentStatus(text) {
   return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || ''));
 }
 
 module.exports = {
+  PAYMENT_STATUS_VOCABULARY,
+  paymentStatusPhraseClaim,
+  paymentStatusPromptLine,
   mayAssertPaymentStatus,
   RECEIPT_VERBS,
   RECEIPT_VERB_RE,
