@@ -366,6 +366,60 @@ describe('classifyListing', () => {
     expect(stated.detail.mismatches[0]).toMatchObject({ field: 'phone', expected: WAVES_LOCATIONS.find((l) => l.id === 'venice').phone });
   });
 
+  describe('follow-ups from Codex round 3', () => {
+    const wavesName = '<h1>Waves Pest Control</h1>';
+    const ENT = (over) => ({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, ...over });
+    const via = (over) => classifyListing(page(`${wavesName}${ld(ENT(over))}`), candidatesFor({}));
+    const text = (body) => classifyListing(page(`${wavesName}<p>${BRAND.phone}</p>${body}`), candidatesFor({}));
+
+    test('a non-Florida address with an unrecognised suffix is shown, so not verified', () => {
+      const r = text('<p>99 Palm Terrace, Atlanta, GA 30303</p>');
+      expect(r.status).toBe('unverified');
+      expect(r.detail).toMatchObject({ reason: 'address_unconfirmed' });
+      expect(r.detail.seen).toContain('Atlanta, GA 30303');
+      expect(text('<p>Suite 5, Springfield IL 62704-1234</p>').status).toBe('unverified');
+    });
+
+    test('a page with no state + ZIP and no street-like string is still judged on name + phone', () => {
+      expect(text('<p>Serving Manatee County since 2019. Call 24/7.</p>').status).toBe('verified');
+      expect(text('<p>Order id 12345 shipped in 2 days</p>').status).toBe('verified'); // lowercase words are not states
+      expect(text('<p>PO 12345 and NO 54321 are reference numbers</p>').status).toBe('verified'); // not state codes
+      expect(text('<p>1 Main Terrace, Sarasota, FLORIDA 34236</p>').status).toBe('unverified'); // Florida in any case
+    });
+
+    test('a bare JSON-LD value object is ignored, not a crash', () => {
+      expect(text(ld({ '@value': null }) + ld([{ '@value': 'x' }])).status).toBe('verified');
+    });
+
+    test('JSON-LD value objects are unwrapped before entities are identified', () => {
+      const node = { '@type': 'LocalBusiness', name: { '@value': 'Waves Pest Control', '@language': 'en' }, telephone: [{ '@value': '(941) 555-0142' }], address: { streetAddress: { '@value': '99 Old Rd' }, addressLocality: { '@value': 'Tampa' } } };
+      const r = classifyListing(page(`${wavesName}<p>${BRAND.phone}</p>${ld(node)}`), candidatesFor({}));
+      expect(r.status).toBe('mismatched'); // the structured mismatch is not ignored
+      expect(r.detail.mismatches.map((m) => m.field)).toEqual(['phone', 'address', 'city']);
+      // a node identified ONLY by a value-object office phone is a Waves entity too
+      const byPhone = { '@type': 'LocalBusiness', name: 'Bradenton Office', telephone: { '@value': BRAND.phone }, address: { streetAddress: '99 Old Rd' } };
+      expect(classifyListing(page(`${wavesName}<p>${BRAND.phone}</p>${ld(byPhone)}`), candidatesFor({})).detail.mismatches.map((m) => m.field)).toContain('address');
+      expect(via({ name: { '@value': 'Waves Pest Control' }, telephone: { '@value': BRAND.phone } }).status).toBe('verified');
+    });
+
+    test('a combined "Suite #110" designator is stripped whole', () => {
+      const { normalizeStreet, parseAddress } = auditor._internals;
+      expect(normalizeStreet('13649 Luxe Ave Suite #110')).toBe('13649 luxe avenue');
+      expect(normalizeStreet('13649 Luxe Ave Ste. #B-2, Bradenton')).toBe('13649 luxe avenue bradenton');
+      expect(parseAddress('13649 Luxe Ave Suite #110, Bradenton, FL 34211')).toEqual({ street: '13649 luxe avenue', city: 'bradenton', region: 'fl', postal: '34211' });
+      expect(via({ address: { streetAddress: '13649 Luxe Ave Suite #110', addressLocality: 'Bradenton' } }).status).toBe('verified');
+      expect(text('<p>13649 Luxe Ave Suite #110, Bradenton, FL 34211</p>')).toMatchObject({ status: 'verified', detail: { address_checked: true } });
+    });
+
+    test('a branded soft-404 served as 200 is fetch-blocked even around stale listing JSON-LD', () => {
+      const stale = classifyListing(page(`<h1>Page Not Found</h1><p>We can't find that page.</p>${wavesName}<p>${BRAND.phone}</p>${ld(ENT({}))}`, { html: `<html><head><title>Page not found | Directory</title></head><body><h1>Page Not Found</h1>${wavesName}<p>${BRAND.phone}</p>${ld(ENT({}))}${filler}</body></html>` }), candidatesFor({}));
+      expect(stale).toMatchObject({ status: 'fetch-blocked', detail: { reason: 'soft_404' } });
+      expect(classifyListing(page(`${wavesName}<p>${BRAND.phone}</p><p>This page doesn't exist anymore.</p>`), candidatesFor({})).detail.reason).toBe('soft_404');
+      // a healthy listing is unaffected
+      expect(text('').status).toBe('verified');
+    });
+  });
+
   describe('Codex round 2', () => {
     const ENT = (over) => ({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, ...over });
     const via = (over) => classifyListing(page(`<h1>Waves Pest Control</h1>${ld(ENT(over))}`), candidatesFor({}));
@@ -623,7 +677,7 @@ describe('audit()', () => {
     expect(result).toEqual({ total: 6, skipped: 0, failed: 0, unverified: 1, verified: 1, mismatched: 1, 'fetch-blocked': 3, missing: 0 });
   });
 
-  test('stored NAP values fit their varchar(255) columns and one failed write does not stop the sweep', async () => {
+  test('stored NAP values fit their varchar(255) columns and one failed write does not stop the sweep but fails the run', async () => {
     const longName = `Waves Pest Control ${'x'.repeat(400)}`;
     const good = `<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>`;
     const ld = `<script type="application/ld+json">${JSON.stringify({ '@type': 'LocalBusiness', name: longName, telephone: BRAND.phone })}</script>`;
@@ -637,7 +691,11 @@ describe('audit()', () => {
       'https://boom.example/l': html(200, good),
       'https://after.example/l': html(200, good),
     };
-    const result = await auditor.audit({ fetchFn: fetchFn(routes), resolveHostFn: async () => true });
+    // The sweep finishes every row, then REJECTS so the cron health wrapper records the failure.
+    const error = await auditor.audit({ fetchFn: fetchFn(routes), resolveHostFn: async () => true }).then(() => null, (e) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error.message).toMatch(/1 of 3 row\(s\) could not be saved/);
+    const result = error.result;
     const byId = Object.fromEntries(updates.map((u) => [u.id, u.patch]));
     expect(byId.long.nap_name).toHaveLength(255);
     expect(JSON.parse(byId.long.status_detail).observed.nap_name).toBe(longName);

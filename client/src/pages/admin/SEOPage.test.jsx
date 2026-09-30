@@ -201,6 +201,52 @@ describe("SEOPage workspace navigation", () => {
     expect(await screen.findByText("SEO dashboard fixture")).toBeInTheDocument();
   });
 
+  it("shows why a citation is unverified and saves an edit through the existing PUT", async () => {
+    const citations = [
+      {
+        id: "c1",
+        directory_name: "Sample Directory",
+        status: "unverified",
+        listing_url: "https://dir.example/waves",
+        location_id: "",
+        status_detail: { reason: "phone_unconfirmed", seen: ["(813) 555-0100"] },
+      },
+    ];
+    const puts = [];
+    fetch.mockImplementation((url, options = {}) => {
+      const route = String(url);
+      if (route.endsWith("/admin/seo/backlinks")) {
+        return jsonResponse({
+          citations,
+          citationStats: { total: 1, unverified: 1 },
+          citationLocations: [{ id: "venice", name: "Venice" }],
+        });
+      }
+      if (route.endsWith("/admin/seo/citations/c1") && options.method === "PUT") {
+        puts.push(JSON.parse(options.body));
+        return jsonResponse({ success: true });
+      }
+      return jsonResponse({});
+    });
+
+    renderPage(["/admin/seo?workspace=authority&view=backlinks"]);
+    fireEvent.click(await screen.findByRole("button", { name: "Citations" }));
+    expect(
+      await screen.findByText(/none of the phones shown is ours \(saw \(813\) 555-0100\)/),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+    fireEvent.change(screen.getByPlaceholderText(/Public listing URL/), {
+      target: { value: "https://dir.example/new" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(puts).toEqual([
+        { listing_url: "https://dir.example/new", location_id: "" },
+      ]),
+    );
+  });
+
   it("does not restore a skipped backlink from an older automatic refresh", async () => {
     const staleQueue = deferred();
     let queueReads = 0;
