@@ -1266,6 +1266,41 @@ describe('r17: every generateGroundedDraft caller that has a sender passes inbou
   });
 });
 
+describe('r19: a friendly prefix or suffix never lets an answer through - it is peeled off and the remainder is classified alone', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const Q = 'Can my dogs go outside?';
+  const guard = (reply, sec = '') => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, sec, asked(Q));
+  test('salutation, thanks or "great question" plus an answer is held (the decision has no snapshot, the send-time path)', async () => {
+    for (const reply of [
+      'Hi, go ahead!', 'Hi, absolutely!', 'Hello! Absolutely.', "Hey, you're good", 'Hi Jane \u2014 feel free!', 'Hey there, go for it', 'Good morning, yes they can', 'Thanks, it is good',
+      'Thanks, go ahead', 'Great question, you can', 'Great question, it is fine!', 'Hi Jane, go ahead, thanks!', 'go ahead, thanks', "you're good, have a great day", 'Have a great day, go ahead',
+      "Absolutely, I'll check, go ahead", 'Thank you so much, they can go out', 'Hi Jane, sure!', 'Hello - no worries, let them out',
+    ]) {
+      expect([reply, guard(reply)]).toEqual([reply, true]);
+      const boom = () => { throw new Error('must not read'); };
+      await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: reply, inbound: Q, conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+    }
+    for (const reply of [`Hi, go ahead! ${reentry}`, `${reentry} Hi, feel free!`, `Thanks, it is good. ${reentry}`]) expect([reply, guard(reply, section)]).toEqual([reply, true]);
+  });
+  test('greetings, thanks and sign-offs on their own, or around a real allowed sentence, still pass', () => {
+    for (const reply of [
+      'Hi Jane', 'Hi', 'Hello there', 'Good morning', 'Hey Jane!', 'Thanks!', 'Thank you so much', 'Thanks for reaching out!', 'Have a great day!', 'Take care', 'Talk soon.', 'Best regards',
+      'Let us know if you have any other questions.', 'Please let us know if you need anything else.', 'Hi Jane, thanks for reaching out!', 'Hi, thanks, have a great day',
+      "I'll check with the office, thanks", "I'll have the office confirm, thanks!", "Hi Jane, I'll have the office confirm the timing. Thanks!", 'Great question, your technician will confirm the timing.',
+      'Hi Jane, your next visit is in 3 weeks.', "We'll see you Thursday between 8 and 10 AM, thanks!",
+    ]) expect([reply, guard(reply)]).toEqual([reply, false]);
+    for (const reply of [`Hi Jane, ${reentry} Thanks!`, `Hello Jane,\n${reentry}\nHave a great day!`, `Good question! ${reentry}`, `Thanks for asking. ${reentry} Let us know if you need anything else.`]) {
+      expect([reply, guard(reply, section)]).toEqual([reply, false]);
+    }
+  });
+  test('no label question: the same friendly answers are not held', () => {
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming('Hi, go ahead!', '', asked('Can you come Tuesday?'))).toBe(false);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {

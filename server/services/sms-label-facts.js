@@ -886,26 +886,56 @@ function markCompanySentences(canon) {
   }
   return out;
 }
-// (d) a hand-off: a staff subject, a deferral verb, and nothing but neutral words
-const DEFERRAL_HEAD_RE = /^(?:(?:sure|ok|okay|thanks|thank\s+you|absolutely|of\s+course|happy\s+to\s+help|great\s+question|good\s+question)(?:[,!]|\s[-\u2013\u2014])?\s+)?(?:i'll|we'll|i\s+will|we\s+will|i\s+can|we\s+can|i|we|let\s+me|let\s+us|the\s+office|our\s+office|your\s+technician|the\s+technician|our\s+technician|a\s+teammate|someone|our\s+team|the\s+team|a\s+manager|the\s+owner)\b/;
+// (d) a hand-off: a staff subject, a deferral verb, and nothing but neutral words (an interjection lead is peeled
+// first and never counts toward the neutral words)
+const DEFERRAL_LEAD_RE = /^(?:sure|ok|okay|absolutely|of\s+course|happy\s+to\s+help)(?:[,!]|\s[-–—])?\s+/;
+const DEFERRAL_SUBJECT_RE = /^(?:i'll|we'll|i\s+will|we\s+will|i\s+can|we\s+can|i|we|let\s+me|let\s+us|the\s+office|our\s+office|your\s+technician|the\s+technician|our\s+technician|a\s+teammate|someone|our\s+team|the\s+team|a\s+manager|the\s+owner)\b/;
 const DEFERRAL_VERB_RE = /\b(?:confirm|confirms|check|follow\s+up|get\s+back|look\s+into|find\s+out|reach\s+out|verify|ask|text\s+you|call\s+you|let\s+you\s+know)\b/;
-const DEFERRAL_WORDS = wordSet('sure ok okay thanks thank you absolutely of course happy to help great good question i ll we let me us the our your a an office technician tech team teammate someone manager owner dispatch will would can have has be confirm confirms check follow up get back look into find out reach verify ask text call know with on about that this it timing time details shortly soon today later as possible right away and more info information then just quickly at visit appointment next for');
-const isDeferral = (sentence) => DEFERRAL_HEAD_RE.test(sentence) && DEFERRAL_VERB_RE.test(sentence) && !hasAnswerForce(sentence.replace(DEFERRAL_HEAD_RE, ' ')) && allIn(wordsOf(sentence), DEFERRAL_WORDS);
-// (e) a greeting, thanks or sign-off with no other content
-const SIGNOFF_HEAD_RE = /^(?:thanks|thank\s+you|(?:good|great)\s+question|have\s+a\s+(?:great|good|wonderful|nice|lovely)|take\s+care|talk\s+soon|best|regards|let\s+us\s+know|please\s+let\s+us\s+know|please\s+don'?t\s+hesitate|happy\s+to\s+help|glad\s+to\s+help|we\s+appreciate|i\s+appreciate|hope\s+(?:this|that)\s+helps)\b/;
-const SIGNOFF_WORDS = wordSet('thanks thank you so much for reaching out contacting asking your message waves pest control have a great good wonderful nice lovely day evening morning afternoon weekend take care best regards talk to soon happy help anytime appreciate it we us let know if need anything else questions any other more please do not don t hesitate reach hope this that helps glad hear from our team is here question');
-const isGreetingOrSignoff = (sentence) => {
-  const words = wordsOf(sentence);
-  if (/^(?:hi|hello|hey|hiya|greetings)$/.test(words[0] || '')) return words.length <= 3;
-  return SIGNOFF_HEAD_RE.test(sentence) && allIn(words, SIGNOFF_WORDS);
+const DEFERRAL_WORDS = wordSet('i ll we let me us to the our your a an office technician tech team teammate someone manager owner dispatch will would can have has be confirm confirms check follow up get back look into find out reach verify ask text call you know with on about that this it timing time details shortly soon today later as possible right away and more info information then just quickly at visit appointment next for');
+const isDeferral = (sentence) => {
+  const body = sentence.replace(DEFERRAL_LEAD_RE, '');
+  return DEFERRAL_SUBJECT_RE.test(body) && DEFERRAL_VERB_RE.test(body) && !hasAnswerForce(body.replace(DEFERRAL_SUBJECT_RE, ' ')) && allIn(wordsOf(body), DEFERRAL_WORDS);
 };
+// (e) a sign-off SENTENCE, matched whole (a bag of neutral words would let "thanks, it is good" through)
+const SIGNOFF_SENTENCE_RE = new RegExp('^(?:'
+  + "(?:thanks|thank\\s+you)(?:\\s+(?:so|very)\\s+much)?(?:\\s+for\\s+(?:reaching\\s+out|contacting\\s+(?:us|waves(?:\\s+pest\\s+control)?)|your\\s+(?:message|patience|question)|asking|letting\\s+us\\s+know|the\\s+question))?"
+  + '|(?:good|great)\\s+question|happy\\s+to\\s+help|glad\\s+to\\s+help|hope\\s+(?:this|that)\\s+helps'
+  + '|have\\s+a\\s+(?:great|good|wonderful|nice|lovely)\\s+(?:day|evening|weekend|one|afternoon|morning)|take\\s+care|talk\\s+soon|best(?:\\s+regards)?|regards'
+  + "|(?:please\\s+)?(?:let\\s+us\\s+know|don'?t\\s+hesitate\\s+to\\s+(?:reach\\s+out|contact\\s+us|ask))(?:\\s+if\\s+you\\s+(?:have|need)\\s+(?:any\\s+)?(?:other\\s+|more\\s+|further\\s+)?(?:questions|anything(?:\\s+else)?|help))?"
+  + ')$');
+const isSignoffSentence = (sentence) => SIGNOFF_SENTENCE_RE.test(sentence);
+// A leading salutation, thanks or "great question" and a trailing thanks / sign-off are PEELED off first; what is
+// left is classified on its own, so nothing rides through on a friendly prefix or suffix. A sentence made only of
+// such pieces passes (nothing remains).
+const NAME_SEP_SRC = '\\s*[,!\\u2013\\u2014-]+\\s*';
+const LEADERS_RE = new RegExp('^(?:'
+  + `(?:(?:hi|hello|hey|hiya|greetings)(?:\\s+there)?(?:\\s+[a-z]+)?|good\\s+(?:morning|afternoon|evening)(?:\\s+[a-z]+)?)${NAME_SEP_SRC}`
+  + `|(?:thanks|thank\\s+you)(?:\\s+(?:so|very)\\s+much)?${NAME_SEP_SRC}`
+  + `|(?:good|great)\\s+question${NAME_SEP_SRC})`);
+const GREETING_ONLY_RE = /^(?:(?:hi|hello|hey|hiya|greetings)(?:\s+there)?(?:\s+[a-z]+)?|good\s+(?:morning|afternoon|evening)(?:\s+[a-z]+)?)$/;
+const TRAILERS_RE = /(?:\s*[,;–—-]+\s*|\s+)(?:thanks|thank\s+you(?:\s+(?:so|very)\s+much)?|have\s+a\s+(?:great|good|wonderful|nice|lovely)\s+(?:day|evening|weekend|one)|take\s+care|talk\s+soon)\s*$/;
+function peelFriendlyEnds(sentence) {
+  let rest = sentence.trim();
+  for (let i = 0; i < 4; i += 1) {
+    const next = rest.replace(LEADERS_RE, '').replace(TRAILERS_RE, '').trim();
+    if (next === rest) break;
+    rest = next;
+  }
+  return rest;
+}
 // (f) off-topic scheduling / billing with no answer force and no label word, clause by clause
 const isOffTopicScheduling = (sentence) => {
   const clauses = clausesOf(sentence);
-  return clauses.length > 0 && clauses.every((c) => isGreetingOrSignoff(c.clause) || (!hasAnswerForce(c.clause)
-    && isSchedulingClause(c.clause, { staffCarry: c.staffCarry, clock: hasClockTime(c.clause), sentence: c.sentence })));
+  return clauses.length > 0 && clauses.every((c) => !hasAnswerForce(c.clause)
+    && isSchedulingClause(c.clause, { staffCarry: c.staffCarry, clock: hasClockTime(c.clause), sentence: c.sentence }));
 };
-const ALLOWED_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isCompanySentence, isDeferral, isGreetingOrSignoff, isOffTopicScheduling];
+// The content types, the first five being the ones the unknown-question path also trusts.
+const CONTENT_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isCompanySentence, isDeferral, isSignoffSentence, isOffTopicScheduling];
+const isAllowedSentence = (sentence) => {
+  if (GREETING_ONLY_RE.test(sentence.trim())) return true;
+  const rest = peelFriendlyEnds(sentence);
+  return rest === '' || CONTENT_SENTENCE_TYPES.some((allowed) => allowed(rest));
+};
 
 // The non-question sentences of a stripped reply (stripLabelSentences output, sanctioned idiom swapped out),
 // with the COMPANY FACTS rain line pre-marked for a rain question.
@@ -927,10 +957,10 @@ function replySentences(strippedText, asked) {
  */
 function answersAskedLabelQuestion(strippedText, asked) {
   if (asked === null) {
-    return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !ALLOWED_SENTENCE_TYPES.slice(0, 5).some((allowed) => allowed(sentence)));
+    return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !CONTENT_SENTENCE_TYPES.slice(0, 5).some((allowed) => allowed(peelFriendlyEnds(sentence))));
   }
   if (!Array.isArray(asked) || !asked.length) return false;
-  return replySentences(strippedText, asked).some((sentence) => !ALLOWED_SENTENCE_TYPES.some((allowed) => allowed(sentence)));
+  return replySentences(strippedText, asked).some((sentence) => !isAllowedSentence(sentence));
 }
 
 /** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine), or answers a label question in `asked` without one. */
