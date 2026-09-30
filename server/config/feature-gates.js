@@ -3468,6 +3468,18 @@ const gates = {
   // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
   lawnAssessmentReferee: process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true',
 
+  // Call-address on-file assist (owner-approved review items 3 and 4,
+  // 2026-09-30): the caller's on-file address rescues a spoken one when the
+  // HOUSE NUMBER matches — the on-file street joins street recovery as an
+  // extra candidate (a misheard street), and the on-file city + ZIP join a
+  // street-only lookup (Google resolving "7417 Monteverdi" to New Jersey).
+  // Also reads a non-FL result on a street-only request as missing_component,
+  // not out_of_service_area. Ships DARK: off unless exactly 'true'. This entry
+  // is for logGateStatus only: services/address-validation/onfile-assist.js
+  // reads GATE_CALL_ADDRESS_ONFILE_ASSIST at call time via
+  // callAddressOnFileAssistLive().
+  callAddressOnFileAssist: process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true',
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -3803,6 +3815,16 @@ function plantIdRefereeLive() {
   return process.env.GATE_PLANT_ID_REFEREE === 'true';
 }
 
+// GATE_CALL_ADDRESS_ONFILE_ASSIST read at CALL time — strict `=== 'true'`, off
+// by default. The one canonical reader for
+// server/services/address-validation/onfile-assist.js. Off, the call pipeline
+// is byte-identical: no extra street candidate, no on-file locality line, no
+// out-of-state reclassification. The gates-map entry above is for
+// logGateStatus only.
+function callAddressOnFileAssistLive() {
+  return process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true';
+}
+
 // GATE_LAWN_ASSESSMENT_REFEREE read at CALL time — ships DARK, off unless
 // exactly 'true' (owner ruling 2026-09-29). ONE gate covers both the GPT-6 Sol
 // second opinion and the Claude Fable name referee in
@@ -3995,5 +4017,6 @@ module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
+module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 // gates 1775330914
