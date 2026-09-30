@@ -625,6 +625,18 @@ describe('runPlanHoldLifecycle', () => {
     expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(6)) }), expect.anything());
   });
 
+  test('the restart text retires once its moment has passed or the office owns the restart: no daily re-asking, one bell', async () => {
+    holdSeed({ status: 'resumed', resume_on: daysOut(-30) }, [lawnVisit('back', daysOut(-2), { status: 'completed' })]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ reminderRetired: 'window_passed' });
+
+    holdSeed({ resume_on: daysOut(0) }, []);
+    await runPlanHoldLifecycle({ today: TODAY });
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(bells('plan_hold_no_visit_back')).toHaveLength(1);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ reminderRetired: 'no_visit_back' });
+  });
+
   test('a churned customer\'s resumed hold retires its restart text for good', async () => {
     holdSeed({ status: 'resumed', resume_on: daysOut(-5) }, [lawnVisit('back', daysOut(3))]);
     mockState.tables.customers[0].pipeline_stage = 'churned';

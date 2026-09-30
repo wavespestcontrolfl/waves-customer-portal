@@ -660,6 +660,14 @@ function restartTextWindowOpen(next, nextOn, today) {
   return !underway && nextOn >= today && nextOn <= addDays(today, 7);
 }
 
+// Stop the daily scan asking about this hold's restart text: its moment
+// has passed (or belongs to the office now).
+async function retireRestartText(hold, reason) {
+  await db('plan_holds').where({ id: hold.id }).update({
+    moved_visits: JSON.stringify({ ...readRecord(hold.moved_visits), reminderRetired: reason }), updated_at: new Date(),
+  });
+}
+
 async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
   if (!customer || customer.active === false || customer.pipeline_stage === 'churned') {
@@ -669,9 +677,7 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
       // A resumed hold keeps its status (the pause did happen); its restart
       // text is retired, so a later reactivation's visit is never taken
       // for this pause's first visit back.
-      await db('plan_holds').where({ id: hold.id }).update({
-        moved_visits: JSON.stringify({ ...readRecord(hold.moved_visits), reminderRetired: 'customer_inactive' }), updated_at: new Date(),
-      });
+      await retireRestartText(hold, 'customer_inactive');
     }
     return 'cancelled';
   }
@@ -684,13 +690,20 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
       await notifyAdmin('service', 'Plan hold: no visit booked after the pause', `Hold ${hold.id} (${hold.family_key}) reached its return date ${dateOnlyString(hold.resume_on)} with no visit booked after it — book the restart and let the customer know.`, {
         bell: true, dedupeKey: `plan_hold_no_visit_back:${hold.id}`, metadata: { kind: 'plan_hold_no_visit_back', holdId: hold.id, customerId: hold.customer_id },
       }).catch(() => {});
+      // The office owns the restart now (the bell says to tell the
+      // customer): the daily scan stops asking, and the bell rings once.
+      await retireRestartText(hold, 'no_visit_back');
     }
     return 'no_visit';
   }
   const nextOn = dateOnlyString(next.scheduled_date);
-  // Once the visit is underway (or done) the text's "move it or cancel"
-  // no longer applies.
-  if (!restartTextWindowOpen(next, nextOn, today)) return 'not_due';
+  if (nextOn > addDays(today, 7)) return 'not_due';
+  // Once the visit is underway, done, or gone by, the text's "move it or
+  // cancel" no longer applies — for good.
+  if (!restartTextWindowOpen(next, nextOn, today)) {
+    await retireRestartText(hold, 'window_passed');
+    return 'not_due';
+  }
   if (!customer.phone) return unsentRestartText(hold, next, nextOn, today);
   // Claim in a SHORT transaction, send outside it: the renderer and the
   // sender query the pool themselves, and a transaction held across the
