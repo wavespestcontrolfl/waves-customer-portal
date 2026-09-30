@@ -70,6 +70,9 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } =
       ({ json: assessed, referee } = await refereeVisit({
         policy, payload, geminiJson: outcome.json, visit: { photoCount: photos.length, images, context },
       }));
+      // The model-claimed findings after a settled tie-break (pre-normalization,
+      // like `raw`), so the eval measures naming discipline on the final answer.
+      if (referee?.outcome === 'settled') referee.adjustedFindings = assessed.findings;
       if (referee.triggered || referee.secondOpinion.called) {
         logger.info(`[lawn-visit-assessment] second opinion ${referee.secondOpinion.ok ? 'ok' : 'failed'}, referee ${referee.outcome} (${referee.disputes.length} disputed)`);
       }

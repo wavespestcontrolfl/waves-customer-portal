@@ -147,6 +147,15 @@ describe('scoring', () => {
     expect(r.findings[1]).toMatchObject({ can_determine: false, cannot_determine_reason: 'no close-up' });
   });
 
+  test('naming discipline follows a settled referee tie-break, not the pre-referee answer (Codex #5362 r4)', () => {
+    const answer = analysis({ raw: { findings: [{ finding_id: 'model-1', name: 'Chinch bug damage', confidence: 'high', photo_refs: [], can_determine: true }] } });
+    expect(evalLib.scoreResult(testCase, answer).causeNamedBelowModerate).toEqual([]);
+    const settled = { ...answer, referee: { outcome: 'settled', adjustedFindings: [{ finding_id: 'model-1', name: 'Brown patch', confidence: 'low', photo_refs: [], can_determine: true }] } };
+    expect(evalLib.scoreResult(testCase, settled).causeNamedBelowModerate).toEqual([
+      expect.objectContaining({ name: 'Brown patch', confidence: 'low' }),
+    ]);
+  });
+
   test('naming discipline uses raw confidence while reported findings retain the evidence gate', () => {
     const answer = analysis({ raw: { findings: [{ finding_id: 'model-1', name: 'Chinch bug damage', confidence: 'high', photo_refs: [], can_determine: true }] } });
     const normalized = require('../services/lawn-visit-result').normalizeAssessment({ findings: answer.raw.findings, photo_quality: [{ photo: 1, quality: 'adequate' }], severities: answer.severities, scores: answer.scores }, 1);

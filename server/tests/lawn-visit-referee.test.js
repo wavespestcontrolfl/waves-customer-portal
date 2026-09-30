@@ -263,6 +263,9 @@ describe('a name disagreement draws Fable', () => {
     const result = await analyzeVisit({ photos });
     expect(result.findings[0]).toMatchObject({ confidence: 'low' });
     expect(result.referee).toMatchObject({ outcome: 'settled' });
+    // The eval reads the settled, pre-normalization findings (Codex #5362 r4); `raw` stays Gemini's.
+    expect(result.referee.adjustedFindings[0]).toMatchObject({ name: 'Brown patch', confidence: 'low' });
+    expect(result.raw.findings[0].name).toBe('Chinch bug damage');
   });
 
   test('a cap never RAISES a lower confidence', async () => {
