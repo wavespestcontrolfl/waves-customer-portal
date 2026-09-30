@@ -36,6 +36,8 @@ describe('normalization (Meta + Google rules)', () => {
     expect(F.splitName('Mary Ann Smith', null)).toEqual({ first: 'Mary Ann', last: 'Smith' });
     expect(F.splitName('Jo', 'Lee')).toEqual({ first: 'Jo', last: 'Lee' });
     expect(F.splitName('Cher', '')).toEqual({ first: 'Cher', last: '' });
+    expect(F.splitName('John Smith Jr.', null)).toEqual({ first: 'John', last: 'Smith' });
+    expect(F.splitName('John Smith, III', '')).toEqual({ first: 'John', last: 'Smith' });
   });
 });
 

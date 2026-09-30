@@ -77,10 +77,12 @@ function normalizeExternalId(value) {
 }
 
 // A single full-name field ("John Smith" in first_name, no last name) splits at
-// the last space; otherwise first/last pass through.
+// the last space, after dropping a trailing generational suffix so "John Smith
+// Jr." does not become last name "Jr."; otherwise first/last pass through.
 function splitName(first, last) {
-  const f = first == null ? '' : String(first).trim();
+  const raw = first == null ? '' : String(first).trim();
   const l = last == null ? '' : String(last).trim();
+  const f = l ? raw : raw.replace(NAME_SUFFIX, '').trim();
   if (!l && /\s/.test(f)) {
     const i = f.lastIndexOf(' ');
     return { first: f.slice(0, i).trim(), last: f.slice(i + 1).trim() };
