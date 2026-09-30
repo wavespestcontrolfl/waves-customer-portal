@@ -5787,6 +5787,48 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
+    // Originating-lead conversion, shared by the normal post-commit path and the
+    // txResult.existing crash-replay path (codex #5399 r10 P1: a replay that skips
+    // it lets the phone-matched preferred-time lead win over the quote/series
+    // lead that should have won). Handoff-derived trigger (Codex #2964 r3):
+    // recovery-rebuilt /book links and older quote links carry the estimate
+    // handoff but no ?lead= param, so a non-pest/one-time booking (which seeds no
+    // series) would strand the quote's lead in new_lead. A VERIFIED handoff names
+    // its wizard estimate, and the wizard stamps estimate_data.lead_id — derive
+    // the trigger from that when the client sent none. Trigger only, like lead_id
+    // itself: the conversion stays keyed off the VERIFIED customer with
+    // enforceOriginating, so neither a forged lead_id nor a derived one can
+    // convert a lead the booker doesn't own. Idempotent (convertLeadFromEvent's
+    // markConverted claim is conditional; an already-won lead no-ops), and
+    // best-effort — the booking is already committed. Returns the
+    // convertLeadFromEvent result, or null when there was no trigger / it threw.
+    const convertOriginatingLeadOnBooking = async ({ seriesBooked = false } = {}) => {
+      let leadTrigger = !!lead_id;
+      if (!leadTrigger && !seriesBooked && pricing_estimate_id) {
+        try {
+          const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
+          if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
+            const handoffEstimate = await db('estimates').where('id', pricing_estimate_id).first();
+            leadTrigger = !!(handoffEstimate?.source === 'quote_wizard' && handoffEstimate?.estimate_data?.lead_id);
+          }
+        } catch (err) {
+          logger.warn(`[lead-trigger] handoff lead derivation failed for customer=${custId}: ${err.message}`);
+        }
+      }
+      if (!seriesBooked && !leadTrigger) return null;
+      try {
+        const { convertLeadFromEvent } = require('../services/lead-estimate-link');
+        return await convertLeadFromEvent({
+          source: seriesBooked ? 'recurring_service_booked' : 'self_booking_estimate',
+          customerId: custId,
+          enforceOriginating: true,
+        });
+      } catch (err) {
+        logger.warn(`[lead-trigger] self-booking conversion failed for customer=${custId}: ${err.message}`);
+        return null;
+      }
+    };
+
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
       // Replay heal (codex #3282 audit P1): if the original request crashed
@@ -5810,6 +5852,8 @@ async function createSelfBooking(payload = {}) {
       // Idempotent: the duplicate-series guard and the locked-draft shape
       // recheck no-op a completed activation, and the drift path strips a
       // stranded parent's pricing instead of seeding a stale plan.
+      let replayLeadConversion = null;
+      let replayLeadConversionRan = false;
       if (wizardSeriesPlan) {
         try {
           const replayParent = await db('scheduled_services')
@@ -5924,16 +5968,8 @@ async function createSelfBooking(payload = {}) {
           // idempotent call the primary path makes (enforceOriginating;
           // an already-won lead no-ops).
           if (replaySeriesActivated) {
-            try {
-              const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-              await convertLeadFromEvent({
-                source: 'recurring_service_booked',
-                customerId: custId,
-                enforceOriginating: true,
-              });
-            } catch (leadErr) {
-              logger.warn(`[booking:confirm] replay lead conversion failed for ${txResult.existing.id} (non-blocking): ${leadErr.message}`);
-            }
+            replayLeadConversion = await convertOriginatingLeadOnBooking({ seriesBooked: true });
+            replayLeadConversionRan = true;
           }
         } catch (err) {
           logger.warn(`[booking:confirm] replay series activation skipped for ${txResult.existing.id}: ${err.message}`);
@@ -6008,7 +6044,27 @@ async function createSelfBooking(payload = {}) {
           const replayBooked = await db('scheduled_services')
             .where({ self_booking_id: txResult.existing.id })
             .first();
-          await convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null, bookedAt: txResult.existing.created_at || null });
+          // The originating (quote / estimate / series) lead wins BEFORE the
+          // preferred-time lead, exactly as on the normal path (one booking =
+          // one win): when the first attempt died before its own conversion the
+          // originating lead is still open, so re-run that same idempotent
+          // conversion here (unless the series branch above already did) and
+          // hand its result to the preferred-time converter.
+          if (!replayLeadConversionRan) {
+            const replaySeriesChild = replayBooked?.id
+              ? await db('scheduled_services')
+                .where({ recurring_parent_id: replayBooked.id })
+                .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
+                .first('id')
+              : null;
+            replayLeadConversion = await convertOriginatingLeadOnBooking({ seriesBooked: !!replaySeriesChild });
+          }
+          await convertPreferredTimeLeadsOnBooking(db, {
+            customerId: custId,
+            booking: replayBooked || null,
+            bookedAt: txResult.existing.created_at || null,
+            wonLeadIds: replayLeadConversion?.converted ? (replayLeadConversion.leadIds || []) : null,
+          });
         } catch (err) {
           logger.warn(`[booking:confirm] replay preferred-time conversion failed for ${txResult.existing.id} (non-blocking): ${err.message}`);
         }
@@ -6365,41 +6421,10 @@ async function createSelfBooking(payload = {}) {
     // recurring series. `lead_id` is only a trigger flag; the conversion is
     // keyed off the VERIFIED customer, so the forgeable lead_id can never
     // convert a lead the booker doesn't own.
-    let leadConversion = null;
-    // Handoff-derived trigger (Codex #2964 r3): recovery-rebuilt /book links
-    // and older quote links carry the estimate handoff but no ?lead= param,
-    // so a non-pest/one-time booking (which seeds no series) would strand the
-    // quote's lead in new_lead. A VERIFIED handoff names its wizard estimate,
-    // and the wizard stamps estimate_data.lead_id — derive the trigger from
-    // that when the client sent none. Trigger only, like lead_id itself: the
-    // conversion below stays keyed off the VERIFIED customer with
-    // enforceOriginating, so neither a forged lead_id nor a derived one can
-    // convert a lead the booker doesn't own. Best-effort — the booking is
-    // already committed.
-    let leadTrigger = !!lead_id;
-    if (!leadTrigger && followUpRows.length === 0 && pricing_estimate_id) {
-      try {
-        const { verifyEstimateHandoffToken } = require('../utils/estimate-handoff-token');
-        if (verifyEstimateHandoffToken(pricing_estimate_id, estimate_token)) {
-          const handoffEstimate = await db('estimates').where('id', pricing_estimate_id).first();
-          leadTrigger = !!(handoffEstimate?.source === 'quote_wizard' && handoffEstimate?.estimate_data?.lead_id);
-        }
-      } catch (err) {
-        logger.warn(`[lead-trigger] handoff lead derivation failed for customer=${custId}: ${err.message}`);
-      }
-    }
-    if (followUpRows.length > 0 || leadTrigger) {
-      try {
-        const { convertLeadFromEvent } = require('../services/lead-estimate-link');
-        leadConversion = await convertLeadFromEvent({
-          source: followUpRows.length > 0 ? 'recurring_service_booked' : 'self_booking_estimate',
-          customerId: custId,
-          enforceOriginating: true,
-        });
-      } catch (err) {
-        logger.warn(`[lead-trigger] self-booking conversion failed for customer=${custId}: ${err.message}`);
-      }
-    }
+    // The originating-lead conversion (verified-handoff trigger derivation +
+    // convertLeadFromEvent) is one shared helper, defined above the replay
+    // branch, so the crash-replay path re-runs the SAME conversion.
+    const leadConversion = await convertOriginatingLeadOnBooking({ seriesBooked: followUpRows.length > 0 });
 
     // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
     // customer is moot once they have booked: convert it through the existing

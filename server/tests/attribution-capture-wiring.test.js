@@ -111,7 +111,9 @@ describe('booking.js self-booking attribution wiring', () => {
   });
 
   test('threads the convertLeadFromEvent outcome into attributeSelfBooking (a converting booking must skip row-only attribution)', () => {
-    expect(src).toMatch(/leadConversion = await convertLeadFromEvent\(/);
+    // The conversion lives in one shared helper (normal + replay paths); the normal path's result feeds attribution.
+    expect(src).toMatch(/return await convertLeadFromEvent\(/);
+    expect(src).toMatch(/const leadConversion = await convertOriginatingLeadOnBooking\(/);
     expect(src).toMatch(/leadConverted:\s*!!leadConversion\?\.converted/);
   });
 });

@@ -19,6 +19,7 @@ let mockLeadUpdateRows = 1;    // rows a conditional leads UPDATE matches (0 = s
 let mockRetireError = null;    // makes the booking_intents suppression UPDATE throw
 let mockLeadSettled = false;    // the bell's just-before re-read finds the lead already converted/closed
 let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
+let mockDeadVisit = false;      // the booking's only visit is cancelled/skipped/rescheduled (live-status lookup finds nothing, any-visit lookup finds one)
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
 let mockWonLeads = [];         // won leads (any type) a customer's booking already produced
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
@@ -32,6 +33,7 @@ function builder(table) {
     whereNotNull: () => b,
     whereNot: () => b,
     whereIn: () => b,
+    whereNotIn: () => { b._liveOnly = true; return b; },
     whereRaw: () => b,
     orWhereRaw: () => b,
     leftJoin: () => b,
@@ -49,6 +51,7 @@ function builder(table) {
       : table === 'leads' ? mockExistingLead
         : table === 'customers' ? mockCustomer
           : table === 'self_booked_appointments as sba' ? mockBookedSince
+            : table === 'scheduled_services' && mockDeadVisit ? (b._liveOnly ? null : { id: 'ss-dead' })
             : table === 'scheduled_services' && mockScheduledService ? mockScheduledService
             : table === 'scheduled_services' && mockBookedSince ? { id: 'ss-1', self_booking_id: mockBookedSince.id }
               : null,
@@ -180,6 +183,7 @@ beforeEach(() => {
   mockLeadSettled = false;
   mockBookedList = null;
   mockScheduledService = null;
+  mockDeadVisit = false;
   mockOrder.length = 0;
   mockMarkConverted.mockClear();
   mockMarkConverted.mockResolvedValue(true);
@@ -521,6 +525,17 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(r.status).toBe(200);
     expect(mockMarkConverted).toHaveBeenCalledTimes(1);
     expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a booking whose only visit is cancelled/skipped/rescheduled does not close the request (codex #5399 r10 P2): the lead stays open and rings', async () => {
+    mockBookedSince = { id: 'sba-1', customer_id: 'cust-1' };
+    mockDeadVisit = true;
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
   });
 
   test('a free callback visit inside the reconcile window is not an acquisition: no conversion, the lead stays open and rings', async () => {
@@ -923,7 +938,14 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
     const replayStart = src.indexOf('if (txResult.existing) {');
     const replayEnd = src.indexOf('const { booking, serviceRow } = txResult;');
     expect(replayStart).toBeGreaterThan(-1);
-    expect(src.slice(replayStart, replayEnd)).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null, bookedAt: txResult.existing.created_at || null })');
+    const replaySrc = src.slice(replayStart, replayEnd);
+    expect(replaySrc).toContain('convertPreferredTimeLeadsOnBooking(db, {');
+    expect(replaySrc).toContain('booking: replayBooked || null');
+    // codex #5399 r10 P1: the replay re-runs the SAME originating-lead conversion the normal path runs, BEFORE the preferred lead, and hands its result over.
+    expect(replaySrc).toContain('convertOriginatingLeadOnBooking({ seriesBooked: !!replaySeriesChild })');
+    expect(replaySrc).toContain('wonLeadIds: replayLeadConversion?.converted ? (replayLeadConversion.leadIds || []) : null');
+    expect(replaySrc.indexOf('convertOriginatingLeadOnBooking({ seriesBooked: !!replaySeriesChild })'))
+      .toBeLessThan(replaySrc.indexOf('convertPreferredTimeLeadsOnBooking(db, {'));
     const normal = src.slice(replayEnd);
     expect(normal).toContain('convertPreferredTimeLeadsOnBooking(db, {\n        customerId: custId,\n        booking: serviceRow,');
     // ...and the normal path hands the helper the conversion it just ran, so it can skip a second win.

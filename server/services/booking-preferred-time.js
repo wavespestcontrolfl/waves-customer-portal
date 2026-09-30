@@ -193,6 +193,10 @@ async function lockPhone(trx, phone) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_time:${phone}`]);
 }
 
+// Visit statuses that no longer hold a self-booking; mirrors the replay guard in
+// routes/booking.js (createSelfBooking) so both agree on "live".
+const DEAD_VISIT_STATUSES = ['cancelled', 'skipped', 'rescheduled'];
+
 /**
  * True when this phone's owner booked on /book at or after `since` AND that
  * booking's conversion took the (just filed) preferred-time lead — via
@@ -221,7 +225,19 @@ async function reconcileBookingSince(db, { phone, since }) {
     let booked = null;
     let service = null;
     for (const candidate of bookings || []) {
-      const row = await db('scheduled_services').where({ self_booking_id: candidate.id }).first();
+      const row = await db('scheduled_services')
+        .where({ self_booking_id: candidate.id })
+        .whereNotIn('status', DEAD_VISIT_STATUSES)
+        .first();
+      // A booking whose visit(s) are all dead (cancelled/skipped/rescheduled —
+      // the same set createSelfBooking's replay guard treats as "no longer
+      // holds the booking") no longer represents a scheduled appointment, so
+      // it must not close the customer's preferred-time request. A booking
+      // with no visit row at all keeps the prior behavior.
+      if (!row) {
+        const anyVisit = await db('scheduled_services').where({ self_booking_id: candidate.id }).first('id');
+        if (anyVisit) continue;
+      }
       if (row && row.is_callback) continue;
       booked = candidate;
       service = row || null;
