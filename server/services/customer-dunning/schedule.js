@@ -7,9 +7,9 @@
  * PR 3); only shadow.js/runner.shadowRun reads through here, and it never
  * calls a writer.
  *
- * Every function takes `database` (default: the pool) and uses ONLY that
- * handle, so a test — or a future caller holding a transaction — controls
- * where it runs. Every UPDATE stamps updated_at by hand (invoice-followups.js
+ * Every function takes `database` (default: the db module) and uses ONLY that
+ * handle; the engine's entry points never inject one, it exists so a transaction
+ * this module (or a caller's lock) opens is threaded through its own helpers. Every UPDATE stamps updated_at by hand (invoice-followups.js
  * convention) and is guarded on the state it read, so a concurrent writer
  * turns it into a no-op rather than an overwrite.
  *

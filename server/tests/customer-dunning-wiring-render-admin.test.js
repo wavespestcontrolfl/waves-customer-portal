@@ -157,24 +157,28 @@ describe('admin controls', () => {
       q.update = async (patch) => { calls.push({ table, patch }); return changed; };
       return q;
     });
-    database.fn = { now: () => 'now' };
+    // the engine runs on the db module: this becomes what it answers
+    const pool = require('../models/db');
+    pool.mockImplementation(database);
+    pool.fn = { now: () => 'now' };
     database.calls = calls;
     return database;
   }
 
   test('pause: only an open, unpaused schedule; clears next_touch_at and records who', async () => {
     const database = fakeDb();
-    expect(await Admin.pause('s1', { reason: 'customer asked', adminId: 'admin-1', database })).toEqual({ ok: true });
+    expect(await Admin.pause('s1', { reason: 'customer asked', adminId: 'admin-1' })).toEqual({ ok: true });
     const patch = database.calls.find((c) => c.patch).patch;
     expect(patch).toMatchObject({ status: 'paused', paused_reason: 'customer asked', paused_by_admin_id: 'admin-1', next_touch_at: null });
     expect(database.calls.some((c) => c.whereIn && c.whereIn[1] === OPEN_STATUSES)).toBe(true);
-    expect(await Admin.pause('s1', { database: fakeDb(0) })).toEqual({ ok: false });
+    fakeDb(0);
+    expect(await Admin.pause('s1')).toEqual({ ok: false });
   });
 
   test('resume: paused only; picks up at the next-day floor (never sends in the click)', async () => {
     const database = fakeDb();
     const now = new Date('2026-10-06T14:16:00Z');
-    expect(await Admin.resume('s1', { now, database })).toEqual({ ok: true });
+    expect(await Admin.resume('s1', { now })).toEqual({ ok: true });
     const call = database.calls.find((c) => c.patch);
     expect(call.patch).toMatchObject({ status: 'active', paused_reason: null, held_reason: null, touch_claimed_at: null }); // C2: no pre-pause worker regains authority
     expect(call.patch.next_touch_at.getTime()).toBe(Followups.heldTouchFloor(now).getTime());
@@ -184,7 +188,8 @@ describe('admin controls', () => {
   test('release: not open => ok:false; open => released_admin through the shared close', async () => {
     const Schedule = require('../services/customer-dunning/schedule');
     const closeSpy = jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: true, landed: [{}, {}] });
-    expect(await Admin.release('s1', { database: fakeDb() })).toEqual({ ok: true, released: 2 });
+    fakeDb();
+    expect(await Admin.release('s1')).toEqual({ ok: true, released: 2 });
     expect(closeSpy.mock.calls[0][1]).toBe('released_admin');
     closeSpy.mockRestore();
   });
@@ -193,17 +198,17 @@ describe('admin controls', () => {
     const Schedule = require('../services/customer-dunning/schedule');
     const now = new Date('2026-10-06T14:16:00Z');
     // pause: the guarded UPDATE matched nothing and the row carries a fresh claim
-    const busy = fakeDb(0);
-    busy.mockImplementation(() => {
+    require('../models/db').mockImplementation(() => {
       const q = { first: async () => ({ id: 's1', status: 'active', touch_claimed_at: new Date(now.getTime() - 60 * 1000) }) };
       q.where = () => q; q.whereIn = () => q; q.update = async () => 0;
       return q;
     });
-    busy.fn = { now: () => 'now' };
-    expect(await Admin.pause('s1', { now, database: busy })).toMatchObject({ ok: false, reason: 'in_flight', message: expect.stringMatching(/try again in a minute/i) });
+    require('../models/db').fn = { now: () => 'now' };
+    expect(await Admin.pause('s1', { now })).toMatchObject({ ok: false, reason: 'in_flight', message: expect.stringMatching(/try again in a minute/i) });
     // release: the shared close refused because a foreign claim is fresh
     const closeSpy = jest.spyOn(Schedule, 'release').mockResolvedValue({ closed: false, landed: [], reason: 'in_flight' });
-    expect(await Admin.release('s1', { database: fakeDb() })).toMatchObject({ ok: false, reason: 'in_flight' });
+    fakeDb();
+    expect(await Admin.release('s1')).toMatchObject({ ok: false, reason: 'in_flight' });
     closeSpy.mockRestore();
   });
 

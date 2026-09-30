@@ -1,16 +1,20 @@
-// The customer-dunning email goes through the billing email authority on the handle the run was given
-// (skipped without APP_TEST_DATABASE_URL, run for real in CI). processSchedule runs INSIDE an outer
-// transaction whose schedule claim, customer and preferences are uncommitted, with the process-wide pool
-// poisoned: the authority's lock transaction opens on the handle (a savepoint), so it and the final boundary
-// see the claim and send once; opened on the pool it could not see it and refused every email.
+// The customer-dunning email goes through the REAL billing email authority (skipped without
+// APP_TEST_DATABASE_URL, run for real in CI): processSchedule claims the schedule, the authority opens its
+// comms-lock transaction and re-reads the customer, preferences and the schedule claim in real SQL, the
+// final boundary passes, and the email is handed to the provider once. The db module is the disposable schema.
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 
-const mockPool = jest.fn(() => { throw new Error('the default pool was used'); });
-mockPool.schema = { hasTable: () => { throw new Error('the default pool was used'); } };
-mockPool.raw = () => { throw new Error('the default pool was used'); };
-mockPool.transaction = () => { throw new Error('the default pool was used'); };
-jest.mock('../models/db', () => mockPool);
+let mockDatabase;
+jest.mock('../models/db', () => {
+  const database = (...args) => mockDatabase(...args);
+  database.transaction = (...args) => mockDatabase.transaction(...args);
+  database.raw = (...args) => mockDatabase.raw(...args);
+  Object.defineProperty(database, 'fn', { get: () => mockDatabase.fn });
+  Object.defineProperty(database, 'schema', { get: () => mockDatabase.schema });
+  Object.defineProperty(database, 'client', { get: () => mockDatabase.client });
+  return database;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
 jest.mock('../services/short-url', () => ({ shortenOrPassthrough: jest.fn(async () => 'https://s.example.test/x'), invoiceShortCodePrefix: () => 'W-1' }));
@@ -71,6 +75,7 @@ postgres('customer-dunning email authority on the run\'s handle (PostgreSQL)', (
     admin = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 4 } });
+    mockDatabase = app;
     await app.schema.createTable('customers', (t) => {
       t.uuid('id').primary(); t.text('first_name'); t.text('email'); t.text('phone'); t.timestamp('deleted_at');
     });
@@ -105,8 +110,8 @@ postgres('customer-dunning email authority on the run\'s handle (PostgreSQL)', (
     totalCents: 10000 * ids.length, digest: `d-${ids.length}`, activeCount: ids.length, excluded: { stopped: [], md: [] },
   });
 
-  // Inside an outer transaction the customer, preferences, invoices, sequences and the schedule are all UNCOMMITTED.
-  async function seed(outer) {
+  async function seed() {
+    const outer = app;
     const customerId = randomUUID();
     await outer('customers').insert({ id: customerId, first_name: 'Pat', email: EMAIL, phone: null });
     await outer('notification_prefs').insert({ customer_id: customerId, invoice_channels: JSON.stringify(['email']) });
@@ -143,66 +148,50 @@ postgres('customer-dunning email authority on the run\'s handle (PostgreSQL)', (
 
   beforeEach(() => { mockSendTemplate.mockReset(); mockResolve.mockReset(); });
 
-  test('processSchedule inside an outer transaction: the authority sees the UNCOMMITTED claim (customer, prefs and schedule), sends the email once, and advances', async () => {
+  test('processSchedule: the authority re-reads the customer, preferences and the schedule CLAIM in real SQL, sends the email once, and advances', async () => {
     const sent = acceptingLibrary();
-    const rolledBack = new Error('rollback');
-    await expect(app.transaction(async (outer) => {
-      const { customerId, schedule } = await seed(outer);
-      // nothing of this is visible to another connection: only the handle can see the claim
-      expect(await app('customers').where({ id: customerId }).first()).toBeUndefined();
-      expect(await app('customer_dunning_schedules').where({ id: schedule.id }).first()).toBeUndefined();
-
-      const out = await Runner.processSchedule(schedule.id, NOW, { database: outer });
-      expect(out.outcome).toBe('advanced');
-      expect(sent).toEqual(['invoice.followup_combined_60_day']);
-      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
-      const row = await outer('customer_dunning_schedules').where({ id: schedule.id }).first();
-      expect(row).toMatchObject({ status: 'active', step_index: 5 });
-      expect(row.touch_claimed_at).toBeNull();
-      const ledger = await outer('collections_contact_ledger').where({ customer_id: customerId, channel: 'email' });
-      expect(ledger).toHaveLength(1);
-      expect(ledger[0].metadata).toMatchObject({ delivered: true });
-      throw rolledBack; // leave nothing behind
-    })).rejects.toBe(rolledBack);
+    const { customerId, schedule } = await seed();
+    const out = await Runner.processSchedule(schedule.id, NOW);
+    expect(out.outcome).toBe('advanced');
+    expect(sent).toEqual(['invoice.followup_combined_60_day']);
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    const row = await app('customer_dunning_schedules').where({ id: schedule.id }).first();
+    expect(row).toMatchObject({ status: 'active', step_index: 5 });
+    expect(row.touch_claimed_at).toBeNull();
+    const ledger = await app('collections_contact_ledger').where({ customer_id: customerId, channel: 'email' });
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0].metadata).toMatchObject({ delivered: true });
   });
 
-  test('a claim that is not ours (the stamp moved) is still refused at the authority\'s boundary, on the handle', async () => {
+  test('a claim that is not ours (the stamp moved) is refused at the authority\'s boundary, nothing is handed to the provider', async () => {
     const sent = acceptingLibrary();
-    const rolledBack = new Error('rollback');
-    await expect(app.transaction(async (outer) => {
-      const { customerId, invoiceIds, schedule } = await seed(outer);
-      const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
-      const stamp = new Date(NOW.getTime() + 1000);
-      await outer('customer_dunning_schedules').where({ id: schedule.id }).update({ touch_claimed_at: stamp });
-      const snapshot = Boundary.snapshotOf(customerId, set(invoiceIds), { scheduleId: schedule.id, claimStamp: new Date(NOW.getTime() + 5000) });
-      const outcome = await dispatchUnderBillingEmailAuthority({
-        input: { customerId, invoiceId: null, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
-        recipientEmail: EMAIL, templateKey: 'invoice.followup_combined_60_day',
-        preSendCheck: Boundary.check(snapshot, { database: outer }), dispatch: async () => { sent.push('x'); }, state, database: outer,
-      });
-      expect(outcome).toEqual({ ok: false });
-      expect(state.boundaryBlock).toMatchObject({ code: 'DUNNING_SCHEDULE_CHANGED', retryable: true });
-      expect(sent).toEqual([]);
-      throw rolledBack;
-    })).rejects.toBe(rolledBack);
+    const { customerId, invoiceIds, schedule } = await seed();
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    const stamp = new Date(NOW.getTime() + 1000);
+    await app('customer_dunning_schedules').where({ id: schedule.id }).update({ touch_claimed_at: stamp });
+    const snapshot = Boundary.snapshotOf(customerId, set(invoiceIds), { scheduleId: schedule.id, claimStamp: new Date(NOW.getTime() + 5000) });
+    const outcome = await dispatchUnderBillingEmailAuthority({
+      input: { customerId, invoiceId: null, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
+      recipientEmail: EMAIL, templateKey: 'invoice.followup_combined_60_day',
+      preSendCheck: Boundary.check(snapshot), dispatch: async () => { sent.push('x'); }, state,
+    });
+    expect(outcome).toEqual({ ok: false });
+    expect(state.boundaryBlock).toMatchObject({ code: 'DUNNING_SCHEDULE_CHANGED', retryable: true });
+    expect(sent).toEqual([]);
   });
 
-  test('without the run\'s handle the authority opens on the pool, cannot see the uncommitted rows, and refuses (the bug this closes)', async () => {
-    const rolledBack = new Error('rollback');
-    await expect(app.transaction(async (outer) => {
-      const { customerId, invoiceIds } = await seed(outer);
-      const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
-      let dispatched = false;
-      const outcome = await dispatchUnderBillingEmailAuthority({
-        input: { customerId, invoiceId: null, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
-        recipientEmail: EMAIL, templateKey: 'invoice.followup_combined_60_day',
-        preSendCheck: Boundary.check(Boundary.snapshotOf(customerId, set(invoiceIds)), { database: outer }),
-        dispatch: async () => { dispatched = true; }, state, // no `database`: the (poisoned) pool
-      });
-      expect(outcome).toEqual({ ok: false });
-      expect(dispatched).toBe(false);
-      expect(state.boundaryBlock).toMatchObject({ code: 'BILLING_EMAIL_RECHECK_FAILED', retryable: true });
-      throw rolledBack;
-    })).rejects.toBe(rolledBack);
+  test('a customer who left the email choice (prefs now text-only) is refused by the authority\'s locked recheck', async () => {
+    const sent = acceptingLibrary();
+    const { customerId, invoiceIds } = await seed();
+    await app('notification_prefs').where({ customer_id: customerId }).update({ invoice_channels: JSON.stringify(['sms']) });
+    const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
+    const outcome = await dispatchUnderBillingEmailAuthority({
+      input: { customerId, invoiceId: null, channel: 'email', metadata: { billingDeliveryCategory: 'invoice' } },
+      recipientEmail: EMAIL, templateKey: 'invoice.followup_combined_60_day',
+      preSendCheck: Boundary.check(Boundary.snapshotOf(customerId, set(invoiceIds))), dispatch: async () => { sent.push('x'); }, state,
+    });
+    expect(outcome).toEqual({ ok: false });
+    expect(state.boundaryBlock).toMatchObject({ retryable: true });
+    expect(sent).toEqual([]);
   });
 });

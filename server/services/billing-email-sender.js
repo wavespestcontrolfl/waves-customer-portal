@@ -40,11 +40,10 @@ function billingEmailRefusal(block) {
 // Who the email may go to: the authority's first read (it reads again under
 // its locks at the provider handoff). An unreadable context is a retryable
 // not-sent, never a blind send.
-async function billingEmailRecipient(authorityInput, logTag, database) {
+async function billingEmailRecipient(authorityInput, logTag) {
   let context;
   try {
-    // The default call shape is unchanged for every existing caller.
-    context = database ? await loadBillingEmailContext(authorityInput, database) : await loadBillingEmailContext(authorityInput);
+    context = await loadBillingEmailContext(authorityInput);
   } catch (err) {
     logger.warn(`[${logTag}] billing email context unavailable for ${authorityInput.customerId}: ${redactContact(err.message)}`);
     return { refusal: { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'billing_email_context_unavailable' } };
@@ -59,8 +58,8 @@ function isEmailLike(value) {
 
 // Who an operator's explicit send goes to: the billing recipient, whatever
 // the customer chose.
-async function operatorEmailRecipient(customer, logTag, database = db) {
-  const prefs = await database('notification_prefs')
+async function operatorEmailRecipient(customer, logTag) {
+  const prefs = await db('notification_prefs')
     .where({ customer_id: customer.id })
     .first()
     .catch((err) => {

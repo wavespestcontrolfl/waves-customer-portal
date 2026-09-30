@@ -30,7 +30,7 @@ const set = {
 };
 const baseCtx = () => ({
   schedule: { id: 's1', episode: 1, step_index: 4 }, step: config.stepsThrough90[4], customer: CUSTOMER, set, channels: ['email', 'sms'],
-  eventKey: 'customer-dunning:s1:1:d60_reminder', claimStamp: new Date(), database: jest.fn(), link: 'https://s.example.test/x',
+  eventKey: 'customer-dunning:s1:1:d60_reminder', claimStamp: new Date(), link: 'https://s.example.test/x',
   snapshot: { customerId: 'cust-1', kind: 'multi', digest: 'd', totalCents: 20000, anchorId: 'inv-a' },
 });
 const baseState = (prefs) => ({

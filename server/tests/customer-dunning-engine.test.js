@@ -119,6 +119,21 @@ jest.mock('../services/collections/contact-ledger', () => {
     }),
   };
 });
+// The one db module the engine runs on: customers / prefs / templates / interactions / schedules are served from
+// the per-test state below, the ledger from mockLedger. Every write is recorded in mockWrites.
+let mockOpenSchedules = [];
+const mockWrites = [];
+const mockTables = {
+  first: (table, target) => {
+    if (table === 'customers') return customer;
+    if (table === 'notification_prefs') return prefs;
+    if (table === 'sms_templates') return smsTemplateRow;
+    if (table === 'customer_dunning_schedules') return mockScheduleRow;
+    if (table === 'collections_contact_ledger') return mockLedger.find((r) => r.id === target);
+    return undefined;
+  },
+  insert: (table, row) => { mockWrites.push(['insert', table, row]); if (table === 'customer_interactions') interactions.push(row); },
+};
 jest.mock('../models/db', () => {
   const fake = jest.fn((table) => {
     fake.tables.push(table);
@@ -133,8 +148,12 @@ jest.mock('../models/db', () => {
       whereIn() { return chain; },
       whereRaw() { return chain; },
       select() { return chain; },
+      orderBy() { return chain; },
       forUpdate() { mockLocked.push(table); return chain; },
+      insert: async (row) => { mockTables.insert(table, row); return []; },
+      del: async () => { mockWrites.push(['del', table]); return 1; },
       update: async (patch) => {
+        mockWrites.push(['update', table, patch]);
         // the only ledger UPDATE this engine issues itself: clearing a stale never_contacted stamp
         if (table === 'collections_contact_ledger' && String(patch?.metadata?.__raw || '').includes("- 'never_contacted'")) {
           const row = mockLedger.find((r) => r.id === target);
@@ -142,9 +161,9 @@ jest.mock('../models/db', () => {
         }
         return 1;
       },
-      first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : table === 'collections_contact_ledger' ? mockLedger.find((r) => r.id === target) : undefined),
+      first: async () => mockTables.first(table, target),
       // copies, as a real query returns: an in-memory view change (a repair's reflected verdict) never edits the stored row
-      then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred).map((r) => ({ ...r, metadata: { ...r.metadata } })) : []),
+      then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred).map((r) => ({ ...r, metadata: { ...r.metadata } })) : table === 'customer_dunning_schedules' ? mockOpenSchedules : []),
     };
     return chain;
   });
@@ -236,18 +255,10 @@ function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-
   prefs = undefined; // legacy: no explicit billing channels
   smsTemplateRow = { is_active: true };
   interactions = [];
-  const served = require('../models/db').implementation;
-  fakeDb = jest.fn((table) => {
-    // the ledger and the schedule row are served by the same in-memory tables the default handle serves
-    if (table === 'collections_contact_ledger' || table === 'customer_dunning_schedules') return served(table);
-    const q = { insertedRow: null };
-    q.where = () => q;
-    q.first = async () => (table === 'customers' ? customer : table === 'notification_prefs' ? prefs : table === 'sms_templates' ? smsTemplateRow : undefined);
-    q.insert = async (row) => { if (table === 'customer_interactions') interactions.push(row); };
-    return q;
-  });
-  fakeDb.raw = jest.fn((sql) => ({ __raw: sql }));
-  fakeDb.fn = { now: () => 'now' };
+  fakeDb = require('../models/db'); // the db module mock itself
+  fakeDb.mockImplementation(fakeDb.implementation);
+  mockOpenSchedules = [];
+  mockWrites.length = 0;
   schedule = {
     id: SCHEDULE_ID, customer_id: CUSTOMER_ID, episode: 1, status: stepStatus, step_index: stepIndex,
     next_touch_at: ago(0), touches_sent: stepIndex, held_since: null, hold_alerted_at: null, link_digest: null, link_url: null,
@@ -291,23 +302,10 @@ function seedOverdue() {
   });
 }
 
-// A read handle for the shadow run: serves the same customer / prefs / template
-// rows the live guards read, the given open schedules, and records any write.
+// The shadow run's world: these are the open schedule rows the db module returns; `writes` is every write anything made.
 function shadowDb(schedules = []) {
-  const writes = [];
-  const database = jest.fn((table) => {
-    if (table === 'collections_contact_ledger') return require('../models/db').implementation(table);
-    const q = {};
-    q.where = () => q; q.whereIn = () => q; q.select = () => q;
-    q.first = async () => (table === 'customers' ? customer : table === 'notification_prefs' ? prefs : table === 'sms_templates' ? smsTemplateRow : undefined);
-    q.insert = (...a) => { writes.push(['insert', table, a]); return q; };
-    q.update = (...a) => { writes.push(['update', table, a]); return q; };
-    q.del = (...a) => { writes.push(['del', table, a]); return q; };
-    q.then = (resolve) => resolve(table === 'customer_dunning_schedules' ? schedules : []);
-    return q;
-  });
-  database.writes = writes;
-  return database;
+  mockOpenSchedules = schedules;
+  return { writes: mockWrites };
 }
 
 // Rails: SMS accepted unless a test overrides it; boundary hooks run the way
@@ -383,7 +381,7 @@ beforeEach(() => {
 });
 afterAll(() => { delete process.env.GATE_DUNNING_LADDER_90; });
 
-const run = (opts = {}) => Runner.processSchedule(SCHEDULE_ID, NOW, { database: fakeDb, ...opts });
+const run = (opts = {}) => Runner.processSchedule(SCHEDULE_ID, NOW, opts);
 const ledgerKeys = () => mockLedger.map((r) => r.idempotency_key);
 const rowFor = (channel) => mockLedger.find((r) => r.channel === channel);
 
@@ -759,7 +757,7 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
         ? makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'account_credit_available' })
         : makeSet(['inv-a', 'inv-b', 'inv-c'])));
       const database = emptyTableDb();
-      const tally = await Runner.shadowRun(NOW, { database });
+      const tally = await Runner.shadowRun(NOW);
       const out = lines();
       expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic members=3 active=3 step=d60_reminder next=/);
       expect(out).toMatch(/SHADOW would absorb customer=cust-0000-synthetic/);
@@ -779,7 +777,7 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
         memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
         mockOnAutopay.mockResolvedValue(true);
         const database = emptyTableDb();
-        const tally = await Runner.shadowRun(NOW, { database });
+        const tally = await Runner.shadowRun(NOW);
         expect(lines()).toMatch(/SHADOW would promote customer=cust-0000-synthetic members=3 active=3 step=d60_reminder next=2026-10-06T14:15:59\.000Z/);
         expect(lines()).not.toMatch(/would (send|hold|pause|close|settle)/);
         expect(mockOnAutopay).not.toHaveBeenCalled();
@@ -794,7 +792,7 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
       memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
       mockOnAutopay.mockResolvedValue(true); // today's autopay state must not be judged for a touch that is not yet due
       const database = emptyTableDb();
-      const tally = await Runner.shadowRun(NOW, { database });
+      const tally = await Runner.shadowRun(NOW);
       const out = lines();
       expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic members=3 active=3 step=d60_reminder next=2026-10-07T\d\d:\d\d:\d\d\.000Z/);
       expect(out).not.toMatch(/schedule=projected/);
@@ -811,12 +809,12 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
         { id: 's-out', customer_id: 'cust-out', step_index: 4 },
       ];
       mockAllowlist = new Set(['cust-in']);
-      await Runner.shadowRun(NOW, { database: emptyTableDb(rowsOpen) });
+      await (async () => { emptyTableDb(rowsOpen); return Runner.shadowRun(NOW); })();
       expect(lines()).toMatch(/schedule=s-in/);
       expect(lines()).not.toMatch(/schedule=s-out/);
       logger.info.mockClear();
       mockAllowlist = null; // empty allowlist = everyone
-      await Runner.shadowRun(NOW, { database: emptyTableDb(rowsOpen) });
+      await (async () => { emptyTableDb(rowsOpen); return Runner.shadowRun(NOW); })();
       expect(lines()).toMatch(/schedule=s-out/);
     });
 
@@ -830,7 +828,7 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
         try { return await fn(database); } finally { inTransaction = false; }
       });
       mockResolve.mockImplementation(async () => { heldDuringResolve.push(inTransaction); return makeSet(['inv-a', 'inv-b', 'inv-c']); });
-      await Runner.shadowRun(NOW, { database: emptyTableDb([{ id: 's1', customer_id: CUSTOMER_ID, step_index: 4 }]) });
+      await (async () => { emptyTableDb([{ id: 's1', customer_id: CUSTOMER_ID, step_index: 4 }]); return Runner.shadowRun(NOW); })();
       expect(heldDuringResolve.length).toBeGreaterThanOrEqual(2); // promotion and the open schedule
       expect(heldDuringResolve.every((held) => held === false)).toBe(true);
       Schedule.inReadOnlyTransaction.mockImplementation(async (database, fn) => fn(database));
@@ -842,9 +840,10 @@ describe('shadow runs the live pre-send guards (R2-1)', () => {
   const logger = require('../services/logger');
   const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
   const openSchedule = [{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }];
-  const shadow = async (database = shadowDb(openSchedule)) => {
+  const shadow = async () => {
+    const database = shadowDb(openSchedule);
     Schedule.promotionCandidates.mockResolvedValue([]);
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     return database;
   };
   const noWrites = (database) => {
@@ -869,11 +868,11 @@ describe('shadow runs the live pre-send guards (R2-1)', () => {
     logger.info.mockClear();
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
-    const database = shadowDb();
-    await Runner.shadowRun(NOW, { database });
+    shadowDb();
+    await Runner.shadowRun(NOW);
     expect(lines()).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
     expect(lines()).not.toMatch(/autopay_hold|would send/); // a customer with no schedule row is not judged
-    noWrites(database);
+    noWrites({ writes: mockWrites });
   });
 
   test('unreadable autopay state and unreadable preferences are would-holds', async () => {
@@ -882,10 +881,9 @@ describe('shadow runs the live pre-send guards (R2-1)', () => {
     expect(lines()).toMatch(/would hold .* reason=autopay_unreadable/);
     logger.info.mockClear();
     mockOnAutopay.mockResolvedValue(false);
-    const database = shadowDb(openSchedule);
-    const serve = database.getMockImplementation();
-    database.mockImplementation((table) => { if (table === 'notification_prefs') throw new Error('prefs down'); return serve(table); });
-    await shadow(database);
+    const serve = fakeDb.getMockImplementation();
+    fakeDb.mockImplementation((table) => { if (table === 'notification_prefs') throw new Error('prefs down'); return serve(table); });
+    const database = await shadow();
     expect(lines()).toMatch(/would hold .* reason=prefs_unreadable/);
     expect(database.writes).toEqual([]);
   });
@@ -926,7 +924,7 @@ describe('shadow evaluates the collections policy before logging a send (R3-1)',
   const shadow = async () => {
     Schedule.promotionCandidates.mockResolvedValue([]);
     const database = shadowDb(openSchedule);
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     return database;
   };
   const untouched = (database) => {
@@ -1090,81 +1088,6 @@ describe('a changed set is planned again before the second attempt (R3-3)', () =
   });
 });
 
-describe('every helper in the runner path uses the injected handle, never the default pool (R4 sweep)', () => {
-  const logger = require('../services/logger');
-  const defaultPool = require('../models/db');
-  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
-  // Any use of the process-wide pool throws. Everything the run reaches for must ride the handle it was given.
-  const withPoolPoisoned = async (fn) => {
-    defaultPool.mockImplementation(() => { throw new Error('the default pool was used'); });
-    try { await fn(); } finally { defaultPool.mockImplementation(defaultPool.implementation); }
-  };
-
-  test('the poison is real (a sanity check on the test itself)', async () => {
-    await withPoolPoisoned(async () => { expect(() => defaultPool('collections_contact_ledger')).toThrow('the default pool was used'); });
-  });
-
-  test('LIVE: a full touch (recover, autopay, set, policy, reservations, send, stamps, advance) touches only the run\'s handle', async () => {
-    await withPoolPoisoned(async () => {
-      expect((await run()).outcome).toBe('advanced');
-    });
-    // the mocked helpers were handed the handle explicitly
-    for (const fn of ['recordContact']) expect(ContactLedger[fn]).toHaveBeenCalledWith(expect.objectContaining({ database: fakeDb }));
-    expect(ContactLedger.claimAttempt.mock.calls.every((c) => c[2]?.database === fakeDb)).toBe(true);
-    expect(ContactLedger.markDelivered.mock.calls.every((c) => c[1]?.database === fakeDb)).toBe(true);
-    expect(mockOnAutopay).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ db: fakeDb, now: NOW }));
-    expect(mockPolicy.mock.calls.every(([a]) => a.database === fakeDb)).toBe(true);
-    expect(mockResolve.mock.calls.filter(([, o]) => o?.now).every(([, o]) => o.database === fakeDb)).toBe(true);
-    expect(mockLoadContext).toHaveBeenCalledWith(expect.anything(), fakeDb);
-    // the billing email authority opens its lock transaction on the run's handle (real authority: customer-dunning-email-authority-postgres.test.js)
-    expect(require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority)
-      .toHaveBeenCalledWith(expect.objectContaining({ database: fakeDb }));
-    expect(mockLoadTemplate.mock.calls.every((c) => c[1] === fakeDb)).toBe(true);
-    expect(smsTemplates.getTemplate.mock.calls.every((c) => c[3]?.database === fakeDb)).toBe(true); // the SMS render reads the probe's snapshot
-    expect(Schedule.claim.mock.calls.every((c) => c[2].database === fakeDb)).toBe(true);
-    expect(Schedule.advance.mock.calls[0][1].database).toBe(fakeDb);
-    expect(Schedule.releaseClaim.mock.calls.every((c) => c[1].database === fakeDb)).toBe(true);
-    expect(interactions).toHaveLength(1); // written through the handle
-  });
-
-  test('LIVE, refusals and holds: the hold/pause writers, the never_contacted stamps, the re-render and the close all ride the handle', async () => {
-    await withPoolPoisoned(async () => {
-      mockLoadContext.mockResolvedValueOnce({ error: mockBlocked('BILLING_EMAIL_RECHECK_FAILED', 'x', { retryable: true }) });
-      expect((await run()).outcome).toBe('told'); // email refused (stamped), text delivered
-      expect(rowFor('email').metadata.never_contacted).toBe(true);
-      live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
-      await run();
-    });
-    expect(ContactLedger.markSendFailed.mock.calls.every((c) => c[2]?.database === fakeDb)).toBe(true);
-    expect(Schedule.close).toHaveBeenLastCalledWith(expect.anything(), 'balance_cleared', NOW, expect.objectContaining({ database: fakeDb }));
-    expect(fakeDb.raw).toHaveBeenCalled(); // the clear ran on the handle
-  });
-
-  test('LIVE, operator send-now: the comms-lock transaction is opened on the handle, not the pool', async () => {
-    const lock = require('../utils/customer-comms-lock').withCustomerCommsLock;
-    lock.mockClear();
-    await withPoolPoisoned(async () => {
-      expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
-    });
-    expect(lock.mock.calls.length).toBeGreaterThan(0);
-    expect(lock.mock.calls.every((c) => c[0] === fakeDb)).toBe(true);
-    expect(mockLoadContext).not.toHaveBeenCalled(); // operator recipient came from the handle's prefs
-  });
-
-  test('SHADOW: the guards, the policy read, the read-only progress and the set resolve all run on the handle it was given', async () => {
-    Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
-    memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
-    const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }]);
-    await withPoolPoisoned(async () => { await Runner.shadowRun(NOW, { database }); });
-    expect(lines()).toMatch(/would send .*schedule=s-open/);
-    expect(mockOnAutopay.mock.calls.every(([, o]) => o.db === database)).toBe(true);
-    expect(mockPolicy.mock.calls.every(([a]) => a.database === database)).toBe(true);
-    expect(mockResolve.mock.calls.every(([, o]) => o.database === database)).toBe(true);
-    expect(mockLoadTemplate.mock.calls.every((c) => c[1] === database)).toBe(true);
-    expect(database.writes).toEqual([]);
-  });
-});
-
 describe('a definite non-send recorded by the email library is recovered too (R4-3)', () => {
   const logger = require('../services/logger');
   const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
@@ -1233,8 +1156,8 @@ describe('a definite non-send recorded by the email library is recovered too (R4
     ContactLedger.markSendFailed.mockClear();
     const emailDb = realRepair();
     Schedule.promotionCandidates.mockResolvedValue([]);
-    const database = shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
-    await Runner.shadowRun(NOW, { database });
+    shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
+    await Runner.shadowRun(NOW);
     expect(lines()).toMatch(/SHADOW would pause customer=cust-0000-synthetic schedule=sched-0000-synthetic step=d60_reminder reason=all_channels_terminal/);
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
     expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
@@ -1304,7 +1227,7 @@ describe('shadow models an ambiguous reservation before logging a send (R5-2)', 
   const shadow = async () => {
     Schedule.promotionCandidates.mockResolvedValue([]);
     const database = shadowDb(open);
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     return database;
   };
   const untouched = (database) => {
@@ -1380,7 +1303,7 @@ describe('progress is selected by the CURRENT touch key after the stage is plann
     });
     Schedule.promotionCandidates.mockResolvedValue([]);
     const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 3, episode: 1, status: 'active' }]);
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder/);
     expect(lines()).not.toMatch(/REMINDER_OUTCOME_UNCONFIRMED/);
     // the policy read excludes THIS touch's rows (none yet), not the old step's
@@ -1397,7 +1320,7 @@ describe('progress is selected by the CURRENT touch key after the stage is plann
       metadata: { notificationEventKey: 'customer-dunning:s-open:1:d60_reminder', selectedChannels: ['email'] },
     });
     Schedule.promotionCandidates.mockResolvedValue([]);
-    await Runner.shadowRun(NOW, { database: shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 3, episode: 1, status: 'active' }]) });
+    await (async () => { shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 3, episode: 1, status: 'active' }]); return Runner.shadowRun(NOW); })();
     expect(lines()).toMatch(/would hold .* step=d30_final reason=REMINDER_OUTCOME_UNCONFIRMED unclaimable=email/);
   });
 
@@ -1457,7 +1380,7 @@ describe('the text is re-checked at the FINAL provider hook, after provider prep
       return boundary >= 3 ? changed : live;
     });
     const out = await run();
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }), { database: fakeDb });
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }));
     const sent = await accepted();
     expect(sent).toHaveLength(1);
     expect(mockSendMessage.mock.calls.at(-1)[0].body).toContain('SMS[invoice_followup_combined_60day] 2 '); // the CURRENT set
@@ -1493,7 +1416,7 @@ describe('the text is re-checked at the FINAL provider hook, after provider prep
     const out = await run();
     expect(await accepted()).toHaveLength(0);
     expect(out.outcome).toBe('held');
-    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SCHEDULE_CHANGED' }), { database: fakeDb });
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SCHEDULE_CHANGED' }));
   });
 
   test('the PUSH rail needs no twin: its check is re-run by the push service right before the FCM request, with no arguments', async () => {
@@ -1558,12 +1481,12 @@ describe('a cleared balance closes the schedule before the autopay guard; autopa
 
   test('the due scan includes autopay_hold schedules (so they are revisited)', async () => {
     const statuses = [];
-    const db = jest.fn(() => {
+    require('../models/db').mockImplementationOnce(() => {
       const q = { where() { return q; }, orderBy() { return q; }, select: async () => [] };
       q.whereIn = (_col, list) => { statuses.push(...list); return q; };
       return q;
     });
-    await Runner.runCustomerSchedules(NOW, { database: db });
+    await Runner.runCustomerSchedules(NOW);
     expect(statuses).toEqual(expect.arrayContaining(['active', 'held', 'autopay_hold']));
   });
 
@@ -1573,12 +1496,12 @@ describe('a cleared balance closes the schedule before the autopay guard; autopa
     mockOnAutopay.mockResolvedValue(true);
     live = empty();
     const database = shadowDb(open);
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     expect(lines()).toMatch(/SHADOW would close customer=cust-0000-synthetic schedule=s-ap step=d60_reminder reason=balance_cleared/);
     expect(lines()).not.toMatch(/autopay_hold/);
     logger.info.mockClear();
     live = makeSet(['inv-a', 'inv-b', 'inv-c']);
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-ap step=d60_reminder reason=autopay_hold/);
     expect(database.writes).toEqual([]);
     expect(Schedule.close).not.toHaveBeenCalled();
@@ -1675,16 +1598,17 @@ describe('the shadow run never repairs (A1)', () => {
     expect(mockEmailMessages).toHaveLength(1);
     expect(rowFor('email').metadata.delivered).toBeUndefined();
     ContactLedger.markDelivered.mockClear();
+    mockWrites.length = 0; // the live tick above wrote; the shadow run below must write nothing
     const emailDb = realRepair();
 
     Schedule.promotionCandidates.mockResolvedValue([]);
-    const database = shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
-    await Runner.shadowRun(NOW, { database });
+    shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
+    await Runner.shadowRun(NOW);
     expect(lines()).toMatch(/SHADOW would settle customer=cust-0000-synthetic schedule=sched-0000-synthetic step=d60_reminder reason=already_delivered/);
     expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
     expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
     expect(emailDb.transaction).not.toHaveBeenCalled();
-    expect(database.writes).toEqual([]);
+    expect(mockWrites).toEqual([]);
     expect(rowFor('email').metadata.delivered).toBeUndefined(); // still unstamped: shadow did not repair
 
     // the live path is unchanged: it repairs (stamps) from the same evidence
@@ -1701,20 +1625,6 @@ describe('the shadow run never repairs (A1)', () => {
     expect(Reservation.repairAcceptedBillingEmailReservations.mock.calls[0][2]).toBeUndefined();
     await reminder.reminderProgress(CUSTOMER_ID, 'invoice_followups_customer', ['email'], { repair: false });
     expect(Reservation.repairAcceptedBillingEmailReservations.mock.calls[1][2]).toEqual({ readOnly: true });
-  });
-});
-
-describe('the injected database handle reaches every set resolve (R2-3)', () => {
-  const runnerCalls = () => mockResolve.mock.calls.filter(([, opts]) => opts && opts.now);
-  test('the initial resolve and the re-render both use the handle processSchedule was given', async () => {
-    let n = 0;
-    const changed = makeSet(['inv-a', 'inv-b'], { totalCents: 20000, digest: 'changed' });
-    // boundary reads (no `now`) change the set once, forcing a re-render; the runner's own resolves are the ones with `now`
-    mockResolve.mockImplementation(async (_id, opts) => { if (opts?.now) return n > 0 ? changed : live; n += 1; return changed; });
-    await run();
-    const calls = runnerCalls();
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    for (const [, opts] of calls) expect(opts.database).toBe(fakeDb);
   });
 });
 
@@ -2078,8 +1988,8 @@ describe('the engine never applies account credit (owner ruling 2026-09-30)', ()
     const logger = require('../services/logger');
     Schedule.promotionCandidates.mockResolvedValue([]);
     live = creditHold();
-    const database = shadowDb([{ id: SCHEDULE_ID, customer_id: CUSTOMER_ID, step_index: 4 }]);
-    await Runner.shadowRun(NOW, { database });
+    shadowDb([{ id: SCHEDULE_ID, customer_id: CUSTOMER_ID, step_index: 4 }]);
+    await Runner.shadowRun(NOW);
     expect(logger.info.mock.calls.map(([m]) => String(m)).join('\n')).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=sched-0000-synthetic step=\w+ reason=account_credit_available/);
     expect(mockNotify).not.toHaveBeenCalled();
     expect(Schedule.markHeld).not.toHaveBeenCalled();
@@ -2368,7 +2278,7 @@ describe('final notice, D2/D4/D5/D11', () => {
     process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     mockLedger.length = 0;
     await run();
-    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, fakeDb); // on the run's own handle
+    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID);
     spy.mockRestore();
   });
 
@@ -2432,7 +2342,7 @@ describe('operator send-now', () => {
       // 1 = set read, 2 = the handoff's first check, 3 = the FINAL check (the invoice was paid meanwhile), then stable
       mockResolve.mockImplementation(async () => { n += 1; return n <= 2 ? live : changed; });
       const out = await run({ operatorInitiated: true, force: true });
-      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }), { database: fakeDb });
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }));
       // the refused attempt never reached the provider; the re-render sent the CURRENT set, once
       expect(mockEmailMessages).toHaveLength(1);
       expect(JSON.parse(mockEmailMessages[0].payload_snapshot).invoice_count).toBe('2');
@@ -2472,12 +2382,12 @@ describe('operator send-now', () => {
 
 describe('runCustomerSchedules: one failure never stops the rest', () => {
   test('processes every due schedule and tallies failures', async () => {
-    const db = jest.fn(() => ({
+    require('../models/db').mockImplementationOnce(() => ({
       whereIn() { return this; }, where() { return this; }, orderBy() { return this; },
       select: async () => [{ id: 's1', customer_id: 'c1' }, { id: 's2', customer_id: 'c2' }],
     }));
     Schedule.claim.mockRejectedValueOnce(new Error('db blip')).mockResolvedValueOnce(null);
-    const out = await Runner.runCustomerSchedules(NOW, { database: db });
+    const out = await Runner.runCustomerSchedules(NOW);
     expect(out.failed).toBe(1);
     expect(out.processed).toBe(1);
   });
@@ -2485,7 +2395,7 @@ describe('runCustomerSchedules: one failure never stops the rest', () => {
 
 describe('runCustomerSchedules: each claim is stamped when it is TAKEN, not at batch start', () => {
   test('a batch that outlives the claim TTL hands later schedules a claim time advanced by the elapsed wall time; cadence keeps the batch clock', async () => {
-    const db = jest.fn(() => ({
+    require('../models/db').mockImplementationOnce(() => ({
       whereIn() { return this; }, where() { return this; }, orderBy() { return this; },
       select: async () => [{ id: 's1', customer_id: 'c1' }, { id: 's2', customer_id: 'c2' }],
     }));
@@ -2494,7 +2404,7 @@ describe('runCustomerSchedules: each claim is stamped when it is TAKEN, not at b
     try {
       // the first schedule's send takes 15 minutes of wall time
       Schedule.claim.mockImplementationOnce(async () => { wall += 15 * 60 * 1000; return null; }).mockResolvedValueOnce(null);
-      await Runner.runCustomerSchedules(NOW, { database: db });
+      await Runner.runCustomerSchedules(NOW);
     } finally { spy.mockRestore(); }
     const [first, second] = Schedule.claim.mock.calls.map((c) => c[1].getTime());
     expect(first).toBe(NOW.getTime());
@@ -2512,7 +2422,7 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
     const { writes } = database;
     live = makeSet(['inv-a', 'inv-b', 'inv-c']);
     memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     const lines = shadowLines().join('\n');
     expect(lines).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
     expect(lines).toMatch(/SHADOW would absorb customer=cust-0000-synthetic seq=seq-inv-/);
@@ -2533,12 +2443,12 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
   test('a customer whose set is held / a schedule that would close are logged as would hold / would close', async () => {
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     live = makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'member_paused' });
-    const database = shadowDb([{ id: 's1', customer_id: CUSTOMER_ID, step_index: 4 }]);
-    await Runner.shadowRun(NOW, { database });
+    shadowDb([{ id: 's1', customer_id: CUSTOMER_ID, step_index: 4 }]);
+    await Runner.shadowRun(NOW);
     expect(shadowLines().join('\n')).toMatch(/would hold customer=cust-0000-synthetic reason=member_paused/);
     logger.info.mockClear();
     live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
-    await Runner.shadowRun(NOW, { database });
+    await Runner.shadowRun(NOW);
     expect(shadowLines().join('\n')).toMatch(/would close customer=cust-0000-synthetic/);
   });
 
@@ -2546,8 +2456,8 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
     Schedule.promotionCandidates.mockResolvedValue(['c1', 'c2']);
     mockResolve.mockRejectedValueOnce(new Error('stripe down')).mockResolvedValueOnce(makeSet(['inv-a', 'inv-b']));
     memberSeqRows = rowsFor(['inv-a', 'inv-b'], 60, 3);
-    const database = shadowDb();
-    const tally = await Runner.shadowRun(NOW, { database });
+    shadowDb();
+    const tally = await Runner.shadowRun(NOW);
     expect(tally.failed).toBe(1);
     expect(tally.promote).toBe(1);
   });

@@ -59,7 +59,7 @@ const pause = (run, reason) => Schedule.markPaused(run.schedule, reason, run).th
 
 async function readPrefs(run) {
   try {
-    return { prefs: await run.database('notification_prefs').where({ customer_id: run.schedule.customer_id }).first() };
+    return { prefs: await db('notification_prefs').where({ customer_id: run.schedule.customer_id }).first() };
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — channel preferences unavailable: ${redactContact(err.message)}`);
     return { error: true };
@@ -80,7 +80,7 @@ function channelsFor(run, prefs, customer) {
 const decision = (kind, reason, extra = {}) => ({ kind, reason, ...extra });
 
 async function decideCustomer(run) {
-  const customer = await run.database('customers').where({ id: run.schedule.customer_id }).first();
+  const customer = await db('customers').where({ id: run.schedule.customer_id }).first();
   if (!customer) return decision('close', 'customer_missing', { closeReason: 'customer_missing', alertMissingCustomer: true });
   if (customer.deleted_at) return decision('pause', 'customer_deleted');
   const { prefs, error } = await readPrefs(run);
@@ -145,7 +145,7 @@ function cadenceRows(rows, run, facts = null) {
 }
 
 async function memberRows(run) {
-  if (!run.rows) run.rows = await Schedule.activeMemberRows(run.schedule.customer_id, { database: run.database });
+  if (!run.rows) run.rows = await Schedule.activeMemberRows(run.schedule.customer_id);
   return run.rows;
 }
 
@@ -159,7 +159,7 @@ const markAtRisk = async (run) => {
   if (!(Followups.ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true')) return;
   if (!FINAL_STEP_IDS.includes(run.step.id)) return;
   try {
-    await Followups.markAtRiskForLongOverdue(run.schedule.customer_id, run.database);
+    await Followups.markAtRiskForLongOverdue(run.schedule.customer_id);
   } catch (err) {
     logger.warn(`[customer-dunning] at-risk stamp failed for customer ${run.schedule.customer_id}: ${redactContact(err.message)}`);
   }
@@ -172,7 +172,7 @@ const interactionType = (delivered) => (delivered.has('sms') ? 'sms_outbound' : 
 async function recordInteraction(run, delivered) {
   const meta = run.snapshotMeta || {};
   try {
-    await run.database('customer_interactions').insert({
+    await db('customer_interactions').insert({
       customer_id: run.schedule.customer_id,
       interaction_type: interactionType(delivered),
       subject: `Invoice reminder — ${run.step.label}`,
@@ -196,7 +196,7 @@ async function recordInteraction(run, delivered) {
  */
 async function finishDelivered(run, facts) {
   const deliveredAt = facts.deliveredAt ? new Date(facts.deliveredAt) : run.now;
-  const base = { claimStamp: run.claimStamp, deliveredAt, now: run.now, database: run.database };
+  const base = { claimStamp: run.claimStamp, deliveredAt, now: run.now };
   let ok;
   if (Schedule.isFinalIndex(run.schedule.step_index)) {
     const { ids, unreadable } = namedForFinal(run, facts);
@@ -226,7 +226,7 @@ async function decideRecovery(run) {
   let progress;
   try {
     // The shadow run reads the same view but must not repair (stamp) anything.
-    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, { database: run.database, ...(run.readOnly ? { repair: false } : {}) });
+    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, run.readOnly ? { repair: false } : undefined);
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${redactContact(err.message)}`);
     return decision('hold', 'progress_unreadable');
@@ -251,7 +251,7 @@ async function decideRecovery(run) {
 async function decideAutopay(run) {
   let onAutopay;
   try {
-    onAutopay = await customerOnAutopay(run.customer, { failClosed: true, db: run.database, now: run.now });
+    onAutopay = await customerOnAutopay(run.customer, { failClosed: true, now: run.now });
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — autopay state unreadable: ${redactContact(err.message)}`);
     return decision('hold', 'autopay_unreadable');
@@ -295,7 +295,7 @@ async function planStage(run, set) {
 async function decideSet(run, set) {
   if (!sendable(set)) return decideEndOfSet(set);
   await planStage(run, set);
-  run.sendChannels = await Render.channelsWithTemplates(run.step, set.kind, run.channels, run.database);
+  run.sendChannels = await Render.channelsWithTemplates(run.step, set.kind, run.channels);
   return run.sendChannels.length ? null : decision('pause', 'no_reachable_channel');
 }
 
@@ -321,7 +321,7 @@ async function applyDecision(run, d) {
     default: { // close
       if (d.reason === 'no_step') logger.error(`[customer-dunning] schedule ${run.schedule.id} has no step at index ${run.schedule.step_index}; releasing`);
       const closed = await Schedule.close(run.schedule, d.closeReason, run.now, {
-        database: run.database, claimStamp: run.claimStamp, expectedStepIndex: run.schedule.step_index,
+        claimStamp: run.claimStamp, expectedStepIndex: run.schedule.step_index,
       });
       // A close refused because the claim was lost (a pause, a resume, another run)
       // changed nothing: report it, alert nobody.
@@ -366,7 +366,7 @@ function attemptSend(run, set) {
   const ctx = {
     schedule: run.schedule, step: run.step, customer: run.customer, set, channels: run.sendChannels,
     explicit: run.explicit, eventKey: run.eventKey, operatorInitiated: run.operatorInitiated,
-    snapshot: Boundary.snapshotOf(run.schedule.customer_id, set, { scheduleId: run.schedule.id, claimStamp: run.claimStamp }), claimStamp: run.claimStamp, database: run.database,
+    snapshot: Boundary.snapshotOf(run.schedule.customer_id, set, { scheduleId: run.schedule.id, claimStamp: run.claimStamp }), claimStamp: run.claimStamp,
   };
   return sendReminderChannels({
     customerId: run.schedule.customer_id,
@@ -379,7 +379,6 @@ function attemptSend(run, set) {
     channels: run.sendChannels,
     metadata: run.snapshotMeta,
     send: makeSender(ctx),
-    database: run.database,
   });
 }
 
@@ -397,7 +396,7 @@ function attemptSend(run, set) {
 async function sendWithRerender(run, set) {
   const first = await attemptSend(run, set);
   if (!setChanged(first) || first.deliveredNow.length) return { result: first, set };
-  const fresh = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
+  const fresh = await resolveDunnableSet(run.schedule.customer_id, { now: run.now });
   run.rows = null; // the rows narrowed to the first set no longer describe the send
   const stop = await decideSet(run, fresh) || await applyStage(run);
   if (stop) return { stop };
@@ -407,7 +406,7 @@ async function sendWithRerender(run, set) {
 async function deliveryFacts(run, result) {
   let event = null;
   try {
-    const progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.sendChannels, { database: run.database });
+    const progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.sendChannels);
     event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
   } catch (err) {
     logger.warn(`[customer-dunning] post-send progress unreadable for schedule ${run.schedule.id}: ${redactContact(err.message)}`);
@@ -476,7 +475,7 @@ async function runClaimed(claimed, opts) {
   const run = { ...opts, schedule: claimed.schedule, claimStamp: claimed.claimStamp };
   const early = await decideCustomer(run) || await decideRecovery(run);
   if (early) return applyDecision(run, early);
-  const set = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
+  const set = await resolveDunnableSet(run.schedule.customer_id, { now: run.now });
   const stop = await decideAfterSet(run, set);
   if (stop) return applyDecision(run, stop);
   // Revisited from an autopay hold and no longer on autopay: the ordinary send path takes the step.
@@ -491,28 +490,28 @@ async function runClaimed(claimed, opts) {
  * Process ONE schedule end to end. `force` (operator send-now) skips the
  * "due" test only; every other guard, the claim included, still applies.
  */
-async function processSchedule(scheduleId, now = new Date(), { database = db, operatorInitiated = false, force = false, claimAt = null } = {}) {
+async function processSchedule(scheduleId, now = new Date(), { operatorInitiated = false, force = false, claimAt = null } = {}) {
   // `claimAt` is when the claim is actually taken (a batch passes its start
   // time plus elapsed wall time); `now` stays the batch clock for cadence.
-  const claimed = await Schedule.claim(scheduleId, claimAt || now, { database, force });
+  const claimed = await Schedule.claim(scheduleId, claimAt || now, { force });
   if (!claimed) return outcome('skipped', { reason: 'not_claimable' });
   try {
-    return await runClaimed(claimed, { now, database, operatorInitiated });
+    return await runClaimed(claimed, { now, operatorInitiated });
   } finally {
-    await Schedule.releaseClaim(claimed, { database });
+    await Schedule.releaseClaim(claimed);
   }
 }
 
-async function dueScheduleIds(now, database) {
-  const rows = await database(Schedule.TABLE).whereIn('status', ['active', 'held', 'autopay_hold'])
+async function dueScheduleIds(now) {
+  const rows = await db(Schedule.TABLE).whereIn('status', ['active', 'held', 'autopay_hold'])
     .where('next_touch_at', '<=', now).orderBy('next_touch_at', 'asc').select('id', 'customer_id');
   return allowlisted(rows).map((r) => r.id);
 }
 
 /** Every due schedule, one at a time; one failure never stops the rest. */
-async function runCustomerSchedules(now = new Date(), { database = db } = {}) {
+async function runCustomerSchedules(now = new Date()) {
   const tally = { processed: 0, failed: 0, outcomes: {} };
-  const ids = await dueScheduleIds(now, database);
+  const ids = await dueScheduleIds(now);
   // A sequential batch can outlive CLAIM_TTL_MS: each claim is stamped at the
   // time it is TAKEN (batch clock + elapsed wall time), never the batch start,
   // or later claims would be born expired to admin controls and
@@ -521,7 +520,7 @@ async function runCustomerSchedules(now = new Date(), { database = db } = {}) {
   for (const id of ids) {
     try {
       const claimAt = new Date(now.getTime() + (Date.now() - wallStart));
-      const out = await processSchedule(id, now, { database, claimAt });
+      const out = await processSchedule(id, now, { claimAt });
       tally.processed += 1;
       tally.outcomes[out.outcome] = (tally.outcomes[out.outcome] || 0) + 1;
     } catch (err) {
@@ -563,7 +562,7 @@ async function decideShadowPolicy(run, set) {
   const memberIds = set.members.map((m) => m.invoice_id);
   const verdicts = await reminderPolicyVerdicts({
     customerId: run.schedule.customer_id, invoiceId: null, invoiceIds: memberIds, policyInvoiceIds: memberIds,
-    source: SOURCE, purpose: 'late_payment', entries: event?.entries || [], database: run.database,
+    source: SOURCE, purpose: 'late_payment', entries: event?.entries || [],
   }, pending);
   if (verdicts.some((v) => v?.balanceIncomplete)) return decision('hold', 'COLLECTIONS_POLICY', { denied: pending });
   const denied = pending.filter((_c, i) => !verdictAllows(verdicts[i]));
@@ -597,8 +596,8 @@ function standingReservation(event, channel) {
  * stage and template checks), and only their decide halves — nothing is applied.
  * `schedule` is always a STORED row (shadow never judges a schedule that does not exist).
  */
-async function judgeShadowSchedule(schedule, set, { now, database }) {
-  const run = { schedule, now, database, operatorInitiated: false, claimStamp: null, readOnly: true };
+async function judgeShadowSchedule(schedule, set, { now }) {
+  const run = { schedule, now, operatorInitiated: false, claimStamp: null, readOnly: true };
   const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
   const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAfterSet(run, set)
     || await decideSet(run, set) || await decideShadowPolicy(run, set);
@@ -622,9 +621,9 @@ async function judgeShadowSchedule(schedule, set, { now, database }) {
 // The set resolve makes Stripe calls (pay-combined's live PaymentIntent check), so it runs on the
 // pool with NO transaction held (a pinned connection would starve DB_POOL_MAX=2, as in promotion).
 // It is a documented pure read; only the member-row read below sits inside the READ ONLY transaction.
-async function shadowPromote(customerId, now, database) {
-  const set = await resolveDunnableSet(customerId, { database, now });
-  const rows = await Schedule.inReadOnlyTransaction(database, (trx) => Schedule.activeMemberRows(customerId, { database: trx }));
+async function shadowPromote(customerId, now) {
+  const set = await resolveDunnableSet(customerId, { now });
+  const rows = await Schedule.inReadOnlyTransaction(db, (trx) => Schedule.activeMemberRows(customerId, { database: trx }));
   const d = Schedule.promotionDecision(set, rows, now);
   if (!d.promote) { line('hold', { customer: customerId, reason: d.reason }); return ['hold']; }
   line('promote', {
@@ -639,9 +638,9 @@ async function shadowPromote(customerId, now, database) {
   return ['promote'];
 }
 
-async function shadowSchedule(schedule, now, database) {
-  const set = await resolveDunnableSet(schedule.customer_id, { database, now });
-  return judgeShadowSchedule(schedule, set, { now, database });
+async function shadowSchedule(schedule, now) {
+  const set = await resolveDunnableSet(schedule.customer_id, { now });
+  return judgeShadowSchedule(schedule, set, { now });
 }
 
 /**
@@ -655,18 +654,18 @@ async function shadowSchedule(schedule, now, database) {
  * due date (shadowPromote). Send evidence for unpromoted customers comes from the
  * one-customer allowlist canary (owner rollout plan D12).
  */
-async function shadowRun(now = new Date(), { database = db } = {}) {
+async function shadowRun(now = new Date()) {
   const tally = { promote: 0, hold: 0, send: 0, pause: 0, settle: 0, close: 0, failed: 0 };
   const bump = (kind) => { tally[kind] += 1; };
-  for (const customerId of await Schedule.promotionCandidates({ database })) {
-    try { (await shadowPromote(customerId, now, database)).forEach(bump); } catch (err) {
+  for (const customerId of await Schedule.promotionCandidates()) {
+    try { (await shadowPromote(customerId, now)).forEach(bump); } catch (err) {
       tally.failed += 1;
       logger.warn(`[customer-dunning] SHADOW promote check failed for customer ${customerId}: ${redactContact(err.message)}`);
     }
   }
-  const open = allowlisted(await database(Schedule.TABLE).whereIn('status', ['active', 'held', 'autopay_hold']).where('next_touch_at', '<=', now));
+  const open = allowlisted(await db(Schedule.TABLE).whereIn('status', ['active', 'held', 'autopay_hold']).where('next_touch_at', '<=', now));
   for (const schedule of open) {
-    try { bump(await shadowSchedule(schedule, now, database)); } catch (err) {
+    try { bump(await shadowSchedule(schedule, now)); } catch (err) {
       tally.failed += 1;
       logger.warn(`[customer-dunning] SHADOW schedule check failed for ${schedule.id}: ${redactContact(err.message)}`);
     }

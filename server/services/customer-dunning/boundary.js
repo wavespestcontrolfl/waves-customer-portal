@@ -81,13 +81,13 @@ async function scheduleStillOurs(snapshot, database) {
 }
 
 /**
- * `defaultDatabase` is the handle a hook that holds no transaction (the SMS
- * hook) reads through — the run's own handle, else the pool.
+ * A hook that holds a transaction (email authority, push, the operator handoff) passes
+ * it as `database`; the SMS pre-dispatch hook holds none and reads through the pool.
  * @returns {(opts?: { database?: object }) => Promise<{ok: boolean, code?: string, reason?: string, retryable?: boolean}>}
  */
-function check(snapshot, { database: defaultDatabase = null } = {}) {
+function check(snapshot) {
   return async ({ database } = {}) => {
-    const handle = database || defaultDatabase || db;
+    const handle = database || db;
     try {
       if (snapshot.scheduleId && !await scheduleStillOurs(snapshot, handle)) return scheduleRefusal();
       const live = await resolveDunnableSet(snapshot.customerId, { database: handle });

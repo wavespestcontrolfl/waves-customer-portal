@@ -60,12 +60,12 @@ function metadataOf(row) {
   return typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata || {});
 }
 
-async function persistPolicyWaivers(rowIds, waived, database = db) {
+async function persistPolicyWaivers(rowIds, waived) {
   const ids = [...rowIds].filter(Boolean);
   if (!ids.length) return false;
   try {
-    const changed = await database('collections_contact_ledger').whereIn('id', ids).update({
-      metadata: database.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('policy_waived_channels', ?::jsonb)", [
+    const changed = await db('collections_contact_ledger').whereIn('id', ids).update({
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('policy_waived_channels', ?::jsonb)", [
         JSON.stringify([...waived]),
       ]),
     });
@@ -75,16 +75,15 @@ async function persistPolicyWaivers(rowIds, waived, database = db) {
   }
 }
 
-// `database` (default: the pool) is the handle every read and repair runs on.
 // `repair: false` is a read-only view for a caller that must not write (the
 // customer-dunning shadow run): accepted Email evidence still counts as
 // delivered in the returned events, but no reservation is stamped, resolved or
 // released. Every existing caller keeps the default (repair).
-async function reminderProgress(customerId, source, channels, { repair = true, database = db } = {}) {
-  const rows = await database('collections_contact_ledger').where({ customer_id: customerId, source })
+async function reminderProgress(customerId, source, channels, { repair = true } = {}) {
+  const rows = await db('collections_contact_ledger').where({ customer_id: customerId, source })
     .where('occurred_at', '>', new Date(Date.now() - 90 * 86400000));
   const repaired = await BillingEmailReservation.repairAcceptedBillingEmailReservations(
-    rows, database, repair ? undefined : { readOnly: true },
+    rows, db, repair ? undefined : { readOnly: true },
   );
   const events = new Map();
   for (const row of rows) {
@@ -111,9 +110,9 @@ async function reminderProgress(customerId, source, channels, { repair = true, d
 // 90-day window has no event to name them, and a caller that completes debt on
 // the strength of it (a final notice) must never substitute today's membership.
 // null fields = unreadable.
-async function restoredDelivery(entry, channel, database = db) {
+async function restoredDelivery(entry, channel) {
   try {
-    const row = await database('collections_contact_ledger').where({ id: entry.id }).first('invoice_ids', 'occurred_at');
+    const row = await db('collections_contact_ledger').where({ id: entry.id }).first('invoice_ids', 'occurred_at');
     let ids = row?.invoice_ids;
     if (typeof ids === 'string') ids = JSON.parse(ids);
     return {
@@ -136,13 +135,12 @@ function pendingReminderChannels(channels, delivered, resolved) {
 }
 
 function reminderPolicyVerdicts({
-  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries, database,
+  customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries,
 }, pending) {
   return Promise.all(pending.map((channel) => collectionsChannelPermitted({
     customerId, invoiceId, channel, purpose, offLedgerBalanceCents, excludeLedgerIds: entries.map((entry) => entry.id), source, logTag: 'billing-reminder',
     invoiceIds: policyInvoiceIds ?? invoiceIds,
     detail: true,
-    ...(database ? { database } : {}),
   })));
 }
 
@@ -160,21 +158,13 @@ async function sendLeg(send, channel, entry) {
 // it reached: 'delivered', 'resolved' (terminal Email refusal, never counted
 // as delivered), or null while it stays pending. An uncertain outcome keeps
 // the reservation held; only a definite non-send becomes retryable.
-// Ledger writes on the caller's handle when it gave one; the call shape is unchanged otherwise.
-const claimLeg = (entry, reservation, database) => (database
-  ? ContactLedger.claimAttempt(entry, reservation, { database }) : ContactLedger.claimAttempt(entry, reservation));
-function stampDelivered(entry, occurredAt, database) {
-  const options = { ...(occurredAt ? { occurredAt } : {}), ...(database ? { database } : {}) };
-  return Object.keys(options).length ? ContactLedger.markDelivered(entry, options) : ContactLedger.markDelivered(entry);
-}
-const stampFailed = (entry, failure, database) => (database
-  ? ContactLedger.markSendFailed(entry, failure, { database }) : ContactLedger.markSendFailed(entry, failure));
-
-async function recordLegOutcome(entry, channel, result, results, database) {
+async function recordLegOutcome(entry, channel, result, results) {
   const delivered = billingLegDeliveryState(channel, result || {});
   if (delivered) {
     const occurredAt = billingLegContactTime(result);
-    const stamped = await stampDelivered(entry, occurredAt, database);
+    const stamped = occurredAt
+      ? await ContactLedger.markDelivered(entry, { occurredAt })
+      : await ContactLedger.markDelivered(entry);
     if (stamped) return delivered;
     results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_ACCEPTANCE_UNSTAMPED' };
     return null;
@@ -182,11 +172,10 @@ async function recordLegOutcome(entry, channel, result, results, database) {
   if (result?.held === true || result?.deliveryHeld === true) return null;
   if (result?.deliveryOutcome === 'uncertain') return null;
   const terminal = channel === 'email' && isTerminalEmailRefusal(result);
-  const failure = {
+  const stamped = await ContactLedger.markSendFailed(entry, {
     code: result?.code || result?.reason || 'not_sent',
     ...(terminal ? { resolved: true, resolution: 'email_terminal_refusal' } : {}),
-  };
-  const stamped = await stampFailed(entry, failure, database);
+  });
   if (!stamped) results[channel] = { ...result, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' };
   return stamped && terminal ? 'resolved' : null;
 }
@@ -210,10 +199,8 @@ function ledgerInvoiceIds(invoiceId, invoiceIds) {
 // deliberately evaluates its amount as off-ledger debt.
 async function sendReminderChannels({
   customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, eventKey, channels, metadata = {}, send, offLedgerBalanceCents,
-  // Additive: the handle every ledger read and write runs on (default: the pool, for every existing caller).
-  database,
 }) {
-  const progress = await reminderProgress(customerId, source, channels, { database });
+  const progress = await reminderProgress(customerId, source, channels);
   // A missing episode has the same shape as restored progress. These sets
   // are private to this progress read, so delivery can update them directly.
   const { entries, delivered, resolved, waived: restoredWaived } = progress
@@ -224,7 +211,7 @@ async function sendReminderChannels({
   const results = {};
   const pending = pendingReminderChannels(channels, delivered, resolved);
   const permitted = await reminderPolicyVerdicts({
-    customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries, database,
+    customerId, invoiceId, invoiceIds, policyInvoiceIds, source, purpose, offLedgerBalanceCents, entries,
   }, pending);
   // Partial debt evidence cannot authorize a leg or settle a restored waiver.
   // Keep the entire pending episode retryable before any delivery mutation.
@@ -246,7 +233,7 @@ async function sendReminderChannels({
   }
   const episodeRowIds = new Set(entries.map((entry) => entry.id));
   const revokedWaiver = [...restoredWaived].some((channel) => !waived.has(channel));
-  if (revokedWaiver && !await persistPolicyWaivers(episodeRowIds, waived, database)) {
+  if (revokedWaiver && !await persistPolicyWaivers(episodeRowIds, waived)) {
     for (const [index, channel] of pending.entries()) {
       if (verdictAllows(permitted[index])) {
         results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_WAIVER_REFRESH_FAILED' };
@@ -263,35 +250,35 @@ async function sendReminderChannels({
     };
     const entry = await ContactLedger.recordContact({
       customerId, channel, purpose, invoiceIds: reservation.invoiceIds, source,
-      idempotencyKey: `billing-reminder:${digest}:${channel}`, metadata: reservation.metadata, database,
+      idempotencyKey: `billing-reminder:${digest}:${channel}`, metadata: reservation.metadata,
     });
     episodeRowIds.add(entry?.id);
     // A retry under the same key re-quotes: its claim refreshes the debt snapshot.
-    const claim = await claimLeg(entry, reservation, database);
-    if (claim.delivered) { delivered.add(channel); restored.push(await restoredDelivery(entry, channel, database)); continue; }
+    const claim = await ContactLedger.claimAttempt(entry, reservation);
+    if (claim.delivered) { delivered.add(channel); restored.push(await restoredDelivery(entry, channel)); continue; }
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
     const result = await sendLeg(send, channel, entry);
     results[channel] = result;
-    const state = await recordLegOutcome(entry, channel, result, results, database);
+    const state = await recordLegOutcome(entry, channel, result, results);
     if (state === 'resolved') resolved.add(channel);
     else if (state) {
       delivered.add(channel);
       if (state === 'delivered') deliveredNow.push(channel);
     }
   }
-  const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds, database);
+  const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);
   return { complete, deliveredNow, results, delivered: [...delivered], restored };
 }
 
 // A waiver only settles the episode once it is durable: a reused row keeps
 // its original metadata, and a denial that arrives after the sibling was
 // delivered writes no new row at all.
-async function settleEpisode(channels, { delivered, resolved, waived }, rowIds, database) {
+async function settleEpisode(channels, { delivered, resolved, waived }, rowIds) {
   if (!legsSettled(channels, delivered, resolved, waived)) return false;
   const reliesOnWaiver = channels.some((channel) => waived.has(channel)
     && !delivered.has(channel) && !resolved.has(channel));
   if (!reliesOnWaiver) return true;
-  return persistPolicyWaivers(rowIds, waived, database);
+  return persistPolicyWaivers(rowIds, waived);
 }
 
 module.exports = {

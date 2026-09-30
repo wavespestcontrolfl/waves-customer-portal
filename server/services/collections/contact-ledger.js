@@ -25,28 +25,6 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { redactContact } = require('../../utils/redact-contact');
 
-// The standing row of a keyed reservation that already existed (see recordContact).
-async function standingReservation(database, idempotencyKey, occurredAt) {
-  const existing = await database('collections_contact_ledger')
-    .where({ idempotency_key: idempotencyKey })
-    .first('id', 'metadata', 'occurred_at');
-  if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
-  const existingMeta = typeof existing.metadata === 'string'
-    ? JSON.parse(existing.metadata) : (existing.metadata || {});
-  // Preserve settled event windows, including a concurrent stamp. Unsettled
-  // reservations still refresh for legacy deferred callers before dispatch.
-  let contactAt = existing.occurred_at;
-  if (![existingMeta.delivered, existingMeta.resolved].includes(true)) {
-    const changed = await database('collections_contact_ledger').where({ id: existing.id })
-      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
-        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
-      ]).update({ occurred_at: occurredAt });
-    if (Number(changed) === 1) contactAt = occurredAt;
-  }
-  return { id: existing.id, metadata: existingMeta, reused: true,
-    ...(contactAt ? { occurred_at: contactAt } : {}) };
-}
-
 async function recordContact({
   customerId,
   channel,
@@ -56,13 +34,10 @@ async function recordContact({
   metadata = null,
   occurredAt = new Date(),
   idempotencyKey = null,
-  // Additive: a caller running on its own handle (the customer-dunning engine) keeps
-  // the reservation on it; every other caller uses the pool.
-  database = db,
 }) {
   // Deliberately NOT wrapped: an insert failure must propagate so the caller
   // skips the delivery it was about to make.
-  let query = database('collections_contact_ledger')
+  let query = db('collections_contact_ledger')
     .insert({
       customer_id: customerId,
       channel,
@@ -82,7 +57,24 @@ async function recordContact({
   const id = first && typeof first === 'object' ? first.id : first;
   if (id) return { id, metadata: metadata || {} };
   if (!idempotencyKey) throw new Error('collections ledger insert returned no id');
-  return standingReservation(database, idempotencyKey, occurredAt);
+  const existing = await db('collections_contact_ledger')
+    .where({ idempotency_key: idempotencyKey })
+    .first('id', 'metadata', 'occurred_at');
+  if (!existing) throw new Error('collections ledger reservation neither inserted nor found');
+  const existingMeta = typeof existing.metadata === 'string'
+    ? JSON.parse(existing.metadata) : (existing.metadata || {});
+  // Preserve settled event windows, including a concurrent stamp. Unsettled
+  // reservations still refresh for legacy deferred callers before dispatch.
+  let contactAt = existing.occurred_at;
+  if (![existingMeta.delivered, existingMeta.resolved].includes(true)) {
+    const changed = await db('collections_contact_ledger').where({ id: existing.id })
+      .whereRaw("NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb) AND NOT (COALESCE(metadata, '{}'::jsonb) @> ?::jsonb)", [
+        JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
+      ]).update({ occurred_at: occurredAt });
+    if (Number(changed) === 1) contactAt = occurredAt;
+  }
+  return { id: existing.id, metadata: existingMeta, reused: true,
+    ...(contactAt ? { occurred_at: contactAt } : {}) };
 }
 
 /**
@@ -156,15 +148,15 @@ function claimVerdict(entry) {
   return { allowed: true, reopen: true };
 }
 
-async function claimAttempt(entry, refresh = null, { database = db } = {}) {
+async function claimAttempt(entry, refresh = null) {
   const verdict = claimVerdict(entry);
   if (!verdict.reopen) return verdict;
-  const changed = await database('collections_contact_ledger').where({ id: entry.id })
+  const changed = await db('collections_contact_ledger').where({ id: entry.id })
     .whereRaw("metadata @> ?::jsonb AND NOT (metadata @> ?::jsonb) AND NOT (metadata @> ?::jsonb)", [
       JSON.stringify({ send_failed: true }), JSON.stringify({ delivered: true }), JSON.stringify({ resolved: true }),
     ])
     .update({
-      metadata: database.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
+      metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [
         JSON.stringify({ ...reservationSnapshot(refresh?.metadata), send_failed: false }),
       ]),
       ...(Array.isArray(refresh?.invoiceIds) ? { invoice_ids: JSON.stringify(refresh.invoiceIds) } : {}),

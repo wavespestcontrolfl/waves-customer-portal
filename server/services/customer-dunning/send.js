@@ -55,8 +55,8 @@ async function ensureLink(ctx) {
     codePrefix: invoiceShortCodePrefix(set.anchor),
   });
   try {
-    await (ctx.database || db)(TABLE).where({ id: schedule.id, touch_claimed_at: ctx.claimStamp })
-      .update({ link_url: ctx.link, link_digest: set.digest, updated_at: (ctx.database || db).fn.now() });
+    await db(TABLE).where({ id: schedule.id, touch_claimed_at: ctx.claimStamp })
+      .update({ link_url: ctx.link, link_digest: set.digest, updated_at: db.fn.now() });
   } catch (err) {
     logger.warn(`[customer-dunning] could not cache the pay link for schedule ${schedule.id}: ${redactContact(err.message)}`);
   }
@@ -71,7 +71,7 @@ async function sendTextLeg(ctx, channel, ledger) {
   let body;
   try {
     const payUrl = await ensureLink(ctx);
-    body = await Render.renderSms({ step, set, customer, payUrl, database: ctx.database });
+    body = await Render.renderSms({ step, set, customer, payUrl });
   } catch (err) {
     // Nothing reached the provider: a definite, retryable non-send. Left to
     // throw, sendReminderChannels would read it as UNCERTAIN and hold the
@@ -80,7 +80,7 @@ async function sendTextLeg(ctx, channel, ledger) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, code: 'REMINDER_PREPARATION_FAILED' };
   }
   if (!body) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_UNAVAILABLE' };
-  const boundary = Boundary.check(ctx.snapshot, { database: ctx.database });
+  const boundary = Boundary.check(ctx.snapshot);
   return sendCustomerMessage({
     to: channel === 'sms' ? customer.phone : null,
     body,
@@ -112,7 +112,7 @@ async function sendTextLeg(ctx, channel, ledger) {
     // short_codes lookup for a shortened payment link). This one runs after it, immediately before
     // messages.create(): an invoice paid or a schedule paused during that lookup still vetoes the text
     // (retryable DUNNING_SET_CHANGED / DUNNING_SCHEDULE_CHANGED, the reservation reopened). It reads on the
-    // handoff transaction when there is one, else on the run's own handle. The push rail needs no twin: its
+    // handoff transaction when there is one, else the pool. The push rail needs no twin: its
     // shouldContinue (this same boundary) is re-run right after the OAuth fetch and before the FCM request.
     ...(channel === 'sms' ? { providerPreSendCheck: ({ dbi } = {}) => boundary({ database: dbi?.isTransaction ? dbi : undefined }) } : {}),
   });
@@ -131,12 +131,12 @@ async function sendTextLeg(ctx, channel, ledger) {
  * the retryable refusal, the tagged throw aborts the dispatch, and the outcome is
  * the same `{ ok: false }` the normal authority returns.
  */
-function boundaryOnlyHandoff(snapshot, state, database = db) {
-  const check = Boundary.check(snapshot, { database });
+function boundaryOnlyHandoff(snapshot, state) {
+  const check = Boundary.check(snapshot);
   const refuse = (verdict) => blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
   return async (dispatch) => {
     try {
-      return await withCustomerCommsLock(database, snapshot.customerId, async (trx) => {
+      return await withCustomerCommsLock(db, snapshot.customerId, async (trx) => {
         const verdict = await check({ database: trx });
         if (verdict.ok !== true) {
           state.boundaryBlock = refuse(verdict);
@@ -175,17 +175,14 @@ const AUTHORITY_INPUT = (customerId) => ({
 });
 
 function emailHandoff(ctx, to, templateKey, state) {
-  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state, ctx.database || db);
+  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state);
   return (dispatch) => dispatchUnderBillingEmailAuthority({
     input: AUTHORITY_INPUT(ctx.customer.id),
     recipientEmail: to,
     templateKey,
-    preSendCheck: Boundary.check(ctx.snapshot, { database: ctx.database }),
+    preSendCheck: Boundary.check(ctx.snapshot),
     dispatch,
     state,
-    // the authority's lock transaction and every read under it ride the run's handle, so the customer,
-    // preferences and (uncommitted) schedule claim it sees are the ones the run read
-    database: ctx.database,
   });
 }
 
@@ -195,15 +192,15 @@ function emailHandoff(ctx, to, templateKey, state) {
  * frequency windows; the flag is cleared again at the start of every attempt
  * so a retried, delivered leg counts as the contact it is.
  */
-async function stampNeverContacted(ledger, on, database = db) {
+async function stampNeverContacted(ledger, on) {
   try {
     if (on) {
-      await ContactLedger.markSendFailed(ledger, { never_contacted: true }, { database });
+      await ContactLedger.markSendFailed(ledger, { never_contacted: true });
     } else {
       // jsonb_exists, not the `?` operator: knex reads a bare `?` as a binding.
-      await database('collections_contact_ledger').where({ id: ledger.id })
+      await db('collections_contact_ledger').where({ id: ledger.id })
         .whereRaw("jsonb_exists(COALESCE(metadata, '{}'::jsonb), 'never_contacted')")
-        .update({ metadata: database.raw("metadata - 'never_contacted'") });
+        .update({ metadata: db.raw("metadata - 'never_contacted'") });
     }
     return true;
   } catch (err) {
@@ -214,8 +211,8 @@ async function stampNeverContacted(ledger, on, database = db) {
 
 async function resolveEmailRecipient(ctx) {
   return ctx.operatorInitiated
-    ? operatorEmailRecipient(ctx.customer, 'customer-dunning', ctx.database)
-    : billingEmailRecipient(AUTHORITY_INPUT(ctx.customer.id), 'customer-dunning', ctx.database);
+    ? operatorEmailRecipient(ctx.customer, 'customer-dunning')
+    : billingEmailRecipient(AUTHORITY_INPUT(ctx.customer.id), 'customer-dunning');
 }
 
 async function deliverEmail(ctx, ledger, { recipient, to }) {
@@ -258,7 +255,7 @@ async function deliverEmail(ctx, ledger, { recipient, to }) {
 async function sendEmailLeg(ctx, ledger) {
   // Every attempt starts clean: an earlier refusal's stamp must not outlive a
   // retry that reaches the customer, whatever the channel selection.
-  const cleared = await stampNeverContacted(ledger, false, ctx.database);
+  const cleared = await stampNeverContacted(ledger, false);
   // A stale flag that cannot be removed would leave a DELIVERED row excluded from
   // the collections frequency window for good: do not send. A definite,
   // retryable non-send, like any other failure before the provider.
@@ -271,7 +268,7 @@ async function sendEmailLeg(ctx, ledger) {
   // non-send (retryable refusal or a provider/preparation failure), not a
   // terminal refusal, used no frequency window.
   const notSent = result?.deliveryOutcome === 'not_sent' && !isTerminalEmailRefusal(result);
-  if (!ctx.explicit && notSent) await stampNeverContacted(ledger, true, ctx.database);
+  if (!ctx.explicit && notSent) await stampNeverContacted(ledger, true);
   return result;
 }
 

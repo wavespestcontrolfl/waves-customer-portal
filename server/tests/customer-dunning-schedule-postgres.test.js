@@ -11,6 +11,17 @@
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 
+// The engine runs on the db module; here it IS the disposable test schema (set in beforeAll).
+let mockDatabase;
+jest.mock('../models/db', () => {
+  const database = (...args) => mockDatabase(...args);
+  database.transaction = (...args) => mockDatabase.transaction(...args);
+  database.raw = (...args) => mockDatabase.raw(...args);
+  Object.defineProperty(database, 'fn', { get: () => mockDatabase.fn });
+  Object.defineProperty(database, 'schema', { get: () => mockDatabase.schema });
+  Object.defineProperty(database, 'client', { get: () => mockDatabase.client });
+  return database;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockResolve = jest.fn();
 jest.mock('../services/customer-dunning/balance-set', () => ({
@@ -62,6 +73,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     admin = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
     await admin.schema.createSchema(schema);
     app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 6 } });
+    mockDatabase = app;
     await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); });
     await app.schema.createTable('notification_prefs', (t) => { t.uuid('customer_id'); });
     await app.schema.createTable('invoices', (t) => {
@@ -642,7 +654,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
         const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
         autopay().mockResolvedValue(true);
         mockResolve.mockResolvedValue({ kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 });
-        expect(await Runner.processSchedule(s.id, NOW, { database: app })).toMatchObject({ outcome: 'closed', reason: 'balance_cleared' });
+        expect(await Runner.processSchedule(s.id, NOW)).toMatchObject({ outcome: 'closed', reason: 'balance_cleared' });
         expect(await fresh(s.id)).toMatchObject({ status: 'completed', closed_reason: 'balance_cleared', next_touch_at: null });
         expect(await Schedule.openScheduleFor(c, { database: app })).toBeUndefined();
       });
@@ -652,7 +664,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
         const s = await openSchedule(c);
         autopay().mockResolvedValue(true);
         mockResolve.mockResolvedValue({ kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 });
-        expect((await Runner.processSchedule(s.id, NOW, { database: app })).outcome).toBe('closed');
+        expect((await Runner.processSchedule(s.id, NOW)).outcome).toBe('closed');
         expect((await fresh(s.id)).status).toBe('completed');
       });
 
@@ -662,13 +674,13 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
         const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
         autopay().mockResolvedValue(true);
         mockResolve.mockResolvedValue(setFor([m]));
-        expect((await Runner.processSchedule(s.id, NOW, { database: app })).outcome).toBe('autopay_hold');
+        expect((await Runner.processSchedule(s.id, NOW)).outcome).toBe('autopay_hold');
         const row = await fresh(s.id);
         expect(row.status).toBe('autopay_hold');
         expect(new Date(row.next_touch_at).getTime()).toBe(Followups.heldTouchFloor(NOW).getTime());
         expect(row.touch_claimed_at).toBeNull();
         const tomorrow = new Date(NOW.getTime() + 2 * DAY);
-        expect((await Runner.runCustomerSchedules(tomorrow, { database: app })).outcomes.autopay_hold).toBeGreaterThanOrEqual(1);
+        expect((await Runner.runCustomerSchedules(tomorrow)).outcomes.autopay_hold).toBeGreaterThanOrEqual(1);
         // this schedule was among those revisited: re-armed again, for the day after
         expect(new Date((await fresh(s.id)).next_touch_at).getTime()).toBe(Followups.heldTouchFloor(tomorrow).getTime());
       });
@@ -753,8 +765,8 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     test('pause and release REFUSE while another run holds a fresh claim; nothing changes, no member is handed back', async () => {
       const { s, m } = await inFlight();
       const memberBefore = await seqRow(m.seq.id);
-      expect(await Admin.pause(s.id, { now: NOW, database: app })).toMatchObject({ ok: false, reason: 'in_flight', message: expect.stringMatching(/try again in a minute/i) });
-      expect(await Admin.release(s.id, { now: NOW, database: app })).toMatchObject({ ok: false, reason: 'in_flight' });
+      expect(await Admin.pause(s.id, { now: NOW })).toMatchObject({ ok: false, reason: 'in_flight', message: expect.stringMatching(/try again in a minute/i) });
+      expect(await Admin.release(s.id, { now: NOW })).toMatchObject({ ok: false, reason: 'in_flight' });
       expect(await fresh(s.id)).toMatchObject({ status: 'active' });
       const memberAfter = await seqRow(m.seq.id);
       expect(memberAfter.step_index).toBe(memberBefore.step_index);
@@ -764,9 +776,9 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     test('once the claim has expired (crashed sender) pause and release go through', async () => {
       const { s } = await inFlight();
       const later = new Date(NOW.getTime() + 11 * 60 * 1000);
-      expect(await Admin.pause(s.id, { now: later, database: app })).toEqual({ ok: true });
+      expect(await Admin.pause(s.id, { now: later })).toEqual({ ok: true });
       expect(await fresh(s.id)).toMatchObject({ status: 'paused' });
-      expect(await Admin.release(s.id, { now: later, database: app })).toMatchObject({ ok: true });
+      expect(await Admin.release(s.id, { now: later })).toMatchObject({ ok: true });
     });
 
     test('the run\'s OWN claim never blocks its own close; another run\'s stamp does', async () => {
@@ -786,7 +798,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
 
       test('an admin pause during a slow run: the runner\'s close is refused, the schedule stays paused, members are untouched', async () => {
         const { s, m, claim } = await inFlight();
-        expect(await Admin.pause(s.id, { now: later, database: app })).toEqual({ ok: true }); // the claim had expired
+        expect(await Admin.pause(s.id, { now: later })).toEqual({ ok: true }); // the claim had expired
         const out = await Schedule.close(claim.schedule, 'balance_cleared', later, { database: app, claimStamp: claim.claimStamp });
         expect(out).toMatchObject({ closed: false, reason: 'claim_lost' });
         expect(await fresh(s.id)).toMatchObject({ status: 'paused', closed_reason: null });
@@ -795,8 +807,8 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
 
       test('pause then resume clears the stamp: the stale worker\'s close is refused and the schedule stays active', async () => {
         const { s, m, claim } = await inFlight();
-        await Admin.pause(s.id, { now: later, database: app });
-        await Admin.resume(s.id, { now: later, database: app });
+        await Admin.pause(s.id, { now: later });
+        await Admin.resume(s.id, { now: later });
         expect((await fresh(s.id)).touch_claimed_at).toBeNull();
         const out = await Schedule.close(claim.schedule, 'no_active_member', later, { database: app, claimStamp: claim.claimStamp });
         expect(out).toMatchObject({ closed: false, reason: 'claim_lost' });
@@ -823,15 +835,15 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
 
       test('the admin release path is unchanged: a fresh foreign claim is in_flight, an expired one goes through', async () => {
         const { s } = await inFlight();
-        expect(await Admin.release(s.id, { now: NOW, database: app })).toMatchObject({ ok: false, reason: 'in_flight' });
-        expect(await Admin.release(s.id, { now: later, database: app })).toMatchObject({ ok: true });
+        expect(await Admin.release(s.id, { now: NOW })).toMatchObject({ ok: false, reason: 'in_flight' });
+        expect(await Admin.release(s.id, { now: later })).toMatchObject({ ok: true });
       });
     });
 
     test('C2: resume clears the claim, so a worker from before the pause cannot regain authority', async () => {
       const { s, claim } = await inFlight();
       await app('customer_dunning_schedules').where({ id: s.id }).update({ status: 'paused', next_touch_at: null });
-      expect(await Admin.resume(s.id, { now: NOW, database: app })).toEqual({ ok: true });
+      expect(await Admin.resume(s.id, { now: NOW })).toEqual({ ok: true });
       const row = await fresh(s.id);
       expect(row.status).toBe('active');
       expect(row.touch_claimed_at).toBeNull();
@@ -917,7 +929,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       const a = await claimAt(s.id, NOW);
       await Schedule.markPaused(a.schedule, 'all_channels_terminal', { claimStamp: a.claimStamp, now: NOW, database: app });
       await Schedule.releaseClaim(a, { database: app });
-      await Admin.resume(s.id, { now: NOW, database: app });
+      await Admin.resume(s.id, { now: NOW });
       await app('customer_dunning_schedules').where({ id: s.id }).update({ next_touch_at: NOW });
       const later = new Date(NOW.getTime() + 3 * DAY);
       const b = await claimAt(s.id, later);
@@ -959,7 +971,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       const [withFlag] = await app('collections_contact_ledger').insert({ metadata: JSON.stringify({ never_contacted: true, send_failed: true, keep: 'x' }) }).returning('id');
       const [plain] = await app('collections_contact_ledger').insert({ metadata: JSON.stringify({ keep: 'y' }) }).returning('id');
       const [nulled] = await app('collections_contact_ledger').insert({ metadata: null }).returning('id');
-      for (const row of [withFlag, plain, nulled]) await Send.stampNeverContacted({ id: row.id }, false, app);
+      for (const row of [withFlag, plain, nulled]) await Send.stampNeverContacted({ id: row.id }, false);
       expect((await app('collections_contact_ledger').where({ id: withFlag.id }).first()).metadata).toEqual({ send_failed: true, keep: 'x' });
       expect((await app('collections_contact_ledger').where({ id: plain.id }).first()).metadata).toEqual({ keep: 'y' });
       expect((await app('collections_contact_ledger').where({ id: nulled.id }).first()).metadata).toBeNull();
@@ -993,7 +1005,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       mockResolve.mockImplementation(async (customerId) => (customerId === promotable
         ? setFor([a, b]) : setFor([o1, o1])));
       const before = await snapshot();
-      const tally = await Runner.shadowRun(NOW, { database: app });
+      const tally = await Runner.shadowRun(NOW);
       expect(await snapshot()).toEqual(before);
       expect(tally.promote).toBeGreaterThanOrEqual(1);
       expect(tally.send).toBeGreaterThanOrEqual(1);

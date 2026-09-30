@@ -19,41 +19,41 @@ const IN_FLIGHT = Object.freeze({
   ok: false, reason: 'in_flight', message: 'The reminder is sending right now. Try again in a minute.',
 });
 
-const openScheduleQuery = (database, scheduleId) => database(Schedule.TABLE).where({ id: scheduleId }).whereIn('status', OPEN_STATUSES);
+const openScheduleQuery = (scheduleId) => db(Schedule.TABLE).where({ id: scheduleId }).whereIn('status', OPEN_STATUSES);
 
-async function pause(scheduleId, { reason = 'admin_paused', adminId = null, now = new Date(), database = db } = {}) {
+async function pause(scheduleId, { reason = 'admin_paused', adminId = null, now = new Date() } = {}) {
   const staleBefore = new Date(now.getTime() - CLAIM_TTL_MS);
-  const changed = await openScheduleQuery(database, scheduleId).whereIn('status', ['active', 'held', 'autopay_hold'])
+  const changed = await openScheduleQuery(scheduleId).whereIn('status', ['active', 'held', 'autopay_hold'])
     .where(function unclaimedOrStale() { this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<=', staleBefore); })
     .update({
-      status: 'paused', paused_reason: String(reason), paused_by_admin_id: adminId, next_touch_at: null, updated_at: database.fn.now(),
+      status: 'paused', paused_reason: String(reason), paused_by_admin_id: adminId, next_touch_at: null, updated_at: db.fn.now(),
     });
   if (Number(changed) === 1) return { ok: true };
-  const row = await openScheduleQuery(database, scheduleId).first();
+  const row = await openScheduleQuery(scheduleId).first();
   return row && Schedule.claimIsFresh(row, now) ? { ...IN_FLIGHT } : { ok: false };
 }
 
 // A resumed schedule picks up at its current step no earlier than the next
 // run (the same floor a held step uses), never sending in the click itself.
-async function resume(scheduleId, { now = new Date(), database = db } = {}) {
-  const changed = await database(Schedule.TABLE).where({ id: scheduleId, status: 'paused' }).update({
+async function resume(scheduleId, { now = new Date() } = {}) {
+  const changed = await db(Schedule.TABLE).where({ id: scheduleId, status: 'paused' }).update({
     status: 'active', next_touch_at: require('../invoice-followups').heldTouchFloor(now), paused_reason: null,
-    touch_claimed_at: null, paused_by_admin_id: null, held_reason: null, held_since: null, hold_alerted_at: null, updated_at: database.fn.now(),
+    touch_claimed_at: null, paused_by_admin_id: null, held_reason: null, held_since: null, hold_alerted_at: null, updated_at: db.fn.now(),
   });
   return { ok: Number(changed) === 1 };
 }
 
-async function release(scheduleId, { now = new Date(), database = db } = {}) {
-  const schedule = await openScheduleQuery(database, scheduleId).first();
+async function release(scheduleId, { now = new Date() } = {}) {
+  const schedule = await openScheduleQuery(scheduleId).first();
   if (!schedule) return { ok: false, reason: 'not_open' };
-  const out = await Schedule.release(schedule, 'released_admin', now, { database });
+  const out = await Schedule.release(schedule, 'released_admin', now);
   if (out.reason === 'in_flight') return { ...IN_FLIGHT };
   return { ok: out.closed, released: out.landed.length };
 }
 
 /** Fires the CURRENT stage through the normal send path with operator channels. */
-async function sendNow(scheduleId, { now = new Date(), database = db } = {}) {
-  const out = await Runner.processSchedule(scheduleId, now, { database, operatorInitiated: true, force: true });
+async function sendNow(scheduleId, { now = new Date() } = {}) {
+  const out = await Runner.processSchedule(scheduleId, now, { operatorInitiated: true, force: true });
   return { routedTo: 'customer_schedule', scheduleId, ...out };
 }
 
