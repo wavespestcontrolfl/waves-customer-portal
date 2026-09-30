@@ -95,8 +95,10 @@ test('a covered pest issue under a SECONDARY selection files as a ticket that na
   const dedupe = log.find((e) => e[0] === 'whereRaw');
   expect(dedupe[1]).toMatch(/metadata->>'propertyId'/);
   expect(dedupe[2]).toEqual(['prop-b']);
-  const alertBody = notifyAdmin.mock.calls[0][2];
-  expect(alertBody).toMatch(/Property: 418 Oak Ave, Bradenton, FL 34205 \(not the primary address\)/);
+  const [, alertTitle, alertWhy, alertOpts] = notifyAdmin.mock.calls[0];
+  expect(alertTitle).toMatch(/^Customers — answer .+ pest issue request$/);
+  expect(alertWhy).toBe('Trail along the counter');
+  expect(alertOpts.detail).toMatch(/Property: 418 Oak Ave, Bradenton, FL 34205 \(not the primary address\)/);
   expect(notifyAdmin.mock.calls[0][3].metadata).toMatchObject({ propertyId: 'prop-b', propertyAddress: '418 Oak Ave, Bradenton, FL 34205' });
 });
 
