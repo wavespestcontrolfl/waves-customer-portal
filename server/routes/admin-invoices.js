@@ -1546,7 +1546,7 @@ router.post('/batch/send-receipts', requireAdmin, async (req, res, next) => {
           await closeOutVisitForIssuedInvoice({ invoiceId, trigger: 'paid', actorTechnicianId: req.technicianId || null });
         }
 
-        emailRes = (await sendReceiptEmail(invoiceId).catch((err) => ({ ok: false, error: err.message }))) || null;
+        emailRes = (await sendReceiptEmail(invoiceId, { attemptToken: claim.token }).catch((err) => ({ ok: false, error: err.message }))) || null;
         emailOk = emailRes?.ok === true;
         if (emailOk) await recordOperatorReceiptDelivered(claim, 'email');
         else if (emailRes?.error) errs.push(`email: ${emailRes.error}`);
@@ -2534,7 +2534,7 @@ router.post('/:id/send-receipt', requireAdmin, async (req, res, next) => {
       }
 
       if (via === 'email' || via === 'both') {
-        emailResult = await sendReceiptEmail(id, { memo: trimmedMemo }).catch((err) => ({ ok: false, error: err.message }));
+        emailResult = await sendReceiptEmail(id, { memo: trimmedMemo, attemptToken: claim.token }).catch((err) => ({ ok: false, error: err.message }));
         if (emailResult.ok) await recordOperatorReceiptDelivered(claim, 'email');
       }
       if (via === 'sms' || via === 'both') {

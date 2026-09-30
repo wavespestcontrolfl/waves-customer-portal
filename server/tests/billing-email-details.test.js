@@ -133,11 +133,27 @@ describe('card and tender labels', () => {
       expect(await Details.payMethodOnFileLabel(invoice)).toBe('Example Bank ···· 6789');
     });
 
-    test('a card already stamped on the invoice needs no lookup', async () => {
-      db.mockClear();
-      expect(await Details.payMethodOnFileLabel({ ...invoice, card_brand: 'mastercard', card_last_four: '4444' }))
-        .toBe('MASTERCARD ···· 4444');
-      expect(db).not.toHaveBeenCalled();
+    test('a card stamped on the invoice is NOT used: a dispute-reopened invoice keeps the charged-back card, so only the saved method is named', async () => {
+      mockTables({
+        customers: [{ autopay_payment_method_id: 'pm-1' }],
+        payment_methods: [{ id: 'pm-1', method_type: 'card', card_brand: 'visa', last_four: '4242' }],
+      });
+      expect(await Details.payMethodOnFileLabel({ ...invoice, status: 'overdue', card_brand: 'mastercard', card_last_four: '4444' }))
+        .toBe('VISA ···· 4242');
+      mockTables({ customers: [{}], payment_methods: [] });
+      expect(await Details.payMethodOnFileLabel({ ...invoice, card_brand: 'mastercard', card_last_four: '4444' })).toBe('');
+    });
+
+    test('the autopay pointer is read scoped to the customer', async () => {
+      const seen = [];
+      db.mockImplementation((table) => {
+        const q = {};
+        q.where = jest.fn((cond) => { seen.push([table, cond]); return q; });
+        q.first = jest.fn(async () => (table === 'customers' ? { autopay_payment_method_id: 'pm-9' } : undefined));
+        return q;
+      });
+      await Details.payMethodOnFileLabel(invoice);
+      expect(seen).toContainEqual(['payment_methods', { id: 'pm-9', customer_id: 'cust-1' }]);
     });
 
     test('a payer-billed invoice or a one-off recipient never sees the homeowner\'s card', async () => {
@@ -197,6 +213,13 @@ describe('property address (full street address, never a nickname)', () => {
       { id: 'inv-1', customer_id: 'c' },
       { address_line1: '', city: 'Bradenton', state: 'FL', zip: '34205', profile_label: 'Primary' },
     )).toBe('');
+  });
+
+  test('a caller projection that omits the unit line is reloaded so the unit is not dropped', async () => {
+    mockTables({ customers: [{ address_line1: '100 Example Lane', address_line2: 'Apt 4', city: 'Bradenton', state: 'FL', zip: '34205' }] });
+    const projection = { address_line1: '100 Example Lane', city: 'Bradenton', state: 'FL', zip: '34205' };
+    expect(await Details.invoicePropertyAddress({ id: 'inv-1', customer_id: 'c' }, projection))
+      .toBe('100 Example Lane Apt 4, Bradenton, FL 34205');
   });
 
   test('a customer row without address columns is read back from the database', async () => {
@@ -281,21 +304,13 @@ describe('idempotency keys', () => {
     expect(key).not.toContain('example.com');
   });
 
-  test('receipt: a retry of the same delivery keys identically; the delivery after the stamp moved keys differently', () => {
-    const paidAt = new Date('2026-09-29T14:00:00Z');
-    const first = Details.receiptKey({ invoice: { id: 'inv-1', paid_at: paidAt, receipt_sent_at: null }, payment: { id: 'pay-1' } });
-    expect(first).toBe('invoice_receipt:inv-1:pay-1:first');
-    expect(Details.receiptKey({ invoice: { id: 'inv-1', paid_at: paidAt, receipt_sent_at: null }, payment: { id: 'pay-1' } })).toBe(first);
-    const stamped = Details.receiptKey({ invoice: { id: 'inv-1', paid_at: paidAt, receipt_sent_at: new Date('2026-09-29T14:05:00Z') }, payment: { id: 'pay-1' } });
-    expect(stamped).not.toBe(first);
-    expect(Details.receiptKey({ invoice: { id: 'inv-1', paid_at: paidAt, receipt_sent_at: new Date('2026-09-30T09:00:00Z') }, payment: { id: 'pay-1' } })).not.toBe(stamped);
-  });
-
-  test('receipt with no ledger row keys on the paid moment; both fit the 260-character column', () => {
-    const paidAt = new Date('2026-09-29T14:00:00Z');
-    const key = Details.receiptKey({ invoice: { id: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', paid_at: paidAt }, payment: null });
-    expect(key).toBe(`invoice_receipt:a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11:${paidAt.getTime()}:first`);
-    expect(key.length).toBeLessThan(260);
+  test('receipt: the key follows the attempt identity, so a fresh operator attempt never dedupes against a blocked earlier one', () => {
+    const a = Details.receiptAttemptKey({ invoiceId: 'inv-1', attemptToken: 'operator:w1:aaa' });
+    expect(a).toMatch(/^invoice_receipt:inv-1:attempt:[0-9a-f]{12}$/);
+    expect(Details.receiptAttemptKey({ invoiceId: 'inv-1', attemptToken: 'operator:w1:aaa' })).toBe(a);
+    expect(Details.receiptAttemptKey({ invoiceId: 'inv-1', attemptToken: 'operator:w1:bbb' })).not.toBe(a);
+    expect(Details.receiptAttemptKey({ invoiceId: 'inv-2', attemptToken: 'operator:w1:aaa' })).not.toBe(a);
+    expect(a.length).toBeLessThan(260);
     expect(Details.invoiceSentKey({ invoiceId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', claimToken: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' }).length).toBeLessThan(260);
   });
 });

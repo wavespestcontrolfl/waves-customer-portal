@@ -668,7 +668,10 @@ async function sendPaymentFailed({
     // the data exists: the payments row first, then the saved method it points
     // at, then the failed intent itself.
     if (!payload.payment_method_label) {
-      const saved = payment?.payment_method_id ? await loadPaymentMethod(payment.payment_method_id) : null;
+      // A lookup blip must never throw out of the webhook: blank row instead.
+      const saved = payment?.payment_method_id
+        ? await loadPaymentMethod(payment.payment_method_id).catch(() => null)
+        : null;
       const savedParts = saved ? methodParts(saved) : null;
       payload.payment_method_label = savedParts?.last4 ? savedParts.label : failedIntentCardLabel(paymentIntent);
     }

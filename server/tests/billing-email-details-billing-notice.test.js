@@ -38,7 +38,7 @@ function chain(rows) {
 }
 
 const CUSTOMER = {
-  id: 'cust-1', first_name: 'Casey', address_line1: '100 Example Lane', city: 'Bradenton', state: 'FL', zip: '34205', profile_label: 'Primary',
+  id: 'cust-1', first_name: 'Casey', address_line1: '100 Example Lane', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34205', profile_label: 'Primary',
 };
 const INVOICE = {
   id: 'inv-1', customer_id: 'cust-1', invoice_number: 'WPC-2026-0123', service_type: 'Quarterly Pest Control',

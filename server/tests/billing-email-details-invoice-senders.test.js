@@ -68,6 +68,7 @@ const CUSTOMER = {
   first_name: 'Pat',
   email: 'customer@example.com',
   address_line1: '100 Example Lane',
+  address_line2: null,
   city: 'Bradenton',
   state: 'FL',
   zip: '34205',
@@ -242,7 +243,7 @@ describe('invoice.receipt', () => {
   const receipt = async (invoice, options = {}, extra = {}) => {
     mockTables({ ...baseTables(invoice), payments: null, ...extra });
     const result = await sendReceiptEmail('inv-1', options);
-    return { result, args: EmailTemplates.sendTemplate.mock.calls[0]?.[0] };
+    return { result, args: EmailTemplates.sendTemplate.mock.calls.at(-1)?.[0] };
   };
 
   test('gate off: exactly today\'s payload (a cash payment shows no method) and a null key', async () => {
@@ -272,14 +273,21 @@ describe('invoice.receipt', () => {
     expect(args.payload.payment_method).toBe('VISA ···· 4242');
   });
 
-  test('gate on: with no key from the caller the receipt is keyed per receipt generation', async () => {
+  test('gate on: a receipt with no caller key and no attempt identity stays key-less, as on main', async () => {
     process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
-    const first = await receipt(paid(), {}, { payments: { id: 'pay-1', amount: '150.00' } });
-    expect(first.args.idempotencyKey).toBe('invoice_receipt:inv-1:pay-1:first');
+    const { args } = await receipt(paid(), {}, { payments: { id: 'pay-1', amount: '150.00' } });
+    expect(args.idempotencyKey).toBeNull();
+  });
+
+  test('gate on: an operator send is keyed on its own claim token; a new claim is a new key (blocked first attempt -> fixed address -> resend sends)', async () => {
+    process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
+    const first = await receipt(paid(), { attemptToken: 'operator:w1:claim-a' });
     EmailTemplates.sendTemplate.mockClear();
-    const stamp = new Date('2026-09-29T14:05:00Z');
-    const resend = await receipt(paid({ receipt_sent_at: stamp }), {}, { payments: { id: 'pay-1', amount: '150.00' } });
-    expect(resend.args.idempotencyKey).toBe(`invoice_receipt:inv-1:pay-1:${stamp.getTime()}`);
+    const again = await receipt(paid(), { attemptToken: 'operator:w1:claim-a' });
+    const resend = await receipt(paid(), { attemptToken: 'operator:w1:claim-b' });
+    expect(first.args.idempotencyKey).toMatch(/^invoice_receipt:inv-1:attempt:/);
+    expect(again.args.idempotencyKey).toBe(first.args.idempotencyKey);
+    expect(resend.args.idempotencyKey).not.toBe(first.args.idempotencyKey);
   });
 
   test('gate on: a key the caller passes always wins (the queue, the webhook, the prepaid receipt)', async () => {

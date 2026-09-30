@@ -173,7 +173,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   // Amount the customer pays = total − applied account credit (what Stripe charges).
   const amountDue = invoiceAmountDue(invoice);
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   if (!customer) return { ok: false, error: 'Customer not found' };
   let prefsLookupFailed = false;
@@ -676,7 +676,7 @@ function routedReceiptRefusal(block, { atHandoff = false } = {}) {
 // answers with ({ ok: false, error, code? }).
 async function resolveReceiptEmailRecipient(invoice, { billingDeliveryCategory = null } = {}) {
   const customer = await db('customers').where({ id: invoice.customer_id })
-    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'property_type', 'company_name')
+    .select('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'address_line2', 'city', 'state', 'zip', 'property_type', 'company_name')
     .first();
   // A routed receipt (the receipt delivery queue, the no-show fee) is billing
   // mail: its recipient, the customer's receipt channel choice and the
@@ -796,7 +796,9 @@ async function sendReceiptEmail(invoiceId, options = {}) {
       property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
       payment_method: BillingEmailDetails.receiptTenderLabel({ payment, invoice }),
     };
-    if (!idempotencyKey) idempotencyKey = BillingEmailDetails.receiptKey({ invoice, payment });
+    if (!idempotencyKey && options.attemptToken) {
+      idempotencyKey = BillingEmailDetails.receiptAttemptKey({ invoiceId: invoice.id, attemptToken: options.attemptToken });
+    }
   }
 
   const first = recipient.name || customer.first_name || 'there';

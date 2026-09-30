@@ -181,4 +181,16 @@ describe('failure with a payments row', () => {
     const payload = await sendFailed({ paymentIntent: failedIntent({ brand: 'visa', last4: '9999' }), failedAt: FAILED_AT });
     expect(payload.payment_method_label).toBe('Mastercard ending in 4444');
   });
+
+  test('gate on: a saved-method lookup that throws leaves the label blank instead of failing the webhook', async () => {
+    mockDetailsLive = true;
+    mockQueues(lifecycle({
+      invoices: [chain({ first: INVOICE })],
+      payments: [chain({ first: row({ next_retry_at: null }) })],
+      payment_methods: [(() => { const q = chain(); q.first = jest.fn(async () => { throw new Error('db blip'); }); return q; })()],
+    }));
+    const payload = await sendFailed({ failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('');
+    expect(payload.failed_payment_date).toBe('September 28, 2026');
+  });
 });

@@ -84,7 +84,7 @@ async function savedMethodRow(customerId) {
   try {
     const customer = await db('customers').where({ id: customerId }).first('autopay_payment_method_id');
     if (customer?.autopay_payment_method_id) {
-      const chosen = await db('payment_methods').where({ id: customer.autopay_payment_method_id }).first();
+      const chosen = await db('payment_methods').where({ id: customer.autopay_payment_method_id, customer_id: customerId }).first();
       if (chosen) return chosen;
     }
     return (await db('payment_methods').where({ customer_id: customerId, is_default: true }).first()) || null;
@@ -110,8 +110,8 @@ function bankOrCardLabel(method = {}) {
 // caller passes `allowed: false` for those and gets '' back.
 async function payMethodOnFileLabel(invoice, { allowed = true } = {}) {
   if (!allowed || !invoice?.customer_id || invoice.payer_id) return '';
-  const own = dottedCardLabel(invoice.card_brand, invoice.card_last_four);
-  if (own) return own;
+  // Only the saved method row: the invoice's own card columns can hold a card
+  // that was charged and later disputed on a reopened invoice.
   return bankOrCardLabel(await savedMethodRow(invoice.customer_id) || {});
 }
 
@@ -177,7 +177,10 @@ async function invoicePropertyAddress(invoice, customer) {
     const stamped = await stampedVisitAddress(await scheduledServiceIdFor(invoice));
     if (stamped) return stamped;
     let source = customer;
-    if (!source?.address_line1 && invoice?.customer_id) {
+    // A caller's projection may omit the unit line (address_line2) or the whole
+    // address; reload the customer's address columns whenever it is incomplete.
+    const complete = source && ['address_line1', 'address_line2', 'city', 'state', 'zip'].every((k) => Object.hasOwn(source, k));
+    if (!complete && invoice?.customer_id) {
       source = await db('customers').where({ id: invoice.customer_id })
         .first('address_line1', 'address_line2', 'city', 'state', 'zip');
     }
@@ -286,16 +289,14 @@ function invoiceSentKey({ invoiceId, claimToken = null, recipientEmail = '' }) {
     : `invoice_sent:${invoiceId}:unclaimed:${shortHash(recipientEmail)}`;
 }
 
-// invoice.receipt when the caller passed no key of its own (the record-payment
-// path and the operator resends deliberately pass none). One email per RECEIPT
-// GENERATION: the first delivery of a payment has no receipt_sent_at yet, and
-// every successful delivery stamps it, so a retry of the same delivery keys
-// identically (deduped) and the operator's next deliberate resend, after the
-// stamp moved, keys differently (sent).
-function receiptKey({ invoice, payment = null }) {
-  const stamp = invoice?.receipt_sent_at ? new Date(invoice.receipt_sent_at).getTime() : 'first';
-  const payRef = payment?.id || (invoice?.paid_at ? new Date(invoice.paid_at).getTime() : 'unpaid');
-  return `invoice_receipt:${invoice.id}:${payRef}:${stamp}`;
+// invoice.receipt when the caller passed no key of its own. Only a deliberate
+// operator / record-payment send with its own per-attempt identity (the
+// receipt-delivery claim token) gets a derived key; automatic sends already
+// carry theirs, and every other caller stays key-less as on main. The key moves
+// with each attempt, so a blocked first attempt (a suppressed address the office
+// then fixes) can never dedupe a later deliberate resend.
+function receiptAttemptKey({ invoiceId, attemptToken }) {
+  return `invoice_receipt:${invoiceId}:attempt:${shortHash(attemptToken)}`;
 }
 
 module.exports = {
@@ -310,6 +311,6 @@ module.exports = {
   invoiceServiceDetails,
   paidPaymentForInvoice,
   invoiceSentKey,
-  receiptKey,
+  receiptAttemptKey,
   _private: { stampedVisitAddress, scheduledServiceIdFor, savedMethodRow, MANUAL_TENDERS },
 };
