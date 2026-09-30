@@ -127,7 +127,19 @@ describe('reportedReserviceLane', () => {
   });
 
   test('ambiguous (both pest and lawn words) → null', () => {
-    expect(reportedReserviceLane('the ants are in the grass again')).toBeNull();
+    expect(reportedReserviceLane('the ants are hurting my lawn treatment')).toBeNull();
+    expect(reportedReserviceLane('ants in the yard and weeds in the lawn')).toBeNull();
+  });
+
+  // Codex round-22 P2: lawn / grass / yard are LOCATIONS after a location preposition ("on the lawn"), not the lawn service.
+  test.each([
+    'the ants are in the grass again',
+    'ants are back on the lawn',
+    'roaches are in the grass again',
+    'fleas all over the yard',
+    'ants around the front lawn',
+  ])('%s → pest (a lawn/grass/yard location, dual-lane account)', (text) => {
+    expect(reportedReserviceLane(text)).toBe('pest');
   });
 
   test('no resolvable wording → null', () => {
@@ -286,5 +298,67 @@ describe('reportedReserviceLane — "yard" is a location unless service-qualifie
     await expect(loadEligibleReserviceLanesStrict('c1', failingDb)).rejects.toThrow('db down');
     const noRow = () => ({ where: () => ({ whereNull: () => ({ first: async () => undefined }) }) });
     await expect(loadEligibleReserviceLanesStrict('c1', noRow)).resolves.toEqual([]);
+  });
+});
+
+
+// Codex round-22 (PR #5336): ONE clause-level classifier — [text, active pest report?, lane, excluded specialty?].
+// PEST_REPORT_TEXT_RE, needsOpenTimes and reportedPestLane all read it (sms-shadow-drafter), so this table is
+// the contract. A negated / resolved clause contributes nothing; other clauses still count.
+describe('clause-level pest-report classifier (isActivePestReport / reportedReserviceLane / reportedReserviceExcludedSpecialty)', () => {
+  const { isActivePestReport } = require('../services/reservice-scheduler');
+  const ROWS = [
+    // resolved clause + active clause
+    ['ants are gone and spiders are back', true, 'pest', false],
+    ['the ants are gone but I still see roaches', true, 'pest', false],
+    ['no ants in the kitchen anymore but the wasps are back', true, 'pest', false],
+    // negated specialty + active pest
+    ["It's not termites—the ants are back", true, 'pest', false],
+    ["it isn't rodents, it's the roaches coming back", true, 'pest', false],
+    // lawn / grass / yard are locations
+    ['ants are back on the lawn', true, 'pest', false],
+    ['roaches are in the grass again', true, 'pest', false],
+    ['fleas are everywhere in the yard', true, 'pest', false],
+    // informational, not a report
+    ['Can someone call me back about my ant service?', false, 'pest', false],
+    ['Tell me more about ants', false, 'pest', false],
+    ['Are ants still included in my plan?', false, 'pest', false],
+    ['we have ants under contract', false, 'pest', false],
+    ['I have a pest control plan', false, 'pest', false],
+    // negated / resolved
+    ["I don't see ants anymore", false, null, false],
+    ['the ants are gone, thank you', false, null, false],
+    ['thanks, no bugs since!', false, null, false],
+    ['no more spiders in the house', false, null, false],
+    ["haven't noticed a single wasp lately", false, null, false],
+    // persisting / affirmative
+    ["still see ants, they didn't go away", true, 'pest', false],
+    ['I still see ants in the kitchen', true, 'pest', false],
+    ['saw ants again this morning', true, 'pest', false],
+    ['found more ants again', true, 'pest', false],
+    ['the roaches have returned', true, 'pest', false],
+    ['more ants showed up after the treatment', true, 'pest', false],
+    ['the ants came back', true, 'pest', false],
+    ['Why are the ants back?', true, 'pest', false],
+    // excluded specialties, affirmed
+    ['the termites are back', true, null, true],
+    ['rats in the attic again', true, null, true],
+    ['the shrubs look sick', false, null, true],
+    // lawn service
+    ['weeds all over my lawn', false, 'lawn', false],
+    ['the grass is looking bad again', false, 'lawn', false],
+    ['my yard treatment did not work', false, 'lawn', false],
+    // genuinely ambiguous
+    ['ants in the yard and weeds in the lawn', false, null, false],
+  ];
+  test.each(ROWS)('%s → active=%s lane=%s specialty=%s', (text, active, lane, specialty) => {
+    expect(isActivePestReport(text)).toBe(active);
+    expect(reportedReserviceLane(text)).toBe(lane);
+    expect(reportedReserviceExcludedSpecialty(text)).toBe(specialty);
+  });
+
+  test('the drafter\'s PEST_REPORT_TEXT_RE is that same classifier', () => {
+    const { PEST_REPORT_TEXT_RE } = require('../services/sms-shadow-drafter');
+    for (const [text, active] of ROWS) expect(PEST_REPORT_TEXT_RE.test(text)).toBe(active);
   });
 });

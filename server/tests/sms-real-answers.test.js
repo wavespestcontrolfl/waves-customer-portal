@@ -1802,9 +1802,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // doesn't itself stub out.
     // Codex round-7 (PR #5336): reserviceExcludedSpecialtyInPromise reads the
     // real reportedReserviceExcludedSpecialty the same way.
-    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane } = jest.requireActual('../services/reservice-scheduler');
+    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport } = jest.requireActual('../services/reservice-scheduler');
     jest.doMock('../services/reservice-scheduler', () => ({
-      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane,
+      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport,
     }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
@@ -2886,11 +2886,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
         jest.resetModules();
         const mk = (openMap) => {
           jest.resetModules();
-          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane } = jest.requireActual('../services/reservice-scheduler');
+          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport } = jest.requireActual('../services/reservice-scheduler');
           jest.doMock('../services/reservice-scheduler', () => ({
             reserviceSelfServeEnabled: () => true,
             loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: openMap, bookable: openMap.pest ? [] : ['pest'] }),
-            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane,
+            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport,
           }));
           return { drafter: require('../services/sms-shadow-drafter') };
         };
@@ -2907,8 +2907,33 @@ describe('free re-service is an entitlement resolved through the existing mechan
         loadWith({ lanes: ['pest'] }); // no open callback at all
         await expect(agentDecisionSendBlockReason({
           decision: { id: 'd1', customer_id: 'cust-1', suggested_message: 'x', input_snapshot: JSON.stringify({ reservice_booked_snapshot: booked, intended_actions: [] }), prompt_version: 'house_voice_v12_real_answers2' },
-          outgoingBody: 'We will see you Thursday, October 8.',
+          outgoingBody: 'We will see you Thursday, October 8 for your re-service.',
         })).resolves.toMatch(/reservice_booking_changed/);
+      });
+
+      // Codex round-22 P2: the recheck needs re-service context (and the matching lane) in the same sentence.
+      test('an unrelated scheduled visit is NOT held up by a moved/cancelled pest callback', async () => {
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        loadWith({ lanes: ['pest'] }); // the pest callback is gone
+        const send = (outgoingBody) => agentDecisionSendBlockReason({
+          decision: { id: 'd1', customer_id: 'cust-1', suggested_message: 'x', input_snapshot: JSON.stringify({ reservice_booked_snapshot: booked, intended_actions: [] }), prompt_version: 'house_voice_v12_real_answers2' },
+          outgoingBody,
+        });
+        for (const unrelated of [
+          'Your regular lawn treatment is already scheduled for Thursday.',
+          'Your quarterly service is on Thursday, October 8.',
+          'We will see you Thursday, October 8.',
+          'Your free lawn re-service is already scheduled for Thursday.', // another lane's re-service
+        ]) {
+          await expect(send(unrelated)).resolves.toBeNull();
+        }
+        for (const related of [
+          'Your free pest re-service is already scheduled for Thursday.',
+          'Your pest callback visit is set for Thursday, October 8.',
+          'Your re-service is booked for Thursday at 9.',
+        ]) {
+          await expect(send(related)).resolves.toMatch(/reservice_booking_changed/);
+        }
       });
     });
 

@@ -147,6 +147,28 @@ describe('laneForCallbackRow — the lane predicate', () => {
     expect(laneForCallbackRow({ serviceKey: 'something_else', serviceType: 'Some Other Service' })).toBe('pest');
   });
 
+  // Codex round-22 P2 (PR #5336): a rodent follow-up is its own specialty, never the pest lane.
+  test('rodent_trapping_followup classifies as "rodent" — it never occupies the pest lane', () => {
+    expect(laneForCallbackRow({ serviceKey: 'rodent_trapping_followup', serviceType: 'Rodent Trapping Follow-up' })).toBe('rodent');
+    expect(laneForCallbackRow({ serviceKey: 'rodent_trapping_followup' })).not.toBe('pest');
+  });
+
+  test('openReserviceCallbacks: an open rodent follow-up does not appear as a booked pest re-service (the pest lane stays bookable)', async () => {
+    const { openReserviceCallbacks, reserviceLaneAvailability } = require('../services/reservice-scheduler');
+    const rows = [
+      { id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Rodent Trapping Follow-up', reschedule_token: 't1', service_key: 'rodent_trapping_followup' },
+    ];
+    const chain = { leftJoin: () => chain, where: () => chain, whereIn: () => chain, orderBy: () => chain, select: async () => rows };
+    const fakeDb = () => chain;
+    expect(await openReserviceCallbacks('cust-1', fakeDb)).toEqual({});
+    // ...and a genuine pest re-service alongside it is still found
+    rows.push({ id: 'r2', scheduled_date: '2099-01-06', window_start: '09:00', window_end: '11:00', service_type: 'Pest Control Re-Service', reschedule_token: 't2', service_key: 'pest_re_service' });
+    const open = await openReserviceCallbacks('cust-1', fakeDb);
+    expect(Object.keys(open)).toEqual(['pest']);
+    expect(open.pest.date).toBe('2099-01-06');
+    expect(typeof reserviceLaneAvailability).toBe('function');
+  });
+
   test('RESERVICE_LANES itself carries only the two reservice lanes — the assessment lane is intentionally NOT a member', () => {
     expect(Object.keys(RESERVICE_LANES).sort()).toEqual(['lawn', 'pest']);
   });
@@ -166,6 +188,12 @@ describe('openCallbackExistsForLane — the transactional dedupe check', () => {
   test('lane "pest" is unaffected by an assessment row on file — no false hit from the widened query (reservice behavior byte-identical)', async () => {
     listResults.scheduled_services = [{ service_type: 'Waves Assessment', service_key: ASSESSMENT_SERVICE_KEY }];
     expect(await openCallbackExistsForLane(dbh, 'cust-1', 'pest')).toBe(false);
+  });
+
+  test('lane "pest" is not blocked by an open rodent follow-up (round-22 P2); lane "rodent" finds it', async () => {
+    listResults.scheduled_services = [{ service_type: 'Rodent Trapping Follow-up', service_key: 'rodent_trapping_followup' }];
+    expect(await openCallbackExistsForLane(dbh, 'cust-1', 'pest')).toBe(false);
+    expect(await openCallbackExistsForLane(dbh, 'cust-1', 'rodent')).toBe(true);
   });
 
   test('lane "pest" still finds a real open pest re-service — unaffected', async () => {

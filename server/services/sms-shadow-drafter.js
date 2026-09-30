@@ -1316,16 +1316,30 @@ function reserviceBookedSnapshot(booked) {
     .map(([lane, info]) => [lane, { date: String(info.date).slice(0, 10), windowStart: info.windowStart || null }]));
 }
 // Does the body refer to the booked appointment — an existing-appointment phrase, or its stored day/date/time?
-function reserviceBodyRefersToBooked(body, info) {
+function reserviceBookedDayNames(info) {
   const day = new Date(`${info.date}T12:00:00Z`);
   const fmt = (opts) => day.toLocaleDateString('en-US', { timeZone: 'UTC', ...opts });
   const names = [fmt({ weekday: 'long' }), fmt({ month: 'long', day: 'numeric' }), fmt({ month: 'short', day: 'numeric' }), `${day.getUTCMonth() + 1}/${day.getUTCDate()}`];
   const time = info.windowStart ? require('../utils/sms-time-format').formatSmsTime(info.windowStart) : null;
-  const named = [...names, time, time && time.replace(':00', '')].filter(Boolean);
-  return RESERVICE_EXISTING_APPT_RE.test(body) || named.some((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i').test(body));
+  return [...names, time, time && time.replace(':00', '')].filter(Boolean);
+}
+// Codex round-22 P2 (PR #5336): a sentence refers to the booked callback only when it (a) carries an
+// existing-appointment marker or the callback's stored day/date/time AND (b) has RE-SERVICE context in the
+// same sentence (a re-service-specific noun) that does not name only ANOTHER lane. "Your regular lawn
+// treatment is already scheduled for Thursday" is an ordinary visit, not the callback — a moved pest
+// callback must not block it.
+function reserviceBodyRefersToBooked(body, info, lane) {
+  const named = reserviceBookedDayNames(info).map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
+  const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
+  const contextRe = new RegExp(`\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})`, 'i');
+  return String(body).split(/[.!?\n]+/).some((sentence) => {
+    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || named.some((rx) => rx.test(sentence))) || !contextRe.test(sentence)) return false;
+    const lanesNamed = RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l);
+    return !lanesNamed.length || lanesNamed.includes(lane);
+  });
 }
 async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
-  const entries = Object.entries(reserviceBookedSnapshot(booked)).filter(([, info]) => reserviceBodyRefersToBooked(body, info));
+  const entries = Object.entries(reserviceBookedSnapshot(booked)).filter(([lane, info]) => reserviceBodyRefersToBooked(body, info, lane));
   if (!entries.length || !customerId) return null;
   const { open } = await liveReserviceLaneState(customerId);
   const moved = entries.filter(([lane, info]) => !open[lane] || String(open[lane].date).slice(0, 10) !== info.date || (info.windowStart && String(open[lane].windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5)));
@@ -2820,32 +2834,16 @@ const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|
 // classifier can't drift. Codex round-16: built LAZILY on first use (like promiseLaneRegexes) and
 // with NO silent fallback — a scheduler mock that omits the list throws here rather than quietly
 // narrowing the prescreen. Exposed as { test } so callers keep the regex-style `.test(text)`.
-let pestReportTextRe = null;
-// Codex round-21 P2: a NEGATED or RESOLVED sighting is not a report ("I don't see ants anymore", "the
-// roaches are gone", "they stopped coming"). Each clause that negates the seeing verb, or says the pests
-// are gone / stopped / no more / anymore, is dropped BEFORE the noun+activity test, so a clause that is
-// still a report survives ("still see ants, they didn't go away"; "no ants in the kitchen anymore but the
-// wasps are back").
-const PEST_REPORT_NEGATED_SIGHTING_RE = /\b(?:don'?t|do\s+not|didn'?t|did\s+not|haven'?t|have\s+not|hasn'?t|has\s+not|can'?t|cannot|couldn'?t|no\s+longer|not)\s+(?:\w+\s+){0,2}?(?:see|seen|seeing|saw|find|finding|found|notice[ds]?|noticing|show(?:ed|ing)?\s*up|return\w*|come|coming|came|have|had|getting|get)\b(?:(?!\b(?:but|however|though|although|yet)\b)[^.,;!?])*/gi;
-const PEST_REPORT_RESOLVED_CLAUSE_RE = /(?:(?!\b(?:but|however|though|although|yet)\b)[^.,;!?])*\b(?:anymore|any\s+more|no\s+more|gone|stopped|disappeared|went\s+away|nothing\s+since|no\s+(?:sign|signs|activity)|none\s+(?:left|since))\b(?:(?!\b(?:but|however|though|although|yet)\b)[^.,;!?])*/gi;
-function withoutNegatedOrResolvedSightings(text) {
-  return String(text || '')
-    .replace(PEST_REPORT_NEGATED_SIGHTING_RE, ' ')
-    .replace(PEST_REPORT_RESOLVED_CLAUSE_RE, ' ');
-}
+// Codex round-22 (PR #5336): the ONE clause-level classifier lives in reservice-scheduler
+// (isActivePestReport — a pest noun bound to an activity predicate in a clause that is not negated or
+// resolved); this object keeps the regex-style `.test(text)` callers use, and still throws when the
+// scheduler omits the shared noun list rather than quietly narrowing the prescreen.
 const PEST_REPORT_TEXT_RE = {
-  test(rawText) {
-    const text = withoutNegatedOrResolvedSightings(rawText);
-    if (!pestReportTextRe) {
-      const nouns = require('./reservice-scheduler').RESERVICE_PEST_NOUNS_SOURCE;
-      if (typeof nouns !== 'string' || !nouns) throw new Error('reservice-scheduler must export RESERVICE_PEST_NOUNS_SOURCE');
-      pestReportTextRe = new RegExp(
-        `(?=.*\\b(?:${nouns}|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)\\b)`
-        + '(?=.*\\b(?:see|saw|seeing|found|finding|find|show(?:ed|ing)?\\s*up|return\\w*|back|again|still|more|everywhere|infest\\w*)\\b)',
-        'i',
-      );
-    }
-    return pestReportTextRe.test(text);
+  test(text) {
+    const scheduler = require('./reservice-scheduler');
+    const nouns = scheduler.RESERVICE_PEST_NOUNS_SOURCE;
+    if (typeof nouns !== 'string' || !nouns) throw new Error('reservice-scheduler must export RESERVICE_PEST_NOUNS_SOURCE');
+    return scheduler.isActivePestReport(text);
   },
 };
 

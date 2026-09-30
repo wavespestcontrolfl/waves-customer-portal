@@ -80,6 +80,9 @@ function laneForCallbackRow({ serviceKey, serviceType } = {}) {
   if (serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType)) return 'assessment';
   if (serviceKey === RESERVICE_LANES.lawn.serviceKey) return 'lawn';
   if (serviceKey === RESERVICE_LANES.pest.serviceKey) return 'pest';
+  // Codex round-22 P2 (PR #5336): a rodent trapping follow-up is its own excluded specialty — it must not
+  // occupy (or be counted as) the customer's PEST lane, or an ant/roach report is denied its covered callback.
+  if (serviceKey === 'rodent_trapping_followup') return 'rodent';
   return /\blawn\b|\bturf\b/i.test(String(serviceType || '')) ? 'lawn' : 'pest';
 }
 
@@ -376,11 +379,84 @@ const RESERVICE_LANE_WORD_PATTERNS = [
   ['lawn', RESERVICE_LAWN_WORDS_RE],
 ];
 
-function reportedReserviceLane(text) {
+// ---------------------------------------------------------------------------
+// ONE clause-level classifier for a customer's inbound pest/lawn report (Codex round-22, PR #5336 —
+// after a long regex chase). Everything below derives from `reservicePestReportFacts`:
+//   * reportedReserviceLane              which self-bookable lane the report is about
+//   * reportedReserviceExcludedSpecialty an AFFIRMED termite/rodent/mosquito/tree-and-shrub issue
+//   * isActivePestReport                 a pest noun bound to an activity predicate (sms-shadow-drafter's
+//                                        PEST_REPORT_TEXT_RE, needsOpenTimes and reportedPestLane use it)
+// The text is split into CLAUSES (. ! ? ; : , — – " - " and/but/however/though/although/yet/while/plus).
+// A clause that is NEGATED ("I don't see ants", "not termites", "no ants") or RESOLVED ("gone", "anymore",
+// "no more", "stopped") contributes nothing; the other clauses still count ("ants are gone and spiders are
+// back" → spiders). lawn/grass/yard/turf/sod after a location preposition ("on the lawn", "in the grass")
+// are LOCATIONS, not the lawn service — unless service-qualified ("lawn treatment").
+// ---------------------------------------------------------------------------
+const RESERVICE_CLAUSE_DELIMITER_RE = /[.!?;:,\n–—]+|\s-\s|\b(?:and|but|however|though|although|yet|while|whereas|plus)\b/gi;
+const RESERVICE_NEG = "(?:not|no|never|none|nor|without|cannot|can'?t|don'?t|doesn'?t|didn'?t|won'?t|wasn'?t|isn'?t|aren'?t|weren'?t|haven'?t|hasn'?t|hadn'?t|couldn'?t|wouldn'?t)";
+const RESERVICE_ANY_PEST_NOUN = `(?:${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)`;
+const RESERVICE_CLAUSE_NEGATED_RE = new RegExp(
+  // a negator shortly before a sighting / presence / return verb ("don't see", "aren't back", "not showing up");
+  // "go away" is a report that PERSISTS ("didn't go away"), not a negated sighting
+  `\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,3}?\\W+(?:see|seen|seeing|saw|find|finding|found|notice[ds]?|noticing|show(?:ed|ing|s)?|return\\w*|come|coming|came|have|had|get|getting|be|is|are|was|were|been|go(?!\\s+away)|going(?!\\s+away)|back|there|here|around|anymore)\\b`
+  // a negator directly before the noun ("not termites", "no ants", "without any roaches")
+  + `|\\b${RESERVICE_NEG}\\s+(?:(?:any|a|an|the|more|even|just|really|actually|about)\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b`,
+  'i',
+);
+const RESERVICE_CLAUSE_RESOLVED_RE = /\b(?:anymore|any\s+more|no\s+more|no\s+longer|gone|stopped|disappeared|went\s+away|nothing\s+since|nothing\s+left|no\s+(?:sign|signs|activity)|none\s+(?:left|since))\b/i;
+const RESERVICE_LOCATION_PHRASE_RE = new RegExp(
+  '\\b(?:in|on|at|near|around|by|under|across|through|throughout|over|into|onto|from|outside|inside)\\s+(?:(?:the|my|our|your|a)\\s+)?(?:(?:front|back|side)\\s+)?(?:lawn|grass|yard|turf|sod)\\b'
+  + '(?!\\s+(?:service|treatment|care|program|maintenance|spray(?:ing)?))',
+  'gi',
+);
+// A pest noun that is really a SERVICE name ("pest control", "ant service", "ant plan") is not a sighting.
+const RESERVICE_NOUN_NOT_SERVICE = '(?!\\s+(?:control|service|services|treatment|treatments|plan|plans|program|visit|visits|schedule|contract|guarantee|coverage|company|inspection|inspections|spray|application|appointment)\\b)';
+const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|returned?|returning|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
+const RESERVICE_ACTIVITY_BOUND_RES = [
+  // noun … activity ("the ants are back", "roaches keep coming", "ants are everywhere")
+  new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}(?:\\W+[\\w'’-]+){0,6}?\\W+${RESERVICE_ACTIVITY_AFTER}`, 'i'),
+  // sighting verb … noun ("still see ants", "found roaches"); "more/another/new" must sit right next to the noun
+  new RegExp(`\\b(?:see|saw|seeing|seen|found|find|finding|spot(?:ted|ting)?|notic\\w*)\\b(?:\\W+(?!about\\b|regarding\\b|for\\b|with\\b)[\\w'’-]+){0,3}?\\W+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
+  new RegExp(`\\b(?:more|another|new)\\s+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
+];
+
+function reserviceClauseDropped(clause) {
+  return RESERVICE_CLAUSE_NEGATED_RE.test(clause) || RESERVICE_CLAUSE_RESOLVED_RE.test(clause);
+}
+// { kept: clauses that still count, survivingText: the original text with dropped clauses blanked }
+function reservicePestReportFacts(text) {
   const s = String(text || '');
-  if (!s || reportedReserviceExcludedSpecialty(s)) return null;
-  const hasLawn = RESERVICE_LAWN_WORDS_RE.test(s);
-  const hasPest = RESERVICE_PEST_WORDS_RE.test(s);
+  const kept = [];
+  let surviving = '';
+  let cursor = 0;
+  const flush = (end, delimiter) => {
+    const clause = s.slice(cursor, end);
+    if (clause.trim() && !reserviceClauseDropped(clause)) { kept.push(clause); surviving += clause; } else surviving += ' '.repeat(clause.length);
+    surviving += delimiter;
+  };
+  for (const m of s.matchAll(RESERVICE_CLAUSE_DELIMITER_RE)) {
+    flush(m.index, m[0]);
+    cursor = m.index + m[0].length;
+  }
+  flush(s.length, '');
+  return { kept, survivingText: surviving };
+}
+// A pronoun return ("they're back", "it is coming back") in a clause that still counts, with a pest noun
+// (not a service name) anywhere in another surviving clause: "the roach poison is not working, they are back".
+const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|was|keep|keeps))?\s+(?:(?:coming|showing)\s+(?:back|up)|back|everywhere|returned|returning)\b/i;
+const RESERVICE_PEST_NOUN_UNBOUND_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i');
+function isActivePestReport(text) {
+  const { kept } = reservicePestReportFacts(text);
+  if (kept.some((clause) => RESERVICE_ACTIVITY_BOUND_RES.some((re) => re.test(clause)))) return true;
+  return kept.some((clause) => RESERVICE_PRONOUN_RETURN_RE.test(clause)) && kept.some((clause) => RESERVICE_PEST_NOUN_UNBOUND_RE.test(clause));
+}
+
+function reportedReserviceLane(text) {
+  const s = reservicePestReportFacts(text).survivingText;
+  if (!s.trim() || reportedReserviceExcludedSpecialty(text)) return null;
+  const located = s.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
+  const hasLawn = RESERVICE_LAWN_WORDS_RE.test(located);
+  const hasPest = RESERVICE_PEST_WORDS_RE.test(located);
   if (hasLawn && hasPest) return null; // ambiguous — let the reply itself name the lane
   if (hasLawn) return 'lawn';
   if (hasPest) return 'pest';
@@ -393,9 +469,10 @@ function reportedReserviceLane(text) {
 // tell the two apart, since an excluded specialty must reject a re-service
 // promise outright even when the reply itself names an eligible pest/lawn
 // lane (a termite report never rides a free PEST re-service link, whatever
-// the reply promises).
+// the reply promises). Round 22: only an AFFIRMED specialty counts — "It's not termites — the ants are
+// back" is a pest report.
 function reportedReserviceExcludedSpecialty(text) {
-  const s = String(text || '');
+  const s = reservicePestReportFacts(text).survivingText;
   return EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE.test(s) || TREE_SHRUB_SPECIALTY_ISSUE_RE.test(s);
 }
 
@@ -437,6 +514,8 @@ async function openReserviceCallbacks(customerId, dbh = db) {
     // Non-re-service callbacks (a retreat the office flagged on a regular
     // catalog row) still block their lane — one open free visit per lane.
     const lane = laneForCallbackRow({ serviceKey: row.service_key, serviceType: row.service_type });
+    // A rodent follow-up is not a pest/lawn re-service: it neither books nor blocks either lane here.
+    if (lane === 'rodent') continue;
     if (byLane[lane]) continue; // soonest visit represents the lane
     byLane[lane] = {
       date: typeof row.scheduled_date === 'string'
@@ -481,7 +560,7 @@ async function openReserviceCallbacks(customerId, dbh = db) {
 // open-assessment checks already use, so this atomic re-check can never miss
 // a row those checks would have caught.
 async function openCallbackExistsForLane(dbh, customerId, lane) {
-  if (!customerId || !(RESERVICE_LANES[lane] || lane === 'assessment')) return false;
+  if (!customerId || !(RESERVICE_LANES[lane] || lane === 'assessment' || lane === 'rodent')) return false;
   if (lane === 'assessment') {
     // The assessment identity IN SQL, never after a LIMIT (Codex #4737 r12
     // pre-push P1): any non-terminal row that is an assessment by name or
@@ -528,6 +607,7 @@ module.exports = {
   RESERVICE_PEST_NOUNS_SOURCE,
   reportedReserviceLane,
   reportedReserviceExcludedSpecialty,
+  isActivePestReport,
   openReserviceCallbacks,
   openCallbackExistsForLane,
 };
