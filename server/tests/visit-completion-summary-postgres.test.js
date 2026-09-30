@@ -5957,6 +5957,51 @@ postgres('visit summary recipient recovery', () => {
       });
     });
 
+    // The park and the summary's acceptance stamp write the same row: the park is one conditional
+    // write, so an acceptance that commits between the worker's check and its park is never lost.
+    describe('the undelivered-link park races the summary acceptance', () => {
+      test('an acceptance that lands between the check and the park finalizes the invoice as sent, with no park, alert or credit reversal', async () => {
+        const invoiceId = await stop();
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return { sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' };
+        });
+        await coordinate();
+        const alert = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n' });
+        const reverse = jest.spyOn(require('../services/customer-credit'), 'reverseAppliedCredit');
+        require('../services/invoice-email').sendInvoiceEmail.mockResolvedValue({ ok: false, blocked: true, error: 'Suppressed: bounce' });
+        // The worker's acceptance check reads a stale "not accepted"; the summary's stamp commits right after it.
+        const realPg = mockPg;
+        let armed = true;
+        // The first such read is the sender's own (planned leg); the second is the worker's park check.
+        let reads = 0;
+        mockPg = new Proxy(realPg, {
+          apply(target, thisArg, args) {
+            const builder = Reflect.apply(target, thisArg, args);
+            if (!armed || args[0] !== 'invoices') return builder;
+            const first = builder.first.bind(builder);
+            builder.first = (...cols) => {
+              if (!armed || cols[0] !== 'sms_sent_at') return first(...cols);
+              reads += 1;
+              if (reads < 2) return first(...cols);
+              armed = false;
+              return first(...cols).then(async (row) => { await Invoice.markSummaryTextAccepted(invoiceId); return { ...row, sms_sent_at: null }; });
+            };
+            return builder;
+          },
+        });
+        try { await Invoice.processScheduledSends(); } finally { mockPg = realPg; }
+        const row = await invoiceRow(invoiceId);
+        expect(row.status).toBe('sent');
+        expect(row.sms_sent_at).not.toBeNull();
+        expect(row.send_claim_token).toBeNull();
+        expect(require('../services/invoice-helpers').isStaleClaimReviewHold(row)).toBe(false);
+        expect(alert).toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: `summary-carried-email:${invoiceId}` }));
+        expect(alert).not.toHaveBeenCalledWith('alert', expect.any(String), expect.any(String), expect.objectContaining({ dedupeKey: `summary-link-undelivered:${invoiceId}` }));
+        expect(reverse).not.toHaveBeenCalled();
+      });
+    });
+
     describe('the summary text is accepted while the queue sends a planned invoice', () => {
       const suppressSummary = () => sendCustomerMessage.mockImplementation(async (input) => {
         if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }

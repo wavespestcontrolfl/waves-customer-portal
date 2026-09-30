@@ -7450,7 +7450,6 @@ const InvoiceService = {
       smsEventVisibleAt = undefined,
       emailEventVisibleAt = undefined,
       deduped = false,
-      // The finalized invoice's Text leg was carried by the visit summary text.
       summaryCarried = false,
     } = {},
   ) {
@@ -7932,24 +7931,39 @@ const InvoiceService = {
       if (!smsHeld && summaryPlannedRow
         && (result.email?.blocked || result.email?.skipped || Number(inv.scheduled_send_attempts || 0) + 1 >= 5)) {
         failed += 1;
-        const accepted = Boolean((await db("invoices").where({ id: inv.id }).first("sms_sent_at"))?.sms_sent_at);
-        if (accepted) {
+        const summaryTextAccepted = async () => Boolean((await db("invoices").where({ id: inv.id }).first("sms_sent_at"))?.sms_sent_at);
+        const finalizeAccepted = async () => {
           await this.markDeliverySent(inv.id, {
             source: "summary_carried_email_refused", summaryCarried: true, claimToken: claimed.send_claim_token,
             requestReview: Boolean(claimed.scheduled_request_review), reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
           });
           await alertSummaryCarriedEmailFailed(inv.id, inv.invoice_number, error);
+        };
+        if (await summaryTextAccepted()) {
+          await finalizeAccepted();
         } else {
-          const parked = await restoreClaimedInvoice({
-            status: "scheduled",
-            scheduled_send_at: null,
-            scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
-            scheduled_send_error: `${require("./invoice-helpers").STALE_SEND_PARK_ERROR} — ${SUMMARY_LINK_PARK_TEXT} and the invoice email did not go: ${error}`,
-            updated_at: new Date(),
-          });
+          // One conditional write under the row lock: the summary's acceptance stamp writes the same
+          // row, so either it lands first (this matches nothing, and the invoice is finalized as
+          // carried) or the park lands first (the acceptance then finalizes the parked invoice).
+          const parked = await db("invoices")
+            .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
+            .whereNull("sms_sent_at")
+            .update({
+              status: "scheduled",
+              scheduled_send_at: null,
+              scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
+              scheduled_send_error: `${require("./invoice-helpers").STALE_SEND_PARK_ERROR} — ${SUMMARY_LINK_PARK_TEXT} and the invoice email did not go: ${error}`,
+              send_claim_token: null,
+              updated_at: new Date(),
+            });
+          if (!parked) {
+            if (await summaryTextAccepted()) await finalizeAccepted();
+            else logger.warn(`[invoice] Summary-planned invoice ${inv.invoice_number}: its send claim changed before it could be parked — left to stale-claim recovery`);
+            continue;
+          }
           // Nothing was delivered: the credit this send auto-applied is returned, exactly as after any
           // other failed scheduled send (the row is 'scheduled' again, so the reversal is allowed).
-          if (parked && result.creditApplied > 0) {
+          if (result.creditApplied > 0) {
             try {
               await require("./customer-credit").reverseAppliedCredit({ invoiceId: inv.id, amount: result.creditApplied, createdBy: "system:scheduled_send_failed" });
             } catch (e) {
