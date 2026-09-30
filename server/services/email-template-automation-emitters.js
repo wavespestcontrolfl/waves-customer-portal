@@ -392,7 +392,10 @@ async function retryPendingIntents() {
       const payload = typeof marker.payload === 'string' ? JSON.parse(marker.payload) : (marker.payload || {});
       let result = null;
       if (marker.trigger_event_key === 'estimate.expired') {
-        result = await emitEstimateExpired(payload, marker.id);
+        // A marker written before flipped_at existed (Rule 1, no expires_at) has
+        // no flip instant in its payload: the marker's own occurred_at IS the
+        // flip's `now` (recordAutomationIntents is handed it), so it stands in.
+        result = await emitEstimateExpired({ ...payload, flipped_at: payload.flipped_at || marker.occurred_at }, marker.id);
       } else if (marker.trigger_event_key === 'review.linked_5star') {
         result = await emitReviewLinked5Star({
           reviewId: payload.review_id, customerId: payload.customer_id, locationId: payload.location_id, starRating: payload.star_rating,

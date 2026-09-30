@@ -115,6 +115,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
     if (customers.length) await db('leads').whereIn('customer_id', customers).del();
     if (customers.length) await db('scheduled_services').whereIn('customer_id', customers).del();
     if (estimates.length) await db('estimates').whereIn('id', estimates).del();
+    if (customers.length) await db('customer_properties').whereIn('customer_id', customers).del();
     if (customers.length) {
       await db('notification_prefs').whereIn('customer_id', customers).del();
       await db('customers').whereIn('id', customers).del();
@@ -174,10 +175,10 @@ describeOrSkip('email division wiring (Postgres)', () => {
     return id;
   }
 
-  async function makeNextVisit(customerId, pattern = 'quarterly', date = '2099-12-24') {
+  async function makeNextVisit(customerId, pattern = 'quarterly', date = '2099-12-24', extra = {}) {
     const [row] = await db('scheduled_services').insert({
       customer_id: customerId, scheduled_date: date, service_type: 'Quarterly Pest Control Service',
-      status: 'confirmed', recurring_pattern: pattern,
+      status: 'confirmed', recurring_pattern: pattern, service_address_city: 'Parrish', ...extra,
     }).returning('id');
     return row.id;
   }
@@ -212,7 +213,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
   });
 
   const fire = (automation, {
-    estimateId, customerId, email, expiresOn = '2026-09-20', immediately = true,
+    estimateId, customerId, email, expiresOn = '2026-09-21', immediately = true,
   }) => Executor.processTrigger({
     triggerEventKey: 'estimate.expired',
     triggerEventId: `estimate_expired:${estimateId}`,
@@ -425,6 +426,65 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(sendTemplate.mock.calls[0][0].payload).toEqual(expect.objectContaining({
         plan_interval_days: '91', activity_avg_first_visit: '3.1', activity_avg_second_visit: '1.2',
       }));
+    });
+
+    // The estimate's ownership is re-judged INSIDE the provider-boundary transaction
+    // (share-locked to its end) and at the reservation: a change after the build
+    // can never deliver the estimate's bearer link to the old recipient.
+    test('the estimate\'s email changes AFTER the build, before the provider handoff: refused at the boundary, nothing sent, terminal skip', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: () => db('estimates').where({ id: estimateId }).update({ customer_email: 'someone.new@example.invalid' }),
+      }));
+
+      const run = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email })).results[0].run;
+
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('changed since this run was created');
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'estimate_recipient_changed' }));
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger[0]).toEqual(expect.objectContaining({ status: 'skipped', reason: 'ESTIMATE_RECIPIENT_CHANGED' }));
+    });
+
+    test('the estimate moves to another customer, or is extended (no longer expired), after the build: both refused at the boundary', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const other = await makeCustomer();
+      const owned = await makeEstimate(customer.id, customer.email);
+      const extended = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => db('estimates').where({ id: owned }).update({ customer_id: other.id }) }));
+      const movedRun = (await fire(automation, { estimateId: owned, customerId: customer.id, email: customer.email })).results[0].run;
+      expect(movedRun.status).toBe('skipped');
+      expect(movedRun.exit_reason).toContain('changed since this run was created');
+
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => db('estimates').where({ id: extended }).update({ status: 'sent' }) }));
+      const extendedRun = (await fire(automation, { estimateId: extended, customerId: customer.id, email: customer.email, expiresOn: '2026-10-21' })).results[0].run;
+      expect(extendedRun.status).toBe('skipped');
+      expect(extendedRun.exit_reason).toContain('no longer expired');
+      expect(await db('email_messages').whereIn('idempotency_key', [movedRun.idempotency_key, extendedRun.idempotency_key])).toHaveLength(0);
+    });
+
+    test('at the RESERVATION too: a change between the build and reserveWithCap is refused by the ledger guard before any row exists', async () => {
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const run = {
+        id: randomUUID(), template_key: 'nurture.expired_1', entity_id: estimateId, recipient_id: customer.id,
+        recipient_email: customer.email, idempotency_key: `res-${randomUUID()}`,
+      };
+      const { guard } = Builders.ledgerGuardsFor(run);
+      await db('estimates').where({ id: estimateId }).update({ customer_email: 'moved@example.invalid' });
+      const denied = await require('../services/email-division/ledger').reserveWithCap({
+        customerId: customer.id, stream: 'nurture', emailKey: 'nurture.expired_1', idempotencyKey: run.idempotency_key, guard,
+      });
+      expect(denied).toEqual(expect.objectContaining({ ok: false, reason: 'ESTIMATE_RECIPIENT_CHANGED', row: null }));
+      expect(await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
     });
 
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
@@ -817,6 +877,60 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(result).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
       });
 
+      test('area intel uses the VISIT\'s frozen service city, never customers.city: a multi-property customer; a visit with no frozen city drops the sentence', async () => {
+        const customer = await makeCustomer({ city: 'Bradenton' }); // the customer record's city is another property
+        const techId = await makeTech();
+        const scheduledId = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { service_address_city: 'Parrish' });
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
+        const intel = jest.fn(async ({ city }) => `In September our technicians treated ghost ants at 61% of our 90 visits in ${city}.`);
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort, getAreaIntelSentence: intel }),
+        });
+        expect(intel).toHaveBeenCalledWith(expect.objectContaining({ city: 'Parrish' }));
+        expect(result.payload.area_intel_sentence).toContain('in Parrish');
+
+        const legacy = await makeCustomer({ city: 'Bradenton' });
+        const legacyScheduled = await makeNextVisit(legacy.id, 'quarterly', '2099-12-24', { service_address_city: null });
+        await makeVisit({ customerId: legacy.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+        const legacyRecord = await makeVisit({ customerId: legacy.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: legacyScheduled });
+        intel.mockClear();
+        const dropped = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', legacyRecord, legacy), deps: baseDeps({ getActivityRatingAverages: async () => cohort, getAreaIntelSentence: intel }),
+        });
+        expect(dropped.ok).toBe(true);
+        expect(intel).not.toHaveBeenCalled();
+        expect(dropped.payload.area_intel_sentence).toBe('');
+      });
+
+      test('the quarterly gate normalizes the cadence with the scheduler\'s own alias table, for the visit and for its parent', async () => {
+        const gate = async (pattern, { parentPattern = null } = {}) => {
+          const customer = await makeCustomer();
+          const techId = await makeTech();
+          let extra = {};
+          if (parentPattern !== null) {
+            const parentId = await makeNextVisit(customer.id, parentPattern);
+            extra = { recurring_parent_id: parentId };
+          }
+          const scheduledId = await makeNextVisit(customer.id, pattern, '2099-12-24', extra);
+          await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+          const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
+          return Builders.buildEmailDivisionPayload({
+            run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+          });
+        };
+        for (const alias of ['every_3_months', 'every three months', '4x', ' Quarterly ', '4x per year']) {
+          const result = await gate(alias);
+          expect({ alias, ok: result.ok }).toEqual({ alias, ok: true });
+        }
+        // The parent's alias counts when the visit carries none.
+        expect((await gate('', { parentPattern: 'every three months' })).ok).toBe(true);
+        // Not quarterly under any spelling.
+        for (const alias of ['monthly', 'every 6 months', '6x', 'nonsense']) {
+          expect((await gate(alias)).code).toBe('plan_not_quarterly');
+        }
+      });
+
       test('SKIPs when the service record belongs to a different customer than the run\'s recipient', async () => {
         const { recordId } = await scenario();
         const other = await makeCustomer();
@@ -940,6 +1054,40 @@ describeOrSkip('email division wiring (Postgres)', () => {
         ]);
         const r3 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', ambiguous, customer), mode: 'shadow', deps: consultDeps() });
         expect(r3.payload.pest_or_problem_named).toBe('pest problem');
+      });
+
+      test('area intel uses the ESTIMATE\'s own property city (its property record, else its own address), never customers.city; no city drops the sentence', async () => {
+        const customer = await makeCustomer({ city: 'Bradenton' });
+        const intel = jest.fn(async ({ city }) => `In September our technicians treated ghost ants at 61% of our 90 visits in ${city}.`);
+        const own = await makeEstimate(customer.id, customer.email, { address: '123 Example St, Parrish, FL 34219' });
+        const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', own, customer), mode: 'shadow', deps: consultDeps({ getAreaIntelSentence: intel }) });
+        expect(intel).toHaveBeenLastCalledWith(expect.objectContaining({ city: 'Parrish' }));
+        expect(r1.payload.area_intel_sentence).toContain('in Parrish');
+
+        const [property] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
+        const withProperty = await makeEstimate(customer.id, customer.email, { address: '9 Other Rd', property_id: property.id });
+        await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', withProperty, customer), mode: 'shadow', deps: consultDeps({ getAreaIntelSentence: intel }) });
+        expect(intel).toHaveBeenLastCalledWith(expect.objectContaining({ city: 'Venice' }));
+
+        intel.mockClear();
+        const noCity = await makeEstimate(customer.id, customer.email, { address: '9 Other Rd' });
+        const r3 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', noCity, customer), mode: 'shadow', deps: consultDeps({ getAreaIntelSentence: intel }) });
+        expect(r3.ok).toBe(true);
+        expect(intel).not.toHaveBeenCalled();
+        expect(r3.payload.area_intel_sentence).toBe('');
+      });
+
+      test('an estimate aged out with NO expires_at still shows its effective expiry date (never blank, never a skip): the run\'s expires_on, else the flip time', async () => {
+        const customer = await makeCustomer();
+        const flipped = await makeEstimate(customer.id, customer.email, { expires_at: null, disposition_at: new Date('2026-09-21T02:30:00Z') });
+        const fromRun = await Builders.buildEmailDivisionPayload({
+          run: runFor('nurture.expired_1', flipped, customer), payload: { expires_on: '2026-09-20' }, mode: 'shadow', deps: consultDeps(),
+        });
+        expect(fromRun.ok).toBe(true);
+        expect(fromRun.payload.expired_date_short).toBe('Sep 20');
+        const fromFlip = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', flipped, customer), mode: 'shadow', deps: consultDeps() });
+        expect(fromFlip.ok).toBe(true);
+        expect(fromFlip.payload.expired_date_short).toBe('Sep 20'); // 10:30 PM ET on Sep 20
       });
 
       test('skips an estimate that is no longer expired, and one with no customer record', async () => {

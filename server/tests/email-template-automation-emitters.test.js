@@ -213,6 +213,24 @@ describe('emitEstimateExpired with no expires_at (Rule 1 aged-out estimates)', (
   });
 });
 
+describe('replaying a legacy estimate.expired marker (written before flipped_at existed)', () => {
+  test('a Rule 1 marker with no expires_at and no flipped_at is replayed with its occurred_at as the flip instant — not dropped', async () => {
+    const occurred = new Date('2026-09-21T02:30:00.000Z'); // 10:30 PM ET on Sep 20
+    const rows = mockIntentsTable([{
+      id: 'intent-legacy', status: 'pending', trigger_event_key: 'estimate.expired', occurred_at: occurred,
+      payload: { id: 'est-old', customer_id: 'cust-1', customer_email: 'sam@example.com', expires_at: null },
+    }]);
+
+    const swept = await sweepMissedLifecycleEvents();
+
+    expect(swept.intentsRetried).toBe(1);
+    expect(AutomationExecutor.processTrigger).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({ estimate_id: 'est-old', expires_on: '2026-09-20' }),
+    }));
+    expect(rows[0].status).toBe('processed');
+  });
+});
+
 describe('gate off is a blanket no-op', () => {
   test('every emitter no-ops without calling the executor or the db', async () => {
     isEnabled.mockReturnValue(false);

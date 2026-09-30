@@ -12,7 +12,8 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 // key set below decides WHICH runs ever touch the email division.
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
 const {
-  hasPayloadBuilder, buildEmailDivisionPayload, onceGuardFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
+  hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
+  ESTIMATE_RECIPIENT_CHANGED, ESTIMATE_NOT_EXPIRED,
 } = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
@@ -1751,6 +1752,18 @@ function recipientChangedSkip() {
   };
 }
 
+// The estimate a nurture run is about changed hands (customer or email) or is no
+// longer expired between the build and the provider boundary: terminal, never
+// retargeted — its bearer link must not reach the old recipient.
+function estimateChangedSkip(reason) {
+  return {
+    skipReason: reason === ESTIMATE_NOT_EXPIRED
+      ? 'the estimate is no longer expired; not sent'
+      : 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient',
+    skipGuard: 'estimate_recipient_changed',
+  };
+}
+
 // Ledger-routed dispatch (the wiring PR). Everything the library's
 // sendTemplate does before the provider — template/version resolution,
 // render + required variables, the unsubscribe/ASM compliance guard,
@@ -1785,7 +1798,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
     expectedRecipientEmail: run.recipient_email,
     // Once per customer / estimate, decided inside the reservation under the
     // customer's advisory lock (null for a template with no such rule).
-    guard: onceGuardFor(run),
+    ...ledgerGuardsFor(run),
     template: {
       templateKey: run.template_key,
       versionId: run.template_version_id || undefined,
@@ -1805,6 +1818,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
       throw Object.assign(new Error('email division eligibility lookup failed'), { code: 'LEDGER_LOOKUP_FAILED' });
     }
     if (out.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
+    if (out.reason === ESTIMATE_RECIPIENT_CHANGED || out.reason === ESTIMATE_NOT_EXPIRED) return estimateChangedSkip(out.reason);
     if (out.reason === ONCE_ALREADY_DELIVERED) {
       return { skipReason: 'this customer (or estimate) already has a sent email of this kind; not sent again', skipGuard: 'already_delivered' };
     }
@@ -1829,6 +1843,9 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   // dispatch takes.
   if (settled?.status === 'sent') throw out.error || deliveryUncertainError();
   if (settled?.status === 'skipped' && settled.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
+  if (settled?.status === 'skipped' && (settled.reason === ESTIMATE_RECIPIENT_CHANGED || settled.reason === ESTIMATE_NOT_EXPIRED)) {
+    return estimateChangedSkip(settled.reason);
+  }
   if (settled?.status === 'skipped') {
     return { skipReason: `email division ledger refused the send: ${settled.reason || out.reason}`, skipGuard: 'ledger_refused' };
   }

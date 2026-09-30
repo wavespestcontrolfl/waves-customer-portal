@@ -78,3 +78,24 @@ describe('seeded automation rows', () => {
     }
   });
 });
+
+describe('negation-aware pest reading (customer-typed service_interest)', () => {
+  const { parsePestsNamed } = require('../services/email-division/visit-products');
+  const pests = (text) => parsePestsNamed(Builders.positiveText(text));
+
+  test('a pest inside a negation is never named; "only" / "just" restores what follows', () => {
+    expect(pests('no termites, fire ants only')).toEqual(['fire ants']);
+    expect(pests('ghost ants, no fire ants')).toEqual(['ghost ants']);
+    expect(pests('fire ants not termites')).toEqual(['fire ants']);
+    expect(pests('We do not have termites. Ghost ants in the kitchen.')).toEqual(['ghost ants']);
+    expect(pests('No termites')).toEqual([]);
+    expect(pests('without any fire ants or roaches')).toEqual([]);
+    expect(pests("don't see rats, just ghost ants")).toEqual(['ghost ants']);
+  });
+
+  test('plain statements are read whole; ambiguity reads as negated (falls back to the plain label)', () => {
+    expect(pests('Ghost ants and fire ants')).toEqual(['ghost ants', 'fire ants']);
+    expect(pests('not fire ants, ghost ants')).toEqual([]);
+    expect(pests('')).toEqual([]);
+  });
+});

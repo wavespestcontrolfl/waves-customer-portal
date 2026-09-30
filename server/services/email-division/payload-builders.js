@@ -123,6 +123,8 @@ function defaultDeps() {
     inferEstimateServiceLines: (...args) => require('../estimate-service-lines').inferEstimateServiceLines(...args),
     parsePestsNamed: (...args) => require('./visit-products').parsePestsNamed(...args),
     linkedLeadIdFor: (...args) => require('../estimate-consultation-offer').linkedLeadIdFor(...args),
+    normalizeRecurringPattern: (...args) => require('../recurring-appointment-seeder').normalizeRecurringPattern(...args),
+    parseRawAddress: (...args) => require('../../utils/address-normalizer').parseRawAddress(...args),
     detectServiceLine: (...args) => require('../service-report/service-line-configs').detectServiceLine(...args),
     now: () => new Date(),
   };
@@ -134,7 +136,7 @@ async function loadCustomer(conn, customerId) {
   // never a thrown uuid-cast error (nothing a retry could change).
   if (!UUID_RE.test(clean(customerId))) return null;
   return conn('customers').where({ id: customerId }).whereNull('deleted_at')
-    .first('id', 'first_name', 'email', 'city', 'latitude', 'longitude');
+    .first('id', 'first_name', 'email', 'latitude', 'longitude');
 }
 
 // The completed, customer-visible, PERFORMED visit a service-record trigger
@@ -324,18 +326,28 @@ async function buildFirstVisitPest({
 // B5 — lc.why_91_days
 // ---------------------------------------------------------------------------
 
-async function planPattern(conn, deps, record) {
-  if (!record.scheduled_service_id) return '';
+// The plan the visit belongs to: its cadence (normalized by the scheduler's own
+// alias table, for the visit and then its parent) and the visit's FROZEN service
+// city. The city is the appointment's own (scheduled_services.service_address_*);
+// never customers.city, which belongs to a different property on a
+// multi-property customer. Empty strings mean "unknown".
+async function planService(conn, deps, record) {
+  const none = { pattern: '', city: '' };
+  if (!record.scheduled_service_id) return none;
   const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id })
-    .first('recurring_pattern', 'recurring_parent_id', 'service_type');
+    .first('recurring_pattern', 'recurring_parent_id', 'service_type', 'service_address_city');
   // The plan is the PEST series: a visit that is not a pest appointment says
   // nothing about the pest plan's cadence.
-  if (!visit || deps.detectServiceLine(visit.service_type) !== 'pest') return '';
-  if (clean(visit.recurring_pattern)) return clean(visit.recurring_pattern).toLowerCase();
-  if (!visit.recurring_parent_id) return '';
+  if (!visit || deps.detectServiceLine(visit.service_type) !== 'pest') return none;
+  const city = clean(visit.service_address_city);
+  const own = deps.normalizeRecurringPattern(visit.recurring_pattern);
+  if (own) return { pattern: own, city };
+  if (!visit.recurring_parent_id) return { pattern: '', city };
   const parent = await conn('scheduled_services').where({ id: visit.recurring_parent_id })
     .first('recurring_pattern', 'service_type');
-  return parent && deps.detectServiceLine(parent.service_type) === 'pest' ? clean(parent.recurring_pattern).toLowerCase() : '';
+  const inherited = parent && deps.detectServiceLine(parent.service_type) === 'pest'
+    ? deps.normalizeRecurringPattern(parent.recurring_pattern) : null;
+  return { pattern: inherited || '', city };
 }
 
 // Once-per-customer (B5) / once-per-estimate (C1) is a SEND-TIME rule, not the
@@ -383,12 +395,22 @@ async function priorSends({
   return rows.length ? 'in_flight' : null;
 }
 
-// The ledger's `guard` for a run: null when the template has no once-rule.
-// Receives the reservation's transaction (already under the customer lock).
-function onceGuardFor(run) {
+const ESTIMATE_RECIPIENT_CHANGED = 'ESTIMATE_RECIPIENT_CHANGED';
+const ESTIMATE_NOT_EXPIRED = 'ESTIMATE_NOT_EXPIRED';
+
+// The ledger's hooks for a run, or null when the template has no rule:
+//   guard         — inside reserveWithCap (under the customer's advisory lock):
+//                   for C1 the estimate's current addressing, then the once rule;
+//                   for B5 the once rule.
+//   boundaryGuard — inside the provider-boundary transaction, immediately before
+//                   the provider request (C1 only): the estimate's addressing is
+//                   re-read with a share lock that lasts to the end of that
+//                   transaction, so an ownership or email update cannot land
+//                   between the check and the request.
+function ledgerGuardsFor(run) {
   const scope = { 'lc.why_91_days': 'customer', 'nurture.expired_1': 'estimate' }[run.template_key];
-  if (!scope) return null;
-  return async (trx) => {
+  if (!scope) return { guard: null, boundaryGuard: null };
+  const once = async (trx) => {
     const state = await priorSends({
       conn: trx,
       run,
@@ -397,6 +419,11 @@ function onceGuardFor(run) {
     });
     if (state === 'sent') return { reason: ONCE_ALREADY_DELIVERED };
     return state ? { reason: ONCE_IN_FLIGHT } : null;
+  };
+  if (scope !== 'estimate') return { guard: once, boundaryGuard: null };
+  return {
+    guard: async (trx) => (await estimateAddressingVerdict(trx, run)) || once(trx),
+    boundaryGuard: (trx) => estimateAddressingVerdict(trx, run, { lock: true }),
   };
 }
 
@@ -415,12 +442,15 @@ async function whyPlanGate({ run, conn, deps }) {
   // re-qualifies: the averages the email quotes are "first visit" and "second
   // visit".
   if (Number(record.visit_number) !== 2) return skip('not the customer\'s second pest visit', 'not_second_visit');
-  if ((await planPattern(conn, deps, record)) !== QUARTERLY_PATTERN) return skip('the customer\'s plan is not the quarterly cadence', 'plan_not_quarterly');
+  const plan = await planService(conn, deps, record);
+  if (plan.pattern !== QUARTERLY_PATTERN) return skip('the customer\'s plan is not the quarterly cadence', 'plan_not_quarterly');
   const planName = clean(record.service_type);
   if (!planName) return skip('the visit carries no plan / service name', 'no_plan_name');
   const customer = await loadCustomer(conn, customerId);
   if (!customer) return skip('customer not found', 'customer_missing');
-  return { record, customer, planName };
+  return {
+    record, customer, planName, city: plan.city,
+  };
 }
 
 // The plan's products: every performed pest visit of this customer up to
@@ -448,7 +478,9 @@ async function buildWhy91Days({
 }) {
   const gate = await whyPlanGate({ run, conn, deps });
   if (gate.skip) return gate;
-  const { record, customer, planName } = gate;
+  const {
+    record, customer, planName, city,
+  } = gate;
   if ((await priorSends({ conn, run, customerId: customer.id })) === 'sent') {
     return skip('this customer already has a sent lc.why_91_days email', 'already_delivered');
   }
@@ -462,9 +494,8 @@ async function buildWhy91Days({
   const second = byVisit?.pest?.[2];
   if (first == null || second == null) return skip('fewer than 20 rated visits on the pest line for a first or second visit', 'cohort_below_20');
 
-  const areaIntel = customer.city
-    ? await deps.getAreaIntelSentence({ city: customer.city, month: deps.now(), conn })
-    : null;
+  // The visit's own frozen city; unknown -> the optional sentence is dropped.
+  const areaIntel = city ? await deps.getAreaIntelSentence({ city, month: deps.now(), conn }) : null;
   const payload = {
     first_name: clean(customer.first_name),
     plan_interval_days: QUARTERLY_INTERVAL_DAYS,
@@ -493,13 +524,46 @@ function parsedEstimateData(value) {
   try { return JSON.parse(value); } catch { return null; }
 }
 
+// Negation-aware reading of CUSTOMER-TYPED text ("no termites, ants only" names
+// ants, never termites). service_interest arrives through a free-text field
+// (lead forms, the admin lead editor, the quote wizard), so a pest named inside
+// a negation is not a pest the customer has. Text is read sentence by sentence,
+// comma segment by comma segment: a negator ("no", "not", "without", "never",
+// "none", "don't", "except", "other than", "ruled out" ...) turns the rest of the
+// sentence off (and cuts a segment at the negator: "ants not termites" keeps
+// ants), until a later segment says "only" / "just" / "but" / "instead", which
+// turns it back on. Anything ambiguous reads as negated: the email then falls
+// back to the plain service label instead of naming a pest the customer may not
+// have.
+const NEGATOR_RE = /\b(no|not|without|never|none|nothing|neither|nor|zero|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|wasn'?t|weren'?t|haven'?t|hasn'?t|except|excluding|other than|ruled? out|free of)\b/i;
+const RESTORE_RE = /\b(only|just|but|instead|mainly|however)\b/i;
+function positiveText(text) {
+  const kept = [];
+  for (const sentence of String(text || '').split(/[.;!?\n]+/)) {
+    let negating = false;
+    for (const segment of sentence.split(/,/)) {
+      const negator = NEGATOR_RE.exec(segment);
+      if (negator) {
+        if (!negating) kept.push(segment.slice(0, negator.index));
+        negating = true;
+      } else if (negating && RESTORE_RE.test(segment)) {
+        negating = false;
+        kept.push(segment);
+      } else if (!negating) {
+        kept.push(segment);
+      }
+    }
+  }
+  return kept.join(' ');
+}
+
 function pestOrProblemNamed(estimate, lead, deps) {
   // A pest the customer themselves named (canonical names only — the same
   // keyword list the visit reader uses); else the quoted line's plain label.
   // Customer-authored service-interest fields ONLY: a model-written summary
   // (lead_synopsis) names a pest even when it negates it, and staff notes are not
   // the customer's words.
-  const text = [estimate.service_interest, lead?.service_interest].map(clean).join(' ');
+  const text = [estimate.service_interest, lead?.service_interest].map(clean).map(positiveText).join(' ');
   const pests = deps.parsePestsNamed(text).slice(0, 2);
   if (pests.length) return listSentence(pests);
   const line = deps.inferEstimateServiceLines({ ...estimate, estimateData: estimate.estimate_data })[0];
@@ -524,8 +588,47 @@ async function consultationUrlFor({
   return (await deps.goneQuietConsultationStillValid(context, run.recipient_email)) ? minted : '';
 }
 
+// The date the estimate's expiry is shown and keyed under: the expiry that
+// triggered this run (the emitter's expires_on, which already falls back to the
+// flip's own date for an aged-out estimate with no expires_at), else the row's
+// expires_at, else the flip's own instant — never blank for a flipped estimate.
+function effectiveExpiryYmd(estimate, payload = {}) {
+  const on = clean(payload.expires_on);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(on)) return on;
+  const instant = estimate.expires_at || estimate.disposition_at || estimate.updated_at;
+  return instant ? etDateString(new Date(instant)) : '';
+}
+
+// The estimate's OWN property city (its property record, else its own address);
+// never customers.city (a multi-property customer's other property).
+async function estimateCity(conn, deps, estimate) {
+  if (estimate.property_id) {
+    const property = await conn('customer_properties').where({ id: estimate.property_id }).first('city');
+    if (clean(property?.city)) return clean(property.city);
+  }
+  return clean(deps.parseRawAddress(clean(estimate.address)).city);
+}
+
+// Who this estimate is CURRENTLY addressed to, and whether it is still an
+// expired one. Used at build time, at the ledger reservation and again at the
+// provider boundary (where the row is share-locked for the rest of the handoff
+// transaction): a reassignment or an email change, or an extension, between
+// the build and the send must never deliver this estimate's bearer link.
+async function estimateAddressingVerdict(conn, run, { lock = false } = {}) {
+  const query = conn('estimates').where({ id: run.entity_id });
+  if (lock) query.forShare();
+  const estimate = await query.first('id', 'status', 'customer_id', 'customer_email');
+  if (!estimate) return { reason: ESTIMATE_RECIPIENT_CHANGED };
+  if (estimate.status !== 'expired') return { reason: ESTIMATE_NOT_EXPIRED };
+  if (clean(estimate.customer_id) !== clean(run.recipient_id)
+    || normalizeEmail(estimate.customer_email) !== normalizeEmail(run.recipient_email)) {
+    return { reason: ESTIMATE_RECIPIENT_CHANGED };
+  }
+  return null;
+}
+
 async function buildExpiredNurture({
-  run, conn = db, deps = defaultDeps(), mode = 'live',
+  run, payload: basePayload = {}, conn = db, deps = defaultDeps(), mode = 'live',
 }) {
   const templateKey = 'nurture.expired_1';
   const estimate = await conn('estimates').where({ id: run.entity_id }).first();
@@ -535,8 +638,7 @@ async function buildExpiredNurture({
   // and email must still be that recipient, or the old recipient would receive
   // the current estimate's bearer link. Same normalization as the ledger's
   // recipient check (trim + lowercase); skips the whole send, never retargets.
-  if (clean(estimate.customer_id) !== clean(run.recipient_id)
-    || normalizeEmail(estimate.customer_email) !== normalizeEmail(run.recipient_email)) {
+  if ((await estimateAddressingVerdict(conn, run))?.reason === ESTIMATE_RECIPIENT_CHANGED) {
     return skip('the estimate\'s customer or email changed since this run was created; not sent to the old recipient', 'estimate_recipient_changed');
   }
   if ((await priorSends({ conn, run, estimateId: estimate.id })) === 'sent') {
@@ -562,17 +664,15 @@ async function buildExpiredNurture({
     const links = await deps.mintEstimateLink(estimate, 'estimate_expired_nurture_1', { emailOnly: true });
     estimateLink = clean(links?.emailUrl) || estimateLink;
   }
-  const areaIntel = customer.city
-    ? await deps.getAreaIntelSentence({ city: customer.city, month: deps.now(), conn })
-    : null;
+  // The estimate's own property city; unknown -> the optional sentence is dropped.
+  const city = await estimateCity(conn, deps, estimate);
+  const areaIntel = city ? await deps.getAreaIntelSentence({ city, month: deps.now(), conn }) : null;
 
   const payload = {
     first_name: firstToken(estimate.customer_name) || clean(customer.first_name) || 'there',
     service_quoted: serviceQuoted,
     address_short: clean(estimate.address).split(',')[0].trim(),
-    expired_date_short: estimate.expires_at
-      ? new Date(estimate.expires_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/New_York' })
-      : '',
+    expired_date_short: shortDate(effectiveExpiryYmd(estimate, basePayload)),
     pest_or_problem_named: pestOrProblemNamed(estimate, lead, deps),
     estimate_link: estimateLink,
     area_intel_sentence: areaIntel || '',
@@ -603,7 +703,7 @@ async function buildEmailDivisionPayload({
   const builder = BUILDERS[run.template_key];
   if (!builder) return { handled: false };
   const result = await builder({
-    run, conn, mode, deps: deps ? { ...defaultDeps(), ...deps } : defaultDeps(),
+    run, payload, conn, mode, deps: deps ? { ...defaultDeps(), ...deps } : defaultDeps(),
   });
   if (result.skip) return { handled: true, ...result };
   return { handled: true, ok: true, payload: { ...payload, ...result.payload } };
@@ -614,9 +714,12 @@ module.exports = {
   hasPayloadBuilder: (templateKey) => Object.prototype.hasOwnProperty.call(BUILDERS, templateKey),
   BUILDER_TEMPLATE_KEYS: Object.freeze(Object.keys(BUILDERS)),
   REQUIRED,
-  onceGuardFor,
+  ledgerGuardsFor,
+  positiveText,
   ONCE_ALREADY_DELIVERED,
   ONCE_IN_FLIGHT,
+  ESTIMATE_RECIPIENT_CHANGED,
+  ESTIMATE_NOT_EXPIRED,
   buildFirstVisitPest,
   buildWhy91Days,
   buildExpiredNurture,

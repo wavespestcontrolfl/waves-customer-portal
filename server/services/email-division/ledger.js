@@ -461,7 +461,7 @@ function skipReservation(trx, id, reason) {
     .update({ status: 'skipped', reason, updated_at: trx.fn.now() });
 }
 
-async function judgeConsent(trx, row, now, expectedRecipientEmail = null) {
+async function judgeConsent(trx, row, now, expectedRecipientEmail = null, boundaryGuard = null) {
   const verdict = await eligibleForEmail({
     customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
     emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
@@ -475,6 +475,14 @@ async function judgeConsent(trx, row, now, expectedRecipientEmail = null) {
     await skipReservation(trx, row.id, REASONS.RECIPIENT_CHANGED);
     return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row };
   }
+  // A caller's own last look, on this same transaction, right before the
+  // provider request (e.g. that the thing the message is about is still
+  // addressed to this recipient).
+  const callerVerdict = boundaryGuard ? await boundaryGuard(trx) : null;
+  if (callerVerdict) {
+    await skipReservation(trx, row.id, callerVerdict.reason);
+    return { ok: false, reason: callerVerdict.reason, row };
+  }
   return { ok: true, reason: null, row };
 }
 
@@ -485,14 +493,14 @@ async function judgeConsent(trx, row, now, expectedRecipientEmail = null) {
  * result does not carry the fence's reason, so `onVerdict` receives every
  * verdict as it is made: the hold's, then the boundary check's.
  */
-function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmail = null } = {}) {
+function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmail = null, boundaryGuard = null } = {}) {
   return (dispatch) => db.transaction(async (trx) => {
     const now = new Date();
     const held = await holdReservation(trx, rowId, now);
     onVerdict(held);
     if (!held.ok) return { ok: false, reason: held.reason };
     await dispatch(trx, async () => {
-      const verdict = await judgeConsent(trx, held.row, now, expectedRecipientEmail);
+      const verdict = await judgeConsent(trx, held.row, now, expectedRecipientEmail, boundaryGuard);
       onVerdict(verdict);
       if (!verdict.ok) {
         const veto = new Error(`marketing email reservation ${rowId} refused at the provider boundary: ${verdict.reason}`);
@@ -531,7 +539,7 @@ function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmai
  * settles it as failed and frees the customer's slot at once.
  */
 async function sendWithLedger({
-  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {}, expectedRecipientEmail = null, guard = null,
+  customerId, stream, marketingClass, emailKey, idempotencyKey, pestKey = null, now = new Date(), template = {}, expectedRecipientEmail = null, guard = null, boundaryGuard = null,
 } = {}) {
   if (template.templateKey != null && template.templateKey !== emailKey) {
     return { ok: false, sent: false, reason: REASONS.TEMPLATE_KEY_MISMATCH, row: null, duplicate: false };
@@ -558,7 +566,7 @@ async function sendWithLedger({
       recipientId: row.customer_id,
       idempotencyKey: row.idempotency_key,
       suppressionGroupKey: groupKeyFor(row.stream, row.email_key, row.marketing_class),
-      withProviderHandoff: reservationHandoff(row.id, { onVerdict: (verdict) => { fence = verdict; }, expectedRecipientEmail }),
+      withProviderHandoff: reservationHandoff(row.id, { onVerdict: (verdict) => { fence = verdict; }, expectedRecipientEmail, boundaryGuard }),
     });
   } catch (err) {
     await markFailed(row.id, `dispatch_error:${err.code || err.status || 'unknown'}`);
