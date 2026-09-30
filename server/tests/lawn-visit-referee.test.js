@@ -371,6 +371,14 @@ describe('findDisputes: the deterministic name rule', () => {
     expect(referee.findDisputes(read([f('Fungal disease')]), read([f('Chinch bugs')])).disputes).toHaveLength(1);
   });
 
+  test('a shared negation over a compound name never splits into a cause (pre-push P1)', () => {
+    for (const name of ['No chinch bugs or grubs observed', 'No signs of chinch bugs, grubs or dollar spot', 'Chinch bugs not found; grubs absent', "Didn't see grubs or brown patch", 'Free of chinch bugs and grubs']) {
+      expect(referee.causeLabelsOf(name).size).toBe(0);
+    }
+    expect(referee.findDisputes(read([f('No chinch bugs or grubs observed')]), read([f('Brown patch')])).disputes).toEqual([]);
+    expect(referee.findDisputes(read([f('Brown patch')]), read([f('No chinch bugs or grubs observed')])).disputes).toEqual([]);
+  });
+
   test('symptom-only, clean, negated and unmapped names commit to no cause -> no dispute', () => {
     for (const name of ['Thinning turf', 'Color stress', 'No major visible stress', 'No chinch bugs observed', 'Irregular browning along the driveway edge']) {
       expect(referee.causeLabelsOf(name).size).toBe(0);

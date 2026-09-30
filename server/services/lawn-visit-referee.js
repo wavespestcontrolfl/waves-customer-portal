@@ -79,9 +79,16 @@ const NAME_PARTS = /\s*(?:\band\b|&|\/|,|;|\bwith\b|\bplus\b|\bor\b|\bvs\.?\b)\s
 /** The set of cause labels a finding name commits to. A name that lists several
  * causes ("chinch bugs and drought") yields several, and is then never a
  * dispute on its own (the pairing treats size > 1 as ambiguous). */
+// Any negation in the name makes it commit to nothing: splitting "No chinch
+// bugs or grubs observed" would strip the shared "No" from "grubs", so a
+// negated name is never split into a cause (pre-push audit P1).
+const NEGATION = /\b(?:no|not|none|without|absent|absence|negative|ruled out|free of|lack of)\b|n't\b/i;
+
 function causeLabelsOf(name) {
   const labels = new Set();
-  for (const part of String(name || '').split(NAME_PARTS)) {
+  const text = String(name || '');
+  if (NEGATION.test(text)) return labels;
+  for (const part of text.split(NAME_PARTS)) {
     if (!part.trim()) continue;
     const label = safeConditionLabel(part);
     if (label && CAUSE_LABELS.has(label)) labels.add(label);
