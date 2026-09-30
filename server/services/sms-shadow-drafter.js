@@ -1023,16 +1023,28 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
 // Codex round-9 (PR #5336): a decision created BEFORE this feature deployed has
 // no reservice_lanes_snapshot, and the strict check above rejected every one of
 // its promises (a suggestion stays reviewable up to 48h, so pending cards
-// straddle the deploy). A decision predates the feature when its prompt version
-// is older than REAL_ANSWERS_PROMPT_VERSION's introducing identity
-// ("house_voice_v12_real_answers2") — bare v12, v11, or no version at all;
-// decisions on the new identity ALWAYS carry the snapshot when they promise, so
-// a new-version decision missing one stays fail-closed.
+// straddle the deploy). Codex round-15: the pre-deploy set is an EXPLICIT list —
+// never a parsed shape — so a future identity change can't silently grandfather
+// new decisions: only a missing version, the identities that shipped before the
+// snapshot existed (PROMPT_VERSION v11, bare v12 "house_voice_v12_real_answers",
+// and the older bare house_voice_v1..v11), each optionally category-tagged
+// ("+bc"), are pre-deploy. EVERY other identity — REAL_ANSWERS_PROMPT_VERSION,
+// any later bump, anything unrecognized — is treated as snapshot-emitting, so a
+// promise on it missing its snapshot stays fail-closed.
+const PRE_DEPLOY_PROMPT_IDENTITIES = Object.freeze([
+  ...Array.from({ length: 11 }, (_, i) => `house_voice_v${i + 1}`),
+  'house_voice_v12_real_answers',
+]);
 function reserviceSnapshotVersionEmitted(promptVersion) {
-  const m = /^house_voice_v(\d+)_real_answers(\d*)/.exec(String(promptVersion || ''));
-  if (!m) return false;
-  const major = Number(m[1]);
-  return major > 12 || (major === 12 && Number(m[2] || 0) >= 2);
+  const identity = String(promptVersion || '').split('+')[0];
+  return !!identity && !PRE_DEPLOY_PROMPT_IDENTITIES.includes(identity);
+}
+// Cheap prescreen for "could this body plausibly be about a free return visit?" — the
+// price words and re-service nouns only (never bare visit/service/treatment). Used to decide
+// whether a recheck that could not read its decision row may still let a message go.
+const RESERVICE_PRESCREEN_RE = /\b(?:free|complimentary|gratis|comped?|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)|at no|on us|on the house|waive[ds]?|covered|included|without (?:any )?(?:charge|cost)|re-?service|re-?treat|re-?spray|revisit|callback|redo|come back|go back|come out again|stop by again|return visit|another visit|follow-?up|tech(?:nician)? (?:out|back))\b/i;
+function reserviceBodyPrescreen(text) {
+  return RESERVICE_PRESCREEN_RE.test(String(text || ''));
 }
 async function loadDraftRowForReservice(draftId) {
   if (!draftId) return {};
@@ -3315,6 +3327,9 @@ module.exports = {
   namedReserviceLanesInText,
   reservicePromiseStillEligible,
   reserviceCarriesLinkAction,
+  reserviceSnapshotVersionEmitted,
+  reserviceBodyPrescreen,
+  PRE_DEPLOY_PROMPT_IDENTITIES,
   validateComplianceCopy,
   hasBannedCustomerCopy,
   PEST_REPORT_TEXT_RE,

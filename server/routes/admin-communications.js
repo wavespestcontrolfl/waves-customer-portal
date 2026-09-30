@@ -3827,6 +3827,9 @@ router.post('/schedule-sms', async (req, res, next) => {
 
         const metaObj = {};
         if (usedDecisionId) metaObj.agent_decision_id = usedDecisionId;
+        // Codex round-15 (PR #5336): record on the queued row itself that its decision carries the
+        // re-service link action, so the fire-time recheck never depends on re-reading the decision.
+        if (usedDecisionId && require('../services/agent-decision-send-checks').decisionCarriesReserviceLink(scheduledAgentDecision)) metaObj.carries_reservice_link = true;
         if (parkedIds.length) metaObj.parked_decision_ids = parkedIds;
         if (scheduledHumanAuthored) metaObj.human_authored = true;
         const metadata = Object.keys(metaObj).length ? JSON.stringify(metaObj) : null;

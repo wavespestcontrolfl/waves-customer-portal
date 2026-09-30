@@ -2604,11 +2604,62 @@ describe('free re-service is an entitlement resolved through the existing mechan
         await expect(require('../services/agent-decision-send-checks').scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, dbh: rowDb(row) })).resolves.toBeNull();
       });
 
+      // Codex round-15 P1 #1: a failed decision read never lets an action-carrying decision through.
+      test('row read fails: the scheduled row\'s own carries_reservice_link flag blocks a missed-promise body', async () => {
+        loadWith({ lanes: ['pest'] });
+        const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
+        const missed = 'We will have someone stop by again for the ants, no cost to you.';
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, carriesAction: true, dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
+      });
+
+      test('row read fails, action unknown: a plausibly re-service body blocks; an unrelated body sends', async () => {
+        loadWith({ lanes: ['pest'] });
+        const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'We will have someone stop by again for the ants, no cost to you.', dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'See you Tuesday at 9!', dbh: throwingDb })).resolves.toBeNull();
+      });
+
+      test('/schedule-sms records carries_reservice_link from the decision snapshot', () => {
+        const { decisionCarriesReserviceLink } = require('../services/agent-decision-send-checks');
+        expect(decisionCarriesReserviceLink({ input_snapshot: JSON.stringify({ intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }] }) })).toBe(true);
+        expect(decisionCarriesReserviceLink({ input_snapshot: { intended_actions: [{ type: 'escalate' }] } })).toBe(false);
+        expect(decisionCarriesReserviceLink({ input_snapshot: null })).toBe(false);
+      });
+
       test('an ordinary decision (no action) with a non-promise body sends without touching eligibility', async () => {
         const { loadEligibleReserviceLanes } = loadWith({ lanes: [] });
         const row = { customer_id: 'cust-1', prompt_version: 'house_voice_v12_real_answers2', input_snapshot: JSON.stringify({ intended_actions: [] }) };
         await expect(require('../services/agent-decision-send-checks').scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'See you Tuesday!', dbh: rowDb(row) })).resolves.toBeNull();
         expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
+      });
+    });
+
+    // Codex round-15 P1 #2: the pre-deploy set is an explicit list pinned to the exported constant.
+    describe('reserviceSnapshotVersionEmitted — explicit identities, pinned to REAL_ANSWERS_PROMPT_VERSION', () => {
+      const drafter = () => require('../services/sms-shadow-drafter');
+
+      test('the current real-answers identity (and its category-tagged forms) is snapshot-emitting', () => {
+        const { REAL_ANSWERS_PROMPT_VERSION, reserviceSnapshotVersionEmitted } = drafter();
+        expect(reserviceSnapshotVersionEmitted(REAL_ANSWERS_PROMPT_VERSION)).toBe(true);
+        expect(reserviceSnapshotVersionEmitted(`${REAL_ANSWERS_PROMPT_VERSION}+bc`)).toBe(true);
+      });
+
+      test('the pre-deploy identities (missing, v1..v11, PROMPT_VERSION, bare v12) are grandfathered, tagged or not', () => {
+        const { PROMPT_VERSION, PRE_DEPLOY_PROMPT_IDENTITIES, reserviceSnapshotVersionEmitted } = drafter();
+        expect(PRE_DEPLOY_PROMPT_IDENTITIES).toContain(PROMPT_VERSION);
+        expect(PRE_DEPLOY_PROMPT_IDENTITIES).toContain('house_voice_v12_real_answers');
+        for (const identity of [null, undefined, '', ...PRE_DEPLOY_PROMPT_IDENTITIES, 'house_voice_v12_real_answers+bc']) {
+          expect(reserviceSnapshotVersionEmitted(identity)).toBe(false);
+        }
+      });
+
+      test('a future or unrecognized identity is never grandfathered', () => {
+        const { REAL_ANSWERS_PROMPT_VERSION, PRE_DEPLOY_PROMPT_IDENTITIES, reserviceSnapshotVersionEmitted } = drafter();
+        for (const identity of ['house_voice_v12_real_answers3', 'house_voice_v13', 'house_voice_v12_other', 'something_else']) {
+          expect(reserviceSnapshotVersionEmitted(identity)).toBe(true);
+        }
+        // The constant can never appear in the pre-deploy list (a bump that reuses an old identity would fail here).
+        expect(PRE_DEPLOY_PROMPT_IDENTITIES).not.toContain(REAL_ANSWERS_PROMPT_VERSION);
       });
     });
 

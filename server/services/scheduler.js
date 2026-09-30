@@ -4357,7 +4357,7 @@ function initScheduledJobs() {
               // non-promise message is never blocked by this recheck's own plumbing.
               const { scheduledReserviceBlockReason } = require('./agent-decision-send-checks');
               const reason = await scheduledReserviceBlockReason({
-                agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, fallbackCustomerId: msg.customer_id || null, dbh: db,
+                agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, fallbackCustomerId: msg.customer_id || null, carriesAction: claimMeta.carries_reservice_link === true, dbh: db,
               });
               if (reason) {
                 reserviceStale = true;

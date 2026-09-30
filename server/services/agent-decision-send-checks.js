@@ -105,27 +105,41 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
 }
 
 /**
+ * Whether a decision's snapshot carries the re-service link action — recorded onto a scheduled row's
+ * metadata at queue time (admin-communications /schedule-sms) so the scheduled-send recheck does not
+ * depend on re-reading the decision to learn it.
+ */
+function decisionCarriesReserviceLink(decision) {
+  const { reserviceCarriesLinkAction } = require('./sms-shadow-drafter');
+  const snapshot = parseInputSnapshot(decision && decision.input_snapshot);
+  return reserviceCarriesLinkAction(snapshot && snapshot.intended_actions);
+}
+
+/**
  * The scheduled-send form of the re-service recheck (scheduler.js): the same verdict as
  * agentDecisionSendBlockReason's re-service leg, for a queued reply whose decision row still has to be
- * read. Ordered so a plain non-promise message is never blocked by the recheck's own plumbing
- * (pre-push audit P1, PR #5336): the cheap body check comes first, and a failure to read the row or
- * to run the check blocks ONLY when the body reads as a promise or the decision is known to carry the
- * re-service link action; otherwise the message sends. Returns a short reason, or null.
+ * read. A plain non-promise message is never blocked by the recheck's own plumbing (pre-push audit P1,
+ * PR #5336), and a decision that carries the link action is never let through unchecked because the
+ * read failed (round 15). A failure to read the row or to run the check blocks when the body reads as
+ * a promise, when the decision is known to carry the action (`carriesAction`, from the scheduled row's
+ * own metadata, else the row just read), or — for a decision whose action state is unknown — when the
+ * body could plausibly be about a free return visit (reserviceBodyPrescreen); otherwise it sends.
+ * Returns a short reason, or null.
  */
-async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fallbackCustomerId = null, dbh = require('../models/db') }) {
-  const { isReserviceOfferPromise, reserviceCarriesLinkAction } = require('./sms-shadow-drafter');
+async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fallbackCustomerId = null, carriesAction = false, dbh = require('../models/db') }) {
+  const { isReserviceOfferPromise, reserviceCarriesLinkAction, reserviceBodyPrescreen } = require('./sms-shadow-drafter');
   const logger = require('./logger');
-  const promise = isReserviceOfferPromise(outgoingBody);
-  let known = false;
+  let known = carriesAction === true;
   try {
     const row = await dbh('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot', 'customer_id', 'prompt_version');
     const snapshot = parseInputSnapshot(row && row.input_snapshot);
-    known = reserviceCarriesLinkAction(snapshot && snapshot.intended_actions);
+    known = known || reserviceCarriesLinkAction(snapshot && snapshot.intended_actions);
     return await reserviceBlock({ decision: { ...row, customer_id: (row && row.customer_id) || fallbackCustomerId }, outgoingBody });
   } catch (err) {
-    logger.warn(`[agent-decision-send-checks] re-service recheck failed for decision ${agentDecisionId}: ${err.message}${promise || known ? '; blocking send' : '; not a re-service message, sending'}`);
-    return promise || known ? 'reservice_recheck_failed' : null;
+    const block = known || isReserviceOfferPromise(outgoingBody) || (!carriesAction && reserviceBodyPrescreen(outgoingBody));
+    logger.warn(`[agent-decision-send-checks] re-service recheck failed for decision ${agentDecisionId}: ${err.message}${block ? '; blocking send' : '; not a re-service message, sending'}`);
+    return block ? 'reservice_recheck_failed' : null;
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, decisionCarriesReserviceLink, parseInputSnapshot };
