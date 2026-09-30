@@ -65,7 +65,12 @@ describe('direct invoice sender callers are all classified for the dispute-hold 
   test.each(Object.entries(CLASSIFIED).filter(([, kind]) => kind !== 'gated'))(
     '%s passes holdExempt: %s at every call',
     (file, kind) => {
-      for (const site of callSites(file)) expect(site).toContain(`holdExempt: '${kind}'`);
+      for (const site of callSites(file)) {
+        // The assistant tool is autonomous unless a staff actor confirmed the write:
+        // its exemption is derived from that trusted context, never unconditional.
+        if (file === 'services/ai-assistant/tools-expanded.js') expect(site).toContain(`holdExempt: actorTechnicianId ? '${kind}' : null`);
+        else expect(site).toContain(`holdExempt: '${kind}'`);
+      }
     },
   );
 

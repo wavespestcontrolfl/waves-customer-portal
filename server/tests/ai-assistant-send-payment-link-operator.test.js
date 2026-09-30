@@ -34,12 +34,13 @@ describe('send_payment_link operator context', () => {
 
   test('an autonomous turn (no execution context) sends as the system — actorTechnicianId null', async () => {
     await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1');
-    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: null });
+    // no staff actor: the dispute-hold exemption is NOT granted (the sender's default-on check applies)
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: null, actorTechnicianId: null });
   });
 
   test('the operator comes from the execution context only — never from the model\'s tool input', async () => {
     await executeToolCall('send_payment_link', { invoice_id: 'inv-1', actorTechnicianId: 'forged' }, 'cust-1', {});
-    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: null });
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: null, actorTechnicianId: null });
   });
 });
 
@@ -103,5 +104,12 @@ describe('send_payment_link — sent must reflect actual delivery, never sendRes
     expect(out.coveredByCredit).toBe(true);
     expect(out.settledZeroDue).toBeUndefined();
     expect(out.error).toBeUndefined();
+  });
+
+  test('an autonomous send refused by the dispute hold tells the assistant nothing was sent (no promise of a link)', async () => {
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER', retryable: true });
+    const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1');
+    expect(out).toMatchObject({ sent: false, held: true });
+    expect(out.message).toMatch(/no payment link was sent/i);
   });
 });

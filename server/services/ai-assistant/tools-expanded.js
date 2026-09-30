@@ -257,7 +257,13 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
       // invoice bills (GATE_INVOICE_ISSUED_CLOSES_VISIT), the transition and
       // its audit row name the staff member who confirmed the write, not
       // the system (GitHub r4 P2 #4127).
-      const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, holdExempt: 'operator', actorTechnicianId });
+      // The dispute-hold exemption follows the TRUSTED execution context only: a staff
+      // member who confirmed the write (actorTechnicianId) is a deliberate office send;
+      // an autonomous assistant turn keeps the sender's default-on hold check.
+      const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, holdExempt: actorTechnicianId ? 'operator' : null, actorTechnicianId });
+      if (sendResult?.code === 'COLLECTION_HOLD_DEFER') {
+        return { sent: false, held: true, message: 'Billing follow-up is on hold for this account, so no payment link was sent. Do not promise one; a team member will follow up.' };
+      }
       // sent reflects ACTUAL delivery only — never `|| sendResult?.ok`
       // (Codex round-5 P1 #4131): a zero-due settlement (or account
       // credit covering the balance) resolves { sent: false, ok: true },
