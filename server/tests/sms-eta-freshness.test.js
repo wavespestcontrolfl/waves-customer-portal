@@ -1002,4 +1002,27 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
     });
     expect(reason).toBe('eta_claim_unbound');
   });
+
+  // Codex pre-push P1 (round 12): with a live snapshot, window-hour copy must
+  // not be rejected as an unbound/unread ETA.
+  test.each([
+    'Your arrival window is 2 hours.',
+    'Your 2 hour arrival window starts at 9.',
+  ])('%p with a live snapshot is not an ETA claim', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBeNull();
+  });
+
+  test('"The tech is 2 hours away." against a live 2 is still unbound', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody: 'The tech is 2 hours away.', now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
 });

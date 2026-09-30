@@ -37,7 +37,7 @@ const {
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
-  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, bodyHasTimedArrivalPhrase,
 } = require('../services/sms-shadow-drafter');
 const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 
@@ -1126,6 +1126,43 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     test('a hundred of something that is not a time is untouched', () => {
       expect(validateLiveEtaMinutes({ reply: 'We serve over a hundred neighbors. The tech is on the way!', factsBlock: facts(12) }))
         .toEqual({ ok: true, violations: [] });
+    });
+  });
+
+  // Codex pre-push P1 (round 12, PR #5334): the window exclusion is ONE
+  // shared predicate (isWindowQuantity) used by the normalizer AND every
+  // leftover-word check, so a window hour the normalizer leaves alone is
+  // never then rejected as an unread ETA — with live facts present.
+  describe('appointment-window hours pass with LIVE facts present; real hour ETAs still fail (round 12 P1)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      'Your arrival window is 2 hours.',
+      'Your 2 hour arrival window starts at 9.',
+      'Your arrival window: 1 to 2 hours.',
+      'Your arrival window is half an hour.',
+      'Your arrival window is a quarter of an hour.',
+      'Your arrival window is an hour.',
+      'Your arrival window is 2 hours. The tech is 2 minutes away.',
+    ])('%p is accepted against a live 2-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) })).toEqual({ ok: true, violations: [] });
+    });
+
+    test.each([
+      'The tech is 2 hours away.',
+      'He is about half an hour away.',
+      'He is an hour out.',
+      'The tech is a thousand minutes away.',
+      'Your arrival window is 2 hours, and the tech is 2 hours away.',
+    ])('%p is still rejected against a live 2-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+
+    test('the normalizer and the leftover-word checks agree on windows', () => {
+      const body = 'Your arrival window is 2 hours.';
+      expect(normalizeTimeQuantities(body)).toBe(body);
+      expect(bodyHasTimedArrivalPhrase(body, { unnormalizedHoursOnly: true })).toBe(false);
+      expect(bodyHasTimedArrivalPhrase(body, { unconvertedNumbersOnly: true })).toBe(false);
+      expect(bodyHasTimedArrivalPhrase('Your arrival window is half an hour.')).toBe(false);
     });
   });
 

@@ -686,10 +686,36 @@ const UNCONVERTED_NUMBER_WORD_RE = /\b(?:hundreds|thousands?|millions?|dozens?|s
 // normalized in the live-context path). The tokenizer therefore always sees
 // "120 minutes away", and its existing trigger/duration exclusions apply
 // equally. An hour figure that names a WINDOW ("your 2 hour arrival window",
-// "a 2 hour window", "arrival window is 2 hours") is a scheduling span, never an ETA, and is left alone
-// (the window look-around in normalizeTimeQuantities); dry time / "takes about 2 hours" stay excluded by the
-// duration rules.
+// "a 2 hour window", "arrival window is 2 hours") is a scheduling span, never
+// an ETA. That decision lives in ONE predicate, isWindowQuantity below, shared
+// by normalizeTimeQuantities (which leaves a window figure alone), the
+// leftover-word checks (bodyHasUnnormalizedHourWord /
+// bodyHasUnconvertedNumberWord, via unreadDurationInArrivalSentence) and the
+// vague-phrase check (bodyHasTimedArrivalPhrase) — Codex round-12 P1, PR
+// #5334: they used to disagree, so a window hour the normalizer skipped was
+// then rejected as an "unread" ETA. Dry time / "takes about 2 hours" stay
+// excluded by the duration rules.
 const HOURS_TO_MINUTES = 60;
+// A duration figure that names a scheduling WINDOW rather than an arrival
+// time: "2 hour arrival window" / "a 2-hour slot" (window word AFTER) or
+// "arrival window is 2 hours" / "window: 1 to 2 hours" / "window is an hour"
+// (window word right BEFORE, an optional "N to" range prefix and article
+// allowed). `index`/`length` locate the figure — a number+unit span, a lone
+// hour word, or a number-word phrase — in `str`.
+const WINDOW_AFTER_RE = /^\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b/i;
+const WINDOW_BEFORE_RE = /\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:\.\d+)?\s*(?:[-–—]|to|or)\s*)?(?:\d+(?:\.\d+)?\s*|(?:(?:a\s+)?(?:half|quarter(?:\s+of)?)\s+)?an?\s+)?$/i;
+function isWindowQuantity(str, index, length) {
+  return WINDOW_AFTER_RE.test(str.slice(index + length))
+    || WINDOW_BEFORE_RE.test(str.slice(Math.max(0, index - 60), index));
+}
+// String.replace that leaves a window figure exactly as written.
+function replaceQuantity(text, re, convert) {
+  return text.replace(re, (m, ...args) => {
+    const offset = args[args.length - 2];
+    const whole = args[args.length - 1];
+    return isWindowQuantity(whole, offset, m.length) ? m : convert(m, ...args);
+  });
+}
 function hoursToMinutes(h) {
   return Math.round(parseFloat(h) * HOURS_TO_MINUTES);
 }
@@ -702,25 +728,25 @@ function normalizeHourMinuteCompounds(text) {
   // An article hour is read ONLY when a minutes figure follows it; a bare
   // "an hour" / "half an hour" / "quarter of an hour" is vague and stays for
   // bodyHasUnnormalizedHourWord to reject.
-  out = out.replace(/(?<!half\s)(?<!quarter\s)(?<!of\s)\ban?\s+(?:hour|hr)\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi,
+  out = replaceQuantity(out, /(?<!half\s)(?<!quarter\s)(?<!of\s)\ban?\s+(?:hour|hr)\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi,
     (m, mins) => `${HOURS_TO_MINUTES + parseInt(mins, 10)} minutes`);
-  out = out.replace(/\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h(?=\d|\b))\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?|m)\b/gi,
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h(?=\d|\b))\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?|m)\b/gi,
     (m, n, mins) => `${hoursToMinutes(n) + parseInt(mins, 10)} minutes`);
   return out;
 }
 function normalizeTimeQuantities(text) {
   let out = String(text || '');
   // "1 to 2 hours" / "1-2 hours" / "1 or 2 hours" — both bounds scale.
-  out = out.replace(/(?<!\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?)\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi,
     (m, a, b) => `${hoursToMinutes(a)}-${hoursToMinutes(b)} minutes`);
   // "2 and a half hours" / "2 hours and a half" / "an hour and a half".
-  out = out.replace(/\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b/gi,
     (m, n) => `${hoursToMinutes(n) + 30} minutes`);
-  out = out.replace(/\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
+  out = replaceQuantity(out, /\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b/gi,
     (m, n) => `${hoursToMinutes(n || 1) + 30} minutes`);
   out = normalizeHourMinuteCompounds(out);
   // "2 hours", "2h", "1.5 hrs".
-  out = out.replace(/(?<!\b(?:window|slot|block)\s*(?:is|of|:|=|–|-|will\s+be|runs)?\s*(?:about\s+|roughly\s+)?(?:\d+(?:\.\d+)?\s*(?:[-–—]|to|or)\s*)?)\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h\b)(?!\s*(?:[-–]\s*)?(?:(?:arrival|service|appointment|time)\s+)?(?:window|block|slot)\b)/gi,
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h\b)/gi,
     (m, n) => `${hoursToMinutes(n)} minutes`);
   return out;
 }
@@ -740,6 +766,7 @@ function unreadDurationInArrivalSentence(str, wordRe) {
   const spans = sentenceSpans(str);
   const re = new RegExp(wordRe.source, wordRe.flags);
   for (const m of str.matchAll(re)) {
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
     const sentence = sentenceAt(str, spans, m.index);
     if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
     if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)) return true;
@@ -793,6 +820,7 @@ function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconv
   const re = new RegExp(TIMED_ARRIVAL_PHRASE_RE.source, 'gi');
   let m;
   while ((m = re.exec(str))) {
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
     const sentence = sentenceFor(m.index);
     if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
     if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
