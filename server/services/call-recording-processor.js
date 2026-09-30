@@ -113,7 +113,6 @@ function callExtractionV2PrimaryEnabled() {
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
@@ -1540,28 +1539,10 @@ function judgedAddressMatches(judged, knownCaller) {
 // does not repeat or replace it, that form address is booked anyway — and the
 // office gets an admin bell.
 // Narrow on every side: form-sourced only, a house number on file, the same
-// street Google resolved, an in-area ZIP, and a verdict that is street-level
+// street Google resolved, a service county Google itself reports (owner ruling
+// 2026-09-30: never a ZIP inference), and a verdict that is street-level
 // (never "the street does not exist", never out of area).
 const STREET_LEVEL_FORM_STATUS = 'street_level_form_accept';
-// Served ZIPs that lie WHOLLY in one served county — the only ZIPs whose county
-// the ZIP alone can prove when Google returns no county. A ZIP on any shared
-// set (ai-property-lookup's Manatee/Sarasota/Charlotte shared sets, imported
-// not copied, plus the service-area map's own multi-county ZIPs: 33921, 33955,
-// 34228, 34243 ...) needs Google's own county. Lazy: ai-property-lookup is a
-// large module the call pipeline should not load until a street-level match
-// actually needs it.
-let wholeCountyZip5Cache = null;
-function wholeCountyZip5() {
-  if (!wholeCountyZip5Cache) {
-    const lookup = require('./property-lookup/ai-property-lookup');
-    const shared = new Set([
-      ...lookup.MANATEE_SHARED_ZIPS, ...lookup.SARASOTA_SHARED_ZIPS, ...lookup.CHARLOTTE_SHARED_ZIPS,
-      ...require('../config/address-county').SHARED_SERVICE_AREA_ZIPS,
-    ]);
-    wholeCountyZip5Cache = new Set(Object.values(SERVICE_AREA_COUNTY_ZIPS).flat().filter((z) => !shared.has(z)));
-  }
-  return wholeCountyZip5Cache;
-}
 function streetLevelFormAddressGateOn() {
   const reader = require('../config/feature-gates').callLeadFormAddressStreetLevelLive;
   return typeof reader === 'function' && reader() === true;
@@ -1665,24 +1646,24 @@ function streetLevelMatch(knownCaller, verdict) {
   const house = houseNumberOf(line1);
   if (!house) return null;                           // no house number: nothing to read back
   const zip = zip5Of(knownCaller.addressZip);
-  // Google's county on the canonical call-routing allowlist (inServiceArea
-  // === true, DeSoto included) is the area proof by itself. With no county,
-  // the on-file ZIP must lie wholly in one served county (never a shared ZIP)
-  // AND Google must return that ZIP.
-  const countyConfirmed = verdict.inServiceArea === true;
-  if (!zip || (!countyConfirmed && !wholeCountyZip5().has(zip))) return null;
+  // Owner ruling 2026-09-30: Google's OWN county, on the canonical call-routing
+  // allowlist (inServiceArea === true, DeSoto included), is the only area proof.
+  // A ZIP is never promoted to a county: with no county the call holds for
+  // review as before.
+  if (verdict.inServiceArea !== true) return null;
+  if (!zip) return null;
   const n = verdict.normalized || {};
   const formName = streetNameKey(line1);
   if (!formName || formName !== streetNameKey(n.street_line_1)) return null;
   const googleHouse = houseNumberOf(n.street_line_1);
   if (googleHouse && googleHouse !== house) return null;   // Google rewrote the house number
-  // Google's own ZIP must match. With no ZIP from Google the route must still
-  // be bound to the submitted locality: a county-confirmed route needs Google's
-  // city to equal the on-file city (a common street name in another served
-  // city must not vouch for this address); without a county there is no proof.
+  // Google's own ZIP must match the on-file ZIP. With no ZIP from Google the
+  // route must still be bound to the submitted locality: Google's city must
+  // equal the on-file city (a common street name in another served city must
+  // not vouch for this address).
   if (n.postal_code) {
     if (zip5Of(n.postal_code) !== zip) return null;
-  } else if (!countyConfirmed || !alnum(n.city) || alnum(n.city) !== alnum(knownCaller.addressCity)) {
+  } else if (!alnum(n.city) || alnum(n.city) !== alnum(knownCaller.addressCity)) {
     return null;
   }
   if (normalizeState(n.state) !== SERVICE_STATE) return null;
@@ -1690,7 +1671,7 @@ function streetLevelMatch(knownCaller, verdict) {
     granularity: 'ROUTE',
     route: String(n.street_line_1 || '').trim() || null,
     zip,
-    areaBasis: countyConfirmed ? 'google_county' : 'google_zip',
+    areaBasis: 'google_county',
   };
 }
 function applyStreetLevelFormVerdict(knownCaller, verdict) {
@@ -1698,7 +1679,7 @@ function applyStreetLevelFormVerdict(knownCaller, verdict) {
   // gate and the same bounds the live pass applied.
   if (!streetLevelFormAddressGateOn()) return knownCaller;
   if (verdict?.inServiceArea !== true || verdict?.streetLevel?.granularity !== 'ROUTE') return knownCaller;
-  if (!['google_county', 'google_zip'].includes(verdict.streetLevel.areaBasis)) return knownCaller;
+  if (verdict.streetLevel.areaBasis !== 'google_county') return knownCaller;
   if (!houseNumberOf(knownCaller.addressLine1)) return knownCaller;
   if (String(knownCaller.addressLine2 || '').trim()) return knownCaller;
   if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
@@ -8007,6 +7988,8 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         spamVerdict: spamVerdictResult,
         outcome: {
           appointmentCreated: !!appointmentResult?.scheduledServiceId,
+          // A street-level address hold is booked only once the office confirms.
+          appointmentPendingReview: appointmentResult?.pendingOfficeReview === true,
           customerId: customerId || null,
           isKnownCustomer: !!call.customer_id || !!customerId,
         },
@@ -18654,7 +18637,7 @@ const CallRecordingProcessor = {
             // on. Keep scheduledServiceId so the downstream audit doesn't treat
             // this as a skipped booking.
             logger.info(`[call-proc] Skipping confirmation for ${callSid}: booking pending office review`);
-            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review' };
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'outbound_booking_review', pendingOfficeReview: true };
           } else if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
             logger.info(`[call-proc] Skipping confirmation for ${callSid}: v2 TCPA gate blocked (SMS + email)`);
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };

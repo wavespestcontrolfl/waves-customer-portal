@@ -395,6 +395,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       await db.transaction(async (trx) => {
         await lockTriageCall(trx, svc.source_call_log_id);
         await fileOwedFollowUpForStreetLevelHold(trx, svc);
+        await stampBookedDispositionForStreetLevelHold(trx, svc);
         await trx('triage_items')
           .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
           .whereIn('status', ['open', 'in_progress'])
@@ -721,6 +722,32 @@ async function fileOwedFollowUpForStreetLevelHold(trx, svc) {
 }
 
 /**
+ * Owner ruling 2026-09-30: a street-level address hold counts as booked only
+ * once the office confirms. At call time the disposition was recorded as
+ * lead_response_flow_triggered (reason appointment_pending_office_review); the
+ * confirm stamps 'booked'. Compare-and-swap on that exact value, so a human's
+ * own disposition tag or a later reprocess is never overwritten. No-op unless
+ * the disposition gate is live and the card is a street-level hold for this
+ * visit. Runs before the review card is resolved.
+ */
+async function stampBookedDispositionForStreetLevelHold(trx, svc) {
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('callDispositionV1')) return false;
+  const card = await trx('triage_items')
+    .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
+    .whereIn('status', ['open', 'in_progress'])
+    .orderBy('created_at', 'desc')
+    .first('payload');
+  const payload = typeof card?.payload === 'string' ? JSON.parse(card.payload) : (card?.payload || null);
+  if (!payload?.street_level_address || String(payload.scheduled_service_id || '') !== String(svc.id)) return false;
+  const stamped = await trx('call_log')
+    .where({ id: svc.source_call_log_id, disposition: 'lead_response_flow_triggered' })
+    .update({ disposition: 'booked', updated_at: new Date() });
+  if (stamped) logger.info(`[outbound-review-confirm] call ${svc.source_call_log_id} disposition booked (street-level hold confirmed for ${svc.id})`);
+  return stamped > 0;
+}
+
+/**
  * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
  * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
  * OR a voice-agent booking, which is created with the same pending/
@@ -945,6 +972,7 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 
 module.exports = {
   fileOwedFollowUpForStreetLevelHold,
+  stampBookedDispositionForStreetLevelHold,
   runOutboundReviewConfirmHook,
   runOfficeConfirmActivation,
   activateLegacyOutboundReviewRowIfNeeded,

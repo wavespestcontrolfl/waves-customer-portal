@@ -5404,11 +5404,6 @@ function summarizeProviderError(err) {
 }
 
 module.exports = {
-  // Shared-county ZIP sets, exported for the call pipeline's street-level
-  // area proof (a ZIP alone cannot prove a county on these).
-  MANATEE_SHARED_ZIPS,
-  SARASOTA_SHARED_ZIPS,
-  CHARLOTTE_SHARED_ZIPS,
   // Lot values from the county parsers are capped at this bound —
   // consumers combining them with UNCAPPED figures (e.g. _buildings gross
   // areas) must treat an at-cap lot as unusable for geometry math.

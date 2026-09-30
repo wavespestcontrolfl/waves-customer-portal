@@ -28,9 +28,10 @@ const lead = (extra = {}) => summarizeKnownCaller({
   id: 'lead-1', first_name: 'Form', pipeline_stage: 'new_lead',
   address_line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219', ...extra,
 });
-// What Google says for a house it has not indexed on a street it knows.
+// What Google says for a house it has not indexed on a street it knows, in a
+// service county Google itself reports (owner ruling 2026-09-30: the only area proof).
 const routeLevel = (extra = {}) => ({
-  status: 'missing_component', granularity: 'ROUTE', inServiceArea: null, county: null,
+  status: 'missing_component', granularity: 'ROUTE', inServiceArea: true, county: 'Manatee County',
   normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34219' },
   ...extra,
 });
@@ -71,7 +72,7 @@ describe('gate off: nothing changes', () => {
     expect(out.addressTrusted).toBe(false);
     expect(out.onFileStreetLevel).toBeUndefined();
     expect(out.onFileAddressVerdict).toEqual({
-      status: 'missing_component', inServiceArea: null,
+      status: 'missing_component', inServiceArea: true,
       address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
     });
     expect(yesForm).not.toHaveBeenCalled();
@@ -84,7 +85,7 @@ describe('gate off: nothing changes', () => {
     const verdict = {
       status: 'street_level_form_accept', inServiceArea: true,
       address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
-      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_county' },
     };
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer).toBeNull();
   });
@@ -125,7 +126,7 @@ describe('gate on: street-level match on a web-form address', () => {
     const verdict = {
       status: 'street_level_form_accept', inServiceArea: true,
       address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
-      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_county' },
     };
     const ctx = (c, v = verdict) => buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: v } }, customer: c, contactPhone: ANI, failOpenEnabled: true });
     expect(ctx(customer).options.knownCustomer).toMatchObject({ addressOnly: true, addressLine1: '1234 Sample Newbuild Trl' });
@@ -178,7 +179,7 @@ describe('gate on: every other case keeps its existing path', () => {
   test('out of area: Google county out of area, or an out-of-area ZIP, never trusts', async () => {
     gateOn();
     expect((await run(lead(), routeLevel({ status: 'out_of_service_area', inServiceArea: false }))).addressTrusted).toBe(false);
-    expect((await run(lead({ zip: '34103', city: 'Naples' }), routeLevel({ normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Naples', state: 'FL', postal_code: '34103' } }))).addressTrusted).toBe(false);
+    expect((await run(lead({ zip: '34103', city: 'Naples' }), routeLevel({ inServiceArea: false, county: 'Collier County', normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Naples', state: 'FL', postal_code: '34103' } }))).addressTrusted).toBe(false);
     expect((await run(lead({ state: 'GA' }), routeLevel())).addressTrusted).toBe(false);
     expect((await run(lead(), routeLevel({ normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'GA', postal_code: '34219' } }))).addressTrusted).toBe(false);
     expect((await run(lead(), routeLevel({ normalized: { street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34203' } }))).addressTrusted).toBe(false);
@@ -310,20 +311,21 @@ describe('onFileAddressIsFromWebForm', () => {
 
 
 describe('area, house number and call-origin provenance', () => {
-  test('P1: Google must affirm the area itself — its own ZIP and state, or a service county', async () => {
+  test('P1: Google must affirm the area itself with a service county (owner ruling 2026-09-30); its ZIP and state must agree', async () => {
     gateOn();
     const run = (verdict) => trustValidatedNewLeadAddress(lead(), { validate: async () => verdict, extraction: confirmed(), isFormAddress: yesForm });
     const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34219', ...extra });
-    // No county and no ZIP or state from Google: the form's ZIP alone is not a witness.
-    expect((await run(routeLevel({ normalized: n({ postal_code: null }) }))).addressTrusted).toBe(false);
+    // No county: never trusted, even when Google echoes the on-file ZIP and state.
+    expect((await run(routeLevel({ inServiceArea: null, county: null }))).addressTrusted).toBe(false);
+    // County confirmed but Google's state / ZIP disagree or are missing.
     expect((await run(routeLevel({ normalized: n({ state: null }) }))).addressTrusted).toBe(false);
     expect((await run(routeLevel({ normalized: n({ postal_code: '34203' }) }))).addressTrusted).toBe(false);
-    // Google's own ZIP and state agree: trusted, and the basis is recorded.
-    const zipOnly = await run(routeLevel());
-    expect(zipOnly.addressTrusted).toBe(true);
-    expect(zipOnly.onFileAddressVerdict.streetLevel.areaBasis).toBe('google_zip');
-    const county = await run(routeLevel({ inServiceArea: true, county: 'Manatee County' }));
+    // County confirmed, ZIP and state agree: trusted, and the basis is recorded.
+    const county = await run(routeLevel());
+    expect(county.addressTrusted).toBe(true);
     expect(county.onFileAddressVerdict.streetLevel.areaBasis).toBe('google_county');
+    // The no-county verdict falls through to the ordinary (untrusted) verdict, so the call holds for review as today.
+    expect((await run(routeLevel({ inServiceArea: null, county: null }))).onFileAddressVerdict.status).toBe('missing_component');
   });
 
   test('P1: the whole house number counts, alphabetic suffix included', async () => {
@@ -388,7 +390,7 @@ describe('units', () => {
     const verdict = {
       status: 'street_level_form_accept', inServiceArea: true,
       address: { line1: '1234 sample newbuild trl', line2: 'apt 5', city: 'parrish', state: 'fl', zip: '34219' },
-      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_county' },
     };
     const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', address_line2: 'Apt 5', city: 'Parrish', state: 'FL', zip: '34219' };
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer).toBeNull();
@@ -396,7 +398,7 @@ describe('units', () => {
 });
 
 describe('county-confirmed and shared-ZIP area proof', () => {
-  test('P2: a county Google confirms on the routing allowlist (DeSoto) is the area proof; without a county the ZIP set still governs', () => {
+  test('P2: a county Google confirms on the routing allowlist (DeSoto) is the area proof; without a county nothing qualifies', () => {
     gateOn();
     const desoto = lead({ city: 'Arcadia', zip: '34266' });
     const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Arcadia', state: 'FL', postal_code: '34266', ...extra });
@@ -406,12 +408,12 @@ describe('county-confirmed and shared-ZIP area proof', () => {
     expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ postal_code: null }) }))).toMatchObject({ areaBasis: 'google_county' });
     expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ postal_code: '34203' }) }))).toBeNull();
     expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ state: 'GA' }) }))).toBeNull();
-    // No county: a ZIP outside the served set is refused even when Google echoes it.
+    // No county: refused even when Google echoes the ZIP.
     expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: null, normalized: n() }))).toBeNull();
     // ...and an out-of-area county never qualifies, whatever the ZIP.
     expect(streetLevelMatch(lead(), routeLevel({ inServiceArea: false }))).toBeNull();
-    // Manatee with no county still works through the ZIP path.
-    expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_zip' });
+    // A Manatee ZIP with no county is refused too (no ZIP inference at all).
+    expect(streetLevelMatch(lead(), routeLevel({ inServiceArea: null, county: null }))).toBeNull();
   });
 });
 
@@ -529,36 +531,41 @@ describe('r6 trust fixes', () => {
   });
 });
 
-describe('shared ZIPs need Google\'s own county (owner ruling 2026-09-30)', () => {
-  const lookup = require('../services/property-lookup/ai-property-lookup');
+describe('Google\'s own county is required, no ZIP inference (owner ruling 2026-09-30)', () => {
   const n = (zip, city = 'Boca Grande') => ({ street_line_1: 'Sample Newbuild Trail', city, state: 'FL', postal_code: zip });
 
-  test('33955 and 33921 (Charlotte / Lee) fail closed with no county, and clear only with a served county', () => {
+  test('33955 and 33921 (Charlotte / Lee) with no county now hold, and clear only with a served county', () => {
     gateOn();
     for (const zip of ['33955', '33921']) {
       const k = lead({ city: 'Punta Gorda', zip });
-      expect(streetLevelMatch(k, routeLevel({ inServiceArea: null, normalized: n(zip) }))).toBeNull();
+      expect(streetLevelMatch(k, routeLevel({ inServiceArea: null, county: null, normalized: n(zip) }))).toBeNull();
       expect(streetLevelMatch(k, routeLevel({ inServiceArea: true, county: 'Charlotte County', normalized: n(zip) }))).toMatchObject({ areaBasis: 'google_county' });
       expect(streetLevelMatch(k, routeLevel({ inServiceArea: false, county: 'Lee County', normalized: n(zip) }))).toBeNull();
     }
   });
 
-  test('every ZIP on the imported shared sets, and the service-area map\'s multi-county ZIPs, needs a county', () => {
+  test('even a wholly-served ZIP (34219 Parrish, 34292 Venice) needs the county; no ZIP-only basis exists', () => {
     gateOn();
-    const { SHARED_SERVICE_AREA_ZIPS } = require('../config/address-county');
-    const shared = new Set([...lookup.MANATEE_SHARED_ZIPS, ...lookup.SARASOTA_SHARED_ZIPS, ...lookup.CHARLOTTE_SHARED_ZIPS, ...SHARED_SERVICE_AREA_ZIPS]);
-    expect(shared.has('33955') && shared.has('33921') && shared.has('34228')).toBe(true);
-    for (const zip of shared) {
-      expect(streetLevelMatch(lead({ zip }), routeLevel({ inServiceArea: null, normalized: n(zip, 'Parrish') }))).toBeNull();
-    }
-    // The sets are imported from ai-property-lookup, not copied.
-    expect(require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8')).toContain("require('./property-lookup/ai-property-lookup')");
+    expect(streetLevelMatch(lead(), routeLevel({ inServiceArea: null, county: null }))).toBeNull();
+    expect(streetLevelMatch(lead({ city: 'Venice', zip: '34292' }), routeLevel({ inServiceArea: null, county: null, normalized: n('34292', 'Venice') }))).toBeNull();
+    expect(streetLevelMatch(lead({ city: 'Venice', zip: '34292' }), routeLevel({ normalized: n('34292', 'Venice') }))).toMatchObject({ areaBasis: 'google_county' });
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    expect(src).not.toContain('google_zip');
+    expect(src).not.toContain('wholeCountyZip5');
+    // ai-property-lookup.js is untouched (its shared ZIP sets are no longer imported).
+    expect(src).not.toContain("require('./property-lookup/ai-property-lookup')");
   });
 
-  test('an unambiguous served ZIP still works on the ZIP path', () => {
+  test('a persisted verdict with a ZIP-only basis no longer replays as trusted', () => {
     gateOn();
-    expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_zip' });
-    expect(streetLevelMatch(lead({ city: 'Venice', zip: '34292' }), routeLevel({ normalized: n('34292', 'Venice') }))).toMatchObject({ areaBasis: 'google_zip' });
+    const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    const verdict = {
+      status: 'street_level_form_accept', inServiceArea: true,
+      address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
+    };
+    const ctx = buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: verdict } }, customer, contactPhone: ANI, failOpenEnabled: true });
+    expect(ctx.options.knownCustomer).toBeNull();
   });
 });
 
