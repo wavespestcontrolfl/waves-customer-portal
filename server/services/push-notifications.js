@@ -304,7 +304,14 @@ class PushNotificationService {
   // beforeDispatch runs after the subscription lookup and immediately before
   // the first provider handoff, so a caller's durable "push started" claim
   // is never burned by a lookup that failed or found nothing to send.
-  async sendToAdminUsers(adminUserIds, notificationForUser, { beforeDispatch = null, deliveredSubscriptionIds = null } = {}) {
+  // beforeHandoff is a staleness check at EVERY device's final boundary:
+  // right before each web-push/APNs leg, and inside FCM after its OAuth
+  // fetch (fcm.js shouldContinue), which can take most of a send window. A
+  // false answer skips that device and every later one — the tech's lock
+  // screen should end on the newer change's own push, not this one.
+  async sendToAdminUsers(adminUserIds, notificationForUser, {
+    beforeDispatch = null, beforeHandoff = null, deliveredSubscriptionIds = null,
+  } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
     const subs = await db('push_subscriptions as ps')
@@ -319,26 +326,48 @@ class PushNotificationService {
     }
     const results = [];
     const delivered = new Set(deliveredSubscriptionIds || []);
+    let superseded = false;
+    // A throw stops the remaining devices, as FCM's shouldContinue already
+    // treats one — it never rejects the fan-out, which would discard the
+    // earlier devices' results (and deliveredSubscriptionIds).
+    const stillCurrent = beforeHandoff
+      ? async () => {
+        if (superseded) return false;
+        try {
+          if ((await beforeHandoff()) === false) superseded = true;
+        } catch (err) {
+          logger.warn(`[push] beforeHandoff failed (${err.code || err.name || 'error'}); remaining devices skipped`);
+          superseded = true;
+        }
+        return !superseded;
+      }
+      : null;
     for (const sub of subs) {
       if (delivered.has(sub.id)) {
         results.push({ sent: true, deduped: true });
         continue;
       }
+      // Android defers the check to FCM's post-OAuth boundary (below).
+      if (stillCurrent && sub.platform !== 'android' && !(await stillCurrent())) {
+        results.push({ sent: false, skipped: true, reason: 'superseded' });
+        continue;
+      }
       const notification = typeof notificationForUser === 'function'
         ? notificationForUser(sub.admin_user_id, sub)
         : notificationForUser;
-      const result = await sendSubscription(sub, notification)
+      const result = await sendSubscription(sub, notification, stillCurrent ? { shouldContinue: stillCurrent } : undefined)
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
       if (result.sent) delivered.add(sub.id);
     }
     return { ...summarize(results, subs.length),
+      ...(superseded ? { superseded: true } : {}),
       ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds: [...delivered] } : {}),
     };
   }
 
-  async sendToAdminUser(adminUserId, notification) {
-    return this.sendToAdminUsers([adminUserId], notification);
+  async sendToAdminUser(adminUserId, notification, opts = {}) {
+    return this.sendToAdminUsers([adminUserId], notification, opts);
   }
 
   async deactivateStaffUser(adminUserId, connection = db) {

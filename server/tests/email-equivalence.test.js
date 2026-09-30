@@ -177,6 +177,10 @@ describe('suppressionCoversEmail — one Gmail inbox, any spelling', () => {
   test('a non-Google address keeps the exact match only', () => {
     expect(capture('j.q.sample1990@example.com')).toHaveLength(1);
   });
+  test('a malformed STORED spelling still suppresses the mailbox (over-suppress is safe; the bounce fence is narrower on purpose)', () => {
+    const calls = capture('jqsample1990@gmail.com');
+    expect(calls[1].sql).not.toMatch(/NOT LIKE|POSITION\('\.\.'/);
+  });
   test.each([
     'server/services/email-template-library.js',
     'server/services/automation-runner.js',

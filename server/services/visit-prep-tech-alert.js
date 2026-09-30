@@ -154,7 +154,13 @@ async function sendPhotoAlert(scheduledServiceId) {
         url: '/tech',
         tag: `visit-prep-${scheduledServiceId}`,
         priority: 'high',
-      }, { beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId) });
+      }, {
+        beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId),
+        // And again at every device's final boundary — each later leg, and
+        // after FCM's OAuth fetch — so a reassignment or cancellation that
+        // commits mid-send stops the rest (codex #5421 r3).
+        beforeHandoff: () => stillAlertable(scheduledServiceId, technicianId),
+      });
     } catch (pushErr) {
       // The card is already durable — a push failure never loses it.
       logger.warn(`[visit-prep-tech-alert] push failed for tech ${technicianId} (card already written): ${pushErr.message}`);
