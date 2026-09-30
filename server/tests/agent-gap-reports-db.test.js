@@ -43,14 +43,26 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     return result;
   }
 
-  test('the Monday digest leaves out gaps already marked fixed, by_design or dismissed', async () => {
-    const { _private: { loadRecentGaps } } = require('../services/agent-gap-digest');
-    const open = await record({ summary: 'Synthetic digest gap still open' });
-    const fixed = await record({ summary: 'Synthetic digest gap fixed after its last sighting' });
+  test('list_gap_reports leaves out gaps already marked fixed, by_design or dismissed', async () => {
+    const open = await record({ summary: 'Synthetic list gap still open' });
+    const fixed = await record({ summary: 'Synthetic list gap fixed after its last sighting' });
     await db('agent_gap_reports').where('id', fixed.id).update({ status: 'fixed' });
-    const ids = (await loadRecentGaps()).map((row) => Number(row.id));
+    const result = await listGapReports({ days: 1 });
+    const ids = result.groups.flatMap((d) => d.gaps || []).map((g) => g.gap_id);
     expect(ids).toContain(open.id);
     expect(ids).not.toContain(fixed.id);
+  });
+
+  test('rang is true on the first sighting and a fixed reopen, false on a repeat of an open gap', async () => {
+    const first = await record({ summary: 'Synthetic ring detection gap' });
+    expect(first.rang).toBe(true);
+    const repeat = await record({ summary: 'Synthetic ring detection gap' });
+    expect(repeat.rang).toBe(false);
+    await db('agent_gap_reports').where('id', first.id).update({ status: 'fixed' });
+    const reopened = await record({ summary: 'Synthetic ring detection gap' });
+    expect(reopened).toMatchObject({ rang: true, reopened: true, status: 'new' });
+    await db('agent_gap_reports').where('id', first.id).update({ status: 'building' });
+    expect((await record({ summary: 'Synthetic ring detection gap' })).rang).toBe(false);
   });
 
   test('list_gap_reports reports the real matching total and has_more when it caps the rows', async () => {

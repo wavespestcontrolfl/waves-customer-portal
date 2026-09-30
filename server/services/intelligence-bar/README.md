@@ -34,7 +34,7 @@ new platform-only tools do not need another branch in that legacy dispatcher.
 
 ## Gap reports
 
-What the bar could not do, recorded for the owner's weekly review. The model
+What the bar could not do, recorded for the owner's review (each new gap rings the admin bell). The model
 has no tool that writes here: a model-facing write goes through the
 confirmation card (#1568), so collection is server-owned. The route feeds
 `createGapCollector()` (`server/services/agent-gap-reports.js`) what the
@@ -56,8 +56,7 @@ prompt asks the model to search with a short, general description before
 declining, so that search becomes the gap's summary. It is stored as written
 (owner 2026-09-28: no name or contact scrubbing), trimmed to 300 characters.
 
-The Monday email carries
-gap numbers, areas and counts only; the descriptions stay in the bar. Rows dedupe by a
+Rows dedupe by a
 fingerprint of source, kind and the summary's word set. A recurrence bumps
 the lifetime `occurrences`, reopens a `fixed` gap as `new`, and fills in a
 domain or tool the first sighting lacked. It also writes one
@@ -105,22 +104,30 @@ wraps.
 reports" and "what should we build next". It groups by domain and ranks by
 sightings in the window, showing `times_seen_in_window` beside
 `times_seen_total`, and each gap carries its `source`. It returns up to 50
-rows with the real `total_matching` and `has_more`. The list tool and the
-digest share one reader, `listRecentGaps()`. The owner's triage (`building`,
+rows with the real `total_matching` and `has_more`, read through
+`listRecentGaps()`. The owner's triage (`building`,
 `fixed`, `by_design`, `dismissed`) is set by a session through
 `ops/agents/gap-status.js`, which dry-runs by default.
-`server/services/agent-gap-digest.js` sends a short weekly reminder (Monday
-8:15am ET, `scheduler.js`) when the last 7 days recorded anything still open
-(not fixed, by_design or dismissed); a quiet week sends nothing. Each line
-names its source through a short label map (`SOURCE_LABELS`: `intelligence-bar`
-→ "bar", `tech-bar` → "tech bar", `texting-ai` → "texting AI", `phone-agent`
-→ "phone agent"), e.g. `gap #3 (new, ops, texting AI): seen 2x this week, 5x
-total`. The bell carries a fixed two-line instruction, and the
-full list is in the bar and in the email fallback (`AGENT_GAP_DIGEST_EMAIL`,
-internal recipients only, default contact@). Kill switch:
+
+`server/services/agent-gap-reports.js` rings the admin bell the moment a gap is
+recorded (owner 2026-09-29: "when a gap happens"; the old Monday digest is
+gone). `upsertGapRow()` reports `rang` for the first sighting of a gap and
+for a `fixed` gap coming back; a repeat of an already-open gap (new, building,
+by_design, dismissed) is quiet. It reads the existing row's status `FOR UPDATE`
+inside the write's transaction and uses Postgres' `xmax = 0` on the returned
+row to tell an insert from a merge. The bell fires after the commit,
+fire-and-forget, so a bell failure never touches the reply that surfaced the
+gap. It is a two-line `agents` bell (`bell: true`, link `/admin/agents`), title
+`Gap #N: <source> (<area>)` or `Gap #N is back: ...`, no free-text summary. Body
+for `intelligence-bar` / `tech-bar` gaps: `A Claude window on the Mac starts
+building it within 10 min.`; for `texting-ai` / `phone-agent` gaps: `Say "build
+gap #N" in any Claude session to start a PR.` The source label map
+(`SOURCE_LABELS`) is `intelligence-bar` -> "bar", `tech-bar` -> "tech bar",
+`texting-ai` -> "texting assistant", `phone-agent` -> "phone agent". Each ring
+event has its own dedupe key (`agent-gap:<id>:<sighting time>`). Kill switch:
 `AGENT_GAP_REPORTS=off`, read at call time. It drops the prompt line, stops
-every write and skips the digest; `list_gap_reports` keeps reading what was
-already recorded.
+every write and every bell; `list_gap_reports` keeps reading what was already
+recorded.
 
 ## Retained context modules
 

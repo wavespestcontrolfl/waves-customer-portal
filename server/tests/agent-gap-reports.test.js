@@ -7,13 +7,17 @@ describe('agent-gap-reports', () => {
   let returningRows;
   let loggerMock;
   let sightings;
+  let priorRow;
+  let notifyMock;
 
   beforeEach(() => {
     jest.resetModules();
     delete process.env.AGENT_GAP_REPORTS;
     insertedRows = [];
     mergedCalls = [];
-    returningRows = [{ id: '7', occurrences: 1, status: 'new' }];
+    returningRows = [{ id: '7', occurrences: 1, status: 'new', domain: null, xmax: '0' }];
+    priorRow = undefined;
+    notifyMock = jest.fn().mockResolvedValue({ id: 'n1' });
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
     sightings = [];
@@ -32,6 +36,7 @@ describe('agent-gap-reports', () => {
             };
           }),
           where: jest.fn(() => ({
+            forUpdate: jest.fn(() => ({ first: jest.fn(async () => priorRow) })),
             update: jest.fn((fields) => ({ returning: jest.fn().mockResolvedValue([{ id: '7', kind: 'missing_capability', occurrences: 1, ...fields }]) })),
           })),
         };
@@ -47,6 +52,7 @@ describe('agent-gap-reports', () => {
 
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/logger', () => loggerMock);
+    jest.doMock('../services/notification-service', () => ({ notifyAdmin: notifyMock }));
   });
 
   afterEach(() => {
@@ -118,7 +124,7 @@ describe('agent-gap-reports', () => {
     test('a recurrence bumps occurrences, reopens a fixed gap, and enriches rather than drops detail', async () => {
       const { writeGapRows } = load();
       const saved = await writeGapRows([{ source: 'intelligence-bar', kind: 'missing_capability', summary: 'add a second service address' }]);
-      expect(saved).toEqual([{ id: 7, occurrences: 1, status: 'new' }]);
+      expect(saved).toEqual([{ id: 7, occurrences: 1, status: 'new', domain: null, rang: true, reopened: false }]);
       const merge = mergedCalls[0];
       expect(merge.occurrences.__raw).toMatch(/occurrences \+ 1/);
       expect(merge.status.__raw).toMatch(/WHEN agent_gap_reports.status = 'fixed' THEN 'new'/);
@@ -168,12 +174,109 @@ describe('agent-gap-reports', () => {
     });
   });
 
+  describe('the admin bell when a gap is recorded', () => {
+    const flush = () => new Promise((resolve) => setImmediate(resolve));
+    const signal = (over = {}) => ({ source: 'texting-ai', kind: 'missing_capability', summary: 'reschedule a recurring series', domain: 'scheduling', ...over });
+
+    test('a first sighting rings once, after the commit, with the two short lines', async () => {
+      const { writeGapRows } = load();
+      returningRows = [{ id: '7', occurrences: 1, status: 'new', domain: 'scheduling', xmax: '0' }];
+      const saved = await writeGapRows([signal({ domain: 'scheduling' })]);
+      await flush();
+      expect(saved[0]).toMatchObject({ id: 7, rang: true, reopened: false });
+      expect(notifyMock).toHaveBeenCalledTimes(1);
+      const [category, title, body, opts] = notifyMock.mock.calls[0];
+      expect(category).toBe('agents');
+      expect(title).toBe('Gap #7: texting assistant (scheduling)');
+      expect(body).toBe('Say "build gap #7" in any Claude session to start a PR.');
+      expect(opts.bell).toBe(true);
+      expect(opts.dedupeKey).toMatch(/^agent-gap:7:\d{4}-\d{2}-\d{2}T/);
+    });
+
+    test('a repeat of an open gap (new, building, by_design, dismissed) is silent', async () => {
+      const { writeGapRows } = load();
+      for (const status of ['new', 'building', 'by_design', 'dismissed']) {
+        priorRow = { status };
+        returningRows = [{ id: '7', occurrences: 4, status, domain: 'scheduling', xmax: '12345' }];
+        const [saved] = await writeGapRows([signal()]);
+        expect(saved.rang).toBe(false);
+      }
+      await flush();
+      expect(notifyMock).not.toHaveBeenCalled();
+    });
+
+    test('a fixed gap that happens again reopens to new and rings again as "is back"', async () => {
+      const { writeGapRows } = load();
+      priorRow = { status: 'fixed' };
+      returningRows = [{ id: '7', occurrences: 5, status: 'new', domain: 'scheduling', xmax: '12345' }];
+      const [saved] = await writeGapRows([signal({ source: 'intelligence-bar' })]);
+      await flush();
+      expect(saved).toMatchObject({ rang: true, reopened: true });
+      expect(notifyMock).toHaveBeenCalledTimes(1);
+      const [, title, body, opts] = notifyMock.mock.calls[0];
+      expect(title).toBe('Gap #7 is back: bar (scheduling)');
+      expect(body).toBe('A Claude window on the Mac starts building it within 10 min.');
+      expect(opts.metadata).toMatchObject({ gapId: 7, reopened: true });
+    });
+
+    test('a reopen and the first sighting have different dedupe keys', async () => {
+      const { writeGapRows } = load();
+      await writeGapRows([signal()]);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      priorRow = { status: 'fixed' };
+      returningRows = [{ id: '7', occurrences: 2, status: 'new', domain: null, xmax: '99' }];
+      await writeGapRows([signal()]);
+      await flush();
+      expect(notifyMock).toHaveBeenCalledTimes(2);
+      expect(notifyMock.mock.calls[0][3].dedupeKey).not.toBe(notifyMock.mock.calls[1][3].dedupeKey);
+    });
+
+    test('the AGENT_GAP_REPORTS=off kill switch rings nothing', async () => {
+      process.env.AGENT_GAP_REPORTS = 'off';
+      const { writeGapRows, _private: { ringGapBell } } = load();
+      await writeGapRows([signal()]);
+      await ringGapBell({ id: 7, source: 'texting-ai', domain: null, at: new Date() });
+      await flush();
+      expect(notifyMock).not.toHaveBeenCalled();
+    });
+
+    test('a bell failure never throws or fails the record, and logs only the error code', async () => {
+      const { writeGapRows } = load();
+      notifyMock.mockRejectedValue(Object.assign(new Error('boom customer text'), { code: 'ECONNRESET' }));
+      const saved = await writeGapRows([signal()]);
+      await flush();
+      expect(saved).toHaveLength(1);
+      expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] bell failed (ECONNRESET)');
+    });
+
+    test('the caller does not wait on a slow bell', async () => {
+      const { writeGapRows } = load();
+      notifyMock.mockReturnValue(new Promise(() => {}));
+      const saved = await writeGapRows([signal()]);
+      expect(saved).toHaveLength(1);
+    });
+
+    test('title and body stay short for every source, and the title never carries the summary', () => {
+      const { _private: { gapBellText, SOURCE_LABELS } } = load();
+      for (const source of [...Object.keys(SOURCE_LABELS), 'something-else']) {
+        for (const reopened of [false, true]) {
+          const { title, body } = gapBellText({ id: 1234567, source, domain: 'communications', reopened });
+          expect(body.length).toBeLessThanOrEqual(110);
+          expect(title.split('\n')).toHaveLength(1);
+          expect(title).toMatch(/^Gap #1234567( is back)?: /);
+        }
+      }
+      expect(gapBellText({ id: 3, source: 'tech-bar', domain: null }).title).toBe('Gap #3: tech bar (other)');
+      expect(gapBellText({ id: 3, source: 'phone-agent', domain: null }).body).toBe('Say "build gap #3" in any Claude session to start a PR.');
+    });
+  });
+
   describe('recordGap', () => {
     test('writes one row for a source with no per-request collector', async () => {
       const { recordGap } = load();
       const saved = await recordGap({ source: 'texting-ai', summary: 'Customer asked about a service we do not offer',
         attempted: 'Customer text: does Waves do pool cleaning?' });
-      expect(saved).toEqual([{ id: 7, occurrences: 1, status: 'new' }]);
+      expect(saved).toEqual([{ id: 7, occurrences: 1, status: 'new', domain: null, rang: true, reopened: false }]);
       expect(insertedRows[0]).toMatchObject({ source: 'texting-ai', kind: 'missing_capability',
         summary: 'Customer asked about a service we do not offer' });
     });

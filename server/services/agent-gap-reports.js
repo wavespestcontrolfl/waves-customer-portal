@@ -29,7 +29,7 @@ const policy = require('./intelligence-bar/action-policy.json');
 // tool_health_events (the Tool Health dashboard).
 const KINDS = new Set(['missing_capability']);
 // The owner's triage lifecycle (migration CHECK). Closed statuses stay out of
-// the default list and the Monday digest; a recurrence reopens `fixed`.
+// the default list; a recurrence reopens `fixed` (and rings the bell again).
 const GAP_STATUSES = Object.freeze(['new', 'building', 'fixed', 'by_design', 'dismissed']);
 const CLOSED_STATUSES = Object.freeze(['fixed', 'by_design', 'dismissed']);
 const MAX_TEXT = 300;
@@ -74,8 +74,8 @@ const BAR_DECLINE_RE = new RegExp([
 ].join('|'), 'i');
 
 // Kill switch (CLAUDE.md rule 14): AGENT_GAP_REPORTS=off stops the prompt
-// line, the collector's writes and the Monday digest. Read at call time, so
-// a flip needs no redeploy. Default on.
+// line, the collector's writes and the admin bell. Read at call time, so a
+// flip needs no redeploy. Default on.
 function gapReportsEnabled() {
   return String(process.env.AGENT_GAP_REPORTS || '').trim().toLowerCase() !== 'off';
 }
@@ -141,13 +141,81 @@ function prepareGapRow({ source, kind, summary, attempted, closestTool, domain }
   };
 }
 
+// A gap's `source` read as a short label for the admin bell title. An
+// unrecognized source (the column is NOT NULL, so it should not happen) falls
+// back to the raw value, or 'bar' if even that is empty.
+const SOURCE_LABELS = {
+  'intelligence-bar': 'bar',
+  'tech-bar': 'tech bar',
+  'texting-ai': 'texting assistant',
+  'phone-agent': 'phone agent',
+};
+
+// Sources where a Claude window on the Mac picks the gap up on its own (the
+// bar-side gaps carry a self-contained summary); the texting AI and phone
+// agent gaps need the owner to start the build.
+const AUTO_PICKUP_SOURCES = new Set(['intelligence-bar', 'tech-bar']);
+
+const BELL_LINK = '/admin/agents';
+
+/**
+ * The admin bell for one ring event: two short actionable lines (owner
+ * ruling 2026-09-28: bell body <= 110 chars). The title names the number,
+ * the source and the area only — a gap's description is model-written or
+ * customer-authored text and stays in the bar ("show gap reports").
+ */
+function gapBellText({ id, source, domain, reopened = false }) {
+  const label = SOURCE_LABELS[source] || source || 'bar';
+  const lead = reopened ? `Gap #${id} is back` : `Gap #${id}`;
+  const title = `${lead}: ${label} (${domain || 'other'})`;
+  const body = AUTO_PICKUP_SOURCES.has(source)
+    ? 'A Claude window on the Mac starts building it within 10 min.'
+    : `Say "build gap #${id}" in any Claude session to start a PR.`;
+  return { title, body };
+}
+
+// Rings the admin bell for a newly recorded (or reopened) gap. Runs AFTER the
+// row's transaction committed, never awaited by the caller, and never
+// throws: a bell failure must not fail or slow the reply that surfaced the
+// gap. The dedupe key is unique per ring event (first sighting, or the
+// reopening sighting), so a reopen rings again but a replay of the same
+// event does not double-ring.
+async function ringGapBell(event) {
+  try {
+    if (!gapReportsEnabled()) return;
+    const { title, body } = gapBellText(event);
+    const NotificationService = require('./notification-service');
+    await NotificationService.notifyAdmin('agents', title, body, {
+      link: BELL_LINK,
+      bell: true,
+      dedupeKey: `agent-gap:${event.id}:${event.at.toISOString()}`,
+      metadata: { gapId: event.id, source: event.source, reopened: Boolean(event.reopened) },
+    });
+  } catch (err) {
+    logger.warn(`[agent-gap-reports] bell failed (${err.code || err.name || 'error'})`);
+  }
+}
+
 // Insert-or-bump. A recurrence counts, refreshes last_seen_at, reopens a
 // `fixed` gap as `new` (building / by_design / dismissed stay), and fills in
 // detail the first sighting lacked rather than discarding it.
 // The sighting row (one per hit) is what windowed counts read.
+//
+// `rang` reports whether this hit is a bell event: the first sighting, or a
+// `fixed` gap coming back. A repeat of an already-open gap is quiet. Two
+// signals decide it inside the one transaction: the existing row's status is
+// read FOR UPDATE first (so a concurrent triage or recurrence cannot flip it
+// between the read and the merge), and Postgres' `xmax = 0` on the returned
+// row says the statement inserted instead of merging (which also settles
+// two simultaneous first sightings: only the inserter rings). The bell itself
+// fires after the commit, fire-and-forget.
 async function upsertGapRow(row) {
   const now = new Date();
-  return db.transaction(async (trx) => {
+  const saved = await db.transaction(async (trx) => {
+    const prior = await trx('agent_gap_reports')
+      .where({ fingerprint: row.fingerprint })
+      .forUpdate()
+      .first('status');
     const rows = await trx('agent_gap_reports')
       .insert({ ...row, occurrences: 1, status: 'new', first_seen_at: now, last_seen_at: now })
       .onConflict('fingerprint')
@@ -159,13 +227,27 @@ async function upsertGapRow(row) {
         closest_tool: trx.raw('COALESCE(agent_gap_reports.closest_tool, EXCLUDED.closest_tool)'),
         attempted: trx.raw('COALESCE(EXCLUDED.attempted, agent_gap_reports.attempted)'),
       })
-      .returning(['id', 'occurrences', 'status']);
-    const saved = rows && rows[0];
-    if (!saved) return null;
-    await trx('agent_gap_report_sightings').insert({ gap_id: saved.id, seen_at: now });
+      .returning(['id', 'occurrences', 'status', 'domain', 'xmax']);
+    const result = rows && rows[0];
+    if (!result) return null;
+    await trx('agent_gap_report_sightings').insert({ gap_id: result.id, seen_at: now });
+    const inserted = String(result.xmax) === '0';
+    const reopened = !inserted && prior?.status === 'fixed';
     // bigint ids come back from pg as strings; "gap #<id>" wants a number.
-    return { id: Number(saved.id), occurrences: Number(saved.occurrences), status: saved.status };
+    return {
+      id: Number(result.id),
+      occurrences: Number(result.occurrences),
+      status: result.status,
+      domain: result.domain || null,
+      rang: inserted || reopened,
+      reopened,
+    };
   });
+  if (saved?.rang) {
+    // Deliberately not awaited: the caller's reply never waits on the bell.
+    ringGapBell({ id: saved.id, source: row.source, domain: saved.domain, reopened: saved.reopened, at: now });
+  }
+  return saved;
 }
 
 /**
@@ -181,7 +263,8 @@ async function recordGap({ source, summary, attempted, closestTool } = {}) {
 /**
  * Records each distinct signal once (deduped by fingerprint, so a search the
  * model retried in several rounds counts one occurrence for the request).
- * Returns the saved { id, occurrences, status } per written row. Never
+ * Returns the saved { id, occurrences, status, domain, rang, reopened } per
+ * written row. Never
  * throws; a failed write is logged with the error code only — the error text
  * can carry a compiled query with the summary in it.
  */
@@ -203,9 +286,9 @@ async function writeGapRows(signals) {
   return saved;
 }
 
-// Same Eastern wall-clock time `days` calendar days back, so the Monday
-// digest's week spans Monday 08:15 ET to Monday 08:15 ET across a DST seam
-// (167 or 169 elapsed hours, never a fixed 168).
+// Same Eastern wall-clock time `days` calendar days back, so a window of
+// whole days spans the same ET wall-clock time across a DST seam (e.g. 167 or
+// 169 elapsed hours for a week, never a fixed 168).
 function gapWindowCutoff(days, now = new Date()) {
   return addETDaysAtWallClock(now, -days);
 }
@@ -214,7 +297,7 @@ function gapWindowCutoff(days, now = new Date()) {
  * Gaps hit in the last `days` days, each with `seen_in_window` (sightings in
  * the window) beside its lifetime `occurrences`; most-seen-in-window first,
  * then most recent. Closed statuses are left out unless `includeClosed`.
- * The one reader behind list_gap_reports and the Monday digest.
+ * The reader behind list_gap_reports.
  */
 async function listRecentGaps({ days, includeClosed = false } = {}) {
   const cutoff = gapWindowCutoff(days);
@@ -347,5 +430,5 @@ module.exports = {
   listRecentGaps,
   setGapStatus,
   createGapCollector,
-  _private: { prepareGapRow, gapWindowCutoff, DECLINE_RE, BAR_DECLINE_RE },
+  _private: { prepareGapRow, gapWindowCutoff, gapBellText, ringGapBell, SOURCE_LABELS, DECLINE_RE, BAR_DECLINE_RE },
 };
