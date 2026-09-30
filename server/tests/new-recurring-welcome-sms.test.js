@@ -31,7 +31,10 @@ const mockDb = jest.fn((table) => {
     whereNot: jest.fn(() => chain),
     whereIn: jest.fn((col, vals) => { wheres.push({ whereIn: col, vals }); return chain; }),
     whereNotNull: jest.fn(() => chain),
+    whereRaw: jest.fn(() => chain),
+    select: jest.fn(() => chain),
     limit: jest.fn(async () => {
+      if (table === 'email_messages') return mockEmailProviderRow ? [mockEmailProviderRow] : [];
       if (table === 'sms_sequences') {
         // The sweep runs two scans over this table — stale-claim recovery
         // (status 'sending') and due delivery (status 'active').
@@ -167,6 +170,7 @@ describe('new recurring welcome SMS', () => {
     mockEmailSequenceExists = false;
     mockEmailProviderRow = null;
     delete process.env.GATE_ONE_TIME_WELCOME_EMAIL;
+    delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
     mockTierLabelStatus.mockResolvedValue('not_label');
     mockPriorRecurringSeries = null;
     mockPriorServicedVisit = null;
@@ -583,6 +587,152 @@ describe('new recurring welcome SMS', () => {
         customer_portal_url: expect.stringContaining('/login'),
       }),
     }));
+  });
+
+  describe('ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): the welcome text is unchanged, only its email half can be folded away', () => {
+    const { APP_SECTION_VALUES } = require('../services/signup-single-email');
+    const FULL_APP_SECTION_TEXT = `Welcome aboard.\n${APP_SECTION_VALUES.join('\n')}`;
+    function dueWelcome({ phone = '(941) 555-1234' } = {}) {
+      mockDueSequences = [{
+        id: 'seq-1',
+        customer_id: 'customer-1',
+        step: 0,
+        created_at: new Date('2026-09-29T14:00:00Z'),
+        metadata: JSON.stringify({ scheduled_service_id: 'svc-1' }),
+      }];
+      mockCustomerRow = { id: 'customer-1', first_name: 'Ada', phone, email: 'ada@example.com' };
+      mockScheduledServiceRow = { status: 'pending' };
+      mockGetTemplate.mockResolvedValue('Hello Ada! Welcome to Waves!');
+      mockSendCustomerMessage.mockResolvedValue({ sent: true, providerMessageId: 'SM0123456789abcdef0123456789abcdef' });
+    }
+
+    test('gate on and the combined signup email was delivered: the text still sends, the welcome EMAIL does not', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', status: 'sent', text_snapshot: FULL_APP_SECTION_TEXT }; // the delivered combined signup email
+      const results = await service.processDueWelcomes();
+      expect(results.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockUpdates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ table: 'sms_sequences', data: expect.objectContaining({ status: 'completed' }) }),
+      ]));
+    });
+
+    test('the delivery-time lookup only counts a delivered full signup email that still carries the app steps', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', status: 'sent', text_snapshot: FULL_APP_SECTION_TEXT };
+      const covered = await service._internals.combinedSignupEmailCoversWelcome(
+        { id: 'customer-1', email: 'Ada@Example.com' }, { created_at: new Date('2026-09-29T14:00:00Z') });
+      expect(covered).toBe(true);
+      const emailQuery = mockDb.mock.results.map((r) => r.value).find((c) => c.whereRaw.mock.calls.length);
+      expect(emailQuery.where).toHaveBeenCalledWith({ template_key: 'estimate.accepted_signup', recipient_type: 'customer' });
+      expect(emailQuery.whereIn).toHaveBeenCalledWith('recipient_id', ['customer-1']);
+      expect(emailQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked', 'spam_report', 'unsubscribed', 'failed', 'queued']);
+      expect(emailQuery.whereRaw).toHaveBeenCalledWith('categories @> ?::jsonb', [JSON.stringify(['signup_full'])]);
+      expect(emailQuery.whereRaw).toHaveBeenCalledWith('lower(recipient_email_snapshot) = ?', ['ada@example.com']);
+      // The window opens an hour BEFORE the queued row (the row is queued moments before the email).
+      // 10:00 AM ET queue row: the hour before is 9:00 AM ET, but the window opens at the ET day start (midnight).
+      expect(emailQuery.where).toHaveBeenCalledWith('created_at', '>=', new Date('2026-09-29T04:00:00Z'));
+    });
+
+    test.each([
+      ['the marker kept but the app link removed', (values) => values.filter((v) => !v.endsWith('/app/'))],
+      ['the marker kept but the sign-in guide removed', (values) => values.filter((v) => !v.includes('waves-app-guide'))],
+      ['the sign-in steps trimmed to a bare marker', (values) => [values[0], 'enter your texted code', values[3]]],
+      ['only the marker', () => ['enter your texted code']],
+    ])('reworded or trimmed app section fails safe (%s): the welcome email sends', async (_label, trim) => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', status: 'sent', text_snapshot: `Welcome aboard.\n${trim(APP_SECTION_VALUES).join('\n')}` };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('the app section is also recognised in the html snapshot (links live in href attributes, & escaped)', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', status: 'sent', text_snapshot: '', html_snapshot: APP_SECTION_VALUES.map((v) => v.replace(/&/g, '&amp;')).join('<br>') };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['sent', { status: 'sent' }],
+      ['delivered', { status: 'delivered' }],
+      ['delivered and then unsubscribed / reported as spam', { status: 'spam_report' }],
+    ])('a signup email that was accepted for sending (%s) suppresses the welcome EMAIL; the text still sends', async (_label, fields) => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT, ...fields };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['bounced', { status: 'bounced' }],
+      ['dropped', { status: 'dropped' }],
+      ['blocked', { status: 'blocked' }],
+      ['failed with no retry', { status: 'failed' }],
+      ['failed and the retry rail exhausted', { status: 'failed', provider_retry_next_at: null, provider_retry_exhausted_at: new Date() }],
+      ['queued for the first time (no retry yet)', { status: 'queued', provider_retry_count: 0 }],
+      // A send still on the retry rail may yet exhaust (GH Codex r8 P1).
+      ['blocked by the provider with a retry scheduled', { status: 'failed', provider_retry_next_at: new Date(Date.now() + 600000) }],
+      ['a retry claimed and in flight', { status: 'queued', provider_retry_count: 1 }],
+    ])('a signup email that is %s does not suppress: the welcome email sends', async (_label, fields) => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT, ...fields };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('gate on but no delivered combined email (failed, blocked, no address, a plain fallback): the welcome email sends exactly as today', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = null;
+      const results = await service.processDueWelcomes();
+      expect(results.sent).toBe(1);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+    });
+
+    test('the gate turned OFF between signup and delivery: the welcome email sends even though a combined email exists', async () => {
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', status: 'sent', text_snapshot: FULL_APP_SECTION_TEXT };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('an unreadable lookup reads as "not covered": the welcome email sends', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      // The first table access of a direct call is the coverage lookup itself.
+      mockDb.mockImplementationOnce(() => { throw new Error('db down'); });
+      await expect(service._internals.combinedSignupEmailCoversWelcome({ id: 'customer-1' }, {})).resolves.toBe(false);
+      expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('sending the welcome email as usual'));
+    });
+
+    test('a phoneless customer whose signup email was delivered: the sequence still completes, nothing is emailed or texted', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome({ phone: '' });
+      mockEmailProviderRow = { id: 'email-1', status: 'sent', text_snapshot: FULL_APP_SECTION_TEXT };
+      const results = await service.processDueWelcomes();
+      expect(results.sent).toBe(1);
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(mockUpdates).toEqual(expect.arrayContaining([
+        expect.objectContaining({ table: 'sms_sequences', data: expect.objectContaining({ status: 'completed' }) }),
+      ]));
+    });
   });
 
   test('phoneless customer with an email gets the welcome email; sequence COMPLETES via email', async () => {

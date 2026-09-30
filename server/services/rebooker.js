@@ -1769,7 +1769,10 @@ class SmartRebooker {
           // Codex r1 P1 #5314): public reschedule's own commit runs a STRICT
           // pre-verify travel probe (probeMoveConflicts) a grace-kept slot
           // would fail before this check ever ran — grace is estimate-picker
-          // only. See scheduling/policy.js and find-time.js's packCapacityEnds.
+          // and /book only (GATE_BOOK_ARRIVAL_GRACE, 2026-09-29: /book's
+          // createSelfBooking waives the same clashes in its own probe; this
+          // rebooker probe does not yet, so public reschedule stays strict).
+          // See scheduling/policy.js and find-time.js's packCapacityEnds.
         })
         : null;
       // A reviewed move also pins the route whose destination was probed.
