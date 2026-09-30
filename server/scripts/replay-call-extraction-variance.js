@@ -1291,7 +1291,12 @@ async function replayCall(call, context) {
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
-  const storedAvRaw = parseJson(call.ai_address_validation, null);
+  const storedAvUnwaived = parseJson(call.ai_address_validation, null);
+  // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) was decided
+  // for the PRIOR extraction's service and property. It rebuilds for the prior
+  // route only; a fresh extraction is judged on the unwaived verdict unless it
+  // names the same service and property type (codex #5378 pre-push P1).
+  const storedAvRaw = require('../services/call-triage-flags').reconstructWaivedAddressValidation(storedAvUnwaived);
   // Effective-verdict reconstruction (codex round-12 P2, mirroring the
   // readiness script): a recovered address routed on the recovery's ACCEPTING
   // verdict while the ORIGINAL unresolvable one was persisted — the
@@ -1399,9 +1404,13 @@ async function replayCall(call, context) {
 
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
+  const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+  const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && priorV2Valid && currentExtraction
+    && waiverInputs(priorV2) !== waiverInputs(currentExtraction))
+    ? storedAvUnwaived : storedAv;
   const currentRoute = currentExtraction
     ? routeForV2(currentExtraction, contactPhone, helpers,
-      avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
+      avVerdictForExtraction(storedAvForCurrent, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
       failOpenContext, { ...conflictCheck, transcription: transcriptForExtraction })
     : { allowed: false, reason: current.status, flags: [] };
 

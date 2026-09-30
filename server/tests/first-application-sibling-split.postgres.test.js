@@ -142,9 +142,12 @@ suite('first-application-sibling-split — periodic sweep', () => {
     };
   }
 
+  // The brevity guard keeps an over-length bell's whole text in `detail`;
+  // these assertions read that full text through `body`.
   async function readBell(conn, dedupeKey) {
-    return conn('notifications').where({ recipient_type: 'admin', category: 'billing' })
+    const row = await conn('notifications').where({ recipient_type: 'admin', category: 'billing' })
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]).first();
+    return row && { ...row, body: row.detail || row.body };
   }
 
   // Runs the sweep's own candidate-discovery + per-invoice-group evaluation
@@ -186,8 +189,8 @@ suite('first-application-sibling-split — periodic sweep', () => {
       .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
     expect(bells).toHaveLength(1);
     expect(bells[0].link).toBe(`/admin/invoices?invoice=${ids.invoiceId}`);
-    expect(bells[0].body).toContain('split it by hand');
-    expect(bells[0].body).toContain('Invoice');
+    expect(bells[0].detail || bells[0].body).toContain('split it by hand');
+    expect(bells[0].detail || bells[0].body).toContain('Invoice');
     expect(bells[0].read_at).toBeNull();
     const metadata = typeof bells[0].metadata === 'string' ? JSON.parse(bells[0].metadata) : bells[0].metadata;
     // P2 fix: metadata carries customerId so NotificationService's
