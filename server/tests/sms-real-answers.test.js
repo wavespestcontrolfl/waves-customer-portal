@@ -2619,6 +2619,18 @@ describe('free re-service is an entitlement resolved through the existing mechan
         await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'See you Tuesday at 9!', dbh: throwingDb })).resolves.toBeNull();
       });
 
+      // Codex round-16 P1 #1: a MISSING decision row is not a pre-deploy decision to grandfather.
+      test('decision row missing (first() → undefined): same fail-closed logic as a failed read', async () => {
+        loadWith({ lanes: ['pest'] });
+        const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
+        const missingRowDb = () => ({ where: () => ({ first: async () => undefined }) });
+        const missed = 'We will have someone stop by again for the ants, no cost to you.';
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, carriesAction: true, dbh: missingRowDb })).resolves.toBe('reservice_recheck_failed');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, dbh: missingRowDb })).resolves.toBe('reservice_recheck_failed');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: "We'll send your free pest re-service link now.", dbh: missingRowDb })).resolves.toBe('reservice_recheck_failed');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'See you Tuesday at 9!', dbh: missingRowDb })).resolves.toBeNull();
+      });
+
       test('/schedule-sms records carries_reservice_link from the decision snapshot', () => {
         const { decisionCarriesReserviceLink } = require('../services/agent-decision-send-checks');
         expect(decisionCarriesReserviceLink({ input_snapshot: JSON.stringify({ intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }] }) })).toBe(true);
@@ -2673,6 +2685,25 @@ describe('free re-service is an entitlement resolved through the existing mechan
       }
       // The guard: an estimate price beside a bare visit is not an offer.
       expect(validateReserviceOffer({ reply: 'No charge for the estimate. See you at the visit.', factsBlock: `X\n${reserviceFactLine([])}\nBILLING:` }).ok).toBe(true);
+    });
+
+    // Codex round-16 P1 #2: the pest-report prescreen is built lazily from the shared list, never a silent fallback.
+    describe('PEST_REPORT_TEXT_RE is built lazily from the shared pest-noun list', () => {
+      test('covers the full shared list plus the excluded specialties', () => {
+        const { PEST_REPORT_TEXT_RE } = require('../services/sms-shadow-drafter');
+        for (const noun of ['ants', 'roaches', 'cockroaches', 'spiders', 'fleas', 'ticks', 'wasps', 'bees', 'hornets', 'silverfish', 'scorpions', 'earwigs', 'centipedes', 'millipedes', 'palmetto bugs', 'bugs', 'pests', 'termites', 'mosquitoes', 'rodents', 'mice', 'rats']) {
+          expect(PEST_REPORT_TEXT_RE.test(`${noun} are back`)).toBe(true);
+        }
+      });
+
+      test('a scheduler mock that omits RESERVICE_PEST_NOUNS_SOURCE throws instead of quietly narrowing the prescreen', () => {
+        jest.resetModules();
+        jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => true }));
+        const { PEST_REPORT_TEXT_RE } = require('../services/sms-shadow-drafter'); // module load must not need the list
+        expect(() => PEST_REPORT_TEXT_RE.test('ants are back')).toThrow(/RESERVICE_PEST_NOUNS_SOURCE/);
+        jest.dontMock('../services/reservice-scheduler');
+        jest.resetModules();
+      });
     });
 
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,

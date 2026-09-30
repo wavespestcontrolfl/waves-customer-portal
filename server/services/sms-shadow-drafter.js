@@ -2453,12 +2453,24 @@ const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|
 // not a report.
 // Codex round-15 P2 (PR #5336): the pest nouns come from reservice-scheduler's ONE shared list
 // (RESERVICE_PEST_NOUNS_SOURCE) plus the excluded specialties, so this prescreen and the lane
-// classifier can't drift.
-const PEST_REPORT_TEXT_RE = new RegExp(
-  `(?=.*\\b(?:${require('./reservice-scheduler').RESERVICE_PEST_NOUNS_SOURCE || 'pests?|bugs?|ants?'}|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)\\b)`
-  + '(?=.*\\b(?:see|saw|seeing|found|finding|find|show(?:ed|ing)?\\s*up|return\\w*|back|again|still|more|everywhere|infest\\w*)\\b)',
-  'i',
-);
+// classifier can't drift. Codex round-16: built LAZILY on first use (like promiseLaneRegexes) and
+// with NO silent fallback — a scheduler mock that omits the list throws here rather than quietly
+// narrowing the prescreen. Exposed as { test } so callers keep the regex-style `.test(text)`.
+let pestReportTextRe = null;
+const PEST_REPORT_TEXT_RE = {
+  test(text) {
+    if (!pestReportTextRe) {
+      const nouns = require('./reservice-scheduler').RESERVICE_PEST_NOUNS_SOURCE;
+      if (typeof nouns !== 'string' || !nouns) throw new Error('reservice-scheduler must export RESERVICE_PEST_NOUNS_SOURCE');
+      pestReportTextRe = new RegExp(
+        `(?=.*\\b(?:${nouns}|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)\\b)`
+        + '(?=.*\\b(?:see|saw|seeing|found|finding|find|show(?:ed|ing)?\\s*up|return\\w*|back|again|still|more|everywhere|infest\\w*)\\b)',
+        'i',
+      );
+    }
+    return pestReportTextRe.test(text);
+  },
+};
 
 // Pronoun-only / bare return phrasing (Codex round-3 P2): the structural
 // pest-noun + activity-verb rule above deliberately dropped "they're back"

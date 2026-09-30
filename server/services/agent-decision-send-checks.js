@@ -132,9 +132,12 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   let known = carriesAction === true;
   try {
     const row = await dbh('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot', 'customer_id', 'prompt_version');
-    const snapshot = parseInputSnapshot(row && row.input_snapshot);
+    // Codex round-16 (PR #5336): a missing row (first() → undefined) is NOT a pre-deploy decision to
+    // grandfather — nothing is known about it, so it takes the same fail-closed path as a failed read.
+    if (!row) throw new Error('agent decision row not found');
+    const snapshot = parseInputSnapshot(row.input_snapshot);
     known = known || reserviceCarriesLinkAction(snapshot && snapshot.intended_actions);
-    return await reserviceBlock({ decision: { ...row, customer_id: (row && row.customer_id) || fallbackCustomerId }, outgoingBody });
+    return await reserviceBlock({ decision: { ...row, customer_id: row.customer_id || fallbackCustomerId }, outgoingBody });
   } catch (err) {
     const block = known || isReserviceOfferPromise(outgoingBody) || (!carriesAction && reserviceBodyPrescreen(outgoingBody));
     logger.warn(`[agent-decision-send-checks] re-service recheck failed for decision ${agentDecisionId}: ${err.message}${block ? '; blocking send' : '; not a re-service message, sending'}`);
