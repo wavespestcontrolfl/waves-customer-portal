@@ -491,14 +491,40 @@ describe('model-switchboard', () => {
     expect(selectors.find((s) => s.key === 'FLAGSHIP').accepts.cap).toBe('vision');
     // OPENAI_BALANCED is the OpenAI leg of ROUTES.visionAnalysis (vision-delta, admin dispatch send images).
     expect(selectors.find((s) => s.key === 'OPENAI_BALANCED').accepts.cap).toBe('vision');
+    // PLANT_ID_REFEREE (ROUTES.plantIdReferee, plant-engine.js's runReferee)
+    // sends the SAME photos as the Gemini/Sol legs it decides between — a
+    // vision selector, matching the other photo-model selectors, never text
+    // (Codex #5307 r1 finding 6).
+    expect(selectors.find((s) => s.key === 'PLANT_ID_REFEREE').accepts.cap).toBe('vision');
     // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
+    // Codex #5307 r7 finding 3: LANES had no entry for either the plant
+    // engine's own Gemini/Sol ladder or the gated referee, so the Models tab
+    // reported zero blast radius for GEMINI_VISION_BEST/OPENAI_PLANT_ID's
+    // plant use and for PLANT_ID_REFEREE entirely.
+    const plantId = lanes.find((l) => l.id === 'plant_id');
+    expect(plantId.primary.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.primary.model);
+    expect(plantId.fallback.model).toBe(MODELS.TEXT_POLICIES.plantIdVision.fallback.model);
+    expect(plantId.inbound).toBe(true);
+    // Codex #5307 r8: the plant lane shows the shared GEMINI_VISION_MODEL pin
+    // like pest_id, sits under Photos with a description, and the engine's
+    // own call-ledger rows carry these exact lane ids (hub-read joins on id).
+    expect(plantId.primary.pinEnv).toBe('GEMINI_VISION_MODEL');
+    for (const id of ['plant_id', 'plant_id_referee']) {
+      const lane = lanes.find((l) => l.id === id);
+      expect(lane.area).toBe('photos');
+      expect(lane.describe).toEqual(expect.any(String));
+    }
+    const plantReferee = lanes.find((l) => l.id === 'plant_id_referee');
+    expect(plantReferee.primary.model).toBe(MODELS.ROUTES.plantIdReferee.model);
+    expect(plantReferee.primary.selector).toBe('PLANT_ID_REFEREE');
+    expect(plantReferee.fallback).toBeNull();
     expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
     expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
     // NEWSLETTER is reached only through the newsletterWriter policy in
     // llm/call.js, whose wire cap gives always-thinking models their floor;
     // its default (Opus 5.5) is itself a requires:'deep' model.
-    expect(deepSafe).toEqual(['DEEP', 'EXTREME', 'NEWSLETTER']);
+    expect(deepSafe).toEqual(['DEEP', 'EXTREME', 'NEWSLETTER', 'PLANT_ID_REFEREE']);
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
     expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);

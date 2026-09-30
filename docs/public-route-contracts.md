@@ -505,9 +505,24 @@ a termite liquid/trench/bait visit), or by an explicit normalized-name alias
 list when no EPA reg is recorded at all (a hand-entered row with no catalog
 `product_id` still carries its snapshotted `product_name`) — gets
 `applications[N].product.report_copy: { how_it_works, also_labeled_for,
-pets_kids }`. `also_labeled_for` is OMITTED (never a null/empty string) for
-the one approved product with no such line (the LESCO 90/10 Nonionic
-Surfactant — it is an adjuvant, not a pesticide). Matching is exact only —
+pets_kids }`. Since owner ruling 2026-09-29, `also_labeled_for` is a single
+composed sentence — `Labeled for {N}+ {City} pests` (e.g. "Labeled for 75+
+Bradenton pests"), or `Labeled for {N}+ pests` when no usable city is
+available — never a named pest list. `N` is the product's raw label pest
+count (`alsoLabeledForPestCount` in `server/config/report-product-copy.js`,
+each with a source/date comment) floored to a multiple of 25
+(`floorToMultipleOf25`); `City` is the visit's own city — `service.city` as
+`buildReportV1Data` already resolves it (the visit's stamped service address
+city via `COALESCE(ss.service_address_city, customers.city)`, i.e. the
+property serviced, falling back to the customer's own city), normalized for
+display (`normalizeReportCity`: trimmed, internal whitespace collapsed, and
+title-cased when the raw value is entirely upper-case or entirely lower-case; mixed case is kept as entered — never invented)
+before it is composed into the sentence (`buildAlsoLabeledForText`); a
+blank/unusable city (or none at all) drops to the no-city wording rather
+than blocking the rest of the copy. `also_labeled_for` is OMITTED (never a
+null/empty string) for products with no `alsoLabeledForPestCount` at all —
+narrow products (gel baits, granular bait, IGRs) and the LESCO 90/10
+Nonionic Surfactant (an adjuvant, not a pesticide). Matching is exact only —
 never a substring/fuzzy match, same posture as
 `pest-report-expectations.js`'s `PRODUCT_EXPECTATION_CLASS` — so a product
 absent from the config (every catalog product not on the owner-approved

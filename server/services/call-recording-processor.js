@@ -1859,13 +1859,19 @@ function safeParseJsonPayload(payload) {
 // Two payloads with the same signature describe the identical question —
 // same candidates, same disagreement flag, same release target; anything
 // else means the office needs to see fresh evidence.
-function emailCardSignature(reasonCode, payload) {
+function emailCardSignature(reasonCode, payload, { wording = false } = {}) {
   const candidates = Array.isArray(payload?.email_candidates)
     ? payload.email_candidates.map((c) => String(c?.value || '').trim().toLowerCase()).filter(Boolean).sort()
     : [];
   const hasTarget = !!payload && Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
   const target = hasTarget ? (payload.email_release_target || null) : 'no-opinion';
-  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target]);
+  const key = [reasonCode || null, !!payload?.email_disagreement, candidates, target];
+  // gmail_same_inbox (2026-09-29) is card WORDING, not evidence: it counts
+  // only when comparing against a still-open card, so a card minted before
+  // the same-inbox wording refreshes on reprocess (codex #5323 r5) — never
+  // against a card a human already confirmed, which must stay satisfied.
+  if (wording) key.push(payload?.gmail_same_inbox || null);
+  return JSON.stringify(key);
 }
 
 // The single address (or blank) a card's evidence supports holding a
@@ -2018,8 +2024,8 @@ async function mintEmailReviewCardsFenced({
       for (const live of liveCards) {
         const desired = cards.find((c) => c.reason_code === live.reason_code);
         const same = !!desired
-          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload))
-            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload));
+          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload), { wording: true })
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload), { wording: true });
         if (same) {
           satisfiedReasonCodes.add(desired.reason_code);
           continue; // identical evidence — no-op, card untouched

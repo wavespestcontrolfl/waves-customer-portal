@@ -3444,6 +3444,13 @@ const gates = {
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
 
+  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): a
+  // still-unsure scope after the Gemini -> OpenAI Sol escalation gets one
+  // more look from Claude Fable 5.1. Ships DARK: off unless exactly 'true'.
+  // This entry is for logGateStatus only: plant-engine.js's runReferee()
+  // reads GATE_PLANT_ID_REFEREE at call time via plantIdRefereeLive().
+  plantIdReferee: process.env.GATE_PLANT_ID_REFEREE === 'true',
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -3511,6 +3518,15 @@ function gateEnvValue(envName) {
 // (newsletter-sender.js processScheduledSends). Off = draft-only, which is
 // what "kill switch" has to mean: a proof that went out while the gate was
 // on cannot be approved or dispatched after it is turned off.
+// GATE_PORTAL_ACTIVITY read at CALL time — strict `=== 'true'`. The one
+// canonical reader for the customer-activity beacon routes (which also stamp
+// last_seen_at), so a flip or an unset kill needs no restart. Kept up here,
+// not at the end of the file, so concurrent gate PRs appending readers at the
+// bottom never conflict with it.
+function portalActivityLive() {
+  return process.env.GATE_PORTAL_ACTIVITY === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -3765,11 +3781,15 @@ function visitPrepPhotosLive() {
   return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
 }
 
-// GATE_PORTAL_ACTIVITY read at CALL time — strict `=== 'true'`. The one
-// canonical reader for the customer-activity beacon routes (which also stamp
-// last_seen_at), so a flip or an unset kill needs no restart.
-function portalActivityLive() {
-  return process.env.GATE_PORTAL_ACTIVITY === 'true';
+// GATE_PLANT_ID_REFEREE read at CALL time — ships DARK, off unless exactly
+// 'true' (owner ruling 2026-09-28, plant engine only — the pest engine's
+// TEXT_POLICIES.photoIdVision ladder is untouched). The one canonical reader
+// for plant-engine.js's runReferee(): on, a scope still unsure after the
+// Gemini -> OpenAI Sol escalation gets one more look from Claude Fable 5.1 as
+// a deciding vote. Off, byte-identical to the Gemini -> Sol ladder — no third
+// call, no third-vote merge.
+function plantIdRefereeLive() {
+  return process.env.GATE_PLANT_ID_REFEREE === 'true';
 }
 
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
@@ -3947,4 +3967,5 @@ module.exports.smsLinkWrapLive = smsLinkWrapLive;
 // gate PRs appending to that one-line list never conflict with this one.
 module.exports.portalActivityLive = portalActivityLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
+module.exports.plantIdRefereeLive = plantIdRefereeLive;
 // gates 1775330914

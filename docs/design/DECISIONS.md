@@ -2662,3 +2662,69 @@ migration (`scheduled_services.rides_parent_id`, schema-only, already pushed
 and run on a preview database) is copied verbatim, unchanged, from the write
 engine's branch. The write engine itself resumes as PR #5268 once the
 office has reviewed the preview's output against real customers.
+
+## 2026-09-28 — Plant photo ID: GPT-6 Sol second opinion + Claude Fable referee
+
+Owner ruling 2026-09-28, plant engine ONLY — replaces the 2026-09-26 "Gemini
+→ GPT-6 Astra, no Claude" ruling for `plant-engine.js` (lawn/tree/shrub/palm
+photo ID). The pest engine's `pest-engine.js` / `TEXT_POLICIES.photoIdVision`
+/ `pest-identification.js` ladder is unchanged and keeps its own Astra second
+opinion.
+
+The plant engine's second opinion moves to `TEXT_POLICIES.plantIdVision`:
+Gemini 3.8 Flash first, GPT-6 Sol (`OPENAI_PLANT_ID`, `MODEL_OPENAI_PLANT_ID`
+override) when Gemini misses, scores below `PHOTO_ID_ESCALATE_BELOW`, or
+disagrees — same trigger shape as `photoIdVision`, sequential, no Claude leg
+at this stage. Beyond that: when a scope that TRIGGERED the escalation is
+still unsure after the second opinion (the providers disagreed, OpenAI never
+answered that scope, or the combined top confidence is still below the
+escalate threshold), Claude Fable 5.1 at effort `high`
+(`MODELS.ROUTES.plantIdReferee`, `MODEL_PLANT_ID_REFEREE` override) gets one
+more look at the same photos as a deciding vote. Ships DARK behind
+`GATE_PLANT_ID_REFEREE` (off unless exactly `'true'`, read at call time via
+`plantIdRefereeLive()`); off, the ladder is byte-identical to Gemini → Sol.
+
+One referee call covers every still-unsure scope at once (same photos, the
+same `ESCALATION_SCHEMA` output, with an appended "earlier reads" block). The
+merge is a deterministic 2-of-3 majority per scope: the referee siding with
+one of two disagreeing earlier reads settles the scope (wording capped at
+`likely`, never `pretty_sure`); siding with an undisputed-but-unsure top
+confirms it (same cap, the referee standing in for a missing second
+opinion); a genuine third answer leaves the scope exactly as unsure as it
+was and joins the candidate/possibility list. A missing, invalid, or
+timed-out referee leaves the escalation result unchanged. Diagnostics
+(`internal.models.referee`, `internal.referee: { triggered, scopes,
+outcome }`) are admin-only, never merged into `v2`. Full detail:
+`docs/photo-id/plant-engine.md`'s "Referee" section.
+
+## 2026-09-29 — Plant photo ID referee narrowed to name tie-breaks
+
+Owner narrowed the plant referee (`GATE_PLANT_ID_REFEREE`, dark, see the
+2026-09-28 entry above) to plant-NAME tie-breaks in identify mode.
+
+It now fires ONLY when the run is in `identify` mode and ONLY for an
+identity lane the subject actually uses (turf/weeds for a lawn, host for
+tree_shrub/palm) where Gemini and Sol's escalation DISAGREED
+(`identityFlags[slot].disagreed` with a `disagreementPair`). A workup
+(problem check), a missing second opinion, and a low-confidence AGREEMENT no
+longer draw a referee call at all — the removed 09-28 shape's "still unsure"
+trigger (disagreed, no second opinion, or still below
+`PHOTO_ID_ESCALATE_BELOW`) and its conditions-scope vote are gone.
+
+The merge is a tie-break only, never a 2-of-3 majority: the referee's own
+top for that slot either matches side A or side B of the disagreement
+(that side goes first, `disagreed: false`, `disagreementPair: null`,
+`blockPrettySure: true`, capped at `likely`, outcome `settled`) or it
+doesn't — a third name, no usable referee answer, or unusable referee
+photos leave the lane EXACTLY as the escalation left it, with no appended
+candidate and no partial credit (outcome `no_majority` or `unavailable`).
+An off-catalog match additionally requires the normalized `offCatalogName`
+to agree, not just the shared group id (`sameCandidateKey`, unchanged,
+still shared with the pest engine).
+
+Unchanged: `TEXT_POLICIES.plantIdVision` (Gemini → Sol), `ROUTES.plantIdReferee`
+(Fable 5.1, effort `high`), the gate, the referee prompt and "earlier reads"
+idea, the pre-referee `legFailureReason` short-circuit, the rule that the
+referee's own quality verdict joins `photoReadFor` and an unusable referee
+read merges nothing, and admin-only `internal.referee` diagnostics. Full
+detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
