@@ -2090,6 +2090,16 @@ function completionUsesReportLane({
 // mint recovers). Legacy (non-report-v1) visits keep their portal-home link —
 // that is where their visit detail lives. delivery_mode 'disabled' never
 // mints and never texts, so it is not a withhold. Pure for testability (_test).
+// The lawn write gate mints its own report token (ensureReportToken) when it
+// freezes the synthesis. If the earlier mint failed and that retry succeeded,
+// the handler adopts the recovered token before the missing-token branch runs,
+// so the text is not withheld/failed and the office is not alerted for a token
+// that now exists. Pure for testability (_test).
+function adoptRecoveredReportToken({ reportToken, gateToken, portalUrl }) {
+  if (reportToken || typeof gateToken !== 'string' || !/^[a-f0-9]{32}$/.test(gateToken)) return null;
+  return { reportToken: gateToken, reportUrl: `${portalUrl}/report/${gateToken}` };
+}
+
 function completionSmsWithheldForMissingReportToken({
   serviceReportV1Delivery,
   typedDeliveryMode,
@@ -12223,6 +12233,46 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     };
 
+    // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
+    // source of truth) and run the consistency check. Its smsSummary is no
+    // longer read — the completion text is the plain DB template for every
+    // service line (owner ruling 2026-08-01) — but the freeze and the
+    // consistency check are what the REPORT reads, so the gate stays.
+    // It runs HERE, in the common completion path before either delivery
+    // channel, so every auto-send lawn completion freezes the watering
+    // instruction (and banner) exactly once whether or not the customer gets
+    // the completion text (email-only customers, SMS disabled, no phone,
+    // text already handled). Best-effort; never blocks completion. Backfill
+    // closeouts skip it: the gate would freeze TODAY's sprinkler settings as
+    // though captured at the historical visit (render-time reconciliation
+    // still applies, as it did before the hoist).
+    if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
+      try {
+        const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
+        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
+        // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
+        // fold the frozen synthesis back in so the later sending/sent writes (which
+        // spread recordStructuredNotes) don't clobber it.
+        if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
+        // Same for the watering-instruction freeze (its own key, first writer wins).
+        if (gate.wateringFreeze) recordStructuredNotes.lawnWateringFreeze = gate.wateringFreeze;
+        // A token the earlier mint could not create but the gate's own mint did.
+        const recovered = adoptRecoveredReportToken({ reportToken, gateToken: gate.reportToken, portalUrl });
+        if (recovered) {
+          reportToken = recovered.reportToken;
+          reportUrl = recovered.reportUrl;
+          reportTokenMintError = null;
+          reportSmsUrl = await shortenOrPassthrough(reportUrl, {
+            kind: 'service_report',
+            entityType: 'service_records',
+            entityId: record.id,
+            customerId: svc.customer_id,
+            codePrefix: 'report',
+          });
+        }
+      } catch { /* best-effort — render-time reconciliation still applies */ }
+    }
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
       && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
       // Report-v1 visit with no public report token (mint failed above): the
@@ -12371,22 +12421,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           || prepaidCovered
           || autopayCoversVisit
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
-        // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
-        // source of truth) and run the consistency check. Its smsSummary is no
-        // longer read — the completion text is the plain DB template for every
-        // service line (owner ruling 2026-08-01) — but the freeze and the
-        // consistency check are what the REPORT reads, so the gate stays.
-        // Best-effort; never blocks completion.
-        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
-          try {
-            const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
-            const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
-            // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
-            // fold the frozen synthesis back in so the later sending/sent writes (which
-            // spread recordStructuredNotes) don't clobber it.
-            if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
-          } catch { /* best-effort — render-time reconciliation still applies */ }
-        }
         // The trace/applications lookup that used to feed this call is gone
         // with the re-entry line. It existed so the SMS could apply the same
         // read-time exterior normalization the report does (codex P2 #3007
@@ -13682,6 +13716,7 @@ module.exports = {
   reportV1InvoiceBodyCarriesPayLink,
   completionUsesReportLane,
   completionSmsWithheldForMissingReportToken,
+  adoptRecoveredReportToken,
   completionStructuredObservationAllowlist,
   completedProtocolActionScopes,
   shouldInsertNoActivityFinding,

@@ -607,3 +607,61 @@ describe('product insight matcher classifies from approved facts, not brand name
     expect(answer).not.toMatch(/not the insecticide/i);
   });
 });
+
+// GATE_LAWN_WATERING_RULE: a product hold answers with the banner text, then the
+// plan's "not before" overlay (afterHold) — never the raw plan or the generic
+// "restriction comes first" condition.
+describe('assistant answers a product watering hold with the banner text then the afterHold plan', () => {
+  const RAW_PLAN = { title: 'This week: one full cycle per turf zone', detail: 'On your permitted watering day, about ½" of water per run.', visitInPlanWeek: true, prescribesRun: true };
+  const AFTER_HOLD = { title: RAW_PLAN.title, detail: `${RAW_PLAN.detail} Not before Thu 3 PM: if your permitted watering day comes first, use your next permitted day after it; if there isn’t one this week, skip that run.` };
+  const HOLD_LINE_1 = 'Skip your turf watering until Thu 3 PM.';
+  const HOLD_AFTERCARE = {
+    watering: `${HOLD_LINE_1} That gives today’s treatment time to work.`,
+    holdTask: HOLD_LINE_1,
+    evidenceSource: 'product_instruction',
+    wateringHold: true,
+    creditableWaterIn: false,
+    needsReview: false,
+    neutral: false,
+    waterInRequired: false,
+  };
+  const dataWith = (weekPlan, aftercare = HOLD_AFTERCARE) => ({ pressureIndex: null, dynamicContext: {}, reportV2: { water: { weekPlan }, aftercare } });
+  const QUESTIONS = ['Should I water after today’s treatment?', 'Can I turn my sprinklers back on?'];
+
+  test.each(QUESTIONS)('%s -> banner text, then the afterHold plan', (question) => {
+    const answer = answerServiceReportQuestion({ question, data: dataWith({ ...RAW_PLAN, afterHold: AFTER_HOLD }) });
+    expect(answer).toBe(`${HOLD_AFTERCARE.watering} ${AFTER_HOLD.title}. ${AFTER_HOLD.detail}`);
+    expect(answer.indexOf(HOLD_LINE_1)).toBe(0);
+    expect(answer).not.toMatch(/restriction comes first/);
+    expect(answer).not.toContain('{holdUntil}');
+  });
+
+  test('with no afterHold overlay the answer keeps today\'s conditioned raw plan', () => {
+    const answer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith(RAW_PLAN) });
+    expect(answer).toMatch(/restriction comes first/);
+    expect(answer).toContain(`${RAW_PLAN.title}. ${RAW_PLAN.detail}`);
+    expect(answer).not.toMatch(/Not before/);
+  });
+
+  test('with no weekly plan at all the hold task still answers a direct watering question', () => {
+    const answer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith(null) });
+    expect(answer).toContain(HOLD_LINE_1);
+    expect(answer).toContain(HOLD_AFTERCARE.holdTask);
+  });
+
+  test('a historical visit (outside the plan week) never answers with the overlay', () => {
+    const answer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith({ ...RAW_PLAN, visitInPlanWeek: false, afterHold: AFTER_HOLD }) });
+    expect(answer).not.toMatch(/Not before/);
+  });
+
+  test('an until-dry hold (holdUntil null) answers with its banner text then the overlay', () => {
+    const line1 = 'Skip your turf watering until today’s treatment has dried.';
+    const aftercare = { ...HOLD_AFTERCARE, watering: `${line1} That gives today’s treatment time to work.`, holdTask: line1, holdUntil: null };
+    const overlay = { title: RAW_PLAN.title, detail: `${RAW_PLAN.detail} Not before the spray has dried: if your permitted watering day comes first, use your next permitted day after it; if there isn’t one this week, skip that run.` };
+    const answer = answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith({ ...RAW_PLAN, afterHold: overlay }, aftercare) });
+    expect(answer).toBe(`${aftercare.watering} ${overlay.title}. ${overlay.detail}`);
+    expect(answer).not.toMatch(/undefined|null|\{holdUntil\}/);
+    // No plan at all: the hold task still answers.
+    expect(answerServiceReportQuestion({ question: 'Should I water after today’s treatment?', data: dataWith(null, aftercare) })).toContain(line1);
+  });
+});
