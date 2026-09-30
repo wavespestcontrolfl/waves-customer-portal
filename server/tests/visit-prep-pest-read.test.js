@@ -39,8 +39,13 @@ jest.mock('../services/visit-prep-read-dispatch', () => ({
   dispatchVisitPrepRead: (...args) => mockDispatch(...args),
 }));
 
+// The plant gate is dark unless a test turns it on: with both live, a stop
+// that also has a lawn / tree & shrub part is the combined read's, not this
+// engine's (visit-prep-read-key.js).
+let mockPlantLive = false;
 jest.mock('../config/feature-gates', () => ({
   visitPrepPestReadLive: () => mockGateOn,
+  visitPrepPlantReadLive: () => mockPlantLive,
 }));
 
 const { triggerVisitPrepPestRead: realTrigger, dailyCap, _internal } = require('../services/visit-prep-pest-read');
@@ -192,6 +197,7 @@ beforeEach(() => {
   mockLockStopForRow.mockReset();
   mockLockStopForRow.mockImplementation(async (trx, id) => id);
   mockGateOn = true;
+  mockPlantLive = false;
   delete process.env.VISIT_PREP_READ_DAILY_CAP;
 });
 

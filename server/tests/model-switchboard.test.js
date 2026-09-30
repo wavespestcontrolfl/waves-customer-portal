@@ -496,6 +496,9 @@ describe('model-switchboard', () => {
     // vision selector, matching the other photo-model selectors, never text
     // (Codex #5307 r1 finding 6).
     expect(selectors.find((s) => s.key === 'PLANT_ID_REFEREE').accepts.cap).toBe('vision');
+    // LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29) sends the visit's photos
+    // the same way: a deep-safe vision selector.
+    expect(selectors.find((s) => s.key === 'LAWN_ASSESSMENT_REFEREE')).toMatchObject({ env: 'MODEL_LAWN_ASSESSMENT_REFEREE', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } });
     // response-drafter.js picks customerCopy for routine intents and highStakes for cancel / complaint / severity — two lanes, two backups.
     // Codex #5307 r7 finding 3: LANES had no entry for either the plant
     // engine's own Gemini/Sol ladder or the gated referee, so the Models tab
@@ -518,13 +521,20 @@ describe('model-switchboard', () => {
     expect(plantReferee.primary.model).toBe(MODELS.ROUTES.plantIdReferee.model);
     expect(plantReferee.primary.selector).toBe('PLANT_ID_REFEREE');
     expect(plantReferee.fallback).toBeNull();
+    const lawnReferee = lanes.find((l) => l.id === 'lawn_assessment_referee');
+    expect(lawnReferee.area).toBe('photos');
+    expect(lawnReferee.describe).toEqual(expect.any(String));
+    expect(lawnReferee.primary.model).toBe(MODELS.ROUTES.lawnAssessmentReferee.model);
+    expect(lawnReferee.primary.selector).toBe('LAWN_ASSESSMENT_REFEREE');
+    expect(lawnReferee.fallback).toBeNull();
+    expect(lawnReferee.inbound).toBe(true);
     expect(lanes.find((l) => l.id === 'response_drafter').fallback.model).toBe(MODELS.TEXT_POLICIES.customerCopy.fallback.model);
     expect(lanes.find((l) => l.id === 'response_drafter_high_stakes').fallback.model).toBe(MODELS.TEXT_POLICIES.highStakes.fallback.model);
     const deepSafe = selectors.filter((s) => s.accepts.deep).map((s) => s.key).sort();
     // NEWSLETTER is reached only through the newsletterWriter policy in
     // llm/call.js, whose wire cap gives always-thinking models their floor;
     // its default (Opus 5.5) is itself a requires:'deep' model.
-    expect(deepSafe).toEqual(['DEEP', 'EXTREME', 'NEWSLETTER', 'PLANT_ID_REFEREE']);
+    expect(deepSafe).toEqual(['DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE']);
     expect(sb.MODEL_CATALOG[MODELS.NEWSLETTER].requires).toBe('deep');
     expect(lanes.find((l) => l.id === 'newsletter').primary.accepts.deep).toBe(true);
     expect(lanes.find((l) => l.id === 'events_curation').primary.accepts.deep).toBe(true);
