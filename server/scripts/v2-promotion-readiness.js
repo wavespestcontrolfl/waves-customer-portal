@@ -40,7 +40,7 @@ const {
 // Production's own fail-open context builder + V1-conflict demotion, so this
 // audit cannot drift from the live contract (local pre-push audit P1).
 const {
-  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, resolveCallContactPhone,
+  buildFailOpenRoutingContext, demoteFailOpenOnV1AddressConflict, applyUnclearServiceTranscriptVeto, resolveCallContactPhone,
   resolveKnownCallerCustomer,
 } = require('../services/call-recording-processor');
 const { checkTcpaConsent } = require('../services/call-routing-gates');
@@ -144,7 +144,7 @@ async function main() {
     // customer_id is no longer selected (Codex #4933 r3 P2): the linked
     // customer is resolved per row via resolveKnownCallerCustomer, which
     // never reads that column (see the comment at its call site below).
-    .select('id', 'twilio_call_sid', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation');
+    .select('id', 'twilio_call_sid', 'transcription', 'ai_extraction', 'ai_extraction_enriched', 'ai_extraction_validation_errors', 'v2_extraction_status', 'created_at', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'ai_extraction_model', 'ai_extraction_prompt_version', 'ai_address_validation', 'ai_validation');
 
   // Cohort boundary: rows are attributed by MODEL, so after a route change
   // a previous primary's rows could masquerade as current-route executions
@@ -344,6 +344,8 @@ async function main() {
       customer: linkedCustomer,
       contactPhone,
       failOpenEnabled: auditFailOpen,
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+      unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
     });
     const knownCustomer = failOpenOptions.knownCustomer;
     let routing = canAutoRoute(v2, {
@@ -355,6 +357,8 @@ async function main() {
     // address conflicts with the on-file one is a NEW address and is demoted
     // back to review. Auditing without it counts those as auto-routes.
     routing = demoteFailOpenOnV1AddressConflict(routing, parseJson(r.ai_extraction) || {}, knownCaller);
+    // ...and the gate's downstream full-transcript service veto (live path parity).
+    routing = applyUnclearServiceTranscriptVeto(routing, parseJson(r.ai_extraction) || {}, r.transcription);
     const v2WouldCreate = routing.allowed;
     const v1DidCreate = v1CreatedSid.has(r.twilio_call_sid);
 

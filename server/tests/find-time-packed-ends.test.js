@@ -663,7 +663,12 @@ describe('capacityGapNeighbours — unassigned blockers count as time-based anch
     };
     const fit = { routeOrder: ['__candidate__'] };
     expect(capacityGapNeighbours(context, fit, 13 * 60))
-      .toEqual({ prevId: null, nextId: null, prevRow: null, nextRow: null, holdRows: [] });
+      .toEqual({
+        prevId: null, nextId: null, prevRow: null, nextRow: null, holdRows: [],
+        // Every stop on the day (GATE_BOOK_ARRIVAL_GRACE's packCapacityEnds
+        // mode reads it) — the completed row is on the day, just never an anchor.
+        dayRows: [expect.objectContaining({ id: 'done', status: 'completed' })],
+      });
   });
 
   // Codex r2 P1 (#5314): every live hold on the day, regardless of whether
