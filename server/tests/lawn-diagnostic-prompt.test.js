@@ -15,7 +15,7 @@ const {
 
 describe('lawn-diagnostic prompt v0.5 naming gate', () => {
   test('prompt version is bumped to v0.5', () => {
-    expect(PROMPT_VERSION).toBe('lawn-diagnostic-v0.5');
+    expect(PROMPT_VERSION).toBe('lawn-diagnostic-v0.6');
   });
 
   test('perception prompt observes only — it forbids naming/concluding a cause', () => {

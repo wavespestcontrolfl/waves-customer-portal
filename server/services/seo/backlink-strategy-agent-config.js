@@ -90,7 +90,7 @@ Save a strategy report at the end with targets added, gaps found, and editorial 
     {
       type: 'custom',
       name: 'get_citation_dashboard',
-      description: `Get the citation/NAP consistency dashboard. Returns all tracked directory citations with their status (active, missing, inconsistent, claimed, unchecked), NAP consistency flag, and priority. Also returns the canonical NAP for reference. Use to identify directories where the business listing is missing or has incorrect information.`,
+      description: `Get the citation/NAP consistency dashboard. Returns all tracked directory citations with their status (unverified, verified, mismatched, fetch-blocked, missing), the last audit's reason and mismatched fields (status_detail), NAP consistency flag, and priority. Also returns the canonical NAP for reference. fetch-blocked means the directory could not be read (bot block, captcha, timeout) and says nothing about whether the listing exists; only a human records missing. Use to identify directories where the listing has incorrect information or has not been verified.`,
       input_schema: {
         type: 'object',
         properties: {},

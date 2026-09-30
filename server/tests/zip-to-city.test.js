@@ -1,4 +1,4 @@
-const { zipToCity, ZIP_TO_CITY } = require('../utils/zip-to-city');
+const { zipToCity, ZIP_TO_CITY, cityAcceptedForZip } = require('../utils/zip-to-city');
 const { CITY_TO_LOCATION, resolveLocationFromCandidates, isOfficeCity } = require('../config/locations');
 const { REVIEW_GBP_BY_CITY } = require('../services/completion-defaults-resolver');
 
@@ -77,24 +77,43 @@ describe('zipToCity', () => {
   });
 });
 
+describe('cityAcceptedForZip community aliases', () => {
+  test('typed communities are accepted for the ZIP they share with the USPS primary', () => {
+    expect(cityAcceptedForZip('34219', 'Duette')).toBe(true);
+    expect(cityAcceptedForZip('33947', 'Rotonda West')).toBe(true);
+    expect(cityAcceptedForZip('34232', 'Lake Sarasota')).toBe(true);
+    expect(cityAcceptedForZip('34275', 'North Venice')).toBe(true);
+    expect(cityAcceptedForZip('34293', 'North Venice')).toBe(true);
+    expect(cityAcceptedForZip('34219', 'Venice')).toBe(false);
+  });
+});
+
 describe('resolveLocationFromCandidates', () => {
   test('uses the ZIP-derived city when there is no area (main-site 34219 lead)', () => {
     expect(resolveLocationFromCandidates(['', '', 'Parrish']).id).toBe('parrish');
   });
 
   test('an unmapped structured city falls through to the known source area', () => {
-    // The Codex regression: "Rotonda West" is not in CITY_TO_LOCATION; a bare
-    // resolveLocation('Rotonda West') would return Bradenton and shadow the
-    // Venice source area. The walker must skip it and use the area.
-    expect(resolveLocationFromCandidates(['Rotonda West', 'Venice', '']).id).toBe('venice');
+    // The Codex regression (originally "Rotonda West", mapped since 2026-09-30):
+    // an unmapped city passed to a bare resolveLocation() would return Bradenton
+    // and shadow the Venice source area. The walker must skip it and use the area.
+    expect(resolveLocationFromCandidates(['Arcadia', 'Venice', '']).id).toBe('venice');
   });
 
   test('a mapped structured city wins over the source area', () => {
     expect(resolveLocationFromCandidates(['Punta Gorda', 'Bradenton', '']).id).toBe('venice');
   });
 
+  test('typed customer communities route to their office, not the Bradenton default', () => {
+    expect(resolveLocationFromCandidates(['Duette', '', '']).id).toBe('parrish');
+    expect(resolveLocationFromCandidates(['Rotonda West', '', '']).id).toBe('venice');
+    expect(resolveLocationFromCandidates(['North Venice', '', '']).id).toBe('venice');
+    expect(resolveLocationFromCandidates(['Lake Sarasota', '', '']).id).toBe('sarasota');
+    expect(isOfficeCity('Duette')).toBe(true);
+  });
+
   test('falls back to the Bradenton default when nothing is routable', () => {
-    expect(resolveLocationFromCandidates(['Rotonda West', 'SW Florida', '']).id).toBe('bradenton');
+    expect(resolveLocationFromCandidates(['Arcadia', 'SW Florida', '']).id).toBe('bradenton');
   });
 });
 

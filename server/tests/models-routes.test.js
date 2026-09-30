@@ -124,6 +124,27 @@ describe('models registry — cross-provider routing', () => {
     expect(M.MODEL_CATALOG[M.PLANT_ID_REFEREE].requires).toBe('deep');
   });
 
+  test('lawnAssessmentReferee is a single-leg Anthropic route on Claude Fable at effort high (owner 2026-09-29), outside TEXT_POLICIES', () => {
+    const M = require('../config/models');
+    expect(M.ROUTES.lawnAssessmentReferee).toEqual({ provider: 'anthropic', model: M.LAWN_ASSESSMENT_REFEREE, effort: 'high' });
+    expect(M.LAWN_ASSESSMENT_REFEREE).toBe(process.env.MODEL_LAWN_ASSESSMENT_REFEREE || 'claude-fable-5-1');
+    expect(M.MODEL_CATALOG[M.LAWN_ASSESSMENT_REFEREE].requires).toBe('deep');
+  });
+
+  test('MODEL_LAWN_ASSESSMENT_REFEREE overrides only the lawn referee route', () => {
+    const saved = process.env.MODEL_LAWN_ASSESSMENT_REFEREE;
+    jest.resetModules();
+    process.env.MODEL_LAWN_ASSESSMENT_REFEREE = 'claude-fable-canary';
+    try {
+      const M = require('../config/models');
+      expect(M.ROUTES.lawnAssessmentReferee.model).toBe('claude-fable-canary');
+      expect(M.ROUTES.plantIdReferee.model).toBe(M.PLANT_ID_REFEREE);
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_LAWN_ASSESSMENT_REFEREE; else process.env.MODEL_LAWN_ASSESSMENT_REFEREE = saved;
+      jest.resetModules();
+    }
+  });
+
   test('MODEL_OPENAI_PLANT_ID and MODEL_PLANT_ID_REFEREE env overrides flow into the registry', () => {
     const savedOpenai = process.env.MODEL_OPENAI_PLANT_ID;
     const savedReferee = process.env.MODEL_PLANT_ID_REFEREE;

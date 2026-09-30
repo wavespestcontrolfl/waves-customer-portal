@@ -9,6 +9,7 @@ jest.mock('../services/llm/call', () => ({ ...jest.requireActual('../services/ll
 jest.mock('knex', () => jest.fn());
 jest.mock('../services/photos', () => ({ getPhotoBase64: jest.fn() }));
 
+const MODELS = require('../config/models');
 const evalLib = require('../services/eval/lawn-visit-assessment-eval');
 const { PROMPT_VERSION, PROMPT_DIGEST } = require('../services/lawn-visit-input');
 
@@ -111,6 +112,10 @@ describe('scoring', () => {
     expect(evalLib.costUsd('gemini-3.8-flash', { input_tokens: 1_000_000, output_tokens: 500_000, reasoning_tokens: 500_000 })).toBe(0.75 + 3.75);
     expect(evalLib.costUsd('gpt-6-astra', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(1.5); // reasoning not billed twice
     expect(evalLib.costUsd('mystery', { input_tokens: 1 })).toBeNull();
+    // Anthropic cache writes/reads sit outside input_tokens and are priced on top (Codex #5362 r2).
+    expect(evalLib.costUsd(MODELS.DEFAULTS.LAWN_ASSESSMENT_REFEREE, { input_tokens: 100_000, output_tokens: 10_000, cache_write_tokens: 100_000, cached_input_tokens: 1_000_000 })).toBe(3);
+    expect(evalLib.costUsd('gpt-6-sol', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(0.3);
+    expect(evalLib.costUsd('claude-fable-5-1', { input_tokens: 100_000, output_tokens: 10_000 })).toBe(1.5);
     expect(evalLib.costUsd('gpt-6-astra', null)).toBeNull();
     // A usage object with null counts (provider omitted its metadata) is an unknown charge, never $0.
     expect(evalLib.costUsd('gpt-6-astra', { input_tokens: null, output_tokens: null, reasoning_tokens: null })).toBeNull();
@@ -140,6 +145,15 @@ describe('scoring', () => {
     expect(r.costUsd).toBe(0.0255); // (9000 × 0.75 + 5000 × 3.75) / 1e6, reasoning billed as output
     expect(r.findings).toHaveLength(2);
     expect(r.findings[1]).toMatchObject({ can_determine: false, cannot_determine_reason: 'no close-up' });
+  });
+
+  test('naming discipline follows a settled referee tie-break, not the pre-referee answer (Codex #5362 r4)', () => {
+    const answer = analysis({ raw: { findings: [{ finding_id: 'model-1', name: 'Chinch bug damage', confidence: 'high', photo_refs: [], can_determine: true }] } });
+    expect(evalLib.scoreResult(testCase, answer).causeNamedBelowModerate).toEqual([]);
+    const settled = { ...answer, referee: { outcome: 'settled', adjustedFindings: [{ finding_id: 'model-1', name: 'Brown patch', confidence: 'low', photo_refs: [], can_determine: true }] } };
+    expect(evalLib.scoreResult(testCase, settled).causeNamedBelowModerate).toEqual([
+      expect.objectContaining({ name: 'Brown patch', confidence: 'low' }),
+    ]);
   });
 
   test('naming discipline uses raw confidence while reported findings retain the evidence gate', () => {
@@ -208,6 +222,14 @@ describe('scoring', () => {
       { reason: 'no_key' }, { reason: 'no_route' }, { reason: 'unsupported_pdf_provider' },
       { reason: 'timeout_budget_exhausted' }, { reason: 'unknown_provider_example' },
     ] })).toEqual([]);
+    // A referee leg that failed before dispatch (no key) was never billed (Codex #5362 r1).
+    expect(evalLib.billedLegs({ status: 'unavailable', failures: [], referee: {
+      secondOpinion: { called: true, model: 'gpt-6-sol', reason: 'no_key', usage: null },
+      triggered: true, referee: { model: 'claude-fable-model', reason: 'no_key' }, usage: null,
+    } })).toEqual([]);
+    expect(evalLib.billedLegs({ status: 'unavailable', failures: [], referee: {
+      secondOpinion: { called: true, model: 'gpt-6-sol', reason: 'timeout', usage: null },
+    } })).toHaveLength(1);
   });
 
   test('summary: MAE + bias per metric, undeterminable and unavailable rates, provider mix, percentiles, cost, repeat variance', () => {

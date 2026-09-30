@@ -708,11 +708,12 @@ const asList = (value) => (Array.isArray(value) ? value : []);
 // ordinary dot access instead of a repeated chain of `?.`s (kept complexity
 // low; split out of plantReadFactsFromResult for the same reason
 // answerName() is split out of readFactsFromContract above).
-// Which engine made a claimed read: the plant read keeps an engine marker in
-// read_result from its claim on; a claimed row without one is the pest
-// read's. Unclaimed rows (none / unsupported) have no origin.
+// Which engine made a claimed read: the plant and combo reads keep an engine
+// marker in read_result from their claim on; a claimed row without one is the
+// pest read's. Unclaimed rows (none / unsupported) have no origin.
 function readOrigin(readStatus, plantResult) {
   if (!['pending', 'done', 'failed'].includes(readStatus)) return null;
+  if (plantResult && plantResult.engine === 'combo') return 'combo';
   return plantResult && (plantResult.engine === 'plant' || plantResult.v2) ? 'plant' : 'pest';
 }
 
@@ -806,9 +807,10 @@ async function finalStopSnapshot(svc, conn, needPest, needPlant) {
       : true;
     // Sibling of stillPest for GATE_VISIT_PREP_PLANT_READ — 'lawn' |
     // 'tree_shrub' | null, so a stop reclassified away from a plant subject
-    // (or into a pest one, which owns the read instead) never shows a
-    // stale plant read (Codex-#5305-r16/r17-style freshness, applied to
-    // the plant sibling).
+    // never shows a stale plant read (Codex-#5305-r16/r17-style freshness,
+    // applied to the plant sibling). A pest part does NOT hide the plant
+    // subject: a combined Lawn & Pest stop (owner ruling 2026-09-30) shows
+    // both notes.
     const plantSubject = needPlant
       ? await require('./visit-prep-plant-applicability').subjectForMembers([...current], c)
       : null;
@@ -824,7 +826,8 @@ async function finalStopSnapshot(svc, conn, needPest, needPlant) {
 // live. Each engine's kill switch hides its stored reads too (Codex #5305 r1
 // P1). A claimed read (pending/done/failed) is shown only by the engine that
 // made it, and only while the stop still suits that engine and, for a plant
-// read, that subject (lawn vs tree_shrub; Codex #5320 r1/r3). An unclaimed
+// read, that subject; a combined Lawn & Pest read shows each of its two notes
+// under the same rule (lawn vs tree_shrub; Codex #5320 r1/r3). An unclaimed
 // row on a stop a live engine suits hasn't been read YET, so an
 // 'unsupported' written by the other engine is served as 'none' and the
 // panel keeps polling (Codex #5320 r3 P2). Otherwise 'unsupported'.
@@ -839,11 +842,41 @@ function servedRead(s, ctx) {
   return read;
 }
 
+// The combined (Lawn & Pest) read's brief entry: BOTH notes, each shown only
+// while its own gate is live and the stop still has that part, each only if
+// that part produced a result (a partial combo shows the part that worked and
+// stays quiet on the other). `read.kind` is 'combo'; `pest` / `plant` are the
+// same fixed-field shapes a pest-only / plant-only read carries, or null.
+const doneFacts = (facts) => (facts && facts.status === 'done' ? facts : null);
+
+function comboPestNote(s, ctx, result) {
+  if (!(ctx.readsLive && ctx.stillPest) || result?.pest?.status !== 'done' || !s.read_ref) return null;
+  return doneFacts(readFactsFromContract('done', ctx.contractsByRef.get(s.read_ref)));
+}
+
+function comboPlantNote(ctx, result) {
+  const plantOk = ctx.plantReadsLive && ctx.plantSubject && (!result?.subject_type || result.subject_type === ctx.plantSubject);
+  if (!plantOk || result?.plant?.status !== 'done' || !result.plant.v2) return null;
+  return doneFacts(plantReadFactsFromResult('done', { v2: result.plant.v2, subject_type: result.subject_type }));
+}
+
+function comboReadFacts(s, ctx, shownStatus, result) {
+  const pestOk = ctx.readsLive && ctx.stillPest;
+  const plantOk = ctx.plantReadsLive && ctx.plantSubject && (!result?.subject_type || result.subject_type === ctx.plantSubject);
+  if (!pestOk && !plantOk) return { status: 'unsupported' };
+  if (shownStatus !== 'done') return { status: shownStatus };
+  const pest = comboPestNote(s, ctx, result);
+  const plant = comboPlantNote(ctx, result);
+  if (!pest && !plant) return { status: 'failed' };
+  return { status: 'done', kind: 'combo', pest, plant };
+}
+
 function servedReadLine(s, ctx) {
   const status = effectiveReadStatus(s.read_status || 'none', s.created_at, Date.now(), s.read_claimed_at);
   const plantResult = s.read_result ? parseJsonMaybe(s.read_result) : null;
   const origin = readOrigin(s.read_status, plantResult);
   const shownStatus = !origin && status === 'unsupported' ? 'none' : status;
+  if (origin === 'combo') return comboReadFacts(s, ctx, shownStatus, plantResult);
   if (ctx.readsLive && ctx.stillPest && origin !== 'plant') {
     return readFactsFromContract(shownStatus, s.read_ref ? ctx.contractsByRef.get(s.read_ref) : null);
   }

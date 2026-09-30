@@ -825,7 +825,10 @@ router.put('/citations/:id', requireAdmin, async (req, res, next) => {
   try {
     await CitationAuditor.updateCitation(req.params.id, req.body);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.code === 'INVALID_CITATION_UPDATE') return res.status(400).json({ error: err.message });
+    next(err);
+  }
 });
 
 // Conversion Funnel
