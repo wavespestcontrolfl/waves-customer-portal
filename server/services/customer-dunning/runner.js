@@ -136,7 +136,7 @@ const markAtRisk = async (run) => {
   if (!(Followups.ladderThrough90Live() && process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true')) return;
   if (!FINAL_STEP_IDS.includes(run.step.id)) return;
   try {
-    await Followups.markAtRiskForLongOverdue(run.schedule.customer_id);
+    await Followups.markAtRiskForLongOverdue(run.schedule.customer_id, run.database);
   } catch (err) {
     logger.warn(`[customer-dunning] at-risk stamp failed for customer ${run.schedule.customer_id}: ${err.message}`);
   }
@@ -199,7 +199,7 @@ async function decideRecovery(run) {
   let progress;
   try {
     // The shadow run reads the same view but must not repair (stamp) anything.
-    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, run.readOnly ? { repair: false } : undefined);
+    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, { database: run.database, ...(run.readOnly ? { repair: false } : {}) });
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${err.message}`);
     return decision('hold', 'progress_unreadable');
@@ -223,7 +223,7 @@ async function decideRecovery(run) {
 async function decideAutopay(run) {
   let onAutopay;
   try {
-    onAutopay = await customerOnAutopay(run.customer, { failClosed: true });
+    onAutopay = await customerOnAutopay(run.customer, { failClosed: true, db: run.database, now: run.now });
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — autopay state unreadable: ${err.message}`);
     return decision('hold', 'autopay_unreadable');
@@ -350,6 +350,7 @@ function attemptSend(run, set) {
     channels: run.sendChannels,
     metadata: run.snapshotMeta,
     send: makeSender(ctx),
+    database: run.database,
   });
 }
 
@@ -377,7 +378,7 @@ async function sendWithRerender(run, set) {
 async function deliveryFacts(run, result) {
   let event = null;
   try {
-    const progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.sendChannels);
+    const progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.sendChannels, { database: run.database });
     event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
   } catch (err) {
     logger.warn(`[customer-dunning] post-send progress unreadable for schedule ${run.schedule.id}: ${err.message}`);
@@ -514,7 +515,7 @@ async function decideShadowPolicy(run, set) {
   const memberIds = set.members.map((m) => m.invoice_id);
   const verdicts = await reminderPolicyVerdicts({
     customerId: run.schedule.customer_id, invoiceId: null, invoiceIds: memberIds, policyInvoiceIds: memberIds,
-    source: SOURCE, purpose: 'late_payment', entries: event?.entries || [],
+    source: SOURCE, purpose: 'late_payment', entries: event?.entries || [], database: run.database,
   }, pending);
   if (verdicts.some((v) => v?.balanceIncomplete)) return decision('hold', 'COLLECTIONS_POLICY', { denied: pending });
   const denied = pending.filter((_c, i) => !verdictAllows(verdicts[i]));

@@ -79,7 +79,7 @@ async function sendTextLeg(ctx, channel, ledger) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, code: 'REMINDER_PREPARATION_FAILED' };
   }
   if (!body) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_UNAVAILABLE' };
-  const boundary = Boundary.check(ctx.snapshot);
+  const boundary = Boundary.check(ctx.snapshot, { database: ctx.database });
   return sendCustomerMessage({
     to: channel === 'sms' ? customer.phone : null,
     body,
@@ -119,12 +119,12 @@ async function sendTextLeg(ctx, channel, ledger) {
  * the retryable refusal, the tagged throw aborts the dispatch, and the outcome is
  * the same `{ ok: false }` the normal authority returns.
  */
-function boundaryOnlyHandoff(snapshot, state) {
-  const check = Boundary.check(snapshot);
+function boundaryOnlyHandoff(snapshot, state, database = db) {
+  const check = Boundary.check(snapshot, { database });
   const refuse = (verdict) => blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
   return async (dispatch) => {
     try {
-      return await withCustomerCommsLock(db, snapshot.customerId, async (trx) => {
+      return await withCustomerCommsLock(database, snapshot.customerId, async (trx) => {
         const verdict = await check({ database: trx });
         if (verdict.ok !== true) {
           state.boundaryBlock = refuse(verdict);
@@ -163,12 +163,12 @@ const AUTHORITY_INPUT = (customerId) => ({
 });
 
 function emailHandoff(ctx, to, templateKey, state) {
-  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state);
+  if (ctx.operatorInitiated) return boundaryOnlyHandoff(ctx.snapshot, state, ctx.database || db);
   return (dispatch) => dispatchUnderBillingEmailAuthority({
     input: AUTHORITY_INPUT(ctx.customer.id),
     recipientEmail: to,
     templateKey,
-    preSendCheck: Boundary.check(ctx.snapshot),
+    preSendCheck: Boundary.check(ctx.snapshot, { database: ctx.database }),
     dispatch,
     state,
   });
@@ -183,7 +183,7 @@ function emailHandoff(ctx, to, templateKey, state) {
 async function stampNeverContacted(ledger, on, database = db) {
   try {
     if (on) {
-      await ContactLedger.markSendFailed(ledger, { never_contacted: true });
+      await ContactLedger.markSendFailed(ledger, { never_contacted: true }, { database });
     } else {
       // jsonb_exists, not the `?` operator: knex reads a bare `?` as a binding.
       await database('collections_contact_ledger').where({ id: ledger.id })
@@ -199,8 +199,8 @@ async function stampNeverContacted(ledger, on, database = db) {
 
 async function resolveEmailRecipient(ctx) {
   return ctx.operatorInitiated
-    ? operatorEmailRecipient(ctx.customer, 'customer-dunning')
-    : billingEmailRecipient(AUTHORITY_INPUT(ctx.customer.id), 'customer-dunning');
+    ? operatorEmailRecipient(ctx.customer, 'customer-dunning', ctx.database)
+    : billingEmailRecipient(AUTHORITY_INPUT(ctx.customer.id), 'customer-dunning', ctx.database);
 }
 
 async function deliverEmail(ctx, ledger, { recipient, to }) {
@@ -241,7 +241,7 @@ async function deliverEmail(ctx, ledger, { recipient, to }) {
 async function sendEmailLeg(ctx, ledger) {
   // Every attempt starts clean: an earlier refusal's stamp must not outlive a
   // retry that reaches the customer, whatever the channel selection.
-  const cleared = await stampNeverContacted(ledger, false);
+  const cleared = await stampNeverContacted(ledger, false, ctx.database);
   // A stale flag that cannot be removed would leave a DELIVERED row excluded from
   // the collections frequency window for good: do not send. A definite,
   // retryable non-send, like any other failure before the provider.
@@ -254,7 +254,7 @@ async function sendEmailLeg(ctx, ledger) {
   // non-send (retryable refusal or a provider/preparation failure), not a
   // terminal refusal, used no frequency window.
   const notSent = result?.deliveryOutcome === 'not_sent' && !isTerminalEmailRefusal(result);
-  if (!ctx.explicit && notSent) await stampNeverContacted(ledger, true);
+  if (!ctx.explicit && notSent) await stampNeverContacted(ledger, true, ctx.database);
   return result;
 }
 

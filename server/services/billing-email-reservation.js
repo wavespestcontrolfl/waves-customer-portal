@@ -195,30 +195,67 @@ function boundToDunningReservation(message, row, identity) {
     && String(payloadOf(message).collections_ledger_id || '') === String(row.id);
 }
 
-async function stampCustomerDunningEmailDelivered(message, row, identity, database) {
+// What a bound customer-dunning email row proves about its send:
+//   accepted  the provider took it (delivered)
+//   terminal  the library durably refused it for a suppression (resolve the leg)
+//   unsent    a definite non-send: aborted before the provider or refused by it, with no
+//             provider retry scheduled (reopen the reservation for a retry)
+//   null      in flight or uncertain (a started handoff, a queued row): stays held
+// The "unsent" phases are the template library's own (providerRetryDefinitelyUnsent).
+function dunningEmailVerdict(message) {
+  if (hasAcceptedEvidence(message)) return 'accepted';
+  const status = String(message.status || '').toLowerCase();
+  if (status === 'blocked' && /^Suppressed: /.test(String(message.error_message || ''))) return 'terminal';
+  if (status !== 'failed' || message.provider_retry_next_at) return null;
+  const phase = String(message.provider_handoff_phase || '').toLowerCase();
+  const attempt = String(message.send_attempt_token || '');
+  if (['pending', 'rejected'].includes(phase)) return attempt && attempt === String(message.provider_handoff_attempt_token || '') ? 'unsent' : null;
+  if (phase || message.provider_handoff_attempt_token) return null;
+  const legacy = String(message.error_message || '');
+  return legacy === 'provider_handoff_pending' || legacy.startsWith('Provider request not started: ') ? 'unsent' : null;
+}
+
+const DUNNING_OUTCOME_PATCH = Object.freeze({
+  terminal: { resolved: true, resolution: 'email_terminal_refusal' },
+  unsent: { code: 'email_not_sent' },
+});
+
+async function stampCustomerDunningEmail(message, row, identity, verdict, database) {
   try {
     return await database.transaction(async (trx) => {
       const query = trx('email_messages').where({ id: message.id });
       if (message.send_attempt_token == null) query.whereNull('send_attempt_token');
       else query.where({ send_attempt_token: message.send_attempt_token });
       const current = await query.forUpdate().first();
-      if (!current || !hasAcceptedEvidence(current) || !boundToDunningReservation(current, row, identity)) return false;
-      const occurredAt = storedEmailAcceptedAt(current);
-      const stamped = await ContactLedger.markDelivered({ id: row.id }, {
-        database: trx,
-        match: { customerId: row.customer_id, channel: 'email', source: DunningKeys.SOURCE, notificationEventKey: metadataOf(row).notificationEventKey },
-        ...(occurredAt ? { occurredAt } : {}),
-      });
-      if (!stamped) throw new Error('accepted reservation was not stamped');
+      if (!current || dunningEmailVerdict(current) !== verdict || !boundToDunningReservation(current, row, identity)) return false;
+      const match = { customerId: row.customer_id, channel: 'email', source: DunningKeys.SOURCE, notificationEventKey: metadataOf(row).notificationEventKey };
+      let stamped;
+      if (verdict === 'accepted') {
+        const occurredAt = storedEmailAcceptedAt(current);
+        stamped = await ContactLedger.markDelivered({ id: row.id }, { database: trx, match, ...(occurredAt ? { occurredAt } : {}) });
+      } else {
+        stamped = await ContactLedger.markSendFailed({ id: row.id }, DUNNING_OUTCOME_PATCH[verdict], { database: trx, match });
+      }
+      if (!stamped) throw new Error('reservation outcome was not stamped');
       return true;
     });
   } catch (err) {
-    logger.warn(`[billing-email-reservation] customer dunning delivered stamp failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] customer dunning reservation stamp failed: ${err.message}`);
     return false;
   }
 }
 
-async function repairAcceptedCustomerDunningEmails(rows, database, { readOnly = false } = {}) {
+// Bound evidence of a definite non-send reopens (or resolves) the reservation, so a
+// worker that died between the email row and recordLegOutcome does not leave it
+// neither retryable nor resolved for good. Reflected in the loaded row either way
+// (a read-only view too: the caller's pass sees the verdict, nothing is written).
+function reflectDunningOutcome(row, verdict) {
+  row.metadata = { ...metadataOf(row), send_failed: true, ...(verdict === 'terminal' ? DUNNING_OUTCOME_PATCH.terminal : {}) };
+}
+
+// The customer-dunning Email reservations neither delivered nor resolved, by the
+// idempotency key their email row carries.
+function unsettledDunningReservations(rows) {
   const pending = new Map();
   for (const row of rows || []) {
     const metadata = metadataOf(row);
@@ -226,18 +263,28 @@ async function repairAcceptedCustomerDunningEmails(rows, database, { readOnly = 
     const identity = customerDunningEmailIdentity(metadata.notificationEventKey);
     if (identity) pending.set(identity.idempotencyKey, { row, identity });
   }
+  return pending;
+}
+
+async function repairAcceptedCustomerDunningEmails(rows, database, { readOnly = false } = {}) {
+  const pending = unsettledDunningReservations(rows);
   const repaired = new Set();
   if (!pending.size) return repaired;
   try {
     const messages = await database('email_messages').whereIn('idempotency_key', [...pending.keys()]);
     for (const message of messages) {
       const hit = pending.get(message.idempotency_key);
-      if (!hit || !hasAcceptedEvidence(message) || !boundToDunningReservation(message, hit.row, hit.identity)) continue;
-      if (readOnly) { repaired.add(String(hit.row.id)); continue; }
-      if (await stampCustomerDunningEmailDelivered(message, hit.row, hit.identity, database)) repaired.add(String(hit.row.id));
+      const verdict = hit && dunningEmailVerdict(message);
+      if (!verdict || !boundToDunningReservation(message, hit.row, hit.identity)) continue;
+      // Already reopened: nothing to write for a definite non-send.
+      if (verdict === 'unsent' && metadataOf(hit.row).send_failed === true) continue;
+      const written = readOnly || await stampCustomerDunningEmail(message, hit.row, hit.identity, verdict, database);
+      if (!written) continue;
+      if (verdict === 'accepted') repaired.add(String(hit.row.id));
+      else reflectDunningOutcome(hit.row, verdict);
     }
   } catch (err) {
-    logger.warn(`[billing-email-reservation] customer dunning accepted-evidence repair failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] customer dunning evidence repair failed: ${err.message}`);
   }
   return repaired;
 }

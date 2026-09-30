@@ -79,12 +79,17 @@ async function scheduleStillOurs(snapshot, database) {
     && !!row.touch_claimed_at && new Date(row.touch_claimed_at).getTime() === snapshot.claimStamp;
 }
 
-/** @returns {(opts?: { database?: object }) => Promise<{ok: boolean, code?: string, reason?: string, retryable?: boolean}>} */
-function check(snapshot) {
+/**
+ * `defaultDatabase` is the handle a hook that holds no transaction (the SMS
+ * hook) reads through — the run's own handle, else the pool.
+ * @returns {(opts?: { database?: object }) => Promise<{ok: boolean, code?: string, reason?: string, retryable?: boolean}>}
+ */
+function check(snapshot, { database: defaultDatabase = null } = {}) {
   return async ({ database } = {}) => {
+    const handle = database || defaultDatabase || db;
     try {
-      if (snapshot.scheduleId && !await scheduleStillOurs(snapshot, database || db)) return scheduleRefusal();
-      const live = await resolveDunnableSet(snapshot.customerId, { database: database || db });
+      if (snapshot.scheduleId && !await scheduleStillOurs(snapshot, handle)) return scheduleRefusal();
+      const live = await resolveDunnableSet(snapshot.customerId, { database: handle });
       return sameSet(live, snapshot) ? { ok: true } : refusal();
     } catch (err) {
       logger.warn(`[customer-dunning] boundary re-check failed for customer ${snapshot.customerId}: ${err.message}`);

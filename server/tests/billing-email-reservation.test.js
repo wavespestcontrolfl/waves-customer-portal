@@ -240,3 +240,80 @@ describe('readOnly view (the customer-dunning shadow run): accepted evidence cou
     expect(JSON.stringify(row)).toBe(before);
   });
 });
+
+describe('customer-dunning definite non-send evidence (R4-3)', () => {
+  const eventKey = 'customer-dunning:sched-1:2:d60_reminder';
+  const row = () => ({ id: 'ledger-9', customer_id: 'customer-1', channel: 'email', source: 'invoice_followups_customer',
+    metadata: JSON.stringify({ notificationEventKey: eventKey }) });
+  const email = (over = {}) => ({
+    id: 'message-9', idempotency_key: 'customer_dunning_email:sched-1:2:d60_reminder', trigger_event_id: 'customer_dunning:sched-1:2:d60_reminder',
+    recipient_type: 'customer', recipient_id: 'customer-1', template_key: 'invoice.followup_combined_60_day',
+    payload_snapshot: JSON.stringify({ collections_ledger_id: 'ledger-9' }), send_attempt_token: 'tok-1', sent_at: null, ...over,
+  });
+  const suppressed = { status: 'blocked', error_message: 'Suppressed: bounce (transactional_required)' };
+  const rejected = { status: 'failed', error_message: 'SendGrid 400', provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'tok-1' };
+  // one handle serving the scan and the locked re-read
+  const handle = (message) => {
+    const locked = { where: jest.fn(() => locked), whereNull: jest.fn(() => locked), forUpdate: jest.fn(() => locked), first: jest.fn(async () => message) };
+    const trx = jest.fn(() => locked);
+    const database = jest.fn(() => ({ whereIn: jest.fn(async () => [message]) }));
+    database.transaction = jest.fn(async (callback) => callback(trx));
+    return { database, trx };
+  };
+  const match = { customerId: 'customer-1', channel: 'email', source: 'invoice_followups_customer', notificationEventKey: eventKey };
+
+  test('a suppression-blocked row resolves the reservation as a terminal refusal (never delivered) and is reflected in the loaded row', async () => {
+    const { database, trx } = handle(email(suppressed));
+    const loaded = row();
+    const repaired = await Reservation.repairAcceptedBillingEmailReservations([loaded], database);
+    expect(repaired.size).toBe(0);
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith({ id: 'ledger-9' }, { resolved: true, resolution: 'email_terminal_refusal' }, { database: trx, match });
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(loaded.metadata).toMatchObject({ send_failed: true, resolved: true, resolution: 'email_terminal_refusal' });
+  });
+
+  test('a definite pre-provider / rejected failure reopens the reservation (send_failed), and is a no-op when it already is', async () => {
+    const { database, trx } = handle(email(rejected));
+    const loaded = row();
+    await Reservation.repairAcceptedBillingEmailReservations([loaded], database);
+    expect(ContactLedger.markSendFailed).toHaveBeenCalledWith({ id: 'ledger-9' }, { code: 'email_not_sent' }, { database: trx, match });
+    expect(loaded.metadata).toMatchObject({ send_failed: true });
+    expect(loaded.metadata.resolved).toBeUndefined();
+    ContactLedger.markSendFailed.mockClear();
+    const reopened = { ...row(), metadata: JSON.stringify({ notificationEventKey: eventKey, send_failed: true }) };
+    await Reservation.repairAcceptedBillingEmailReservations([reopened], handle(email(rejected)).database);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['queued', { status: 'queued', provider_handoff_phase: 'pending', provider_handoff_attempt_token: 'tok-1' }],
+    ['failed after the handoff started', { status: 'failed', provider_handoff_phase: 'started', provider_handoff_attempt_token: 'tok-1' }],
+    ['failed with a provider retry scheduled', { ...rejected, provider_retry_next_at: new Date() }],
+    ['rejected phase of another attempt', { ...rejected, provider_handoff_attempt_token: 'tok-2' }],
+    ['blocked for a reason that is not a suppression', { status: 'blocked', error_message: 'aborted' }],
+    ['a legacy pending marker without tokens', { status: 'queued', error_message: 'provider_handoff_pending' }],
+  ])('%s: uncertain, nothing written', async (_name, over) => {
+    const { database } = handle(email(over));
+    await Reservation.repairAcceptedBillingEmailReservations([row()], database);
+    expect(database.transaction).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+  });
+
+  test('evidence not bound to this reservation (another ledger row, another customer) is ignored', async () => {
+    for (const over of [{ payload_snapshot: JSON.stringify({ collections_ledger_id: 'ledger-other' }) }, { recipient_id: 'customer-2' }]) {
+      const { database } = handle(email({ ...suppressed, ...over }));
+      await Reservation.repairAcceptedBillingEmailReservations([row()], database);
+      expect(database.transaction).not.toHaveBeenCalled();
+    }
+  });
+
+  test('readOnly reports the verdict in the loaded row and writes nothing', async () => {
+    const { database } = handle(email(suppressed));
+    const loaded = row();
+    await Reservation.repairAcceptedBillingEmailReservations([loaded], database, { readOnly: true });
+    expect(database.transaction).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(loaded.metadata).toMatchObject({ resolved: true, send_failed: true });
+  });
+});

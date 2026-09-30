@@ -141,13 +141,16 @@ jest.mock('../models/db', () => {
         return 1;
       },
       first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : table === 'collections_contact_ledger' ? mockLedger.find((r) => r.id === target) : undefined),
-      then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred) : []),
+      // copies, as a real query returns: an in-memory view change (a repair's reflected verdict) never edits the stored row
+      then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred).map((r) => ({ ...r, metadata: { ...r.metadata } })) : []),
     };
     return chain;
   });
   fake.tables = [];
   fake.raw = jest.fn((sql) => ({ __raw: sql }));
   fake.fn = { now: () => 'now' };
+  // The ledger / schedule behaviour, kept so the injected handle can serve it while the DEFAULT pool is poisoned in a test.
+  fake.implementation = fake.getMockImplementation();
   return fake;
 });
 
@@ -219,13 +222,18 @@ function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-
   prefs = undefined; // legacy: no explicit billing channels
   smsTemplateRow = { is_active: true };
   interactions = [];
+  const served = require('../models/db').implementation;
   fakeDb = jest.fn((table) => {
+    // the ledger and the schedule row are served by the same in-memory tables the default handle serves
+    if (table === 'collections_contact_ledger' || table === 'customer_dunning_schedules') return served(table);
     const q = { insertedRow: null };
     q.where = () => q;
     q.first = async () => (table === 'customers' ? customer : table === 'notification_prefs' ? prefs : table === 'sms_templates' ? smsTemplateRow : undefined);
     q.insert = async (row) => { if (table === 'customer_interactions') interactions.push(row); };
     return q;
   });
+  fakeDb.raw = jest.fn((sql) => ({ __raw: sql }));
+  fakeDb.fn = { now: () => 'now' };
   schedule = {
     id: SCHEDULE_ID, customer_id: CUSTOMER_ID, episode: 1, status: stepStatus, step_index: stepIndex,
     next_touch_at: ago(0), touches_sent: stepIndex, held_since: null, hold_alerted_at: null, link_digest: null, link_url: null,
@@ -247,11 +255,23 @@ function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-
 }
 
 
+// Makes the nth access to the ledger table on the RUN'S handle throw. The runner reads and writes
+// the ledger only through the handle it was given, so this is where its failures are injected.
+function failLedgerAccess(nth, message = 'ledger down') {
+  const impl = fakeDb.getMockImplementation();
+  let n = 0;
+  fakeDb.mockImplementation((table) => {
+    if (table === 'collections_contact_ledger') { n += 1; if (n === nth) throw new Error(message); }
+    return impl(table);
+  });
+}
+
 // A read handle for the shadow run: serves the same customer / prefs / template
 // rows the live guards read, the given open schedules, and records any write.
 function shadowDb(schedules = []) {
   const writes = [];
   const database = jest.fn((table) => {
+    if (table === 'collections_contact_ledger') return require('../models/db').implementation(table);
     const q = {};
     q.where = () => q; q.whereIn = () => q; q.select = () => q;
     q.first = async () => (table === 'customers' ? customer : table === 'notification_prefs' ? prefs : table === 'sms_templates' ? smsTemplateRow : undefined);
@@ -283,8 +303,11 @@ function acceptingSms(overrides = {}) {
 const mockEmailMessages = [];
 function acceptingEmail() {
   mockSendTemplate.mockImplementation(async (args) => {
-    const existing = mockEmailMessages.find((m) => m.idempotency_key === args.idempotencyKey);
+    const existing = mockEmailMessages.find((m) => m.idempotency_key === args.idempotencyKey && m.sent_at);
     if (existing) return { sent: true, deduped: true, message: existing };
+    // a definitely-unsent row under the key is reclaimed by the retry, as the library does
+    const stale = mockEmailMessages.findIndex((m) => m.idempotency_key === args.idempotencyKey);
+    if (stale >= 0) mockEmailMessages.splice(stale, 1);
     let dispatched = false;
     // The library's provider work: asynchronous preparation (markers, link
     // guard), then the caller's final boundary check, then the request.
@@ -411,8 +434,7 @@ describe('recover first (B-10, B-12, B-20, A-8)', () => {
   });
 
   test('a transient failure reading delivery progress holds the schedule; it never re-routes to a fresh send', async () => {
-    const db = require('../models/db');
-    db.mockImplementationOnce(() => { throw new Error('ledger down'); }); // reminderProgress' ledger read
+    failLedgerAccess(1); // reminderProgress' ledger read
     const out = await run();
     expect(out).toMatchObject({ outcome: 'held', reason: 'progress_unreadable' });
     expect(mockSendMessage).not.toHaveBeenCalled();
@@ -681,11 +703,7 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
         metadata: { notificationEventKey: key, delivered: true, selectedChannels: ['email', 'sms'] },
       });
       smsBlocked({ code: 'OUTSIDE_SEND_WINDOW', retryable: true, deferred: true });
-      const db = require('../models/db');
-      const impl = db.getMockImplementation();
-      db.mockImplementationOnce(impl); // recover-first read
-      db.mockImplementationOnce(impl); // sendReminderChannels' read
-      db.mockImplementationOnce(() => { throw new Error('ledger down'); }); // the post-send read
+      failLedgerAccess(3); // recover-first (1), sendReminderChannels (2); the post-send read (3) fails
       const out = await run();
       expect(out.outcome).toBe('told');
       expect(Schedule.markTold).toHaveBeenCalledTimes(1);
@@ -905,10 +923,8 @@ describe('never_contacted must be cleared before a retry sends (R3-2)', () => {
     await run();
     expect(rowFor('email').metadata.never_contacted).toBe(true);
 
-    const db = require('../models/db');
-    const impl = db.getMockImplementation();
-    // reads: recover-first progress (1), sendReminderChannels' progress (2); the clear (3) fails
-    db.mockImplementationOnce(impl); db.mockImplementationOnce(impl); db.mockImplementationOnce(() => { throw new Error('ledger update down'); });
+    // ledger accesses: recover-first progress (1), sendReminderChannels' progress (2); the clear (3) fails
+    failLedgerAccess(3, 'ledger update down');
     mockSendTemplate.mockClear();
     const out = await run();
     expect(out.outcome).toBe('held');
@@ -925,9 +941,7 @@ describe('never_contacted must be cleared before a retry sends (R3-2)', () => {
 
   test('a failed clear with NO stale flag on the row does not block the send', async () => {
     customer.phone = null;
-    const db = require('../models/db');
-    const impl = db.getMockImplementation();
-    db.mockImplementationOnce(impl); db.mockImplementationOnce(impl); db.mockImplementationOnce(() => { throw new Error('ledger update down'); });
+    failLedgerAccess(3, 'ledger update down');
     expect((await run()).outcome).toBe('advanced');
     expect(mockSendTemplate).toHaveBeenCalledTimes(1);
   });
@@ -1008,6 +1022,156 @@ describe('a changed set is planned again before the second attempt (R3-3)', () =
   });
 });
 
+describe('every helper in the runner path uses the injected handle, never the default pool (R4 sweep)', () => {
+  const logger = require('../services/logger');
+  const defaultPool = require('../models/db');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  // Any use of the process-wide pool throws. Everything the run reaches for must ride the handle it was given.
+  const withPoolPoisoned = async (fn) => {
+    defaultPool.mockImplementation(() => { throw new Error('the default pool was used'); });
+    try { await fn(); } finally { defaultPool.mockImplementation(defaultPool.implementation); }
+  };
+
+  test('the poison is real (a sanity check on the test itself)', async () => {
+    await withPoolPoisoned(async () => { expect(() => defaultPool('collections_contact_ledger')).toThrow('the default pool was used'); });
+  });
+
+  test('LIVE: a full touch (recover, autopay, set, policy, reservations, send, stamps, advance) touches only the run\'s handle', async () => {
+    await withPoolPoisoned(async () => {
+      expect((await run()).outcome).toBe('advanced');
+    });
+    // the mocked helpers were handed the handle explicitly
+    for (const fn of ['recordContact']) expect(ContactLedger[fn]).toHaveBeenCalledWith(expect.objectContaining({ database: fakeDb }));
+    expect(ContactLedger.claimAttempt.mock.calls.every((c) => c[2]?.database === fakeDb)).toBe(true);
+    expect(ContactLedger.markDelivered.mock.calls.every((c) => c[1]?.database === fakeDb)).toBe(true);
+    expect(mockOnAutopay).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ db: fakeDb, now: NOW }));
+    expect(mockPolicy.mock.calls.every(([a]) => a.database === fakeDb)).toBe(true);
+    expect(mockResolve.mock.calls.filter(([, o]) => o?.now).every(([, o]) => o.database === fakeDb)).toBe(true);
+    expect(mockLoadContext).toHaveBeenCalledWith(expect.anything(), fakeDb);
+    expect(mockLoadTemplate.mock.calls.every((c) => c[1] === fakeDb)).toBe(true);
+    expect(Schedule.claim.mock.calls.every((c) => c[2].database === fakeDb)).toBe(true);
+    expect(Schedule.advance.mock.calls[0][1].database).toBe(fakeDb);
+    expect(Schedule.releaseClaim.mock.calls.every((c) => c[1].database === fakeDb)).toBe(true);
+    expect(interactions).toHaveLength(1); // written through the handle
+  });
+
+  test('LIVE, refusals and holds: the hold/pause writers, the never_contacted stamps, the re-render and the close all ride the handle', async () => {
+    await withPoolPoisoned(async () => {
+      mockLoadContext.mockResolvedValueOnce({ error: mockBlocked('BILLING_EMAIL_RECHECK_FAILED', 'x', { retryable: true }) });
+      expect((await run()).outcome).toBe('told'); // email refused (stamped), text delivered
+      expect(rowFor('email').metadata.never_contacted).toBe(true);
+      live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
+      await run();
+    });
+    expect(ContactLedger.markSendFailed.mock.calls.every((c) => c[2]?.database === fakeDb)).toBe(true);
+    expect(Schedule.close).toHaveBeenLastCalledWith(expect.anything(), 'balance_cleared', NOW, expect.objectContaining({ database: fakeDb }));
+    expect(fakeDb.raw).toHaveBeenCalled(); // the clear ran on the handle
+  });
+
+  test('LIVE, operator send-now: the comms-lock transaction is opened on the handle, not the pool', async () => {
+    const lock = require('../utils/customer-comms-lock').withCustomerCommsLock;
+    lock.mockClear();
+    await withPoolPoisoned(async () => {
+      expect((await run({ operatorInitiated: true, force: true })).outcome).toBe('advanced');
+    });
+    expect(lock.mock.calls.length).toBeGreaterThan(0);
+    expect(lock.mock.calls.every((c) => c[0] === fakeDb)).toBe(true);
+    expect(mockLoadContext).not.toHaveBeenCalled(); // operator recipient came from the handle's prefs
+  });
+
+  test('SHADOW: the guards, the policy read, the read-only progress and the set resolve all run on the handle it was given', async () => {
+    Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
+    memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
+    const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }]);
+    await withPoolPoisoned(async () => { await Runner.shadowRun(NOW, { database }); });
+    expect(lines()).toMatch(/would send .*schedule=projected/);
+    expect(lines()).toMatch(/would send .*schedule=s-open/);
+    expect(mockOnAutopay.mock.calls.every(([, o]) => o.db === database)).toBe(true);
+    expect(mockPolicy.mock.calls.every(([a]) => a.database === database)).toBe(true);
+    expect(mockResolve.mock.calls.every(([, o]) => o.database === database)).toBe(true);
+    expect(mockLoadTemplate.mock.calls.every((c) => c[1] === database)).toBe(true);
+    expect(database.writes).toEqual([]);
+  });
+});
+
+describe('a definite non-send recorded by the email library is recovered too (R4-3)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const emailOnly = () => { prefs = { invoice_channels: ['email'] }; };
+  // The library durably records the outcome; the worker then dies before recordLegOutcome resolves the reservation
+  // (the ledger stamp is lost), leaving it neither retryable nor resolved.
+  const libraryRecordsThenWorkerDies = (over) => {
+    mockSendTemplate.mockImplementationOnce(async (args) => {
+      mockEmailMessages.push({
+        id: 'em-x', idempotency_key: args.idempotencyKey, trigger_event_id: args.triggerEventId, recipient_type: 'customer',
+        recipient_id: args.recipientId, template_key: args.templateKey, payload_snapshot: JSON.stringify(args.payload),
+        send_attempt_token: 'tok-1', sent_at: null, ...over,
+      });
+      return { sent: false, blocked: over.status === 'blocked', reason: over.error_message };
+    });
+    ContactLedger.markSendFailed.mockResolvedValueOnce(false);
+  };
+  const suppressed = { status: 'blocked', error_message: 'Suppressed: bounce (transactional_required)' };
+  const rejected = { status: 'failed', error_message: 'SendGrid 400', provider_handoff_phase: 'rejected', provider_handoff_attempt_token: 'tok-1' };
+
+  test('a suppression-blocked email row: the ambiguous reservation is RESOLVED (terminal) by the next run, which pauses instead of holding forever', async () => {
+    emailOnly();
+    libraryRecordsThenWorkerDies(suppressed);
+    expect((await run()).outcome).toBe('held'); // unconfirmed
+    expect(rowFor('email').metadata.resolved).toBeUndefined();
+    expect(rowFor('email').metadata.send_failed).toBeUndefined();
+    expect((await run()).outcome).toBe('held'); // without the repair: ambiguous every run (the bug)
+
+    realRepair();
+    expect(await run()).toMatchObject({ outcome: 'paused', reason: 'all_channels_terminal' });
+    expect(rowFor('email').metadata).toMatchObject({ resolved: true, resolution: 'email_terminal_refusal' });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1); // no second email
+  });
+
+  test('a definite pre-provider / rejected failure row: the reservation is REOPENED and the next run sends (once)', async () => {
+    emailOnly();
+    libraryRecordsThenWorkerDies(rejected);
+    expect((await run()).outcome).toBe('held');
+    realRepair();
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockSendTemplate).toHaveBeenCalledTimes(2);
+    expect(mockEmailMessages.filter((m) => m.sent_at)).toHaveLength(1);
+    expect(rowFor('email').metadata.delivered).toBe(true);
+  });
+
+  test.each([
+    ['still queued (in flight)', { status: 'queued', provider_handoff_phase: 'pending', provider_handoff_attempt_token: 'tok-1' }],
+    ['failed AFTER the provider handoff started (uncertain)', { status: 'failed', error_message: 'timeout', provider_handoff_phase: 'started', provider_handoff_attempt_token: 'tok-1' }],
+    ['failed with a provider retry scheduled', { ...rejected, provider_retry_next_at: new Date() }],
+    ['a rejected phase that is not this attempt\'s', { ...rejected, provider_handoff_attempt_token: 'someone-else' }],
+  ])('%s stays HELD: nothing written, nothing re-sent', async (_name, over) => {
+    emailOnly();
+    libraryRecordsThenWorkerDies(over);
+    await run();
+    realRepair();
+    ContactLedger.markSendFailed.mockClear();
+    expect((await run()).outcome).toBe('held');
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+  });
+
+  test('SHADOW reports the verdict (would pause) and writes nothing', async () => {
+    emailOnly();
+    libraryRecordsThenWorkerDies(suppressed);
+    await run();
+    ContactLedger.markSendFailed.mockClear();
+    const emailDb = realRepair();
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    const database = shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
+    await Runner.shadowRun(NOW, { database });
+    expect(lines()).toMatch(/SHADOW would pause customer=cust-0000-synthetic schedule=sched-0000-synthetic step=d60_reminder reason=all_channels_terminal/);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(emailDb.transaction).not.toHaveBeenCalled();
+    expect(rowFor('email').metadata.resolved).toBeUndefined(); // the stored reservation is untouched
+  });
+});
+
 describe('a delivery older than the progress window is still a delivery, and completes what it NAMED (R2-2 / A2)', () => {
   const crypto = require('crypto');
   const finalKey = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;
@@ -1052,10 +1216,7 @@ describe('a delivery older than the progress window is still a delivery, and com
   test('the reservation row itself unreadable is the same hold', async () => {
     finalNotice();
     seedOldFinal();
-    const db = require('../models/db');
-    const impl = db.getMockImplementation();
-    // reads: recover-first progress (1), sendReminderChannels progress (2); the reservation row read (3) fails
-    db.mockImplementationOnce(impl); db.mockImplementationOnce(impl); db.mockImplementationOnce(() => { throw new Error('ledger down'); });
+    failLedgerAccess(3); // recover-first progress (1), sendReminderChannels progress (2); the reservation row read (3) fails
     const out = await run();
     expect(out).toMatchObject({ outcome: 'held', reason: 'delivered_evidence_unreadable' });
     expect(Schedule.completeFinal).not.toHaveBeenCalled();
@@ -1736,7 +1897,7 @@ describe('final notice, D2/D4/D5/D11', () => {
     process.env.GATE_BALANCE_REMINDER_LEGACY_OFF = 'true';
     mockLedger.length = 0;
     await run();
-    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID);
+    expect(spy).toHaveBeenCalledWith(CUSTOMER_ID, fakeDb); // on the run's own handle
     spy.mockRestore();
   });
 
@@ -1800,7 +1961,7 @@ describe('operator send-now', () => {
       // 1 = set read, 2 = the handoff's first check, 3 = the FINAL check (the invoice was paid meanwhile), then stable
       mockResolve.mockImplementation(async () => { n += 1; return n <= 2 ? live : changed; });
       const out = await run({ operatorInitiated: true, force: true });
-      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }));
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }), { database: fakeDb });
       // the refused attempt never reached the provider; the re-render sent the CURRENT set, once
       expect(mockEmailMessages).toHaveLength(1);
       expect(JSON.parse(mockEmailMessages[0].payload_snapshot).invoice_count).toBe('2');
