@@ -126,6 +126,9 @@ function defaultDeps() {
     linkedLeadIdFor: (...args) => require('../estimate-consultation-offer').linkedLeadIdFor(...args),
     normalizeRecurringPattern: (...args) => require('../recurring-appointment-seeder').normalizeRecurringPattern(...args),
     parseEstimateAddress: (...args) => require('../estimate-property-linkage').parseEstimateAddress(...args),
+    isCommercialServiceRow: (...args) => require('../self-booking-plan-sync').isCommercialServiceRow(...args),
+    treatmentTargetKey: (...args) => require('./visit-products').treatmentTargetKey(...args),
+    targetForSentence: (...args) => require('./area-intel').targetForSentence(...args),
     detectServiceLine: (...args) => require('../service-report/service-line-configs').detectServiceLine(...args),
     now: () => new Date(),
   };
@@ -277,6 +280,33 @@ async function nextPestVisit({
   return { ymd: pest[0] ? dateOnlyString(pest[0].scheduled_date) : '' };
 }
 
+// Commercial plans are not this email's audience: commercial copy stays
+// terms-neutral (AGENTS.md: estimate follow-up truth scope), and both templates
+// promise a free re-service between visits. detectServiceLine calls a
+// "Commercial Quarterly Pest Control" plan 'pest', so the visit's own service
+// type, its appointment and series root, and its property are read with the
+// repo's canonical commercial classifier (isCommercialServiceRow, the same one the
+// WaveGuard plan sync uses to keep commercial rows out of residential plans) and
+// the property's recorded type.
+async function isCommercialPlan({ conn, deps, record }) {
+  const asRow = (row) => ({ service_type: row?.service_type, service_key: row?.service_key_snapshot });
+  if (deps.isCommercialServiceRow({ service_type: record.service_type })) return true;
+  if (!record.scheduled_service_id) return false;
+  const columns = ['service_type', 'service_key_snapshot', 'recurring_parent_id', 'property_id'];
+  const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id }).first(...columns);
+  if (!visit) return false;
+  if (deps.isCommercialServiceRow(asRow(visit))) return true;
+  if (visit.recurring_parent_id) {
+    const parent = await conn('scheduled_services').where({ id: visit.recurring_parent_id }).first('service_type', 'service_key_snapshot');
+    if (parent && deps.isCommercialServiceRow(asRow(parent))) return true;
+  }
+  if (visit.property_id) {
+    const property = await conn('customer_properties').where({ id: visit.property_id }).first('property_type');
+    if (/commercial/i.test(clean(property?.property_type))) return true;
+  }
+  return false;
+}
+
 // Is the visit part of an active recurring pest plan at its property? Either its
 // own appointment is a series member (it has a recurring parent, or carries a
 // recurring cadence of its own), or the customer has an open recurring pest
@@ -309,6 +339,7 @@ async function firstVisitGate({
     return skip('the visit does not belong to the recipient customer', 'recipient_not_visit_customer');
   }
   if (record.service_line !== 'pest') return skip('not a pest-line visit', 'not_pest_line');
+  if (await isCommercialPlan({ conn, deps, record })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
 
   // First performed visit on the line, judged against records that existed
   // BEFORE this one (a delayed run must not read a later visit as "prior").
@@ -350,6 +381,25 @@ function petAdvisorySentence(summary) {
     : '';
 }
 
+// The pests recorded at the visit. The technician's STRUCTURED treatment targets
+// (the chips committed per applied product; never a nutrition or adjuvant
+// product's) are preferred; only without them do the technician's notes count, and
+// then through the negation-aware reader ("no ghost ants found; treated spiders"
+// names spiders only). readVisitSummary's own pestsNamed is negation-blind, so it
+// is not used here.
+function pestsRecorded({ products, record, deps }) {
+  const targets = [];
+  for (const product of products || []) {
+    if (product.family === 'nutrition' || product.family === 'adjuvant') continue;
+    for (const target of product.targets || []) {
+      const key = deps.treatmentTargetKey(target);
+      if (key && !targets.includes(key)) targets.push(key);
+    }
+  }
+  if (targets.length) return targets.map((key) => deps.targetForSentence(key));
+  return deps.parsePestsNamed(positiveText(record.technician_notes));
+}
+
 async function buildFirstVisitPest({
   run, conn = db, deps = defaultDeps(), mode = 'live',
 }) {
@@ -357,7 +407,7 @@ async function buildFirstVisitPest({
   if (gate.skip) return gate;
   const { record, customer } = gate;
 
-  const { primary, secondary } = await deps.readVisitProducts(record.id, { conn });
+  const { primary, secondary, products } = await deps.readVisitProducts(record.id, { conn });
   if (!primary) return skip('no customer-visible primary product recorded for the visit', 'no_primary_product');
   const summary = await deps.readVisitSummary(record.id, { conn });
   if (!summary) return skip('visit summary unavailable', 'visit_summary_missing');
@@ -377,7 +427,7 @@ async function buildFirstVisitPest({
     primary_product_name: clean(primary.productName),
     primary_active_ingredient: clean(primary.activeIngredient),
     primary_product_family_phrase: clean(primary.phrase),
-    pests_named_list: listSentence(summary.pestsNamed || []),
+    pests_named_list: listSentence(pestsRecorded({ products, record, deps })),
     next_visit_date: longDate(nextVisit.ymd || ''),
     secondary_products_sentence: secondaryProductsSentence(secondary),
     nonrepellent_band_note: nonrepellentBandNote(primary, deps),
@@ -552,6 +602,7 @@ async function whyPlanGate({
   }
   // The plan's service line: this email's cohort figures are that line's.
   if (record.service_line !== 'pest') return skip('not a pest-line visit', 'not_pest_line');
+  if (await isCommercialPlan({ conn, deps, record })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
   const plan = await planService(conn, deps, record);
   if (plan.pattern !== QUARTERLY_PATTERN) return skip('the customer\'s plan is not the quarterly cadence', 'plan_not_quarterly');
   // Sent once, after the plan's SECOND performed visit. The ordinal is the

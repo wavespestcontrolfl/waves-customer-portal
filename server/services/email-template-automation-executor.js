@@ -2233,10 +2233,14 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // is dropped, not deferred — its trigger's intent marker was settled
     // 'processed' when the run was created, so nothing replays it; a later
     // re-flip to live sends only events from then on.
-    const { dispatchMode, shadowRun } = dispatchModeFor(claimedRun);
-    const built = await applyPayloadBuilder(claimedRun, resolvedAutomation, executionPayload, shadowRun, attemptNumber);
+    const built = await applyPayloadBuilder(claimedRun, resolvedAutomation, executionPayload, dispatchModeFor(claimedRun).shadowRun, attemptNumber);
     if (built.settled) return built.settled;
     executionPayload = built.payload;
+    // The mode is read AGAIN, immediately before the decision it governs: the
+    // builder awaits database work, radar and consultation calls, and a gate flipped
+    // to shadow or off during them must stop the send (a shadow-origin run still
+    // never sends: origin_mode outranks the gate).
+    const { dispatchMode, shadowRun } = dispatchModeFor(claimedRun);
     if (shadowRun) {
       return finalizeShadowRun(claimedRun, resolvedAutomation, executionPayload);
     }

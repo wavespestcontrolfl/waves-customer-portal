@@ -160,7 +160,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
   async function makeVisit({
     customerId, technicianId = null, visitNumber = 1, serviceLine = 'pest', date = '2026-09-20', products = ['taurus'],
     rating = null, ratingSource = null, defaulted = null, createdAt = new Date('2026-09-20T15:00:00Z'),
-    notes = 'Treated ghost ants along the foundation.', scheduledServiceId = null, serviceType = 'Quarterly Pest Control Service',
+    notes = 'Treated ghost ants along the foundation.', scheduledServiceId = null, serviceType = 'Quarterly Pest Control Service', targets = [],
   }) {
     const id = randomUUID();
     await db('service_records').insert({
@@ -170,7 +170,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
       client_pest_rating: rating, client_pest_rating_source: ratingSource, client_pest_rating_defaulted: defaulted,
       scheduled_service_id: scheduledServiceId, created_at: createdAt,
     });
-    for (const key of products) await db('service_products').insert({ service_record_id: id, ...PRODUCTS[key] });
+    for (const key of products) await db('service_products').insert({ service_record_id: id, ...PRODUCTS[key], targets });
     created.visits.push(id);
     return id;
   }
@@ -644,6 +644,58 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(ledger[0].status).toBe('skipped');
     });
 
+    test('B1: the appointment is reclassified COMMERCIAL after the build: refused at the boundary (the builder\'s own gate), nothing sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: () => db('scheduled_services').where({ id: series }).update({ service_type: 'Commercial Quarterly Pest Control' }),
+      }));
+      const run = (await Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      })).results[0].run;
+      expect(run.status).toBe('skipped');
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
+    // The gate is read AGAIN after the builder (it awaits database work, radar and
+    // consultation calls): a flip to shadow or off during it stops the send.
+    test.each([
+      ['shadow', 'shadow', 'would_send'],
+      ['off', 'skipped', null],
+    ])('the gate flips to %s DURING the payload builder: no send', async (mode, expectedStatus) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike());
+      require('../services/estimate-follow-up')._private.mintStageLinks.mockImplementationOnce(async () => {
+        process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = mode;
+        return { emailUrl: 'https://example.test/l/minted' };
+      });
+
+      const run = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email })).results[0].run;
+
+      expect(run.status).toBe(expectedStatus);
+      if (mode === 'off') expect(run.exit_reason).toContain('gate is off');
+      expect(sendTemplate).not.toHaveBeenCalled();
+      expect(await db('marketing_email_ledger').where({ customer_id: customer.id })).toHaveLength(0);
+    });
+
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
@@ -1055,6 +1107,53 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(ok.ok).toBe(true);
       });
 
+      test('a COMMERCIAL recurring pest plan is skipped (terms-neutral copy; the template promises free re-service) — by the record\'s type, the appointment\'s, the series root\'s, or the property\'s', async () => {
+        const techId = await makeTech();
+        const cases = {
+          'record type': async (customer) => makeVisit({
+            customerId: customer.id, technicianId: techId, serviceType: 'Commercial Quarterly Pest Control', scheduledServiceId: await makeDoneRecurring(customer.id),
+          }),
+          'appointment type': async (customer) => makeVisit({
+            customerId: customer.id, technicianId: techId, scheduledServiceId: await makeDoneRecurring(customer.id, { service_type: 'Commercial Quarterly Pest Control' }),
+          }),
+          'series root': async (customer) => {
+            const root = await makeDoneRecurring(customer.id, { service_type: 'Commercial Quarterly Pest Control' });
+            const child = await makeDoneRecurring(customer.id, { recurring_parent_id: root, service_type: 'Quarterly Pest Control Service' });
+            return makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: child });
+          },
+          'property type': async (customer) => {
+            const [property] = await db('customer_properties').insert({ customer_id: customer.id, property_type: 'commercial' }).returning('id');
+            return makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: await makeDoneRecurring(customer.id, { property_id: property.id }) });
+          },
+        };
+        for (const [label, build] of Object.entries(cases)) {
+          const customer = await makeCustomer();
+          await makeNextVisit(customer.id);
+          const recordId = await build(customer);
+          const result = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+          expect({ label, code: result.code }).toEqual({ label, code: 'not_residential_plan' });
+        }
+      });
+
+      test('pests_named_list: structured treatment targets are preferred; notes are read negation-aware ("no ghost ants found; treated spiders" names spiders only)', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const series = await makeDoneRecurring(customer.id);
+        await makeNextVisit(customer.id);
+        const fromNotes = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: series, notes: 'No ghost ants found; treated spiders along the eaves.' });
+        const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', fromNotes, customer), mode: 'live', deps: baseDeps() });
+        expect(r1.payload.pests_named_list).toBe('spiders');
+
+        const other = await makeCustomer();
+        const series2 = await makeDoneRecurring(other.id);
+        await makeNextVisit(other.id);
+        const structured = await makeVisit({
+          customerId: other.id, technicianId: techId, scheduledServiceId: series2, targets: ['Fire ants'], notes: 'Customer mentioned termites; treated perimeter.',
+        });
+        const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', structured, other), mode: 'live', deps: baseDeps() });
+        expect(r2.payload.pests_named_list).toBe('fire ants'); // the structured target wins; the notes never add termites
+      });
+
       test('the rain sentence: coordinates come from the VISITED property, a complete radar read over whole days after the visit; shadow makes no external call', async () => {
         const customer = await makeCustomer({ latitude: 10, longitude: 10 }); // the customer record's coordinates belong to ANOTHER property
         const techId = await makeTech();
@@ -1269,6 +1368,18 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const secondAtB = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 9, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: seriesB });
         const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', secondAtB, customer), deps });
         expect(r2.ok).toBe(true);
+      });
+
+      test('a COMMERCIAL quarterly plan is skipped for B5 too', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const scheduledId = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { service_type: 'Commercial Quarterly Pest Control' });
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'not_residential_plan' }));
       });
 
       test('a visit whose recurring pest series cannot be established is skipped (no series, no plan evidence)', async () => {
