@@ -304,6 +304,23 @@ async function checkRow(row, seams = {}) {
   return classifyListing(page, candidatesFor(row));
 }
 
+// nap_name / nap_phone are varchar(255) (20260401000045). A directory page can
+// state anything, so stored values are clipped to fit; a clipped value keeps its
+// fuller observed form (bounded) in status_detail.observed as evidence.
+const NAP_COLUMN_MAX = 255;
+const EVIDENCE_MAX = 2000;
+function napColumns(nap, detail) {
+  const out = { nap_name: null, nap_phone: null, nap_address: null };
+  if (!nap) return { columns: out, detail };
+  const observed = {};
+  for (const [col, max] of [['nap_name', NAP_COLUMN_MAX], ['nap_phone', NAP_COLUMN_MAX], ['nap_address', EVIDENCE_MAX]]) {
+    const value = nap[col] == null ? null : String(nap[col]);
+    out[col] = value == null ? null : value.slice(0, max);
+    if (value != null && value.length > max) observed[col] = value.slice(0, EVIDENCE_MAX);
+  }
+  return { columns: out, detail: Object.keys(observed).length ? { ...detail, observed } : detail };
+}
+
 function statusCounts(rows) {
   return Object.fromEntries(STATES.map((s) => [s, rows.filter((r) => r.status === s).length]));
 }
@@ -314,6 +331,7 @@ class CitationAuditor {
     logger.info('Citation audit running...');
     const rows = await db('seo_citations').whereNot('status', 'missing');
     const audited = [];
+    let failed = 0;
     for (const row of rows) {
       let res;
       try {
@@ -328,22 +346,29 @@ class CitationAuditor {
       stillSame = row.updated_at
         ? stillSame.whereRaw('abs(extract(epoch from updated_at) * 1000 - ?) < 1', [new Date(row.updated_at).getTime()]) // pg keeps microseconds, JS ms
         : stillSame.whereNull('updated_at');
-      const changed = await stillSame.update({
-        status: res.status,
-        status_detail: JSON.stringify(res.detail),
-        nap_name: res.nap ? res.nap.nap_name : null,
-        nap_phone: res.nap ? res.nap.nap_phone : null,
-        nap_address: res.nap ? res.nap.nap_address : null,
-        nap_consistent: res.status === 'verified' ? true : res.status === 'mismatched' ? false : null,
-        last_checked: etDateString(),
-        updated_at: new Date(),
-      });
+      const { columns, detail } = napColumns(res.nap, res.detail);
+      let changed;
+      try {
+        changed = await stillSame.update({
+          status: res.status,
+          status_detail: JSON.stringify(detail),
+          ...columns,
+          nap_consistent: res.status === 'verified' ? true : res.status === 'mismatched' ? false : null,
+          last_checked: etDateString(),
+          updated_at: new Date(),
+        });
+      } catch (err) {
+        // One row's write must never abort the rest of the weekly sweep.
+        logger.error(`Citation audit: row ${row.id} could not be saved: ${err.message}`);
+        failed += 1;
+        continue;
+      }
       if (changed) audited.push({ status: res.status });
       else logger.warn(`Citation audit: row ${row.id} changed during the sweep; result discarded`);
     }
     const counts = statusCounts(audited);
-    logger.info(`Citation audit: ${JSON.stringify(counts)} (${audited.length} of ${rows.length} written)`);
-    return { total: audited.length, skipped: rows.length - audited.length, ...counts };
+    logger.info(`Citation audit: ${JSON.stringify(counts)} (${audited.length} of ${rows.length} written${failed ? `, ${failed} failed to save` : ''})`);
+    return { total: audited.length, skipped: rows.length - audited.length - failed, failed, ...counts };
   }
 
   async getDashboard() {

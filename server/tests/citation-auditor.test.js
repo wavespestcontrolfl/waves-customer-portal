@@ -431,6 +431,11 @@ describe('audit()', () => {
         then: (resolve, reject) => Promise.resolve(store.filter((r) => filters.every((f) => f(r))).map((r) => ({ ...r }))).then(resolve, reject),
         update: async (patch) => {
           const hit = store.filter((r) => filters.every((f) => f(r)));
+          // Mirror Postgres: nap_name / nap_phone are varchar(255); a row can also fail to save.
+          for (const col of ['nap_name', 'nap_phone']) {
+            if (patch[col] != null && String(patch[col]).length > 255) throw new Error('value too long for type character varying(255)');
+          }
+          if (hit.some((r) => r.failWrite)) throw new Error('write failed');
           hit.forEach((r) => { updates.push({ id: r.id, patch }); Object.assign(r, patch); });
           return hit.length;
         },
@@ -480,7 +485,31 @@ describe('audit()', () => {
     expect(JSON.parse(byId.none.status_detail)).toEqual({ reason: 'no_listing_url' });
     expect(byId.human).toBeUndefined();
     expect(Object.values(byId).map((p) => p.status)).not.toContain('missing');
-    expect(result).toEqual({ total: 6, skipped: 0, unverified: 1, verified: 1, mismatched: 1, 'fetch-blocked': 3, missing: 0 });
+    expect(result).toEqual({ total: 6, skipped: 0, failed: 0, unverified: 1, verified: 1, mismatched: 1, 'fetch-blocked': 3, missing: 0 });
+  });
+
+  test('stored NAP values fit their varchar(255) columns and one failed write does not stop the sweep', async () => {
+    const longName = `Waves Pest Control ${'x'.repeat(400)}`;
+    const good = `<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>`;
+    const ld = `<script type="application/ld+json">${JSON.stringify({ '@type': 'LocalBusiness', name: longName, telephone: BRAND.phone })}</script>`;
+    store = rows([
+      { id: 'long', listing_url: 'https://long.example/l', status: 'unverified' },
+      { id: 'boom', listing_url: 'https://boom.example/l', status: 'unverified', failWrite: true },
+      { id: 'after', listing_url: 'https://after.example/l', status: 'unverified' },
+    ]);
+    const routes = {
+      'https://long.example/l': html(200, `${ld}${good}`),
+      'https://boom.example/l': html(200, good),
+      'https://after.example/l': html(200, good),
+    };
+    const result = await auditor.audit({ fetchFn: fetchFn(routes), resolveHostFn: async () => true });
+    const byId = Object.fromEntries(updates.map((u) => [u.id, u.patch]));
+    expect(byId.long.nap_name).toHaveLength(255);
+    expect(JSON.parse(byId.long.status_detail).observed.nap_name).toBe(longName);
+    expect(byId.boom).toBeUndefined();
+    expect(byId.after).toMatchObject({ status: 'verified' });
+    expect(result).toMatchObject({ total: 2, skipped: 0, failed: 1 });
+    expect(require('../services/logger').error).toHaveBeenCalledWith(expect.stringContaining('could not be saved'));
   });
 
   test('a throwing check lands fetch-blocked and does not stop the sweep', async () => {
