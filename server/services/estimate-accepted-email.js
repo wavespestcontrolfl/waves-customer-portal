@@ -139,17 +139,36 @@ async function isAddedPropertyToday({ customerId, email, ownKey, property }) {
 // Two acceptances for the same account seconds apart (two properties) must not
 // both see "no signup email yet today" and both send the full email: the
 // full-vs-short decision and its send run one at a time per account, under a
-// transaction-scoped advisory lock (GH Codex r7 P2). The second waits until the
-// first's send has returned, so its email_messages row is settled and visible.
+// session advisory lock (GH Codex r7 P2). The second waits until the first's
+// send has returned, so its email_messages row is settled and visible.
+// The lock lives on its OWN raw connection, outside the knex pool: fn() reads
+// and sends through the pool, so a pooled lock connection — held by the holder
+// and by every waiter — could starve the pool (DB_POOL_MAX can be 2) and stall
+// the holder itself (pre-push audit P1). lock_timeout bounds the wait; if the
+// lock can't be had (timeout, connection error) the send goes ahead unlocked,
+// which at worst is today's behavior — a second full email.
+const SIGNUP_LOCK_TIMEOUT_MS = 20000;
 async function serializedPerAccount(customerId, fn) {
   const self = customerId ? await db('customers').where({ id: customerId }).first('account_id') : null;
   const key = `signup-email:${self?.account_id || customerId || 'none'}`;
-  let out;
-  await db.transaction(async (trx) => {
-    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
-    out = await fn();
-  });
-  return out;
+  let conn = null;
+  let locked = false;
+  try {
+    conn = await db.client.acquireRawConnection();
+    await conn.query(`SET lock_timeout = ${SIGNUP_LOCK_TIMEOUT_MS}`);
+    await conn.query('SELECT pg_advisory_lock(hashtext($1))', [key]);
+    locked = true;
+  } catch (err) {
+    logger.warn(`[estimate-accepted-email] signup lock unavailable (${EmailTemplateLibrary.redactEmailAddresses(err.message)}); deciding unlocked`);
+  }
+  try {
+    return await fn();
+  } finally {
+    if (conn) {
+      if (locked) await conn.query('SELECT pg_advisory_unlock(hashtext($1))', [key]).catch(() => {});
+      await db.client.destroyRawConnection(conn).catch(() => {});
+    }
+  }
 }
 
 // Everything the combined email adds to the payload, plus which template

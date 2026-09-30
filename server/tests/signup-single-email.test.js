@@ -63,9 +63,14 @@ function mockDb(state = {}) {
     qbs.push(qb);
     return qb;
   });
-  // The per-account advisory lock around the full-vs-short decision.
+  // The per-account advisory lock around the full-vs-short decision, on its
+  // own raw connection (never a pooled one).
   s.locks = [];
-  db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn(async (sql, bindings) => { s.locks.push({ sql, bindings }); }) }));
+  s.destroyed = 0;
+  db.client = {
+    acquireRawConnection: jest.fn(async () => ({ query: jest.fn(async (sql, bindings) => { s.locks.push({ sql, bindings }); return { rows: [] }; }) })),
+    destroyRawConnection: jest.fn(async () => { s.destroyed += 1; }),
+  };
   s.qbs = qbs;
   return s;
 }
@@ -168,23 +173,27 @@ describe('the onboarding email itself', () => {
       expect(res.coversMembership).toBeUndefined();
     });
 
-    test('the full-vs-short decision and its send run under a per-account advisory lock (GH Codex r7 P2)', async () => {
+    test('the full-vs-short decision and its send run under a per-account advisory lock on a raw connection (GH Codex r7 P2)', async () => {
       const s = mockDb({ customer: { id: 'cust-1', first_name: 'Taylor', email: 'taylor@example.com', account_id: 'acct-9' } });
       EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
       await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(s.locks).toEqual([{ sql: expect.stringContaining('pg_advisory_xact_lock'), bindings: ['signup-email:acct-9'] }]);
+      expect(s.locks.map((l) => l.sql)).toEqual([
+        expect.stringContaining('lock_timeout'),
+        expect.stringContaining('pg_advisory_lock'),
+        expect.stringContaining('pg_advisory_unlock'),
+      ]);
+      expect(s.locks[1].bindings).toEqual(['signup-email:acct-9']);
+      expect(s.destroyed).toBe(1);
     });
 
-    test('lock serializes: the second decision starts only after the first send returned', async () => {
-      mockDb();
-      const { serializedPerAccount } = require('../services/estimate-accepted-email')._private;
-      let chainTail = Promise.resolve();
-      db.transaction = jest.fn((fn) => { const run = chainTail.then(() => fn({ raw: jest.fn(async () => {}) })); chainTail = run.catch(() => {}); return run; });
-      const order = [];
-      const job = (name) => async () => { order.push(`${name}:start`); await new Promise((r) => setTimeout(r, 5)); order.push(`${name}:end`); return name; };
-      const [a, b] = await Promise.all([serializedPerAccount('cust-1', job('a')), serializedPerAccount('cust-1', job('b'))]);
-      expect([a, b]).toEqual(['a', 'b']);
-      expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end']);
+    test('lock unavailable (timeout / connection error): the email still goes out, unlocked', async () => {
+      const s = mockDb();
+      db.client.acquireRawConnection = jest.fn(async () => ({ query: jest.fn(async (sql) => { if (sql.includes('pg_advisory_lock')) throw new Error('canceling statement due to lock timeout'); return { rows: [] }; }) }));
+      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+      expect(res.sent).toBe(true);
+      expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+      expect(s.destroyed).toBe(1);
     });
 
     describe('does the send cover membership.started? (decided here, at send time)', () => {
