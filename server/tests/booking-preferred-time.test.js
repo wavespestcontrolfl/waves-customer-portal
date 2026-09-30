@@ -20,7 +20,7 @@ let mockRetireError = null;    // makes the booking_intents suppression UPDATE t
 let mockLeadSettled = false;    // the bell's just-before re-read finds the lead already converted/closed
 let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
-let mockWonLeads = [];         // won leads (other types) a customer's booking already produced
+let mockWonLeads = [];         // won leads (any type) a customer's booking already produced
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
 
@@ -848,9 +848,19 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
       const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null, bookedAt });
       expect(out).toEqual({ converted: 0, alreadyWon: true });
       expect(mockMarkConverted).not.toHaveBeenCalled();
-      // the lookup is scoped: this customer, won, not the preferred-time type, converted at/after the booking (minus slack)
+      // the lookup is scoped: this customer, won (any type), converted at/after the booking (minus slack)
       const wonQuery = mockDb.mock.calls.filter((c) => c[0] === 'leads as won_lead');
       expect(wonQuery).toHaveLength(1);
+    });
+
+    test('an earlier PREFERRED-TIME win counts too (codex r9 P1): booking converted A, a repeat submit filed B -> B is not won', async () => {
+      mockOpenLeads = [{ id: 'lead-B' }];
+      mockExistingLead = { ...openLead, id: 'lead-B' };
+      mockWonLeads = [{ id: 'lead-A' }];
+      const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null, bookedAt });
+      expect(out).toEqual({ converted: 0, alreadyWon: true });
+      expect(mockMarkConverted).not.toHaveBeenCalled();
+      expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
     });
 
     test('the won-lead note is written once per lead (a replay does not stack notes)', async () => {

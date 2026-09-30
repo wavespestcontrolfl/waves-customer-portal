@@ -944,7 +944,12 @@ on both the first commit and the `txResult.existing` replay) hands the booked
 customer's open preferred-time leads to the existing lifecycle —
 `convertLeadFromEvent` with an explicit `leadId` → `markConverted` → funnel
 settle — so staff do not chase someone who already booked and the booking counts
-on the lead's own funnel row (never a raw status write); the explicit-lead
+on the lead's own funnel row (never a raw status write); one booking wins at most ONE lead: when the booking has already won a lead
+for this customer (its own quote-wizard / estimate / series conversion, or an
+earlier preferred-time win the same appointment already settled), the
+preferred-time lead is NOT converted — it stays OPEN with a one-time system note
+naming the won lead, rings no bell, and the office closes it (no lead status
+closes work without the funnel reading it as lost, so none is written); the explicit-lead
 conversion claims the lead's open status AND the identity it was read with
 (customer link, phone, email, estimate link), so a lead staff re-assigned or
 re-contacted in between is never credited to this booking. A booking that

@@ -450,8 +450,10 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
 // ad_service_attribution row to 'booked' — one appointment reported and
 // uploaded as two conversions. markConverted links the win to the customer
 // (leads.customer_id) and stamps converted_at, so "this booking already won a
-// lead" is: a live WON lead of another type for this customer converted at or
-// after the booking was created (60 s of app/DB clock slack, the same
+// lead" is: a live WON lead for this customer — of ANY type, an earlier
+// preferred-time win included (codex r9: a repeat submit after the booking
+// converted lead A files B, and B must not win the same appointment again) —
+// converted at or after the booking was created (60 s of app/DB clock slack, the same
 // tolerance the submit-side reconcile uses). Returns the won lead ids ([] when
 // none). Reads only; a failed read answers [] (the caller then proceeds as
 // before rather than blocking a conversion on an ambiguous read).
@@ -464,7 +466,6 @@ async function wonLeadIdsForBooking(db, { customerId, bookedAt }) {
       .where('won_lead.customer_id', customerId)
       .where('won_lead.status', 'won')
       .whereNull('won_lead.deleted_at')
-      .whereNot('won_lead.lead_type', LEAD_TYPE)
       .where('won_lead.converted_at', '>=', since)
       .select('won_lead.id');
     return (rows || []).map((r) => r.id).filter(Boolean);
