@@ -219,6 +219,14 @@ describe('writerRulesRejection', () => {
     ["We'll be back tomorrow.", 'date'],
     ['See you next week.', 'date'],
     ['Bacillus thuringiensis israelensis went into the pond.', 'active_ingredient'],
+    ['We applied two cc behind the stove.', 'amount'],
+    ['Two cubic centimeters went into each crack.', 'amount'],
+    ["Please don't walk on the treated lawn.", 'aftercare'],
+    ['Please avoid the treated areas.', 'aftercare'],
+    ['Keep off the treated beds for now.', 'reentry'],
+    ['We treated the kitchen, and no pest activity was observed across the property.', 'unscoped_absence'],
+    ['Your next visit is at noon.', 'time'],
+    ['We will return at midnight.', 'time'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -242,6 +250,9 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('The other 10 stations showed no termite activity.')).toBeNull();
     expect(writerRulesRejection('We saw none at the front.')).toBeNull();
     expect(writerRulesRejection('You mentioned ants came back on Tuesday.')).toBeNull();
+    expect(writerRulesRejection('In the kitchen, no activity was found.')).toBeNull();
+    expect(writerRulesRejection('Mosquitoes were most active near midnight.')).toBeNull();
+    expect(writerRulesRejection('We walked the fence line and treated the beds.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();

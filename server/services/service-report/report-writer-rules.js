@@ -207,7 +207,7 @@ function activeIngredientNames(values) {
     .filter((part) => part.length >= 3);
 }
 
-const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gal|gallons?|lbs?|pounds?|grams?|kilograms?|kg)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
+const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|cc|ccs|cubic\s+centimet(?:er|re)s?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gal|gallons?|lbs?|pounds?|grams?|kilograms?|kg)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
 const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\bacres?\b|\bacreage\b/i;
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
@@ -262,7 +262,7 @@ const FUTURE_CUE_AFTER_RE = /^[^.!?]{0,30}\b(?:next|upcoming)\s+(?:visit|appoint
 // A clock time is refused on the same terms, plus an arrival cue ("we'll
 // arrive between 8 and 10 AM", "your window is 10 AM"); an observation
 // ("strongest after 8 PM") or a past arrival ("we arrived at 10 AM") passes.
-const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])/gi;
+const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|\b(?:noon|midnight|midday)\b/gi;
 const ARRIVAL_CUE_RE = /\b(?:arriv(?:e|al|ing)|window)\b/i;
 function forwardMention(copy, pattern, extraCue = null) {
   for (const match of copy.matchAll(pattern)) {
@@ -304,10 +304,15 @@ const PLACE_NOUNS = [
   'there(?!\\s+(?:is|was|were|are|has|have|had|seems?|seemed|appears?|appeared|remains?|remained)\\b)',
 ];
 const PLACE_RE = new RegExp(`\\b(?:${PLACE_NOUNS.join('|')})\\b`, 'i');
+// Judged per clause: a place in another clause ("We treated the kitchen,
+// and no pest activity was observed across the property") scopes nothing.
+// A fronted place stays in its clause ("In the kitchen, no activity was
+// found").
+const CLAUSE_SPLIT_RE = /(?<=[.!?])\s+|;\s*|,\s*(?:and|but|while|though|although|yet|so|whereas)\s+/i;
 function unscopedAbsence(copy) {
-  return copy.split(/(?<=[.!?])\s+/).some((sentence) => {
-    const rest = sentence.replace(ABSENCE_RE, ' ');
-    return rest !== sentence && !PLACE_RE.test(rest);
+  return copy.split(CLAUSE_SPLIT_RE).some((clause) => {
+    const rest = clause.replace(ABSENCE_RE, ' ');
+    return rest !== clause && !PLACE_RE.test(rest);
   });
 }
 // Aftercare told to the customer (rule 7): an instruction, at the start of
@@ -317,18 +322,19 @@ function unscopedAbsence(copy) {
 // treated area this evening", "Leave the stations undisturbed"). The same
 // words in work copy ("we moved a station to keep the bait dry", "standing
 // water in the yard") give no instruction and pass.
-const CARE_VERB = String.raw`(?:disturb|mov(?:e|ing)|touch|clean|wash|mop(?:ping)?|vacuum|water|irrigat(?:e|ing)|mow(?:ing)?|sweep|wip(?:e|ing)|scrub(?:bing)?|spray|remov(?:e|ing))(?:ing)?`;
+const CARE_VERB = String.raw`(?:disturb|mov(?:e|ing)|touch|clean|wash|mop(?:ping)?|vacuum|water|irrigat(?:e|ing)|mow(?:ing)?|sweep|wip(?:e|ing)|scrub(?:bing)?|spray|remov(?:e|ing)|walk|step(?:ping)?|play|sit(?:ting)?|let)(?:ing)?`;
 const INSTRUCTION_START = String.raw`(?:^|[.!?;:]\s+|\b(?:please|you\s+(?:should|can|may|must|need\s+to|will\s+want\s+to)|you['’]ll\s+want\s+to|we\s+(?:recommend|suggest|ask)(?:\s+that\s+you)?|be\s+sure\s+to|make\s+sure\s+to|remember\s+to|try\s+to)\s+)["'“‘(]*(?:please\s+)?`;
 const AFTERCARE_RE = new RegExp(`${INSTRUCTION_START}(?:`
   + String.raw`(?:do\s+not|don['’]t|not|never|avoid(?:ing)?|refrain\s+from|try\s+not\s+to)\s+(?:\w+\s+)?${CARE_VERB}\b`
   + String.raw`|(?:leav(?:e|ing)|keep(?:ing)?)\s+(?:the\s+|your\s+|all\s+|any\s+)?(?:bait\w*|stations?|traps?|placements?|devices?|treated\s+\w+)\b[^.!?]{0,30}?\b(?:undisturbed|untouched|alone|in\s+place|clear|dry)\b`
   + String.raw`|(?:water|irrigat(?:e|ing)|wash|mop(?:ping)?|clean|vacuum)(?:ing)?\s+(?:the\s+|your\s+|any\s+)?(?:treated|lawn|yard|grass|turf|beds?|plants?|floors?|baseboards?|areas?)\b`
+  + String.raw`|avoid(?:ing)?\s+(?:the\s+|your\s+|any\s+)?treated\b`
   + ')', 'im');
 // Phrases the owner rules name that no older screen covers (rules 4, 9,
 // 13, 14).
 const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmap(?:s|ped|ping)?\b|\btrac(?:e|ed|ing)\s+(?:route|outline|path|area|perimeter|line)s?\b|\btreated\s+outlines?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
-const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
+const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\b(?:stay|keep)\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
 // Checked in order; the first hit names the rejection. Active ingredients
 // (a common list plus the caller's catalog actives) are checked last.

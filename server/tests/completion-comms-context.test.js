@@ -307,12 +307,18 @@ describe('buildCompletionCommsContext', () => {
           // Tapbacks quote a Waves text: loud (a normal row) and quiet.
           { created_at: mk(8), direction: 'inbound', message_body: 'Liked “Your visit is confirmed for Friday between 8 and 10”' },
           { created_at: mk(8.5), direction: 'inbound', message_type: 'sms_reaction', message_body: 'Loved “We will retreat for free”' },
+          // Working a gate or door is an access detail, pest talk or not;
+          // an entry point the pests use is not.
+          { created_at: mk(9), direction: 'inbound', message_body: 'blue works at the side gate where the ants are' },
+          { created_at: mk(9.2), direction: 'inbound', message_body: 'Use the side gate, the roaches are by the pool' },
+          { created_at: mk(9.4), direction: 'inbound', message_body: 'Ants are coming in under the back door' },
         ],
         // A bare code as the whole body, with no quote and no anchor.
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],
       }),
     });
-    expect(ctx.text).not.toMatch(/blue|for entry|sunflower/i);
+    expect(ctx.text).not.toMatch(/blue|for entry|sunflower|side gate/i);
+    expect(ctx.text).toMatch(/^Customer text .*: Ants are coming in under the back door$/m);
     expect(ctx.text).toMatch(/^Call .*: Customer said ants are back by the sink\.$/m);
     expect(ctx.text).not.toContain('3355');
     expect(ctx.text).not.toContain('Twilio create failed');
@@ -360,6 +366,28 @@ describe('buildCompletionCommsContext', () => {
     });
     expect(ctx.text).toMatch(/^Customer email .*: Roaches are back under the sink\.$/);
     expect(ctx.text).not.toContain('retreat the kitchen');
+  });
+
+  test("customer words: the window's anchor day is Eastern time too", async () => {
+    // 00:30 UTC ten days back is the evening before in Florida.
+    const ago = new Date(NOW - 10 * DAY);
+    const anchor = new Date(Date.UTC(ago.getUTCFullYear(), ago.getUTCMonth(), ago.getUTCDate(), 0, 30));
+    const utcDay = anchor.toISOString().slice(0, 10);
+    const etDay = new Date(anchor.getTime() - DAY).toISOString().slice(0, 10);
+    const ctx = await buildCustomerWordsContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      knex: stubKnex({
+        scheduled_services: [
+          { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Service', source_estimate_id: 'est-1', created_at: anchor },
+        ],
+        estimates: [{ id: 'est-1', accepted_at: anchor }],
+        service_completion_profiles: [], call_log: [], emails: [],
+        sms_log: [{ created_at: new Date(NOW - DAY), direction: 'inbound', message_body: 'Ants are back by the sink.' }],
+      }),
+    });
+    expect(ctx.promptHint).toContain(`since the estimate was accepted (${etDay})`);
+    expect(ctx.promptHint).not.toContain(utcDay);
   });
 
   test('customer words: calls with no summary never use up the six kept', async () => {

@@ -309,6 +309,13 @@ function credentialShaped(token) {
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
 // lowercase code ("blue", "open sesame") looks like any other word.
 const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in)\b/i;
+// So is a sentence about working a gate, door or lock ("blue works at the
+// side gate where the ants are", "use the side gate", "punch it in at the
+// door"), pest talk or not; "ants come in under the back door" stays.
+const ACCESS_POINT_RE = /\b(?:gates?|doors?|garage|locks?|deadbolts?|keypads?|entr(?:y|ance)|fobs?|remotes?|panels?)\b/i;
+const ACCESS_USE_RE = /\b(?:works?|worked|opens|opened|unlocks?|unlocked|use|using|enter|entering|type|typing|punch(?:ing)?|press(?:ing)?|dial|key\s+in)\b/i;
+const accessSentence = (sentence) => ACCESS_SENTENCE_RE.test(sentence)
+  || (ACCESS_POINT_RE.test(sentence) && ACCESS_USE_RE.test(sentence));
 // And a sentence reaches the writer only when it talks about pests or the
 // signs they leave: scheduling, thanks, a bare reply, and any other way of
 // phrasing an access detail ("blue works at the side gate") never do.
@@ -316,7 +323,7 @@ const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pas
 const PEST_TALK_RE = /\b(?:pests?|bugs?|insects?|critters?|wildlife|animals?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|webs?|cobwebs?|webbing|rodents?|rats?|mice|mouse|squirrels?|raccoons?|o?possums?|armadillos?|iguanas?|bats?|birds?|snakes?|lizards?|geckos?|frogs?|toads?|termites?|swarm(?:ers?|ing|s)?|wings?|mud\s+tubes?|mosquito(?:e?s)?|no-?see-?ums?|bites?|bitten|itch(?:y|ing)?|fleas?|ticks?|bed\s*bugs?|bees?|wasps?|hornets?|yellow\s*jackets?|nests?|hives?|stings?|stung|silverfish|earwigs?|crickets?|centipedes?|millipedes?|scorpions?|beetles?|moths?|fl(?:y|ies)|gnats?|weevils?|pill\s*bugs?|stink\s*bugs?|love\s*bugs?|whitefl(?:y|ies)|aphids?|mealybugs?|chinch\s*bugs?|grubs?|droppings?|poop|feces|urine|smells?|smelly|odou?rs?|stench|noises?|scratch(?:ing|es)?|chew(?:ed|ing)?|gnaw(?:ed|ing)?|holes?|gaps?|openings?|damaged?|frass|sawdust|eggs?|larvae?|activity|infest\w*|traps?|bait(?:s|ed)?|stations?|dead|crawling|trails?|trailing|hormigas?|cucarachas?|ratas?|ratones?|ara[nñ]as?|termitas?|pulgas?|garrapatas?|chinches?|avispas?|abejas?|bichos?|plagas?)\b/i;
 function scrub(text) {
   return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
-    .filter((sentence) => !ACCESS_SENTENCE_RE.test(sentence) && PEST_TALK_RE.test(sentence))
+    .filter((sentence) => !accessSentence(sentence) && PEST_TALK_RE.test(sentence))
     .join(' ')
     .replace(/\S+/g, (word) => {
       const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
@@ -453,7 +460,10 @@ async function buildCustomerWordsContext({
     .slice(0, MAX_CONTEXT_LINES)
     .map((entry) => entry.line)
     .join('\n');
-  const promptHint = `Recent contact with this customer (${reason}). Texts and emails are the customer's own words. A call entry is an AI summary of a conversation between the customer and Waves: use only what it says the customer reported, never what Waves said or promised. It is never a finding: use it only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote it, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`;
+  // The window's anchor day in Eastern time, like every line (the shared
+  // window label prints the UTC date).
+  const etReason = floor ? reason.replace(`(${contextDate(floor)})`, `(${etDay(floor)})`) : reason;
+  const promptHint = `Recent contact with this customer (${etReason}). Texts and emails are the customer's own words. A call entry is an AI summary of a conversation between the customer and Waves: use only what it says the customer reported, never what Waves said or promised. It is never a finding: use it only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote it, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`;
   return { text, promptHint };
 }
 
