@@ -588,7 +588,12 @@ async function markHeld(schedule, reason, { claimStamp, now = new Date(), databa
   // paused member) is never swallowed by an earlier alert for another reason.
   const newHold = schedule.status !== 'held' || (!!schedule.held_reason && schedule.held_reason !== heldReason);
   const since = newHold ? now : heldSince(schedule, now);
-  const changed = await guardedOpen(database, schedule, claimStamp).update({
+  // An autopay_hold schedule revisited under the run's own claim can fail a lookup (prefs, progress, the
+  // autopay state itself): the failure hold must land on it, or the write matches nothing and the hold's
+  // clock never starts. (It is the only claim-guarded writer reachable from an autopay_hold claim that
+  // guardedOpen excluded: pause already acts on any open row, and every send-side writer runs after
+  // resumeFromAutopay has made the row active.)
+  const changed = await guardedOpen(database, schedule, claimStamp, CLAIMABLE_STATUSES).update({
     status: 'held', held_reason: heldReason, held_since: since,
     ...(newHold ? { hold_alerted_at: null } : {}),
     next_touch_at: Followups.heldTouchFloor(now), updated_at: database.fn.now(),

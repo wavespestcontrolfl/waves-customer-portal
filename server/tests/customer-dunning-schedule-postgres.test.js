@@ -651,6 +651,34 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       const autopay = () => require('../services/autopay-eligibility').customerOnAutopay;
       afterEach(() => autopay().mockResolvedValue(false));
 
+      test('R10 D1: a lookup failure on a revisited autopay_hold row lands the hold (held_since set, re-armed, alert clock started)', async () => {
+        const c = await customer();
+        const m = await member(c, { sentDaysAgo: 60, step: 4 });
+        const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
+        mockResolve.mockResolvedValue(setFor([m]));
+        autopay().mockRejectedValue(new Error('autopay lookup down'));
+        mockNotify.mockClear();
+        expect(await Runner.processSchedule(s.id, NOW)).toMatchObject({ outcome: 'held' });
+        const row = await fresh(s.id);
+        expect(row.status).toBe('held');
+        expect(row.held_reason).toBeTruthy();
+        expect(new Date(row.held_since).getTime()).toBe(NOW.getTime()); // the alert clock starts now
+        expect(new Date(row.next_touch_at).getTime()).toBeGreaterThan(NOW.getTime()); // no longer overdue
+        expect(row.touch_claimed_at).toBeNull();
+      });
+
+      test('R10 D1: markHeld / markPaused / markAutopayHold with a stamp that is not the row\'s claim match nothing and return false', async () => {
+        const c = await customer();
+        await member(c, { sentDaysAgo: 60, step: 4 });
+        const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
+        const claim = await Schedule.claim(s.id, NOW, { database: app });
+        const wrong = new Date(NOW.getTime() - 1);
+        expect(await Schedule.markHeld(claim.schedule, 'x', { claimStamp: wrong, now: NOW, database: app })).toBe(false);
+        expect(await Schedule.markPaused(claim.schedule, 'x', { claimStamp: wrong, now: NOW, database: app })).toBe(false);
+        expect(await Schedule.markAutopayHold(claim.schedule, { claimStamp: wrong, now: NOW, database: app })).toBe(false);
+        expect((await fresh(s.id)).status).toBe('autopay_hold');
+      });
+
       test('the invoices were paid meanwhile: the hold is CLOSED (balance_cleared), the customer is freed', async () => {
         const c = await customer();
         const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
@@ -718,14 +746,15 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
           expect((await seqRow(m.seq.id)).status).toBe('completed'); // exactly the invoice the notice named
         });
 
-        test('the widening is for settling only: a plain active/held write on an autopay_hold row is still refused', async () => {
+        test('the settle widening is for settling only: a plain advance on an autopay_hold row is still refused (a failure hold is the one other write that lands, R10 D1)', async () => {
           const c = await customer();
           await member(c, { sentDaysAgo: 60, step: 4 });
           const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
           const claim = await Schedule.claim(s.id, NOW, { database: app });
           expect(await Schedule.advance(claim.schedule, { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(false);
-          expect(await Schedule.markHeld(claim.schedule, 'x', { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(false);
           expect((await fresh(s.id)).status).toBe('autopay_hold');
+          expect(await Schedule.markHeld(claim.schedule, 'x', { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(true);
+          expect((await fresh(s.id)).status).toBe('held');
         });
       });
 

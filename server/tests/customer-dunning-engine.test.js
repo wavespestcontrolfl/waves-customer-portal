@@ -1154,6 +1154,41 @@ describe('a definite non-send recorded by the email library is recovered too (R4
     expect(mockSendTemplate).toHaveBeenCalledTimes(1);
   });
 
+  test('SHADOW: durable rejection evidence with no send_failed stamp is judged as live judges it after its repair: claimable, would SEND; nothing is written', async () => {
+    emailOnly();
+    libraryRecordsThenWorkerDies(rejected);
+    await run();
+    expect(rowFor('email').metadata.send_failed).toBeUndefined(); // the stored reservation is ambiguous...
+    ContactLedger.markSendFailed.mockClear();
+    mockWrites.length = 0;
+    realRepair();
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
+    await Runner.shadowRun(NOW);
+    expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=sched-0000-synthetic step=d60_reminder/); // ...but the repair makes it retryable
+    expect(lines()).not.toMatch(/REMINDER_OUTCOME_UNCONFIRMED/);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(mockWrites).toEqual([]);
+    expect(rowFor('email').metadata.send_failed).toBeUndefined(); // still unstamped: shadow only read
+    // and live does repair it and retry
+    expect((await run()).outcome).toBe('advanced');
+  });
+
+  test('SHADOW: accepted evidence with no delivered stamp is would-SETTLE; nothing is written', async () => {
+    emailOnly();
+    ContactLedger.markDelivered.mockResolvedValueOnce(false); // the crash between acceptance and the stamp
+    await run();
+    ContactLedger.markDelivered.mockClear();
+    mockWrites.length = 0;
+    realRepair();
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
+    await Runner.shadowRun(NOW);
+    expect(lines()).toMatch(/SHADOW would settle .* reason=already_delivered/);
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(mockWrites).toEqual([]);
+  });
+
   test('SHADOW reports the verdict (would pause) and writes nothing', async () => {
     emailOnly();
     libraryRecordsThenWorkerDies(suppressed);
@@ -1535,6 +1570,42 @@ describe('a cleared balance closes the schedule before the autopay guard; autopa
     });
     await Runner.runCustomerSchedules(NOW);
     expect(statuses).toEqual(expect.arrayContaining(['active', 'held', 'autopay_hold']));
+  });
+
+  describe('a claim-guarded write that matches no row is stale, never the state it would have produced (R10)', () => {
+    test('markHeld matching nothing (a lookup failure hold): outcome stale, not held', async () => {
+      Schedule.markHeld.mockResolvedValue(false);
+      mockOnAutopay.mockRejectedValue(new Error('down'));
+      expect(await run()).toMatchObject({ outcome: 'stale' });
+    });
+
+    test('markPaused matching nothing: stale, not paused', async () => {
+      Schedule.markPaused.mockResolvedValue(false);
+      customer.deleted_at = new Date();
+      expect((await run()).outcome).toBe('stale');
+    });
+
+    test('markAutopayHold matching nothing: stale, not autopay_hold', async () => {
+      Schedule.markAutopayHold.mockResolvedValue(false);
+      mockOnAutopay.mockResolvedValue(true);
+      expect((await run()).outcome).toBe('stale');
+    });
+
+    test('the same writers succeeding keep their outcomes (held / paused / autopay_hold)', async () => {
+      mockOnAutopay.mockRejectedValue(new Error('down'));
+      expect(await run()).toMatchObject({ outcome: 'held', reason: 'autopay_unreadable' });
+      mockOnAutopay.mockResolvedValue(true);
+      expect((await run()).outcome).toBe('autopay_hold');
+    });
+
+    test('a failure hold on a revisited autopay_hold row is handed the autopay_hold schedule under the run\'s claim (the writer must accept it)', async () => {
+      setup({ stepStatus: 'autopay_hold' });
+      const db = require('../models/db');
+      const serve = db.getMockImplementation();
+      db.mockImplementation((table) => { if (table === 'notification_prefs') throw new Error('prefs down'); return serve(table); });
+      expect(await run()).toMatchObject({ outcome: 'held', reason: 'prefs_unreadable' });
+      expect(Schedule.markHeld).toHaveBeenCalledWith(expect.objectContaining({ status: 'autopay_hold' }), 'prefs_unreadable', expect.objectContaining({ claimStamp: NOW }));
+    });
   });
 
   describe('delivery evidence settles on an autopay_hold row without authorizing a send (R9)', () => {

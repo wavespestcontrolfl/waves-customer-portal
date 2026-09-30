@@ -55,8 +55,14 @@ const outcome = (kind, extra = {}) => ({ outcome: kind, ...extra });
 
 // ── stage 2: customer + preferences ──────────────────────────────────────
 
-const hold = (run, reason) => Schedule.markHeld(run.schedule, reason, run).then(() => outcome('held', { reason }));
-const pause = (run, reason) => Schedule.markPaused(run.schedule, reason, run).then(() => outcome('paused', { reason }));
+// A claim-guarded write that matched no row means the schedule is no longer the one this run read (a control
+// action, a successor's claim): report it, never the state the write would have produced.
+function staleWrite(run, writer) {
+  logger.warn(`[customer-dunning] ${writer} matched no row for schedule ${run.schedule.id}; its claim or state changed`);
+  return outcome('stale');
+}
+const hold = async (run, reason) => (await Schedule.markHeld(run.schedule, reason, run) ? outcome('held', { reason }) : staleWrite(run, 'markHeld'));
+const pause = async (run, reason) => (await Schedule.markPaused(run.schedule, reason, run) ? outcome('paused', { reason }) : staleWrite(run, 'markPaused'));
 
 async function readPrefs(run) {
   try {
@@ -324,8 +330,7 @@ async function applyDecision(run, d) {
     case 'hold': return hold(run, d.reason);
     case 'pause': return pause(run, d.reason);
     case 'autopay_hold':
-      await Schedule.markAutopayHold(run.schedule, run);
-      return outcome('autopay_hold');
+      return await Schedule.markAutopayHold(run.schedule, run) ? outcome('autopay_hold') : staleWrite(run, 'markAutopayHold');
     case 'settle': return finishDelivered(run, d.facts);
     default: { // close
       if (d.reason === 'no_step') logger.error(`[customer-dunning] schedule ${run.schedule.id} has no step at index ${run.schedule.step_index}; releasing`);
@@ -603,7 +608,15 @@ async function decideShadowPolicy(run, set) {
 // The ledger row a channel's keyed reservation already has, shaped as recordContact returns a reused one.
 async function standingReservation(run, channel) {
   const row = await findReminderReservation(run.schedule.customer_id, run.eventKey, channel);
-  return row ? { id: row.id, reused: true, metadata: row.metadata } : { id: 'new', reused: false, metadata: {} };
+  if (!row) return { id: 'new', reused: false, metadata: {} };
+  // The read-only recovery view reflects a bound email row's durable verdict (send_failed / resolved) onto the
+  // progress entry without stamping the stored row; live repairs it first, so judge the keyed row WITH it.
+  const reflected = (currentEvent(run)?.entries || []).find((entry) => String(entry.id) === String(row.id));
+  let overlay = reflected?.metadata;
+  if (typeof overlay === 'string') { try { overlay = JSON.parse(overlay); } catch { overlay = {}; } }
+  const metadata = { ...row.metadata };
+  for (const key of ['send_failed', 'resolved', 'resolution', 'delivered']) if (overlay && key in overlay) metadata[key] = overlay[key];
+  return { id: row.id, reused: true, metadata };
 }
 
 /**
