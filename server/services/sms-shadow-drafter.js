@@ -583,7 +583,13 @@ const RESERVICE_SPECIFIC_NOUN_SOURCE = `re-?service|re-?treat(?:ment)?|re-?spray
 // (a technician-sent "free visit" is still an offer; "your scheduled visit" is
 // billing copy). service / treatment / application need the marker outright.
 const RESERVICE_NOT_SCHEDULED_LOOKBEHIND = "(?<!\\b(?:scheduled|regular|routine|upcoming|next|planned|annual|quarterly|monthly|bi-?monthly|initial|first|this|plan(?:['’]s)?|today['’]s|tomorrow['’]s)\\s)";
-const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|(?:another|extra|second|return|follow-?up|repeat)\\s+(?:visits?|trips?|treatments?|services?|applications?|sprays?|calls?)|${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:visit|trip)|callback|redo|re-do|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)`;
+// Codex round-17 P2 (PR #5336): a plain visit/trip is an OFFER only when it is not an existing
+// appointment: a possessive ("your visit", "our visit") or a day/date/time reference ("tomorrow",
+// "Tuesday's visit", "the visit on Tuesday", "at 9") marks a booked visit whose price is billing copy.
+// (Return semantics — another/return/extra/follow-up/come back — never go through this alternative.)
+const RESERVICE_NOT_EXISTING_VISIT_BEHIND = "(?<!\\b(?:your|my|our|his|her|their|its)\\s)(?<!\\b(?:tomorrow|today|tonight|(?:mon|tues|wednes|thurs|fri|satur|sun)day)['’]s\\s)";
+const RESERVICE_NOT_DATED_VISIT_AHEAD = "(?!(?:e?s)?\\s+(?:tomorrow|today|tonight|(?:on|at|scheduled)\\b|(?:mon|tues|wednes|thurs|fri|satur|sun)day\\b))";
+const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|(?:another|extra|second|return|follow-?up|repeat)\\s+(?:visits?|trips?|treatments?|services?|applications?|sprays?|calls?)|${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}${RESERVICE_NOT_EXISTING_VISIT_BEHIND}(?:visit|trip)${RESERVICE_NOT_DATED_VISIT_AHEAD}|callback|redo|re-do|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)`;
 // "free" as a price word, not an idiom: excluded when "free" is followed by
 // "to <verb>" / "from ..." / "of ..." (except "free of charge"), so "feel
 // free to call", "you are / you're free to return", "free of pests" never
@@ -628,7 +634,9 @@ const BOUND_GENERIC_OFFER_SOURCE = `\\b${BOUND_PRICE_ADJ}\\s+${BOUND_MODIFIER}${
 const FREE_RESERVICE_OFFER_RE = new RegExp(
   `${FREE_OFFER_WORD_SOURCE}[^.?!\\n]{0,60}\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b`
   + `|\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]{0,60}${FREE_OFFER_WORD_SOURCE}`
-  + `|${BOUND_GENERIC_OFFER_SOURCE}`,
+  + `|${BOUND_GENERIC_OFFER_SOURCE}`
+  // "Your visit is free; we'll text the booking link now" — a possessive visit stays an offer when the same sentence sends the link.
+  + '|\\byour\\s+(?:visit|trip)\\s+is\\s+(?:free|complimentary|on\\s+us)\\b[^.?!\\n]{0,40}\\blink\\b',
   'i',
 );
 // Codex round-2 finding: a promise can cover a re-service WITHOUT ever
@@ -911,6 +919,18 @@ function namedReserviceLanesInText(text) {
   const promise = reservicePromiseClauses(text).join(' ');
   return promiseLaneRegexes().filter(([, rx]) => rx.test(promise)).map(([lane]) => lane);
 }
+// Codex round-17 P2 (PR #5336): the lanes a body names. A DETECTED promise scopes lanes to its offer spans
+// (namedReserviceLanesInText — "Your lawn treatment is scheduled, and I'll send your free pest re-service"
+// is a pest promise). An action-backed body the detector MISSES has no span to scope to, so every
+// service-lane word anywhere in it counts (pest nouns, lawn service words; never location words like
+// yard): "We'll have someone stop by again, then treat your weeds at no cost" names lawn.
+function reserviceBodyLanes(body, promise) {
+  if (promise) return namedReserviceLanesInText(body);
+  const { RESERVICE_PEST_NOUNS_SOURCE } = require('./reservice-scheduler');
+  return [['pest', RESERVICE_PEST_NOUNS_SOURCE], ['lawn', RESERVICE_LAWN_SERVICE_WORDS]]
+    .filter(([, words]) => new RegExp(`\\b(?:${words})\\b`, 'i').test(body))
+    .map(([lane]) => lane);
+}
 // Codex round-7 (PR #5336): a promise clause that names an excluded
 // specialty ("we'll send your free termite re-service link" — a reviewer's
 // edit of a valid pest draft) is a promise the link can never keep, since
@@ -927,96 +947,58 @@ function reserviceExcludedSpecialtyInPromise(text) {
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
-  const actions = Array.isArray(intendedActions) ? intendedActions : [];
+  const actions = [].concat(intendedActions || []);
   // Codex round-16 P2 (PR #5336): a draft whose intended_actions carry the re-service link action is
   // ALWAYS validated, whether or not the detector recognizes the wording — otherwise a card the model
   // worded in a way the detector misses ("have someone stop by again … no cost to you") skips this
   // function, stores no promisedLanes snapshot, and the new-version send check then rejects it even
   // while the customer is eligible. Such a draft derives its lane below (named → reported → the single
-  // bookable lane) or is rejected. Non-promise wording contributes no lanes/specialties (promiseText).
+  // bookable lane) or is rejected. Its body is classified over the WHOLE text for lanes/specialties
+  // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
   const promise = isReserviceOfferPromise(text);
   if (!promise && !reserviceCarriesLinkAction(actions)) return { ok: true, violations: [] };
-  const promiseText = promise ? text : '';
-  // Codex round-5 P2 (finding #3): the re-service link page shows the
-  // customer its OWN real availability — a promise that ALSO offers or
-  // books a specific slot right here is a second, conflicting offer (and a
-  // book_appointment with no eligibility/pricing checks of its own). Reject
-  // outright rather than let the times/booking checks elsewhere silently
-  // coexist with a free-re-service promise.
-  const offeredTimesList = Array.isArray(offeredTimes) ? offeredTimes : [];
-  if (offeredTimesList.length) {
-    return { ok: false, violations: ['the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'] };
-  }
-  if (actions.some((a) => a?.type === 'book_appointment')) {
-    return { ok: false, violations: ['the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'] };
-  }
-  const lanes = eligibleReserviceLanes(factsBlock);
-  if (!lanes.length) {
-    return { ok: false, violations: ['the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'] };
-  }
-  // Codex round-5 P1 (finding #1): the reported issue's own lane, from the
-  // customer's inbound text, is resolved and checked EVERY time — not only
-  // when the reply names no lane (the old gap: a reply naming an eligible
-  // lane sailed through even when the customer's OWN report was about a
-  // different lane, or an excluded specialty entirely). reservice-scheduler
-  // is the SAME classifier the no-named-lane branch below already uses (NOT
-  // sms-service-intent.js's lead-intake regexClassify, which lumps
-  // termite/rodent/mosquito words into its 'pest' bucket — that bucket is
-  // for lead-intake ROUTING, not the re-service mechanism's own pest/lawn
-  // split, which categorically excludes those specialties).
+  // reservice-scheduler is the SAME classifier the no-named-lane path uses (NOT sms-service-intent.js's
+  // lead-intake regexClassify, which lumps termite/rodent/mosquito words into its 'pest' bucket — that
+  // bucket is for lead-intake ROUTING, not the re-service mechanism's own pest/lawn split, which
+  // categorically excludes those specialties).
   const { reportedReserviceLane, reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
-  if (reportedReserviceExcludedSpecialty(inboundMessage)) {
-    return { ok: false, violations: ['the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'] };
-  }
-  if (reserviceExcludedSpecialtyInPromise(promiseText)) {
-    return { ok: false, violations: ['the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'] };
-  }
+  const lanes = eligibleReserviceLanes(factsBlock);
+  // Codex round-5 P1 (finding #1): the reported issue's own lane, from the customer's inbound text, is
+  // resolved and checked EVERY time — not only when the reply names no lane.
   const reportedLane = reportedReserviceLane(inboundMessage);
-  // Codex r7: eligibility is per service line — a pest-only customer must
-  // not be offered a free LAWN re-service (or the reverse).
-  const named = namedReserviceLanesInText(promiseText);
-  if (named.length && reportedLane && !named.includes(reportedLane)) {
-    return { ok: false, violations: [`the reply offers a free ${named.join(' and ')} re-service but the customer reported a ${reportedLane} issue`] };
-  }
+  // Codex r7: eligibility is per service line — a pest-only customer must not be offered a free LAWN
+  // re-service (or the reverse).
+  const named = reserviceBodyLanes(text, promise);
   const wrong = named.filter((lane) => !lanes.includes(lane));
-  if (wrong.length) {
-    return { ok: false, violations: [`the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
-  }
-  // The lane(s) this reply actually promises — carried by the caller into
-  // input_snapshot (Codex round-3 P2) so a later send-time recheck knows
-  // WHICH lane(s) must still be live eligible without re-deriving them from
-  // reply text a human may have edited.
-  let promisedLanes = named;
-  if (!named.length) {
-    // Codex round-1 P2 (d): a GENERIC "we'll send your free re-service link"
-    // names no service line in the reply, so the named-lane check above has
-    // nothing to run against — a pest customer offered a lawn-only
-    // entitlement (or the reverse) would sail through. reportedLane was
-    // already resolved above; require it to intersect what FREE RE-SERVICE
-    // actually lists. An unresolved report (neither/both/ambiguous, an
-    // excluded specialty, or no inbound text at all) has no lane to check,
-    // so the reply itself must name a covered one.
-    if (reportedLane && !lanes.includes(reportedLane)) {
-      return { ok: false, violations: [`the reply offers a free re-service but the customer reported a ${reportedLane} issue and FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`] };
-    }
-    // Lane for a promise naming none: the customer's reported lane; for an action-only draft (wording
-    // the detector missed) also the single bookable lane, since no other lane exists to be ambiguous
-    // with. Nothing derivable → reject rather than publish a card with no snapshot.
-    const derivedLane = reportedLane || (!promise && lanes.length === 1 ? lanes[0] : null);
-    if (!derivedLane) {
-      return { ok: false, violations: ['the reply offers a free re-service without naming which service line it covers, and the reported issue\'s service line could not be resolved from the customer\'s text — name the covered service line explicitly'] };
-    }
-    promisedLanes = [derivedLane];
-  }
-  // Codex round-1 P2 (c): a free-re-service PROMISE with no
-  // {"type":"escalate","note":"send_reservice_link"} in intended_actions is
-  // a broken promise — the ONLY thing that actually gets a teammate to text
-  // the link is that action, and nothing else in this pipeline sends it.
-  const hasSendLinkAction = actions.some((a) => a?.type === 'escalate' && a?.note === 'send_reservice_link');
-  if (!hasSendLinkAction) {
-    return { ok: false, violations: ['the reply promises a free re-service but intended_actions is missing {"type":"escalate","note":"send_reservice_link"} — nothing would actually send the link'] };
-  }
-  return { ok: true, violations: [], promisedLanes };
+  // The lane(s) this reply actually promises — carried by the caller into input_snapshot (Codex
+  // round-3 P2) so a later send-time recheck knows WHICH lane(s) must still be live eligible without
+  // re-deriving them from reply text a human may have edited. A reply naming none takes the customer's
+  // reported lane (Codex round-1 P2 (d)); an action-only draft also the single bookable lane, since no
+  // other lane exists to be ambiguous with. Nothing derivable → rejected below, never published.
+  const promisedLanes = named.length ? named : [reportedLane || (!promise && lanes.length === 1 ? lanes[0] : null)].filter(Boolean);
+  const notLinked = !actions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link');
+  // Ordered checks, first hit wins. Pure conditions, so evaluating them all up front changes nothing.
+  const checks = [
+    // Codex round-5 P2 (finding #3): the re-service link page shows the customer its OWN real
+    // availability — a promise that ALSO offers or books a specific slot right here is a second,
+    // conflicting offer (and a book_appointment has no eligibility/pricing checks of its own).
+    [[].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
+    [actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
+    [!lanes.length, 'the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'],
+    [reportedReserviceExcludedSpecialty(inboundMessage), 'the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'],
+    [reserviceExcludedSpecialtyInPromise(text), 'the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'],
+    [reportedLane && named.length && !named.includes(reportedLane), `the reply offers a free ${named.join(' and ')} re-service but the customer reported a ${reportedLane} issue`],
+    [wrong.length, `the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`],
+    // A GENERIC "we'll send your free re-service link" names no service line, so a pest customer
+    // offered a lawn-only entitlement (or the reverse) must be caught against the reported lane.
+    [reportedLane && !named.length && !lanes.includes(reportedLane), `the reply offers a free re-service but the customer reported a ${reportedLane} issue and FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`],
+    [!promisedLanes.length, 'the reply offers a free re-service without naming which service line it covers, and the reported issue\'s service line could not be resolved from the customer\'s text — name the covered service line explicitly'],
+    // Codex round-1 P2 (c): a free-re-service PROMISE with no send_reservice_link escalate is a broken
+    // promise — the ONLY thing that gets a teammate to text the link is that action.
+    [notLinked, 'the reply promises a free re-service but intended_actions is missing {"type":"escalate","note":"send_reservice_link"} — nothing would actually send the link'],
+  ];
+  const hit = checks.find(([violated]) => violated);
+  return hit ? { ok: false, violations: [hit[1]] } : { ok: true, violations: [], promisedLanes };
 }
 
 // Send-time revalidation of a re-service promise (Codex round-3 P2): a
@@ -1116,13 +1098,17 @@ async function reservicePromiseStillEligible({ outgoingBody, customerId, promise
   if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
   // Codex round-7 (PR #5336): checked BEFORE any snapshot fallback — an edit that
   // swaps the promised service for an excluded specialty names no pest/lawn lane.
-  // (Non-promise bodies contribute nothing below: promiseText is empty, so no lane or specialty is read from it.)
-  const promiseText = promise ? body : '';
-  if (reserviceExcludedSpecialtyInPromise(promiseText)) {
+  // (A detected promise scopes specialties/lanes to its offer spans; an action-backed body the detector
+  // misses is classified over the WHOLE body — Codex round-17 P2.)
+  if (reserviceExcludedSpecialtyInPromise(body)) {
     return 're-service promise names an excluded specialty (termites/rodents/mosquitoes/tree & shrub) the link cannot book';
   }
   const snapshotLanes = ['pest', 'lawn'].filter((lane) => [].concat(promisedLanes).includes(lane));
-  const namedLanes = namedReserviceLanesInText(promiseText);
+  const namedLanes = reserviceBodyLanes(body, promise);
+  // Round-17: any lane named anywhere in an action-backed non-promise body must be one the card promised.
+  if (!promise && namedLanes.some((lane) => snapshotLanes.length && !snapshotLanes.includes(lane))) {
+    return `re-service body names a service line (${namedLanes.join(' and ')}) outside the promised lane(s) ${snapshotLanes.join(' and ')}`;
+  }
   const lanes = namedLanes.length ? namedLanes : snapshotLanes;
   // Where the promised lanes come from, resolved ONCE (Codex round-14): the draft-time snapshot; the
   // body's own named lanes when no decision backs it; a grandfathered pre-deploy decision (older

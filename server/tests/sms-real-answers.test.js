@@ -2731,14 +2731,15 @@ describe('free re-service is an entitlement resolved through the existing mechan
 
       test('no reported lane but a single bookable lane → that lane', () => {
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
-        const out = validateReserviceOffer({ reply: missed, factsBlock: facts(['lawn']), intendedActions: sendLink, inboundMessage: '' });
+        // (a body naming no lane of its own — the whole-body scan would otherwise read "ants" as pest)
+        const out = validateReserviceOffer({ reply: 'We will have someone stop by again, no cost to you.', factsBlock: facts(['lawn']), intendedActions: sendLink, inboundMessage: '' });
         expect(out.ok).toBe(true);
         expect(out.promisedLanes).toEqual(['lawn']);
       });
 
       test('no derivable lane (two bookable lanes, unresolved report) → rejected, not published', () => {
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
-        const out = validateReserviceOffer({ reply: missed, factsBlock: facts(['pest', 'lawn']), intendedActions: sendLink, inboundMessage: 'hello' });
+        const out = validateReserviceOffer({ reply: 'We will have someone stop by again, no cost to you.', factsBlock: facts(['pest', 'lawn']), intendedActions: sendLink, inboundMessage: 'hello' });
         expect(out.ok).toBe(false);
       });
 
@@ -2746,6 +2747,26 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
         expect(validateReserviceOffer({ reply: missed, factsBlock: facts([]), intendedActions: sendLink, inboundMessage: 'the ants are back' }).ok).toBe(false);
         expect(validateReserviceOffer({ reply: missed, factsBlock: facts(['lawn']), intendedActions: sendLink, inboundMessage: 'the ants are back' }).ok).toBe(false);
+      });
+
+      // Codex round-17 P2 #1: an action-backed body the detector misses is classified over the WHOLE body.
+      test('send time: a pest card edited to also treat weeds is blocked (lawn not in the pest snapshot); pest wording passes', async () => {
+        const edited = "We'll have someone stop by again, then treat your weeds at no cost.";
+        const pestWording = 'We will have someone stop by again for the ants, no cost to you.';
+        const { drafter } = loadWith({ lanes: ['pest', 'lawn'] });
+        const meta = { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: sendLink };
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: edited, customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta })).resolves.toMatch(/outside the promised lane/);
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: pestWording, customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta })).resolves.toBeNull();
+        // ...and an excluded specialty named anywhere in such a body is blocked too.
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: 'We will have someone stop by again for the termites, no cost to you.', customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta })).resolves.toMatch(/excluded specialty/);
+        // A DETECTED promise keeps the offer-span scoping (a lawn word elsewhere never counts).
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: "Your lawn treatment is scheduled, and I'll send your free pest re-service link.", customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta })).resolves.toBeNull();
+      });
+
+      test('draft time: an action-only body naming a lane the customer is not eligible for is rejected', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const out = validateReserviceOffer({ reply: "We'll have someone stop by again, then treat your weeds at no cost.", factsBlock: facts(['pest']), intendedActions: sendLink, inboundMessage: 'the ants are back' });
+        expect(out.ok).toBe(false);
       });
 
       test('no action and a non-promise body is untouched', () => {
@@ -2857,6 +2878,16 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["We can't come back out this week. There won't be any charge for rescheduling.", false, []],
   ["Your visit is Tuesday. It's free to reschedule.", false, []],
   ["We'll send someone back out. See you Tuesday.", false, []],
+  ["Your visit tomorrow is free.", false, []],
+  ["There is no charge for your visit on Tuesday.", false, []],
+  ["The visit tomorrow is on us.", false, []],
+  ["Tuesday's visit is free with your plan.", false, []],
+  ["No charge for the visit on Friday at 9.", false, []],
+  ["Our visit today is complimentary.", false, []],
+  ["Your visit is free; we'll text the booking link now.", true, []],
+  ["A complimentary visit is on us.", true, []],
+  ["We can send a technician for a free visit.", true, []],
+  ["We'll schedule a free visit this week.", true, []],
   ["We can't offer a free lawn re-service.", false, []],
   ["You're not eligible for a free re-service right now.", false, []],
   ["Unfortunately that isn't covered - the re-service is not free.", false, []],
