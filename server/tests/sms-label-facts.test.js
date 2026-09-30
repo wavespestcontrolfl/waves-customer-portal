@@ -976,3 +976,45 @@ describe('reply guard — claim kinds and quantities (round 3)', () => {
     expect(labelFactsLib.neutralizeGroundedTimes('Keep pets off for thirteen hours.', sec)).toBe('Keep pets off for thirteen hours.');
   });
 });
+
+// Pre-push review: a non-numeric claim riding in a sentence that also has a
+// quantity is still judged, and staff scheduling wording is not a re-entry claim.
+describe('reply guard — mixed sentences and scheduling (pre-push review)', () => {
+  beforeEach(() => { process.env[GATE] = 'true'; });
+  const factsWith = (products) => buildFactsBlock(context, { now: NOW, labelFacts: labelFacts(products) });
+  const check = (reply, factsBlock) => validateComplianceCopy({ reply, factsBlock });
+  const none = () => buildFactsBlock(context, { now: NOW });
+  const rainOnly = () => factsWith([product({ rainfastMinutes: 180, reiHours: null, reentrySummary: null })]);
+  const untilDry = () => factsWith([product({ rainfastMinutes: 180, reiHours: 0 })]);
+  const fourHours = () => factsWith([product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })]);
+
+  test('a grounded quantity does not launder a non-numeric claim in the same sentence', () => {
+    const mixed = "Rain won't wash it off after 3 hours, and the kids can go back out on the lawn once it's dry.";
+    expect(check(mixed, rainOnly()).ok).toBe(false); // no re-entry line
+    expect(check(mixed, fourHours()).ok).toBe(false); // line is 4 hours, not "until dry"
+    expect(check(mixed, untilDry()).ok).toBe(true);
+    expect(check("Rain won't wash it off after 3 hours; keep pets off for 4 hours.", fourHours()).ok).toBe(true);
+    expect(check("Keep pets off for 4 hours, and rain won't wash it off after a few hours.", fourHours()).ok).toBe(false);
+    expect(check("Keep pets off for 4 hours, and it won't wash off.", untilDry()).ok).toBe(false); // 4 hours is not the line
+    expect(check('Rain will not wash it off after 3 hours, and it is safe once dry; your technician will confirm the timing.', rainOnly()).ok).toBe(true);
+  });
+
+  test('staff scheduling wording without a number is not a re-entry claim; people / pets still are', () => {
+    for (const reply of [
+      'We can come back out Thursday.',
+      'The tech will be outside your home.',
+      "We'll come back out next week.",
+      'Our technician can come back out for a follow-up visit.',
+      "We'll get back out to you at your next appointment.",
+    ]) {
+      expect(check(reply, none()).ok).toBe(true);
+      expect(check(reply, rainOnly()).ok).toBe(true);
+    }
+    for (const reply of [
+      'The kids can go back out on the lawn.',
+      'The dogs can be outside once it is dry.',
+      'You can let the kids back out Thursday.',
+      'Keep the dogs off the lawn until Thursday.',
+    ]) expect(check(reply, none()).ok).toBe(false);
+  });
+});

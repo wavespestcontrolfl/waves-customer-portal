@@ -435,7 +435,12 @@ const RAIN_TRIGGER_RE = /\brain[-\s]?fast\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this
 // (no comma between them): "Rain is fine after 2 hours", "if it rains within
 // 2 hours" - but not "we'll be there in 2 hours, rain is expected".
 const RAIN_WORD_TRIGGER_RE = /\b(?:rain(?:s|ed|ing|fall|y)?|showers?|storms?|thunderstorms?|downpours?|sprinklers?|irrigation)\b/gi;
-const REENTRY_TRIGGER_RE = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.!?\n]{0,25}\boff\b|\b(?:stay|stays|staying|keep|keeps|keeping)\s+(?:out|away|inside|indoors)\b|\bwait(?:ing)?\b|\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|on\s+(?:it|the\s+(?:lawn|grass|yard|treated)))\b|\b(?:walk|play|sit|lie|run)(?:ing)?\s+on\b|\bthe\s+(?:kids?|children|dogs?|cats?|pets?|pups?)\s+(?:out|outside|back)\b|\bgood\s+to\s+go\b/gi;
+// The re-entry topic words, in three parts so the loose "go / come / be back
+// out" movement wording can be told from an explicit stay-off / re-entry word.
+const REENTRY_STRONG_A_SRC = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.!?\n]{0,25}\boff\b|\b(?:stay|stays|staying|keep|keeps|keeping)\s+(?:out|away|inside|indoors)\b/.source;
+const REENTRY_MOVE_SRC = /\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|on\s+(?:it|the\s+(?:lawn|grass|yard|treated)))\b/.source;
+const REENTRY_STRONG_B_SRC = /\b(?:walk|play|sit|lie|run)(?:ing)?\s+on\b|\bthe\s+(?:kids?|children|dogs?|cats?|pets?|pups?)\s+(?:out|outside|back)\b|\bgood\s+to\s+go\b/.source;
+const REENTRY_TRIGGER_RE = new RegExp(`${REENTRY_STRONG_A_SRC}|\\bwait(?:ing)?\\b|${REENTRY_MOVE_SRC}|${REENTRY_STRONG_B_SRC}`, 'gi');
 const DRY_TRIGGER_RE = /\bdr(?:y|ies|ied|ying)\b/gi;
 const SCHEDULE_BEFORE_RE = /\b(?:arriv\w*|arrival|be\s+there|be\s+out|be\s+by|come\s+(?:by|out)|coming\s+(?:by|out)|stop(?:ping)?\s+by|between|eta|scheduled?|appointment|technician\s+(?:will|is)|tech\s+(?:will|is))\b[^.!?\n]{0,25}$|\b(?:we|i|tech(?:nician)?|team)(?:'ll|'re|\s+will|\s+can|\s+are|\s+would)?\s+(?:be\s+|come\s+|coming\s+|get\s+)?back(?:\s+(?:out|by|over))?\b[^.!?\n]{0,15}$/i;
 const SCHEDULE_AFTER_RE = /^[^.!?\n]{0,6}\b(?:window|arrival|appointment)\b/i;
@@ -530,7 +535,13 @@ function groundedLineKinds(sectionText) {
 // "until dry" re-entry claim is grounded only by a re-entry line that itself
 // says "until dry". A sentence that carries a quantity is decided by the
 // quantity path above, and the sanctioned "safe once dry" idiom is not a claim.
-const REENTRY_TOPIC_NO_WAIT_RE = new RegExp(REENTRY_TRIGGER_RE.source.replace('|\\bwait(?:ing)?\\b', ''), 'i');
+const REENTRY_STRONG_RE = new RegExp(`${REENTRY_STRONG_A_SRC}|${REENTRY_STRONG_B_SRC}`, 'i');
+const REENTRY_MOVE_RE = new RegExp(REENTRY_MOVE_SRC, 'i');
+// Scheduling, not re-entry: the loose movement wording ("come back out
+// Thursday", "the tech will be outside") with staff as the subject or a
+// scheduling word in the clause, and no person / pet in it.
+const STAFF_SUBJECT_RE = /\b(?:we|we'll|we're|i|i'll|our\s+(?:team|tech(?:nician)?s?|crew)|(?:the|a|your)\s+(?:tech(?:nician)?|team|crew|office)|tech(?:nician)?s?|someone|somebody)\b/i;
+const SCHEDULE_WORD_RE = /\b(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?s?\b|\b(?:tomorrow|tonight|next\s+(?:week|month|visit)|this\s+(?:week|weekend|morning|afternoon)|appointments?|visits?|re-?schedul\w*|schedul\w*|arriv\w*|window|stop(?:ping)?\s+by|swing\s+by|come\s+by)\b/i;
 const WAIT_RE = /\bwait(?:ing)?\b/i;
 const BEING_RE = /\b(?:pets?|dogs?|cats?|pups?|puppies|kids?|children|people|family|everyone|anyone|humans?|toddlers?)\b/i;
 const SAFE_ONCE_DRY_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/gi;
@@ -538,13 +549,25 @@ function hasUngroundedNonNumericClaim(text, sectionText) {
   const kinds = groundedLineKinds(sectionText);
   const rainRe = new RegExp(RAIN_TRIGGER_RE.source, 'i');
   const dryRe = new RegExp(DRY_TRIGGER_RE.source, 'i');
-  for (const raw of String(text || '').split(/[!?\n]+|\.(?!\d)/)) {
-    if (!raw.trim() || timeQuantities(raw).length) continue;
-    const sentence = raw.replace(SAFE_ONCE_DRY_RE, ' ');
-    const dry = dryRe.test(sentence);
-    const reentryClaim = REENTRY_TOPIC_NO_WAIT_RE.test(sentence) || (dry && (WAIT_RE.test(sentence) || BEING_RE.test(sentence)));
-    if (reentryClaim && (!kinds.reentry || (dry && !kinds.reentryUntilDry))) return true;
-    if (rainRe.test(sentence) && !kinds.rain) return true;
+  // Sentence by sentence. A sentence with a quantity is judged by the quantity
+  // path for the clauses that carry one; its OTHER clauses ("...after 3
+  // hours, and the kids can go back out once it's dry") are still judged here.
+  for (const sentenceRaw of String(text || '').split(/[!?\n]+|\.(?!\d)/)) {
+    const hasQuantity = timeQuantities(sentenceRaw).length > 0;
+    const parts = hasQuantity
+      ? sentenceRaw.split(/[,;:]+|\s[-\u2013\u2014]+\s|\s(?:and|but|then|or|so|while|because)\s/i).filter((c) => !timeQuantities(c).length)
+      : [sentenceRaw];
+    for (const raw of hasQuantity ? [parts.join(' ')] : parts) {
+      if (!raw.trim()) continue;
+      const sentence = raw.replace(SAFE_ONCE_DRY_RE, ' ');
+      const dry = dryRe.test(sentence);
+      const scheduling = !BEING_RE.test(sentence) && (STAFF_SUBJECT_RE.test(sentence) || SCHEDULE_WORD_RE.test(sentence));
+      const reentryClaim = REENTRY_STRONG_RE.test(sentence)
+        || (REENTRY_MOVE_RE.test(sentence) && !scheduling)
+        || (dry && (WAIT_RE.test(sentence) || BEING_RE.test(sentence)));
+      if (reentryClaim && (!kinds.reentry || (dry && !kinds.reentryUntilDry))) return true;
+      if (rainRe.test(sentence) && !kinds.rain) return true;
+    }
   }
   return false;
 }
