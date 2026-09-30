@@ -1735,13 +1735,42 @@ function paymentRowCandidates({ family, amountCents, claimedDate, rows, partialW
     return amountOk && (!claimedDate || paymentDateMatchesClaim(p, claimedDate));
   });
 }
+const PRESENCE_STATUS_FAMILIES = new Set(['paid', 'pending', 'failed', 'refunded', 'disputed', 'reversed']);
+// The status FAMILY of a payments row for identity-ambiguity purposes: a partial refund keeps status
+// 'paid'; a row with no status is its own (unknown) family.
+function statusFamilyOfRow(p) {
+  const status = String(p?.status || '').toLowerCase();
+  if (!status) return 'unknown';
+  for (const family of ['pending', 'failed', 'refunded', 'disputed']) {
+    if (PAYMENT_STATUS_VOCABULARY[family].rowStatuses.includes(status)) return family;
+  }
+  return status === 'paid' ? 'paid' : status;
+}
+function identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows }) {
+  const families = new Set();
+  for (const p of rows) {
+    if (!p) continue;
+    const amountOk = rowAmountMatches(p, amountCents) || partialRefundCents(p) === amountCents;
+    if (!amountOk) continue;
+    if (claimedDate && !paymentDateMatchesClaim(p, claimedDate)) continue;
+    if (claimedTender && paymentTenderLabel(p) !== claimedTender) continue;
+    families.add(statusFamilyOfRow(p));
+  }
+  return families;
+}
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
   inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false,
 }) {
   if (requireDate && !claimedDate) return null;
+  const allRows = rows || context?.billing?.recentPayments || [];
+  // Codex round-19 P1: the identity (amount / date / tender) is matched across EVERY status FIRST. Two
+  // attempts with the same identity but different status families (a failed + a paid $120 card payment
+  // on the same day) cannot be told apart by a status claim — it needs disambiguation, so it binds to
+  // NEITHER row (filtering to the asserted family first would let "your payment failed" pick the failed one).
+  if (amountCents != null && PRESENCE_STATUS_FAMILIES.has(family) && identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows: allRows }).size > 1) return onAmbiguous;
   const candidates = paymentRowCandidates({
-    family, amountCents, claimedDate, rows: rows || context?.billing?.recentPayments || [], partialWording, allowPartialPaid,
+    family, amountCents, claimedDate, rows: allRows, partialWording, allowPartialPaid,
   });
   // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
   // is about a payment but NO tender could be extracted from it or the reply,
@@ -3226,9 +3255,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // is no open invoice to check against (no invoice ⇒ nothing the pay page
   // could withhold Zelle for — the "no Zelle configured" branch is
   // unaffected either way).
-  const zelleEligible = presetFactsBlock || !context?.billing?.openInvoice?.id
+  // Codex round-19 P1: with SEVERAL open invoices the offer is about the invoice the customer's message names
+  // (number, then a unique amount) — not always the newest; a reference that can't be tied to exactly one
+  // abstains (no Zelle fact). The resolved id is what is persisted below, so the send-time recheck validates it.
+  const zelleTarget = presetFactsBlock ? { invoiceId: null } : require('./zelle-target-invoice').resolveZelleTargetInvoice(context?.billing, inboundMessage);
+  const zelleEligible = presetFactsBlock || !zelleTarget.invoiceId
     ? false
-    : await fetchZelleEligibility({ customerId: context?.customer?.id || null, openInvoiceId: context.billing.openInvoice.id });
+    : await fetchZelleEligibility({ customerId: context?.customer?.id || null, openInvoiceId: zelleTarget.invoiceId });
   // Pre-push audit P1 (finding 2): the invoice this Zelle eligibility check
   // actually ran against, for the caller to persist alongside
   // facts_generated_at. A send-time recheck re-runs isZelleTransferEligible
@@ -3237,7 +3270,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // eligible for (paid off, replaced, or a saved-card charge/PI started
   // since). null when the fact was never offered, so a body a human typed
   // Zelle into by hand (no snapshot) fails the send-time recheck closed.
-  const zelleInvoiceId = zelleEligible ? context.billing.openInvoice.id : null;
+  const zelleInvoiceId = zelleEligible ? zelleTarget.invoiceId : null;
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole

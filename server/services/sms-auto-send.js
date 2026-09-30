@@ -899,7 +899,7 @@ async function dispatchClaimedSend({
         && zelleDenialRecheck.hasNegativeZelleAvailabilityClaim(reply)) {
       let denial;
       try {
-        denial = await zelleDenialRecheck.zelleDenialStale({ customerId });
+        denial = await zelleDenialRecheck.zelleDenialStale({ customerId, inboundMessage });
       } catch (err) {
         logger.warn(`[sms-auto-send] Zelle denial recheck threw (decision ${claim.decisionId}): ${err.message}`);
         denial = { stale: true, reason: 'zelle_recheck_failed' };

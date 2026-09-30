@@ -218,12 +218,15 @@ const MARKER_STRUCTURE = Object.freeze({
 // Defense in depth: the three free-text sections buildFactsBlock writes AFTER
 // every fixed section (call summaries, a per-line-sanitized call transcript, the
 // SMS thread) are never searched — the match must start before the earliest of
-// their headers and cannot run into one. `(?:.|\\n)` (not [^]) is valid in
+// their headers (each at a LINE START) and cannot run into one. `(?:.|\\n)` (not [^]) is valid in
 // both JS and PostgreSQL ARE.
 const FREE_TEXT_HEADERS_ALT = 'RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:';
 function markerPattern(marker) {
   const inner = MARKER_STRUCTURE[marker] || `(?:^|\\n)${String(marker).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`;
-  return `^(?:(?!${FREE_TEXT_HEADERS_ALT})(?:.|\\n))*?${inner}`;
+  // Codex round-19 P2: a stop header counts ONLY at a line boundary ("\nRECENT PHONE CALLS…"), never as a
+  // substring — a service/property note that merely MENTIONS "RECENT PHONE CALLS" must not end the scan
+  // early and hide the fixed sections after it. (Lookahead on the preceding newline: valid in JS and PostgreSQL ARE.)
+  return `^(?:(?!\\n(?:${FREE_TEXT_HEADERS_ALT}))(?:.|\\n))*?${inner}`;
 }
 const MARKER_REGEXES = new Map();
 function markerRegex(marker) {

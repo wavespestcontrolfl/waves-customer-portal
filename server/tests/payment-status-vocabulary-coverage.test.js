@@ -617,8 +617,12 @@ describe('round-18: a receipt and another status in the same clause bind the SAM
     expect(rq(`${R} while part of it was refunded.`, ctx([partial]))).toBe(false);
     expect(rq(`${R} while part of it was refunded.`, ctx([row('paid')]))).toBe(true);
   });
-  test('a receipt alone still binds its paid row', () => {
-    expect(rq(`${R}.`, ctx([row('paid'), row('processing')]))).toBe(false);
+  test('a receipt alone binds its paid row — when that row is the only one with the identity', () => {
+    expect(rq(`${R}.`, ctx([row('paid')]))).toBe(false);
+    expect(rq(`${R}.`, ctx([row('paid'), row('processing', { amount: 45 })]))).toBe(false); // different identity
+    expect(rq(`${R}.`, ctx([row('paid'), row('processing', { payment_date: '2026-09-01' })]))).toBe(false);
+    // ...but a paid and a processing row with the SAME identity are indistinguishable (round-19 P1)
+    expect(rq(`${R}.`, ctx([row('paid'), row('processing')]))).toBe(true);
   });
 });
 
@@ -680,5 +684,46 @@ describe('round-18: COMPANY FACTS payment policy answers pass the deterministic 
     expect(rq('You can mail us a check.')).toBe(false);
     expect(rq("We don't accept cash.")).toBe(false);
     expect(rq('Technicians accept cards at the visit, never cash.')).toBe(false);
+  });
+});
+
+// Codex round-19 P1: identity ambiguity is judged across EVERY status before a status claim picks its family.
+describe('round-19: rows with the same identity but conflicting statuses make a status claim ungrounded', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const row = (status, over = {}) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card', ...over });
+  const FAILED = 'Your $120 card payment from Sep 12 failed.';
+  const PAID = 'We received your $120 card payment from Sep 12.';
+  const PROCESSING = 'Your $120 card payment from Sep 12 is still processing.';
+
+  test('a failed + a paid attempt (either order): neither "failed" nor "received" binds', () => {
+    for (const rows of [[row('failed'), row('paid')], [row('paid'), row('failed')]]) {
+      expect(rq(FAILED, ctx(rows))).toBe(true);
+      expect(rq(PAID, ctx(rows))).toBe(true);
+    }
+  });
+  test('failed + processing, and refunded + paid, are ambiguous too', () => {
+    for (const rows of [[row('failed'), row('processing')], [row('processing'), row('failed')]]) {
+      expect(rq(FAILED, ctx(rows))).toBe(true);
+      expect(rq(PROCESSING, ctx(rows))).toBe(true);
+    }
+    expect(rq('Your $120 card payment from Sep 12 was refunded.', ctx([row('refunded'), row('paid')]))).toBe(true);
+  });
+  test('a genuine single-status case is unchanged', () => {
+    expect(rq(FAILED, ctx([row('failed')]))).toBe(false);
+    expect(rq(PAID, ctx([row('paid')]))).toBe(false);
+    expect(rq(FAILED, ctx([row('failed'), row('paid', { payment_date: '2026-09-10' })]))).toBe(false); // different date
+    expect(rq(FAILED, ctx([row('failed'), row('paid', { amount: 45 })]))).toBe(false); // different amount
+    expect(rq(FAILED, ctx([row('failed'), row('paid', { payment_method_type: 'us_bank_account' })]))).toBe(false); // different tender named
+    expect(rq(FAILED, ctx([row('failed'), row('failed')]))).toBe(false); // same family twice is not a conflict
+  });
+  test('an inbound naming the tender/date resolves what the reply left open', () => {
+    const asked = 'Why did my $120 card payment from Sep 12 fail?';
+    expect(rq('Your $120 payment failed.', ctx([row('failed'), row('paid', { payment_method_type: 'us_bank_account' })]), asked)).toBe(false);
+    expect(rq('Your $120 payment failed.', ctx([row('failed'), row('paid')]), asked)).toBe(true);
+  });
+  test('absence claims are not affected (any matching row contradicts them anyway)', () => {
+    expect(rq("We haven't received your $120 card payment from Sep 12.", ctx([row('failed'), row('paid')]))).toBe(true);
+    expect(rq("We haven't received your $120 card payment from Sep 12.", ctx([row('failed')]))).toBe(false);
   });
 });

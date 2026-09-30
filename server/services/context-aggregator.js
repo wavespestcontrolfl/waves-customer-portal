@@ -587,7 +587,7 @@ class ContextAggregator {
         // ceiling, far above any real account.
         .orderBy('created_at', 'desc')
         .limit(300)
-        .select('id', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
+        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
         // FAIL CLOSED (Codex r11): a lone invoice-query failure must not
         // read as "no invoices" — null marks billing UNAVAILABLE and the
         // facts render a visible unknown instead of "Balance: Current".
@@ -677,6 +677,11 @@ class ContextAggregator {
     // newest row must not present "$0.00 due" while an older invoice carries
     // the balance.
     const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
+    // EVERY own invoice with a positive due (newest first, capped) — `openInvoice` above is only the newest.
+    // Lets a caller tell WHICH open invoice a customer's message is about (Codex round-19 P1).
+    const openInvoices = ownInvoices.filter((inv) => invoiceAmountDue(inv) > 0).slice(0, 10).map((inv) => ({
+      id: inv.id, invoiceNumber: inv.invoice_number || null, status: inv.status, amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
+    }));
     const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
     // The BILLING LANE, resolved once and carried as an explicit FACT. The
     // per-application copy rule lets a monthly amount be spoken only when the
@@ -825,6 +830,7 @@ class ContextAggregator {
           amountDue: invoiceAmountDue(openInvoice),
           dueDate: openInvoice.due_date || null,
         } : null,
+        openInvoices,
         payerBilledInvoice: hasPayerBilledOpen,
         // v10: payment method on file — brand/bank + last4 only, never a
         // full number. ACH methods store bank last4 with a null card_brand

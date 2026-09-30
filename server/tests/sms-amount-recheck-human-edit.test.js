@@ -144,3 +144,34 @@ describe('multi-claim clauses are rechecked claim-by-claim at send time', () => 
     expect(drafter.enumeratePaymentClaims('Thanks so much, see you Tuesday!', {}).claims).toEqual([]);
   });
 });
+
+// Codex round-19 P2: the send-time fresh context surfaces the payment the customer asked about, exactly as the
+// draft did — a valid reply about an OLDER payment (outside the 3-row display window) is not blocked at send.
+describe('a valid reply about an older referenced payment is not blocked at send time', () => {
+  const { outgoingAmountsStale, amountFreeStatusClaimStale } = require('../services/sms-amount-recheck');
+  const older = { id: 'p-old', amount: 120, status: 'paid', payment_date: '2026-06-12', payment_method_type: 'card' };
+  const newest = [1, 2, 3].map((n) => ({ id: `p${n}`, amount: 60 + n, status: 'paid', payment_date: `2026-09-0${n}`, payment_method_type: 'card' }));
+  const freshCtx = () => ({
+    customer: { id: 'c1' },
+    billing: { outstandingBalance: 0, recentPayments: [...newest], recentPaymentsTruncated: true, paymentHistory: { rows: [...newest, older], complete: true } },
+  });
+  const ASK = 'Did you get my $120 payment from June 12?';
+  const REPLY = 'We received your $120 payment from June 12.';
+  const STALE = { stale: true, reason: 'amount_no_longer_authorized' };
+
+  test('with the inbound, the older row is surfaced before the binder runs => not stale', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(freshCtx());
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: REPLY, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh, inboundMessage: ASK })).resolves.toEqual({ stale: false });
+  });
+  test('the same reply without the referencing inbound has no such row in view => stale (the surfacing is what makes it valid)', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(freshCtx());
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: REPLY, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh, inboundMessage: null })).resolves.toEqual(STALE);
+  });
+  test('the amount-free/absence path surfaces too; a genuinely missing payment is still a stale denial-of-nothing', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(freshCtx());
+    // "we don't see it" is FALSE when the older paid row exists
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "We don't see a $120 payment from June 12.", strict: true, dbh, inboundMessage: ASK })).resolves.toEqual(STALE);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ ...freshCtx(), billing: { ...freshCtx().billing, paymentHistory: { rows: [...newest], complete: true } } });
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "We don't see a $120 payment from June 12.", strict: true, dbh, inboundMessage: ASK })).resolves.toEqual({ stale: false });
+  });
+});

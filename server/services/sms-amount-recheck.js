@@ -9,7 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const drafter = require('./sms-shadow-drafter');
-const { ensureAbsenceHistory } = require('./payment-history');
+const { ensureAbsenceHistory, surfaceReferencedPayments } = require('./payment-history');
 
 // The amount forms and the payment-acknowledgement grammar are the
 // draft-time guard's own (one definition for both amount guards): every
@@ -343,6 +343,9 @@ async function amountFreeStatusClaimStale({
     // a settlement claim read the emptiness as "nothing owed". Fail closed.
     const ctx = customerRow ? await require('./context-aggregator').getContextForCustomer(customerRow) : null;
     if (!ctx) return { stale: true, reason: 'amount_recheck_no_customer' };
+    // the payment the customer asked about may be older than the display window (Codex round-19 P2) — the SAME
+    // surfacing the draft did, from the same inbound, so a valid reply about it is judged against that row
+    await surfaceReferencedPayments(ctx, inboundMessage, dbh);
     await ensureAbsenceHistory(ctx, text, dbh);
     const stale = drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage });
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
@@ -378,7 +381,7 @@ function bodyNeedsPaymentRecheck(body) {
  * recipient configured, no open invoice, or the invoice fails the pay page's Zelle visibility); stale
  * ('zelle_now_available') when it would be offered now. An unverifiable check fails CLOSED.
  */
-async function zelleDenialStale({ customerId, dbh = db } = {}) {
+async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null } = {}) {
   const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
   if (!manualPayOptionsFromEnv()?.zelle?.recipient) return { stale: false };
   if (!customerId) return { stale: true, reason: 'zelle_recheck_failed' };
@@ -386,7 +389,9 @@ async function zelleDenialStale({ customerId, dbh = db } = {}) {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
     const ctx = customerRow ? await require('./context-aggregator').getContextForCustomer(customerRow) : null;
     if (!ctx) return { stale: true, reason: 'zelle_recheck_failed' };
-    const invoiceId = ctx?.billing?.openInvoice?.id || null;
+    // several open invoices: the SAME resolver as the draft (Codex round-19 P1); an unresolvable reference
+    // abstained at draft time, so the denial stands
+    const invoiceId = require('./zelle-target-invoice').resolveZelleTargetInvoice(ctx?.billing, inboundMessage).invoiceId;
     if (!invoiceId) return { stale: false }; // nothing to pay by Zelle => "not available" is true
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: invoiceId, dbh });
     if (eligibility.eligible) return { stale: true, reason: 'zelle_now_available' };
@@ -437,7 +442,8 @@ async function outgoingAmountsStale({
       try {
         const customerRow = await dbh('customers').where({ id: customerId }).first();
         const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
-        effectiveZelleInvoiceId = ctx?.billing?.openInvoice?.id || null;
+        // several open invoices: the one the customer's message names, else abstain => zelle_invoice_unresolved
+        effectiveZelleInvoiceId = require('./zelle-target-invoice').resolveZelleTargetInvoice(ctx?.billing, inboundMessage).invoiceId;
       } catch (err) {
         logger.warn(`[sms-amount-recheck] open-invoice lookup for Zelle recheck failed for customer ${customerId}: ${err.message}; blocking send`);
         return { stale: true, reason: 'zelle_recheck_failed' };
@@ -446,7 +452,7 @@ async function outgoingAmountsStale({
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: effectiveZelleInvoiceId, dbh });
     if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
   } else if (hasNegativeZelleAvailabilityClaim(text)) {
-    const denial = await zelleDenialStale({ customerId, dbh });
+    const denial = await zelleDenialStale({ customerId, dbh, inboundMessage });
     if (denial.stale) return denial;
   }
   const strict = strictForVersion(promptVersion);
@@ -496,7 +502,12 @@ async function outgoingAmountsStale({
     // The pooled rule (pre-v12 prompts, NOT human-edited) has no per-clause
     // owed/receipt split; a human-edited pre-v12 reply uses the clause-aware
     // binder with trustOwedAmounts so only its OWED clauses are excused.
-    if (binderStrict) await ensureAbsenceHistory(ctx, text, dbh);
+    if (binderStrict) {
+      // Codex round-19 P2: the SAME surfacing the draft did, from the same inbound, so a valid reply about an
+      // older payment is judged against that row instead of blocked
+      await surfaceReferencedPayments(ctx, inboundMessage, dbh);
+      await ensureAbsenceHistory(ctx, text, dbh);
+    }
     const stale = binderStrict
       ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage })
       : amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));

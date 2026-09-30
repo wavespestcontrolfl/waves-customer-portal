@@ -913,3 +913,41 @@ describe('negative Zelle availability claims are revalidated before sending', ()
     await expect(zelleDenialStale({ customerId: null, dbh })).resolves.toEqual({ stale: true, reason: 'zelle_recheck_failed' });
   });
 });
+
+// Codex round-19 P1: the send-time recheck validates the invoice the customer NAMED when several are open.
+describe('several open invoices: the send-time Zelle recheck resolves the same invoice as the draft', () => {
+  const { zelleDenialStale } = require('../services/sms-amount-recheck');
+  let priorZelle;
+  beforeEach(() => { priorZelle = process.env.ZELLE_RECIPIENT; process.env.ZELLE_RECIPIENT = 'pay@example.com'; });
+  afterEach(() => { if (priorZelle === undefined) delete process.env.ZELLE_RECIPIENT; else process.env.ZELLE_RECIPIENT = priorZelle; });
+  const open = [
+    { id: 'inv-3', invoiceNumber: 'WPC-2026-0303', status: 'sent', amountDue: 95 },
+    { id: 'inv-1', invoiceNumber: 'WPC-2026-0101', status: 'overdue', amountDue: 210 },
+  ];
+  const dbh = dbWithTables({ customers: { id: 'c1' }, invoices: { id: 'x', customer_id: 'c1', status: 'open' } });
+  const ctxWith = (list) => ({ billing: { openInvoice: list[0], openInvoices: list } });
+  const BODY = 'You can Zelle to pay@example.com.';
+
+  test('a human-typed Zelle offer (no persisted id): the invoice the inbound names is rechecked, not the newest', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?' })).resolves.toEqual({ stale: false });
+    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: expect.objectContaining({ id: 'x' }), dbh: expect.any(Function) });
+  });
+  test('several open and no reference: the offer cannot be tied to one invoice => blocked (unresolved)', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+    expect(payPageZelleVisibility).not.toHaveBeenCalled();
+  });
+  test('a persisted invoice id (from the decision) is used as-is', async () => {
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, zelleInvoiceId: 'inv-1', inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+  test('a Zelle DENIAL: unresolvable with several open => it stands; named invoice now eligible => stale', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
+    payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I pay by Zelle?' })).resolves.toEqual({ stale: false });
+    await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I Zelle invoice WPC-2026-0101?' })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
+  });
+});
