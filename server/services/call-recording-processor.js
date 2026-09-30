@@ -1341,7 +1341,10 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   if (countyKey === 'desoto') {
     return { reason: 'desoto_locality', county: 'DeSoto' };
   }
-  const servedHillsboroughTown = cities.some((c) => SOUTH_HILLSBOROUGH_CITIES.includes(c));
+  // A served south-Hillsborough town named by city OR by a served ZIP (AV
+  // can return a ZIP with no locality), as the inspection route checks it.
+  const servedHillsboroughTown = [...cities, ...zips.map((z) => lower(zipToCity(z)))]
+    .some((c) => c && SOUTH_HILLSBOROUGH_CITIES.includes(c));
   if (av && (av.status === 'out_of_service_area' || av.inServiceArea === false)) {
     if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
     return { reason: 'address_validation_out_of_service_area', county: av.county || null };
@@ -16139,7 +16142,9 @@ const CallRecordingProcessor = {
                     onFile: freshCallCustomer,
                   });
                   if (fencedGeoVeto) {
-                    throw new Error(`service-area check failed on the fenced customer row (${fencedGeoVeto.reason}) — booking held for office review`);
+                    const geoErr = new Error(`service-area check failed on the fenced customer row (${fencedGeoVeto.reason}) — booking held for office review`);
+                    geoErr.fencedGeoVeto = fencedGeoVeto;
+                    throw geoErr;
                   }
                   customer = freshCallCustomer;
                   // Call OWNERSHIP re-reads too (r40): a journaled
@@ -17956,6 +17961,25 @@ const CallRecordingProcessor = {
           } catch (schedErr) {
             logger.error(`[call-proc] Failed to create scheduled service: ${schedErr.message}; skipping SMS so customer isn't told about an appointment that doesn't exist`);
             appointmentResult = { service: serviceType, dateTime: extracted.preferred_date_time, scheduleError: schedErr.message, smsSent: false };
+            // A fenced geographic veto (Codex #5403 r7) is a HOLD, not a
+            // failure: surface it exactly like the pre-fence veto — skip
+            // reason, confirm reason, and in legacy/shadow routing the
+            // skipped-booking card (enforce mode files its own card).
+            if (schedErr.fencedGeoVeto) {
+              const fencedSkipReason = schedErr.fencedGeoVeto.reason === 'on_file_address_unavailable'
+                ? 'service_area_unverified'
+                : 'out_of_service_area';
+              appointmentResult = { ...appointmentResult, scheduleCreated: false, skippedReason: fencedSkipReason };
+              if (!bridgeNeedsConfirmation.includes(fencedSkipReason)) bridgeNeedsConfirmation.push(fencedSkipReason);
+              if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+                await fileSkippedBookingCard({
+                  call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+                  skippedReason: fencedSkipReason,
+                  preferredDateTime: extracted.preferred_date_time,
+                  serviceType, bridgeNeedsConfirmation, callSid,
+                });
+              }
+            }
           }
 
           // SMS cleared ONLY by IMPLIED inbound consent, the resolved target

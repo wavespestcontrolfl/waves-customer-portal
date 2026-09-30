@@ -116,6 +116,13 @@ describe('legacyGeographicVeto', () => {
     })).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
   });
 
+  test('a served south-Hillsborough ZIP with no city stays bookable (Codex r7 P2)', () => {
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'out_of_service_area', inServiceArea: false, county: 'Hillsborough County', normalized: { postal_code: '33570' } },
+      extracted: {},
+    })).toBeNull();
+  });
+
   test('served south-Hillsborough towns stay bookable in the legacy path', () => {
     expect(legacyGeographicVeto({
       addressValidation: { status: 'out_of_service_area', inServiceArea: false, county: 'Hillsborough County' },
@@ -211,8 +218,18 @@ describe('legacy booking branch wiring', () => {
     const after = source.slice(fenceAt, fenceAt + 2500);
     expect(after).toContain('const fencedGeoVeto = legacyGeographicVeto({');
     expect(after).toContain('onFile: freshCallCustomer');
-    expect(after).toMatch(/if \(fencedGeoVeto\) \{\s*throw new Error/);
+    expect(after).toMatch(/if \(fencedGeoVeto\) \{\s*const geoErr = new Error\([^;]*;\s*geoErr\.fencedGeoVeto = fencedGeoVeto;\s*throw geoErr;/);
     expect(after.indexOf('fencedGeoVeto')).toBeLessThan(after.indexOf('customer = freshCallCustomer;'));
+  });
+
+  test('a fenced geographic veto surfaces as a held booking with a review card (Codex r7 P2)', () => {
+    expect(source).toContain('geoErr.fencedGeoVeto = fencedGeoVeto;');
+    const catchAt = source.indexOf('} catch (schedErr) {');
+    const block = source.slice(catchAt, catchAt + 2200);
+    expect(block).toContain('if (schedErr.fencedGeoVeto) {');
+    expect(block).toContain('skippedReason: fencedSkipReason');
+    expect(block).toContain('bridgeNeedsConfirmation.push(fencedSkipReason)');
+    expect(block).toContain('await fileSkippedBookingCard({');
   });
 
   test('the geographic veto sits ahead of the booking branch and is not keyed on any V2 mode', () => {
