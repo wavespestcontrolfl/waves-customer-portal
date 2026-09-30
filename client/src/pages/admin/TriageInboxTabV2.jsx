@@ -64,6 +64,7 @@ const REASON_LABELS = {
   confirmed_without_start_time: "Confirmed, no start time",
   low_confidence: "Low confidence",
   address_recovered: "Address recovered — read back",
+  address_readback_form_street: "Web-form address, street confirmed only — read back house number",
   on_file_house_number_conflict: "House number differs from record — confirm",
   email_unverified: "Email spelled — read back",
   email_invalid: "Email couldn't be captured",

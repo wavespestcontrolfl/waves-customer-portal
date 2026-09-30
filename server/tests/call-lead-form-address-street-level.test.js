@@ -2,7 +2,7 @@
 // lead whose on-file address came from their own form, who does not repeat it
 // on the call, books to that form address even when Google confirms only the
 // STREET (a new-build street in Parrish / Lakewood Ranch). The office gets an
-// address_readback card. Synthetic names and addresses only.
+// address_readback_form_street card. Synthetic names and addresses only.
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { canAutoRoute } = require('../services/call-triage-flags');
 const { callLeadFormAddressStreetLevelLive } = require('../config/feature-gates');
@@ -17,6 +17,7 @@ const {
   buildStreetLevelReadbackItem,
   buildStreetLevelReadbackWrite,
   recordStreetLevelReadback,
+  streetLevelReadbackEligibleRow,
 } = CallRecordingProcessor._test;
 
 const GATE = 'GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL';
@@ -112,9 +113,9 @@ describe('gate on: street-level match on a web-form address', () => {
 
     // ...and the office gets the existing read-back card, advisory, address lane.
     const item = buildStreetLevelReadbackItem({ knownCaller: out, routingResult: routing, callLogId: 'call-1', extraction: confirmed() });
-    expect(item).toMatchObject({ call_log_id: 'call-1', reason_code: 'address_readback', severity: 'advisory', category: 'address_review' });
+    expect(item).toMatchObject({ call_log_id: 'call-1', reason_code: 'address_readback_form_street', severity: 'advisory', category: 'address_review' });
     expect(JSON.parse(item.payload)).toMatchObject({
-      flag: 'address_readback', address_source: 'web_form_on_file',
+      flag: 'address_readback_form_street', address_source: 'web_form_on_file',
       address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219',
       google_granularity: 'ROUTE', google_street: 'Sample Newbuild Trail',
     });
@@ -502,18 +503,75 @@ describe('codex round 3 on #5381', () => {
     expect(s).toMatch(/await recordStreetLevelReadbackFor\(created\);/);
     // Only this call's own AI booking, never an attached human booking or a dead row; proof must bind.
     const helper = s.slice(s.indexOf('const recordStreetLevelReadbackFor'), s.indexOf('const existing = await findExistingCallAppointment'));
-    expect(helper).toContain("booking_source || 'phone_call') !== 'phone_call'");
-    expect(helper).toContain("['cancelled', 'rescheduled', 'skipped']");
+    expect(helper).toContain('streetLevelReadbackEligibleRow(row)');
     expect(helper).toContain('authority.useOnFileAddress');
-    // address_readback stays out of SUPERSEDE_KEPT_REASON_CODES: the AV low-confidence read-back keeps its replace-on-new-recording semantics.
+    // the street-level code stays out of SUPERSEDE_KEPT_REASON_CODES: the AV low-confidence read-back keeps its replace-on-new-recording semantics.
+    expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).not.toContain('address_readback_form_street');
     expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).not.toContain('address_readback');
   });
 
   test('P2: the call-level review state opens once the card has committed with the booking', () => {
     const s = src();
-    expect(s).toMatch(/if \(streetLevelReadbackFiled && svc && !svc\.__held && !bridgeNeedsConfirmation\.includes\('address_readback'\)\) \{\s*bridgeNeedsConfirmation\.push\('address_readback'\);/);
+    expect(s).toMatch(/if \(streetLevelReadbackFiled && svc && !svc\.__held && !bridgeNeedsConfirmation\.includes\(STREET_LEVEL_READBACK_REASON\)\) \{\s*bridgeNeedsConfirmation\.push\(STREET_LEVEL_READBACK_REASON\);/);
     // The push comes after the booking transaction resolved, never inside it.
-    expect(s.indexOf("bridgeNeedsConfirmation.push('address_readback')")).toBeGreaterThan(s.indexOf('const svc = await db.transaction(async (trx) => {'));
-    expect(s.indexOf("bridgeNeedsConfirmation.push('address_readback')")).toBeGreaterThan(s.indexOf('await recordStreetLevelReadbackFor(existingByKey)'));
+    expect(s.indexOf("bridgeNeedsConfirmation.push(STREET_LEVEL_READBACK_REASON)")).toBeGreaterThan(s.indexOf('const svc = await db.transaction(async (trx) => {'));
+    expect(s.indexOf("bridgeNeedsConfirmation.push(STREET_LEVEL_READBACK_REASON)")).toBeGreaterThan(s.indexOf('await recordStreetLevelReadbackFor(existingByKey)'));
+  });
+});
+
+describe('codex round 4 on #5381', () => {
+  const STREET_LEVEL_READBACK_REASON = 'address_readback_form_street';
+  const src = () => require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+  const adminTriage = () => require('fs').readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
+
+  test('P2: only this call\'s own explicit AI booking that has not started gets the card', () => {
+    const ok = { id: 'v1', booking_source: 'phone_call', status: 'confirmed' };
+    expect(streetLevelReadbackEligibleRow(ok)).toBe(true);
+    expect(streetLevelReadbackEligibleRow({ ...ok, status: 'pending' })).toBe(true);
+    // null / other sources are human or attached bookings.
+    for (const booking_source of [null, undefined, '', 'admin', 'manual']) expect(streetLevelReadbackEligibleRow({ ...ok, booking_source })).toBe(false);
+    // started or dead visits: a pre-visit read-back is moot.
+    for (const status of ['en_route', 'on_site', 'completed', 'cancelled', 'rescheduled', 'skipped', 'no_show', null, '']) expect(streetLevelReadbackEligibleRow({ ...ok, status })).toBe(false);
+    expect(streetLevelReadbackEligibleRow(null)).toBe(false);
+    expect(streetLevelReadbackEligibleRow({ booking_source: 'phone_call', status: 'confirmed' })).toBe(false);
+  });
+
+  test('P1: a ZIP that also belongs to an unserved county fails closed without a Google county', () => {
+    gateOn();
+    // 33921 is on both the Charlotte and Lee lists.
+    const boca = lead({ city: 'Boca Grande', zip: '33921' });
+    const n = { street_line_1: 'Sample Newbuild Trail', city: 'Boca Grande', state: 'FL', postal_code: '33921' };
+    expect(streetLevelMatch(boca, routeLevel({ inServiceArea: null, normalized: n }))).toBeNull();
+    // A served county from Google still clears it.
+    expect(streetLevelMatch(boca, routeLevel({ inServiceArea: true, county: 'Charlotte County', normalized: n }))).toMatchObject({ areaBasis: 'google_county' });
+    // A Lee county from Google never does.
+    expect(streetLevelMatch(boca, routeLevel({ inServiceArea: false, county: 'Lee County', normalized: n }))).toBeNull();
+    // Every Lee and Collier ZIP is out of the ZIP-only path; an unambiguous served ZIP still works.
+    const { LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
+    for (const zip of [...LEE_ZIPS, ...COLLIER_ZIPS]) {
+      expect(streetLevelMatch(lead({ zip }), routeLevel({ inServiceArea: null, normalized: { ...n, postal_code: zip } }))).toBeNull();
+    }
+    expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_zip' });
+  });
+
+  test('P2: the lane has its own reason code, known everywhere reason codes are mapped, and no migration is needed', () => {
+    const CODE = 'address_readback_form_street';
+    const item = buildStreetLevelReadbackItem({ knownCaller: { ...lead(), onFileStreetLevel: { granularity: 'ROUTE', route: 'X' } }, routingResult: { usesOnFileAddress: true }, callLogId: 'c', extraction: confirmed() });
+    expect(item.reason_code).toBe(CODE);
+    expect(item.category).toBe('address_review');
+    expect(CODE.length).toBeLessThanOrEqual(60);   // triage_items.reason_code is varchar(60); no CHECK constraint exists
+    expect(adminTriage()).toMatch(/'address_readback', 'address_readback_form_street'/);   // address-confirmation inbox filter
+    // The low-confidence address_readback is untouched (its own flag, category and copy).
+    expect(require('../services/call-triage-flags').ADVISORY_TRIAGE_FLAGS.has('address_readback')).toBe(true);
+    expect(src()).not.toMatch(/address_readback: ['"]the address on file/);
+  });
+
+  test('P1: the street-level card is version-bound on both admin triage paths and survives another card\'s call verdict', () => {
+    const a = adminTriage();
+    // single-card resolve/dismiss (transitionCore)
+    expect(a).toMatch(/item\.reason_code === 'address_readback_form_street'\s*\/\/ …and email review cards/);
+    // call-level verdict: own version check and excluded from the sibling sweep unless it is the clicked card
+    expect(a).toMatch(/if \(item\.reason_code === 'address_readback_form_street'\) \{\s*const liveStreetCard/);
+    expect(a).toMatch(/item\.reason_code !== 'address_readback_form_street' \? \['address_readback_form_street'\] : \[\]/);
   });
 });

@@ -38,7 +38,7 @@ test('address-only lookup filters in SQL before the default inbox limit', async 
     'open', 'in_progress', customerId, customerId,
     'missing_unit_number', 'address_unverified', 'missing_service_address',
     'low_confidence_address', 'address_validation_unavailable', 'address_unverifiable',
-    'address_not_validated', 'on_file_proof_customer_mismatch', 'address_recovered', 'address_readback', 'on_file_house_number_conflict', 100,
+    'address_not_validated', 'on_file_proof_customer_mismatch', 'address_recovered', 'address_readback', 'address_readback_form_street', 'on_file_house_number_conflict', 100,
   ]);
 });
 

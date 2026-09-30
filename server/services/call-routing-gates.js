@@ -760,6 +760,8 @@ function buildTriageItem({
     property_role_confirm: 'address_review',
     address_recovered: 'address_review',
     address_readback: 'address_review',
+    // Web-form lead booked on a street-level Google match: read the house number back.
+    address_readback_form_street: 'address_review',
     secondary_contact_captured: 'customer_field_conflict',
     secondary_contact_is_existing_customer: 'customer_field_conflict',
     shared_phone_ambiguous: 'customer_field_conflict',
