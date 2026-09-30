@@ -19,6 +19,8 @@ const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoice
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
+// Moved to services/pay-combined.js (dunning consolidation) — re-exported below unchanged.
+const { invoiceCreditWouldFullyCover } = require('../services/pay-combined');
 
 /**
  * Public pay routes — no auth required.
@@ -254,12 +256,6 @@ async function invoiceCaptureNeeded(invoice) {
   }
 }
 
-// Would auto-applied account credit fully cover this invoice? PROBE only —
-// never applies anything. Mirrors createInvoicePaymentIntent's
-// availableCredit gate (feature-gated, payer-billed excluded). Under the
-// held-coverage flow (Codex #2507 round-7 P1) a required-save invoice
-// stays collectible until capture completes, so GET/capture-setup can no
-// longer key the capture state off status === 'prepaid' alone.
 // Account credit /setup WILL auto-apply to this invoice (same gate + opt-in
 // as invoiceCreditWouldFullyCover), so the pay page can show the post-credit
 // amount before /setup answers. 0 when the gate is off / opted out / no credit.
@@ -271,20 +267,6 @@ async function invoiceProjectedCreditApplied(invoice) {
   const credit = Number(row?.account_credits) || 0;
   if (!(credit > 0)) return 0;
   return Math.min(Math.round(credit * 100), Math.round(invoiceAmountDue(invoice) * 100)) / 100;
-}
-
-async function invoiceCreditWouldFullyCover(invoice) {
-  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
-  if (!invoice?.customer_id || invoice?.payer_id) return false;
-  // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
-  // including the customer's opt-in (customers.auto_apply_account_credit,
-  // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
-  // it must read as zero here too — otherwise the capture step / combined
-  // preview would show a coverage the setup path will never apply.
-  const row = await db('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
-  if (row?.auto_apply_account_credit !== true) return false;
-  const credit = Number(row?.account_credits) || 0;
-  return credit > 0 && credit >= invoiceAmountDue(invoice);
 }
 
 router.get('/:token', async (req, res, next) => {

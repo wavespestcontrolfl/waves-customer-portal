@@ -105,19 +105,73 @@ async function abandonedSiblingPaymentIntent(inv, { database = db } = {}) {
 
 const amountDueCents = (invoice) => Math.round(invoiceAmountDue(invoice) * 100);
 
+// Would auto-applied account credit fully cover this invoice? PROBE only —
+// never applies anything. Mirrors createInvoicePaymentIntent's
+// availableCredit gate (feature-gated, payer-billed excluded). Under the
+// held-coverage flow (Codex #2507 round-7 P1) a required-save invoice stays
+// collectible until capture completes, so GET/capture-setup can no longer
+// key the capture state off status === 'prepaid' alone. Lives here (moved
+// from routes/pay-v2.js, which re-exports it unchanged) so the dunning
+// set authority can mirror the pay page's own preview predicate; `database`
+// lets a caller holding a transaction read through it.
+async function invoiceCreditWouldFullyCover(invoice, { database = db } = {}) {
+  if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
+  if (!invoice?.customer_id || invoice?.payer_id) return false;
+  // Mirrors createInvoicePaymentIntent's availableCredit gate exactly,
+  // including the customer's opt-in (customers.auto_apply_account_credit,
+  // owner ruling 2026-08-28): an opted-out balance reads as zero there, so
+  // it must read as zero here too — otherwise the capture step / combined
+  // preview would show a coverage the setup path will never apply.
+  const row = await database('customers').where({ id: invoice.customer_id }).first('account_credits', 'auto_apply_account_credit');
+  if (row?.auto_apply_account_credit !== true) return false;
+  const credit = Number(row?.account_credits) || 0;
+  return credit > 0 && credit >= invoiceAmountDue(invoice);
+}
+
+// Why combinedEligibleSiblings returned null (the optional onDegrade
+// callback's argument). 'none' is the ONLY reason that means "genuinely a
+// single invoice" — the combined flow engaged, and simply no sibling rides
+// it; every other reason is a degrade the caller may want to tell apart from
+// that (dunning consolidation: a hold, not a single-invoice send).
+const DEGRADE_REASONS = Object.freeze(['gate_off', 'payer_anchor', 'payer_unresolved', 'incomplete', 'over_cap', 'none']);
+
+// Wraps the optional onDegrade callback into `degrade(reason)`, which
+// reports the reason and returns null (so every `return null` site stays a
+// one-liner and the return value never changes). A throwing callback is
+// swallowed: an observer must not turn a graceful degrade into a failure.
+function makeDegrade(onDegrade) {
+  return (reason) => {
+    if (typeof onDegrade === 'function') {
+      try { onDegrade(reason); } catch (cbErr) {
+        logger.warn(`[pay-combined] onDegrade callback threw (${reason}): ${cbErr.message}`);
+      }
+    }
+    return null;
+  };
+}
+
 /**
  * The sibling invoices a combined charge for `anchorInvoice` would collect,
  * or null when the combined flow must not engage (gate off, payer-billed
  * anchor, incomplete read, over-cap, or simply no siblings). Never throws —
  * a null return always degrades to today's single-invoice flow.
+ *
+ * `onDegrade(reason)` (optional, observer only) is called once for each null
+ * return with one of DEGRADE_REASONS: gate_off | payer_anchor |
+ * payer_unresolved | incomplete | over_cap | none. It is not called when the
+ * function throws (the setup-seam abort verdicts). A missing customer id or
+ * an unexpected selection failure reports 'incomplete'. `database` is
+ * threaded into the payer resolve as well as every read below it.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null, onDegrade } = {}) {
+  const degrade = makeDegrade(onDegrade);
+  let errorReason = 'incomplete';
   try {
-    if (!isEnabled('payIncludeBalance')) return null;
-    if (!anchorInvoice?.customer_id) return null;
+    if (!isEnabled('payIncludeBalance')) return degrade('gate_off');
+    if (!anchorInvoice?.customer_id) return degrade('incomplete');
     // A payer-billed or statement-accrued anchor is the third party's money —
     // never fan the homeowner's balance into it.
-    if (anchorInvoice.payer_id || anchorInvoice.payer_statement_id) return null;
+    if (anchorInvoice.payer_id || anchorInvoice.payer_statement_id) return degrade('payer_anchor');
     // LIVE anchor payer resolution (codex r6 P1): a payer assigned via the
     // scheduled service or customer default AFTER invoice creation leaves
     // invoices.payer_id null — the raw-column check above would let
@@ -137,6 +191,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
           customerId: String(anchorInvoice.customer_id),
           ...(anchorInvoice.scheduled_service_id ? { scheduledServiceId: String(anchorInvoice.scheduled_service_id) } : {}),
           throwOnError: true,
+          database,
         });
       } catch (resolveErr) {
         if (resolveErr.combinedSetupAbort) throw resolveErr;
@@ -152,6 +207,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
           err.combinedSetupAbort = true;
           throw err;
         }
+        errorReason = 'payer_unresolved';
         throw resolveErr; // outer catch degrades (GET / non-seam callers)
       }
       if (resolved?.payerId) {
@@ -164,7 +220,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
           throw err;
         }
         logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
-        return null;
+        return degrade('payer_anchor');
       }
     }
 
@@ -177,9 +233,9 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     });
     if (incomplete) {
       logger.warn(`[pay-combined] sibling read incomplete for invoice ${anchorInvoice.invoice_number} (${incomplete}) — combined flow disabled for this session`);
-      return null;
+      return degrade('incomplete');
     }
-    if (!candidates.length) return null;
+    if (!candidates.length) return degrade('none');
 
     const stopped = await dunningStoppedInvoiceIds(candidates.map((inv) => inv.id), { database });
     const eligible = [];
@@ -226,7 +282,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       }
       eligible.push(inv);
     }
-    if (!eligible.length) return null;
+    if (!eligible.length) return degrade('none');
     // Saved-card/orphan reconciliation fence per sibling (codex r13 P1): a
     // sibling with an unresolved charge attempt or orphaned charge may
     // ALREADY be collected — a combined PI capturing its share too would
@@ -245,13 +301,13 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
           logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${fenceErr.message}`);
         }
       }
-      if (!cleared.length) return null;
+      if (!cleared.length) return degrade('none');
       eligible.length = 0;
       eligible.push(...cleared);
     }
     if (eligible.length > MAX_COMBINED_SIBLINGS) {
       logger.warn(`[pay-combined] customer ${anchorInvoice.customer_id} has ${eligible.length} eligible siblings (cap ${MAX_COMBINED_SIBLINGS}) — combined flow disabled for this session`);
-      return null;
+      return degrade('over_cap');
     }
     return eligible;
   } catch (err) {
@@ -259,7 +315,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     // uncertainty) must reach the route, never degrade to single-invoice.
     if (err.combinedSetupAbort || err.payerBilledAnchor) throw err;
     logger.warn(`[pay-combined] sibling selection failed for invoice ${anchorInvoice?.id}: ${err.message} — combined flow disabled for this session`);
-    return null;
+    return degrade(errorReason);
   }
 }
 
@@ -1364,7 +1420,9 @@ async function recordResidual(trx, paymentIntent, entry, reason, { isAnchor = fa
 
 module.exports = {
   MAX_COMBINED_SIBLINGS,
+  DEGRADE_REASONS,
   amountDueCents,
+  invoiceCreditWouldFullyCover,
   combinedEligibleSiblings,
   abandonedSiblingPaymentIntent,
   buildAllocation,

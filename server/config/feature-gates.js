@@ -3496,6 +3496,22 @@ const gates = {
   // "unset = byte-identical." Also guarded against overwriting a
   // churned/archived customer's stage. Unset = byte-identical.
   balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
+
+  // Customer-level overdue reminders (dunning consolidation, PR 1: inert
+  // foundations — nothing reads these yet). A customer with 2+ actively-
+  // dunned open invoices gets ONE customer_dunning_schedules row that owns
+  // the cadence, instead of one reminder per invoice. Both gates ship DARK:
+  // off unless exactly 'true'. These three entries are for logGateStatus
+  // only; the readers live in services/customer-dunning/ (later PRs), which
+  // read the env at call time. SHADOW computes and logs only (no rows, no
+  // mints, no reservations, no sends); the live gate additionally needs
+  // GATE_DUNNING_LADDER_90 and the pay-page balance gate (payIncludeBalance)
+  // on. dunningCustomerScheduleAllowlist reads ENABLED when
+  // DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST (comma list of customer ids; empty =
+  // everyone) is non-empty — the one-customer canary before a full flip.
+  dunningCustomerScheduleShadow: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true',
+  dunningCustomerSchedule: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true',
+  dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -3945,10 +3961,37 @@ function outlinkTrackingLive() {
   return process.env.GATE_OUTLINK_TRACKING === 'true';
 }
 
+// Customer-level dunning gates read at CALL time — strict `=== 'true'`. The
+// `dunningCustomerSchedule*` gates-map entries above are for logGateStatus
+// only. Both ship dark; the live reader is separate from the shadow reader so
+// a shadow run can never be mistaken for authority to send.
+function dunningCustomerScheduleShadowLive() {
+  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true';
+}
+
+function dunningCustomerScheduleLive() {
+  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true';
+}
+
+// DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST — comma-separated customer ids, read at
+// CALL time. Returns null when unset/empty (= everyone), else a Set of the
+// trimmed non-empty ids. It only ever NARROWS the live gate (a canary); it
+// never turns anything on by itself.
+function dunningCustomerScheduleAllowlist() {
+  const ids = String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+  return ids.length ? new Set(ids) : null;
+}
+
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
+module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
+module.exports.dunningCustomerScheduleLive = dunningCustomerScheduleLive;
+module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowlist;
 // gates 1775330914
