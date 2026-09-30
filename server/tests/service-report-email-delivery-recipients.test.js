@@ -196,6 +196,77 @@ describe('service report email recipient delivery', () => {
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
   });
 
+  describe('service.report_ready payload copy', () => {
+    const { buildReportV1Data } = require('../services/service-report/report-data');
+    const { buildServiceReportDynamicContext } = require('../services/service-report/dynamic-context');
+    const fixture = {
+      customerName: 'Tenant Contact',
+      serviceDate: '2026-05-18',
+      serviceType: 'Residential Pest Control',
+      serviceDisplayName: 'Residential Pest Control',
+      technicianName: 'Waves Tech',
+      cityState: 'Sarasota, FL',
+      serviceAddress: '123 Example Way, Sarasota, FL 34236',
+      findings: [],
+      applications: [],
+      advisory: { exterior_reentry_min: 60, interior_reentry_min: 150 },
+      metrics: [],
+    };
+    const reentry = {
+      displayTimezone: 'America/New_York',
+      customerSummary: 'Exterior ready at 2:27 PM. Interior ready at 3:57 PM.',
+      targets: [
+        { key: 'exterior', label: 'Exterior', readyAt: '2026-05-18T18:27:00.000Z' },
+        { key: 'interior', label: 'Interior', readyAt: '2026-05-18T19:57:00.000Z' },
+      ],
+    };
+
+    async function sentPayload({ dynamicContext, ...data }) {
+      const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
+      buildReportV1Data.mockImplementation(() => Promise.resolve({ ...data }));
+      buildServiceReportDynamicContext.mockImplementation(() => Promise.resolve(dynamicContext));
+      EmailTemplateLibrary.sendTemplate.mockResolvedValue({ sent: true, message: { provider_message_id: 'fixture-message' } });
+      await sendServiceReportV1Email('record-1', { token: 'token-1' });
+      return EmailTemplateLibrary.sendTemplate.mock.calls[0][0].payload;
+    }
+
+    afterEach(() => {
+      buildServiceReportDynamicContext.mockImplementation(() => Promise.resolve({}));
+      buildReportV1Data.mockImplementation(() => Promise.resolve({ ...fixture, serviceAddress: undefined, advisory: {} }));
+    });
+
+    test('re-entry summary states exterior and interior each once', async () => {
+      const payload = await sentPayload({ ...fixture, dynamicContext: { reentry } });
+      expect(payload.reentry_summary).toBe('Exterior ready at 2:27 PM. Interior ready at 3:57 PM.');
+    });
+
+    test('without a customer summary the per-target lines are the fallback', async () => {
+      const payload = await sentPayload({ ...fixture, dynamicContext: { reentry: { ...reentry, customerSummary: '' } } });
+      expect(payload.reentry_summary).toBe('Exterior ready at 2:27 PM Interior ready at 3:57 PM');
+    });
+
+    test('without any ready time the advisory minutes are the fallback', async () => {
+      const payload = await sentPayload({ ...fixture, dynamicContext: {} });
+      expect(payload.reentry_summary).toBe('Exterior re-entry: 60 min Interior re-entry: 150 min');
+    });
+
+    test('property_address is the full service address, cityState only as a fallback', async () => {
+      const full = await sentPayload({ ...fixture, dynamicContext: {} });
+      expect(full.property_address).toBe('123 Example Way, Sarasota, FL 34236');
+      EmailTemplateLibrary.sendTemplate.mockClear();
+      const fallback = await sentPayload({ ...fixture, serviceAddress: '', dynamicContext: {} });
+      expect(fallback.property_address).toBe('Sarasota, FL');
+    });
+
+    test('the record load selects the stamped-or-customer street and ZIP, not just city/state', async () => {
+      await sentPayload({ ...fixture, dynamicContext: {} });
+      const chain = db.mock.results.find((result, index) => db.mock.calls[index][0] === 'service_records').value;
+      const selected = chain.select.mock.calls[0].map((arg) => String(arg && arg.toString ? arg.toString() : arg)).join('\n');
+      expect(selected).toMatch(/address_line1/);
+      expect(selected).toMatch(/as zip/);
+    });
+  });
+
   test('checks rendered copy, takes the re-entry seal, rechecks the send seal, then dispatches', async () => {
     const { sendServiceReportV1Email } = require('../services/service-report/email-delivery');
     const order = [];
@@ -285,7 +356,7 @@ describe('service report email recipient delivery', () => {
       templateKey: 'service.report_ready',
       payload: expect.objectContaining({
         property_address: 'Sarasota, FL',
-        finding_summary: 'No action-required findings were documented.',
+        finding_summary: '',
         application_summary: '0 applications',
         pdf_note: 'Your PDF service report is attached.',
       }),

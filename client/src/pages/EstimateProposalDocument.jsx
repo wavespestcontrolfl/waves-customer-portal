@@ -10,6 +10,7 @@ import {
 import { commercialTermRows, proposalHasAuthoredTerms } from '../lib/proposal-sections';
 import { formatLineBasis, showsLineBasis } from '@proposal-bid';
 import { formatETDateTime } from '../lib/timezone';
+import { resolveApiAssetUrl } from '../utils/apiAssetUrl';
 
 // Work-order style estimate document (owner direction 2026-08-07, modeled on
 // ServiceReportDocument): this is what renders whenever the estimate is
@@ -606,7 +607,7 @@ export default function EstimateProposalDocument({ data, token }) {
             ) : null}
             {estimate.satelliteUrl && !satelliteFailed ? (
               <img
-                src={estimate.satelliteUrl}
+                src={resolveApiAssetUrl(estimate.satelliteUrl)}
                 alt={`Satellite view of ${estimate.address || 'the property'}`}
                 style={{ marginTop: 8, width: '100%', maxHeight: 260, objectFit: 'cover', borderRadius: 10, border: `1px solid ${LINE}` }}
                 onError={() => setSatelliteFailed(true)}

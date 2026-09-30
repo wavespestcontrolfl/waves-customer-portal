@@ -181,6 +181,8 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const call = generateGroundedDraft.mock.calls[0][0];
     expect(call.inboundMessage).toBe('Hello what happened this morning');
     expect(call.intent.intent).toBe('service_scheduling_window_reply');
+    // A live, sendable draft: may reach the scheduler path with no city.
+    expect(call.liveOpenTimes).toBe(true);
     // Real-answers OPEN TIMES (pre-push audit P1): without this, a matched
     // customer's known city never reaches fetchOpenTimesBlock, and the
     // gate-on prompt would ask the model to offer times it has none of.
@@ -304,8 +306,25 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
     expect(payload.prompt_version).toBeNull();
-    expect(typeof payload.suggested_message).toBe('string');
+    // The scheduling lane has no template: an empty card, never an echo.
+    expect(payload.suggested_message).toBeNull();
     expect(JSON.parse(payload.input_snapshot).review_draft).toEqual({ source: 'template' });
+  });
+
+  test('LLM failure on a scheduling text never echoes the customer back (re-service regression)', async () => {
+    generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 0, converged: false });
+
+    await processInboundSms({
+      customer: CUSTOMER,
+      from: '+19415551234',
+      to: '+19415550000',
+      body: 'We have had a few centipedes, and a few roaches get caught in our glue traps since your initial visit. I am curious if you are able to do Saturday morning before 9am for a respray?',
+      smsLogId: 'sms-in-echo',
+    });
+
+    const payload = lastDecisionInsert();
+    expect(payload.workflow).toBe('service_scheduling_sms');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('unconverged draft never replaces the template', async () => {
@@ -326,7 +345,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
-    expect(payload.suggested_message).not.toContain('2 PM sharp');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('redaction placeholder in the reply keeps the template', async () => {
@@ -347,7 +366,7 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
-    expect(payload.suggested_message).not.toContain('[name]');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('a priced reply keeps the template (house rule: no prices in SMS)', async () => {
@@ -368,13 +387,13 @@ describe('processInboundSms — grounded LLM review draft', () => {
 
     const payload = lastDecisionInsert();
     expect(payload.model).toBe('deterministic_rules');
-    expect(payload.suggested_message).not.toContain('$415.75');
+    expect(payload.suggested_message).toBeNull();
   });
 
   test('a priced TEMPLATE echo also stores NULL — the fallback lane is guarded too (Codex P1)', async () => {
     seedActiveSchedulingThread();
-    // LLM path unavailable → deterministic template, which echoes raw
-    // inbound text — including the customer's own "$50".
+    // LLM path unavailable → no scheduling template, so nothing of the
+    // customer's own "$50" can reach the card.
     generateGroundedDraft.mockResolvedValue({ parsed: null, passes: 0, converged: false });
 
     await processInboundSms({

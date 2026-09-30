@@ -17,6 +17,8 @@ const NotificationService = require('./notification-service');
 const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
+const { withOutlinkTrackingForEmail } = require('./outlink-tracking');
+const { resolveEmailLinks } = require('./email-lead-links');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -657,7 +659,7 @@ async function activeSuppressionsFor(template, email, suppressionGroupKey, datab
   if (!email) return [];
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   const rows = await database('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
     .where({ status: 'active' });
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
     return rows.filter((row) => GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));
@@ -1449,6 +1451,12 @@ async function sendTemplate({
   // automation executor's email-division ledger fence; see
   // prepareTemplateSend).
   marketingRequiresLedger = false,
+  // Provenance only (email_messages.lead_id / estimate_id, recorded by
+  // resolveEmailLinks; never affects delivery, guards or dedupe): the estimate
+  // the mail concerns when the caller has no `estimateId` to hand the
+  // annual-offer guard (a deposit receipt). The lead is derived from
+  // recipient_id or the estimate's owner; no caller passes one directly.
+  linkEstimateId = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
   const auditRefusal = (err) => auditSendRefusal(err, {
@@ -1482,6 +1490,16 @@ async function sendTemplate({
     retryMessage = existing || null;
   }
 
+  // Outside links in prep guides route through /go/<code> for click logging
+  // (GATE_OUTLINK_TRACKING; no-op unless the gate is on and this is a prep.*
+  // send). Render-time only: the stored version is never edited, and the
+  // helper fails open to the original version.
+  if (!test) {
+    version = await withOutlinkTrackingForEmail({
+      template, version, payload, recipientType, recipientId,
+    });
+  }
+
   let prepared;
   try {
     prepared = prepareTemplateSend({
@@ -1500,6 +1518,10 @@ async function sendTemplate({
   // Fresh per send attempt; echoed in custom_args so the webhook fallback can tell
   // this attempt's events from a prior (retried) attempt's. See webhooks-sendgrid.js.
   const sendAttemptToken = crypto.randomUUID();
+  // The single chokepoint for tying prospect mail to its lead / estimate.
+  const links = await resolveEmailLinks({
+    recipientType, recipientId, estimateId, estimateIds, linkEstimateId, payload, test,
+  });
   const messageSnapshot = {
     provider: 'sendgrid',
     send_attempt_token: sendAttemptToken,
@@ -1511,6 +1533,8 @@ async function sendTemplate({
     trigger_event_id: triggerEventId || null,
     recipient_type: test ? 'test' : (recipientType || null),
     recipient_id: recipientId || null,
+    lead_id: links.lead_id,
+    estimate_id: links.estimate_id,
     recipient_email_snapshot: to,
     from_name_snapshot: fromName,
     from_email_snapshot: fromEmail,

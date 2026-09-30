@@ -651,6 +651,14 @@ async function submitRecap({
         client_pest_rating: clientPestRating,
         ...(serviceRecordCols.client_pest_rating_source ? { client_pest_rating_source: 'technician' } : {}),
         ...(serviceRecordCols.client_pest_rating_at ? { client_pest_rating_at: new Date() } : {}),
+        // Owner ruling 2026-09-29: a rating submitted through Recap is
+        // always an explicit staff/tech action — this form has no
+        // first-visit-default concept — so it always clears (or never
+        // sets) the completion form's default flag. Without this a recap
+        // that replaces a completion's untouched first-visit 5 with the
+        // tech's own chosen rating would leave the row wrongly excluded
+        // from email-division's activity averages.
+        ...(serviceRecordCols.client_pest_rating_defaulted ? { client_pest_rating_defaulted: false } : {}),
       }
       : {};
     const existing = await trx('service_records')

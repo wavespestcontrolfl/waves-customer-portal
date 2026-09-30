@@ -450,7 +450,7 @@ async function validateCandidate(candidate, { bouncedEmail, ownerCustomerId, own
   if (!EMAIL_RE.test(email)) return { ok: false, reason: 'syntax' };
   if (email === normalizeEmail(bouncedEmail)) return { ok: false, reason: 'same_as_bounced' };
   const suppressed = await db('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [email]).where({ status: 'active' }).first();
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email)).where({ status: 'active' }).first();
   if (suppressed) return { ok: false, reason: 'candidate_suppressed' };
   const triedBefore = await db('email_bounce_rescues')
     .whereRaw('LOWER(candidate_email) = ?', [email])

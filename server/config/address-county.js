@@ -37,10 +37,12 @@ const ZIP_COUNTY = Object.freeze(Object.fromEntries([
 // address-level lane exists (codex gh-r38).
 const CITY_COUNTY = Object.freeze({
   bradenton: 'Manatee', parrish: 'Manatee', palmetto: 'Manatee', ellenton: 'Manatee',
+  duette: 'Manatee',
   'anna maria': 'Manatee', 'holmes beach': 'Manatee',
   'bradenton beach': 'Manatee', myakka: 'Manatee', 'myakka city': 'Manatee',
   venice: 'Sarasota', 'north port': 'Sarasota', nokomis: 'Sarasota',
   osprey: 'Sarasota', 'siesta key': 'Sarasota', 'laurel': 'Sarasota',
+  'north venice': 'Sarasota', 'lake sarasota': 'Sarasota',
   'port charlotte': 'Charlotte', 'punta gorda': 'Charlotte', 'rotonda west': 'Charlotte',
 });
 

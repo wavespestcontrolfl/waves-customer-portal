@@ -4773,6 +4773,19 @@ async function lockAndGuardFollowingSiblings(conn, {
       const label = firstId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
       throw httpError(409, `Can't apply this price/service change to the rest of the series: ${label} is ${reason}. Handle that visit's billing first, or set the change to this appointment only.`);
     }
+    // A /secure card confirmation mid-finish on the edited visit OR any
+    // sibling this propagation would reprice — same VISIT_BUSY_RETRY
+    // contract as the single-visit guard above (findCompletingCardRequest
+    // VisitId's own comment has the full lock-vs-plain-read rationale).
+    const finishingId = await findCompletingCardRequestVisitId(conn, guardRows.map((visit) => visit.id));
+    if (finishingId) {
+      const when = guardRows.find((visit) => visit.id === finishingId);
+      const label = finishingId === editedId ? 'this appointment' : `the ${dateOnly(when?.scheduled_date) || 'later'} visit`;
+      throw Object.assign(
+        new Error(`The customer is finishing their card confirmation for ${label} — try the price change again in a moment.`),
+        { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+      );
+    }
     invoiceLinkColumn = await conn.schema.hasColumn('invoices', 'scheduled_service_id').catch(() => false);
     if (invoiceLinkColumn) {
       for (const visit of guardRows) {
@@ -13246,30 +13259,6 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       } else if (occupancyRouteTouched && occupancyDateKey) {
         await acquireOccupancyLock(trx, occupancyDateKey);
       }
-      // A zero-price re-service conversion voids this visit's invoices below
-      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
-      // while the issued-invoice closeout locks the invoice FIRST and the
-      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
-      // closeout serializes on the scheduled-service invoice-mint advisory
-      // lock ahead of its invoice lock; the conversion takes the same lock
-      // here — after the occupancy rung (slot-reservation's order) and
-      // before any row lock — so the two run strictly one after the other
-      // whichever starts first.
-      //
-      // A plain repricing save takes the SAME lock, for a different race
-      // (owner ruling 2026-09-28, PR "the re-price block"): every invoice-
-      // minting path takes this lock before it mints, so acquiring it here
-      // — before the findBillingCoveredVisits check just below, and before
-      // this visit's own scheduled_services row is ever locked or written —
-      // means no invoice can be minted at the OLD price while this save is
-      // deciding whether to allow the new one. Held through the write below
-      // (transaction-scoped advisory lock — released on commit/rollback).
-      // Gated on `priceEditPosted` (the request shape), never on a
-      // pre-transaction DB comparison — see its own comment above.
-      if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {
-        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
-        await acquireScheduledInvoiceMintLock(trx, req.params.id);
-      }
       // Regrouping can adopt a destination partner's technician. Include all
       // destination rows (eligibility may change during this save), then
       // revalidate after locking: an assignment may finish while we wait.
@@ -13319,6 +13308,40 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           const { lockTechDays } = require('../services/scheduling/tech-day-lock');
           arrivalRouteFenceKeys = new Set(await lockTechDays(trx, preFence));
         }
+      }
+      // A zero-price re-service conversion voids this visit's invoices below
+      // (voidConversionInvoicesRestoringCredits) AFTER locking the visit row,
+      // while the issued-invoice closeout locks the invoice FIRST and the
+      // visit row after it — an ABBA deadlock (GitHub r10 P2 #4127). The
+      // closeout serializes on the scheduled-service invoice-mint advisory
+      // lock ahead of its invoice lock; the conversion takes the same lock
+      // here — after the occupancy rung AND the tech-day fence above, and
+      // before any row lock — so the two run strictly one after the other
+      // whichever starts first.
+      //
+      // A plain repricing save takes the SAME lock, for a different race
+      // (owner ruling 2026-09-28, PR "the re-price block"): every invoice-
+      // minting path takes this lock before it mints, so acquiring it here
+      // — before the findBillingCoveredVisits check further below, and
+      // before this visit's own scheduled_services row is ever locked or
+      // written — means no invoice can be minted at the OLD price while
+      // this save is deciding whether to allow the new one. Held through
+      // the write below (transaction-scoped advisory lock — released on
+      // commit/rollback). Gated on `priceEditPosted` (the request shape),
+      // never on a pre-transaction DB comparison — see its own comment
+      // above.
+      //
+      // Taken AFTER the tech-day fence (Codex P2 on #5253): a save that
+      // combines a price/service edit with a technician assignment used to
+      // take this mint lock BEFORE the fence above, while a concurrent
+      // accept of a reservation-held appointment (estimate-public.js, its
+      // "RUNG 1 FIRST" block) takes the tech-day fence FIRST and this same
+      // mint lock after — an ABBA deadlock. Moved here, after the fence, so
+      // both paths agree: occupancy -> tech-day fence -> mint, in that
+      // order, before any row lock.
+      if (reServiceConversionZeroPrice || priceEditPosted || serviceEditPosted) {
+        const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+        await acquireScheduledInvoiceMintLock(trx, req.params.id);
       }
       // Save-time eligibility for the FINAL technician on the FINAL date
       // this save lands on (tech-out P1 pre-push audit): assignScheduleJobs
@@ -13565,17 +13588,14 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // #5253). Refuse with a retry rather than race it. The consent
           // amount itself is LEAST-stamped at render and caps the charge, so
           // a confirmation that lands after this save can never charge more
-          // than the customer was shown.
-          if (await trx.schema.hasTable('appointment_card_requests')) {
-            const finishing = await trx('appointment_card_requests')
-              .where({ scheduled_service_id: req.params.id, status: 'completing' })
-              .first('id');
-            if (finishing) {
-              throw Object.assign(
-                new Error('The customer is finishing their card confirmation for this visit — try the price change again in a moment.'),
-                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
-              );
-            }
+          // than the customer was shown. See findCompletingCardRequestVisitId
+          // for the lock-vs-plain-read contract this shares with
+          // finishVerifiedSecureCapture.
+          if (await findCompletingCardRequestVisitId(trx, [req.params.id])) {
+            throw Object.assign(
+              new Error('The customer is finishing their card confirmation for this visit — try the price change again in a moment.'),
+              { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+            );
           }
         }
       }
@@ -13627,6 +13647,17 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               throw Object.assign(
                 httpError(409, `Can't convert this series to a free re-service: the ${dateOnly(when?.scheduled_date) || 'later'} visit is ${reason}. Void or release that first, or convert this appointment only.`),
                 { code: 'REPRICE_BLOCKED_COMMITTED_MONEY', isOperational: true },
+              );
+            }
+            // Same VISIT_BUSY_RETRY contract as the single-visit and
+            // 'following' sibling guards — a /secure card confirmation
+            // mid-finish on any zeroed sibling.
+            const sibFinishingId = await findCompletingCardRequestVisitId(trx, convSiblings.map((visit) => visit.id));
+            if (sibFinishingId) {
+              const when = convSiblings.find((visit) => visit.id === sibFinishingId);
+              throw Object.assign(
+                new Error(`The customer is finishing their card confirmation for the ${dateOnly(when?.scheduled_date) || 'later'} visit — try converting the series again in a moment.`),
+                { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
               );
             }
           }
@@ -17577,13 +17608,23 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // completion and Charge Now reuse it at the OLD price.
 // It also discovers invoices linked through a service record or a
 // combined-visit packet (Codex r2 P1 on #5253), so money or a live invoice
-// on an indirectly linked invoice blocks too. A free re-service conversion
-// gets no exemption (owner ruling 2026-09-28, #5253 r3: "same rule as any
-// re-price") — staff void or release first. None of the three
-// existing callers (the plan trim, the series-cancel fee rails, the price/
-// service sibling propagation before this option was threaded onto it) ever
-// needed to know about an invoice nobody has paid — so this stays opt-in,
-// default false, keeping every pre-existing call byte-identical.
+// on an indirectly linked invoice blocks too. One more indirect link
+// (owner-ordered follow-up to #5253, Codex round 9):
+//   - a combined first-application invoice for a non-anchor member visit.
+//     estimate-converter.js stamps EVERY covered member (anchor and
+//     siblings alike) with the SAME invoice id on
+//     scheduled_services.first_application_invoice_id — a link deliberately
+//     separate from invoices.scheduled_service_id (which only ever names the
+//     anchor) — so a member visit's own re-price has no other way to find
+//     the invoice covering it (memberBillingInvoiceRows: any non-void
+//     invoice on the anchor that bills the member by its own lines).
+// A free re-service conversion gets no exemption (owner ruling 2026-09-28,
+// #5253 r3: "same rule as any re-price") — staff void or release first. None
+// of the three existing callers (the plan trim, the series-cancel fee rails,
+// the price/service sibling propagation before this option was threaded
+// onto it) ever needed to know about an invoice nobody has paid — so this
+// stays opt-in, default false, keeping every pre-existing call
+// byte-identical.
 // Money committed at the ESTIMATE level for a visit created or adopted from
 // one (Codex r8 P1 on #5253) — invisible to findBillingCoveredVisits, which
 // keys on the visit: a received, not-yet-applied estimate deposit (keyed by
@@ -17610,6 +17651,155 @@ async function findEstimateScopedCommitment(conn, estimateId) {
     if (term) return 'on an annual prepay invoice that is still open at the old price';
   }
   return null;
+}
+
+// Combined first-application invoices that still bill each member visit
+// (owner ruling 2026-09-29 on #5301 — the simple rule, no replacement-chain
+// tracing): every NON-void invoice on the member's anchor visit, plus the
+// stamp itself, plus any non-void invoice on ANOTHER visit that itemizes
+// the member directly (found without the stamp, so a member an old pod's
+// mint left unstamped is still covered — the itemized discovery below),
+// that bills THIS member by its own lines — an itemized
+// invoice names each visit it bills (client_id scheduled_<id>_primary,
+// which every service mint writes); an unitemized base-application invoice
+// ("First service application") bills every member; the live stamp bills
+// its members by construction. Locks: the anchor's mint lock is TRIED
+// first (invoice creation serializes on it, so no new invoice appears
+// before this save commits), then the candidate invoices are locked AND
+// read in one NOWAIT statement. Contention is a VISIT_BUSY_RETRY, never a
+// wait (this save already holds a visit row; the card-charge path locks
+// invoice then visit). Returns rows in findBillingCoveredVisits' shape.
+async function memberBillingInvoiceRows(conn, ids) {
+  const { CANCELLED_SERVICE_RESOLVED_STATUSES } = require('../services/invoice');
+  const originalIdOf = new Map((ids || []).filter((id) => id != null).map((id) => [String(id), id]));
+  const memberIds = [...originalIdOf.keys()];
+  if (memberIds.length === 0) return [];
+  const busy = () => Object.assign(
+    new Error('An invoice for this visit is being updated or charged right now — try the price change again in a moment.'),
+    { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+  );
+  // Two ways to find a combined invoice that still bills a member:
+  //  1. the STAMP — scheduled_services.first_application_invoice_id, written
+  //     at accept time or later by reconcileRecentUnstampedAccepts;
+  //  2. the invoice's OWN itemized lines — a non-void invoice whose
+  //     line_items carry client_id scheduled_<member>_primary (jsonb
+  //     containment, so it works with the column typed jsonb). An invoice an
+  //     old pod minted during the pre-deploy write gap leaves its members
+  //     UNSTAMPED until the reconciliation runs; a member repriced in that
+  //     window would otherwise pass this guard and be stamped afterwards
+  //     (Codex on #5301). Invoices whose own scheduled_service_id IS the
+  //     member are excluded — the direct read already covers those.
+  // The alias keys the discovery apart from the locked read below (and gives
+  // the test harness an exact table string to key on).
+  const readStamps = () => conn('scheduled_services as ss')
+    .join('invoices as inv', 'inv.id', 'ss.first_application_invoice_id')
+    .whereIn('ss.id', memberIds)
+    .select('ss.id as member_id', 'inv.id as stamp_id', 'inv.scheduled_service_id as anchor_id');
+  const itemizedIdsOf = (inv) => {
+    let items = inv.line_items;
+    if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
+    items = Array.isArray(items) ? items : [];
+    return { items, itemized: items.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ''))?.[1]).filter(Boolean) };
+  };
+  const readItemized = async () => {
+    const containment = memberIds.map(() => 'itemized.line_items @> ?::jsonb').join(' OR ');
+    // Scoped to the members' own customers (Codex r1 P2 on #5374): a combined
+    // first-application invoice is minted for the anchor's customer, and its
+    // members are that same customer's visits (estimate-first-application-
+    // invoice.js), so the indexed invoices.customer_id bounds the jsonb
+    // containment scan to one customer's invoices instead of the table.
+    const rows = await conn('invoices as itemized')
+      .whereIn('itemized.customer_id', conn('scheduled_services').whereIn('id', memberIds).select('customer_id'))
+      .whereNotIn('itemized.status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+      .whereRaw(`(${containment})`, memberIds.map((id) => JSON.stringify([{ client_id: `scheduled_${id}_primary` }])))
+      .select('itemized.id', 'itemized.scheduled_service_id', 'itemized.line_items');
+    return rows.filter((row) => {
+      const { itemized } = itemizedIdsOf(row);
+      return memberIds.some((member) => itemized.includes(member) && String(row.scheduled_service_id) !== member);
+    });
+  };
+  let stamps;
+  let discovered;
+  let candidates;
+  try {
+    // Anchor mint locks are TRIED (never waited on) until the anchor set is
+    // stable: discovery -> try-lock every anchor it names -> discover again,
+    // because an invoice minted on a not-yet-locked anchor between the read
+    // and the lock would otherwise be missed. Once an anchor's lock is held
+    // no new invoice can appear on it before this save commits.
+    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    const lockedAnchors = new Set();
+    for (let pass = 0; ; pass += 1) {
+      stamps = await readStamps();
+      discovered = await readItemized();
+      const wanted = new Set([
+        ...stamps.map((row) => row.anchor_id),
+        ...discovered.map((row) => row.scheduled_service_id),
+      ].filter(Boolean).map(String));
+      const fresh = [...wanted].filter((anchorId) => !lockedAnchors.has(anchorId)).sort();
+      if (fresh.length === 0) break;
+      if (pass >= 3) throw busy();
+      for (const anchorId of fresh) {
+        if (!(await tryAcquireScheduledInvoiceMintLock(conn, anchorId))) throw busy();
+        lockedAnchors.add(anchorId);
+      }
+    }
+    if (stamps.length === 0 && discovered.length === 0) return [];
+    const anchorIds = [...lockedAnchors].sort();
+    const stampIds = [...new Set(stamps.map((row) => String(row.stamp_id)))].sort();
+    const discoveredIds = [...new Set(discovered.map((row) => String(row.id)))].sort();
+    // ONE locked read: NOWAIT row locks on every candidate (this save holds
+    // a visit row; the card-charge path locks invoice then visit, so a wait
+    // here could deadlock). The reconciliation writer
+    // (estimate-first-application-invoice.js stampGroupRevalidated) locks
+    // invoice then visit rows too but takes no mint lock; it needs no
+    // serialization with this guard — the guard no longer depends on the
+    // stamp, and a stamp landing after this save is only a link.
+    candidates = await conn('invoices')
+      .where(function () {
+        this.whereIn('id', [...new Set([...stampIds, ...discoveredIds])]).orWhereIn('scheduled_service_id', anchorIds);
+      })
+      .whereNotIn('status', CANCELLED_SERVICE_RESOLVED_STATUSES)
+      .orderBy('id')
+      .forUpdate()
+      .noWait()
+      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    throw busy();
+  }
+  const billedIds = (inv) => {
+    const { items, itemized } = itemizedIdsOf(inv);
+    const aggregate = itemized.length === 0 && items.some((li) => /^first (service )?application$/i.test(String(li?.description || '').trim()));
+    return { itemized, aggregate };
+  };
+  const stampByMember = new Map(stamps.map((row) => [String(row.member_id), row]));
+  const out = [];
+  for (const member of memberIds) {
+    const stamp = stampByMember.get(member);
+    const seen = new Set();
+    for (const inv of candidates) {
+      const { itemized, aggregate } = billedIds(inv);
+      const viaStamp = stamp && (String(inv.id) === String(stamp.stamp_id)
+        || (String(inv.scheduled_service_id) === String(stamp.anchor_id) && (aggregate || itemized.includes(member))));
+      // Unstamped (or differently stamped) member itemized on another
+      // visit's invoice; the member's own-visit invoices are the direct
+      // read's job.
+      const viaLines = itemized.includes(member) && String(inv.scheduled_service_id) !== member;
+      if (!(viaStamp || viaLines) || seen.has(String(inv.id))) continue;
+      seen.add(String(inv.id));
+      out.push({
+        scheduled_service_id: originalIdOf.get(member),
+        status: inv.status,
+        credit_applied: inv.credit_applied ?? 0,
+        line_items: inv.line_items,
+        stripe_payment_intent_id: inv.stripe_payment_intent_id ?? null,
+        total: inv.total,
+        _openReason: 'attached to a combined first-application invoice that is still open at the old price',
+      });
+    }
+  }
+  return out;
 }
 
 async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
@@ -17745,6 +17935,14 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           );
         invoiced.push(...packetLinked);
       }
+      // Combined first-application invoice, non-anchor member (see the
+      // comment above this function). scheduled_services.first_application_
+      // invoice_id is the only durable link for a member other than the
+      // anchor — invoices.scheduled_service_id names only the anchor.
+      // hasColumn-guarded: the column postdates some schemas.
+      if (await conn.schema.hasColumn('scheduled_services', 'first_application_invoice_id')) {
+        invoiced.push(...await memberBillingInvoiceRows(conn, ids));
+      }
     }
     const hasDepositCreditLine = (items) => {
       try {
@@ -17775,12 +17973,44 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         // Completion and Charge Now reuse any live attached invoice, so it
         // would keep billing the OLD price (Codex r1 P1: a $0 draft too) —
         // the same "any live invoice" rule the sibling propagation already
-        // applies (Codex #3505 r7, owner decision).
-        mark(inv.scheduled_service_id, 'attached to an invoice that is still open at the old price');
+        // applies (Codex #3505 r7, owner decision). The combined
+        // first-application read above tags its rows with a more specific
+        // `_openReason` so the refusal names which invoice is still open;
+        // every other source falls back to the generic wording.
+        mark(inv.scheduled_service_id, inv._openReason || 'attached to an invoice that is still open at the old price');
       }
     }
   }
   return covered;
+}
+
+// A /secure card confirmation mid-finish ('completing') for one of these
+// visits is not durable yet, so the money-committed rails findBillingCovered
+// Visits runs can't see it (Codex r8 P1 on #5253; broadened to sibling
+// guards on #5253 follow-up) — a plain read, kept OUTSIDE that function
+// deliberately: this is a transient contention signal (VISIT_BUSY_RETRY,
+// retry the save) never a durable committed-money refusal
+// (REPRICE_BLOCKED_COMMITTED_MONEY). finishVerifiedSecureCapture
+// (appointment-card-request.js) takes this SAME visit's scheduled-invoice
+// mint lock around its pending→completing claim and its completing→
+// completed write, so a capture mid-claim or mid-final-write is already
+// serialized by the mint lock this route holds (taken above for the edited
+// visit, try-locked for siblings) — a capture waits for that lock, or this
+// save's own lock acquisition blocks until the capture's claim/write
+// commits and releases it. This plain read exists ONLY to catch the window
+// a capture sits 'completing' WITHOUT holding the lock — between its claim
+// commit and its later completing→completed write, which spans an
+// out-of-transaction Stripe SetupIntent re-read and so cannot hold a
+// transaction-scoped advisory lock the whole time. Returns the first
+// covered visit id, or null.
+async function findCompletingCardRequestVisitId(conn, visitIds) {
+  const ids = [...new Set((visitIds || []).filter((id) => id != null))];
+  if (ids.length === 0 || !(await conn.schema.hasTable('appointment_card_requests'))) return null;
+  const finishing = await conn('appointment_card_requests')
+    .whereIn('scheduled_service_id', ids)
+    .where({ status: 'completing' })
+    .first('scheduled_service_id');
+  return finishing ? finishing.scheduled_service_id : null;
 }
 
 // Reconcile a recurring series to an exact number of upcoming visits — the
@@ -18798,9 +19028,9 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 
 // A held family (lawn_care / mosquito / tree_shrub — cancellation-
 // resolution/holds.js's startHold, HOLDABLE_FAMILIES) promises "no visits
-// before resume_on": every one of the family's upcoming visits was moved out
-// to no earlier than that date and the monthly component (when the customer
-// is on one) suspended. Top-up must honor that same promise rather than
+// before resume_on": every one of the family's visits inside the pause was
+// skipped (a prepaid one moved to on or after that date) and the monthly
+// component (when the customer is on one) suspended. Top-up must honor that same promise rather than
 // booking a fresh visit into the held window. Codex GitHub r6 P1.
 //
 // Reuses holds.js's own family classifier (familyOfServiceRow,
@@ -18814,8 +19044,8 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 //
 // "Active" uses the EXACT status/column semantics runPlanHoldLifecycle
 // itself reads: status: 'active' AND resume_on in the future. A hold whose
-// resume_on has already arrived is not fenced here — startHold moves every
-// visit in the family to no earlier than resume_on, so a visit ON that date
+// resume_on has already arrived is not fenced here — startHold leaves no
+// family visit before resume_on, so a visit ON that date
 // is exactly what the hold always intended to let through once it ends;
 // runPlanHoldLifecycle's own cron flips status to 'resumed' shortly after,
 // independently of top-up.
@@ -23849,7 +24079,7 @@ router.post('/generate-report', async (req, res) => {
 
 ## CONTEXT
 
-This prompt generates copy for two sections of a branded, customer-facing service report PDF for **Waves Pest Control & Lawn Care** — a premium home services provider in Southwest Florida. The sections appear inside a formal document alongside customer info, property details, product tables, and safety guidance.
+This prompt generates copy for two sections of a branded, customer-facing service report PDF for **Waves Pest Control** — a premium home services provider in Southwest Florida. The sections appear inside a formal document alongside customer info, property details, product tables, and safety guidance.
 
 The two sections are:
 
@@ -26026,6 +26256,7 @@ module.exports.sendRescheduleNoticeForVisit = sendRescheduleNoticeForVisit;
 // cancel so a 'following' / 'series' cancel refuses prepaid visits the same
 // way the trim does instead of silently dropping paid visits off the books.
 module.exports.findBillingCoveredVisits = findBillingCoveredVisits;
+module.exports.findCompletingCardRequestVisitId = findCompletingCardRequestVisitId;
 module.exports.findEstimateScopedCommitment = findEstimateScopedCommitment;
 // The billable-amount booking gate — also consumed lazily by the IB
 // create_appointment proposal and executor for its single visit

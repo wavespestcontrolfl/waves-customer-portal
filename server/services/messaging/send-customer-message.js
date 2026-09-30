@@ -330,6 +330,9 @@ async function sendCustomerMessage(input) {
 async function sendCustomerMessageCore(input) {
   let providerOutcome = { sent: false, deliveryOutcome: 'not_sent' };
   let providerHandoffReservation = null;
+  // Short codes the SMS link wrap put in THIS attempt's body (stamped to the
+  // sms_log row in the finally below once the send is accepted).
+  let wrappedLinkCodes = [];
   try {
   // 1. Contract validation
   const contractCheck = validateContract(input);
@@ -464,7 +467,17 @@ async function sendCustomerMessageCore(input) {
     // only and manual semantics are unconditional either way.
     || (['lead', 'customer'].includes(input.audience)
       && ['conversational', 'card_request'].includes(input.purpose)
-      && input.entryPoint === 'admin_communications_manual_sms');
+      && input.entryPoint === 'admin_communications_manual_sms')
+    // The estimate page's "text me the packet" send (estimate-public.js
+    // POST /:token/service-details/send, B01): a bearer-token page whose
+    // recipient can be a stranger's wrong number, so the phone lock (the STOP /
+    // wrong-number writers' own lockSmsPhone) is held through the provider
+    // request, and for a customer-backed estimate the customer-comms lock too
+    // (the sms_enabled writer's lock, taken first). Suppression and consent
+    // reload under them and fail closed. A lead has no customer row: phone only.
+    || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
+      && input.entryPoint === 'estimate_service_details_send'
+      && input.metadata?.original_message_type === 'estimate_service_details');
   if (withSmsHandoff && (typeof withSmsHandoff !== 'function' || sendInput.channel !== 'sms' || !smsHandoffAllowed)) {
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'UNSUPPORTED_SMS_HANDOFF', reason: 'Locked SMS handoff is not allowed for this message' };
   }
@@ -660,6 +673,32 @@ async function sendCustomerMessageCore(input) {
 
   // 5. Run validator pipeline. Each entry is { name, fn }; fn is invoked
   //    with (input, policy, contactState).
+  // GATE_SMS_LINK_WRAP: every portal link in a customer/lead SMS becomes a
+  // tracked /l/<code> short link (sms-link-wrap.js). Here — after the
+  // withheld-link rewrite, the app/billing routing and every earlier body
+  // transform, immediately before countSegments — so the audit row, segment
+  // count and the text that goes out all describe the SAME wrapped body. Never
+  // blocks: any failure inside keeps the original link.
+  if (sendInput.channel === 'sms') {
+    try {
+      const linkWrap = await require('./sms-link-wrap').wrapPortalLinks({
+        body: sendInput.body,
+        channel: sendInput.channel,
+        audience: sendInput.audience,
+        purpose: sendInput.purpose,
+        hasMedia: sendHasMedia,
+        customerId: sendInput.customerId,
+        leadId: sendInput.leadId,
+      });
+      if (linkWrap.codes.length) {
+        sendInput.body = linkWrap.body;
+        wrappedLinkCodes = linkWrap.codes;
+      }
+    } catch (err) {
+      logger.warn(`[send_customer_message] SMS link wrap failed, body unchanged: ${err?.name || 'error'}`);
+    }
+  }
+
   const segmentMeta = countSegments(sendInput.body || '');
   const pipeline = [
     { name: 'require_input_ids',          fn: () => validateRequiredIds(sendInput, policy) },
@@ -1287,6 +1326,14 @@ async function sendCustomerMessageCore(input) {
         .attachReservationContext(providerHandoffReservation, err.providerOutcome);
     }
     throw err;
+  } finally {
+    // Fire-and-forget: stamping never adds latency to the send path. The
+    // .catch is a backstop (settleWrappedLinks never throws); code only, never
+    // the message — a Knex error embeds the bound target_url.
+    if (wrappedLinkCodes.length) {
+      void require('./sms-link-wrap').settleWrappedLinks(wrappedLinkCodes, providerOutcome)
+        .catch((err) => logger.warn(`[send_customer_message] wrapped-link stamp failed: ${String((err && (err.code || err.name)) || 'error').slice(0, 40)}`));
+    }
   }
 }
 

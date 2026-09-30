@@ -53,20 +53,23 @@ const fs = require('fs');
 const SCRIPT_PATH = path.join(__dirname, 'run-voice-relay-eval.js');
 const DEFAULT_TRIALS = 3;
 // Each child here IS a full run of run-voice-relay-eval.js — the shipped
-// 36-scenario fixture (up to 90 caller turns, six 20s model streams per turn)
-// plus the eval's own retry-once wrapper, plus --judge's chains. That is
-// exactly the run the eval harness's own operational ceiling is sized for
+// 43-scenario fixture (up to 130 caller turns, six 20s model streams per
+// turn) plus the eval's own retry-once wrapper, plus --judge's chains. That
+// is exactly the run the eval harness's own operational ceiling is sized for
 // (server/services/eval/voice-relay-replay.js CHILD_TIMEOUT_MS derivation,
-// exported as _internals.CHILD_TIMEOUT_MS: up to 3h/attempt, doubled for the
-// retry = 7h12m, +48m overhead = 8h) — so this runner must use a ceiling AT
-// LEAST that generous, or it would kill a legitimately still-running child
+// exported as _internals.CHILD_TIMEOUT_MS: 4h20m/attempt for 130 turns, plus
+// 45 judge chains at ceil(45/4)=12 four-minute batches = 48m, so 5h08m/
+// attempt; the retry-once wrapper doubles that to a 10h16m worst case for
+// the pair) — so this runner must use a ceiling AT LEAST that generous, with
+// real margin over it (Codex round-2 P2: the prior 10h value here UNDERCUT
+// that 10h16m bound), or it would kill a legitimately still-running child
 // well before the eval's own wrapper would. Mirrored as a literal rather
 // than required directly: voice-relay-eval.js's module graph is heavier
 // (call-extraction-replay, the relay conversation loader, etc.) than this
 // file's own runOnce/summarizeCondition unit tests need — see runBenchmark's
 // existing lazy require of relay-conversation below for the same reason.
 // Re-derive together if that file's ceiling ever changes.
-const CHILD_TIMEOUT_MS = 8 * 60 * 60 * 1000;
+const CHILD_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 // The full set of flags this runner understands (see the file header's
 // usage examples). An unrecognized flag — a typo like --onyl or --trail — is
 // a usage error caught here, before any child process runs, rather than
@@ -230,6 +233,10 @@ function assertOnlyHasIds(ARGS) {
   if (!ids.length) {
     throw new Error(`--only must name at least one scenario id (got "${ARGS.only}")`);
   }
+  // Use the replay's fixture loader and selector so preflight accepts exactly
+  // the IDs each child will accept, before any benchmark condition starts.
+  const { loadFixture, renderDateTokens, selectScenarios } = require('../services/eval/voice-relay-replay');
+  selectScenarios(renderDateTokens(loadFixture()), ids);
 }
 
 /**
@@ -431,6 +438,44 @@ function summarizeCondition(id, runs) {
   // figure (missing data), same as today.
   const scenarioEvaluatedSamples = attemptSummaries.reduce((n, s) => n + Math.max(0, (s.scenarios || 0) - (s.replayErrors || 0)), 0);
 
+  // Real per-round Anthropic token usage, summed across every attempt the
+  // same way the scenario counts above are (voice-relay-replay.js's
+  // summarize() threads a `usage` block through result.summary /
+  // attempts[].summary unstripped — see docs/sandy-benchmark.md "Cache-hit
+  // rate"). `(s.usage && s.usage[key]) || 0` tolerates an older/mocked
+  // summary with no `usage` field at all (contributes 0, never throws).
+  const sumAttemptsUsage = (key) => attemptSummaries.reduce((n, s) => n + ((s.usage && s.usage[key]) || 0), 0);
+  const usage = {
+    inputTokens: sumAttemptsUsage('input_tokens'),
+    outputTokens: sumAttemptsUsage('output_tokens'),
+    cachedInputTokens: sumAttemptsUsage('cached_input_tokens'),
+    cacheWriteTokens: sumAttemptsUsage('cache_write_tokens'),
+    rounds: sumAttemptsUsage('rounds'),
+    cacheReadRounds: sumAttemptsUsage('cacheReadRounds'),
+    // Rejected model rounds (timeout/abort/provider error) spent tokens no
+    // usage block reports: with any, the totals above are a lower bound, and
+    // a timeout-prone condition would otherwise read artificially cheaper.
+    incompleteRounds: sumAttemptsUsage('incompleteRounds'),
+  };
+  // null (not 0) with no rounds carrying usage at all — missing data, never
+  // read as "confirmed zero cache hits".
+  usage.cacheHitRate = usage.rounds ? usage.cacheReadRounds / usage.rounds : null;
+  // A run whose token telemetry never reached these totals — crashed, timed
+  // out or killed (no result), inconclusive, model-mismatched (excluded
+  // from every aggregate), or a completed run with an attempt that carries
+  // no usage block — still spent tokens this condition cannot count (Codex
+  // pre-push, PR #4946). Any such run also makes the totals a lower bound.
+  // Codex r10: summarize() always creates the usage container, so its mere
+  // presence proves nothing — every successful model round (modelRounds)
+  // must have carried a usage block (usage.rounds), or an SDK/instrumentation
+  // regression would present zero tokens as complete data.
+  const instrumented = (a) => a && a.summary && a.summary.usage && typeof a.summary.usage === 'object'
+    && (a.summary.usage.rounds || 0) >= (a.summary.modelRounds || 0);
+  const withTelemetry = completed.filter((r) => Array.isArray(r.result.attempts) && r.result.attempts.length > 0
+    && r.result.attempts.every(instrumented));
+  usage.missingTelemetryRuns = runs.length - withTelemetry.length;
+  usage.complete = usage.incompleteRounds === 0 && usage.missingTelemetryRuns === 0;
+
   return {
     condition: id,
     trials: runs.length,
@@ -478,6 +523,17 @@ function summarizeCondition(id, runs) {
     durationMsTotalRunMedian: percentile(totalRunDurations, 50),
     durationMsTotalRunP90: totalRunDurations.length >= 3 ? percentile(totalRunDurations, 90) : null,
     durationMsTotalRunSampleCount: totalRunDurations.length,
+    // Real Anthropic usage for THIS condition — unlike the rest of "Cost"
+    // (docs/sandy-benchmark.md), which stays benchmark-wide only because the
+    // relay's own model calls are never ledgered, per-round token counts now
+    // come straight off each round's finalMessage() (see
+    // voice-relay-replay.js's installHarness), so they ARE attributable per
+    // condition even though dollar cost still is not (tokens don't say which
+    // condition's PRICE per token applied, and a candidate model's per-token
+    // rate can differ from the baseline's). `usage.rounds` is the sample size
+    // behind `cacheHitRate` — report it alongside the rate, same as every
+    // other rate in this summary.
+    usage,
   };
 }
 
@@ -495,8 +551,13 @@ function summarizeCondition(id, runs) {
  */
 function resolveOutPath(ARGS, { fsImpl = fs } = {}) {
   const outPath = path.resolve(ARGS.out || path.join(__dirname, '..', '..', `voice-relay-benchmark-${Date.now()}.json`));
-  const target = fsImpl.existsSync(outPath) ? outPath : path.dirname(outPath);
+  const exists = fsImpl.existsSync(outPath);
+  const target = exists ? outPath : path.dirname(outPath);
   try {
+    const stats = fsImpl.statSync(target);
+    if (exists ? !stats.isFile() : !stats.isDirectory()) {
+      throw new Error('output must be a regular file in an existing directory');
+    }
     fsImpl.accessSync(target, fs.constants.W_OK);
   } catch (err) {
     throw new Error(`--out destination is not writable: ${outPath} (${err.code || err.message})`);
@@ -605,14 +666,6 @@ async function runBenchmark({ argv = process.argv.slice(2), execFileImpl = execF
       // concurrent children would contend for the same rate limit and
       // confound latency across conditions.
       const r = await runOnce(condition, trial, { cliArgs: ARGS, scriptPath, execFileImpl, timeoutMs });
-      // Cache-state hypothesis: the eval JSON does not expose Anthropic's own
-      // prompt-cache usage fields (cache_read_input_tokens /
-      // cache_creation_input_tokens) anywhere today (see
-      // docs/sandy-benchmark.md "Interleaving and warm/cold separation"), and
-      // condition order is now rotated per trial rather than fixed, so
-      // "trial 0 == cold" is no longer even a positional proxy. Always
-      // 'unknown' until the harness threads real usage data through.
-      r.cacheHypothesis = 'unknown';
       runs.push(r);
       log(`[benchmark] ${condition.id} trial=${trial} ranOk=${r.ranOk}${r.inconclusive ? ' inconclusive=true' : ''}${r.modelMismatch ? ' modelMismatch=true' : ''} wallMs=${r.wallMs}\n`);
     }
@@ -680,6 +733,16 @@ if (require.main === module) {
         // retried). See docs/sandy-benchmark.md "Latency".
         'durationMs p50 (first attempt)': c.durationMsFirstAttemptMedian, 'durationMs p90 (first attempt)': c.durationMsFirstAttemptP90 ?? 'n/a (n<3)',
         'durationMs p50 (total run)': c.durationMsTotalRunMedian, 'durationMs p90 (total run)': c.durationMsTotalRunP90 ?? 'n/a (n<3)',
+        // Real per-round Anthropic usage for this condition — see
+        // docs/sandy-benchmark.md "Cache-hit rate". `usage.rounds` is the
+        // sample size behind cacheHitRate; report both, never the rate alone.
+        tokensIn: c.usage.inputTokens, tokensOut: c.usage.outputTokens,
+        cacheRead: c.usage.cachedInputTokens, cacheWrite: c.usage.cacheWriteTokens,
+        cacheHitRate: c.usage.cacheHitRate == null ? 'n/a (0 rounds)' : `${(c.usage.cacheHitRate * 100).toFixed(1)}% (${c.usage.rounds} round(s))`,
+        usageComplete: c.usage.complete ? 'yes' : `NO — ${[
+          c.usage.incompleteRounds ? `${c.usage.incompleteRounds} rejected/unparseable round(s)` : null,
+          c.usage.missingTelemetryRuns ? `${c.usage.missingTelemetryRuns} run(s) without telemetry` : null,
+        ].filter(Boolean).join(', ')}; totals are a lower bound`,
       })));
       process.exitCode = exitCode;
     } catch (err) {

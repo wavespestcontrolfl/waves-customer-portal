@@ -13,15 +13,32 @@
  * Best-effort by contract: callers fire-and-forget; a template or
  * SendGrid failure must never affect the accept response. Idempotent
  * per estimate, so an accept retry can't double-send.
+ *
+ * ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL, dark): when the accept route
+ * passes `signup`, the email is sent from the gate-on template
+ * (estimate.accepted_signup, transactional_required) and also carries the
+ * property and the plan (membership.started's values). There is NO payment
+ * section: the "Auto Pay is set up" confirmation stays its own email (owner
+ * 2026-09-30). The result then says whether the send covered membership.started
+ * (`coversMembership`: accepted by the provider AND every plan value rendered);
+ * the caller sends membership.started itself when it did not. A later acceptance
+ * the same ET day for a DIFFERENT property gets the short per-property
+ * template. Gate off / no `signup`: exactly the email described above, byte for
+ * byte.
  */
 
 const db = require('../models/db');
 const logger = require('./logger');
 const EmailTemplateLibrary = require('./email-template-library');
-const { TZ, parseETDateTime, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
+const { TZ, parseETDateTime, etDateString, formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 const { portalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { withAccountPrimaryContact } = require('./customer-contact');
+const {
+  BASE_TEMPLATE_KEY, SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY, SIGNUP_FULL_CATEGORY, SIGNUP_SHORT_CATEGORY,
+  QUERY_STATUSES, RETRY_COLUMNS, acceptedForSending, signupGateLive, membershipCoveredBy,
+} = require('./signup-single-email');
+const { propertyStreetAddress, propertyStreetLine } = require('../utils/property-display');
 
 function clean(value) {
   return String(value == null ? '' : value).trim();
@@ -31,6 +48,165 @@ function clean(value) {
 // must not stop the estimate contact from being tried (GH Codex r6 P2).
 function usableEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean(value));
+}
+
+
+// ── One signup email (GATE_SIGNUP_SINGLE_EMAIL) ───────────────────────────
+function isTemplateUnavailable(err) {
+  return err?.code === 'EMAIL_TEMPLATE_UNAVAILABLE' || err?.code === 'EMAIL_TEMPLATE_DISABLED';
+}
+
+// The property this estimate is for, as the customer reads it: the stamped
+// visit address (the address the visit was booked for), else the estimate's
+// own property address, else the customer's street address — never the
+// profile_label nickname ("Primary"). { full, street } or null.
+async function propertyForEstimate({ estimateId, customerId, appointment }) {
+  if (appointment?.id) {
+    const row = await db('scheduled_services').where({ id: appointment.id })
+      .first('service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip');
+    const stamped = {
+      address_line1: row?.service_address_line1 ?? appointment.service_address_line1,
+      address_line2: row?.service_address_line2 ?? appointment.service_address_line2,
+      city: row?.service_address_city ?? appointment.service_address_city,
+      state: row?.service_address_state ?? appointment.service_address_state,
+      zip: row?.service_address_zip ?? appointment.service_address_zip,
+    };
+    const full = propertyStreetAddress(stamped);
+    if (full) return { full, street: propertyStreetLine(stamped) };
+  }
+  const estimate = await db('estimates').where({ id: estimateId }).first('address');
+  const estimateAddress = clean(estimate?.address);
+  if (estimateAddress) return { full: estimateAddress, street: clean(estimateAddress.split(',')[0]) || estimateAddress };
+  if (customerId) {
+    const cust = await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
+    const full = propertyStreetAddress(cust || {});
+    if (full) return { full, street: propertyStreetLine(cust) };
+  }
+  return null;
+}
+
+// This customer plus every customer on the same account — the same person's
+// other properties. Shared by the same-day short-email check and the welcome
+// queue's check so the two can never disagree about who "the customer" is.
+async function accountCustomerIds(customerId) {
+  const ids = new Set([String(customerId)]);
+  const self = await db('customers').where({ id: customerId }).first('account_id');
+  if (self?.account_id) {
+    const siblings = await db('customers').where({ account_id: self.account_id }).select('id');
+    for (const sibling of siblings || []) ids.add(String(sibling.id));
+  }
+  return [...ids];
+}
+
+const normalizeAddress = (value) => clean(value).toLowerCase().replace(/\s+/g, ' ');
+
+// Is this an ADDED property? Yes when the customer (or a customer on the same
+// account, same address) was already sent a full signup email that the provider
+// ACCEPTED (or that is on the retry rail) earlier today, ET, and no signup email
+// today (full or short) already named THIS property — a second estimate for a
+// property already on the plan (pest in the morning, lawn in the afternoon) is
+// not an added property and gets the full email. If the first acceptance's email
+// could not be sent, or was refused / suppressed, the next one is the first the
+// customer actually received and gets the full version. A later bounce is not
+// tracked (owner ruling 2026-09-30): that address cannot receive our mail, so
+// nothing we send instead would arrive either.
+async function isAddedPropertyToday({ customerId, email, ownKey, property }) {
+  const start = parseETDateTime(`${etDateString()}T00:00`);
+  if (!start || !customerId) return false;
+  const ids = await accountCustomerIds(customerId);
+  const rows = await db('email_messages')
+    .whereIn('template_key', [SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY])
+    .where({ recipient_type: 'customer' })
+    .whereIn('recipient_id', ids)
+    .whereIn('status', QUERY_STATUSES)
+    .whereRaw('lower(recipient_email_snapshot) = ?', [clean(email).toLowerCase()])
+    .where('created_at', '>=', start)
+    .whereNot('idempotency_key', ownKey)
+    .select('categories', 'payload_snapshot', 'status', ...RETRY_COLUMNS);
+  const parsed = (value, fallback) => {
+    if (typeof value !== 'string') return value ?? fallback;
+    try { return JSON.parse(value); } catch { return fallback; }
+  };
+  const earlier = (rows || []).filter(acceptedForSending).map((r) => ({
+    full: (parsed(r.categories, []) || []).includes(SIGNUP_FULL_CATEGORY),
+    address: normalizeAddress(parsed(r.payload_snapshot, {})?.property_address),
+  }));
+  if (!earlier.some((e) => e.full)) return false;
+  const here = normalizeAddress(property?.full);
+  return !earlier.some((e) => e.address && e.address === here);
+}
+
+// Two acceptances for the same account seconds apart (two properties) must not
+// both see "no signup email yet today" and both send the full email: the
+// full-vs-short decision and its send run one at a time per account, under a
+// session advisory lock (GH Codex r7 P2). The second waits until the first's
+// send has returned, so its email_messages row is settled and visible.
+// The lock lives on its OWN raw connection, outside the knex pool: fn() reads
+// and sends through the pool, so a pooled lock connection — held by the holder
+// and by every waiter — could starve the pool (DB_POOL_MAX can be 2) and stall
+// the holder itself (pre-push audit P1). lock_timeout bounds the wait; if the
+// lock can't be had (timeout, connection error) the send goes ahead unlocked,
+// which at worst is today's behavior — a second full email.
+const SIGNUP_LOCK_TIMEOUT_MS = 20000;
+async function serializedPerAccount(customerId, fn) {
+  const self = customerId ? await db('customers').where({ id: customerId }).first('account_id') : null;
+  const key = `signup-email:${self?.account_id || customerId || 'none'}`;
+  let conn = null;
+  let locked = false;
+  try {
+    conn = await db.client.acquireRawConnection();
+    await conn.query(`SET lock_timeout = ${SIGNUP_LOCK_TIMEOUT_MS}`);
+    await conn.query('SELECT pg_advisory_lock(hashtext($1))', [key]);
+    locked = true;
+  } catch (err) {
+    logger.warn(`[estimate-accepted-email] signup lock unavailable (${EmailTemplateLibrary.redactEmailAddresses(err.message)}); deciding unlocked`);
+  }
+  try {
+    return await fn();
+  } finally {
+    if (conn) {
+      if (locked) await conn.query('SELECT pg_advisory_unlock(hashtext($1))', [key]).catch(() => {});
+      await db.client.destroyRawConnection(conn).catch(() => {});
+    }
+  }
+}
+
+// Everything the combined email adds to the payload, plus which template
+// carries it. Never throws — a section that cannot be built is simply absent
+// (and its separate email then goes out as it does today).
+async function buildSignupEmail({ customerId, estimateId, appointment, email, signup, ownKey }) {
+  const safe = async (label, fn) => {
+    try { return await fn(); } catch (err) {
+      logger.warn(`[estimate-accepted-email] signup ${label} unavailable for estimate ${estimateId}: ${EmailTemplateLibrary.redactEmailAddresses(err.message)}`);
+      return null;
+    }
+  };
+  const plan = signup.membershipEmail
+    ? await safe('plan', () => require('./account-membership-email').buildMembershipStartedSection({ ...signup.membershipEmail, recipientEmail: email }))
+    : null;
+  // No plan folded in (e.g. the email is going to the estimate's contact, not
+  // the account holder) → nothing in this email needs the transactional_required
+  // stream, so send the plain, unsubscribe-respecting email exactly as today and
+  // let membership.started go out on its own (GH Codex r7 P2).
+  if (!plan) return null;
+  const property = await safe('property', () => propertyForEstimate({ estimateId, customerId, appointment }));
+  // A later same-day acceptance for a DIFFERENT property is an added property —
+  // but only when the email can name it; otherwise the full email (which names
+  // nothing it can't) is the honest one.
+  const added = property?.street
+    ? await safe('day check', () => isAddedPropertyToday({ customerId, email, ownKey, property }))
+    : false;
+  const short = !!added;
+  return {
+    short,
+    templateKey: short ? SHORT_TEMPLATE_KEY : SIGNUP_TEMPLATE_KEY,
+    category: short ? SIGNUP_SHORT_CATEGORY : SIGNUP_FULL_CATEGORY,
+    plan,
+    variables: {
+      ...(property ? { property_heading: 'Property', property_address: property.full, property_street: property.street } : {}),
+      ...(plan ? plan.variables : {}),
+    },
+  };
 }
 
 const TWO_HOURS_MS = 2 * 60 * 60 * 1000;
@@ -110,76 +286,116 @@ function renderedCarriesAcceptanceCopy(result) {
   return bodies.some((b) => b.includes(ACCEPTANCE_COPY_MARKER));
 }
 
-async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, acceptanceId = null, idempotencyKey } = {}) {
+// Who the email goes to: the linked customer, else the estimate's own contact —
+// a phoneless one-time accept commits without a customer row, and a linked
+// customer row can carry no usable email while the estimate does — and last the
+// account owner's address for a secondary property (#1995), so a row / estimate
+// address always wins. null when there is no usable address anywhere.
+async function resolveRecipient({ customerId, estimateId }) {
+  const customer = customerId
+    ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email', 'account_id', 'is_primary_profile')
+    : null;
+  const own = usableEmail(customer?.email) ? null : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
+  let email = clean(own ? own.customer_email : customer?.email);
+  if (!usableEmail(email) && customer) email = clean((await withAccountPrimaryContact({ ...customer, email: '' })).email);
+  if (!usableEmail(email)) return null;
+  return { email, firstName: clean(customer?.first_name || String(own?.customer_name || '').split(/\s+/)[0]) || 'there' };
+}
+
+// One send of the onboarding email: the combined signup variant when given,
+// else the plain email. When the combined template (or the short one) is
+// unavailable the customer still gets the plain email exactly as today, and
+// membership.started goes out separately because nothing was folded in.
+// Returns the sendTemplate result and the variant that actually went out.
+async function sendOnboardingTemplate(ctx, variant) {
+  const send = (v) => EmailTemplateLibrary.sendTemplate({
+    templateKey: v ? v.templateKey : BASE_TEMPLATE_KEY,
+    to: ctx.recipient.email,
+    payload: {
+      first_name: ctx.recipient.firstName,
+      service_type: clean(ctx.serviceLabel) || 'service',
+      appointment_line: appointmentLineFor(ctx.appointment),
+      acceptance_note: ctx.acceptanceNote,
+      customer_portal_url: portalUrl('/login'),
+      company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+      ...v?.variables,
+    },
+    recipientType: 'customer',
+    recipientId: ctx.customerId || null,
+    idempotencyKey: ctx.idempotencyKey || ctx.ownKey,
+    triggerEventId: ctx.ownKey,
+    categories: v ? ['estimate_accepted_onboarding', v.category] : ['estimate_accepted_onboarding'],
+    // SendGrid 4xx bodies can echo the recipient address — keep provider
+    // errors out of the logs and log a redacted reason below.
+    suppressProviderErrorLog: true,
+  });
+  let sent = { result: null, variant };
+  try {
+    sent.result = await send(variant);
+  } catch (err) {
+    if (!variant || !isTemplateUnavailable(err)) throw err;
+    logger.warn(`[estimate-accepted-email] ${variant.templateKey} unavailable for estimate ${ctx.estimateId}; sending the plain onboarding email`);
+    sent = { result: await send(null), variant: null };
+  }
+  const { result } = sent;
+  if (result?.sent) logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${ctx.estimateId}`);
+  else logger.info(`[estimate-accepted-email] onboarding email NOT sent for estimate ${ctx.estimateId} (${result?.blocked ? 'suppression-blocked' : (result?.reason || 'not sent')})`);
+  return sent;
+}
+
+// The copy went out (a deduped sent-ish row counts) — but only stamp fulfilment
+// when the RENDERED email actually carries the note: an admin can publish a
+// template version without the optional {{acceptance_note}} block, and a send
+// without the copy is not the promised copy (GH Codex r7 P1). The catch-up sweep
+// escalates that. Returns true when the note was promised but is missing.
+async function stampAcceptanceCopy({ acceptanceNote, acceptanceId, estimateId, result }) {
+  if (!acceptanceNote || !result?.sent) return false;
+  if (!renderedCarriesAcceptanceCopy(result)) {
+    logger.error(`[estimate-accepted-email] onboarding email for estimate ${estimateId} rendered WITHOUT the acceptance copy — the active estimate.accepted_onboarding version lacks {{acceptance_note}}`);
+    return true;
+  }
+  await db('estimate_acceptances')
+    .where(acceptanceId ? { id: acceptanceId } : { estimate_id: estimateId })
+    .whereNull('copy_emailed_at')
+    .update({ copy_emailed_at: new Date() });
+  return false;
+}
+
+// `signup` (GATE_SIGNUP_SINGLE_EMAIL only — the accept route passes it for a
+// standard recurring signup): { membershipEmail: <sendMembershipStarted args> }.
+// Then the result also carries `coversMembership`, the send-time answer to "did
+// this email make the separate membership.started email unnecessary".
+async function sendEstimateAcceptedOnboarding(args = {}) {
+  const { customerId, estimateId, acceptanceId, signup } = args;
   try {
     if (!estimateId) return null;
-    // Recipient: the linked customer, else the estimate's own contact — a
-    // phoneless one-time accept commits without a customer row, and a linked
-    // customer row can carry no usable email while the estimate does.
-    const customer = customerId
-      ? await db('customers').where({ id: customerId }).first('id', 'first_name', 'email', 'account_id', 'is_primary_profile')
-      : null;
-    let email = clean(customer?.email);
-    const estimateContact = usableEmail(email)
-      ? null
-      : await db('estimates').where({ id: estimateId }).first('customer_name', 'customer_email');
-    if (estimateContact) email = clean(estimateContact.customer_email);
-    // Secondary-property accept with no email on the row OR the estimate:
-    // the account owner's address (#1995) — same person, minted from their
-    // own estimate. Checked last so a row/estimate address always wins.
-    if (!usableEmail(email) && customer) {
-      const withPrimary = await withAccountPrimaryContact({ ...customer, email: '' });
-      if (usableEmail(withPrimary.email)) email = clean(withPrimary.email);
-    }
-    if (!usableEmail(email)) {
+    const recipient = await resolveRecipient(args);
+    if (!recipient) {
       logger.info(`[estimate-accepted-email] no usable email for ${customerId ? `customer ${customerId}` : `estimate ${estimateId}`}; skipping onboarding email`);
       // Distinct from a failure: nothing to retry until an address exists.
       return { sent: false, outcome: 'no_address' };
     }
-    const firstName = clean(customer?.first_name || String(estimateContact?.customer_name || '').split(/\s+/)[0]) || 'there';
     // Only THIS acceptance event's copy (pre-push Codex P1): without an
     // acceptanceId (gate off / unattested pre-gate accept) nothing was shown
     // for this event, so the note stays empty — never the newest row's terms.
     const acceptanceNote = acceptanceId ? await acceptanceNoteFor(estimateId, acceptanceId) : '';
-    const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: 'estimate.accepted_onboarding',
-      to: email,
-      payload: {
-        first_name: firstName,
-        service_type: clean(serviceLabel) || 'service',
-        appointment_line: appointmentLineFor(appointment),
-        acceptance_note: acceptanceNote,
-        customer_portal_url: portalUrl('/login'),
-        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
-      },
-      recipientType: 'customer',
-      recipientId: customerId || null,
-      idempotencyKey: idempotencyKey || acceptedOnboardingKey(estimateId, acceptanceId),
-      triggerEventId: acceptedOnboardingKey(estimateId, acceptanceId),
-      categories: ['estimate_accepted_onboarding'],
-      // SendGrid 4xx bodies can echo the recipient address — keep provider
-      // errors out of the logs and log a redacted reason below.
-      suppressProviderErrorLog: true,
-    });
-    if (result?.sent) logger.info(`[estimate-accepted-email] onboarding email sent for estimate ${estimateId}`);
-    else logger.info(`[estimate-accepted-email] onboarding email NOT sent for estimate ${estimateId} (${result?.blocked ? 'suppression-blocked' : (result?.reason || 'not sent')})`);
-    // The copy went out (a deduped sent-ish row counts) — but only stamp
-    // fulfilment when the RENDERED email actually carries the note: an
-    // admin can publish a template version without the optional
-    // {{acceptance_note}} block, and a send without the copy is not the
-    // promised copy (GH Codex r7 P1). The catch-up sweep escalates that.
-    if (acceptanceNote && result?.sent) {
-      if (renderedCarriesAcceptanceCopy(result)) {
-        await db('estimate_acceptances')
-          .where(acceptanceId ? { id: acceptanceId } : { estimate_id: estimateId })
-          .whereNull('copy_emailed_at')
-          .update({ copy_emailed_at: new Date() });
-      } else {
-        logger.error(`[estimate-accepted-email] onboarding email for estimate ${estimateId} rendered WITHOUT the acceptance copy — the active estimate.accepted_onboarding version lacks {{acceptance_note}}`);
-        return { ...result, copyMissing: true };
-      }
-    }
-    return result;
+    const ownKey = acceptedOnboardingKey(estimateId, acceptanceId);
+    // ONE SIGNUP EMAIL: only for a caller that passed `signup`, only while the
+    // gate is on at this moment. Otherwise the send is the email as it has
+    // always been.
+    const decideAndSend = async () => {
+      const wanted = await buildSignupEmail({ ...args, email: recipient.email, ownKey });
+      return sendOnboardingTemplate({ ...args, recipient, acceptanceNote, ownKey }, wanted);
+    };
+    const { result, variant } = signup && signupGateLive()
+      ? await serializedPerAccount(customerId, decideAndSend)
+      : await sendOnboardingTemplate({ ...args, recipient, acceptanceNote, ownKey }, null);
+    const copyMissing = await stampAcceptanceCopy({ acceptanceNote, acceptanceId, estimateId, result });
+    // Covered only by a send the provider accepted whose rendered output carries
+    // the whole plan section. Every other outcome (no address, a failure, a
+    // suppression) simply omits the flag, and the caller sends membership.started.
+    const coversMembership = membershipCoveredBy(result, variant?.plan);
+    return { ...result, ...(copyMissing && { copyMissing }), ...(coversMembership && { coversMembership }) };
   } catch (err) {
     const reason = err.status
       ? `SendGrid ${err.status}`
@@ -190,4 +406,10 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
   }
 }
 
-module.exports = { sendEstimateAcceptedOnboarding, acceptedOnboardingKey, ACCEPTANCE_COPY_MARKER, _private: { appointmentLineFor, acceptanceNoteFor, renderedCarriesAcceptanceCopy } };
+module.exports = {
+  sendEstimateAcceptedOnboarding,
+  acceptedOnboardingKey,
+  ACCEPTANCE_COPY_MARKER,
+  accountCustomerIds,
+  _private: { serializedPerAccount, appointmentLineFor, acceptanceNoteFor, renderedCarriesAcceptanceCopy, propertyForEstimate, isAddedPropertyToday, buildSignupEmail },
+};

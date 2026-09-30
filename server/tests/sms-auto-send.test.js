@@ -196,26 +196,30 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
     jest.resetModules();
   });
 
-  test('the candidate query matches an EXPLICIT identity list plus escaped +tag prefixes — no unescaped LIKE, no over-matching prefix (Codex round-19 P1)', () => {
-    // History: a fixed 2-value whereIn (round 1) stopped matching once a per-category gate suffixed the
-    // version ("+tag"), and an exact match stopped matching once the constant's numeric suffix bumped
-    // (round 2). Round 19: neither a bare LIKE 'house_voice_v12_real_answers%' (whose `_` is a wildcard and
-    // which over-matches future variants) — the identities are enumerated (the current one and the bare one
-    // it replaced) and only their "+tag" forms are matched by an ESCAPEd LIKE.
+  test('the candidate query matches PROMPT_VERSION, the bare REAL_ANSWERS_PROMPT_VERSION, or any +category-suffixed variant of it', () => {
+    // A fixed 2-value whereIn (the round-1 fix) would stop matching the
+    // moment a per-category gate joins the master one, since
+    // currentPromptVersion() then suffixes the version with the active
+    // category tags (pre-push audit P1 round 2) — this must be a LIKE-
+    // prefix match instead, covering every such variant without
+    // enumerating them.
     jest.resetModules();
-    const whereInCalls = [];
-    const orWhereRawCalls = [];
+    const whereCalls = [];
+    const orWhereCalls = [];
     const query = {};
     for (const method of [
-      'join', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'select', 'whereNotExists',
+      'join', 'whereNotNull', 'whereRaw', 'orderBy', 'limit', 'select', 'whereNotExists', 'whereIn',
     ]) query[method] = jest.fn(() => query);
-    query.whereIn = jest.fn((...args) => { whereInCalls.push(args); return query; });
-    query.orWhereRaw = jest.fn((...args) => { orWhereRawCalls.push(args); return query; });
-    // Knex's own subquery convention (a `this`-bound function, called with NO positional argument).
+    // Knex's own subquery convention (a `this`-bound function, called with
+    // NO positional argument) — the exact shape the real query builder AND
+    // this mock both support; an arrow function relying on a parameter
+    // would silently receive undefined here.
     query.where = jest.fn((...args) => {
+      whereCalls.push(args);
       if (typeof args[0] === 'function') args[0].call(query);
       return query;
     });
+    query.orWhere = jest.fn((...args) => { orWhereCalls.push(args); return query; });
     const mockDb = jest.fn(() => query);
     jest.doMock('../models/db', () => mockDb);
     const drafter = require('../services/sms-shadow-drafter');
@@ -223,15 +227,27 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
     const fresh = require('../services/sms-auto-send');
     fresh.gratitudeCandidatePage({ activatedAt: new Date(0), now: new Date(), cursor: null, pageSize: 100 });
 
-    const identities = whereInCalls.find(([col]) => col === 'md.prompt_version')[1];
-    expect(identities).toEqual([drafter.PROMPT_VERSION, ...drafter.GRATITUDE_DISCOVERY_REAL_ANSWERS_IDENTITIES]);
-    expect(identities).toContain(drafter.REAL_ANSWERS_PROMPT_VERSION);
-    expect(identities).toContain('house_voice_v12_real_answers');
-    // Every tag prefix is escaped (the `_`s are literal) and carries an ESCAPE clause.
-    expect(orWhereRawCalls).toEqual(drafter.GRATITUDE_DISCOVERY_REAL_ANSWERS_IDENTITIES.map((identity) => [
-      "md.prompt_version LIKE ? ESCAPE '\\'", [`${identity.replace(/_/g, '\\_')}+%`],
-    ]));
-    // A future variant is NOT matched: the LIKE patterns only cover "<identity>+…".
-    for (const [, [pattern]] of orWhereRawCalls) expect(pattern.endsWith('+%')).toBe(true);
+    const versionWhere = whereCalls.find(([col]) => col === 'md.prompt_version');
+    expect(versionWhere).toEqual(['md.prompt_version', drafter.PROMPT_VERSION]);
+    // ONE family LIKE (Codex #5392 r3 P0): keyed off the family, not the
+    // current constant, so a suffix bump ('_cf', later ones) never strands
+    // rows stamped under an earlier version.
+    expect(orWhereCalls).toEqual([
+      ['md.prompt_version', 'like', 'house\\_voice\\_v12\\_real\\_answers%'],
+    ]);
+    const pattern = orWhereCalls[0][2];
+    const likeRe = new RegExp(`^${pattern.replace(/\\(.)/g, '\u0000$1').replace(/%/g, '.*').replace(/\u0000(.)/g, (_, c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))}$`);
+    for (const stamped of [
+      'house_voice_v12_real_answers', // stamped before the bump
+      'house_voice_v12_real_answers+c', // the row from the finding
+      'house_voice_v12_real_answers+bclm',
+      drafter.REAL_ANSWERS_PROMPT_VERSION, // 'house_voice_v12_real_answers2_cf'
+      `${drafter.REAL_ANSWERS_PROMPT_VERSION}+bc`,
+      'house_voice_v12_real_answers_cf', // the company-facts cohort stamped before the re-service token
+      'house_voice_v12_real_answers2_cf_lbl+c', // a later suffix
+    ]) expect(likeRe.test(stamped)).toBe(true);
+    expect(likeRe.test('house_voice_v13_real_answers')).toBe(false);
+    expect(likeRe.test('house_voice_v12X')).toBe(false);
+    expect(likeRe.test('house_voice_v11')).toBe(false); // matched by the exact PROMPT_VERSION branch instead
   });
 });

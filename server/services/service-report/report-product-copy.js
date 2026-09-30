@@ -25,19 +25,31 @@ function passesReportCopyScreen(line) {
 // `product` is report-data.js's enriched service_products row (the one
 // `attachApprovedReportProductFacts` returns) — carries `product_name` /
 // `epa_reg_number` when a catalog join resolved, or a hand-entered
-// `epa_reg` on legacy rows with no product_id. Returns null on no match
-// (unapproved product, or nothing recorded to match on) — fail closed.
-function reportProductCopyForApplicationProduct(product = {}) {
-  const copy = reportProductCopyFor({
+// `epa_reg` on legacy rows with no product_id. `city` is the visit's own
+// city (report-data.js passes `service.city` — the visit's stamped service
+// address city, falling back to the customer's own city; see that call
+// site), used ONLY to compose the "Labeled for N+ City pests" sentence
+// (owner ruling 2026-09-29) — a missing/unusable city falls back to the
+// no-city wording, never blocks the rest of the copy. Returns null on no
+// match (unapproved product, or nothing recorded to match on) — fail closed.
+function reportProductCopyForApplicationProduct(product = {}, city) {
+  const match = {
     epaReg: product?.epa_reg_number || product?.epa_reg || '',
     name: product?.product_name || product?.name || '',
-  });
+  };
+  const copy = reportProductCopyFor({ ...match, city });
   if (!copy) return null;
   // Belt-and-suspenders on reviewed static text, so a config edit that skips
   // re-review still fails closed: the report directory's banned-copy screen
   // plus the shared compliance-language screen ("pet-safe", "EPA-approved").
   if (!passesReportCopyScreen(copy.how_it_works)) return null;
-  if (copy.also_labeled_for && !passesReportCopyScreen(copy.also_labeled_for)) return null;
+  // The labeled-count line is screened WITHOUT the city (codex r1 on #5352):
+  // a locality is data, not a claim, and "Safety Harbor" would otherwise trip
+  // the safety-word check and drop all three approved lines.
+  if (copy.also_labeled_for) {
+    const cityless = reportProductCopyFor({ ...match, city: null })?.also_labeled_for;
+    if (!cityless || !passesReportCopyScreen(cityless)) return null;
+  }
   // pets_kids is a re-entry-adjacent claim, sanitized at the SOURCE — every
   // mode (live, PDF, static, sms_preview) reads applications through this
   // one function, so stripping here (rather than only in reports-public.js's

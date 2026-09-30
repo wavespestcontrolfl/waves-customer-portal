@@ -813,6 +813,7 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
           estimateId: claim.openTimesSnapshot.lookup?.estimateId || null,
           // Same service identity the draft was priced with (Codex r3 / audit P1)
           ...(claim.openTimesSnapshot.lookup?.serviceType ? { serviceType: claim.openTimesSnapshot.lookup.serviceType } : {}),
+          ...(claim.openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: claim.openTimesSnapshot.lookup.scheduledServiceId } : {}),
           quotedWindows: stillQuoted,
         });
         if (!recheck.ok) {
@@ -944,17 +945,12 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
       // A `this`-bound function, not an arrow — the Knex-documented
       // subquery convention this codebase already uses elsewhere
       // (availability.js's whereNotExists(function linkedVisit() {...})).
-      // Codex round-19 P1 (PR #5336): an EXPLICIT identity list plus escaped "+category" tag prefixes —
-      // never an unescaped LIKE on the bare prefix (its `_` is a wildcard, and a prefix over-matches
-      // future variants the executor was never written for). The identities are the current
-      // real-answers one and the bare one it replaced (drafts written in the minutes before that
-      // deploy), each optionally category-tagged.
-      const identities = [drafter.PROMPT_VERSION, ...drafter.GRATITUDE_DISCOVERY_REAL_ANSWERS_IDENTITIES];
-      const escapeLike = (v) => String(v).replace(/[\\%_]/g, (c) => `\\${c}`);
-      this.whereIn('md.prompt_version', identities);
-      for (const identity of drafter.GRATITUDE_DISCOVERY_REAL_ANSWERS_IDENTITIES) {
-        this.orWhereRaw("md.prompt_version LIKE ? ESCAPE '\\'", [`${escapeLike(identity)}+%`]);
-      }
+      this.where('md.prompt_version', drafter.PROMPT_VERSION)
+        // the whole real-answers family (bare, '_cf', later suffixes, any
+        // '+category' tags) — NOT the current REAL_ANSWERS_PROMPT_VERSION,
+        // which moves with every suffix bump and would strand rows stamped
+        // under an earlier version. LIKE metacharacters escaped.
+        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_VERSION_FAMILY.replace(/[\\%_]/g, '\\$&')}%`);
     })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)

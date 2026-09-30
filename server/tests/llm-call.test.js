@@ -232,6 +232,32 @@ describe('callAnthropic prompt caching', () => {
     }));
   });
 
+  test('the json_schema sent to Anthropic carries no numeric bounds (a 400 on every call), and the caller\'s schema is untouched', async () => {
+    mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"confidence":0.5,"items":[]}' }] });
+    const schema = {
+      type: 'object',
+      additionalProperties: false,
+      required: ['confidence', 'items'],
+      properties: {
+        confidence: { type: 'number', minimum: 0, maximum: 1 },
+        items: {
+          type: 'array',
+          maxItems: 3,
+          items: {
+            type: 'object', additionalProperties: false, required: ['n'], properties: { n: { type: 'integer', exclusiveMinimum: 0, exclusiveMaximum: 10, multipleOf: 1 } },
+          },
+        },
+      },
+    };
+    const before = JSON.stringify(schema);
+    const r = await callAnthropic({ model: FLAGSHIP, text: 'hi', jsonMode: true, jsonSchema: schema });
+    expect(r.ok).toBe(true);
+    const wire = JSON.stringify(mockAnthropicCreate.mock.calls.at(-1)[0].output_config.format.schema);
+    expect(wire).not.toMatch(/"(minimum|maximum|exclusiveMinimum|exclusiveMaximum|multipleOf|maxItems)"/);
+    expect(wire).toMatch(/"confidence"/);
+    expect(JSON.stringify(schema)).toBe(before);
+  });
+
   test('MODELS.ANTHROPIC_EFFORT pins output_config.effort on effort-capable models only (next to a json_schema format, or alone)', async () => {
     const MODELS = require('../config/models');
     mockAnthropicCreate.mockResolvedValue({ content: [{ type: 'text', text: '{"ok":true}' }] });
