@@ -20,6 +20,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const { calculatePestPressureScore } = require('./calculate');
+const { SCALE_TECHNICIAN_RATING, SCALE_BLENDED } = require('./score-scale');
 const { resolveReviewWindow, isOneTimeServiceLabel } = require('./review-window');
 const {
   loadActiveConfig,
@@ -71,8 +72,20 @@ async function gatherInputs(knex, serviceRecord, config) {
     windows: config.serviceFrequencyWindows,
   });
 
-  const [client, technician, reService, recurring, risk, previous] = await Promise.all([
-    extractClientRating({ knex, serviceRecordId: serviceRecord.id }),
+  // The client rating decides which scale THIS score lands on (a technician
+  // tap is scored directly, anything else is blended), and the previous-score
+  // baseline must be on the same scale - so it resolves first (#4741).
+  const client = await extractClientRating({ knex, serviceRecordId: serviceRecord.id });
+  // A technician-sourced client_pest_rating IS the report score, not one of
+  // the five blended components (owner ruling 2026-09-24). A customer-
+  // submitted (or legacy/null-source) rating keeps feeding the ordinary
+  // clientRating component untouched.
+  const technicianDirectRating = client && client.present && client.source === 'technician'
+    && Number.isInteger(client.value)
+    ? client.value
+    : null;
+
+  const [technician, reService, recurring, risk, previous] = await Promise.all([
     extractTechnicianRating({ knex, serviceRecordId: serviceRecord.id }),
     extractReServiceImpact({
       knex,
@@ -100,20 +113,9 @@ async function gatherInputs(knex, serviceRecord, config) {
       serviceLine,
       beforeServiceRecordId: serviceRecord.id,
       beforeServiceDate: serviceRecord.service_date,
+      currentScale: technicianDirectRating !== null ? SCALE_TECHNICIAN_RATING : SCALE_BLENDED,
     }),
   ]);
-
-  // Owner ruling 2026-09-24: a technician-sourced client_pest_rating IS the
-  // report score, not one of the five blended components. `client` here is
-  // the extractClientRating() result — it reads the same
-  // service_records.client_pest_rating column the customer-facing capture
-  // writes to, distinguished only by client_pest_rating_source. A
-  // customer-submitted (or legacy/null-source) rating keeps feeding the
-  // ordinary clientRating component untouched.
-  const technicianDirectRating = client && client.present && client.source === 'technician'
-    && Number.isInteger(client.value)
-    ? client.value
-    : null;
 
   return {
     serviceLine,
@@ -125,6 +127,7 @@ async function gatherInputs(knex, serviceRecord, config) {
       recurringIssueRating: pickValue(recurring),
       riskFactorRating: pickValue(risk),
       previousScore: previous.value,
+      previousScoreOnOtherScaleOnly: previous.otherScaleOnly === true,
       technicianDirectRating,
     },
     extractorResults: { client, technician, reService, recurring, risk, previous },

@@ -124,12 +124,26 @@ function fakeConn(seed = {}) {
     // Mirrors the real query: an aliased select, never pluck() on a Raw
     // (Knex 3's pluck needs a string column; Codex #5319 r1).
     q.pluck = () => { throw new Error('pluck() must not be used here'); };
-    q.select = async () => store.activityLog
+    q.groupByRaw = () => { q._grouped = true; return q; };
+    q.select = async () => (q._grouped ? lastCheckedRows : (rows) => rows)(store.activityLog
       .filter((r) => r.action === q._action)
       .filter((r) => !q._since || !r.created_at || new Date(r.created_at) >= q._since)
       .filter((r) => !q._caseValue || metaOf(r).case === q._caseValue)
       .filter((r) => !q._idsFilter || q._idsFilter.includes(String(metaOf(r).submissionId)))
-      .map((r) => ({ submission_id: String(metaOf(r).submissionId) }));
+      .map((r) => ({
+        submission_id: String(metaOf(r).submissionId),
+        attempts: metaOf(r).attempts == null ? null : String(metaOf(r).attempts),
+        created_at: r.created_at,
+      })));
+    // MAX(created_at) per submission, as the grouped query returns.
+    const lastCheckedRows = (rows) => {
+      const last = new Map();
+      for (const r of rows) {
+        const prev = last.get(r.submission_id);
+        if (!prev || new Date(r.created_at) > new Date(prev)) last.set(r.submission_id, r.created_at);
+      }
+      return [...last].map(([submission_id, last_checked]) => ({ submission_id, last_checked }));
+    };
     q.insert = async (row) => { store.activityLog.push({ created_at: new Date(), ...row }); return [{ id: `gen-${store.activityLog.length}` }]; };
     return q;
   }
@@ -283,12 +297,17 @@ describe('base eligibility filters', () => {
     expect(await selectCandidates(conn, NOW)).toHaveLength(0);
   });
 
-  test('a submission from before today\'s ET midnight is excluded (the claim would refuse it)', async () => {
-    const conn = fakeConn({
+  test('a submission from an earlier day on a still-upcoming visit is a candidate; one older than the recovery window is not (Codex #5320 r12)', async () => {
+    const recent = fakeConn({
       submissions: [submission({ read_status: 'none', created_at: new Date(NOW.getTime() - 26 * 3600 * 1000) })],
       services: [svc({ scheduled_date: TODAY_ET })],
     });
-    expect(await selectCandidates(conn, NOW)).toHaveLength(0);
+    expect(await selectCandidates(recent, NOW)).toHaveLength(1);
+    const old = fakeConn({
+      submissions: [submission({ read_status: 'none', created_at: new Date(NOW.getTime() - 16 * 24 * 3600 * 1000) })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(old, NOW)).toHaveLength(0);
   });
 });
 
@@ -441,7 +460,7 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
       photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
     });
     const candidates = await selectCandidates(conn, NOW);
-    expect(candidates.map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+    expect(candidates.map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
     await sweepVisitPrepPestReads(conn, NOW);
     const row = conn._store.submissions[0];
     expect(row).toMatchObject({ read_status: 'none', read_result: null, read_ref: null, read_attempts: 1 });
@@ -454,7 +473,7 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
       submissions: [submission({ read_status: 'done', read_result: LAWN_READ, created_at: NOW })],
       services: [svc({ scheduled_date: TODAY_ET })],
     });
-    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_DONE]);
+    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
   });
 
   test('a done read that still matches the stop is never a candidate (and is checked, then cooled down)', async () => {
@@ -514,5 +533,97 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
     await _retryOneForTest(conn, row);
     expect(conn._store.submissions[0].read_status).toBe('done');
     expect(mockTrigger).not.toHaveBeenCalled();
+  });
+});
+
+describe('case (d) covers failed reads and is one retry per settled attempt (Codex #5320 r13)', () => {
+  const LAWN_FAIL = JSON.stringify({ engine: 'plant', subject_type: 'lawn' });
+  const marker = (attempts) => ({
+    action: 'visit_prep_read_sweep_attempt', created_at: NOW, metadata: { submissionId: 'sub-1', case: SWEEP_CASE.STALE_READ, attempts },
+  });
+
+  test('a failed lawn read on a stop that is pest now is released and re-read', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'failed', read_result: LAWN_FAIL, read_attempts: 1, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+    await sweepVisitPrepPestReads(conn, NOW);
+    expect(conn._store.submissions[0]).toMatchObject({ read_status: 'none', read_attempts: 1 });
+    expect(mockTrigger).toHaveBeenCalledWith(expect.objectContaining({ expectStatus: ['none'] }));
+  });
+
+  test('a failed read on the line it failed on is never retried', async () => {
+    mockIsPestStop.mockResolvedValue('plant:lawn');
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'failed', read_result: LAWN_FAIL, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+    });
+    expect(await selectCandidates(conn, NOW)).toEqual([]);
+  });
+
+  test('a stop reclassified AGAIN after a recovered read gets its own retry; the same attempt never twice', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const LAWN_DONE = JSON.stringify({ engine: 'plant', subject_type: 'lawn', v2: {} });
+    const again = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_DONE, read_attempts: 2, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      activityLog: [marker(1)],
+    });
+    expect((await selectCandidates(again, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+    const same = fakeConn({
+      submissions: [submission({ read_status: 'done', read_result: LAWN_DONE, read_attempts: 2, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      activityLog: [marker(2)],
+    });
+    expect(await selectCandidates(same, NOW)).toEqual([]);
+  });
+
+  test('the retry marker records the attempt it replaced', async () => {
+    mockIsPestStop.mockResolvedValue(true);
+    const conn = fakeConn({
+      submissions: [submission({ read_status: 'failed', read_result: LAWN_FAIL, read_attempts: 3, created_at: NOW })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+    await sweepVisitPrepPestReads(conn, NOW);
+    const retry = conn._store.activityLog.find((r) => r.action === 'visit_prep_read_sweep_attempt');
+    expect(metaOf(retry)).toMatchObject({ case: SWEEP_CASE.STALE_READ, attempts: 3 });
+  });
+});
+
+describe('the widened window (Codex #5348 r1)', () => {
+  test('the 14-day cutoff is 14 ET calendar days, even across the spring DST change', async () => {
+    // 00:30 ET on Sat Mar 20 2027 (EDT since Mar 14): 14 x 24 h back is
+    // 23:30 EST on Mar 5, but the window starts at Mar 6 00:00 ET.
+    const now = new Date('2027-03-20T04:30:00Z');
+    const conn = fakeConn({
+      submissions: [
+        submission({ id: 'sub-old', read_status: 'none', created_at: new Date('2027-03-05T23:45:00-05:00') }),
+        submission({ id: 'sub-in', read_status: 'none', created_at: new Date('2027-03-06T00:15:00-05:00') }),
+      ],
+      services: [svc({ scheduled_date: '2027-03-20' })],
+    });
+    expect((await selectCandidates(conn, now)).map((c) => c.submission_id)).toEqual(['sub-in']);
+  });
+
+  test('rows are checked least-recently-checked first, so newer rows are reached once old ones cool down', async () => {
+    const conn = fakeConn({
+      submissions: [
+        submission({ id: 'sub-old', read_status: 'unsupported', created_at: new Date(NOW.getTime() - 3 * 3600 * 1000) }),
+        submission({ id: 'sub-new', read_status: 'unsupported', created_at: new Date(NOW.getTime() - 1 * 3600 * 1000) }),
+      ],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      // The older row was checked 2 h ago (past the cooldown); the newer one never.
+      activityLog: [{ action: 'visit_prep_read_sweep_check', created_at: new Date(NOW.getTime() - 2 * 3600 * 1000), metadata: { submissionId: 'sub-old' } }],
+    });
+    await selectCandidates(conn, NOW);
+    const order = mockIsPestStop.mock.calls.map(([svcArg]) => svcArg.id);
+    expect(order).toHaveLength(2);
+    // Both rows share svc-1, so read the order off the check markers written.
+    const checks = conn._store.activityLog.filter((r) => r.action === 'visit_prep_read_sweep_check').slice(1).map((r) => metaOf(r).submissionId);
+    expect(checks).toEqual(['sub-new', 'sub-old']);
   });
 });

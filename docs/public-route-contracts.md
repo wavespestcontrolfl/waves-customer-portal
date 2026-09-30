@@ -821,6 +821,45 @@ absent bearer also keeps public behavior. An expired
 access token gets the refreshable 401 only when the customers-only gate needs
 that identity. An estimate-linked request keeps the estimate account instead
 of inheriting an ambient portal session.
+Quote-wizard handoff identity at `/api/booking/confirm` (customers-only gate
+on): the wizard links its draft estimate to any existing customer matching
+the unverified phone/email the anonymous quoter typed, and hands the token
+back to that same caller, so a token-verified pricing handoff (`pricing_
+estimate_id` + `estimate_token`) whose draft is linked to an ESTABLISHED
+customer is not identity. The gate binds it exactly as before (same address
+fix-it when the street matches no account property), and the refusal — 409
+telling the customer to sign in with the portal code — is applied inside the
+booking transaction under the customer row lock, after the address bind and
+signed-slot validation and against the customer's CURRENT stage (a lead
+promoted meanwhile is caught), so it is not an early "is this contact a
+customer" probe and a typed phone plus a street match never books on someone
+else's account. Residual: a caller who already holds the phone, the street
+and a valid signed slot can still see the 409 for an established customer
+versus the normal flow for a lead. Preserved: a verified portal bearer still
+books (identity from the token, address-bound to the account); the
+staff/system accept link (`source_estimate_id` + namespaced `accept_token`)
+still books as the estimate's customer; a draft linked to a row still in a
+pre-customer pipeline stage (the quoter's own freshly minted lead) or to no
+customer keeps the quoter's own booking; an identical retry of a booking that
+already committed (same draft, slot and customer, and the typed phone — or the
+email that linked the draft — is the customer's) still reaches the idempotent
+replay. No message is sent on the refusal: the refusal retires the open
+abandoned-booking recovery intents carrying that HMAC-verified draft id (only the id — neither the typed nor the stored contact ever widens it), and
+`/api/booking/capture-intent` writes such a handoff's row already suppressed
+(and retires any staged for the draft). Every accepted capture-intent request
+answers one constant `200 {"ok": true}` — no `skipped`, `created`/`updated` or
+`intent_id` fields — whatever was staged, skipped, suppressed or errored (the
+clients are fire-and-forget and read no body), so it is no probe for whether a
+contact is a customer or has a recent booking; only the request-shape 400
+(`valid phone required`) differs. "Blocked" is judged account-wide by one
+shared classifier used by confirmation, capture-intent and the recovery worker:
+the draft-linked customer row or any sibling property row on its account being
+an established customer, ARCHIVED (archiving never re-opens the handoff), or the
+draft's customer row being missing (fail closed) blocks it. The
+suppression writes are best effort: the abandoned-booking recovery worker
+re-checks at send time (SMS and email) and skips, marking suppressed, any intent
+whose draft is so linked — a lookup error skips that tick — so a failed
+suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`

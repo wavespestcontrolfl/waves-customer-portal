@@ -181,6 +181,20 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     )).toBeInTheDocument();
   });
 
+  it('names the weeds a lawn read found (Codex #5320 r13)', () => {
+    renderPanel({ customerFlagged: [{
+      ...CUSTOMER_FLAGGED[0],
+      read: {
+        status: 'done', kind: 'plant', wordingTier: null, headline: 'Weeds in the lawn',
+        plantCommonName: null, conditionName: null, weedNames: ['Spotted Spurge', 'Dollarweed'],
+        fits: [], notYet: [], nextStepText: null, referralKind: null, safetyLines: [],
+      },
+    }] });
+    expect(screen.getByText(
+      'Photo read (AI suggestion, not confirmed): Weeds in the lawn. Weeds: Spotted Spurge, Dollarweed.',
+    )).toBeInTheDocument();
+  });
+
   it('shows "Photo read pending" while a read runs, and nothing for unsupported/failed/none', () => {
     renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] });
     expect(screen.getByText('Photo read pending')).toBeInTheDocument();
