@@ -274,8 +274,16 @@ async function reconcilePending({ members, pending, token, nowMs }) {
     if ((status === 'PROCESSING' || status === 'UNKNOWN') && !aged) { stillPending.push(p); continue; }
     // FAILED / PARTIAL / aged-out: revert this op so the delta re-sends it (idempotent).
     if (p.op === 'ingest') {
-      const drop = new Set(p.members.map((e) => hashId(e.d)));
-      effective = effective.filter((e) => !drop.has(hashId(e.d)));
+      // A NEW member's failed ingest reverts to absent. An ENRICHMENT (entry
+      // carries `prev`, its pre-enrichment state) was already in Google, so it
+      // reverts to that prior entry — it must stay tracked, or an opt-out
+      // landing before this reconciliation could never be removed.
+      const sent = new Map(p.members.map((e) => [hashId(e.d), e]));
+      effective = effective.flatMap((e) => {
+        const m = sent.get(hashId(e.d));
+        if (!m) return [e];
+        return m.prev ? [m.prev] : [];
+      });
     } else { // remove did not durably apply -> the members are still in Google; keep them
       const have = new Set(effective.map((e) => hashId(e.d)));
       for (const e of asEntries(p.members)) {
@@ -441,7 +449,7 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       const before = priorByHash.get(h);
       if (before && e.e && matchFields.extrasSig(e.e) !== matchFields.extrasSig(before.e)) {
         if (hasPendingRemove(e)) { persistedCurrent.push(before); continue; }
-        enrichEntries.push(e);
+        enrichEntries.push({ ...e, prev: before }); // prev: restored if the ingest fails
       }
       persistedCurrent.push(e);
     }

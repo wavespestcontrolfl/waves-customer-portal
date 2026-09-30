@@ -520,6 +520,37 @@ describe('address identifier (name + ZIP)', () => {
     const ids = removes()[0].audienceMembers.map((m) => m.userData.userIdentifiers);
     expect(ids).toEqual([[{ emailAddress: 'h:new@x.com' }, addressOf(jo)], [{ emailAddress: 'h:old@x.com' }]]);
   });
+  test('a FAILED enrichment reverts to the pre-enrichment entry (still tracked) — an opt-out before reconcile is still removed', async () => {
+    configure({ allow: true });
+    // run 1: enrich an already-uploaded member; the pending ingest carries its pre-enrichment entry
+    global.fetch = okFetch({ requestId: 'enr' });
+    mockCollectLeads.mockResolvedValue([{ key: 'lead:l1', email: 'a@x.com', phone: null, ...person }]);
+    const legacy = { k: 'lead:l1', d: ['h:a@x.com', ''] };
+    stateRow = { member_keys: [legacy], pending: [] };
+    await GCM.syncAudience('unbooked_leads', {});
+    const row = inserts.filter((i) => i.table === 'ad_audience_syncs').pop().row;
+    expect(JSON.parse(row.pending)[0]).toMatchObject({ op: 'ingest', members: [expect.objectContaining({ prev: legacy })] });
+    // run 2: Google reports the enrichment FAILED and the lead opted out meanwhile
+    stateRow = { member_keys: JSON.parse(row.member_keys), pending: JSON.parse(row.pending), destination_sig: row.destination_sig };
+    tableData.email_suppressions = [{ email: 'a@x.com' }];
+    mockCollectLeads.mockResolvedValue([]);
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'FAILED' }] }, 'audienceMembers:remove': { requestId: 'rm' } });
+    const r = await GCM.syncAudience('unbooked_leads', {});
+    expect(r.consentRemovals).toBe(1);
+    expect(removes()[0].audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:a@x.com' }]);
+  });
+  test('a FAILED enrichment of a still-current member re-sends the enrichment (old extras restored, then diffed again)', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: null, ...person }]);
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }],
+      pending: [{ requestId: 'enr', op: 'ingest', at: recentIso(), members: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo, prev: { k: 'customer:c1', d: ['h:a@x.com', ''] } }] }],
+    };
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'FAILED' }] }, 'audienceMembers:ingest': { requestId: 'again' } });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toAdd: 0, toRemove: 0, toEnrich: 1 });
+    expect(ingests()).toHaveLength(1);
+  });
   test('a stale row sharing a current member\'s name+ZIP handle is retained, not removed', async () => {
     configure({ allow: true });
     global.fetch = okFetch({ requestId: 'x' });
