@@ -1533,9 +1533,6 @@ function judgedAddressMatches(judged, knownCaller) {
 // street Google resolved, an in-area ZIP, and a verdict that is street-level
 // (never "the street does not exist", never out of area).
 const STREET_LEVEL_FORM_STATUS = 'street_level_form_accept';
-// leads.first_contact_channel values the web forms write (lead-webhook 'form',
-// public-quote 'website_quote'); a call-created lead is 'call'.
-const FORM_LEAD_CHANNELS = ['form', 'website_quote'];
 const SERVICE_AREA_ZIP5 = new Set(Object.values(SERVICE_AREA_COUNTY_ZIPS).flat());
 function streetLevelFormAddressGateOn() {
   const reader = require('../config/feature-gates').callLeadFormAddressStreetLevelLive;
@@ -1565,23 +1562,19 @@ function houseNumberOf(line) {
 }
 // leads.extracted_data.stage values the web forms stamp. A form typed onto a
 // lead a call created (the voicemail text-back and phone-match attaches keep
-// first_contact_channel 'call') still leaves its own typed address here.
+// first_contact_channel 'call') leaves its own typed address here too.
 const FORM_LEAD_STAGES = new Set(['lead_webhook_received', 'property_lookup_started', 'quote_calculated']);
 function parseJsonObjectSafe(v) {
   if (v && typeof v === 'object') return v;
   try { const o = JSON.parse(v); return o && typeof o === 'object' ? o : null; } catch { return null; }
 }
-// The address a lead row's own web form typed: the form channels' address
-// columns, or — for a call-origin lead a form attached to — the normalized
-// address the form wrote into extracted_data. Never a call-derived address:
-// call writers never put an address in extracted_data.
+// The address a lead row's own web form typed: the normalized address the
+// form endpoint wrote into extracted_data, on EVERY lead channel. leads.address
+// is never read here — it is fill-if-empty by the call pipeline, so a form that
+// arrived without an address and was later enriched by a call would otherwise
+// pass call-derived text off as the form's. Call writers never put an address
+// in extracted_data. Fails closed when the snapshot is absent.
 function formTypedAddressOf(row) {
-  if (FORM_LEAD_CHANNELS.includes(row.first_contact_channel)) {
-    const typed = String(row.address || '').trim();
-    if (!typed) return null;
-    const parsed = parseRawAddress(typed);
-    return { line1: parsed.line1, city: parsed.city, zip: parsed.zip || row.zip };
-  }
   const ex = parseJsonObjectSafe(row.extracted_data);
   const addr = parseJsonObjectSafe(ex?.address);
   if (!ex || !FORM_LEAD_STAGES.has(ex.stage) || !addr || !String(addr.line1 || '').trim()) return null;
@@ -1603,7 +1596,7 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
       .where({ customer_id: knownCaller.id })
       .whereNull('deleted_at')
       .orderBy('created_at', 'desc')
-      .select('address', 'zip', 'first_contact_channel', 'extracted_data')
+      .select('extracted_data')
       .limit(25);
     const zip = zip5Of(knownCaller.addressZip);
     const city = alnum(knownCaller.addressCity);

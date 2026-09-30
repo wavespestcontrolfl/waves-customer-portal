@@ -38,6 +38,12 @@ const confirmed = (serviceAddress = {}) => ({
   property: { service_address: serviceAddress },
 });
 const yesForm = jest.fn(async () => true);
+const { parseRawAddress } = require('../utils/address-normalizer');
+// A lead row as the web form leaves it: the form endpoint's normalized address snapshot in extracted_data.
+const formRow = (address, zip) => {
+  const p = parseRawAddress(address);
+  return { first_contact_channel: 'form', address, zip, extracted_data: { stage: 'lead_webhook_received', address: { line1: p.line1, city: p.city, zip: p.zip || zip || '' } } };
+};
 
 let saved;
 beforeEach(() => { saved = process.env[GATE]; yesForm.mockClear(); });
@@ -240,7 +246,7 @@ describe('street type is part of the street (codex pre-push P1)', () => {
 
   test('the form-provenance check keeps the street type too', async () => {
     const known = lead({ address_line1: '1234 Sample Palm Dr' });
-    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [{ first_contact_channel: 'form', address, zip: '34219' }] });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [formRow(address, '34219')] });
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Drive, Parrish, FL 34219'))).toBe(true);
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Dr Parrish FL 34219'))).toBe(true);
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Court, Parrish, FL 34219'))).toBe(false);
@@ -249,7 +255,7 @@ describe('street type is part of the street (codex pre-push P1)', () => {
 
   test('the WHOLE street must match: an extra directional or street word never hides as a city (codex pre-push r2 P1)', async () => {
     const known = lead({ address_line1: '1234 Sample Palm Dr' });
-    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [{ first_contact_channel: 'form', address, zip: null }] });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [formRow(address, null)] });
     for (const typed of [
       '1234 Sample Palm Drive East',
       '1234 Sample Palm Drive East, Parrish, FL 34219',
@@ -274,7 +280,7 @@ describe('onFileAddressIsFromWebForm', () => {
       whereNull: (col) => { calls.push({ isNull: col }); return q; },
       select: () => q,
       orderBy: () => q,
-      limit: async () => rows.map((r) => ({ first_contact_channel: 'form', ...r })),
+      limit: async () => rows.map((r) => formRow(r.address, r.zip)),
     };
     return q;
   };
@@ -331,7 +337,7 @@ describe('codex round 1 on #5381', () => {
 
   test('P1: the whole house number counts, alphabetic suffix included', async () => {
     const known = lead({ address_line1: '123A Sample Newbuild Trl' });
-    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [{ first_contact_channel: 'form', address, zip: '34219' }] });
+    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [formRow(address, '34219')] });
     expect(await onFileAddressIsFromWebForm(known, conn('123A Sample Newbuild Trail, Parrish, FL 34219'))).toBe(true);
     expect(await onFileAddressIsFromWebForm(known, conn('123B Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
     expect(await onFileAddressIsFromWebForm(known, conn('123 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
@@ -360,6 +366,12 @@ describe('codex round 1 on #5381', () => {
     expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', extracted_data: { stage: 'voicemail', address: formAddr } }]))).toBe(false);
     expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', extracted_data: null }]))).toBe(false);
     expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'manual', address: '1234 Sample Newbuild Trl', zip: '34219' }]))).toBe(false);
+    // An addressless form later enriched by a call: leads.address is call-derived, the form snapshot is empty or absent.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'form', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: { stage: 'lead_webhook_received', address: { line1: '', city: '', zip: '' } } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'form', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: { stage: 'lead_webhook_received' } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'website_quote', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: null }]))).toBe(false);
+    // ...while the same form row WITH its snapshot on any channel qualifies.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'website_quote', extracted_data: { stage: 'quote_calculated', address: formAddr } }]))).toBe(true);
   });
 
   test('P1: the card is built for the booking transaction, not written at approval', () => {
