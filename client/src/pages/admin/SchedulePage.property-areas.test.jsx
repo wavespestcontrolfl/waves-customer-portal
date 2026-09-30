@@ -11,6 +11,7 @@ const products = [
   { id: 'liquid', name: 'Fixture foliar spray', category: 'insecticide', application_method: 'foliar_spray', default_rate_per_1000: 0.8, rate_unit: 'fl_oz/gal' },
 ];
 let measurements;
+let areaLoadFailures = 0;
 beforeEach(async () => {
   localStorage.clear();
   vi.stubGlobal('scrollTo', vi.fn());
@@ -21,6 +22,10 @@ beforeEach(async () => {
   } };
   vi.stubGlobal('fetch', vi.fn(async url => {
     let data = {};
+    if (url.includes('property-areas') && areaLoadFailures > 0) {
+      areaLoadFailures -= 1;
+      return new Response(JSON.stringify({ error: 'unavailable' }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+    }
     if (url.includes('property-areas')) data = measurements;
     if (url.includes('feature-flags')) data = { flags: {} };
     if (url.includes('tech-tips')) data = { available: true, groups: [] };
@@ -29,7 +34,7 @@ beforeEach(async () => {
   }));
   await refetchFlags();
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); areaLoadFailures = 0; });
 function panel(type = 'Tree & Shrub Care', fields = [], id = 'visit-1') {
   return <CompletionPanel service={{ id, customerId: 'customer-1', serviceType: type, scheduledDate: '2026-09-27',
     completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields, nextStepChips: [] } }}
@@ -225,4 +230,28 @@ it('a completion refused as stale refetches the areas and retries with the new v
   fireEvent.click(complete);
   await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
   expect(onSubmit.mock.calls[1][1].propertyServiceArea).toMatchObject({ version: 'b'.repeat(64), treatedSqft: 600, explicitVisitArea: true });
+});
+
+it('a failed refetch after a stale completion keeps completion blocked until Retry loads a fresh version', async () => {
+  const onSubmit = vi.fn()
+    .mockRejectedValueOnce(Object.assign(new Error('Property areas changed.'), { status: 409, code: 'property_service_area_changed' }))
+    .mockResolvedValue({ success: true });
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', scheduledDate: '2026-09-27',
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: bedField, nextStepChips: [] } }}
+    products={products} onClose={() => {}} onSubmit={onSubmit} />);
+  fireEvent.change(await screen.findByLabelText('Area treated today (sq ft)'), { target: { value: '600' } });
+  measurements = { ...measurements, version: 'b'.repeat(64) };
+  areaLoadFailures = 1;
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  const retry = await screen.findByRole('button', { name: 'Retry' });
+  // The failed reload never releases the stale closeout.
+  expect(screen.getByRole('button', { name: /complete & send recap/i })).toBeDisabled();
+  fireEvent.click(retry);
+  const complete = screen.getByRole('button', { name: /complete & send recap/i });
+  await waitFor(() => expect(complete).toBeEnabled());
+  fireEvent.change(await screen.findByLabelText('Area treated today (sq ft)'), { target: { value: '600' } });
+  fireEvent.click(complete);
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+  expect(onSubmit.mock.calls[1][1].propertyServiceArea).toMatchObject({ version: 'b'.repeat(64), treatedSqft: 600 });
 });

@@ -139,9 +139,9 @@ async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lo
     const result = await performLookup(address, liveRefresh ? { refresh: true } : { cacheOnly: true, persist: false })
       .catch(error => {
         if (!liveRefresh) return null;
-        // Upstream messages can name providers, keys or URLs: log them here
-        // and give the client a fixed operational message.
-        logger.warn(`[property-service-areas] lookup refresh failed property=${property.id}: ${error?.message}`);
+        // Upstream messages can name providers, keys, URLs or the street
+        // address: log only a stable error code, never the message.
+        logger.warn(`[property-service-areas] lookup refresh failed property=${property.id} code=${error?.code || error?.name || 'error'}`);
         throw fail('Property lookup is unavailable right now. Try again in a few minutes.', 502);
       });
     estimates = lookupSuggestions(result?.enriched);

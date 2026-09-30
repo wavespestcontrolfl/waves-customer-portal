@@ -215,10 +215,22 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
         && await require('../services/property-service-areas').hasAreaMeasurementsColumn(trx)) {
         // This older editor does not review service areas. A changed turf
         // amount withdraws the old review instead of keeping its stamp on
-        // a different number. Same customer fence as the shared editor.
-        await trx('customer_properties').where({ customer_id: customerId, is_primary: true })
-          .whereRaw("jsonb_exists(service_area_measurements->'areas', 'lawn')")
-          .update({ service_area_measurements: trx.raw("service_area_measurements #- '{areas,lawn}'"), updated_at: trx.fn.now() });
+        // a different number, and moves the lawn mirrors the review had set
+        // (property and customer property_sqft) to the same amount, so no
+        // reader keeps pricing the withdrawn one. Only the primary property
+        // at the customer's own address carries those mirrors — the shared
+        // editor's rule. Same customer fence as the shared editor.
+        const { addressKey } = require('../services/customer-properties');
+        const customer = await trx('customers').where({ id: customerId }).first();
+        const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true })
+          .whereRaw("jsonb_exists(service_area_measurements->'areas', 'lawn')").first();
+        if (primary && customer && addressKey(customer) === addressKey(primary)) {
+          await trx('customer_properties').where({ id: primary.id }).update({
+            service_area_measurements: trx.raw("service_area_measurements #- '{areas,lawn}'"),
+            property_sqft: nextLawnSqft, updated_at: trx.fn.now(),
+          });
+          await trx('customers').where({ id: customerId }).update({ property_sqft: nextLawnSqft, updated_at: trx.fn.now() });
+        }
       }
       // The fence already holds the prefs advisory lock, so this read is
       // serialized against the address fan-out's stamp write (gh-r44).

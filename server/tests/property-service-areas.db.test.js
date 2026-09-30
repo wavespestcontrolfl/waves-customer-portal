@@ -172,6 +172,10 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     const saved = (await knex('customer_properties').where({ id: primary.id }).first()).service_area_measurements.areas;
     expect(saved.lawn).toBeUndefined();
     expect(saved.beds.sqft).toBe(900);
+    // The mirrors the withdrawn review had set follow the legacy amount.
+    expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(4500);
+    expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(4500);
+    expect((await knex('customer_properties').where({ id: second.id }).first()).property_sqft).toBe(1200);
     expect((await knex('customer_properties').where({ id: second.id }).first()).service_area_measurements.areas.lawn.sqft).toBe(1200);
   });
   test('rolls back the property and mirrors if the required audit fails', async () => {

@@ -91,9 +91,14 @@ describe('readAreaMeasurements without a database', () => {
   test('a failed live refresh returns a fixed message, not the upstream error text', async () => {
     const knex = makeKnex({ customer_properties: [fixtureProperty()] });
     const lookup = jest.fn().mockRejectedValue(new Error('provider https://upstream.example/?key=SECRET timed out'));
+    const warn = jest.spyOn(require('../services/logger'), 'warn').mockImplementation(() => {});
     const failure = await areas.readAreaMeasurements(scope, admin, { knex, refresh: true, lookup, claimRefresh: async () => true }).catch(error => error);
     expect(failure).toMatchObject({ status: 502, isOperational: true });
     expect(failure.message).not.toMatch(/SECRET|upstream/);
+    // The server log gets a stable code only, never the upstream message.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('code=Error'));
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/SECRET|upstream|Fixture/);
+    warn.mockRestore();
   });
 
   test('an ordinary read never claims a live refresh', async () => {

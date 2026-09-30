@@ -28,6 +28,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
   const [draft, setDraft] = useState({});
   const [message, setMessage] = useState('');
   const [stale, setStale] = useState(false);
+  const [reloadCount, setReloadCount] = useState(0);
   const epoch = useRef(0);
   const current = useRef({ endpoint, onMeasurements, onUnavailable });
   current.current = { endpoint, onMeasurements, onUnavailable };
@@ -40,15 +41,18 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     if (!endpoint || (serviceId && !activeKey)) return undefined;
     adminFetch(endpoint).then(result => {
       if (!alive || generation !== epoch.current) return;
-      if (!result?.enabled) { current.current.onUnavailable?.(); return; }
+      if (!result?.enabled) { current.current.onUnavailable?.({ failed: false }); return; }
       setData(result); current.current.onMeasurements?.(result);
     }).catch(err => {
       if (!alive || generation !== epoch.current) return;
-      current.current.onUnavailable?.();
-      if (err.status !== 404) setError('Property areas are unavailable. Enter the area treated for this visit.');
+      // A 404 is the feature being off; anything else is a failed load the
+      // parent may need to hold completion on (a stale-version refresh).
+      const failed = err.status !== 404;
+      current.current.onUnavailable?.({ failed });
+      if (failed) setError('Property areas are unavailable. Enter the area treated for this visit.');
     });
     return () => { alive = false; };
-  }, [endpoint, serviceId, activeKey, refreshToken]);
+  }, [endpoint, serviceId, activeKey, refreshToken, reloadCount]);
 
   function editAreas() {
     setDraft(Object.fromEntries(Object.keys(AREA_LABELS).map(key => [key, {
@@ -125,7 +129,10 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     } finally { if (current.current.endpoint === startedFor && generation === epoch.current) setBusy(false); }
   }
 
-  if (!data) return error ? <p role="status" className="text-14 text-zinc-600 my-3">{error}</p> : null;
+  if (!data) return error ? <div role="status" className="text-14 text-zinc-600 my-3">
+    <p>{error}</p>
+    <Button variant="ghost" className={controlClass} onClick={() => setReloadCount(value => value + 1)} disabled={disabled}>Retry</Button>
+  </div> : null;
   const shownKeys = activeKey ? [activeKey] : Object.keys(AREA_LABELS);
   const savedArea = activeKey ? data.areas[activeKey] : null;
   const effectiveVisitArea = visitArea ?? (savedArea?.reviewedAt ? savedArea.sqft : '');

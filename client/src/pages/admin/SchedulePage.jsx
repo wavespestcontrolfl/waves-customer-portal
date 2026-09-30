@@ -18674,7 +18674,10 @@ export function CompletionPanel({
     visitArea={serviceLineForCloseout === "lawn" ? lawnAreaOverride : propertyVisitOverride}
     refreshToken={propertyAreasRefreshToken}
     onMeasurements={data => { setPropertyAreas(data ? { ...data, serviceId: service.id } : null); if (data) setPropertyAreasRefreshing(false); }}
-    onUnavailable={() => { propertyAreasUnavailableRef.current = service.id; setPropertyAreasRefreshing(false); }}
+    // A failed load after a stale-version 409 keeps completion blocked (the
+    // next submit would otherwise skip the version check); only a fresh
+    // version, or the feature being off, releases it. The panel offers Retry.
+    onUnavailable={({ failed = false } = {}) => { propertyAreasUnavailableRef.current = service.id; if (!failed) setPropertyAreasRefreshing(false); }}
     onVisitAreaChange={area => {
       invalidateGeneratedReportOnTypedEdit();
       if (serviceLineForCloseout === "lawn") setLawnAreaOverride(area === null ? undefined : area);
