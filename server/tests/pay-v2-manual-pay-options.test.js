@@ -428,6 +428,21 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
     const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
     expect(result).toEqual({ visible: false, reason: 'not_eligible' });
   });
+
+  // Codex round-6 pre-push audit P1: the customer-SMS callers pass
+  // customerFacing: true and must refuse any payer-stamped invoice, while the
+  // pay page (no flag) keeps its payer-facing behavior.
+  test('customerFacing rejects a payer_id- or payer_statement_id-stamped invoice; the pay page (no flag) does not', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    for (const stamp of [{ payer_id: 'payer-1' }, { payer_statement_id: 'stmt-1' }]) {
+      const inv = invoiceData({ status: 'overdue', ...stamp });
+      await expect(payPageZelleVisibility({ invoice: inv, customerFacing: true })).resolves.toEqual({ visible: false, reason: 'payer_owned' });
+    }
+    await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), customerFacing: true })).resolves.toEqual({ visible: true, reason: null });
+    const payerFacing = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', payer_id: 'payer-1' }) });
+    expect(payerFacing.reason).not.toBe('payer_owned');
+  });
 });
 
 // GATE_PAY_PAGE_FAQ — the FAQ accordion flag rides the same GET payload.

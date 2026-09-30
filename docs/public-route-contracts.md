@@ -544,7 +544,12 @@ absent, payload byte-identical — that is the kill switch; `VENMO_HANDLE` /
 `PAYPAL_ME_HANDLE` are ignored and cannot resurrect a tender) AND the
 invoice clears `payPageZelleVisibility` (`pay-v2.js`; PR #5331) — the ONE
 function this route, the SMS drafter's draft-time eligibility fetch, and
-the send-time recheck all call, so none of them can quietly disagree.
+the send-time recheck all call, so none of them can quietly disagree. The two
+CUSTOMER-SMS callers (they text the homeowner) additionally pass
+`customerFacing: true`, which rejects any invoice stamped with a `payer_id` or
+`payer_statement_id` — including one stamped after the reply was drafted;
+`GET /api/pay/:token` never passes it, so the payer-facing pay page keeps its
+behavior byte-for-byte.
 Exhaustively, every condition it applies: the invoice is collectible, not
 withdrawn from the customer (a Bill-To move to a payer after the homeowner
 already held this link, see THIRD-PARTY BILL-TO WITHDRAWAL below), not

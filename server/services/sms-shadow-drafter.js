@@ -441,7 +441,7 @@ async function fetchZelleEligibilityLookup({ customerId, openInvoiceId } = {}) {
       // and credit-pending fixes so this draft-time fact can never offer
       // Zelle in a case the pay page itself would withhold it.
       const { payPageZelleVisibility } = require('../routes/pay-v2');
-      return Boolean((await payPageZelleVisibility({ invoice: row })).visible);
+      return Boolean((await payPageZelleVisibility({ invoice: row, customerFacing: true })).visible);
     })();
     return await Promise.race([work, timeout]);
   } catch (err) {
@@ -1149,6 +1149,15 @@ function billingAmountCents(context, { settledOnly = false } = {}) {
   };
 }
 
+// Codex round-6 pre-push audit P1 (PR #5331): the account currently OWES
+// money — an open invoice with an amount due, or a positive outstanding
+// balance. Deliberately excludes published monthly dues (see
+// authorizedDuesCents), which authorize QUOTING a price, not owing it.
+function billingHasOutstandingObligation(context) {
+  const billing = context?.billing || {};
+  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0;
+}
+
 // Independent-review P1 (round 3, PR #5331): ONE shared tender vocabulary,
 // so replyClaimedTender (what a REPLY claims — "I Zelled you", "paid by
 // Venmo") and paymentTenderLabel (below, what a PAID ROW's own columns show)
@@ -1291,6 +1300,13 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
+  // Codex round-6 pre-push audit P1 (PR #5331): "is anything owed right now"
+  // (the SETTLEMENT-claim test) is decided from authoritative OUTSTANDING
+  // obligations only — an open invoice or a positive balance — never from
+  // owedCents, which also carries a monthly member's published dues (prices a
+  // reply may QUOTE, present even when the account is fully settled). Same
+  // predicate serves the send-time recheck, which calls this function.
+  const hasOutstandingObligation = billingHasOutstandingObligation(context);
   // Independent-review P1 (round 6, PR #5331): billing.unavailable means the
   // account's whole money picture is UNKNOWABLE (context-aggregator.js: the
   // invoice-grounding read itself failed) — owedCents/paidCents above come
@@ -1382,7 +1398,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
       if (kind === 'event') return true;
       // billingUnavailable: never let an empty owedCents set (unknowable,
       // not zero) ground a "nothing is owed" claim.
-      if (kind === 'settlement' && (owedCents.size > 0 || billingUnavailable)) return true;
+      if (kind === 'settlement' && (hasOutstandingObligation || billingUnavailable)) return true;
       continue;
     }
     const owed = AMOUNT_OWED_RE.test(masked);

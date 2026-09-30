@@ -389,10 +389,21 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
 async function payPageZelleVisibility({
   invoiceId = null, invoice = null, dbh = db,
   creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive,
+  // Codex round-6 pre-push audit P1 (PR #5331): the CUSTOMER-SMS boundary
+  // (draft-time fetchZelleEligibility, send-time zelleInvoiceStillEligible)
+  // texts the HOMEOWNER, so an invoice already stamped to a third-party payer
+  // (payer_id) or a monthly payer statement (payer_statement_id) — including
+  // one stamped AFTER the reply was drafted — is never theirs to pay: reject
+  // it outright. isZelleTransferEligible itself deliberately skips payer
+  // resolution and the saved-method / credit probes for a payer-stamped
+  // invoice (the payer-facing pay page keeps that behavior), so that branch
+  // cannot be relied on here. GET /:token never passes this.
+  customerFacing = false,
 } = {}) {
   if (!manualPayOptionsFromEnv()) return { visible: false, reason: 'not_configured' };
   const inv = invoice || (invoiceId ? await dbh('invoices').where({ id: invoiceId }).first() : null);
   if (!inv) return { visible: false, reason: 'invoice_not_found' };
+  if (customerFacing && (inv.payer_id || inv.payer_statement_id)) return { visible: false, reason: 'payer_owned' };
   const eligible = await isZelleTransferEligible(inv, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive });
   if (!eligible) return { visible: false, reason: 'not_eligible' };
   // Finding 4: any positive projected account credit (invoiceProjectedCreditApplied
