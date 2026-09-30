@@ -472,8 +472,9 @@ async function sendCustomerMessageCore(input) {
     // POST /:token/service-details/send, B01): a bearer-token page whose
     // recipient can be a stranger's wrong number, so the phone lock (the STOP /
     // wrong-number writers' own lockSmsPhone) is held through the provider
-    // request. Suppression and consent reload under it and fail closed. Phone
-    // lock only — the lead audience has no customer row to hold.
+    // request, and for a customer-backed estimate the customer-comms lock too
+    // (the sms_enabled writer's lock, taken first). Suppression and consent
+    // reload under them and fail closed. A lead has no customer row: phone only.
     || (['lead', 'customer'].includes(input.audience) && input.purpose === 'estimate_followup'
       && input.entryPoint === 'estimate_service_details_send'
       && input.metadata?.original_message_type === 'estimate_service_details');

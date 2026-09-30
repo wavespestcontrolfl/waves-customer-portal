@@ -424,5 +424,58 @@ describe('B01: service-details SMS honors the suppression store and sms_enabled'
       const sql = mockDb.raw.mock.calls.map((c) => c[0]).find((q) => /INSERT INTO sms_send_claims/.test(q));
       expect(sql).toMatch(/outcome IN \('withheld', 'policy_blocked'\)\s+AND sms_send_claims\.created_at < NOW\(\) - interval '6 seconds'/);
     });
+
+    describe('Codex round 2 on #5384: customer-comms lock before the phone lock', () => {
+      const lockOrder = () => mockDb.raw.mock.calls
+        .map(([sql, binds]) => (/customer-comms:/.test(String(binds?.[0])) ? 'customer-comms' : /twilio_21610/.test(sql) ? 'phone' : null))
+        .filter(Boolean);
+      const rawWithArgs = () => mockDb.raw.mock.calls.filter((c) => /pg_advisory_xact_lock/.test(c[0]));
+
+      test('a customer-backed estimate takes customer-comms FIRST, then the phone lock, for the customer id and phone', async () => {
+        const TwilioService = require('../services/twilio');
+        TwilioService.sendSMS.mockImplementationOnce(realisticSend(ACCEPTED));
+        const res = await post();
+        expect(res.status).toBe(200);
+        expect(lockOrder()).toEqual(['customer-comms', 'phone']);
+        const args = rawWithArgs().map((c) => c[1]);
+        expect(args[0]).toEqual(['customer-comms:cust-b01-1']);
+        expect(args[1]).toEqual([fixtures.phone]);
+      });
+
+      test('a lead-only estimate stays phone-lock only (no customer-comms lock)', async () => {
+        const TwilioService = require('../services/twilio');
+        TwilioService.sendSMS.mockImplementationOnce(realisticSend(ACCEPTED));
+        fixtures.estimate = deliveredRow(fixtures.phone, { customer_id: null });
+        fixtures.prefs = null;
+        fixtures.customer = null;
+        const res = await post();
+        expect(res.status).toBe(200);
+        expect(lockOrder()).toEqual(['phone']);
+      });
+
+      test('sms_enabled flipped to false AFTER the first read but BEFORE the handoff: the locked re-read of notification_prefs stops the send (409)', async () => {
+        const TwilioService = require('../services/twilio');
+        // Enabled for every read before the locked handoff transaction opens
+        // (the chain's own reads); disabled for any read once it has (the
+        // customer turned SMS off in between).
+        let prefsReads = 0;
+        Object.defineProperty(fixtures, 'prefs', {
+          configurable: true,
+          get() { prefsReads += 1; return { customer_id: 'cust-b01-1', sms_enabled: mockDb.transaction.mock.calls.length === 0 }; },
+          set() {},
+        });
+        try {
+          let providerDispatched = false;
+          TwilioService.sendSMS.mockImplementationOnce(realisticSend({ ...ACCEPTED, get sid() { providerDispatched = true; return SID; } }));
+          const res = await post();
+          expect(res.status).toBe(409);
+          expect(await res.json()).toEqual(UNAVAILABLE);
+          expect(prefsReads).toBeGreaterThanOrEqual(2);
+          expect(providerDispatched).toBe(false);
+        } finally {
+          delete fixtures.prefs;
+        }
+      });
+    });
   });
 });

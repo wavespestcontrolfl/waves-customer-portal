@@ -70,7 +70,7 @@ const {
 } = require('../../shared/estimate-purchased-warranty.cjs');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { stripSmsUrlScheme } = require('../services/messaging/sms-link-policy');
-const { lockSmsPhone } = require('../utils/customer-comms-lock');
+const { lockSmsPhone, withSmsConsentLock } = require('../utils/customer-comms-lock');
 const AppointmentReminders = require('../services/appointment-reminders');
 const { WAVEGUARD: PRICING_WAVEGUARD } = require('../services/pricing-engine/constants');
 const { pricedTreeShrubPalmCount } = require('../services/pricing-engine/tree-shrub-palm-priced');
@@ -26926,10 +26926,19 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         // state cannot be positively loaded — so an opt-out committed after
         // the initial read, or a read error the initial chain fails open on,
         // can never send. Same shape as admin-leads / lead-auto-reply.
-        withSmsHandoff: (dispatch) => db.transaction(async (trx) => {
-          await lockSmsPhone(trx, contact.customerPhone);
-          return dispatch(trx);
-        }),
+        //
+        // A customer-backed estimate also takes the customer-comms lock BEFORE
+        // the phone lock (withSmsConsentLock's order): the global sms_enabled
+        // opt-out writer (routes/notifications.js) serializes on customer-comms,
+        // not the phone, so the notification_prefs re-read under this handoff
+        // sees it committed or the writer waits until Twilio has the request.
+        // Leads have no customer row, so they stay phone-lock only.
+        withSmsHandoff: estimate.customer_id
+          ? (dispatch) => withSmsConsentLock(db, { phone: contact.customerPhone, customerId: estimate.customer_id }, (trx) => dispatch(trx))
+          : (dispatch) => db.transaction(async (trx) => {
+            await lockSmsPhone(trx, contact.customerPhone);
+            return dispatch(trx);
+          }),
         metadata: {
           original_message_type: 'estimate_service_details',
           estimate_id: estimate.id,
