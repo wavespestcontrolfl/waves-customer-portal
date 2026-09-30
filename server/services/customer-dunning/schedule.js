@@ -34,7 +34,7 @@ const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'ref
 // D10: a step held this long gets ONE staff alert (and keeps retrying).
 const HELD_ALERT_DAYS = 7;
 // Hold reasons the office must resolve by hand: alerted at once, once.
-const OFFICE_HOLD_REASONS = Object.freeze(['member_paused', 'member_autopay_hold', 'credit_covers_anchor', 'account_credit_available', 'over_cap']);
+const OFFICE_HOLD_REASONS = Object.freeze(['member_paused', 'member_autopay_hold', 'account_credit_available', 'over_cap']);
 const HOUR_MS = 60 * 60 * 1000;
 
 const isFinalIndex = (index) => Number(index) >= FINAL_INDEX;
