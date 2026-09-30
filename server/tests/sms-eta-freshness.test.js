@@ -599,6 +599,91 @@ describe('round 7 (Codex P2): structural default-deny — a plain minutes figure
   });
 });
 
+describe('round 8 (Codex P2): bare-integer default-deny — "The tech should make it in 20" matches neither IMPLICIT_MINUTES_ARRIVAL_RE nor a strong trigger', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+    drafter.bodyHasTimedArrivalPhrase.mockReset().mockImplementation(real.bodyHasTimedArrivalPhrase);
+    drafter.bodyHasUnclassifiedArrivalDigit.mockReset().mockImplementation(real.bodyHasUnclassifiedArrivalDigit);
+    drafter.findGroundedMinutesFigures.mockReset().mockImplementation(real.findGroundedMinutesFigures);
+  });
+  const liveEtaSnapshot = { entries: [{ minutes: 20, scheduledServiceIds: ['svc-1'] }] };
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+    '20ish.',
+  ])('%p is bound and blocked once the visit is done, with no unit word or fixed phrase required', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
+    });
+    expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+    '20ish.',
+  ])('%p passes when the visit is still en_route', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBeNull();
+  });
+
+  // "about 2 hours out" is its own claim (raw captured "2", no conversion) —
+  // bound against a snapshot that also reads 2 so the mechanism is exercised
+  // the same way the round-7 tests exercise "20 minutes.".
+  test('"About 2 hours out." is bound and blocked once the visit is done', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody: 'About 2 hours out.', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
+    });
+    expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  // The "no-snapshot trigger path" fix: findEtaMinutesClaims itself now
+  // recognizes these phrasings, so an ungrounded claim fails closed even
+  // with NO snapshot and NO /track/ link at all — it must never be silently
+  // waved through as status copy just because findGroundedMinutesFigures
+  // never ran (there's no snapshot to run it against).
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+  ])('%p with NO snapshot and NO link fails closed as ungrounded', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody, now: NOW,
+    });
+    expect(reason).toBe('eta_claim_no_snapshot');
+  });
+
+  // Visit left en_route (matching the snapshot) so a genuine arrival-status
+  // word elsewhere in a couple of these sentences ("be there", "on the way")
+  // never itself blocks the send — the point under test is narrower: the
+  // number sitting nearby is never misread as a mismatched/unbound MINUTES
+  // figure of its own.
+  test.each([
+    '$20 is due at the visit.',
+    'He should be there at 2:30.',
+    "He's on the way to 123 Main St.",
+    'You have 2 visits left this year.',
+    'Your renewal lands on the 20th.',
+    'Battery is at 100% right now.',
+  ])('negative: %p is never parsed as a bare-integer ETA claim, even with a live snapshot present', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBeNull();
+  });
+});
+
 describe('round 6 (Codex P2): a token\'s OWNING row must itself be live — a grouped-stop sibling\'s liveness never covers it', () => {
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');

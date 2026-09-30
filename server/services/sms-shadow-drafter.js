@@ -509,7 +509,19 @@ const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)
 // AND (for "due") no other STRONG trigger word at all — the phrase itself is
 // the trigger, same reasoning as the rest of this pass. An optional "about"
 // between "in" and the number is allowed ("reach you in about 20").
-const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here|with\s+you)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up|due|reach(?:ing)?\s+you|get(?:ting)?\s+to\s+you)\s+in\s+(?:about\s+)?(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// Round 8 (Codex P2, PR #5334): "the tech should make it in 20" — "make it
+// (there|here|to you)? in N" is the same shape (a fixed phrase right before
+// "in N") and joins this same alternation.
+const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here|with\s+you)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up|due|reach(?:ing)?\s+you|get(?:ting)?\s+to\s+you|make\s+it(?:\s+(?:there|here|to\s+you))?)\s+in\s+(?:about\s+)?(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+// "He'll be by in 20" / "the tech will swing by in 20" / "they should be
+// there in 20" (Codex round-8 P2): the number sits after ARBITRARY words a
+// fixed phrase list can never enumerate, but "tech/he/she/they" + a
+// future-tense marker (will/should/the 'll contraction) earlier in the same
+// short span is itself as strong a trigger as any fixed phrase above — a
+// later bare "in N" in that span is claimed the same way, no unit word
+// required. Scoped to a short (<=30-char) gap so an unrelated later "in N"
+// elsewhere in a long sentence never false-positives.
+const FUTURE_ARRIVAL_IN_MINUTES_RE = /\b(?:tech|he|she|they)(?:'ll|\s+(?:will|should))\b[^.?!\n]{0,30}?\bin\s+(?:about\s+)?(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
 // Bare-integer ETA claims (Codex round-6 P2, PR #5334): "ETA: 20", "his ETA
 // is 20", "ETA 20", "eta ~20" carry no "minutes"/"in" wording at all — every
 // pass above requires SOME unit or connector word, so these skipped number
@@ -551,6 +563,56 @@ function looksLikeTimeAddressOrPhone(str, index, length) {
   if (STREET_SUFFIX_RE.test(after)) return true;
   if (PHONE_DIGIT_BEFORE_RE.test(before) || PHONE_DIGIT_AFTER_RE.test(after)) return true;
   return false;
+}
+// Bare-integer default-deny classification (Codex round-8 P2, PR #5334): once
+// findGroundedMinutesFigures's caller has a LIVE ETA to check a claim
+// against, a bare integer with NO unit/connector word at all ("The tech
+// should make it in 20") still needs to be told apart from every OTHER kind
+// of plain number a reply can contain — a dollar figure, a clock time, an
+// address, a date, a count of something that isn't time, an ordinal, or a
+// percentage. Each of these is checked in isolation, narrowly, against the
+// text immediately around the match; a bare integer that matches NONE of
+// them is the claim itself (default-deny). "N hour(s)" is handled by its own
+// dedicated token pass below (ETA_HOURS_TOKEN_RE), not here.
+const MONEY_SIGN_BEFORE_RE = /\$\s*$/;
+const MONEY_WORD_AFTER_RE = /^\s*(?:dollars?|bucks?)\b/i;
+const ORDINAL_SUFFIX_AFTER_RE = /^(?:st|nd|rd|th)\b/i;
+const PERCENT_SIGN_AFTER_RE = /^\s*%/;
+const MONTH_NAME_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
+const DATE_SLASH_AFTER_RE = /^\s*\/\s*\d{1,4}\b/;
+const DATE_SLASH_BEFORE_RE = /\d{1,4}\s*\/\s*$/;
+// "N hour(s)" (round 8): a timed claim exactly like "N minutes" — checked
+// through the SAME maybeGroundedClaim strong-trigger/duration-exclusion
+// logic in findGroundedMinutesFigures below, so "allow 2 hours before
+// letting pets out" stays excluded exactly like "allow 30 minutes ..." does,
+// while "about 2 hours out" claims.
+const ETA_HOURS_TOKEN_RE = /\b(\d{1,3})\s*(?:hours?|hrs?)\b/gi;
+const WORD_AFTER_RE = /^\s*[A-Za-z]+\b/;
+function classifyBareEtaNumber(str, index, length) {
+  const before = str.slice(Math.max(0, index - 15), index);
+  const after = str.slice(index + length, index + length + 24);
+  // Ordinal ("the 20th") / percentage ("100%") checked first — both would
+  // otherwise also match the generic trailing-word check below.
+  if (ORDINAL_SUFFIX_AFTER_RE.test(after)) return 'excluded';
+  if (PERCENT_SIGN_AFTER_RE.test(after)) return 'excluded';
+  // Money ("$20", "20 dollars").
+  if (MONEY_SIGN_BEFORE_RE.test(before) || MONEY_WORD_AFTER_RE.test(after)) return 'excluded';
+  // Time of day / address / phone-like token — the shared helper above.
+  if (looksLikeTimeAddressOrPhone(str, index, length)) return 'excluded';
+  // Date: a month name nearby, or an N/N slash date.
+  if (MONTH_NAME_RE.test(before) || MONTH_NAME_RE.test(after)) return 'excluded';
+  if (DATE_SLASH_AFTER_RE.test(after) || DATE_SLASH_BEFORE_RE.test(before)) return 'excluded';
+  // "N hour(s)" is handled by its own dedicated pass in
+  // findGroundedMinutesFigures (the SAME strong-trigger/duration-exclusion
+  // logic "N minutes" gets — "allow 2 hours before letting pets out" must
+  // stay excluded exactly like "allow 30 minutes ..." does), so a hitherto
+  // unclaimed "hour(s)" figure reaching this point was already judged and
+  // excluded there; fall through to the generic trailing-word rule below.
+  // A count with a non-time noun directly after it ("3 bugs", "2 visits",
+  // "4 traps", "12 months", "30 days") — any other word sitting right after
+  // the number reads as its unit/noun, so it is never a bare arrival figure.
+  if (WORD_AFTER_RE.test(after)) return 'excluded';
+  return 'claim';
 }
 // Sentence spans over raw sentence-boundary punctuation only (. ? ! or a
 // newline) — an em dash, comma, or "—" never splits a sentence, so "heading
@@ -691,6 +753,17 @@ function findEtaMinutesClaims(text) {
     claims.push({ minutes: parseInt(im[1], 10), index: im.index });
   }
 
+  // Future-verb "in N" pass (round 8): "he'll be by in 20" — the number sits
+  // after words the fixed implicit-phrase list above can't enumerate; the
+  // subject + future-tense marker earlier in the clause is itself the
+  // trigger, same reasoning as the implicit-minutes pass.
+  const futureRe = new RegExp(FUTURE_ARRIVAL_IN_MINUTES_RE.source, FUTURE_ARRIVAL_IN_MINUTES_RE.flags);
+  let fm;
+  while ((fm = futureRe.exec(str))) {
+    if (claims.some((c) => c.index === fm.index)) continue;
+    claims.push({ minutes: parseInt(fm[1], 10), index: fm.index });
+  }
+
   // "<N> out" pass (round 6): the bare "out" idiom carries no unit at all —
   // the phrase itself is the trigger, same reasoning as the implicit-minutes
   // pass above.
@@ -714,8 +787,12 @@ function findEtaMinutesClaims(text) {
   // "eta ~20" carry no unit and no connector word at all — nothing above can
   // ever catch them however the trigger words are extended. A STRONG arrival
   // trigger anywhere in the sentence (see maybeClaim above — "eta" itself is
-  // one) makes ANY bare integer 1-180 in that sentence a claim, unless it
-  // reads as a time of day or an address/phone-like token.
+  // one) makes ANY bare integer 1-180 in that sentence a claim, unless
+  // classifyBareEtaNumber (round 8) reads it as something else entirely — a
+  // time of day, money, an address/phone-like token, a date, a count with a
+  // non-time noun right after it ("2 visits left" — "left" is itself a
+  // STRONG trigger, so this pass must not claim the unrelated "2"), an
+  // ordinal, or a percentage.
   const bareRe = new RegExp(BARE_ETA_NUMBER_RE.source, BARE_ETA_NUMBER_RE.flags);
   let bm;
   while ((bm = bareRe.exec(str))) {
@@ -728,7 +805,7 @@ function findEtaMinutesClaims(text) {
     if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) continue;
     const minutes = parseInt(bm[1], 10);
     if (minutes < 1 || minutes > 180) continue;
-    if (looksLikeTimeAddressOrPhone(str, bm.index, bm[0].length)) continue;
+    if (classifyBareEtaNumber(str, bm.index, bm[0].length) !== 'claim') continue;
     claims.push({ minutes, index: bm.index });
   }
 
@@ -756,6 +833,11 @@ function findEtaMinutesClaims(text) {
 // claim" bailout, since removing that bailout IS the structural fix: a bare
 // "20 minutes." with nothing else in the sentence is exactly the shape a
 // trigger-word list can never catch, and grounded default-deny catches it.
+// Round 8 (Codex P2): the same default-deny now also covers a BARE integer
+// with no unit word at all ("The tech should make it in 20") — see the
+// bare-integer pass and classifyBareEtaNumber below, which tell an unclaimed
+// bare number apart from a time of day, money, an address/phone-like token,
+// a date, a count of something that isn't time, an ordinal, or a percentage.
 function findGroundedMinutesFigures(text) {
   const claims = [];
   const str = normalizeNumberWords(text);
@@ -795,6 +877,54 @@ function findGroundedMinutesFigures(text) {
     maybeGroundedClaim(parseInt(m[1], 10), m.index, m[0].length, sentenceFor(m.index));
   }
 
+  // "N hour(s)" pass (round 8): the SAME strong-trigger/duration-exclusion
+  // judgment as the minutes pass above — "about 2 hours out" claims, "allow
+  // 2 hours before letting pets out"/"takes about 2 hours to dry" stay
+  // excluded exactly like their minutes equivalents.
+  const hoursRe = new RegExp(ETA_HOURS_TOKEN_RE.source, ETA_HOURS_TOKEN_RE.flags);
+  let hm;
+  while ((hm = hoursRe.exec(str))) {
+    if (consumed.some(([s, e]) => hm.index >= s && hm.index < e)) continue;
+    maybeGroundedClaim(parseInt(hm[1], 10), hm.index, hm[0].length, sentenceFor(hm.index));
+  }
+
+  // Bare-integer default-deny (Codex round-8 P2, PR #5334): "the tech should
+  // make it in 20" carries no unit word AND matches none of
+  // findEtaMinutesClaims's fixed phrase/trigger lists. Once there IS a live
+  // ETA to check a claim against, ANY bare integer 1-180 left unclaimed above
+  // is a timed claim UNLESS classifyBareEtaNumber reads it as something else
+  // entirely — a time of day, money, an address/phone-like token, a date, a
+  // count with a non-time noun right after it, an ordinal, or a percentage.
+  // Numbers already claimed or excluded by the unit-based passes above are
+  // skipped by index so this pass never double-claims or re-fights a
+  // duration exclusion those passes already settled (a trailing "minutes"
+  // word reads here as an ordinary trailing noun either way, so the verdict
+  // agrees).
+  const bareRe = /\b(\d{1,3})\b/g;
+  let bm2;
+  while ((bm2 = bareRe.exec(str))) {
+    if (consumed.some(([s, e]) => bm2.index >= s && bm2.index < e)) continue;
+    if (claims.some((c) => c.index === bm2.index)) continue;
+    const minutes = parseInt(bm2[1], 10);
+    if (minutes < 1 || minutes > 180) continue;
+    if (classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
+      claims.push({ minutes, index: bm2.index });
+    }
+  }
+
+  // "<N>ish" (round 8): the digits and "ish" share no word boundary at all,
+  // so the \b-anchored bare-integer pass above can never match "20ish" —
+  // this tiny dedicated pass is the only way to catch it. Always a timed
+  // approximation once findGroundedMinutesFigures runs at all; no exclusion
+  // category applies to an "-ish" suffix.
+  const ishRe = /\b(\d{1,3})ish\b/gi;
+  let ishm;
+  while ((ishm = ishRe.exec(str))) {
+    if (claims.some((c) => c.index === ishm.index)) continue;
+    const minutes = parseInt(ishm[1], 10);
+    if (minutes >= 1 && minutes <= 180) claims.push({ minutes, index: ishm.index });
+  }
+
   return claims;
 }
 // Backstop for sms-eta-freshness.js (round 6): does the outgoing body carry
@@ -804,15 +934,30 @@ function findGroundedMinutesFigures(text) {
 // elsewhere in the message (a dollar amount, an address in another
 // sentence). Exists so a future phrasing this module's own parser still
 // can't read fails the send-time recheck closed rather than passing as pure
-// status copy.
+// status copy. Round 8 (Codex P2): "he should be there at 2:30" / "on the
+// way to 123 Main St" carry a STRONG trigger ("be there" / "on the way")
+// alongside a digit that is plainly a clock time or a street address, never
+// an unread ETA phrasing — each digit run in a qualifying sentence is run
+// through classifyBareEtaNumber so a digit classified as something else
+// entirely (time of day, money, an address/phone-like token, a date, a
+// count with a non-time noun, an ordinal, a percentage) never trips this
+// backstop; a digit classifyBareEtaNumber can't otherwise explain still does.
 function bodyHasUnclassifiedArrivalDigit(text) {
   const str = normalizeNumberWords(text);
   const spans = sentenceSpans(str);
   const claims = findEtaMinutesClaims(text);
+  const digitRe = /\d{1,3}/g;
   return spans.some(([s, e]) => {
     const sentence = str.slice(s, e);
-    if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !/\d/.test(sentence)) return false;
-    return !claims.some((c) => c.index >= s && c.index < e);
+    if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return false;
+    if (claims.some((c) => c.index >= s && c.index < e)) return false;
+    const re = new RegExp(digitRe.source, digitRe.flags);
+    let dm;
+    while ((dm = re.exec(str))) {
+      if (dm.index < s || dm.index >= e) continue;
+      if (classifyBareEtaNumber(str, dm.index, dm[0].length) === 'claim') return true;
+    }
+    return false;
   });
 }
 // The send-time freshness recheck (sms-eta-freshness.js) needs only "does

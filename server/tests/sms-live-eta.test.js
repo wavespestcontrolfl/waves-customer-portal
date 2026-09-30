@@ -891,6 +891,68 @@ describe('round 7 (Codex P2): structural default-deny at draft time — a plain 
   });
 });
 
+describe('round 8 (Codex P2): bare-integer default-deny — "The tech should make it in 20" catches neither IMPLICIT_MINUTES_ARRIVAL_RE nor a strong trigger', () => {
+  let prior;
+  beforeEach(() => { prior = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; });
+
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+    '20ish.',
+  ])('%p is bound to the LIVE ETA figure with no unit word or fixed phrase required', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+    'About 2 hours out.',
+  ])('%p is rejected when it does not match the LIVE ETA figure', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+  });
+
+  // "about 2 hours out" is a claim in its OWN right (no unit word — bound as
+  // the raw captured figure "2", same as every other pass in this module)
+  // and gets the EXACT-match treatment: it passes when the (contrived) LIVE
+  // ETA figure is itself 2, and is rejected above when it is 9.
+  test('"About 2 hours out." is bound to the LIVE ETA figure', () => {
+    const result = validateLiveEtaMinutes({ reply: 'About 2 hours out.', factsBlock: 'LIVE ETA: about 2 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  // The "no-snapshot trigger path" fix: findEtaMinutesClaims itself now
+  // recognizes these phrasings, so an ungrounded claim fails closed even
+  // with NO LIVE ETA fact in the facts block at all — it must never be
+  // silently waved through as status copy just because
+  // findGroundedMinutesFigures never ran.
+  test.each([
+    'The tech should make it in 20.',
+    "He'll be by in 20.",
+  ])('%p with NO LIVE ETA fact at all is rejected as an ungrounded claim', (reply) => {
+    const result = validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' });
+    expect(result.ok).toBe(false);
+  });
+
+  test.each([
+    '$20 is due at the visit.',
+    'He should be there at 2:30.',
+    "He's on the way to 123 Main St.",
+    'You have 2 visits left this year.',
+    'Your renewal lands on the 20th.',
+    'Battery is at 100% right now.',
+  ])('negative: %p is never parsed as a bare-integer ETA claim even with a LIVE ETA fact present', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 20 minutes (GPS, as of 2:45 PM ET)' })).toEqual({ ok: true, violations: [] });
+  });
+
+  test('gate off: never runs (byte-identical to before)', () => {
+    delete process.env[GATE];
+    expect(validateLiveEtaMinutes({ reply: 'The tech should make it in 20.', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+});
+
 describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2)', () => {
   test('no scheduled_service ever backed a LIVE ETA fact: null', () => {
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [] })).toBeNull();
