@@ -63,12 +63,33 @@
  *   - any lock not free: customer comms, host or pest series maintenance lock
  *     (all try-locks), or the pest series rows (FOR UPDATE NOWAIT)
  *
- * ROLLBACK refuses (skips and reports, never forces) any row whose current
- * values differ from what the apply wrote, that is no longer pending/confirmed
- * and ungrouped, that the preview's own classification (own fields plus durable
- * records: reminded/confirmed, invoice, card hold or request, closeout packet,
- * completion claim, prepaid, in progress, near-term) no longer calls movable,
- * or whose original date is now past or inside the near-term window.
+ * ROLLBACK IS A RESCHEDULE. It goes through the SAME validate-and-write
+ * function as the forward move (planMove/writeMove), with the recorded original
+ * date and window as the target. The original technician is re-run through
+ * assignableRecurringTemplateTechnicianId for that date and the entry is
+ * REFUSED if he/she is no longer assignable (never restored unassigned). The
+ * shared path checks: live ownership (customer_id and recurring_parent_id equal
+ * the recorded values), status/ungrouped, the near-term floor on the target, the
+ * durable pins (the preview's own classification: reminded/confirmed, invoice,
+ * card hold/request, closeout packet, completion claim, prepaid, in progress),
+ * the customer's pest occupancy on the target date, the technician's bookings
+ * over the target window (with the technician-NULL mirror guard), add-on
+ * equality against the row's CURRENT add-ons, and billability. Rollback also
+ * refuses a row whose moved columns no longer hold the values the apply wrote.
+ *
+ * ORDER OF LOCKS (scheduling/occupancy.js ORDERING CONTRACT). Every target date
+ * of the whole run is collected up front and its date-wide occupancy lock is
+ * try-acquired in sorted order FIRST, before any customer-comms, series or row
+ * lock; a pair (or rollback entry) with a date it could not lock is skipped.
+ * Then per pair: customer comms, host series, pest series, pest rows (FOR UPDATE
+ * NOWAIT), and the chosen host occurrence (FOR UPDATE NOWAIT, revalidated:
+ * date, window, technician, property) before it is planned against. The dry run
+ * takes no locks.
+ *
+ * CANDIDATE DISCOVERY is re-run inside the apply transaction for the pair's
+ * customer (server/services/rider-series-candidates.js, the report script's own
+ * function): a pair that is no longer found, or is now host_ambiguous,
+ * rider_ambiguous or property_unresolved, is skipped.
  *
  * ---------------------------------------------------------------------------
  * SIDE EFFECTS CHECKED (owner ruling: NO customer communication of any kind)
@@ -97,10 +118,6 @@
  * series_moves, sms_log, messaging_audit_log, reschedule_log or
  * job_status_history and sets no visit_id.
  *
- * NOT re-derived here: the report script's own candidate-finding reasons
- * (host_ambiguous / rider_ambiguous / property_unresolved). They are not part
- * of previewRiderPair; the move-set equality above is what catches a pair whose
- * plan changed since approval.
  */
 const fs = require('fs');
 
@@ -138,14 +155,25 @@ function readApproved(path) {
 }
 
 // ---- locks ------------------------------------------------------------------
-// Same lock family every series writer takes (rider-series.js loadLockedRiderContext):
-// customer comms (try), host then pest series maintenance advisory lock (try),
-// then the pest series rows FOR UPDATE NOWAIT. Any miss skips the pair.
-async function lockPair(sp, { customerId, lawnParentId, pestParentId }) {
+// Rung 1 of the scheduling ORDER: the date-wide occupancy lock for every target
+// date of the run, try-acquired in sorted order before any other lock. Returns
+// the set of dates now held. A read-only dry run takes no locks.
+async function lockTargetDates(trx, dates, apply) {
+  const { tryAcquireOccupancyLock } = require('../server/services/scheduling/occupancy');
+  const sorted = [...new Set(dates.filter(Boolean))].sort();
+  if (!apply) return new Set(sorted);
+  const held = new Set();
+  for (const d of sorted) {
+    if (await tryAcquireOccupancyLock(trx, d)) held.add(d);
+  }
+  return held;
+}
+
+async function lockSeries(sp, { customerId, parentIds }) {
   const { tryLockCustomerComms } = require('../server/utils/customer-comms-lock');
   const { acquireRecurringSeriesMaintenanceLock } = require('../server/routes/admin-schedule')._test;
   if (!(await tryLockCustomerComms(sp, customerId))) throw new PairSkip('customer_comms_locked');
-  for (const [parentId, reason] of [[lawnParentId, 'host_series_locked'], [pestParentId, 'pest_series_locked']]) {
+  for (const [parentId, reason] of parentIds) {
     try {
       await acquireRecurringSeriesMaintenanceLock(sp, parentId, false);
     } catch (err) {
@@ -153,17 +181,29 @@ async function lockPair(sp, { customerId, lawnParentId, pestParentId }) {
       throw err;
     }
   }
+}
+
+async function lockRowsNoWait(query, reason) {
   try {
-    await sp('scheduled_services')
-      .where((q) => { q.where('id', pestParentId).orWhere('recurring_parent_id', pestParentId); })
-      .forUpdate().noWait().select('id');
+    return await query.forUpdate().noWait();
   } catch (err) {
-    if (err.code === '55P03') throw new PairSkip('pest_rows_locked');
+    if (err.code === '55P03') throw new PairSkip(reason);
     throw err;
   }
 }
 
-// ---- per-move checks ----------------------------------------------------------
+// Same lock family every series writer takes (rider-series.js loadLockedRiderContext).
+async function lockPair(sp, { customerId, lawnParentId, pestParentId }) {
+  await lockSeries(sp, {
+    customerId,
+    parentIds: [[lawnParentId, 'host_series_locked'], [pestParentId, 'pest_series_locked']],
+  });
+  await lockRowsNoWait(sp('scheduled_services')
+    .where((q) => { q.where('id', pestParentId).orWhere('recurring_parent_id', pestParentId); })
+    .select('id'), 'pest_rows_locked');
+}
+
+// ---- host occurrence ------------------------------------------------------------
 async function findHostRow(sp, { hostParent, cols, to }) {
   const { JOIN_INELIGIBLE_STATUSES } = require('../server/services/visit-context/statuses');
   const { TERMINAL_TRACK_STATES } = require('../server/services/customer-lifecycle-guard');
@@ -196,6 +236,34 @@ async function findHostRow(sp, { hostParent, cols, to }) {
   }) || null;
 }
 
+const hhmm = (v) => (v == null ? null : String(v).slice(0, 5));
+
+// Picks the host occurrence, then (apply) row-locks it NOWAIT and re-selects it:
+// a technician swap, re-window or re-date that committed in between (those
+// writers do not take the series lock) makes the pick stale and skips the move.
+async function pickLockedHostRow(sp, ctx, to) {
+  const hostRow = await findHostRow(sp, { hostParent: ctx.hostParent, cols: ctx.cols, to });
+  if (!hostRow) throw new PairSkip('no_host_visit_on_target_date', to);
+  if (!ctx.apply) return hostRow;
+  await lockRowsNoWait(sp('scheduled_services').where({ id: hostRow.id }).select('id'), 'host_row_locked');
+  const again = await findHostRow(sp, { hostParent: ctx.hostParent, cols: ctx.cols, to });
+  if (!again || String(again.id) !== String(hostRow.id)
+    || hhmm(again.window_start) !== hhmm(hostRow.window_start)
+    || hhmm(again.window_end) !== hhmm(hostRow.window_end)
+    || String(again.technician_id ?? '') !== String(hostRow.technician_id ?? '')) {
+    throw new PairSkip('host_row_changed', hostRow.id);
+  }
+  return again;
+}
+
+// ---- shared move validation ------------------------------------------------------
+// assignableRecurringTemplateTechnicianId takes FOR SHARE on the technician row
+// whenever it is handed a transaction, which a READ ONLY dry run refuses. The dry
+// run hands it a plain-reader view of the same connection instead.
+function techReader(sp, ctx) {
+  return ctx.apply ? sp : Object.assign((...a) => sp(...a), { isTransaction: false });
+}
+
 async function occupantOnDate(sp, { customerId, to, exceptIds, pestParentId }) {
   const { familyOfServiceRow } = require('../server/services/cancellation-processor');
   const rows = await sp('scheduled_services as s')
@@ -212,24 +280,57 @@ async function occupantOnDate(sp, { customerId, to, exceptIds, pestParentId }) {
 
 function addonKey(a) { return `${a.service_id || ''}|${a.service_name || ''}`; }
 
-function assertRowMovable(row, move, { pestParentId, todayStr }) {
+// The visit will occupy [target window start, + the pest duration] on the target
+// date for the RESOLVED technician. Reuses the shared conflict reader
+// (scheduling/occupancy.js, same non-occupying statuses as the admin schedule
+// writers); that reader is tech-blind, so the technician scope is applied here
+// with the mirror guard AGENTS.md requires for booking conflict checks: a
+// technician-NULL row collides with any technician, and an unassigned visit
+// collides with every row in its window.
+async function assertNoTechnicianConflict(sp, { target, to, exemptIds, rowId }) {
+  const { findConflictingVisits } = require('../server/services/scheduling/occupancy');
+  const { ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../server/services/scheduling/window-rules');
+  const clashes = await findConflictingVisits({
+    db: sp,
+    date: to,
+    windowStart: target.windowStart,
+    windowEnd: target.windowEnd,
+    excludeServiceIds: exemptIds,
+    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  });
+  const clash = clashes.find((c) => !c.technician_id || !target.technicianId
+    || String(c.technician_id) === String(target.technicianId));
+  if (clash) throw new PairSkip('technician_booked_in_window', `${rowId}->${clash.id}`);
+}
+
+// Ownership, status, date and near-term floor, then the durable pins.
+async function assertRowMovable(sp, row, { expect, to, ctx }) {
   const { isPlanSeriesRow } = require('../server/services/recurring-series-cancel-reseed');
+  const {
+    NEAR_TERM_DAYS, _internals: { attributeReasonMap, classifyRiderRow, addDaysStr },
+  } = require('../server/services/rider-series-preview');
+  const nearTermCutoff = addDaysStr(ctx.todayStr, NEAR_TERM_DAYS);
   const checks = [
     [!row, 'row_missing'],
-    [row && String(row.recurring_parent_id || row.id) !== String(pestParentId), 'row_not_in_pest_series'],
+    [row && String(row.customer_id) !== String(expect.customerId), 'row_customer_changed'],
+    [row && String(row.recurring_parent_id || row.id) !== String(expect.pestParentId), 'row_not_in_pest_series'],
+    [row && expect.recurringParentId !== undefined
+      && String(row.recurring_parent_id ?? '') !== String(expect.recurringParentId ?? ''), 'row_series_changed'],
     [row && !isPlanSeriesRow(row), 'row_not_a_plan_row'],
     [row && !PENDING_STATUSES.includes(row.status), 'row_status_changed'],
     [row && row.visit_id != null, 'row_grouped'],
-    [row && d10(row.scheduled_date) !== d10(move.from), 'row_date_changed'],
-    [!(d10(move.to) > todayStr), 'target_not_future'],
+    [row && d10(row.scheduled_date) !== expect.fromDate, 'row_date_changed'],
+    [!(to > nearTermCutoff), 'target_within_near_term'],
   ];
   const failed = checks.find(([bad]) => bad);
-  if (failed) throw new PairSkip(failed[1], move.id);
+  if (failed) throw new PairSkip(failed[1], row?.id || expect.rowId);
+  const verdict = classifyRiderRow(row, await attributeReasonMap(sp, [row.id]), nearTermCutoff, ctx.todayStr);
+  if (!verdict.movable) throw new PairSkip('row_no_longer_movable', verdict.why || (verdict.terminal ? 'terminal' : 'booster'));
 }
 
-// The add-on rows due on the NEW date must be exactly the rows the visit
-// already carries (this refuses an occurrence-only add-on rather than moving
-// or dropping it), and the visit must still be billable.
+// The add-on rows due on the TARGET date must be exactly the rows the visit
+// currently carries (an occurrence-only add-on is refused rather than moved or
+// dropped), and the visit must still be billable.
 async function assertAddonsAndBillable(sp, ctx, row, to) {
   const { filterAddonLinesForDate, seriesExtensionUnbillable } = require('../server/routes/admin-schedule')._test;
   const {
@@ -252,101 +353,93 @@ async function assertAddonsAndBillable(sp, ctx, row, to) {
   if (unbillable) throw new PairSkip('unbillable', `${row.id}:${unbillable.code || 'unbillable'}`);
 }
 
-// Window and tech the moved visit takes from the host lawn stop, exactly as
-// rider-series.js#resolveHostJoinFields resolves them.
-async function resolveHostJoin(sp, ctx, hostRow, to) {
-  const { normalizeTopUpWindow, assignableRecurringTemplateTechnicianId } = require('../server/routes/admin-schedule')._test;
-  const { template } = ctx;
-  const window = normalizeTopUpWindow(hostRow.window_start, template.estimated_duration_minutes, hostRow.window_end);
-  if (window?.unplaceable) throw new PairSkip('window_unplaceable', hostRow.id);
-  const preferred = template.recurring_technician_override ? template : {
-    ...template,
-    technician_id: hostRow.technician_id,
-    recurring_technician_id: hostRow.technician_id,
-    recurring_technician_override: false,
-  };
-  // assignableRecurringTemplateTechnicianId takes FOR SHARE on the technician
-  // row whenever it is handed a transaction, which a READ ONLY dry run refuses.
-  // The dry run hands it a plain-reader view of the same connection instead.
-  const techConn = ctx.apply ? sp : Object.assign((...a) => sp(...a), { isTransaction: false });
-  const technicianId = await assignableRecurringTemplateTechnicianId(techConn, preferred, to);
-  let tech = 'unassigned';
-  if (technicianId) tech = String(technicianId) === String(hostRow.technician_id) ? 'host' : 'own';
-  return {
-    windowStart: window ? window.start : hostRow.window_start,
-    windowEnd: window ? window.end : hostRow.window_end,
-    technicianId,
-    tech,
-  };
-}
-
-// The moved visit will occupy [host window start, start + the pest duration] on
-// the target date for the RESOLVED technician. Reuses the shared conflict reader
-// (scheduling/occupancy.js, the one the admin schedule writers use, with the
-// same non-occupying statuses); that reader is tech-blind, so the technician
-// scope is applied here with the mirror guard AGENTS.md requires for booking
-// conflict checks: a technician-NULL row collides with any technician, and an
-// unassigned visit collides with every row in its window. The intended host lawn
-// row and the rows of this pair's own move set are exempt.
-async function assertNoTechnicianConflict(sp, { row, hostRow, join, to, moveIds }) {
-  const { findConflictingVisits } = require('../server/services/scheduling/occupancy');
-  const { ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../server/services/scheduling/window-rules');
-  const clashes = await findConflictingVisits({
-    db: sp,
-    date: to,
-    windowStart: join.windowStart,
-    windowEnd: join.windowEnd,
-    excludeServiceIds: [row.id, hostRow.id, ...moveIds],
-    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
-  });
-  const clash = clashes.find((c) => !c.technician_id || !join.technicianId
-    || String(c.technician_id) === String(join.technicianId));
-  if (clash) throw new PairSkip('technician_booked_in_window', `${row.id}->${clash.id}`);
-}
-
-async function planMove(sp, ctx, move) {
+// THE shared path for forward moves and rollbacks: validates a move of one row to
+// (to, target window, target technician) and returns the guarded update to run.
+//   expect: { rowId, customerId, pestParentId, recurringParentId?, fromDate }
+//   target: { windowStart, windowEnd, technicianId, tech, restore? }
+//   exemptIds: rows that may share the window (the row itself, the host lawn row)
+async function planMove(sp, ctx, {
+  expect, to, target, exemptIds,
+}) {
   const { recurringDispatchDuePatch } = require('../server/services/scheduling/recurring-dispatch-due');
   const { cols } = ctx;
-  const to = d10(move.to);
-  const from = d10(move.from);
-
-  const row = await sp('scheduled_services').where({ id: move.id }).first();
-  assertRowMovable(row, move, ctx);
-
-  const hostRow = await findHostRow(sp, { hostParent: ctx.hostParent, cols, to });
-  if (!hostRow) throw new PairSkip('no_host_visit_on_target_date', move.id);
-  if (!hostRow.window_start) throw new PairSkip('host_visit_windowless', move.id);
+  const row = await sp('scheduled_services').where({ id: expect.rowId }).first();
+  await assertRowMovable(sp, row, { expect, to, ctx });
 
   const occupant = await occupantOnDate(sp, {
-    customerId: ctx.customerId, to, exceptIds: [...ctx.moveIds], pestParentId: ctx.pestParentId,
+    customerId: expect.customerId, to, exceptIds: [row.id, ...exemptIds], pestParentId: expect.pestParentId,
   });
-  if (occupant) throw new PairSkip('pest_visit_already_on_target_date', `${move.id}->${occupant.id}`);
-
-  await assertAddonsAndBillable(sp, ctx, row, to);
-  const join = await resolveHostJoin(sp, ctx, hostRow, to);
+  if (occupant) throw new PairSkip('pest_visit_already_on_target_date', `${row.id}->${occupant.id}`);
   await assertNoTechnicianConflict(sp, {
-    row, hostRow, join, to, moveIds: [...ctx.moveIds],
+    target, to, exemptIds: [row.id, ...exemptIds], rowId: row.id,
   });
+  await assertAddonsAndBillable(sp, ctx, row, to);
 
   const changes = {
-    scheduled_date: to, window_start: join.windowStart, window_end: join.windowEnd, technician_id: join.technicianId,
+    scheduled_date: to, window_start: target.windowStart, window_end: target.windowEnd, technician_id: target.technicianId,
   };
   const updates = {
     ...changes,
     updated_at: new Date(),
-    ...(cols.recurring_dispatch_due_date ? recurringDispatchDuePatch(row, changes) : {}),
-    ...(cols.route_order ? { route_order: null } : {}),
+    ...(target.restore
+      ? target.restore
+      : {
+        ...(cols.recurring_dispatch_due_date ? recurringDispatchDuePatch(row, changes) : {}),
+        ...(cols.route_order ? { route_order: null } : {}),
+      }),
   };
   const before = {};
   for (const c of TOUCHED_COLUMNS) if (cols[c]) before[c] = c.endsWith('_date') ? (row[c] ? d10(row[c]) : null) : (row[c] ?? null);
   return {
-    id: row.id, from, to, hostRowId: hostRow.id, tech: join.tech, before, updates,
+    id: row.id, from: expect.fromDate, to, tech: target.tech, before, updates, recurringParentId: row.recurring_parent_id ?? null,
   };
 }
 
-// ---- one pair -------------------------------------------------------------------
-// Everything a pair must still satisfy before any row is looked at: the
-// recomputed preview is eligible and its MOVE set equals the approved one.
+// Guarded write of one planned move. Returns the rollback entry.
+async function writeMove(sp, p, ctx, ids) {
+  const returned = await sp('scheduled_services')
+    .where({
+      id: p.id, scheduled_date: p.from, customer_id: ids.customerId,
+    })
+    .whereIn('status', PENDING_STATUSES)
+    .whereNull('visit_id')
+    .update(p.updates)
+    .returning(['id', ...TOUCHED_COLUMNS.filter((c) => ctx.cols[c])]);
+  if (returned.length !== 1) throw new PairSkip('row_changed_during_write', p.id);
+  const after = {};
+  for (const c of Object.keys(p.before)) after[c] = c.endsWith('_date') ? (returned[0][c] ? d10(returned[0][c]) : null) : (returned[0][c] ?? null);
+  return {
+    id: p.id, ...ids, recurringParentId: p.recurringParentId, before: p.before, after,
+  };
+}
+
+// The pest series' template context (price template, add-ons, blackout, weekend
+// rule) every move of that series is validated against.
+async function buildMoveContext(sp, { pestParentId, customerId, dates, apply, todayStr }) {
+  const { overlayRecurringTemplateOverrides } = require('../server/services/recurring-template-overrides');
+  const { customerPrefersNoWeekends } = require('../server/services/recurring-appointment-seeder');
+  const { getBlackoutLayers } = require('../server/services/scheduling/blackout-dates');
+  const { loadStoredDiscountScope } = require('../server/routes/admin-schedule')._test;
+  const cols = await sp('scheduled_services').columnInfo();
+  const pestParent = await sp('scheduled_services').where({ id: pestParentId }).first();
+  if (!pestParent) throw new PairSkip('parent_missing');
+  if (String(pestParent.customer_id) !== String(customerId)) throw new PairSkip('customer_mismatch');
+  const template = overlayRecurringTemplateOverrides(pestParent, cols);
+  const skipParent = !!pestParent.skip_weekends || await customerPrefersNoWeekends(sp, pestParent.customer_id);
+  const parentAddons = await sp('scheduled_service_addons').where({ scheduled_service_id: pestParentId });
+  const storedDiscountScope = await loadStoredDiscountScope(sp, template, parentAddons);
+  const sorted = [...dates].sort();
+  let blackoutDates = null;
+  try {
+    blackoutDates = await sp.transaction((s2) => getBlackoutLayers(sorted[0], sorted[sorted.length - 1], s2));
+  } catch { throw new PairSkip('blackout_check_error'); }
+  return {
+    cols, template, blackoutDates, skipParent, parentAddons, storedDiscountScope, todayStr, apply,
+  };
+}
+
+// ---- one pair (forward) ---------------------------------------------------------
+// The recomputed preview is eligible and its MOVE set equals the approved one.
 // (An insert-set difference is only reported, never a reason to skip.)
 async function verifyAgainstPreview(sp, ids, approvedPair, out) {
   const { previewRiderPair } = require('../server/services/rider-series-preview');
@@ -359,55 +452,60 @@ async function verifyAgainstPreview(sp, ids, approvedPair, out) {
   }
 }
 
-async function loadParents(sp, ids) {
-  const cols = await sp('scheduled_services').columnInfo();
-  const pestParent = await sp('scheduled_services').where({ id: ids.pestParentId }).first();
-  const hostParent = await sp('scheduled_services').where({ id: ids.lawnParentId }).first();
-  if (!pestParent || !hostParent) throw new PairSkip('parent_missing');
-  if (String(pestParent.customer_id) !== String(ids.customerId) || String(hostParent.customer_id) !== String(ids.customerId)) {
-    throw new PairSkip('customer_mismatch');
-  }
-  return { cols, pestParent, hostParent };
+// Candidate discovery re-run for this customer: the approved parents must still
+// be found as a pair, and unambiguous (same function the report script uses).
+async function verifyCandidatePair(sp, ids) {
+  const { findCandidatePairs } = require('../server/services/rider-series-candidates');
+  const pairs = await findCandidatePairs(sp, { customerId: ids.customerId });
+  const match = pairs.find((p) => String(p.lawnParentId) === String(ids.lawnParentId)
+    && String(p.pestParentId) === String(ids.pestParentId));
+  if (!match) throw new PairSkip('candidate_pair_not_found');
+  if (match.extraReasons.length) throw new PairSkip('candidate_pair_ambiguous', match.extraReasons.join(','));
 }
 
-async function buildMoveContext(sp, parents, ids, approvedPair, { apply, todayStr }) {
-  const { overlayRecurringTemplateOverrides } = require('../server/services/recurring-template-overrides');
-  const { customerPrefersNoWeekends } = require('../server/services/recurring-appointment-seeder');
-  const { getBlackoutLayers } = require('../server/services/scheduling/blackout-dates');
-  const { loadStoredDiscountScope } = require('../server/routes/admin-schedule')._test;
-  const { cols, pestParent, hostParent } = parents;
-  const template = overlayRecurringTemplateOverrides(pestParent, cols);
-  const skipParent = !!pestParent.skip_weekends || await customerPrefersNoWeekends(sp, pestParent.customer_id);
-  const parentAddons = await sp('scheduled_service_addons').where({ scheduled_service_id: ids.pestParentId });
-  const storedDiscountScope = await loadStoredDiscountScope(sp, template, parentAddons);
-  const allDates = approvedPair.move.flatMap((m) => [d10(m.from), d10(m.to)]).sort();
-  let blackoutDates = null;
-  try {
-    blackoutDates = await sp.transaction((s2) => getBlackoutLayers(allDates[0], allDates[allDates.length - 1], s2));
-  } catch { throw new PairSkip('blackout_check_error'); }
+// Window and tech the moved visit takes from the host lawn stop, exactly as
+// rider-series.js#resolveHostJoinFields resolves them.
+async function resolveHostJoin(sp, ctx, hostRow, to) {
+  const { normalizeTopUpWindow, assignableRecurringTemplateTechnicianId } = require('../server/routes/admin-schedule')._test;
+  const { template } = ctx;
+  if (!hostRow.window_start) throw new PairSkip('host_visit_windowless', hostRow.id);
+  const window = normalizeTopUpWindow(hostRow.window_start, template.estimated_duration_minutes, hostRow.window_end);
+  if (window?.unplaceable) throw new PairSkip('window_unplaceable', hostRow.id);
+  const preferred = template.recurring_technician_override ? template : {
+    ...template,
+    technician_id: hostRow.technician_id,
+    recurring_technician_id: hostRow.technician_id,
+    recurring_technician_override: false,
+  };
+  const technicianId = await assignableRecurringTemplateTechnicianId(techReader(sp, ctx), preferred, to);
+  let tech = 'unassigned';
+  if (technicianId) tech = String(technicianId) === String(hostRow.technician_id) ? 'host' : 'own';
   return {
-    cols, template, pestParentId: ids.pestParentId, hostParent, customerId: ids.customerId, blackoutDates, skipParent,
-    parentAddons, storedDiscountScope, moveIds: new Set(approvedPair.move.map((m) => m.id)), todayStr, apply,
+    windowStart: window ? window.start : hostRow.window_start,
+    windowEnd: window ? window.end : hostRow.window_end,
+    technicianId,
+    tech,
   };
 }
 
-// Guarded write of one planned move. Returns the rollback entry.
-async function writeMove(sp, p, cols, ids) {
-  const returned = await sp('scheduled_services')
-    .where({ id: p.id, scheduled_date: p.from })
-    .whereIn('status', PENDING_STATUSES)
-    .whereNull('visit_id')
-    .update(p.updates)
-    .returning(['id', ...TOUCHED_COLUMNS.filter((c) => cols[c])]);
-  if (returned.length !== 1) throw new PairSkip('row_changed_during_write', p.id);
-  const after = {};
-  for (const c of Object.keys(p.before)) after[c] = c.endsWith('_date') ? (returned[0][c] ? d10(returned[0][c]) : null) : (returned[0][c] ?? null);
+async function planForwardMove(sp, ctx, ids, approvedPair, move) {
+  const to = d10(move.to);
+  const hostRow = await pickLockedHostRow(sp, ctx, to);
+  const target = await resolveHostJoin(sp, ctx, hostRow, to);
+  const plan = await planMove(sp, ctx, {
+    expect: {
+      rowId: move.id, customerId: ids.customerId, pestParentId: ids.pestParentId, fromDate: d10(move.from),
+    },
+    to,
+    target,
+    exemptIds: [hostRow.id, ...approvedPair.move.map((m) => m.id)],
+  });
   return {
-    id: p.id, ...ids, before: p.before, after,
+    ...plan, hostRowId: hostRow.id, window: `${hhmm(target.windowStart)}-${hhmm(target.windowEnd)}`,
   };
 }
 
-async function processPair(trx, approvedPair, { apply, todayStr }) {
+async function processPair(trx, approvedPair, { apply, todayStr, lockedDates }) {
   const ids = {
     lawnParentId: approvedPair.lawnParentId, pestParentId: approvedPair.pestParentId, customerId: approvedPair.customerId,
   };
@@ -416,21 +514,31 @@ async function processPair(trx, approvedPair, { apply, todayStr }) {
   };
   if (!approvedPair.move.length) return { ...out, status: 'no_moves' };
   if (approvedPair.eligible !== true) return { ...out, reason: 'approved_pair_not_eligible' };
+  const unlocked = approvedPair.move.map((m) => d10(m.to)).find((d) => !lockedDates.has(d));
+  if (unlocked) return { ...out, reason: 'occupancy_date_locked', detail: unlocked };
 
   const entries = [];
   try {
     await trx.transaction(async (sp) => {
       if (apply) await lockPair(sp, ids);
-      const parents = await loadParents(sp, ids);
+      const hostParent = await sp('scheduled_services').where({ id: ids.lawnParentId }).first();
+      if (!hostParent) throw new PairSkip('parent_missing');
+      if (String(hostParent.customer_id) !== String(ids.customerId)) throw new PairSkip('customer_mismatch');
+      await verifyCandidatePair(sp, ids);
       await verifyAgainstPreview(sp, ids, approvedPair, out);
-      const ctx = await buildMoveContext(sp, parents, ids, approvedPair, { apply, todayStr });
+      const dates = approvedPair.move.flatMap((m) => [d10(m.from), d10(m.to)]);
+      const ctx = {
+        ...await buildMoveContext(sp, {
+          pestParentId: ids.pestParentId, customerId: ids.customerId, dates, apply, todayStr,
+        }),
+        hostParent,
+      };
       const planned = [];
-      for (const move of approvedPair.move) planned.push(await planMove(sp, ctx, move));
+      for (const move of approvedPair.move) planned.push(await planForwardMove(sp, ctx, ids, approvedPair, move));
       for (const p of planned) {
-        if (apply) entries.push(await writeMove(sp, p, ctx.cols, ids));
+        if (apply) entries.push(await writeMove(sp, p, ctx, ids));
         out.moves.push({
-          id: p.id, from: p.from, to: p.to, hostRowId: p.hostRowId, tech: p.tech,
-          window: `${String(p.updates.window_start).slice(0, 5)}-${String(p.updates.window_end || '').slice(0, 5)}`,
+          id: p.id, from: p.from, to: p.to, hostRowId: p.hostRowId, tech: p.tech, window: p.window,
         });
       }
     });
@@ -447,36 +555,6 @@ async function processPair(trx, approvedPair, { apply, todayStr }) {
 }
 
 // ---- forward run ----------------------------------------------------------------
-async function applyApproved(conn, approved, { apply = false, rollbackOut = null } = {}) {
-  const { etDateString } = require('../server/utils/datetime-et');
-  const todayStr = etDateString();
-  const pairs = [];
-  const entries = [];
-  const run = async (trx) => {
-    await enterMode(trx, apply, !!conn.isTransaction);
-    for (const approvedPair of approved.results) {
-      const result = await processPair(trx, approvedPair, { apply, todayStr });
-      const { entries: e, ...rest } = result;
-      pairs.push(rest);
-      if (e) entries.push(...e);
-    }
-    if (apply) {
-      const doc = {
-        kind: 'rider-onetime-move-rollback',
-        version: 1,
-        createdAt: new Date().toISOString(),
-        approvedGeneratedAt: approved.generatedAt || null,
-        moves: entries,
-      };
-      if (rollbackOut) writeDurably(rollbackOut, doc);
-    } else {
-      throw new DryRunDone();
-    }
-  };
-  await runTxn(conn, run);
-  return { apply, pairs, moved: entries.length };
-}
-
 class DryRunDone extends Error {}
 
 // A dry run is a READ ONLY transaction that is always rolled back: SET LOCAL
@@ -508,90 +586,115 @@ function writeDurably(path, doc) {
   }
 }
 
-// ---- rollback -------------------------------------------------------------------
-async function lockRollbackEntry(sp, entry) {
-  const { tryLockCustomerComms } = require('../server/utils/customer-comms-lock');
-  const { acquireRecurringSeriesMaintenanceLock } = require('../server/routes/admin-schedule')._test;
-  if (!(await tryLockCustomerComms(sp, entry.customerId))) throw new PairSkip('customer_comms_locked');
-  try {
-    await acquireRecurringSeriesMaintenanceLock(sp, entry.pestParentId, false);
-  } catch (err) {
-    if (err.code === 'VISIT_CHANGED_RETRY') throw new PairSkip('pest_series_locked');
-    throw err;
-  }
+async function applyApproved(conn, approved, { apply = false, rollbackOut = null } = {}) {
+  const { etDateString } = require('../server/utils/datetime-et');
+  const todayStr = etDateString();
+  const pairs = [];
+  const entries = [];
+  const run = async (trx) => {
+    await enterMode(trx, apply, !!conn.isTransaction);
+    const targetDates = approved.results
+      .filter((r) => r.eligible === true)
+      .flatMap((r) => r.move.map((m) => d10(m.to)));
+    const lockedDates = await lockTargetDates(trx, targetDates, apply);
+    for (const approvedPair of approved.results) {
+      const result = await processPair(trx, approvedPair, { apply, todayStr, lockedDates });
+      const { entries: e, ...rest } = result;
+      pairs.push(rest);
+      if (e) entries.push(...e);
+    }
+    if (apply) {
+      const doc = {
+        kind: 'rider-onetime-move-rollback',
+        version: 2,
+        createdAt: new Date().toISOString(),
+        approvedGeneratedAt: approved.generatedAt || null,
+        moves: entries,
+      };
+      if (rollbackOut) writeDurably(rollbackOut, doc);
+    } else {
+      throw new DryRunDone();
+    }
+  };
+  await runTxn(conn, run);
+  return { apply, pairs, moved: entries.length };
 }
 
-// The row must still carry exactly the values the apply wrote and still be a
-// plain pending/confirmed, ungrouped visit.
+// ---- rollback (a reschedule through the SAME planMove/writeMove) -----------------
+// The row must still carry exactly the values the apply wrote.
 function assertUnchangedSinceApply(row, entry) {
   if (!row) throw new PairSkip('row_missing');
-  if (!PENDING_STATUSES.includes(row.status) || row.visit_id != null) throw new PairSkip('row_changed_since_apply');
   for (const c of Object.keys(entry.after)) {
     const now = c.endsWith('_date') ? (row[c] ? d10(row[c]) : null) : (row[c] ?? null);
     if (String(now ?? '') !== String(entry.after[c] ?? '')) throw new PairSkip('row_changed_since_apply', c);
   }
 }
 
-// The visit may have picked up a customer commitment since the apply without
-// any moved column changing (a reminder or confirmation sent, an invoice, a card
-// hold or request, a closeout packet, a completion claim, prepaid, in progress).
-// Re-runs the preview's own classification (classifyRiderRow: own fields plus
-// durable records, under the caller's row lock) and refuses anything that is not
-// still plainly movable. Also refuses to restore onto a past date or a date
-// inside the near-term window, which the preview treats as immovable.
-async function assertStillRestorable(sp, row, entry) {
-  const { etDateString } = require('../server/utils/datetime-et');
-  const {
-    NEAR_TERM_DAYS, _internals: { attributeReasonMap, classifyRiderRow, addDaysStr },
-  } = require('../server/services/rider-series-preview');
-  const todayStr = etDateString();
-  const nearTermCutoff = addDaysStr(todayStr, NEAR_TERM_DAYS);
-  const restoreTo = entry.before.scheduled_date;
-  if (!restoreTo || restoreTo <= nearTermCutoff) throw new PairSkip('restore_date_not_beyond_near_term', restoreTo);
-  const reasonMap = await attributeReasonMap(sp, [row.id]);
-  const verdict = classifyRiderRow(row, reasonMap, nearTermCutoff, todayStr);
-  if (!verdict.movable) throw new PairSkip('row_no_longer_movable', verdict.why || (verdict.terminal ? 'terminal' : 'booster'));
+// The recorded original technician, run through the same date-aware assignability
+// check as the forward path. No longer assignable -> refuse (never unassigned).
+async function resolveRollbackTarget(sp, ctx, entry) {
+  const { assignableRecurringTemplateTechnicianId } = require('../server/routes/admin-schedule')._test;
+  const original = entry.before.technician_id ?? null;
+  let technicianId = null;
+  if (original) {
+    technicianId = await assignableRecurringTemplateTechnicianId(techReader(sp, ctx), {
+      id: entry.pestParentId, recurring_technician_override: true, recurring_technician_id: original,
+    }, entry.before.scheduled_date);
+    if (!technicianId) throw new PairSkip('original_technician_not_assignable', entry.id);
+  }
+  return {
+    windowStart: entry.before.window_start,
+    windowEnd: entry.before.window_end,
+    technicianId,
+    tech: technicianId ? 'original' : 'unassigned',
+    // The recorded originals are restored verbatim.
+    restore: {
+      ...(ctx.cols.recurring_dispatch_due_date ? { recurring_dispatch_due_date: entry.before.recurring_dispatch_due_date ?? null } : {}),
+      ...(ctx.cols.route_order ? { route_order: entry.before.route_order ?? null } : {}),
+    },
+  };
 }
 
-// Reverts one recorded move (verify-then-restore; a changed row is skipped).
-async function revertEntry(sp, entry, { apply, cols }) {
-  if (apply) await lockRollbackEntry(sp, entry);
-  const q = sp('scheduled_services').where({ id: entry.id });
-  let row;
-  try {
-    row = await (apply ? q.forUpdate().noWait() : q).first();
-  } catch (err) {
-    if (err.code === '55P03') throw new PairSkip('row_locked');
-    throw err;
+async function revertEntry(sp, entry, { apply, todayStr }) {
+  const to = entry.before.scheduled_date;
+  if (apply) {
+    await lockSeries(sp, { customerId: entry.customerId, parentIds: [[entry.pestParentId, 'pest_series_locked']] });
+    await lockRowsNoWait(sp('scheduled_services').where({ id: entry.id }).select('id'), 'row_locked');
   }
-  assertUnchangedSinceApply(row, entry);
-  await assertStillRestorable(sp, row, entry);
-  if (!apply) return;
-  const n = await sp('scheduled_services').where({ id: entry.id, scheduled_date: entry.after.scheduled_date })
-    .whereIn('status', PENDING_STATUSES).whereNull('visit_id')
-    .update({
-      scheduled_date: entry.before.scheduled_date,
-      window_start: entry.before.window_start,
-      window_end: entry.before.window_end,
-      technician_id: entry.before.technician_id,
-      updated_at: new Date(),
-      // The recorded originals are restored verbatim.
-      ...(cols.recurring_dispatch_due_date ? { recurring_dispatch_due_date: entry.before.recurring_dispatch_due_date ?? null } : {}),
-      ...(cols.route_order ? { route_order: entry.before.route_order ?? null } : {}),
-    });
-  if (n !== 1) throw new PairSkip('row_changed_since_apply');
+  const current = await sp('scheduled_services').where({ id: entry.id }).first();
+  assertUnchangedSinceApply(current, entry);
+  const ctx = await buildMoveContext(sp, {
+    pestParentId: entry.pestParentId, customerId: entry.customerId, dates: [to, entry.after.scheduled_date], apply, todayStr,
+  });
+  const target = await resolveRollbackTarget(sp, ctx, entry);
+  const plan = await planMove(sp, ctx, {
+    expect: {
+      rowId: entry.id,
+      customerId: entry.customerId,
+      pestParentId: entry.pestParentId,
+      recurringParentId: entry.recurringParentId,
+      fromDate: entry.after.scheduled_date,
+    },
+    to,
+    target,
+    exemptIds: [],
+  });
+  if (apply) await writeMove(sp, plan, ctx, { customerId: entry.customerId });
 }
 
 async function rollbackApplied(conn, doc, { apply = false } = {}) {
   if (!doc || doc.kind !== 'rider-onetime-move-rollback' || !Array.isArray(doc.moves)) throw new Error('not a rider one-time-move rollback file');
+  const { etDateString } = require('../server/utils/datetime-et');
+  const todayStr = etDateString();
   const results = [];
   const run = async (trx) => {
     await enterMode(trx, apply, !!conn.isTransaction);
-    const cols = await trx('scheduled_services').columnInfo();
+    const lockedDates = await lockTargetDates(trx, doc.moves.map((e) => e.before.scheduled_date), apply);
     for (const entry of doc.moves) {
       const res = { id: entry.id, status: 'skipped', reason: null };
       try {
-        await trx.transaction((sp) => revertEntry(sp, entry, { apply, cols }));
+        if (!lockedDates.has(entry.before.scheduled_date)) throw new PairSkip('occupancy_date_locked', entry.before.scheduled_date);
+        await trx.transaction((sp) => revertEntry(sp, entry, { apply, todayStr }));
         res.status = apply ? 'reverted' : 'would_revert';
       } catch (err) {
         if (!(err instanceof PairSkip)) throw err;

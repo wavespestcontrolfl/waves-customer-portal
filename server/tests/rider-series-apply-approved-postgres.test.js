@@ -100,7 +100,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
 
   // Lawn host (every 6 weeks, 09:00-10:00, tech) + pest rider (quarterly,
   // completed anchor + two pending children the plan moves onto lawn dates).
-  async function buildPair() {
+  async function buildPair({ pestTech = null } = {}) {
     const lawnParent = await row({
       recurring_ongoing: true,
       recurring_pattern: 'every_6_weeks',
@@ -147,6 +147,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
         window_start: '14:00',
         window_end: '15:00',
         route_order: 3,
+        technician_id: pestTech,
       }));
     }
     return { lawnParent, pestParent, kids };
@@ -360,8 +361,132 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
       ...doc,
       moves: [{ ...confirmed, before: { ...confirmed.before, scheduled_date: etDateString() } }],
     }, { apply: true });
-    expect(nearTerm.results[0]).toMatchObject({ status: 'skipped', reason: 'restore_date_not_beyond_near_term' });
+    expect(nearTerm.results[0]).toMatchObject({ status: 'skipped', reason: 'target_within_near_term' });
     expect(await snapshot()).toBe(settled);
+  });
+
+  test('a target date whose occupancy lock is held elsewhere skips the pair (forward and rollback)', async () => {
+    const { tryAcquireOccupancyLock } = require('../services/scheduling/occupancy');
+    const pair = await buildPair();
+    const approved = await approvedFor(pair);
+    const target = approved.results[0].move[0].to;
+    const other = await database.transaction();
+    try {
+      expect(await tryAcquireOccupancyLock(other, target)).toBe(true);
+      const before = await snapshot();
+      const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'occupancy_date_locked', detail: target });
+      expect(await snapshot()).toBe(before);
+    } finally {
+      await other.rollback();
+    }
+
+    // Rollback: lock the ORIGINAL date of an applied move.
+    const out = rollbackPath();
+    await applyApproved(trx, approved, { apply: true, rollbackOut: out });
+    const doc = JSON.parse(fs.readFileSync(out, 'utf8'));
+    const held = await database.transaction();
+    try {
+      expect(await tryAcquireOccupancyLock(held, doc.moves[0].before.scheduled_date)).toBe(true);
+      const res = await rollbackApplied(trx, doc, { apply: true });
+      expect(res.results.find((r) => r.id === doc.moves[0].id)).toMatchObject({ status: 'skipped', reason: 'occupancy_date_locked' });
+      expect(res.results.find((r) => r.id === doc.moves[1].id).status).toBe('reverted');
+    } finally {
+      await held.rollback();
+    }
+  });
+
+  test('the chosen host occurrence is row-locked NOWAIT (apply only) before it is planned against', async () => {
+    const pair = await buildPair();
+    const approved = await approvedFor(pair);
+    const target = approved.results[0].move[0].to;
+    const host = await trx('scheduled_services').where({ scheduled_date: target, service_type: 'Lawn Care - Every 6 Weeks' }).first('id');
+    const seen = [];
+    const onQuery = (q) => { if (/for update nowait/i.test(q.sql)) seen.push({ sql: q.sql, bindings: q.bindings }); };
+    database.client.on('query', onQuery);
+    try {
+      await applyApproved(trx, approved, { apply: false });
+      expect(seen.filter((q) => (q.bindings || []).includes(host.id))).toEqual([]);
+      await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+    } finally {
+      database.client.removeListener('query', onQuery);
+    }
+    // One lock per host pick and one more per re-select is not needed: the row is locked once, then re-read.
+    expect(seen.filter((q) => (q.bindings || []).includes(host.id)).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('a compatible second pest root introduced after approval makes the pair ambiguous and skips it', async () => {
+    const pair = await buildPair();
+    const approved = await approvedFor(pair);
+    await row({
+      status: 'pending', recurring_ongoing: true, recurring_pattern: 'quarterly', service_type: 'Quarterly Pest Control',
+      scheduled_date: addDays(ANCHOR, 30),
+    });
+    const before = await snapshot();
+    const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'candidate_pair_ambiguous' });
+    expect(await snapshot()).toBe(before);
+  });
+
+  describe('rollback is a reschedule through the same validation', () => {
+    async function applied(opts) {
+      const pair = await buildPair(opts);
+      const approved = await approvedFor(pair);
+      const out = rollbackPath();
+      await applyApproved(trx, approved, { apply: true, rollbackOut: out });
+      const doc = JSON.parse(fs.readFileSync(out, 'utf8'));
+      return { pair, doc, entry: doc.moves[0] };
+    }
+
+    test('refuses when a new booking now sits in the original window (unassigned original = every row collides)', async () => {
+      const { entry, doc } = await applied();
+      const otherCustomer = randomUUID();
+      await trx('customers').insert({
+        id: otherCustomer, first_name: 'Other', last_name: 'Fixture', email: `${otherCustomer}@example.invalid`,
+        phone: `+1941555${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+        address_line1: '200 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
+      });
+      await row({
+        customer_id: otherCustomer, is_recurring: false, service_type: 'Lawn Care Visit', scheduled_date: entry.before.scheduled_date,
+        status: 'confirmed', window_start: '14:30', window_end: '15:30', technician_id: techId,
+      });
+      const res = await rollbackApplied(trx, doc, { apply: true });
+      expect(res.results.find((r) => r.id === entry.id)).toMatchObject({ status: 'skipped', reason: 'technician_booked_in_window' });
+      const stayed = await trx('scheduled_services').where({ id: entry.id }).first();
+      expect(dateOnly(stayed.scheduled_date)).toBe(entry.after.scheduled_date);
+    });
+
+    test('refuses when an occurrence-only add-on has been attached since the apply', async () => {
+      const { entry, doc } = await applied();
+      await trx('scheduled_service_addons').insert({ scheduled_service_id: entry.id, service_name: 'Occurrence-only add-on', estimated_price: 25 });
+      const res = await rollbackApplied(trx, doc, { apply: true });
+      expect(res.results.find((r) => r.id === entry.id)).toMatchObject({ status: 'skipped', reason: 'addon_set_differs_on_target_date' });
+      expect(dateOnly((await trx('scheduled_services').where({ id: entry.id }).first()).scheduled_date)).toBe(entry.after.scheduled_date);
+    });
+
+    test('refuses when the original technician is no longer assignable (never restores unassigned)', async () => {
+      const { entry, doc } = await applied({ pestTech: techId });
+      expect(entry.before.technician_id).toBe(techId);
+      await trx('technicians').where({ id: techId }).update({ field_dispatchable: false });
+      const res = await rollbackApplied(trx, doc, { apply: true });
+      expect(res.results.find((r) => r.id === entry.id)).toMatchObject({ status: 'skipped', reason: 'original_technician_not_assignable' });
+      const now = await trx('scheduled_services').where({ id: entry.id }).first();
+      expect(dateOnly(now.scheduled_date)).toBe(entry.after.scheduled_date);
+    });
+
+    test('refuses when the row changed customer since the apply', async () => {
+      const { entry, doc } = await applied();
+      const otherCustomer = randomUUID();
+      await trx('customers').insert({
+        id: otherCustomer, first_name: 'Other', last_name: 'Fixture', email: `${otherCustomer}@example.invalid`,
+        phone: `+1941555${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+        address_line1: '200 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
+      });
+      await trx('scheduled_services').where({ id: entry.id }).update({ customer_id: otherCustomer });
+      const res = await rollbackApplied(trx, doc, { apply: true });
+      expect(res.results.find((r) => r.id === entry.id)).toMatchObject({ status: 'skipped', reason: 'row_customer_changed' });
+      expect(dateOnly((await trx('scheduled_services').where({ id: entry.id }).first()).scheduled_date)).toBe(entry.after.scheduled_date);
+    });
   });
 
   test('rollback restores every moved row, and refuses a row that changed since the apply', async () => {
