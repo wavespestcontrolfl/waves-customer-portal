@@ -2,6 +2,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { redactContact } = require('../utils/redact-contact');
 const ContactLedger = require('./collections/contact-ledger');
 const { readStoredBillingReplayContext } = require('./email-template-library');
 const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
@@ -17,7 +18,7 @@ function replayContext(message) {
     const context = readStoredBillingReplayContext(message);
     return context?.collections_ledger_id ? context : null;
   } catch (err) {
-    logger.warn(`[billing-email-reservation] stored context unreadable: ${err.message}`);
+    logger.warn(`[billing-email-reservation] stored context unreadable: ${redactContact(err.message)}`);
     return null;
   }
 }
@@ -61,7 +62,7 @@ async function markBillingEmailReservationDelivered(message, database = db) {
     // caller's held transaction aborted.
     return await database.transaction(stampCurrentAttempt);
   } catch (err) {
-    logger.warn(`[billing-email-reservation] delivered stamp failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] delivered stamp failed: ${redactContact(err.message)}`);
     return false;
   }
 }
@@ -78,7 +79,7 @@ async function resolveBillingEmailReservationRefusal(message, database = db) {
       { database, match: reservationMatch(context) },
     );
   } catch (err) {
-    logger.warn(`[billing-email-reservation] refusal stamp failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] refusal stamp failed: ${redactContact(err.message)}`);
     return false;
   }
 }
@@ -150,7 +151,7 @@ async function releaseBillingEmailReservationForRequote(message, database = db) 
       return true;
     });
   } catch (err) {
-    logger.warn(`[billing-email-reservation] changed-quote release failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] changed-quote release failed: ${redactContact(err.message)}`);
     return false;
   }
 }
@@ -240,7 +241,7 @@ async function stampCustomerDunningEmail(message, row, identity, verdict, databa
       return true;
     });
   } catch (err) {
-    logger.warn(`[billing-email-reservation] customer dunning reservation stamp failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] customer dunning reservation stamp failed: ${redactContact(err.message)}`);
     return false;
   }
 }
@@ -284,7 +285,7 @@ async function repairAcceptedCustomerDunningEmails(rows, database, { readOnly = 
       else reflectDunningOutcome(hit.row, verdict);
     }
   } catch (err) {
-    logger.warn(`[billing-email-reservation] customer dunning evidence repair failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] customer dunning evidence repair failed: ${redactContact(err.message)}`);
   }
   return repaired;
 }
@@ -370,7 +371,7 @@ async function repairAcceptedBillingChannelEmails(rows, database, { readOnly = f
     }
     return repaired;
   } catch (err) {
-    logger.warn(`[billing-email-reservation] accepted-evidence repair failed: ${err.message}`);
+    logger.warn(`[billing-email-reservation] accepted-evidence repair failed: ${redactContact(err.message)}`);
     return new Set();
   }
 }

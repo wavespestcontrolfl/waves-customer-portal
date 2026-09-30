@@ -19,6 +19,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 const config = require('../../config/invoice-followups');
 const Followups = require('../invoice-followups');
 const { isTerminalEmailRefusal } = require('../billing-reminder-delivery');
@@ -50,7 +51,7 @@ async function alertStaff({ title, body, dedupeKey, customerId }) {
     });
     return true;
   } catch (err) {
-    logger.warn(`[customer-dunning] staff alert failed (${dedupeKey}): ${err.message}`);
+    logger.warn(`[customer-dunning] staff alert failed (${dedupeKey}): ${redactContact(err.message)}`);
     return false;
   }
 }
@@ -227,7 +228,7 @@ async function promote(now = new Date(), { database = db } = {}) {
         logger.info(`[customer-dunning] customer ${customerId} not promoted: ${out.reason}`);
       }
     } catch (err) {
-      logger.error(`[customer-dunning] promotion failed for customer ${customerId}: ${err.message}`);
+      logger.error(`[customer-dunning] promotion failed for customer ${customerId}: ${redactContact(err.message)}`);
     }
   }
   return { promoted };
@@ -290,7 +291,7 @@ async function releaseClaim(claimed, { database = db } = {}) {
         .update({ touch_claimed_at: null, updated_at: database.fn.now() });
     }
   } catch (err) {
-    logger.warn(`[customer-dunning] could not clear touch claim for schedule ${schedule.id}: ${err.message}`);
+    logger.warn(`[customer-dunning] could not clear touch claim for schedule ${schedule.id}: ${redactContact(err.message)}`);
   }
 }
 

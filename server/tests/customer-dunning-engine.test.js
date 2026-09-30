@@ -1728,6 +1728,63 @@ describe('transient email failures stay retryable, terminal ones pause (real sen
     expect(JSON.stringify(rowFor('email').metadata)).not.toContain('example.test');
   });
 
+  describe('no contact detail reaches a log line (PII)', () => {
+    const logger = require('../services/logger');
+    const allLogged = () => ['debug', 'info', 'warn', 'error'].flatMap((level) => logger[level].mock.calls.map((c) => c.join(' '))).join('\n');
+    const PII = /pat@example\.test|9415550100|941[ -.]?555[ -.]?0100/;
+
+    test('a provider 400 that echoes the recipient address and phone: nothing in any log line; the template library is told not to log it; the outcome is unchanged', async () => {
+      prefs = { invoice_channels: ['email'] };
+      const err = Object.assign(new Error('The to address pat@example.test (+1 941 555 0100) does not contain a valid address'), { status: 400 });
+      mockSendTemplate.mockImplementation(async ({ withProviderHandoff }) => { await withProviderHandoff(async () => { throw err; }); });
+      expect((await run()).outcome).toBe('held');
+      expect(mockSendTemplate.mock.calls[0][0].suppressProviderErrorLog).toBe(true);
+      expect(allLogged()).not.toMatch(PII);
+      expect(allLogged()).toContain('[redacted-email]');
+      expect(allLogged()).toContain('email failed'); // the line itself is still logged
+    });
+
+    test('the operator path passes the same suppression', async () => {
+      await run({ operatorInitiated: true, force: true });
+      expect(mockSendTemplate.mock.calls[0][0].suppressProviderErrorLog).toBe(true);
+    });
+
+    test('billingEmailSendFailure: the log line is redacted, every returned outcome field is exactly what it was', async () => {
+      const { billingEmailSendFailure } = require('../services/billing-email-sender');
+      const message = '400 Bad Request: pat@example.test (+19415550100) rejected';
+      const cases = [
+        [Object.assign(new Error(message), { status: 400 }), true, { ok: false, error: message, deliveryOutcome: 'not_sent' }],
+        [new Error(message), true, { ok: false, error: message, deliveryOutcome: 'uncertain' }],
+        [new Error(message), false, { ok: false, error: message, deliveryOutcome: 'not_sent' }],
+        [Object.assign(new Error(message), { code: 'EMAIL_TEMPLATE_DISABLED' }), true, { ok: false, skipped: true, reason: 'template_unavailable' }],
+      ];
+      for (const [error, handoffStarted, expected] of cases) {
+        logger.error.mockClear();
+        const log = jest.fn(async () => {});
+        expect(await billingEmailSendFailure(error, handoffStarted, log, { logTag: 'test', label: 'thing' })).toEqual(expected);
+        expect(log).toHaveBeenCalledWith({ status: 'failed', failureReason: message }); // the caller's own record is unchanged
+        expect(allLogged()).not.toMatch(PII);
+      }
+    });
+
+    test('the engine\'s own warn lines redact an error that carries a contact detail (ledger, autopay, progress reads)', async () => {
+      failLedgerAccess(1, 'connection reset while reading pat@example.test +19415550100');
+      expect((await run()).outcome).toBe('held');
+      mockOnAutopay.mockRejectedValueOnce(new Error('lookup failed for pat@example.test'));
+      await run();
+      expect(allLogged()).not.toMatch(PII);
+      expect(allLogged()).toMatch(/redacted/);
+    });
+
+    test('the shared redactor: the email library\'s redactEmailAddresses is the same single implementation, and phones are scrubbed', () => {
+      const { redactContact, redactEmailAddresses } = require('../utils/redact-contact');
+      expect(redactEmailAddresses('a b@c.co d')).toBe('a [redacted-email] d');
+      expect(redactContact('call +19415550100 or (941) 555-0100 or 941.555.0100')).toBe('call [redacted-phone] or [redacted-phone] or [redacted-phone]');
+      expect(redactContact('invoice W-2026-0412 total 129.00')).toBe('invoice W-2026-0412 total 129.00'); // ordinary numbers survive
+      expect(redactContact(undefined)).toBe('');
+    });
+  });
+
   test('a failure BEFORE the provider handoff (template lookup / preparation throws) is also retryable', async () => {
     emailOnly();
     mockSendTemplate.mockRejectedValue(new Error('template store down'));

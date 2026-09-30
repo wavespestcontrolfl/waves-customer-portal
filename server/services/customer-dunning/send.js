@@ -14,6 +14,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 const { sendCustomerMessage } = require('../messaging/send-customer-message');
 const EmailTemplateLibrary = require('../email-template-library');
 const { dispatchUnderBillingEmailAuthority, blocked } = require('../billing-channel-email-authority');
@@ -57,7 +58,7 @@ async function ensureLink(ctx) {
     await (ctx.database || db)(TABLE).where({ id: schedule.id, touch_claimed_at: ctx.claimStamp })
       .update({ link_url: ctx.link, link_digest: set.digest, updated_at: (ctx.database || db).fn.now() });
   } catch (err) {
-    logger.warn(`[customer-dunning] could not cache the pay link for schedule ${schedule.id}: ${err.message}`);
+    logger.warn(`[customer-dunning] could not cache the pay link for schedule ${schedule.id}: ${redactContact(err.message)}`);
   }
   return ctx.link;
 }
@@ -75,7 +76,7 @@ async function sendTextLeg(ctx, channel, ledger) {
     // Nothing reached the provider: a definite, retryable non-send. Left to
     // throw, sendReminderChannels would read it as UNCERTAIN and hold the
     // reservation for good.
-    logger.warn(`[customer-dunning] ${channel} leg for schedule ${ctx.schedule.id} not prepared: ${err.message}`);
+    logger.warn(`[customer-dunning] ${channel} leg for schedule ${ctx.schedule.id} not prepared: ${redactContact(err.message)}`);
     return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, code: 'REMINDER_PREPARATION_FAILED' };
   }
   if (!body) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_UNAVAILABLE' };
@@ -206,7 +207,7 @@ async function stampNeverContacted(ledger, on, database = db) {
     }
     return true;
   } catch (err) {
-    logger.warn(`[customer-dunning] never_contacted stamp failed for ledger ${ledger.id}: ${err.message}`);
+    logger.warn(`[customer-dunning] never_contacted stamp failed for ledger ${ledger.id}: ${redactContact(err.message)}`);
     return false;
   }
 }
@@ -241,6 +242,8 @@ async function deliverEmail(ctx, ledger, { recipient, to }) {
       idempotencyKey: emailIdempotencyKey(ctx.schedule, ctx.step.id),
       categories: ['invoice_followup_customer', ctx.step.id],
       suppressionGroupKey: 'transactional_required',
+      // the template library must not log a raw provider error (SendGrid echoes the recipient address)
+      suppressProviderErrorLog: true,
       withProviderHandoff: emailHandoff(ctx, to, templateKey, state),
     });
     return await billingEmailSendOutcome(result, state, log);

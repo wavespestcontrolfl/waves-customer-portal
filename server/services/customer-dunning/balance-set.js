@@ -28,6 +28,7 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 const featureGates = require('../../config/feature-gates');
 const { openBalanceInvoices } = require('../open-balance');
 const PayCombined = require('../pay-combined');
@@ -169,7 +170,7 @@ async function anchorProblem(anchorRow, customerId, database) {
     logger.info(`[customer-dunning] anchor ${anchorRow.id} held (${verdict.code || verdict.reason})`);
     return { hold: ANCHOR_HOLD_BY_REASON[verdict.reason], row: anchorRow };
   } catch (err) {
-    logger.info(`[customer-dunning] anchor ${anchorRow.id} check unreadable (${err.code || err.memberCheck || 'error'}): ${err.message}`);
+    logger.info(`[customer-dunning] anchor ${anchorRow.id} check unreadable (${err.code || err.memberCheck || 'error'}): ${redactContact(err.message)}`);
     return { hold: err.memberCheck === 'payer_resolve' ? 'payer_unresolved' : 'anchor_reconciliation', row: anchorRow };
   }
 }
@@ -313,7 +314,7 @@ async function resolveDunnableSet(customerId, { database = db, now = new Date() 
   try {
     return await resolveUnguarded(customerId, database, now);
   } catch (err) {
-    logger.warn(`[customer-dunning] set resolve failed for customer ${customerId}: ${err.message} — holding`);
+    logger.warn(`[customer-dunning] set resolve failed for customer ${customerId}: ${redactContact(err.message)} — holding`);
     return result('hold', 'balance_incomplete');
   }
 }

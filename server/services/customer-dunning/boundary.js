@@ -27,6 +27,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 const { resolveDunnableSet } = require('./balance-set');
 
 const SET_CHANGED = 'DUNNING_SET_CHANGED';
@@ -92,7 +93,7 @@ function check(snapshot, { database: defaultDatabase = null } = {}) {
       const live = await resolveDunnableSet(snapshot.customerId, { database: handle });
       return sameSet(live, snapshot) ? { ok: true } : refusal();
     } catch (err) {
-      logger.warn(`[customer-dunning] boundary re-check failed for customer ${snapshot.customerId}: ${err.message}`);
+      logger.warn(`[customer-dunning] boundary re-check failed for customer ${snapshot.customerId}: ${redactContact(err.message)}`);
       return refusal();
     }
   };

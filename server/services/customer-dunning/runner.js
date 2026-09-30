@@ -22,6 +22,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 const Followups = require('../invoice-followups');
 const { explicitBillingChannels } = require('../billing-delivery-channels');
 const { customerOnAutopay } = require('../autopay-eligibility');
@@ -52,7 +53,7 @@ async function readPrefs(run) {
   try {
     return { prefs: await run.database('notification_prefs').where({ customer_id: run.schedule.customer_id }).first() };
   } catch (err) {
-    logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — channel preferences unavailable: ${err.message}`);
+    logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — channel preferences unavailable: ${redactContact(err.message)}`);
     return { error: true };
   }
 }
@@ -152,7 +153,7 @@ const markAtRisk = async (run) => {
   try {
     await Followups.markAtRiskForLongOverdue(run.schedule.customer_id, run.database);
   } catch (err) {
-    logger.warn(`[customer-dunning] at-risk stamp failed for customer ${run.schedule.customer_id}: ${err.message}`);
+    logger.warn(`[customer-dunning] at-risk stamp failed for customer ${run.schedule.customer_id}: ${redactContact(err.message)}`);
   }
 };
 
@@ -175,7 +176,7 @@ async function recordInteraction(run, delivered) {
       }),
     });
   } catch (err) {
-    logger.warn(`[customer-dunning] interaction log failed for schedule ${run.schedule.id}: ${err.message}`);
+    logger.warn(`[customer-dunning] interaction log failed for schedule ${run.schedule.id}: ${redactContact(err.message)}`);
   }
 }
 
@@ -219,7 +220,7 @@ async function decideRecovery(run) {
     // The shadow run reads the same view but must not repair (stamp) anything.
     progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, { database: run.database, ...(run.readOnly ? { repair: false } : {}) });
   } catch (err) {
-    logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${err.message}`);
+    logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${redactContact(err.message)}`);
     return decision('hold', 'progress_unreadable');
   }
   run.step = STEPS[run.schedule.step_index];
@@ -244,7 +245,7 @@ async function decideAutopay(run) {
   try {
     onAutopay = await customerOnAutopay(run.customer, { failClosed: true, db: run.database, now: run.now });
   } catch (err) {
-    logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — autopay state unreadable: ${err.message}`);
+    logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — autopay state unreadable: ${redactContact(err.message)}`);
     return decision('hold', 'autopay_unreadable');
   }
   return onAutopay ? decision('autopay_hold', 'autopay_hold') : null;
@@ -401,7 +402,7 @@ async function deliveryFacts(run, result) {
     const progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.sendChannels, { database: run.database });
     event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
   } catch (err) {
-    logger.warn(`[customer-dunning] post-send progress unreadable for schedule ${run.schedule.id}: ${err.message}`);
+    logger.warn(`[customer-dunning] post-send progress unreadable for schedule ${run.schedule.id}: ${redactContact(err.message)}`);
     // What this tick's recover-first read already saw as delivered still is:
     // a partial delivery must not turn into a hold or pause for want of a re-read.
     const prior = currentEvent(run); // this touch's event from the recover-first read, never another step's
@@ -500,7 +501,7 @@ async function runCustomerSchedules(now = new Date(), { database = db } = {}) {
       tally.outcomes[out.outcome] = (tally.outcomes[out.outcome] || 0) + 1;
     } catch (err) {
       tally.failed += 1;
-      logger.error(`[customer-dunning] schedule ${id} failed: ${err.message}`);
+      logger.error(`[customer-dunning] schedule ${id} failed: ${redactContact(err.message)}`);
     }
   }
   return tally;
@@ -638,14 +639,14 @@ async function shadowRun(now = new Date(), { database = db } = {}) {
   for (const customerId of await Schedule.promotionCandidates({ database })) {
     try { (await shadowPromote(customerId, now, database)).forEach(bump); } catch (err) {
       tally.failed += 1;
-      logger.warn(`[customer-dunning] SHADOW promote check failed for customer ${customerId}: ${err.message}`);
+      logger.warn(`[customer-dunning] SHADOW promote check failed for customer ${customerId}: ${redactContact(err.message)}`);
     }
   }
   const open = allowlisted(await database(Schedule.TABLE).whereIn('status', ['active', 'held']).where('next_touch_at', '<=', now));
   for (const schedule of open) {
     try { bump(await shadowSchedule(schedule, now, database)); } catch (err) {
       tally.failed += 1;
-      logger.warn(`[customer-dunning] SHADOW schedule check failed for ${schedule.id}: ${err.message}`);
+      logger.warn(`[customer-dunning] SHADOW schedule check failed for ${schedule.id}: ${redactContact(err.message)}`);
     }
   }
   logger.info(`[customer-dunning] SHADOW summary: promote=${tally.promote} send=${tally.send} hold=${tally.hold} pause=${tally.pause} settle=${tally.settle} close=${tally.close} failed=${tally.failed}`);

@@ -23,6 +23,7 @@
 
 const db = require('../../models/db');
 const logger = require('../logger');
+const { redactContact } = require('../../utils/redact-contact');
 
 // The standing row of a keyed reservation that already existed (see recordContact).
 async function standingReservation(database, idempotencyKey, occurredAt) {
@@ -125,7 +126,7 @@ async function markDelivered(target, { database = db, match = {}, occurredAt } =
     // whole transaction aborted.
     return database.isTransaction ? await database.transaction(stamp) : await stamp(database);
   } catch (err) {
-    logger.warn(`[collections-ledger] delivered stamp failed: ${err.message}`);
+    logger.warn(`[collections-ledger] delivered stamp failed: ${redactContact(err.message)}`);
     return false;
   }
 }
@@ -198,7 +199,7 @@ async function markSendFailed(entry, extra = {}, { database = db, match = {} } =
     };
     return database.isTransaction ? await database.transaction(stamp) : await stamp(database);
   } catch (err) {
-    logger.warn(`[collections-ledger] send-failed stamp failed for ledger row ${entry.id}: ${err.message}`);
+    logger.warn(`[collections-ledger] send-failed stamp failed for ledger row ${entry.id}: ${redactContact(err.message)}`);
     return false;
   }
 }

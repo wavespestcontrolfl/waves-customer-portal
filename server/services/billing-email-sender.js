@@ -7,6 +7,7 @@
 // customer's billing choices, as before, and rechecks ownership only.
 const db = require('../models/db');
 const logger = require('./logger');
+const { redactContact } = require('../utils/redact-contact');
 const { loadBillingEmailContext } = require('./billing-channel-email-authority');
 const { getInvoiceEmailRecipients } = require('./customer-contact');
 const { isDefiniteRejection } = require('./sendgrid-mail');
@@ -45,7 +46,7 @@ async function billingEmailRecipient(authorityInput, logTag, database) {
     // The default call shape is unchanged for every existing caller.
     context = database ? await loadBillingEmailContext(authorityInput, database) : await loadBillingEmailContext(authorityInput);
   } catch (err) {
-    logger.warn(`[${logTag}] billing email context unavailable for ${authorityInput.customerId}: ${err.message}`);
+    logger.warn(`[${logTag}] billing email context unavailable for ${authorityInput.customerId}: ${redactContact(err.message)}`);
     return { refusal: { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'billing_email_context_unavailable' } };
   }
   if (context.error) return { refusal: billingEmailRefusal(context.error) };
@@ -63,7 +64,7 @@ async function operatorEmailRecipient(customer, logTag, database = db) {
     .where({ customer_id: customer.id })
     .first()
     .catch((err) => {
-      logger.warn(`[${logTag}] notification_prefs lookup failed for ${customer.id}: ${err.message}`);
+      logger.warn(`[${logTag}] notification_prefs lookup failed for ${customer.id}: ${redactContact(err.message)}`);
       return null;
     });
   const [recipient] = getInvoiceEmailRecipients(customer, prefs || {})
@@ -119,7 +120,8 @@ async function billingEmailSendFailure(err, handoffStarted, log, { logTag, label
     return { ok: true };
   }
   await log({ status: 'failed', failureReason: err.message });
-  logger.error(`[${logTag}] ${label} email failed: ${err.message}`);
+  // Provider errors can echo the recipient address: the outcome below keeps the raw message, the log line does not.
+  logger.error(`[${logTag}] ${label} email failed: ${redactContact(err.message)}`);
   if (['EMAIL_TEMPLATE_DISABLED', 'EMAIL_TEMPLATE_UNAVAILABLE'].includes(err.code)) {
     return { ok: false, skipped: true, reason: 'template_unavailable' };
   }
