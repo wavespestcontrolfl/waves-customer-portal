@@ -193,14 +193,28 @@ function activityRatingSentence(record, byVisit, serviceLine) {
   return '';
 }
 
-async function rainSinceVisitSentence({ customer, visitYmd, deps, mode }) {
+// The coordinates of the property the VISIT was at: the triggering appointment's
+// property record. Never customers.latitude/longitude (a multi-property
+// account's other property). null when the appointment has no property record
+// or its coordinates are missing or not real (a null is not zero).
+async function visitPropertyCoordinates(conn, record) {
+  if (!record.scheduled_service_id) return null;
+  const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id }).first('property_id');
+  if (!visit?.property_id) return null;
+  const property = await conn('customer_properties').where({ id: visit.property_id }).first('latitude', 'longitude');
+  if (property?.latitude == null || property?.longitude == null) return null;
+  const latitude = Number(property.latitude);
+  const longitude = Number(property.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || (latitude === 0 && longitude === 0)) return null;
+  return { latitude, longitude };
+}
+
+async function rainSinceVisitSentence({ coordinates, visitYmd, deps, mode }) {
   // Only whole days after the visit through yesterday: today's MRMS value is
   // a partial accumulation, and the visit day itself straddles the visit.
   // Shadow makes no external call.
-  if (mode !== 'live') return '';
-  const latitude = Number(customer?.latitude);
-  const longitude = Number(customer?.longitude);
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !visitYmd) return '';
+  if (mode !== 'live' || !coordinates || !visitYmd) return '';
+  const { latitude, longitude } = coordinates;
   const start = addDaysYmd(visitYmd, 1);
   const end = addDaysYmd(etDateString(deps.now()), -1);
   if (start > end) return '';
@@ -339,7 +353,7 @@ async function buildFirstVisitPest({
     nonrepellent_band_note: nonrepellentBandNote(primary, deps),
     activity_rating_sentence: activityRatingSentence(record, byVisit, 'pest'),
     rain_since_visit_sentence: await rainSinceVisitSentence({
-      customer, visitYmd, deps, mode,
+      coordinates: mode === 'live' ? await visitPropertyCoordinates(conn, record) : null, visitYmd, deps, mode,
     }),
     pet_advisory_sentence: petAdvisorySentence(summary),
   };
@@ -430,6 +444,18 @@ async function priorSends({
 
 const ESTIMATE_RECIPIENT_CHANGED = 'ESTIMATE_RECIPIENT_CHANGED';
 const ESTIMATE_NOT_EXPIRED = 'ESTIMATE_NOT_EXPIRED';
+const ESTIMATE_EXPIRY_SUPERSEDED = 'ESTIMATE_EXPIRY_SUPERSEDED';
+
+// The expiry date (ET, YYYY-MM-DD) the run was created for: the emitter's
+// expires_on, carried on the run's stored payload (and context).
+function runExpiresOn(run) {
+  const parse = (value) => {
+    if (value && typeof value === 'object') return value;
+    try { return JSON.parse(value) || {}; } catch { return {}; }
+  };
+  const on = clean(parse(run.payload).expires_on || parse(run.context).expires_on);
+  return /^\d{4}-\d{2}-\d{2}$/.test(on) ? on : '';
+}
 
 // The ledger's hooks for a run, or null when the template has no rule:
 //   guard         — inside reserveWithCap (under the customer's advisory lock):
@@ -668,12 +694,20 @@ async function estimateCity(conn, deps, estimate) {
 // provider boundary (where the row is share-locked for the rest of the handoff
 // transaction): a reassignment or an email change, or an extension, between
 // the build and the send must never deliver this estimate's bearer link.
-async function estimateAddressingVerdict(conn, run, { lock = false } = {}) {
+async function estimateAddressingVerdict(conn, run, { lock = false, expiresOn = runExpiresOn(run) } = {}) {
   const query = conn('estimates').where({ id: run.entity_id });
   if (lock) query.forShare();
-  const estimate = await query.first('id', 'status', 'customer_id', 'customer_email');
+  const estimate = await query.first('id', 'status', 'customer_id', 'customer_email', 'expires_at');
   if (!estimate) return { reason: ESTIMATE_RECIPIENT_CHANGED };
   if (estimate.status !== 'expired') return { reason: ESTIMATE_NOT_EXPIRED };
+  // A delayed run belongs to the EXPIRY that triggered it: an estimate extended
+  // during the delay and expired again has a newer expiry (and a newer run), so
+  // this one is superseded — it must neither send nor use up the estimate's
+  // once-only allowance. Compared only when both sides are recorded (an aged-out
+  // estimate with no expires_at has no expiry date to compare).
+  if (expiresOn && estimate.expires_at && etDateString(new Date(estimate.expires_at)) !== expiresOn) {
+    return { reason: ESTIMATE_EXPIRY_SUPERSEDED };
+  }
   if (clean(estimate.customer_id) !== clean(run.recipient_id)
     || normalizeEmail(estimate.customer_email) !== normalizeEmail(run.recipient_email)) {
     return { reason: ESTIMATE_RECIPIENT_CHANGED };
@@ -692,8 +726,12 @@ async function buildExpiredNurture({
   // and email must still be that recipient, or the old recipient would receive
   // the current estimate's bearer link. Same normalization as the ledger's
   // recipient check (trim + lowercase); skips the whole send, never retargets.
-  if ((await estimateAddressingVerdict(conn, run))?.reason === ESTIMATE_RECIPIENT_CHANGED) {
+  const addressing = await estimateAddressingVerdict(conn, run, { expiresOn: clean(basePayload.expires_on) || runExpiresOn(run) });
+  if (addressing?.reason === ESTIMATE_RECIPIENT_CHANGED) {
     return skip('the estimate\'s customer or email changed since this run was created; not sent to the old recipient', 'estimate_recipient_changed');
+  }
+  if (addressing?.reason === ESTIMATE_EXPIRY_SUPERSEDED) {
+    return skip('the estimate was extended and expired again since this run was created; a newer run owns the touch', 'estimate_expiry_superseded');
   }
   if ((await priorSends({ conn, run, estimateId: estimate.id })) === 'sent') {
     return skip('this estimate already has a sent expired-estimate touch', 'already_delivered');
@@ -774,6 +812,7 @@ module.exports = {
   ONCE_IN_FLIGHT,
   ESTIMATE_RECIPIENT_CHANGED,
   ESTIMATE_NOT_EXPIRED,
+  ESTIMATE_EXPIRY_SUPERSEDED,
   buildFirstVisitPest,
   buildWhy91Days,
   buildExpiredNurture,

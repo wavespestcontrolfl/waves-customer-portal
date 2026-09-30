@@ -13,7 +13,7 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
 const {
   hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
-  ESTIMATE_RECIPIENT_CHANGED, ESTIMATE_NOT_EXPIRED,
+  ESTIMATE_RECIPIENT_CHANGED, ESTIMATE_NOT_EXPIRED, ESTIMATE_EXPIRY_SUPERSEDED,
 } = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
@@ -1757,9 +1757,10 @@ function recipientChangedSkip() {
 // retargeted — its bearer link must not reach the old recipient.
 function estimateChangedSkip(reason) {
   return {
-    skipReason: reason === ESTIMATE_NOT_EXPIRED
-      ? 'the estimate is no longer expired; not sent'
-      : 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient',
+    skipReason: {
+      [ESTIMATE_NOT_EXPIRED]: 'the estimate is no longer expired; not sent',
+      [ESTIMATE_EXPIRY_SUPERSEDED]: 'the estimate was extended and expired again since this run was created; a newer run owns the touch',
+    }[reason] || 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient',
     skipGuard: 'estimate_recipient_changed',
   };
 }
@@ -1818,7 +1819,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
       throw Object.assign(new Error('email division eligibility lookup failed'), { code: 'LEDGER_LOOKUP_FAILED' });
     }
     if (out.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-    if (out.reason === ESTIMATE_RECIPIENT_CHANGED || out.reason === ESTIMATE_NOT_EXPIRED) return estimateChangedSkip(out.reason);
+    if (out.reason === ESTIMATE_RECIPIENT_CHANGED || out.reason === ESTIMATE_NOT_EXPIRED || out.reason === ESTIMATE_EXPIRY_SUPERSEDED) return estimateChangedSkip(out.reason);
     if (out.reason === ONCE_ALREADY_DELIVERED) {
       return { skipReason: 'this customer (or estimate) already has a sent email of this kind; not sent again', skipGuard: 'already_delivered' };
     }
@@ -1843,7 +1844,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   // dispatch takes.
   if (settled?.status === 'sent') throw out.error || deliveryUncertainError();
   if (settled?.status === 'skipped' && settled.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-  if (settled?.status === 'skipped' && (settled.reason === ESTIMATE_RECIPIENT_CHANGED || settled.reason === ESTIMATE_NOT_EXPIRED)) {
+  if (settled?.status === 'skipped' && (settled.reason === ESTIMATE_RECIPIENT_CHANGED || settled.reason === ESTIMATE_NOT_EXPIRED || settled.reason === ESTIMATE_EXPIRY_SUPERSEDED)) {
     return estimateChangedSkip(settled.reason);
   }
   if (settled?.status === 'skipped') {

@@ -312,7 +312,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
       const other = await makeCustomer();
       const ownerEstimate = await makeEstimate(customer.id, customer.email);
       const ownerRun = (await fire(automation, {
-        estimateId: ownerEstimate, customerId: customer.id, email: customer.email, expiresOn: '2026-10-20', immediately: false,
+        estimateId: ownerEstimate, customerId: customer.id, email: customer.email, immediately: false,
       })).results[0].run;
       await db('estimates').where({ id: ownerEstimate }).update({ customer_id: other.id });
       const afterOwner = await Executor.executeRun(ownerRun.id);
@@ -376,13 +376,15 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(first.status).toBe('skipped');
       expect(first.exit_reason).toContain('no longer expired');
 
-      await db('estimates').where({ id: estimateId }).update({ status: 'expired' });
+      // Extended, then expired again: the estimate's CURRENT expiry is now Oct 20.
+      await db('estimates').where({ id: estimateId }).update({ status: 'expired', expires_at: new Date('2026-10-20T16:00:00Z') });
       const second = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-10-20' })).results[0].run;
       expect(second.id).not.toBe(first.id);
       expect(second.idempotency_key).not.toBe(first.idempotency_key);
       expect(second.status).toBe('sent');
 
       // Same expiry again: the key dedupes. A LATER expiry of the same estimate: skipped at send time.
+      await db('estimates').where({ id: estimateId }).update({ expires_at: new Date('2026-11-20T16:00:00Z') });
       const third = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-11-20' })).results[0].run;
       expect(third.status).toBe('skipped');
       expect(third.exit_reason).toContain('already has a sent');
@@ -465,7 +467,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(movedRun.exit_reason).toContain('changed since this run was created');
 
       sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => db('estimates').where({ id: extended }).update({ status: 'sent' }) }));
-      const extendedRun = (await fire(automation, { estimateId: extended, customerId: customer.id, email: customer.email, expiresOn: '2026-10-21' })).results[0].run;
+      const extendedRun = (await fire(automation, { estimateId: extended, customerId: customer.id, email: customer.email })).results[0].run;
       expect(extendedRun.status).toBe('skipped');
       expect(extendedRun.exit_reason).toContain('no longer expired');
       expect(await db('email_messages').whereIn('idempotency_key', [movedRun.idempotency_key, extendedRun.idempotency_key])).toHaveLength(0);
@@ -634,7 +636,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(sendTemplate).toHaveBeenCalledTimes(1);
     });
 
-    test('nurture.expired_1, same rule per estimate: a concurrent second expiry defers while the first is in flight, then is skipped as already delivered', async () => {
+    test('nurture.expired_1, same rule per estimate: while the first run is in flight, a run for the estimate\'s NEWER expiry defers; the first is then superseded at the boundary (terminal skip), and the newer run sends once', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
       const estimateId = await makeEstimate(customer.id, customer.email);
@@ -642,19 +644,40 @@ describeOrSkip('email division wiring (Postgres)', () => {
       const hold = latch();
       sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => hold.gate }));
 
-      const firstPromise = fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-09-20' });
+      const firstPromise = fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-09-21' });
       await waitFor(() => db('marketing_email_ledger').where({ customer_id: customer.id, email_key: 'nurture.expired_1', status: 'reserved' }).first());
+      // Extended and expired again while the first is held: the estimate's current expiry is Oct 20.
+      await db('estimates').where({ id: estimateId }).update({ expires_at: new Date('2026-10-20T16:00:00Z') });
       const second = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-10-20' })).results[0].run;
       expect(second.status).toBe('retry_scheduled');
       expect(second.last_error).toContain('in flight');
 
       hold.release();
-      expect((await firstPromise).results[0].run.status).toBe('sent');
+      const first = (await firstPromise).results[0].run;
+      expect(first.status).toBe('skipped'); // superseded at the provider boundary: never sent, never counted
+      expect(first.exit_reason).toContain('extended and expired again');
       await reclaim(second);
       const retried = await Executor.executeRun(second.id);
-      expect(retried.status).toBe('skipped');
-      expect(retried.exit_reason).toContain('already has a sent');
-      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      expect(retried.status).toBe('sent');
+      // The first run was vetoed at the boundary (nothing delivered); only the newer run's message exists.
+      expect(await db('email_messages').where({ idempotency_key: first.idempotency_key })).toHaveLength(0);
+      expect(await db('email_messages').where({ idempotency_key: second.idempotency_key })).toHaveLength(1);
+    });
+
+    test('a delayed nurture run is bound to the expiry that triggered it: extended and expired again during the delay -> the old run is skipped (build time), never sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email); // expires_at Sep 21
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike());
+      const old = (await fire(automation, {
+        estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-09-21', immediately: false,
+      })).results[0].run;
+      await db('estimates').where({ id: estimateId }).update({ expires_at: new Date('2026-09-22T16:00:00Z') }); // one-day extension, expired again
+      const result = await Executor.executeRun(old.id);
+      expect(result.status).toBe('skipped');
+      expect(result.exit_reason).toContain('extended and expired again');
+      expect(sendTemplate).not.toHaveBeenCalled();
     });
   });
 
@@ -811,14 +834,21 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(skipped).toEqual(expect.objectContaining({ skip: true, code: 'next_visit_property_ambiguous' }));
       });
 
-      test('the rain sentence needs a COMPLETE radar read over whole days after the visit; shadow makes no external call', async () => {
-        const { customer, recordId } = await scenario({});
-        await db('customers').where({ id: customer.id }).update({ latitude: 27.5, longitude: -82.4 });
+      test('the rain sentence: coordinates come from the VISITED property, a complete radar read over whole days after the visit; shadow makes no external call', async () => {
+        const customer = await makeCustomer({ latitude: 10, longitude: 10 }); // the customer record's coordinates belong to ANOTHER property
+        const techId = await makeTech();
+        const [property] = await db('customer_properties').insert({ customer_id: customer.id, latitude: 27.5, longitude: -82.4 }).returning('id');
+        const [done] = await db('scheduled_services').insert({
+          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: property.id,
+        }).returning('id');
+        await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: property.id });
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: done.id });
         const rain = jest.fn(async ({ start, end }) => ({ days: [{ date: start, inches: 0.4 }, { date: end, inches: 0.5 }], complete: true }));
         const live = await Builders.buildEmailDivisionPayload({
           run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps({ fetchMrmsDailyRain: rain }),
         });
         expect(live.payload.rain_since_visit_sentence).toBe('NOAA radar shows about 0.9 inches of rain near your address since the visit; local totals may vary.');
+        expect(rain).toHaveBeenCalledWith(expect.objectContaining({ latitude: 27.5, longitude: -82.4 }));
         const incomplete = await Builders.buildEmailDivisionPayload({
           run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live',
           deps: baseDeps({ fetchMrmsDailyRain: async () => ({ days: [{ date: 'x', inches: 2 }], complete: false }) }),
@@ -829,6 +859,20 @@ describeOrSkip('email division wiring (Postgres)', () => {
           run: runFor('lc.first_visit_pest', recordId, customer), mode: 'shadow', deps: baseDeps({ fetchMrmsDailyRain: rain }),
         });
         expect(shadow.payload.rain_since_visit_sentence).toBe('');
+        expect(rain).not.toHaveBeenCalled();
+
+        // The property has no coordinates (null is not zero) or the visit has no property: no sentence, no call —
+        // the customer record's coordinates are never a fallback.
+        await db('customer_properties').where({ id: property.id }).update({ latitude: null, longitude: null });
+        const noCoords = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps({ fetchMrmsDailyRain: rain }),
+        });
+        expect(noCoords.payload.rain_since_visit_sentence).toBe('');
+        const unlinked = await makeVisit({ customerId: customer.id, technicianId: techId, createdAt: new Date('2026-09-21T15:00:00Z'), date: '2026-09-21' });
+        const noProperty = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', unlinked, customer), mode: 'live', deps: baseDeps({ fetchMrmsDailyRain: rain }),
+        });
+        expect(noProperty.skip || noProperty.payload.rain_since_visit_sentence === '').toBeTruthy();
         expect(rain).not.toHaveBeenCalled();
       });
     });
