@@ -2368,7 +2368,7 @@ async function linkedScheduledServiceId(invoice, database = db) {
 // same on its transaction before its caller re-reads it and passes it in).
 // `database` is that same locked handle, used only for the linked-visit
 // lookup and the ownership recheck — never a second root-pool connection.
-async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice }) {
+async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimToken, sendInvoice, holdExempt = null }) {
   // `error` is the field withProviderHandoff's caller (this file) has always
   // read on a blocked outcome (byte-identical to the pre-refactor shape);
   // `reason` mirrors it so billingEmailPreSendCheck's OTHER caller —
@@ -2404,6 +2404,21 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
     return { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: ownership.code, error: ownership.reason, reason: ownership.reason,
       validator: "check_invoice_ownership_boundary" };
+  }
+  // Collections DISPUTE hold, re-read at the actual provider boundary on the
+  // locked handle (owner ruling 2026-09-30): a hold that committed after the
+  // sender's own up-front check, during claiming, lock waits or message
+  // preparation, still stops the pay link here - retryable and deferred, never
+  // terminal (savepoint read, fail closed). Payer-billed and the explicit
+  // operator/customer exemptions are skipped; no cross-writer locking (the hold
+  // writer never waits - the accepted millisecond window of collection-hold.js).
+  if (!HOLD_EXEMPT_CALLERS.has(holdExempt) && !current.payer_id) {
+    const collectionHold = require("./collections/collection-hold");
+    const held = await collectionHold.dueInvoiceHeldByDisputeHold(current.customer_id, database);
+    if (held.held) {
+      const defer = collectionHold.holdDeferOutcome(held);
+      return { sent: false, blocked: true, ...defer, error: defer.reason, validator: "check_invoice_collection_hold" };
+    }
   }
   if (invoiceAmountDue(current) <= 0
     || invoiceAmountDue(current) !== invoiceAmountDue(sendInvoice)
@@ -6324,13 +6339,13 @@ const InvoiceService = {
           }
           const current = await database("invoices").where({ id: invoiceId }).first();
           return checkInvoiceDeliveryPreconditions(database, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
           });
         },
         withProviderHandoff: (dispatch) => withCheckedInvoiceProviderHandoff(
           invoiceId,
           (trx, current) => checkInvoiceDeliveryPreconditions(trx, current, {
-            sendClaimToken: invoice.send_claim_token, sendInvoice,
+            sendClaimToken: invoice.send_claim_token, sendInvoice, holdExempt,
           }),
           dispatch,
         ),
@@ -6843,6 +6858,7 @@ const InvoiceService = {
           claimToken: claim.invoice.send_claim_token,
           payUrlParams,
           operatorInitiated,
+          holdExempt,
           hasEmailLeg: true,
           // This wrapper's own claim above already adopted (and will
           // restore/resolve) any queued pay-link SMS this send supersedes —

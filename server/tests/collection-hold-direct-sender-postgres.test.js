@@ -158,6 +158,93 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
     expect((await Invoices.sendViaSMS(inv2, {})).code).not.toBe('COLLECTION_HOLD_DEFER');
   });
 
+  describe('a hold that lands AFTER the up-front check is caught at the provider boundary', () => {
+    // First lookup (the sender's up-front check) answers "clear"; every later one (the boundary
+    // re-read on the locked handle) answers "held" - the dispute lands during claiming/preparation.
+    // The real sendCustomerMessage runs the invoice's provider-handoff hook (the locked boundary
+    // check) around the provider request; mimic that contract: a blocked handoff maps to a blocked
+    // outcome and the provider is never reached.
+    let providerReached;
+    beforeEach(() => {
+      providerReached = jest.fn();
+      sendCustomerMessage.mockImplementation(async (input) => {
+        const outcome = await input.withProviderHandoff(async () => {
+          providerReached();
+          return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM1', channel: 'sms' };
+        });
+        if (outcome.blocked) {
+          return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: outcome.code, reason: outcome.error || outcome.reason,
+            ...(outcome.retryable ? { retryable: true } : {}), ...(outcome.deferred ? { deferred: true } : {}),
+            ...(outcome.nextAllowedAt ? { nextAllowedAt: outcome.nextAllowedAt } : {}) };
+        }
+        return { sent: true, deliveryOutcome: 'accepted', channel: 'sms', providerMessageId: 'SM1',
+          channelResults: { sms: { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM1' } } };
+      });
+    });
+    const raceHold = () => {
+      const real = Hold.dueInvoiceHeldByDisputeHold;
+      return jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold')
+        .mockImplementationOnce(real)
+        .mockImplementation(async () => ({ held: true, reason: 'hold' }));
+    };
+
+    test('sendViaSMS: nothing goes to the provider; the claim is given back; the refusal is the retryable hold', async () => {
+      const c = await newCustomer();
+      const inv = await newInvoice(c);
+      const spy = raceHold();
+      let out;
+      try { out = await Invoices.sendViaSMS(inv, {}).catch((err) => ({ threw: err })); } finally { spy.mockRestore(); }
+      const refusal = out.threw || out;
+      expect(refusal.code).toBe('COLLECTION_HOLD_DEFER');
+      expect(refusal.deferred).toBe(true);
+      expect(providerReached).not.toHaveBeenCalled();
+      const row = await invoice(inv);
+      expect(row.send_claim_token).toBeNull();
+      expect(row.sent_at).toBeNull();
+    });
+
+    test('sendViaSMSAndEmail: same - no provider contact, claim released, retryable', async () => {
+      const c = await newCustomer();
+      const inv = await newInvoice(c);
+      const spy = raceHold();
+      let out;
+      try { out = await Invoices.sendViaSMSAndEmail(inv).catch((err) => ({ threw: err })); } finally { spy.mockRestore(); }
+      expect(providerReached).not.toHaveBeenCalled();
+      expect(out.threw || out).toMatchObject({ ok: false });
+      expect(JSON.stringify(out.threw ? { code: out.threw.code } : out)).toContain('COLLECTION_HOLD_DEFER');
+      expect((await invoice(inv)).send_claim_token).toBeNull();
+    });
+
+    test('the scheduled worker path (allowClaimed): the boundary defers it without spending an attempt', async () => {
+      const c = await newCustomer();
+      const inv = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000) });
+      const real = Hold.dueInvoiceHeldByDisputeHold;
+      // let the due query + the worker's own delivery-boundary check clear; the sender's boundary re-read holds
+      let calls = 0;
+      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementation(async (...args) => {
+        calls += 1;
+        return calls <= 1 ? real(...args) : { held: true, reason: 'hold' };
+      });
+      try { await Invoices.processScheduledSends(); } finally { spy.mockRestore(); }
+      expect(providerReached).not.toHaveBeenCalled();
+      const row = await invoice(inv);
+      expect(row.status).toBe('scheduled');
+      expect(row.scheduled_send_attempts || 0).toBe(0);
+      expect(row.send_claim_token).toBeNull();
+    });
+
+    test('an operator/customer exemption is not stopped at the boundary either', async () => {
+      const c = await newCustomer();
+      const inv = await newInvoice(c);
+      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementation(async () => ({ held: true, reason: 'hold' }));
+      try {
+        const out = await Invoices.sendViaSMS(inv, { operatorInitiated: true, holdExempt: 'operator' });
+        expect(out.code).not.toBe('COLLECTION_HOLD_DEFER');
+      } finally { spy.mockRestore(); }
+      expect(providerReached).toHaveBeenCalled();
+    });
+  });
+
   test('a pre-claimed send (the worker) is not re-checked by the sender - processScheduledSends owns that check', async () => {
     const c = await newCustomer();
     await placeHold(c);
