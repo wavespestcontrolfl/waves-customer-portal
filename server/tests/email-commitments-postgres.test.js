@@ -218,6 +218,28 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(closed.sms_context).toMatchObject({ property_id: property.id, property_adopted: true });
   });
 
+  test('an ask left unscoped because intake saw two properties never adopts the one left after the other is deactivated', async () => {
+    const [first, second] = await mockPg('customer_properties').insert([
+      { customer_id: customerId, address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true },
+      { customer_id: customerId, address_line1: '200 Example Lane', city: 'Sarasota', zip: '34236', active: true },
+    ]).returning('*');
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: 'Can I get a quote please', subject: 'Quote' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'a quote', quote: 'Can I get a quote please', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date(email.received_at.getTime() + 1000) });
+    const commitment = await mockPg('call_commitments').first();
+    expect(commitment.sms_context).toMatchObject({ properties_at_intake: 2 });
+    await mockPg('customer_properties').where({ id: second.id }).update({ active: false });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await refreshEmailCommitments({ conn: mockPg, now: new Date(commitment.due_at.getTime() + 60000) });
+    const after = await mockPg('call_commitments').first();
+    expect(after.sms_context.property_id ?? null).toBeNull();
+    expect(after.sms_context.property_adopted).toBeUndefined();
+    expect(first.id).toBeTruthy();
+  });
+
   test('an unscoped ask is never given a property when the customer now has two', async () => {
     const email = await insertEmail({ customer_id: customerId, classification: 'lead_inquiry', body_text: 'Yes I would like a quote please' });
     dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',

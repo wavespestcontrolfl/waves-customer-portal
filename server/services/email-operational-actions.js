@@ -151,6 +151,9 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
             speaker: direction === 'outbound' ? 'agent' : 'caller' }]),
           sms_context: { channel: 'email', basis: item.basis, due_text: item.due_text, property_id: propertyId,
             customer_id: customer.id, source_at: email.received_at,
+            // The property count the model was shown (capped at 2): only an
+            // ask made with NO property on file may adopt a later sole one.
+            properties_at_intake: Math.min(properties.length, 2),
             // Whether a payment can answer this ask — the same stamp SMS
             // intake writes; the verifier admits payment evidence only on it.
             ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}),
@@ -294,10 +297,12 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
 // sms-operational-actions.js's lockLiveCommitment sameSource check).
 // A new lead's first email usually arrives before they have a property (it
 // is created when they accept an estimate), so intake could not scope the
-// ask. When the ask still names no property and the customer now has exactly
-// one, check against that one; with several, never guess.
+// ask. When the customer had NO property at intake and now has exactly
+// one, check against that one. An ask left unscoped because intake saw
+// several stays unscoped, even if all but one are later deactivated — that
+// was ambiguity, not absence. With several now, never guess.
 async function soleProperty(conn, row, customerId) {
-  if (row.sms_context?.property_id) return {};
+  if (row.sms_context?.property_id || row.sms_context?.properties_at_intake !== 0) return {};
   const properties = await conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id');
   return properties.length === 1 ? { property_id: properties[0], property_adopted: true } : {};
 }
