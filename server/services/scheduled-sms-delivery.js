@@ -214,19 +214,23 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   // always goes out.
   const bundledReviewRequestId = meta.entry_point === 'dispatch_completion_deferred' ? meta.bundled_review_request_id : null;
   let clicked = false;
+  let result;
   if (bundledReviewRequestId) {
     try {
       const ask = await db('review_requests').where({ id: bundledReviewRequestId })
         .first('id', 'customer_id', 'service_record_id', 'scheduled_service_id', 'created_at', 'template_key');
       clicked = Boolean(ask) && await require('./review-click-guard').askSuppressedByClick(ask);
     } catch (err) {
-      // Deliberately fail open: an unreadable click lookup leaves the bundled
-      // ask to the ordinary spacing path rather than blocking the completion.
-      logger.warn(`[scheduled-sms] click-guard lookup failed; bundled review ask proceeds (smsLogId=${msg.id} errType=${err?.name})`);
+      // Fail closed: with the click state unknown the invitation is never sent
+      // blind. It is handled like a spacing hold below: stripped from the
+      // completion and re-armed for the standalone sender, which re-checks the
+      // click before it texts.
+      logger.warn(`[scheduled-sms] click-guard lookup failed; bundled review line held (smsLogId=${msg.id} errType=${err?.name})`);
+      result = { code: 'REVIEW_CLICK_STATE_UNAVAILABLE' };
     }
   }
-  let result = {};
-  if (!clicked) {
+  if (clicked) result = {};
+  if (!result) {
     result = await dispatchReviewAsk(msg.customer_id, dispatch);
     if (!REVIEW_HOLD_CODES.includes(result?.code)) return result;
   }

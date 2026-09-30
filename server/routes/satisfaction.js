@@ -71,6 +71,11 @@ router.get('/review-card', async (req, res, next) => {
         'service_records.service_type',
         'service_records.service_date',
         'service_records.ended_at',
+        // A record written without ended_at (e.g. by pest-recap) completes at
+        // its linked visit's instant: the same fallback order visitAnchor uses.
+        'scheduled_services.actual_end_time as linked_actual_end_time',
+        'scheduled_services.check_out_time as linked_check_out_time',
+        'scheduled_services.completed_at as linked_completed_at',
         'technicians.name as technician_name'
       )
       .orderBy('service_records.service_date', 'desc')
@@ -101,7 +106,7 @@ router.get('/review-card', async (req, res, next) => {
       return Number.isNaN(t) ? -Infinity : t;
     };
     const candidates = [
-      ...(records || []).map((r) => ({ ...r, visitDate: r.service_date, completedMs: instant(r.ended_at) })),
+      ...(records || []).map((r) => ({ ...r, visitDate: r.service_date, completedMs: instant(r.ended_at || r.linked_actual_end_time || r.linked_check_out_time || r.linked_completed_at) })),
       ...(scheduled || []).map((r) => ({ ...r, visitDate: r.scheduled_date, completedMs: instant(r.actual_end_time || r.check_out_time || r.completed_at) })),
     ];
     candidates.sort((a, b) => (ymd(b.visitDate).localeCompare(ymd(a.visitDate))) || (b.completedMs - a.completedMs));

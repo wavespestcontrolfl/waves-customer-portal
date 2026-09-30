@@ -141,6 +141,21 @@ describe('GET /review-card — tracked links only, never a send', () => {
     expect((await card()).card).toMatchObject({ serviceRecordId: 'rec-pm' });
   });
 
+  test('a same-day record with no ended_at sorts by its linked visit\'s completion instant', async () => {
+    db.state.visits = [
+      { id: 'rec-am', service_type: 'Pest Control', service_date: '2026-09-25', ended_at: '2026-09-25T14:00:00Z', technician_name: 'Alex' },
+      // pest-recap writes the record without ended_at; its linked visit finished later
+      { id: 'rec-recap', service_type: 'Lawn Care', service_date: '2026-09-25', ended_at: null, linked_actual_end_time: null, linked_check_out_time: '2026-09-25T21:00:00Z', technician_name: 'Alex' },
+    ];
+    expect((await card()).card).toMatchObject({ serviceRecordId: 'rec-recap' });
+    const recordSelect = db.mock.results.find((r, i) => db.mock.calls[i][0] === 'service_records' && r.value.select.mock.calls.length)?.value.select.mock.calls[0];
+    expect(recordSelect).toEqual(expect.arrayContaining([
+      'scheduled_services.actual_end_time as linked_actual_end_time',
+      'scheduled_services.check_out_time as linked_check_out_time',
+      'scheduled_services.completed_at as linked_completed_at',
+    ]));
+  });
+
   test('no completed visit in the window: no card', async () => {
     db.state.visits = [];
     expect((await card()).card).toBeNull();

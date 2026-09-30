@@ -355,21 +355,41 @@ test('a tapped customer whose review line cannot be stripped still gets the comp
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('completion sent as-is, bundled ask suppressed'));
 });
 
-test('an unreadable click lookup is logged and leaves the bundled ask to the ordinary path', async () => {
+test('an unreadable click lookup fails closed: the review line is stripped and re-armed, never sent blind', async () => {
   const logger = require('../services/logger');
   logger.warn.mockClear();
-  const body = 'Your service is complete: https://portal.test/report/abc\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
-  row.message_body = body;
+  const completion = 'Your service is complete: https://portal.test/report/abc';
+  row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
   row.metadata.entry_point = 'dispatch_completion_deferred';
   row.metadata.bundled_review_request_id = 'review-1';
   providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
   require('../services/review-click-guard').askSuppressedByClick.mockRejectedValueOnce(new Error('lookup unavailable'));
-  const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' }));
+  const send = jest.fn(async () => {
+    expect(row.message_body).toBe(completion);
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' };
+  });
   expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete')).toMatchObject({ sent: true });
   expect(send).toHaveBeenCalledTimes(1);
-  expect(row.message_body).toBe(body);
-  expect(reviewUpdates).toEqual([]);
+  expect(history.lastDeliveredAskAt).not.toHaveBeenCalled(); // no blind review-ask dispatch
+  // re-armed (not suppressed) for the standalone sender, which re-checks the click
+  expect(reviewUpdates).toEqual([{ scheduled_for: new Date(Date.now() + 15 * 60000) }]);
+  expect(reviewRequest).toMatchObject({ status: 'pending', sms_sent_at: null });
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('click-guard lookup failed'));
+});
+
+test('an unreadable click lookup with a line that cannot be stripped holds the text instead of sending the link', async () => {
+  row.message_body = 'Your service is complete: https://portal.test/report/abc\n\nLoved it? Leave us a quick review: https://portal.test/rate/review1';
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askSuppressedByClick.mockRejectedValueOnce(new Error('lookup unavailable'));
+  const send = jest.fn();
+  expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete'))
+    .toMatchObject({ code: 'REVIEW_CLICK_STATE_UNAVAILABLE', scheduledHold: true });
+  expect(send).not.toHaveBeenCalled();
+  expect(row).toMatchObject({ status: 'scheduled', scheduled_for: new Date(Date.now() + 15 * 60000) });
+  expect(row.metadata.review_hold_reason).toBe('REVIEW_CLICK_STATE_UNAVAILABLE');
+  expect(reviewUpdates).toEqual([]);
 });
 
 test('an unpersisted completion rewrite never dispatches a stale bundled ask', async () => {
