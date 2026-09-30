@@ -139,21 +139,33 @@ function ownReplySubject(subject, threadSubjects = []) {
 // Only messages sent BEFORE each one count: a later reply repeats its
 // subject behind "Re:", and would otherwise blank the subject of the very
 // email that first wrote it. Returns Map(email id -> own subject or '').
+// Gmail sync can store a reply before the message it answers (a full
+// resync inserts newest first), so a thread is judged only once the email
+// has been stored this long: until then, its partners may still be arriving.
+// Read against the database clock, the same one that stamped created_at.
+const settledSql = (alias) => `${alias}.created_at <= now() - interval '15 minutes'`;
 async function ownSubjectsInThreads(conn, rows) {
   const own = new Map();
-  const threadIds = [...new Set(rows.filter((r) => String(r?.subject || '').trim() && r.gmail_thread_id && r.received_at)
+  const withSubject = rows.filter((r) => String(r?.subject || '').trim());
+  // A row stored too recently has no subject of its own yet: absence from a
+  // thread still syncing is no proof that a subject is new.
+  const settled = new Set(withSubject.length ? (await conn('emails as e').whereIn('e.id', withSubject.map((r) => r.id))
+    .whereRaw(settledSql('e')).pluck('e.id')).map(String) : []);
+  const threadIds = [...new Set(withSubject.filter((r) => r.gmail_thread_id && r.received_at)
     .map((r) => r.gmail_thread_id))];
   // Each distinct subject a thread carries, once, at its first appearance:
   // a subject is new text for an email only when no earlier message in its
   // thread carried it, however long the thread (a thread holds few distinct
   // subjects even when it holds many messages).
+  // A draft was never sent: its subject is no earlier message's words.
   const stored = threadIds.length ? await conn('emails').whereIn('gmail_thread_id', threadIds).whereNotNull('subject')
+    .whereRaw("NOT COALESCE(jsonb_exists(label_ids::jsonb, 'DRAFT'), false)")
     .distinctOn('gmail_thread_id', 'subject').orderBy([{ column: 'gmail_thread_id' }, { column: 'subject' },
       { column: 'received_at' }, { column: 'id' }])
     .select('id', 'gmail_thread_id', 'subject', 'received_at') : [];
   const at = (r) => new Date(r.received_at).getTime();
   for (const row of rows) {
-    if (!String(row?.subject || '').trim()) { own.set(row?.id, ''); continue; }
+    if (!String(row?.subject || '').trim() || !settled.has(String(row.id))) { own.set(row?.id, ''); continue; }
     const earlier = row.gmail_thread_id && row.received_at ? stored.filter((o) => o.gmail_thread_id === row.gmail_thread_id
       && String(o.id) !== String(row.id)
       && (at(o) < at(row) || (at(o) === at(row) && String(o.id) < String(row.id)))).map((o) => o.subject) : [];
@@ -162,4 +174,4 @@ async function ownSubjectsInThreads(conn, rows) {
   return own;
 }
 
-module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject, ownSubjectsInThreads };
+module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject, ownSubjectsInThreads, settledSql };

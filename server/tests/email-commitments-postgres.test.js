@@ -50,6 +50,9 @@ const insertEmail = (overrides = {}) => mockPg('emails').insert({
   // 20 minutes old by default: staff sends are read only after intake's
   // 15-minute link grace period.
   subject: 'Estimate', body_text: 'Please send the estimate', received_at: new Date(Date.now() - 20 * 60000),
+  // Stored 20 minutes ago too: intake and subject history read a row only
+  // once its thread has settled (15 minutes after it was stored).
+  created_at: new Date(Date.now() - 20 * 60000),
   label_ids: JSON.stringify(['INBOX']), ...overrides,
 }).returning('*').then(([row]) => row);
 
@@ -607,6 +610,29 @@ postgres('Email commitments on PostgreSQL', () => {
     await insertEmail({ gmail_thread_id: threadId, subject: 'Booked you for Monday 9am', received_at: new Date(start + 61 * 60000) });
     const echo = await insertEmail({ gmail_thread_id: threadId, subject: 'Re: Booked you for Monday 9am', received_at: new Date(start + 62 * 60000) });
     expect((await ownSubjectsInThreads(mockPg, [echo])).get(echo.id)).toBe('');
+  });
+
+  test('a row stored under 15 minutes ago waits for its thread to settle: not read by intake, its subject not new yet', async () => {
+    const { ownSubjectsInThreads } = require('../services/email/email-strip');
+    const fresh = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Please reschedule Friday', created_at: new Date() });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 0 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect((await ownSubjectsInThreads(mockPg, [fresh])).get(fresh.id)).toBe('');
+    await mockPg('emails').where({ id: fresh.id }).update({ created_at: new Date(Date.now() - 20 * 60000) });
+    expect((await ownSubjectsInThreads(mockPg, [fresh])).get(fresh.id)).toBe('Please reschedule Friday');
+  });
+
+  test('an unsent draft is no earlier message: the sent subject stays new', async () => {
+    const { ownSubjectsInThreads } = require('../services/email/email-strip');
+    const threadId = randomUUID();
+    const start = Date.now() - 3 * 3600000;
+    await insertEmail({ gmail_thread_id: threadId, subject: 'Booked you for Friday', label_ids: JSON.stringify(['DRAFT']),
+      received_at: new Date(start) });
+    const sent = await insertEmail({ gmail_thread_id: threadId, subject: 'Booked you for Friday', label_ids: JSON.stringify(['SENT']),
+      received_at: new Date(start + 60000) });
+    expect((await ownSubjectsInThreads(mockPg, [sent])).get(sent.id)).toBe('Booked you for Friday');
   });
 
   test('with the email gate off, a staff Gmail reply is no evidence for a live SMS ask (dark launch)', async () => {

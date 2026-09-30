@@ -32,7 +32,7 @@ const { extractSmsOperations, VERSION: EXTRACTOR_VERSION } = require('./sms-oper
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, PAYMENT_WITNESS_KINDS } = require('./sms-commitment-fulfillment');
 const { ringOverdueBell, keptLate, resolveDueDeadline } = require('./sms-operational-actions');
 const { resolveEmailCustomerLink, personSentFilter } = require('./email/email-customer-link');
-const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads, settledSql } = require('./email/email-strip');
 const NotificationService = require('./notification-service');
 
 const VERSION = `${EXTRACTOR_VERSION}:email`;
@@ -250,6 +250,9 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
     const askCandidates = await conn('emails')
       .whereNull('operational_analysis').whereNotNull('customer_id').whereIn('classification', CLASSIFICATIONS)
       .where('received_at', '>=', since).where('received_at', '<=', now)
+      // Read only once its thread has settled (ownSubjectsInThreads): a
+      // resync can store a reply before the message it repeats.
+      .whereRaw(settledSql('emails'))
       .whereExists(function availableCustomer() {
         this.select(1).from('customers as c').whereRaw('c.id = emails.customer_id').whereNull('c.deleted_at');
       })
@@ -263,6 +266,7 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       // reply before the inbound it answers, and a missing thread partner
       // would otherwise mark it no_customer_link for good.
       .where('er.received_at', '>=', since).where('er.received_at', '<=', new Date(now.getTime() - SENT_LINK_GRACE_MS))
+      .whereRaw(settledSql('er'))
       .whereNotExists(noTerminalReceipt('er'))
       .orderBy('er.received_at').orderBy('er.id').limit(PAGE_INTAKE)
       .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
