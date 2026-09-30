@@ -857,18 +857,28 @@ async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = 
       const scope = await successorCoverageScope(term, conn);
       overrides = !scope ? overrides : (!scope.resolved ? [] : overrides.filter((row) => rowInRenewalScope(row, scope)));
     }
-    // Substituted IN PLACE, never reordered to the end (the slicing below,
-    // when more rows match than are sold, keeps the EARLIEST — coverageCandidateRows'
-    // own date-ordered query — so moving an unmoved row's position would
-    // change who gets kept for no reason the caller asked for). Only a row
-    // with no DB-fetched counterpart at all (the "moved INTO the window"
-    // case: the ordinary query's date filter excluded it) is appended.
-    const overrideById = new Map(overrides.map((row) => [String(row.id), row]));
-    const dbIds = new Set(rows.map((row) => String(row.id)));
+    // Every overridden id leaves the DB list first — an override the gates
+    // above dropped (moved OUT of the window or scope) must not survive
+    // through its stale in-window DB row — then the eligible overrides go
+    // back in, each layered over its DB row so columns the caller did not
+    // select (window_start) keep their stored values. The merged list is
+    // re-sorted in coverageCandidateRows' own canonical order (scheduled_date,
+    // window_start, id): the sold-slot slicing below keeps the EARLIEST rows,
+    // so a visit moved earlier must compete for a slot at its new position.
+    const overriddenIds = new Set(extraCandidateRows.map((row) => String(row?.id)));
+    const dbById = new Map(rows.map((row) => [String(row.id), row]));
+    // Postgres ORDER BY ASC: NULLS LAST, plain byte order (never locale).
+    const cmp = (a, b) => {
+      if (a == null || b == null) return (a == null) - (b == null);
+      const x = String(a); const y = String(b);
+      return x < y ? -1 : (x > y ? 1 : 0);
+    };
     candidateRows = [
-      ...rows.map((row) => overrideById.get(String(row.id)) || row),
-      ...overrides.filter((row) => !dbIds.has(String(row.id))),
-    ];
+      ...rows.filter((row) => !overriddenIds.has(String(row.id))),
+      ...overrides.map((row) => ({ ...(dbById.get(String(row.id)) || {}), ...row })),
+    ].sort((a, b) => cmp(dateOnly(a.scheduled_date), dateOnly(b.scheduled_date))
+      || cmp(a.window_start, b.window_start)
+      || cmp(a.id, b.id));
   }
 
   // A callback / re-service is never a SOLD visit: it is free by definition
