@@ -32,6 +32,7 @@ jest.mock('../services/messaging/send-window', () => ({
 }));
 jest.mock('../services/stripe', () => ({ chargeInvoiceWithSavedCard: jest.fn(),
   savedCardChargeSuppressesAlternateCollection: jest.fn(() => false),
+  savedCardChargeNeedsReconciliation: jest.fn(() => false),
   assertNoInvoiceChargeReconciliationPending: jest.fn(async () => {}),
   retrievePaymentIntent: jest.fn(async () => null),
   cancelPaymentIntent: jest.fn(async () => null),
@@ -280,6 +281,37 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
       expect(inv.status).toBe('scheduled');
       for (const text of bodies()) expect(payLinkIn(text, inv)).toBe(false);
     } finally { await cleanup(f); }
+  });
+
+  test('a decline notice suppressed AT the send boundary (hold committed after the recheck) is promoted to the hand-over: the invoice is queued, the completion text is report-only (Codex r8 P1)', async () => {
+    const f = await seedVisit();
+    const Stripe = require('../services/stripe');
+    try {
+      await mockPg('customers').where({ id: f.customerId }).update({ billing_mode: 'per_application', autopay_enabled: true });
+      const pmId = randomUUID();
+      await mockPg('payment_methods').insert({ id: pmId, customer_id: f.customerId, processor: 'stripe', method_type: 'card',
+        stripe_payment_method_id: `pm_fixture_${pmId.slice(0, 8)}`, is_default: true, autopay_enabled: true, card_brand: 'visa', last_four: '4242',
+        exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+      await mockPg('customers').where({ id: f.customerId }).update({ autopay_payment_method_id: pmId });
+      Stripe.chargeInvoiceWithSavedCard.mockImplementation(async () => {
+        throw Object.assign(new Error('Synthetic provider decline'), { wavesCardDecline: { attemptedAmount: 89, cardBrand: 'visa', cardLast4: '4242' } });
+      });
+      // No hold exists at the up-front read or at the pre-send recheck; the boundary check
+      // inside sendCustomerMessage is what suppresses the decline notice.
+      sendCustomerMessage.mockImplementation(async (input) => (input.purpose === 'payment_failure'
+        ? { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED', reason: 'synthetic boundary hold' }
+        : { sent: true, channel: 'sms', sid: `SM${randomUUID().replace(/-/g, '').slice(0, 32)}` }));
+      expect(await complete(f)).toMatchObject({ status: 200 });
+      expect(Stripe.chargeInvoiceWithSavedCard).toHaveBeenCalled();
+      const declineCalls = sendCustomerMessage.mock.calls.filter(([input]) => input.purpose === 'payment_failure');
+      expect(declineCalls).toHaveLength(1);
+      const inv = await invoiceFor(f);
+      expect(inv).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
+      expect((await recordFor(f)).structured_notes.invoiceSenderOwnsPayLinkFor).toBe(String(inv.id));
+      for (const [input] of sendCustomerMessage.mock.calls.filter(([i]) => i.purpose !== 'payment_failure')) {
+        expect(payLinkIn(String(input.body || ''), inv)).toBe(false);
+      }
+    } finally { Stripe.chargeInvoiceWithSavedCard.mockReset(); await mockPg('payment_methods').where({ customer_id: f.customerId }).del(); await mockPg('customers').where({ id: f.customerId }).update({ autopay_payment_method_id: null }); await cleanup(f); }
   });
 
   test('a completion RETRY after the release sends no second pay link: the sender owns the invoice, the retry text is report-only', async () => {

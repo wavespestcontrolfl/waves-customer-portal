@@ -155,6 +155,33 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
     }));
   });
 
+  test('a dispute-hold suppression of the expiry text is a WAIT: no alert, no interaction, no error - the email leg still runs its own gate (Codex r8 P1)', async () => {
+    const alertInsert = jest.fn(async () => [1]);
+    const interactionInsert = jest.fn(async () => [1]);
+    paymentExpiry.resolveAlertsForExemptCustomers = jest.fn(async () => {});
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+    require('../services/sms-template-renderer').renderSmsTemplate.mockResolvedValueOnce('expiry body');
+    require('../services/payment-lifecycle-email').sendPaymentMethodExpiring.mockResolvedValueOnce({ ok: false, skipped: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+    db.mockImplementation((table) => {
+      if (table === 'payment_methods as pm') return query([{
+        id: 'pm-1', customer_id: 'cust-1', last_four: '4242', exp_month: '9', exp_year: '2026', card_brand: 'Visa',
+      }]);
+      if (table === 'customers') return query([], { first: {
+        id: 'cust-1', first_name: 'Pat', last_name: 'Customer', phone: '+19415550100', billing_mode: null,
+      } });
+      if (table === 'sms_log') return query([], { first: null });
+      if (table === 'inventory_alerts') return query([], { insert: alertInsert });
+      if (table === 'customer_interactions') return query([], { insert: interactionInsert });
+      throw new Error(`Unexpected table ${table}`);
+    });
+    await expect(paymentExpiry.checkExpiringCards()).resolves.toMatchObject({ notified: 0 });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'autopay', entryPoint: 'payment_expiry_workflow' }));
+    expect(alertInsert).not.toHaveBeenCalled();
+    expect(interactionInsert).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['old Email', { ok: true, deduped: true }, 0, false],
     ['failed Email', { ok: false, deliveryOutcome: 'not_sent' }, 0, false],

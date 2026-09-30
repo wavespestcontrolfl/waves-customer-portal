@@ -190,7 +190,8 @@ async function logPaymentLifecycleEmailAttempt({
 }
 
 // Lifecycle notices whose body carries a pay / update-card link.
-const HOLD_GATED_TEMPLATES = new Set(['payment.failed', 'payment.retry_notice', 'payment.method_expiring']);
+const HOLD_GATED_TEMPLATES = require('./collections/collection-hold').HOLD_GATED_EMAIL_TEMPLATES;
+const CUSTOMER_INITIATED_EMAIL_CATEGORY = require('./collections/collection-hold').CUSTOMER_INITIATED_EMAIL_CATEGORY;
 
 async function sendLifecycleTemplate({
   customerId,
@@ -206,6 +207,11 @@ async function sendLifecycleTemplate({
   categories = [],
   billingDeliveryCategory = null,
   beforeProviderHandoff = null,
+  // TRUSTED provenance from the caller (sendPaymentFailed, from the Stripe webhook's own PI
+  // markers): the notice answers a payment the customer just attempted themselves, so it is not
+  // billing follow-up and the dispute hold does not withhold it (the same exemption the
+  // Text/App boundary applies to a customerInitiated payment_failure).
+  customerInitiated = false,
 }) {
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found',
@@ -217,7 +223,8 @@ async function sendLifecycleTemplate({
   // One live check at the shared send boundary (every caller - billing-cron, the retry
   // obligation, the Stripe webhook, the expiry workflows - passes through here); fail closed.
   // Confirmations and receipts carry no such link and are untouched.
-  if (HOLD_GATED_TEMPLATES.has(templateKey)) {
+  const holdApplies = HOLD_GATED_TEMPLATES.has(templateKey) && customerInitiated !== true;
+  if (holdApplies) {
     const held = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id);
     if (held.held) {
       logger.info(`[payment-lifecycle-email] ${templateKey} suppressed for customer ${customer.id}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
@@ -292,7 +299,7 @@ async function sendLifecycleTemplate({
               }
             }
             // Dispute hold re-read at the provider boundary (see the up-front check above).
-            if (HOLD_GATED_TEMPLATES.has(templateKey)
+            if (holdApplies
               && (await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id)).held) {
               return { ok: false };
             }
@@ -658,6 +665,10 @@ async function sendPaymentFailed({
     paymentMethodId: payment?.payment_method_id || null,
     idempotencyKey: dedupeKey,
     billingDeliveryCategory: 'payment_issue',
+    customerInitiated: customerInitiated === true,
+    // Stored on the email row so a provider-block retry keeps the exemption (the retry rail
+    // reads it before its dispute-hold check).
+    categories: customerInitiated === true ? [CUSTOMER_INITIATED_EMAIL_CATEGORY] : [],
   });
   if (emailResult?.retryable) {
     const err = new Error('Payment-issue delivery preferences are unavailable');

@@ -103,6 +103,20 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
       expect.objectContaining({ createdAt: sentAt, paymentMethodId: 'pm-cur' }));
   });
 
+  test('a dispute-hold suppression of the expiry text is a WAIT: skipped, nothing stamped, no error (Codex r8 P1)', async () => {
+    getChargeableAutopayMethod.mockResolvedValueOnce({ id: 'pm-cur', method_type: null });
+    wireDb({
+      customers: [thenable([CUSTOMER])],
+      payment_methods: [thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa',
+        last_four: '4242', exp_month: '9', exp_year: '26' }])],
+    });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(await sendCardExpiryWarnings()).toMatchObject({ sent: 0, skipped: 1 });
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'autopay', entryPoint: 'autopay_card_expiry_warning' }));
+    expect(logAutopay).not.toHaveBeenCalled();
+    expect(require('../services/logger').error).not.toHaveBeenCalled();
+  });
+
   test.each([
     ['30_day', '2026-09-10T15:00:00Z', 30],
     ['7_day', '2026-09-24T15:00:00Z', 7],

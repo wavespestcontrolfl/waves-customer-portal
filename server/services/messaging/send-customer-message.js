@@ -260,6 +260,10 @@ function classifyDeliveryCertainty(outcome) {
   return 'unknown';
 }
 
+// Purposes whose SMS/App notices are billing follow-up (pay / update-card link or a
+// charge announcement) and so wait out an active collections dispute hold.
+const HOLD_GATED_MESSAGE_PURPOSES = Object.freeze(['payment_failure', 'autopay']);
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -349,13 +353,17 @@ async function sendCustomerMessageCore(input) {
   // - never queue: dunning after the release covers it; the retry row stays as it is. Fail
   // closed on an unverifiable hold. A notice for a payment the customer just made themselves
   // (customerInitiated) is not follow-up and is exempt.
-  if (input.audience === 'customer' && input.purpose === 'payment_failure' && input.customerId
+  // The machine-initiated 'autopay' purpose is the same follow-up: the card-expiry sweeps
+  // (autopay-notifications, workflows/payment-expiry) text an update-card portal link and the
+  // pre-charge reminder announces a charge the hold has stopped. Every purpose-'autopay'
+  // sender is a cron sweep; a customer-driven autopay notice would carry customerInitiated.
+  if (input.audience === 'customer' && HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose) && input.customerId
     && input.customerInitiated !== true) {
     const held = await require('../collections/collection-hold').dueInvoiceHeldByDisputeHold(input.customerId);
     if (held.held) {
-      logger.info(`[send_customer_message] payment-failure notice suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+      logger.info(`[send_customer_message] billing notice (${input.purpose}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
       return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
-        reason: 'Customer has an active collections dispute hold; the payment-failure notice was suppressed' };
+        reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed' };
     }
   }
 

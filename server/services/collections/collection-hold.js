@@ -197,6 +197,15 @@ async function recordHoldOverrideOn(database, { customerId, actorId, ip, userAge
 // therefore sent within one tick.
 const HOLD_DEFER_MS = 4 * 60 * 1000;
 
+// Lifecycle (payment.*) email templates whose body carries a pay / update-card link. ONE list
+// for the fresh-send guard (payment-lifecycle-email.js) and the provider-retry rail
+// (transactional-email-provider-retry.js), so a scheduled retry of a stored snapshot can never
+// reach a disputing customer through a path the fresh send refuses.
+// Category stamped on a payment.failed row that answers the customer's own payment attempt: the
+// retry rail keeps the customerInitiated exemption from it.
+const CUSTOMER_INITIATED_EMAIL_CATEGORY = 'customer_initiated';
+const HOLD_GATED_EMAIL_TEMPLATES = new Set(['payment.failed', 'payment.retry_notice', 'payment.method_expiring']);
+
 // { held: true, reason: 'hold' | 'lookup_failed', error? } | { held: false }.
 // Fail closed: a lookup that cannot be answered holds the send (retried next tick).
 // On a caller's transaction the read runs in a SAVEPOINT, so a failed lookup
@@ -274,6 +283,22 @@ async function queueHeldInvoiceForSender(invoiceId, database = db) {
   });
 }
 
+// The hold answer for a STORED lifecycle email row (a provider-block retry, a bounce
+// recovery): { held: false } unless the row's template carries a pay / update-card link
+// (HOLD_GATED_EMAIL_TEMPLATES), it is addressed to a customer, and it is not the notice for
+// the customer's OWN payment attempt (CUSTOMER_INITIATED_EMAIL_CATEGORY, stamped at send).
+// Fail closed like the fresh-send guard: an unanswerable lookup is held.
+async function storedLifecycleEmailHeld(message, database = db) {
+  if (!HOLD_GATED_EMAIL_TEMPLATES.has(String(message?.template_key || '').trim())) return { held: false };
+  if (String(message.recipient_type || '').toLowerCase() !== 'customer' || !message.recipient_id) return { held: false };
+  let categories = message.categories;
+  if (typeof categories === 'string') {
+    try { categories = JSON.parse(categories); } catch { categories = []; }
+  }
+  if (Array.isArray(categories) && categories.includes(CUSTOMER_INITIATED_EMAIL_CATEGORY)) return { held: false };
+  return dueInvoiceHeldByDisputeHold(message.recipient_id, database);
+}
+
 // A direct sender that refused on the hold and restored the invoice to draft must
 // leave it SCHEDULED: a hold deferral always leaves the invoice on the sender's
 // queue, so it goes out after the release. Best-effort here (the caller already
@@ -338,6 +363,9 @@ function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
 }
 
 module.exports = {
+  storedLifecycleEmailHeld,
+  HOLD_GATED_EMAIL_TEMPLATES,
+  CUSTOMER_INITIATED_EMAIL_CATEGORY,
   dueInvoiceHeldByDisputeHold,
   holdDeferOutcome,
   HOLD_DEFER_CODE,

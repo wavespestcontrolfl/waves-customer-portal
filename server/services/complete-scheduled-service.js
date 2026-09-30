@@ -11994,6 +11994,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
               metadata: { original_message_type: 'payment_failed', notificationEventKey: `payment-problem:service:${record.id}`, service_record_id: record.id, invoice_id: invoice.id, billing_mode_at_send: resolveBillingLane({ billing_mode: svc.cust_billing_mode, waveguard_tier: svc.cust_waveguard_tier, monthly_rate: svc.cust_monthly_rate }).mode, templateKey: 'payment_failed' },
             }));
             paymentFailedNoticeSent = !!failResult.sent;
+            // The send boundary re-reads the dispute hold itself (send-customer-message step
+            // 1.5). A hold that committed - or a lookup that failed, which fails closed -
+            // between the recheck above and that boundary suppresses the notice there. Promote
+            // it to the SAME flag the recheck sets so handOverInvoiceToSender queues the invoice
+            // onto the sender (it then sends after the release) and the completion text goes
+            // report-only, instead of an ordinary failed notice on an unqueued draft.
+            if (failResult.code === 'COLLECTION_HOLD_SUPPRESSED') payLinkHeldByDisputeHold = true;
             const noticeLegs = (failResult.channelResults || failResult.deduped === true)
               && require('./messaging/billing-prior-delivery').settledLegTimes(failResult);
             const noticeSentAt = failResult.deduped ? noticeLegs?.eventAt : new Date();

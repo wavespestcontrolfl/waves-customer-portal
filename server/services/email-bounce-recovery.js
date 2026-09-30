@@ -629,6 +629,13 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // The replay contract always supplies a reason for a refusal. An allowed
       // handoff has already populated result, so an absent reason is ignored.
       authorityRefusal = handoff.reason;
+    } else if ((await require('./collections/collection-hold').storedLifecycleEmailHeld(bouncedMessage)).held) {
+      // Collections DISPUTE hold (owner ruling 2026-09-30): a stored payment.failed /
+      // payment.retry_notice / payment.method_expiring copy carries a pay or update-card link, so
+      // recovery must not re-send it to the corrected address while the hold stands (or cannot be
+      // verified - fail closed). Recovery is one-shot: the copy settles as blocked, exactly like
+      // the fresh-send guard's suppression (dunning after the release covers the customer).
+      authorityRefusal = 'collection_hold';
     } else {
       await dispatchToProvider();
     }

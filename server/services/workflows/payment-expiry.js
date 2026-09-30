@@ -332,6 +332,12 @@ class PaymentExpiry {
           },
           hasEmailLeg: reminderStage !== '60_day',
         });
+        if (sendResult.code === 'COLLECTION_HOLD_SUPPRESSED') {
+          // Dispute hold: the notice waits (no alert row, no interaction stamped; the next sweep
+          // re-tries); the email leg is gated at its own lifecycle boundary.
+          await emailPromise;
+          continue;
+        }
         if (sendResult.blocked || sendResult.sent === false) {
           throw new Error(`payment expiry SMS blocked: ${sendResult.code || sendResult.reason || 'unknown'}`);
         }

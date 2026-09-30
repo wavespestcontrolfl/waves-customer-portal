@@ -530,6 +530,34 @@ async function recordRetrySend(message, result) {
   return finishRetrySend(message, await settleRetrySend(message, result));
 }
 
+// A held lifecycle notice older than this when the hold ends is not re-sent from its stored copy:
+// the provider ladder itself never re-sends a notice older than ~7 hours (RETRY_DELAYS_MS), and a
+// "your payment failed" snapshot that has sat through a multi-day dispute can describe a balance
+// that has since changed. It settles as a definite non-delivery instead; the dunning ladder after
+// the release covers the customer.
+const HOLD_GATED_RETRY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// null = go ahead and dispatch. Otherwise the retryOne outcome. While a dispute hold stands (or
+// its lookup cannot be answered - fail closed) the row goes back on the queue one hold interval
+// out with the claim's attempt refunded: a hold is a WAIT, never a spent retry or a terminal
+// failure.
+async function holdGateLifecycleRetry(message) {
+  const collectionHold = require('./collections/collection-hold');
+  const held = await collectionHold.storedLifecycleEmailHeld(message);
+  if (!held.held) {
+    const bornAt = new Date(message.created_at || message.queued_at || Date.now()).getTime();
+    const wasHeld = /dispute[- ]hold/i.test(String(message.error_message || ''));
+    if (wasHeld && Number.isFinite(bornAt) && Date.now() - bornAt > HOLD_GATED_RETRY_MAX_AGE_MS) {
+      return stopRetry(message, { status: 'failed', reason: 'Stale after a collections dispute hold; not re-sent from the stored copy.' });
+    }
+    return null;
+  }
+  const outcome = collectionHold.holdDeferOutcome(held);
+  logger.info(`[email-provider-retry] ${message.template_key} ${message.id} held: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+  await markRetryHeld(message, outcome.reason);
+  return { sent: false, held: true };
+}
+
 async function retryOne(message) {
   // A row scheduled before the ruling took effect settles the same way.
   if (isSenderRenderedEmail(message)) {
@@ -721,6 +749,11 @@ async function retryOne(message) {
         return await finishRetrySend(message, accepted);
       }
     } else {
+      // A stored pay / update-card lifecycle snapshot (payment.failed, payment.retry_notice,
+      // payment.method_expiring) re-checks the collections dispute hold before it goes back to
+      // SendGrid, exactly as a fresh send does (payment-lifecycle-email.js): the retry waits.
+      const holdOutcome = await holdGateLifecycleRetry(message);
+      if (holdOutcome) return holdOutcome;
       await dispatchToProvider();
     }
     if (state.blocked) {

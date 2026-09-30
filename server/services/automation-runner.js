@@ -205,6 +205,20 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
   return res;
 }
 
+// A collections dispute hold is a WAIT (owner ruling 2026-09-30): the step is not attempted, so
+// it leaves no failed step-send row (a queued row already inserted for it is removed) and the
+// enrollment moves to a bounded recheck time instead of staying overdue - an overdue held
+// enrollment would be re-picked every minute and could fill the runner's 50-row page ahead of
+// unrelated automations. After the release the next tick past that time sends it.
+async function deferPaymentFailedForHold({ enrollment, sendId = null, reason }) {
+  if (sendId) await db('automation_step_sends').where({ id: sendId }).del();
+  await db('automation_enrollments').where({ id: enrollment.id, status: 'active' }).update({
+    next_send_at: new Date(Date.now() + require('./collections/collection-hold').HOLD_DEFER_MS),
+    updated_at: new Date(),
+  });
+  return { sent: false, deferred: true, held: true, reason };
+}
+
 // A refusal that stands until the customer's record changes cancels the
 // enrollment, as before. One the authority marks retryable (a recheck that
 // could not run, a recipient that moved mid-send) leaves the step due for
@@ -212,6 +226,7 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
 // re-reads it as a schedulable hold, but nothing re-reads it for this step.
 async function settlePaymentFailedRefusal({ enrollment, sendId, block }) {
   const reason = String(block.reason || block.code || 'Billing email refused');
+  if (block.code === 'COLLECTION_HOLD_DEFER') return deferPaymentFailedForHold({ enrollment, sendId, reason });
   if (block.retryable === true && block.code !== 'BILLING_PREFERENCES_CHANGED') {
     await db('automation_step_sends').where({ id: sendId }).update({
       status: 'failed', failure_reason: reason.slice(0, 500), updated_at: new Date(),
@@ -675,6 +690,18 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     consultationText: consultationBlock.text,
   });
 
+  const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
+  // Collections DISPUTE hold: read BEFORE the step-send row is inserted, so a held step leaves no
+  // row at all (sendPaymentFailedThroughBillingAuthority re-checks under the authority's locks).
+  if (billingSend) {
+    const upFront = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(enrollment.customer_id);
+    if (upFront.held) {
+      return deferPaymentFailedForHold({ enrollment, reason: upFront.reason === 'lookup_failed'
+        ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
+        : 'Customer has an active collections dispute hold; payment-failed email deferred' });
+    }
+  }
+
   const sendRow = await db('automation_step_sends').insert({
     enrollment_id: enrollment.id,
     step_id: step.id,
@@ -683,7 +710,6 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
     status: 'queued',
   }).returning('*').then((rows) => rows[0]);
 
-  const billingSend = template.key === 'payment_failed' && !!enrollment.customer_id && !testRecipient;
   const deliveryBlock = await automationDeliveryBlock({ enrollment, template, recipient,
     sendId: sendRow.id, testRecipient, billingSend });
   if (deliveryBlock) return deliveryBlock;
@@ -789,6 +815,13 @@ async function processDueSteps() {
     .where('e.status', 'active')
     .where('t.enabled', true)
     .where('e.next_send_at', '<=', new Date())
+    // A payment-failed enrollment for a customer under an active collections dispute hold is a
+    // wait: it stays out of the page (never starving unrelated automations) and is picked up on
+    // the first tick after the release. The step itself re-checks the hold (fail closed).
+    .where((q) => q.whereNot('e.template_key', 'payment_failed')
+      .orWhereNotExists(function heldPaymentFailed() {
+        require('./collections/collection-hold').disputeHoldExistsSql(this, 'e.customer_id');
+      }))
     .orderBy('e.next_send_at', 'asc')
     .limit(50)
     .select('e.id');
