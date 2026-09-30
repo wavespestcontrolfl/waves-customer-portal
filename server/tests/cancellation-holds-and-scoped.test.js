@@ -575,6 +575,46 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockSms).not.toHaveBeenCalled();
   });
 
+  test('an AI booking still awaiting office review is not a visit: no hold for it, never skipped, never named as the first visit back', async () => {
+    const review = { status: 'pending', source_action: 'voice_agent', customer_confirmed: false };
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],
+      visits: [lawnVisit('req', daysOut(6), review), lawnVisit('back', daysOut(45))],
+    });
+    expect(await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) })).toMatchObject({ notNeeded: true, nextVisitOn: daysOut(45) });
+
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('req', daysOut(3), review), lawnVisit('back', daysOut(6))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(6)) }), expect.anything());
+  });
+
+  test('a churned customer\'s resumed hold retires its restart text for good', async () => {
+    holdSeed({ status: 'resumed', resume_on: daysOut(-5) }, [lawnVisit('back', daysOut(3))]);
+    mockState.tables.customers[0].pipeline_stage = 'churned';
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits || '{}')).toMatchObject({ reminderRetired: 'customer_inactive' });
+    mockState.tables.customers[0].pipeline_stage = 'active_customer';
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].status).toBe('resumed');
+  });
+
+  test('a first visit back moved right before the send gives the claim back quietly: no text, no alarm', async () => {
+    holdSeed({ resume_on: daysOut(0) }, [lawnVisit('back', daysOut(1))]);
+    const { renderRequiredSmsTemplate: render } = require('../services/sms-template-renderer');
+    render.mockImplementationOnce(async () => 'body');
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { const r = await openTrx(cb); mockState.tables.scheduled_services[0].scheduled_date = daysOut(4); return r; };
+    try {
+      await sendDueRestartTexts(['h1']);
+    } finally { db.transaction = openTrx; }
+    expect(mockSms).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
+    expect(bells('plan_hold_restart_text_undelivered')).toHaveLength(0);
+  });
+
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {
     holdSeed({}, [lawnVisit('placeholder', daysOut(22), { status: 'rescheduled' }), lawnVisit('back', daysOut(25))]);
     expect((await runPlanHoldLifecycle({ today: daysOut(20) })).reminded).toBe(1);

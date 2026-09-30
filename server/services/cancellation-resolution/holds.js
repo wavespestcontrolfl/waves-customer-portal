@@ -70,11 +70,19 @@ function displayDate(dateStr) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
+// A real appointment: not a pending-rebook placeholder, and not an AI-made
+// booking still awaiting office review (the canonical classifier) — neither
+// makes a hold needed, gets skipped, or is named as the first visit back.
+function isBookedAppointment(visit) {
+  const { isPendingOutboundReviewBooking } = require('../call-booking-source-actions');
+  return visit.status !== 'rescheduled' && !isPendingOutboundReviewBooking(visit);
+}
+
 // A booked visit dated inside the pause. A 'rescheduled' row is a pending-
 // rebook placeholder, not an appointment (firstVisitBack skips it too): it
 // neither makes a hold needed nor gets skipped.
 function inPauseVisit(visit, startsOn, resume) {
-  if (visit.status === 'rescheduled') return false;
+  if (!isBookedAppointment(visit)) return false;
   const date = dateOnlyString(visit.scheduled_date);
   return !!date && date >= startsOn && date < resume;
 }
@@ -104,12 +112,17 @@ async function startAwayMode({ customerId, caseId, until = null }) {
   const today = etDateString();
   const untilYmd = ymdOrDefaultAwayUntil(until);
   if (untilYmd <= today) throw codedError('away_date_invalid', 'The return date must be in the future');
-  const existing = await db('property_preferences').where({ customer_id: customerId }).first('id', 'away_mode_until');
-  if (existing) {
-    await db('property_preferences').where({ id: existing.id }).update({ away_mode_until: untilYmd, updated_at: new Date() });
-  } else {
-    await db('property_preferences').insert({ customer_id: customerId, away_mode_until: untilYmd, created_at: new Date(), updated_at: new Date() });
-  }
+  // The prior value is read and replaced under one row lock, so a failed
+  // accept's restore can never put back a value another accept replaced.
+  const existing = await db.transaction(async (trx) => {
+    const row = await trx('property_preferences').where({ customer_id: customerId }).forUpdate().first('id', 'away_mode_until');
+    if (row) {
+      await trx('property_preferences').where({ id: row.id }).update({ away_mode_until: untilYmd, updated_at: new Date() });
+    } else {
+      await trx('property_preferences').insert({ customer_id: customerId, away_mode_until: untilYmd, created_at: new Date(), updated_at: new Date() });
+    }
+    return row;
+  });
   try {
     await db('customer_interactions').insert({
       customer_id: customerId,
@@ -183,13 +196,14 @@ function countedPriorHold(q, customerId, familyKey) {
  */
 async function notNeededOutcome({ customerId, familyKey, visits, today, resume }) {
   if (visits.some((v) => inPauseVisit(v, today, resume))) return null;
-  const stillEmpty = await db.transaction(async (trx) => {
+  const live = await db.transaction(async (trx) => {
     await lockCustomerComms(trx, customerId);
-    const live = await familyUpcomingVisits(customerId, familyKey, trx);
-    return !live.some((v) => inPauseVisit(v, today, resume));
+    return familyUpcomingVisits(customerId, familyKey, trx);
   });
-  if (!stillEmpty) throw codedError('hold_visits_changed', 'Your schedule just changed — please try again');
-  const next = visits
+  if (live.some((v) => inPauseVisit(v, today, resume))) throw codedError('hold_visits_changed', 'Your schedule just changed — please try again');
+  // The next visit named to the customer comes from the locked read too.
+  const next = live
+    .filter(isBookedAppointment)
     .map((v) => dateOnlyString(v.scheduled_date))
     .filter((date) => date && date >= resume)
     .sort()[0] || null;
@@ -479,7 +493,7 @@ async function applyHoldSkips(holdResults) {
             require('../tech-visit-notifications').notifyVisitCancelled({
               visitId: visit.id, technicianId: row.technician_id, actorId: 'customer',
               snapshot: { date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
-              previousStatus: visit.status, trx,
+              previousStatus: row.status, trx,
             });
           }
           return 'skipped';
@@ -577,7 +591,7 @@ async function firstVisitBack(hold, dbh = db) {
     .whereNotIn('s.status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
     .orderBy('s.scheduled_date', 'asc')
     .select('s.*', 'sv.service_key', 'sv.name as service_name');
-  return rows.find((row) => familyOfServiceRow(row) === hold.family_key) || null;
+  return rows.find((row) => familyOfServiceRow(row) === hold.family_key && isBookedAppointment(row)) || null;
 }
 
 // An accept runs its skips within seconds of writing the hold; a hold
@@ -596,7 +610,16 @@ const SKIP_RECOVERY_AFTER_MS = 15 * 60 * 1000;
 async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
   if (!customer || customer.active === false || customer.pipeline_stage === 'churned') {
-    if (hold.status === 'active') await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+    if (hold.status === 'active') {
+      await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+    } else {
+      // A resumed hold keeps its status (the pause did happen); its restart
+      // text is retired, so a later reactivation's visit is never taken
+      // for this pause's first visit back.
+      await db('plan_holds').where({ id: hold.id }).update({
+        moved_visits: JSON.stringify({ ...readRecord(hold.moved_visits), reminderRetired: 'customer_inactive' }), updated_at: new Date(),
+      });
+    }
     return 'cancelled';
   }
   const next = await firstVisitBack(hold);
@@ -650,24 +673,31 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   const sent = await deliverRestartText(hold, customer, next, nextOn);
   const row = await db('plan_holds').where({ id: hold.id }).first('moved_visits');
   const record = readRecord(row?.moved_visits);
-  if (sent) {
+  if (sent === true) {
     await db('plan_holds').where({ id: hold.id }).update({
       moved_visits: JSON.stringify({ ...record, reminderClaim: { ...(record.reminderClaim || {}), delivered: true } }),
       updated_at: new Date(),
     });
     return 'sent';
   }
-  // Give the claim back so tomorrow's run retries.
+  // Give the claim back so the next run retries (a visit that changed just
+  // before the send is named afresh then — nothing failed).
   const { reminderClaim: _released, ...rest } = record;
   await db('plan_holds').where({ id: hold.id, reminder_sent_at: claimAt }).update({
     reminder_sent_at: null, moved_visits: JSON.stringify(rest), updated_at: new Date(),
   });
+  if (sent === 'stale') return 'not_due';
   return unsentRestartText(hold, next, nextOn, today);
 }
 
 // Render and send the restart text; true only when the provider accepted it.
+// The first visit back is read once more right before the provider call: a
+// dispatch move or cancel since the claim makes this attempt give its claim
+// back, and the next run names the real date.
 async function deliverRestartText(hold, customer, next, nextOn) {
   try {
+    const fresh = await db('scheduled_services').where({ id: next.id }).first('status', 'scheduled_date');
+    if (!fresh || fresh.status !== next.status || dateOnlyString(fresh.scheduled_date) !== nextOn) return 'stale';
     const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
     const { gsmSafeName } = require('../messaging/gsm-normalize');
@@ -825,6 +855,7 @@ async function remindDueHolds(out, today) {
   // after the return date.
   const toRemind = await db('plan_holds').whereIn('status', ['active', 'resumed']).whereNull('reminder_sent_at').select('*');
   for (const hold of toRemind) {
+    if (readRecord(hold.moved_visits).reminderRetired) continue;
     try {
       const result = await sendRestartTextIfDue(hold, { today });
       if (result === 'sent') out.reminded += 1;
