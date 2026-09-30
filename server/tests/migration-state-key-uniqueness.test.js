@@ -83,10 +83,23 @@ function isReadOnlyCollisionArchiveReference(file, src, literal, matchIndex) {
     && archiveContractForSource(src);
 }
 
+// The lawn prep-guide supersession (PR #5420) exports the marker of the
+// migration it supersedes as documentation (SUPERSEDES). It is never written
+// or queried — down() matches only its OWN MIGRATION_MARKER. Pinned to that
+// one exported declaration, as the only occurrence of the literal in the file.
+function isSupersedesDocReference(file, src, literal, matchIndex) {
+  const declaration = "exports.SUPERSEDES = 'migration:20260930120000';";
+  return file === '20260930120001_prep_lawn_guide_revision_codex_r1.js'
+    && literal === 'migration:20260930120000'
+    && matchIndex === src.indexOf(declaration) + 'exports.SUPERSEDES = '.length
+    && src.split('migration:20260930120000').length === 2;
+}
+
 function derivedKeys(file, src) {
   return [...src.matchAll(DERIVED_KEY)]
     .filter((match) => !isReadOnlySeedAuditReference(file, src, match[1], match.index)
-      && !isReadOnlyCollisionArchiveReference(file, src, match[1], match.index))
+      && !isReadOnlyCollisionArchiveReference(file, src, match[1], match.index)
+      && !isSupersedesDocReference(file, src, match[1], match.index))
     .map(([, literal, stamp]) => ({ literal, stamp }));
 }
 
@@ -117,6 +130,16 @@ describe('migration-derived state keys and audit tags', () => {
     const literalMutation = src.replace('  const existing =',
       "  await knex('pricing_config_audit').insert({ changed_by: 'migration:20260911000020' });\n  const existing =");
     expect(derivedKeys(file, literalMutation)).toContainEqual({ literal: 'migration:20260911000020', stamp: '20260911000020' });
+  });
+
+  test('the prep-lawn SUPERSEDES export is exempt only as its single documentation reference', () => {
+    const file = '20260930120001_prep_lawn_guide_revision_codex_r1.js';
+    const src = migrationSource(file);
+    expect(derivedKeys(file, src)).not.toContainEqual({ literal: 'migration:20260930120000', stamp: '20260930120000' });
+    // Any second use of that literal (e.g. writing or matching it) is an owner again.
+    const mutating = src.replace('exports.up = async function up(knex) {',
+      "exports.up = async function up(knex) {\n  const tag = 'migration:20260930120000';");
+    expect(derivedKeys(file, mutating)).toContainEqual({ literal: 'migration:20260930120000', stamp: '20260930120000' });
   });
 
   test('every derived key carries the stamp of the file that owns it', () => {
