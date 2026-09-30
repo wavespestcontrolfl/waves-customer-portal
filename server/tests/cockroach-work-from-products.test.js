@@ -183,3 +183,17 @@ describe('complete-scheduled-service wiring (source-level guards)', () => {
     expect(source).toMatch(/if \(derivedWork\.length\) typedFindings\.values\.work_completed = derivedWork\.join\(', '\);\s+else delete typedFindings\.values\.work_completed;/);
   });
 });
+
+describe('companion cockroach sections keep the work chips tappable (codex P1, #5365)', () => {
+  const { findingsSchemaForType } = require('../services/service-report/activity-indicators');
+  const field = (opts) => findingsSchemaForType('cockroach', opts).fields.find((f) => f.key === 'work_completed');
+
+  test('primary form: derived, hidden', () => {
+    expect(field({}).autoFilled).toBe(true);
+  });
+  test('companion form: tappable and still optional', () => {
+    const f = field({ companion: true });
+    expect(f.autoFilled).toBe(false);
+    expect(f.required).toBe(false);
+  });
+});
