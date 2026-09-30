@@ -361,10 +361,14 @@ async function refreshEmailCommitment(conn, row, now, verify) {
     if (!locked) return;
     // Revalidate against the same property scope the verdict was reached under.
     const { customer_id: scopedCustomer, property_id: scopedProperty, property_adopted: adopted } = current.sms_context;
-    // An adopted sole property is re-read under the customer lock: a second
-    // property committed since the read above means this verdict's scope is
-    // stale, so leave the row for the next tick.
-    if (adopted && (await soleProperty(trx, locked, customerId)).property_id !== scopedProperty) return;
+    // A property adopted on THIS tick is re-read under the customer lock: a
+    // second property committed since the read above means this verdict's
+    // scope is stale, so leave the row for the next tick. An adoption already
+    // stored on the row is settled scope and is not re-litigated.
+    if (adopted && !row.sms_context?.property_id) {
+      const sole = await trx('customer_properties').where({ customer_id: customerId, active: true }).limit(2).pluck('id');
+      if (sole.length !== 1 || sole[0] !== scopedProperty) return;
+    }
     const live = { ...locked, sms_context: { ...locked.sms_context, customer_id: scopedCustomer,
       ...(scopedProperty ? { property_id: scopedProperty } : {}), ...(adopted ? { property_adopted: true } : {}) } };
     if (verdict.verdict === 'fulfilled' && !await revalidateSmsFulfillment(trx, live, message, verdict, now)) return;

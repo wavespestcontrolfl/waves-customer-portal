@@ -371,6 +371,29 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(after.sms_context.property_id ?? null).toBeNull();
   });
 
+  test('an adoption stored on the row keeps being checked on later ticks', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'lead_inquiry',
+      body_text: 'Yes I would like a quote please', subject: 'Re: thanks for reaching out' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'would like a quote', quote: 'Yes I would like a quote please', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date(email.received_at.getTime() + 1000) });
+    const commitment = await mockPg('call_commitments').first();
+    const [property] = await mockPg('customer_properties').insert({ customer_id: customerId,
+      address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236', active: true }).returning('*');
+    // First tick: no witness yet, the deadline has passed → bell, and the adoption is stored.
+    const first = new Date(commitment.due_at.getTime() + 60000);
+    await refreshEmailCommitments({ conn: mockPg, now: first });
+    expect((await mockPg('call_commitments').first()).sms_context).toMatchObject({ property_id: property.id, property_adopted: true });
+    // Later: the estimate is delivered; the next tick must still check and close it.
+    const [estimate] = await mockPg('estimates').insert({ customer_id: customerId, property_id: property.id,
+      status: 'accepted', service_interest: 'Pest Control', estimate_data: { deliveryState: { lastDeliveredAt: new Date(first.getTime() + 60000).toISOString() } } }).returning('id');
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { verdict: 'fulfilled', record_ref: `estimate:${estimate.id}`, quote: 'Pest Control' } });
+    const refresh = await refreshEmailCommitments({ conn: mockPg, now: new Date(first.getTime() + 3 * 60000) });
+    expect(refresh).toMatchObject({ scanned: 1, fulfilled: 1 });
+    expect((await mockPg('call_commitments').first()).status).toBe('fulfilled');
+  });
+
   test('a staff promise follows a customer merge (email_customer_id is repointed; the jsonb snapshot is not)', async () => {
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
     const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
