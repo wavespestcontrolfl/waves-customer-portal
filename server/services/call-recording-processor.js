@@ -2078,7 +2078,7 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION, isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
-const { findStreetLevelHoldCard, isStreetLevelHoldVisit } = require('./street-level-hold');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit, refreshHoldFollowUpPlan } = require('./street-level-hold');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -16774,7 +16774,12 @@ const CallRecordingProcessor = {
                   // confirms the address: the promised follow-up rides on the review
                   // card (payload.follow_up_plan) instead of a child at an unverified
                   // address.
-                  if (await isStreetLevelHoldRow(trx, primaryRow)) return null;
+                  if (await isStreetLevelHoldRow(trx, primaryRow)) {
+                    // A reprocess / replacement may have found or corrected the follow-up:
+                    // keep the card (which the confirm hook reads) on the current plan.
+                    await refreshHoldFollowUpPlan(trx, { callLogId: primaryRow.source_call_log_id, visitId: primaryRow.id, plan: callFollowUpPlan });
+                    return null;
+                  }
                   // Any existing follow-up off this primary — whatever its
                   // status or origin (AI child OR a completion-CTA follow-up)
                   // — means dispatch already owns the outcome (a cancelled

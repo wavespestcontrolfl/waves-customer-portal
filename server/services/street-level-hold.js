@@ -93,4 +93,24 @@ async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db) {
   }
 }
 
-module.exports = { heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit };
+// A reprocess / recording replacement that reuses a held visit may discover a
+// follow-up or correct its date: the confirm hook reads the plan from the visit's
+// card, so refresh it there (jsonb merge, same transaction as the caller's). A
+// null plan never erases an earlier one. Returns true when a card was updated.
+async function refreshHoldFollowUpPlan(conn, { callLogId, visitId, plan }) {
+  if (!plan) return false;
+  const card = await findStreetLevelHoldCard(conn, { callLogId, visitId });
+  if (!card) return false;
+  const next = { scheduled_date: plan.scheduledDate || null, window_start: plan.windowStart || null };
+  const cur = card.payload?.follow_up_plan;
+  if (cur && cur.scheduled_date === next.scheduled_date && cur.window_start === next.window_start) return false;
+  await conn('triage_items')
+    .where({ id: card.id })
+    .update({
+      payload: conn.raw("COALESCE(payload, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ follow_up_plan: next })]),
+      updated_at: new Date(),
+    });
+  return true;
+}
+
+module.exports = { heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };

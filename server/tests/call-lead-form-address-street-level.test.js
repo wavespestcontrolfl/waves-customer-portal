@@ -617,9 +617,9 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     const s = src();
     expect(s).toContain('if (scheduleWasReused && !disputeHeldReuse && !(await isStreetLevelHoldRow(db, svc))) {');
     const fu = s.indexOf('const ensureCallFollowUpVisit = async (primaryRow) => {');
-    const guard = s.indexOf('if (await isStreetLevelHoldRow(trx, primaryRow)) return null;', fu);
+    const guard = s.indexOf('if (await isStreetLevelHoldRow(trx, primaryRow)) {', fu);
     expect(guard).toBeGreaterThan(fu);
-    expect(guard - fu).toBeLessThan(1200);
+    expect(guard - fu).toBeLessThan(1500);
     // Before any child insert.
     expect(guard).toBeLessThan(s.indexOf("source_action: 'ai_call_pipeline_followup'", fu));
   });

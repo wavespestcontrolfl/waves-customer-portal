@@ -2,7 +2,7 @@
 // closes with a cancelled / skipped visit, and an unconfirmed hold takes no
 // self-book daily-cap capacity. Synthetic data only.
 const fs = require('fs');
-const { closeHoldCardForEndedVisit, heldVisitSubquery } = require('../services/street-level-hold');
+const { closeHoldCardForEndedVisit, heldVisitSubquery, refreshHoldFollowUpPlan } = require('../services/street-level-hold');
 
 const card = (status = 'open') => ({ id: 't1', status, payload: { street_level_address: true, scheduled_service_id: 'visit-1' }, summary: 'x' });
 
@@ -78,5 +78,47 @@ describe('self-book daily cap', () => {
     expect(raws).toContain("hold_ti.payload->>'scheduled_service_id' = scheduled_services.id::text");
     expect(raws).toContain('scheduled_services.customer_confirmed = false');
     expect(raws).toContain("scheduled_services.status NOT IN ('cancelled', 'skipped', 'rescheduled')");
+  });
+});
+
+describe('follow-up plan refresh on reuse', () => {
+  const plan = (d, w = '09:00') => ({ scheduledDate: d, windowStart: w });
+  const make = (payload) => {
+    const updates = [];
+    const conn = (table) => {
+      const q = {
+        where() { return q; }, whereRaw() { return q; }, orderBy() { return q; },
+        first: async () => (payload ? { id: 't1', status: 'resolved', payload, summary: 'x' } : null),
+        update: async (u) => { updates.push({ table, u }); return 1; },
+      };
+      return q;
+    };
+    conn.raw = (sql, b) => ({ sql, b });
+    return { conn, updates };
+  };
+  const base = { street_level_address: true, scheduled_service_id: 'v1' };
+
+  test('a newly discovered follow-up is written onto the hold card (any status)', async () => {
+    const { conn, updates } = make(base);
+    expect(await refreshHoldFollowUpPlan(conn, { callLogId: 'c1', visitId: 'v1', plan: plan('2026-10-19') })).toBe(true);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].u.payload.b[0]).toContain('2026-10-19');
+  });
+  test('a corrected date replaces the old one; an unchanged plan, or no plan, writes nothing', async () => {
+    const changed = make({ ...base, follow_up_plan: { scheduled_date: '2026-10-19', window_start: '09:00' } });
+    expect(await refreshHoldFollowUpPlan(changed.conn, { callLogId: 'c1', visitId: 'v1', plan: plan('2026-10-26') })).toBe(true);
+    expect(changed.updates[0].u.payload.b[0]).toContain('2026-10-26');
+    const same = make({ ...base, follow_up_plan: { scheduled_date: '2026-10-19', window_start: '09:00' } });
+    expect(await refreshHoldFollowUpPlan(same.conn, { callLogId: 'c1', visitId: 'v1', plan: plan('2026-10-19') })).toBe(false);
+    const none = make(base);
+    expect(await refreshHoldFollowUpPlan(none.conn, { callLogId: 'c1', visitId: 'v1', plan: null })).toBe(false);
+    expect(none.updates).toHaveLength(0);
+    expect(await refreshHoldFollowUpPlan(make(null).conn, { callLogId: 'c1', visitId: 'v1', plan: plan('2026-10-19') })).toBe(false);
+  });
+  test('the reuse path refreshes the card before returning without a child', () => {
+    const s = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    const at = s.indexOf('if (await isStreetLevelHoldRow(trx, primaryRow)) {');
+    expect(s.slice(at, at + 500)).toContain('await refreshHoldFollowUpPlan(trx, { callLogId: primaryRow.source_call_log_id, visitId: primaryRow.id, plan: callFollowUpPlan });');
+    expect(s.slice(at, at + 600)).toContain('return null;');
   });
 });
