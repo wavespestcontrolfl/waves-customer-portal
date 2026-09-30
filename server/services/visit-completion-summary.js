@@ -5,7 +5,7 @@ const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
 const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
-const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-helpers');
+const { invoiceAmountDue, isInvoiceCollectibleStatus, isQueueSendClaimToken, SUMMARY_TEXT_PLANNED_ERROR } = require('./invoice-helpers');
 const { createDefaultCustomerRows } = require('./customer-default-rows');
 
 const VISIT_SUMMARY_TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -483,7 +483,11 @@ async function summaryLinkStillValid(database, link, visitId, recipientPhone) {
   if (link.kind === 'receipt' && await summaryReceiptTextHandled(database, invoice)) return false;
   // A send already claimed for this invoice (an operator send in flight, whose text row may not
   // exist yet): the summary goes plain rather than both reaching the provider.
-  if (link.kind === 'pay_link' && (invoice.status === 'sending' || invoice.send_claim_token)) return false;
+  // The queue's own claim on a summary-planned invoice is the exception: that send is email-only
+  // by design (the summary text is the link's carrier), so it does not make the summary go plain.
+  const plannedQueueClaim = invoice.status === 'sending' && isQueueSendClaimToken(invoice.send_claim_token)
+    && String(invoice.scheduled_send_error || '').startsWith(SUMMARY_TEXT_PLANNED_ERROR);
+  if (link.kind === 'pay_link' && (invoice.status === 'sending' || invoice.send_claim_token) && !plannedQueueClaim) return false;
   // The invoice's own text already went or is queued (an operator send-now): the link is
   // not texted a second time. Read from the text's own event key, not sms_sent_at, which
   // the queue's email-only finalization stamps too.
@@ -505,6 +509,10 @@ async function recordSummaryLinkTextAccepted(link, database = db) {
     await database('invoices').where({ id: link.invoiceId })
       .update({ receipt_sms_sent_at: database.raw('COALESCE(receipt_sms_sent_at, NOW())'),
         receipt_sent_at: database.raw('COALESCE(receipt_sent_at, NOW())'), updated_at: database.fn.now() });
+    // The receipt did reach the customer: an alert raised while the summary text was still
+    // undelivered (the email gave up first) no longer stands.
+    await require('./admin-alert-episodes').closeAdminAlertKeys(database, [`summary-carried-receipt-email:${link.invoiceId}`], 'summary_text_accepted')
+      .catch((err) => require('./logger').warn(`[visit-summary] could not resolve the receipt alert for ${link.invoiceId}: ${err.message}`));
   }
 }
 

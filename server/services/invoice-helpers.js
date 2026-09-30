@@ -159,6 +159,18 @@ const SUMMARY_TEXT_CARRIED_ERROR = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPT
 // carried marker above only when the summary's link-bearing text is accepted.
 const SUMMARY_TEXT_PLANNED_ERROR = 'SUMMARY_TEXT_PLANNED';
 
+// The scheduled-send queue's own send claim is told apart from an operator's by its token: the
+// column is a uuid, so the queue's tokens are version-8 uuids (the version nibble is '8'), which
+// nothing else generates. The visit summary needs the difference: a planned invoice claimed by the
+// queue sends email only (the summary text still carries the link), while any other claim on the
+// invoice may text it.
+function newQueueSendClaimToken() {
+  return require('crypto').randomUUID().replace(/^(.{14})./, '$18');
+}
+function isQueueSendClaimToken(token) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-/i.test(String(token || ''));
+}
+
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
 // The stale-claim review hold, read back from the park above: a row parked
@@ -312,6 +324,8 @@ module.exports = {
   BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
   SUMMARY_TEXT_CARRIED_ERROR,
   SUMMARY_TEXT_PLANNED_ERROR,
+  newQueueSendClaimToken,
+  isQueueSendClaimToken,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,

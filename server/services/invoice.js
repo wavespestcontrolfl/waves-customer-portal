@@ -3438,7 +3438,9 @@ async function dequeuePayerOwnedZeroDueInvoice(inv, reasonText) {
 // and claimPacketInvoiceForSend's requireDue branch so a fairness change
 // (the attempt cap, the due predicate) only has to be made once.
 async function claimDueScheduledInvoiceForSend(database, invoiceId) {
-  const claimToken = crypto.randomUUID();
+  // A recognizable queue claim (see newQueueSendClaimToken): the visit summary lets a planned,
+  // email-only queue claim pass, and drops its link for any other claim.
+  const claimToken = require("./invoice-helpers").newQueueSendClaimToken();
   // Full row (pre-push audit P1, #4131 slice 4): claimPacketInvoiceForSend's
   // requireDue branch used to return "*" as claim.invoice before sharing
   // this helper, and downstream consumers of a packet claim read fields

@@ -220,21 +220,29 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
     });
 }
 
-// The customer's receipt link rides the visit summary text, and the receipt email that
-// backs it up did not go (or the job gave up): the office is told, one alert per invoice.
+// The receipt's Text leg belongs to the visit summary text, and the receipt email that backs it
+// up did not go (or the job gave up): the office is told, one alert per invoice. The wording
+// follows what the summary text actually did: receipt_sms_sent_at is stamped only when it was
+// accepted. A summary that is deferred or was suppressed delivered nothing, so neither channel has.
+// The alert is closed when the summary text is later accepted (visit-completion-summary.js).
 async function alertCarriedReceiptEmail(job, reason) {
   try {
+    const accepted = Boolean((await db('invoices').where({ id: job.invoice_id }).first('receipt_sms_sent_at'))?.receipt_sms_sent_at);
     await require('./admin-alert-compose').raiseAdminAlert('alert', {
       area: 'Billing',
-      action: 'confirm the customer got the receipt',
-      why: 'The receipt link went out by text only, and the receipt email did not go.',
+      action: accepted ? 'confirm the customer got the receipt' : 'send the customer their receipt',
+      why: accepted
+        ? 'The receipt link went out by text only, and the receipt email did not go.'
+        : 'Neither the visit summary text nor the receipt email has delivered the receipt link.',
       severity: 'needs-you',
       link: `/admin/invoices?invoice=${job.invoice_id}`,
       subject: { type: 'invoice', id: String(job.invoice_id) },
       doneWhen: 'receipt_delivered',
       who: 'person',
     }, {
-      detail: `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`,
+      detail: accepted
+        ? `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`
+        : `Invoice ${job.invoice_id}: the visit summary text that was to carry its receipt link has not been accepted (deferred or not sent), and the receipt email did not go (${reason}). Send the customer their receipt.`,
       dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`,
       metadata: { invoice_id: job.invoice_id },
     });

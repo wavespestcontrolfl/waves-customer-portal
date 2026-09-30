@@ -5856,5 +5856,87 @@ postgres('visit summary recipient recovery', () => {
         expect(Number((await mockPg('customers').where({ id: fixture.customerId }).first('account_credits')).account_credits)).toBe(20);
       });
     });
+
+    describe('a planned invoice the queue claimed before the summary handoff', () => {
+      const Helpers = require('../services/invoice-helpers');
+      test('the summary still carries the link: the queue claim on a planned row is email-only', async () => {
+        const invoiceId = await stop();
+        let calls = 0;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          calls += 1;
+          if (calls === 1) await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: Helpers.newQueueSendClaimToken() });
+          return handoffSender()(input);
+        });
+        await coordinate();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body.startsWith(`${plainBody()} Pay your invoice: `)).toBe(true);
+        expect(strayTexts).toEqual([]);
+      });
+
+      test('the queue worker takes its claim with a queue token, and any other claim does not carry one', async () => {
+        const invoiceId = await stop();
+        await coordinate();
+        await mockPg('invoices').where({ id: invoiceId }).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+        let token;
+        jest.spyOn(Invoice, 'sendViaSMSAndEmail').mockImplementation(async (id, options) => {
+          token = options.claimToken;
+          await mockPg('invoices').where({ id }).update({ status: 'scheduled', send_claim_token: null });
+          return { ok: true, sms: { ok: false }, email: { ok: true } };
+        });
+        await Invoice.processScheduledSends();
+        expect(Helpers.isQueueSendClaimToken(token)).toBe(true);
+        expect(Helpers.isQueueSendClaimToken(randomUUID())).toBe(false);
+      });
+    });
+
+    describe('the carried receipt alert follows what the summary text did', () => {
+      const alertRow = (invoiceId) => mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [`summary-carried-receipt-email:${invoiceId}`]).first();
+      afterEach(async () => { await mockPg('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'summary-carried-receipt-email:%'").del(); });
+      const exhaustEmail = async (invoiceId) => {
+        require('../services/invoice-email').sendReceiptEmail.mockResolvedValue({ ok: false, error: 'SendGrid 500' });
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() - 1000) });
+          await Queue.processDueReceiptDeliveryJobs();
+        }
+      };
+
+      test('summary deferred and the email exhausted: the alert says neither delivered; the summary then accepted closes it', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        const nextAllowedAt = new Date(Date.now() + 8 * 3600000).toISOString();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt }));
+        await coordinate();
+        const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+        await exhaustEmail(invoiceId);
+        expect(await jobRow(invoiceId)).toMatchObject({ status: 'failed' });
+        const raised = await alertRow(invoiceId);
+        expect(JSON.stringify(raised)).toMatch(/Neither the visit summary text nor the receipt email/);
+        expect(JSON.stringify(raised)).not.toMatch(/went out by text only/);
+        expect(raised.metadata.autoCleared).not.toBe(true);
+        expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
+        await Summary.finalizeDeferredSummarySms(queued.metadata);
+        expect((await alertRow(invoiceId)).metadata).toMatchObject({ autoCleared: true });
+      });
+
+      test('the summary text accepted and the email exhausted: the alert says the receipt went by text only', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await coordinate();
+        await exhaustEmail(invoiceId);
+        const raised = await alertRow(invoiceId);
+        expect(JSON.stringify(raised)).toMatch(/went out by text only/);
+        expect(JSON.stringify(raised)).not.toMatch(/Neither the visit summary text/);
+      });
+
+      test('the expected email skip with the summary still deferred also says undelivered', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        const nextAllowedAt = new Date(Date.now() + 8 * 3600000).toISOString();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt }));
+        await coordinate();
+        require('../services/invoice-email').sendReceiptEmail.mockResolvedValue({ ok: false, error: 'No receipt recipient email' });
+        await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() - 1000) });
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(JSON.stringify(await alertRow(invoiceId))).toMatch(/Neither the visit summary text nor the receipt email/);
+      });
+    });
   });
 });
