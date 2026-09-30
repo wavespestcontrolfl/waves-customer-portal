@@ -1434,11 +1434,17 @@ hold, water-in or hold-then-water-in: `reportV2.banner`
 `hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
 finished customer sentences with absolute Eastern clock times; `holdUntil`,
 `waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
-has dried" hold has `holdUntil: null` and no printed duration, and expires at the
-end of the visit day in Eastern time; the key is absent when there is no claim); `reportV2.aftercare` gains `evidenceSource:
-'product_instruction'`, `wateringHold` (hold states), `creditableWaterIn`
-(water-in only; a mixed visit is a hold), `holdTask` (the banner's first line
-verbatim), `ruleSource`, `holdUntil` and `waterInBy`; and
+has dried" hold has no printed duration and `expiresAt: null` (dryness is a
+condition, so neither it nor a timed hold that also waits for drying ever ends by
+the clock; the plan-week scope bounds it), and an until-dry-only hold also has
+`holdUntil: null`; the key is absent when there is no claim); `reportV2.aftercare`
+gains `evidenceSource: 'product_instruction'`, `wateringHold` (while a hold is
+live), `creditableWaterIn` (water-in only; a mixed visit is a hold), `holdTask`
+(the banner's first line verbatim, or its first two lines for hold-then-water-in),
+`waterInTask` (a banner line verbatim: an uncredited water-in, or the water-in
+step once a timed hold-then-water-in hold has ended), `wateringEnded: true` past
+`expiresAt` (the wording stays as a record, nothing is restricted, credited or
+promoted), `ruleSource`, `holdUntil` and `waterInBy`; and
 `reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
 `{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
 end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
