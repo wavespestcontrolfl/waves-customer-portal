@@ -27,6 +27,10 @@ jest.mock('../config/feature-gates', () => ({
   // that gate, and false matches this route's pre-existing (append-only)
   // behavior for every test that doesn't override it.
   bookCapacityCommitLive: jest.fn(() => false),
+  // GATE_BOOK_ARRIVAL_GRACE (2026-09-29): routes/booking.js reads this
+  // canonical reader; off here — it only ever runs behind
+  // bookInsertionOffersLive() anyway (also off).
+  bookArrivalGraceLive: jest.fn(() => false),
 }));
 
 // Universal query-chain mock (same shape booking-customers-only-gate.test.js

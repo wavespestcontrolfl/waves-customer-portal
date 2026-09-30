@@ -30,6 +30,9 @@
  *      closed, audit log.
  *   6. Template kill switch — dropped_call_address_request is admin-editable
  *      and is_active-toggleable like every automated template.
+ *   7. Never to a number whose caller said no to texts on any call (owner
+ *      2026-09-30 — the same "no texts" the booking-link text and the
+ *      missed-call / voicemail texts honour). A call-back is still fine.
  */
 
 const db = require('../models/db');
@@ -44,6 +47,7 @@ const { isWithinSendWindowET } = require('./messaging/send-window');
 // sentinel providerMessageId and no SMS leaves the system.
 const { isRealProviderSend } = require('./sms-auto-send');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
+const { saidNoTextsOnAnyCall } = require('./messaging/auto-text-holds');
 
 const MESSAGE_TYPE = 'dropped_call_address_request';
 const MIN_CALL_SECONDS = 120;
@@ -342,6 +346,20 @@ async function sendDroppedCallAddressRequest({ leadId, extracted = {}, call = {}
   if (!withinSendWindowET()) {
     logger.info(`[dropped-call-sms] Outside 8am-8pm ET window — text skipped for lead ${leadId}`);
     return { sent: false, skipped: 'quiet_hours' };
+  }
+
+  // "No texts" said on an earlier call with this number (or on this one,
+  // once saved — the processor checks this call's own extraction before it
+  // gets here). BEFORE any claim: the one-shot is not consumed, the card
+  // still opens and reads "call them back". Fail closed on a read error.
+  try {
+    if (await saidNoTextsOnAnyCall(phone, { originCallId: call.id || null })) {
+      logger.info(`[dropped-call-sms] Caller said no to texts — text skipped for lead ${leadId}`);
+      return { sent: false, skipped: 'said_no_texts' };
+    }
+  } catch (e) {
+    logger.warn(`[dropped-call-sms] no-texts read failed — skipping (fail closed): ${e.code || e.name || 'db_error'}`);
+    return { sent: false, skipped: 'said_no_texts_read_failed' };
   }
 
   // Belt-and-suspenders history check; the ATOMIC gate is the claim insert.

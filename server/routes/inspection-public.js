@@ -196,7 +196,7 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { geocodeAddressWithStatus } = require('../services/geocoder');
 const { reverseGeocodeCounty } = require('../services/address-validation');
 const { isInServiceAreaCounty } = require('../services/call-triage-flags');
-const { isInServiceAreaBox } = require('../services/service-area');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox } = require('../services/service-area');
 const { isAssessmentBooking, scopeToAssessmentBookings, ASSESSMENT_SERVICE_KEY } = require('../services/assessment-booking');
 const { isOpenLeadRow } = require('../services/lead-statuses');
 // The Waves Assessment's catalog identity for travel-gap padding — shared by
@@ -681,9 +681,14 @@ async function checkServiceArea(location, address = null) {
   // reverseGeocodeCounty returns a bare county name, so an out-of-state
   // county with a served county's name (Charlotte County, VA) would pass
   // the name match alone. Outside the box is out of area, no network call.
-  if (!isInServiceAreaBox(location.lat, location.lng)) return { ok: false, county: null };
+  if (!isInServiceAreaCoarseBox(location.lat, location.lng)) return { ok: false, county: null };
   const key = process.env.GOOGLE_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-  if (!key) return { ok: true, county: null };
+  // No key: no county lookup, so the DeSoto rectangle applies unless the
+  // address's own ZIP proves a served locality (isInServiceAreaBox). With a
+  // key the reverse-geocoded county decides below and wins over the rectangle.
+  if (!key) {
+    return { ok: isInServiceAreaBox(location.lat, location.lng, { zip: address?.zip }), county: null };
+  }
   let county = null;
   try {
     county = await reverseGeocodeCounty({ latitude: location.lat, longitude: location.lng }, key);
@@ -777,6 +782,12 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
     // and the commit's own preparedCapacity gate reading the same env.
     capacityPlacement: bookInsertionOffersLive(),
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+    // the gate is off). The commit is the same createSelfBooking, which
+    // re-reads the live grace for this date (no signed offer on this flow) —
+    // the rebuild and the commit run in the same request, so both see the
+    // same gate and grace value.
+    bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }

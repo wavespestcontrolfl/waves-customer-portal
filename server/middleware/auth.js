@@ -95,6 +95,13 @@ const CANCELLED_READ_ROUTES = [
   // notifications kept reaching a signed-out device. Narrow write: it only
   // deactivates the caller's own token.
   ['POST', '/api/push/native-unsubscribe'],
+  // Activity beacons (GATE_PORTAL_ACTIVITY): the cancelled portal still
+  // opens tabs and taps billing pushes, and a 401 here would churn the
+  // refresh token on every tab change. Write-only analytics rows for the
+  // caller's own session — nothing is read back.
+  ['POST', '/api/customer/activity/page-view'],
+  ['POST', '/api/customer/activity/push-open'],
+  ['POST', '/api/customer/activity/heartbeat'],
 ];
 
 function cancelledReadRoute(req) {

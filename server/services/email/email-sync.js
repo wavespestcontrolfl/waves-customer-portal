@@ -315,6 +315,10 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
     from_address: parsed.from_address,
     from_name: parsed.from_name,
     to_address: parsed.to_address,
+    // '' when the message had no Cc/Bcc header; NULL only on rows synced
+    // before capture existed.
+    cc_address: parsed.cc_address ?? '',
+    bcc_address: parsed.bcc_address ?? '',
     subject: parsed.subject,
     body_text: parsed.body_text,
     body_html: parsed.body_html,
@@ -379,6 +383,10 @@ async function upsertEmail(parsed, { backfill = false } = {}) {
       list_unsubscribe: parsed.list_unsubscribe || existing.list_unsubscribe || null,
       list_unsubscribe_post: parsed.list_unsubscribe_post || existing.list_unsubscribe_post || null,
       message_id: parsed.message_id || existing.message_id || null,
+      // Backfill the recipient capture on resync, only where it never
+      // happened (NULL): a captured value is never overwritten.
+      cc_address: existing.cc_address ?? parsed.cc_address ?? null,
+      bcc_address: existing.bcc_address ?? parsed.bcc_address ?? null,
       reply_to: parsed.reply_to || existing.reply_to || null,
       authentication_results: parsed.authentication_results || existing.authentication_results || null,
       updated_at: new Date(),

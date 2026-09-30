@@ -26,8 +26,9 @@ const PENDING_PURGE_MS = 30 * 24 * 60 * 60 * 1000;    // 30 days — then delete
 // signup: its own transition, out of subscribeOrResubscribe's shared state
 // machine (Codex #4737 r9 P2).
 async function transitionWaitlistRow(existing, {
-  source, firstName, lastName, requireConfirmation, promoteWaitlist, linkCustomer, lc,
+  source, firstName, lastName, requireConfirmation, promoteWaitlist, linkCustomer, lc, dbh = null,
 }) {
+  const conn = dbh || db;
   // Codex pre-push P1 :1087, 2026-09-24 — a 'waitlist' row (the
   // out-of-area inspection-link prompt, inspection-public.js's POST
   // /:token/waitlist) intentionally carries NO subscription: it skips
@@ -63,7 +64,7 @@ async function transitionWaitlistRow(existing, {
   if (requireConfirmation) {
     updates.status = 'pending';
     updates.confirmation_sent_at = new Date();
-    updates.confirmation_token = db.raw('gen_random_uuid()');
+    updates.confirmation_token = conn.raw('gen_random_uuid()');
   } else {
     updates.status = 'active';
     updates.confirmed_at = new Date();
@@ -72,10 +73,10 @@ async function transitionWaitlistRow(existing, {
   // an overlapping signup or admin promotion that moved it first wins, and
   // this call returns null so the caller re-runs the normal state machine
   // (never a second token overwriting the first's emailed link).
-  const moved = await db('newsletter_subscribers').where({ id: existing.id, status: 'waitlist' }).update(updates);
+  const moved = await conn('newsletter_subscribers').where({ id: existing.id, status: 'waitlist' }).update(updates);
   if (!moved) return null;
-  if (linkCustomer) await linkToCustomer(lc);
-  const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+  if (linkCustomer) await linkToCustomer(lc, conn);
+  const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
   return { subscriber: fresh, action: requireConfirmation ? 'confirmation_sent' : 'resubscribed' };
 }
 
@@ -134,7 +135,12 @@ async function subscribeOrResubscribeOnce({
   // /subscribers) may promote a waitlist row straight to active; bulk and
   // automatic trusted flows never do (Codex #4737 r3 P2).
   promoteWaitlist,
+  // Optional caller transaction: every read/write of the state machine runs on
+  // it (default: the pool) so a caller holding a connection + locks never waits
+  // on a second pooled connection for its own subscribe.
+  dbh = null,
 } = {}, { retried } = {}) {
+  const conn = dbh || db;
   if (!email) {
     const err = new Error('email required');
     err.code = 'EMAIL_REQUIRED';
@@ -154,7 +160,7 @@ async function subscribeOrResubscribeOnce({
     throw err;
   }
 
-  const existing = await db('newsletter_subscribers').where({ email: lc }).first();
+  const existing = await conn('newsletter_subscribers').where({ email: lc }).first();
 
   if (existing) {
     // Pending → still mid-DOI. Resend the confirmation email if the
@@ -163,25 +169,25 @@ async function subscribeOrResubscribeOnce({
     // trusted (admin add) on a previously public-form-pending row.
     if (existing.status === 'pending') {
       if (requireConfirmation) {
-        await db('newsletter_subscribers').where({ id: existing.id }).update({
+        await conn('newsletter_subscribers').where({ id: existing.id }).update({
           source,
           first_name: firstName !== null ? firstName : existing.first_name,
           last_name: lastName !== null ? lastName : existing.last_name,
           confirmation_sent_at: new Date(),
           updated_at: new Date(),
         });
-        if (linkCustomer) await linkToCustomer(lc);
-        const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+        if (linkCustomer) await linkToCustomer(lc, conn);
+        const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
         return { subscriber: fresh, action: 'confirmation_resent' };
       }
       // Trusted-context promotion: flip pending to active.
-      await db('newsletter_subscribers').where({ id: existing.id }).update({
+      await conn('newsletter_subscribers').where({ id: existing.id }).update({
         status: 'active',
         confirmed_at: new Date(),
         updated_at: new Date(),
       });
-      if (linkCustomer) await linkToCustomer(lc);
-      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+      if (linkCustomer) await linkToCustomer(lc, conn);
+      const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
       return { subscriber: fresh, action: 'confirmed' };
     }
 
@@ -189,7 +195,7 @@ async function subscribeOrResubscribeOnce({
       // Its own status-specific transition (Codex #4737 r9 P2) — see
       // transitionWaitlistRow below.
       return waitlistBranch(existing, {
-        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist, lc,
+        email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist, lc, dbh,
       }, retried);
     }
 
@@ -223,19 +229,19 @@ async function subscribeOrResubscribeOnce({
       updates.deactivated_at = null;
       updates.deactivated_reason = null;
       updates.reengagement_flagged_at = null;
-      updates.tags = db.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]);
+      updates.tags = conn.raw("COALESCE(tags, '[]'::jsonb) - ?", [REENGAGEMENT_TAG]);
       if (requireConfirmation) {
         updates.status = 'pending';
         updates.confirmation_sent_at = new Date();
-        updates.confirmation_token = db.raw('gen_random_uuid()');
+        updates.confirmation_token = conn.raw('gen_random_uuid()');
         updates.confirmed_at = null;
       } else {
         updates.status = 'active';
         updates.confirmed_at = new Date();
       }
-      await db('newsletter_subscribers').where({ id: existing.id }).update(updates);
-      if (linkCustomer) await linkToCustomer(lc);
-      const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+      await conn('newsletter_subscribers').where({ id: existing.id }).update(updates);
+      if (linkCustomer) await linkToCustomer(lc, conn);
+      const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
       return {
         subscriber: fresh,
         action: requireConfirmation ? 'confirmation_sent' : 'resubscribed',
@@ -245,16 +251,16 @@ async function subscribeOrResubscribeOnce({
     // status === 'active' — already confirmed. No-op aside from the
     // customer-link refresh (in case the row predates the customer
     // signup and the link is newly possible).
-    if (linkCustomer) await linkToCustomer(lc);
-    const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
+    if (linkCustomer) await linkToCustomer(lc, conn);
+    const fresh = await conn('newsletter_subscribers').where({ id: existing.id }).first();
     return { subscriber: fresh, action: 'already_active' };
   }
 
   // New row — its own step (keeps this state machine's complexity down).
-  return insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer }, () => (retried
+  return insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer, dbh }, () => (retried
     ? null
     : subscribeOrResubscribeOnce({
-      email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist,
+      email, firstName, lastName, source, strict, linkCustomer, requireConfirmation, promoteWaitlist, dbh,
     }, { retried: true })));
 }
 
@@ -273,7 +279,8 @@ async function waitlistBranch(existing, params, retried) {
   return subscribeOrResubscribeOnce(signup, { retried: true });
 }
 
-async function insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer }, onConflict) {
+async function insertNewSubscriber({ lc, firstName, lastName, source, requireConfirmation, linkCustomer, dbh = null }, onConflict) {
+  const conn = dbh || db;
   const insertRow = {
     email: lc,
     first_name: firstName,
@@ -288,17 +295,21 @@ async function insertNewSubscriber({ lc, firstName, lastName, source, requireCon
   }
   let row;
   try {
-    [row] = await db('newsletter_subscribers').insert(insertRow).returning('*');
+    // A unique violation aborts a transaction; on a caller's transaction the
+    // insert runs in a savepoint so the conflict retry below can still read.
+    [row] = conn.isTransaction
+      ? await conn.transaction((sp) => sp('newsletter_subscribers').insert(insertRow).returning('*'))
+      : await conn('newsletter_subscribers').insert(insertRow).returning('*');
   } catch (err) {
     const retry = err && err.code === '23505' ? onConflict() : null;
     if (retry) return retry;
     throw err;
   }
 
-  if (linkCustomer) await linkToCustomer(lc);
+  if (linkCustomer) await linkToCustomer(lc, conn);
   // Re-read for the same reason — surfaces the freshly populated
   // customer_id without requiring callers to know the link runs.
-  const fresh = await db('newsletter_subscribers').where({ id: row.id }).first();
+  const fresh = await conn('newsletter_subscribers').where({ id: row.id }).first();
   return {
     subscriber: fresh,
     action: requireConfirmation ? 'confirmation_sent' : 'created',

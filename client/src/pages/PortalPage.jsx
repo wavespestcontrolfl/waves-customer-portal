@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import { useAuth, tokenCustomerId } from '../hooks/useAuth';
 import useLockBodyScroll from '../hooks/useLockBodyScroll';
 import useModalFocus from '../hooks/useModalFocus';
+import usePortalActivity from '../hooks/usePortalActivity';
 import api from '../utils/api';
 import usePortalRead, { PortalReadProvider } from '../hooks/usePortalRead';
 import PropertySelectionRevalidator from '../components/portal/PropertySelectionRevalidator';
@@ -2668,6 +2669,25 @@ function SavedVisitDetails({ visits }) {
   </ul>;
 }
 
+// The Google review card stops showing once the customer taps it or dismisses
+// it. A tracked click also ends it server-side (review_requests.redirected_at);
+// this remembers the untracked bare-link tap and dismissals per completed visit
+// in the browser only — no new table.
+const REVIEW_CARD_DONE_KEY = 'waves.googleReviewCardDone';
+// Keyed by the scheduled visit, which every service record of that visit
+// shares; an unlinked legacy record falls back to its own id.
+const reviewCardKey = (c) => c.scheduledServiceId || c.serviceRecordId;
+function reviewCardDone(serviceRecordId) {
+  try { return JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').includes(serviceRecordId); } catch { return false; }
+}
+function rememberReviewCardDone(serviceRecordId) {
+  if (!serviceRecordId) return; // no visit id to remember: the dismissal lasts this session only
+  try {
+    const ids = JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').filter((id) => id !== serviceRecordId);
+    localStorage.setItem(REVIEW_CARD_DONE_KEY, JSON.stringify([...ids, serviceRecordId].slice(-20)));
+  } catch { /* storage unavailable — the card just shows again next visit to Home */ }
+}
+
 function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [], activePropertyId, selectedProperty = null, onSavedScopeUnavailable, focusRequestId }) {
   // Saved-property scope: the entry this tab shows, for the scope-echo check.
   const dashboardEntry = properties.find((p) => p.id === (activePropertyId || customer?.id)) || null;
@@ -2748,8 +2768,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
   useEffect(() => { if (lastScopeStale && onSavedScopeUnavailable) onSavedScopeUnavailable(); }, [lastScopeStale, onSavedScopeUnavailable]);
   const lastService = lastScopeStale ? null : (lastRead.data?.services?.[0] || null);
   const lastServiceStatus = lastRead.error ? 'error' : lastRead.data ? 'ready' : 'loading';
-  const [pendingSatisfaction, setPendingSatisfaction] = useState(null);
-  const [pendingSatisfactionStatus, setPendingSatisfactionStatus] = useState('loading');
+  const [reviewCard, setReviewCard] = useState(null);
+  const [reviewCardStatus, setReviewCardStatus] = useState('loading');
   const [referralStats, setReferralStats] = useState(null);
   const [referralStatsStatus, setReferralStatsStatus] = useState('loading');
   // Authoritative billing mode from the autopay response — /auth/me still
@@ -2771,15 +2791,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       setBillingModeStatus('ready');
     }).catch(() => setBillingModeStatus('error'));
   }, []);
-  const [satRating, setSatRating] = useState(0);
-  const [satHover, setSatHover] = useState(0);
-  const [satPhase, setSatPhase] = useState('rate');
-  const [satFeedback, setSatFeedback] = useState('');
-  const [satReviewLink, setSatReviewLink] = useState('');
-  const [satOfficeName, setSatOfficeName] = useState('');
-  const [satSubmitting, setSatSubmitting] = useState(false);
-  const [satError, setSatError] = useState('');
-  const [satDismissed, setSatDismissed] = useState(false);
+  const [reviewCardDismissed, setReviewCardDismissed] = useState(false);
   // Home-page content rows (owner 2026-07-09) — Facebook and Instagram
   // (same public feed the wavespestcontrol.com Social Hub renders), the
   // Waves blog, and the newsletter. Best-effort: an empty/failed feed just
@@ -2835,20 +2847,20 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
         console.error(err);
         setBalanceStatus('error');
       });
-    api.getPendingSatisfaction().then(d => {
-      // A prompt served under another house than Home shows (the echo
+    api.getGoogleReviewCard().then(d => {
+      // A card served under another house than Home shows (the echo
       // disagrees with the entry) is not asked — the selection is re-read
       // instead (GitHub codex r11 P2). Same rule as the next/last reads.
       const { entry, saved, named, refresh } = pendingScopeRef.current;
       if (scopeEchoMismatch(d.propertyScope, entry, saved, named)) {
         if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
-      } else if (d.pending?.length) setPendingSatisfaction(d.pending[0]);
-      setPendingSatisfactionStatus('ready');
+      } else if (d.card && !reviewCardDone(reviewCardKey(d.card))) setReviewCard(d.card);
+      setReviewCardStatus('ready');
     }).catch(err => {
-      // No error UI: the feedback card only exists when a pending item is
-      // known, so a failed load safely renders nothing.
+      // No error UI: the review card only exists when the server offers one,
+      // so a failed load safely renders nothing.
       console.error(err);
-      setPendingSatisfactionStatus('error');
+      setReviewCardStatus('error');
     });
     api.getReferrals().then(d => {
       if (d?.stats) setReferralStats({
@@ -2883,68 +2895,6 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       .then((d) => setNewsletterPosts((d?.posts || []).filter((p) => p.link).slice(0, 6)))
       .catch(() => {});
   }, []);
-
-  const handleSatRating = async (rating) => {
-    setSatRating(rating);
-    setSatError('');
-    setSatSubmitting(true);
-    try {
-      const result = await api.submitSatisfaction({
-        serviceRecordId: pendingSatisfaction.id,
-        rating,
-      });
-      if (result.action === 'review') {
-        setSatReviewLink(result.reviewLink);
-        setSatOfficeName(result.officeName);
-        setSatPhase('review');
-      } else {
-        setSatPhase('feedback');
-      }
-    } catch (err) {
-      // The write failed — an optimistically lit rating with no phase change
-      // read as "recorded" while nothing was saved. Clear it and say so.
-      console.error(err);
-      setSatRating(0);
-      setSatError('We could not record your rating. Please try again.');
-    }
-    setSatSubmitting(false);
-  };
-
-  const handleSatFeedback = async () => {
-    const note = satFeedback.trim();
-    if (!note) {
-      // Nothing to save — the rating from the previous step already went
-      // through, and an empty POST would only draw the duplicate 409.
-      setSatPhase('thanks');
-      return;
-    }
-    setSatSubmitting(true);
-    setSatError('');
-    try {
-      // The server updates the response the rating step inserted, filling
-      // in the written note (satisfaction.js duplicate-update path).
-      await api.submitSatisfaction({
-        serviceRecordId: pendingSatisfaction.id,
-        rating: satRating,
-        feedbackText: note,
-      });
-      setSatPhase('thanks');
-    } catch (err) {
-      if (err?.status === 409) {
-        // A note is already stored for this visit (double-submit) — that IS
-        // the saved state, not a failure.
-        setSatPhase('thanks');
-        setSatSubmitting(false);
-        return;
-      }
-      // The rating from the previous step is already recorded, but this
-      // note is NOT — thanking the customer for a message we never received
-      // silently loses a service concern. Keep the form open to retry.
-      console.error(err);
-      setSatError('Your note could not be sent. Your rating is saved — please try sending the note again.');
-    }
-    setSatSubmitting(false);
-  };
 
   // position:relative lets the glass specular pseudo-elements anchor to each
   // card; inert without the glass theme mounted (no offsets, no stacking context).
@@ -3304,100 +3254,42 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
 
       {!dashboardSecondarySelection && <PropertyAlertsCard data={propertyAlerts} />}
 
-      {pendingSatisfactionStatus === 'ready' && pendingSatisfaction && !satDismissed && (
-        <section data-glass="card" style={{ ...card, padding: 20, borderColor: satPhase === 'rate' ? '#FED7AA' : '#BFDBFE' }}>
-          {satPhase === 'rate' && (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
-                  <ShellIconTile icon="star" tone="success" size={38} />
-                  <div style={{ minWidth: 0 }}>
-                    <div data-glass="chip" style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
-                    <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
-                    <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
-                      {pendingSatisfaction.service_type || pendingSatisfaction.serviceType}
-                      {pendingSatisfaction.technician_name || pendingSatisfaction.technicianName ? ` · ${pendingSatisfaction.technician_name || pendingSatisfaction.technicianName}` : ''}
-                    </div>
-                  </div>
+      {reviewCardStatus === 'ready' && reviewCard && !reviewCardDismissed && (
+        <section data-glass="card" style={{ ...card, padding: 20, borderColor: '#BFDBFE' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'flex-start', minWidth: 0 }}>
+              <ShellIconTile icon="star" tone="success" size={38} />
+              <div style={{ minWidth: 0 }}>
+                <div data-glass="chip" style={dashboardLabel}><Icon name="star" size={14} strokeWidth={2} />Visit Feedback</div>
+                <div style={{ marginTop: 4, fontSize: 17, fontWeight: 700, color: B.glassNavy }}>How was your visit?</div>
+                <div style={{ marginTop: 2, fontSize: 14, color: muted, lineHeight: 1.45 }}>
+                  {reviewCard.serviceType}
+                  {reviewCard.technicianName ? ` · ${reviewCard.technicianName}` : ''}
                 </div>
-                <ShellCloseButton onClick={() => setSatDismissed(true)} label="Dismiss feedback prompt" />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: compact ? 'repeat(5, minmax(0, 1fr))' : 'repeat(10, minmax(0, 1fr))', gap: 4, marginTop: 14 }}>
-                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => {
-                  const active = n <= (satHover || satRating);
-                  const color = n <= 3 ? B.red : n <= 7 ? B.orange : B.green;
-                  return (
-                    <button key={n} type="button" onMouseEnter={() => setSatHover(n)} onMouseLeave={() => setSatHover(0)} onClick={() => handleSatRating(n)} disabled={satSubmitting} style={{
-                      minWidth: 0, height: 38, borderRadius: 8, border: 'none',
-                      background: active ? color : GLASS_SUBTLE,
-                      color: active ? '#fff' : B.grayMid,
-                      fontWeight: 700, cursor: satSubmitting ? 'wait' : 'pointer',
-                    }}>{n}</button>
-                  );
-                })}
-              </div>
-              {satError && (
-                <div style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 12 }}>
-                  {satError}
-                </div>
-              )}
-            </>
-          )}
-          {satPhase === 'review' && (
-            <div style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: 18, fontWeight: 700, color: B.glassNavy }}>Thanks for the {satRating}/10.</div>
-              <div style={{ marginTop: 6, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
-                {satReviewLink
-                  ? <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team.</>
-                  // No link means the review ask is queued to text later — a
-                  // bare Google link here couldn't be attributed and the
-                  // queued text would still send afterward.
-                  : <>A quick Google review helps neighbors find the {satOfficeName || 'Waves'} team — keep an eye on your texts for our review link.</>}
-              </div>
-              <div style={{ display: 'flex', gap: 10, justifyContent: 'center', marginTop: 14, flexWrap: 'wrap' }}>
-                {satReviewLink ? (
-                  <a data-glass-accent="" href={satReviewLink} target="_blank" rel="noopener noreferrer" style={{
-                    ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
-                    boxShadow: 'none', borderRadius: 8,
-                  }}>Open Google</a>
-                ) : null}
-                <button data-glass-accent="" type="button" onClick={() => setSatDismissed(true)} style={{
-                  ...PORTAL_BUTTON_BASE, background: '#fff', color: B.glassNavy, padding: '10px 18px',
-                  boxShadow: 'none', border: '1px solid #E7E2D7', borderRadius: 8,
-                }}>Done</button>
               </div>
             </div>
-          )}
-          {satPhase === 'feedback' && (
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>Thanks for the feedback.</div>
-              <textarea
-                value={satFeedback}
-                onChange={e => setSatFeedback(e.target.value)}
-                placeholder="Anything we could do better?"
-                rows={3}
-                style={{
-                  width: '100%', marginTop: 10, padding: 12, borderRadius: 8,
-                  border: '1px solid #D8D0C0', fontSize: 14, fontFamily: FONTS.body,
-                  resize: 'vertical',
-                }}
-              />
-              {satError && (
-                <div role="alert" style={{ padding: 10, background: `${B.red}10`, border: `1px solid ${B.red}33`, borderRadius: 8, fontSize: 14, color: B.red, marginTop: 10 }}>
-                  {satError}
-                </div>
-              )}
-              <button data-glass-accent="" type="button" onClick={handleSatFeedback} disabled={satSubmitting} style={{
-                ...PORTAL_BUTTON_BASE, marginTop: 10, width: '100%', background: B.glassNavy,
-                color: '#fff', boxShadow: 'none', borderRadius: 8,
-              }}>{satSubmitting ? 'Sending...' : 'Send feedback'}</button>
-            </div>
-          )}
-          {satPhase === 'thanks' && (
-            <div style={{ textAlign: 'center', color: B.glassNavy, fontWeight: 700 }}>
-              Thank you. We appreciate the note.
-            </div>
-          )}
+            <ShellCloseButton
+              onClick={() => { rememberReviewCardDone(reviewCardKey(reviewCard)); setReviewCardDismissed(true); }}
+              label="Dismiss feedback prompt"
+            />
+          </div>
+          <div style={{ marginTop: 12, fontSize: 14, color: B.grayDark, lineHeight: 1.5 }}>
+            A quick Google review helps neighbors find the {reviewCard.officeName || 'Waves'} team.
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <a
+              data-glass-accent=""
+              href={reviewCard.reviewLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              // Hide the card in the same handler; the link itself still opens Google.
+              onClick={() => { rememberReviewCardDone(reviewCardKey(reviewCard)); setReviewCardDismissed(true); }}
+              style={{
+                ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
+                boxShadow: 'none', borderRadius: 8,
+              }}
+            >Open Google</a>
+          </div>
         </section>
       )}
 
@@ -16616,6 +16508,8 @@ export default function PortalPage() {
   const [activeTab, setActiveTab] = useState(
     cancelledAccount && !CANCELLED_TABS.includes(initialTab) ? 'plan' : initialTab,
   );
+  // Tab view beacon (server-gated by GATE_PORTAL_ACTIVITY; a dark gate stops it).
+  usePortalActivity(activeTab, `${customer?.id ?? ''}:${sessionEpoch}`);
   const resetTabScroll = useRef(false);
   const moreButtonRef = useRef(null);
   useEffect(() => {

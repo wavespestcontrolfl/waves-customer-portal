@@ -4,7 +4,9 @@
 // nothing at all. Only first-party, already-filtered evidence (a short-link
 // click, a recorded page view, a text reply) carries the "Engaged" badge and
 // sets "Last engaged". Email opens, email-provider clicks and raw token-page
-// views are listed, labelled by the server, and never engaged.
+// views are listed, labelled by the server, and never engaged. "Last seen in
+// the portal or app" (summary.lastSeenAt, the foreground beacons) is a separate
+// informational line: presence, not engagement.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell, Globe, Link2, Mail, MessageSquare, Phone, Smartphone } from "lucide-react";
 import { Badge, Button, Card } from "../ui";
@@ -30,10 +32,15 @@ function fmtWhen(value) {
   });
 }
 
-// Informational only: neither of these is engagement, and each says why.
+// Informational only: none of these is engagement, and each says why.
 function SummaryNotes({ summary }) {
   return (
     <>
+      {summary?.lastSeenAt && (
+        <p className="mb-2 text-14 text-ink-secondary" data-testid="engagement-last-seen">
+          Last seen in the portal or app {fmtWhen(summary.lastSeenAt)}
+        </p>
+      )}
       {summary?.lastEmailOpenAt && (
         <p className="mb-2 text-14 text-ink-secondary" data-testid="engagement-last-open">
           Last email open {fmtWhen(summary.lastEmailOpenAt)} (unreliable — Apple Mail fakes opens, so it is not counted).

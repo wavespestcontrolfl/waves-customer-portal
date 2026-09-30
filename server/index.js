@@ -714,6 +714,8 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
 app.use('/api/client-errors', require('./routes/client-errors'));
 app.use('/api/push', require('./routes/push'));
+// Customer activity beacons (GATE_PORTAL_ACTIVITY, dark) — authenticated, writes analytics rows only.
+app.use('/api/customer/activity', require('./routes/customer-activity'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);

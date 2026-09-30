@@ -4,7 +4,10 @@ const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
 const { sameGmailInbox } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
-const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
+// Owner ruling 2026-09-30: DeSoto County (Arcadia) is NOT served. The three
+// served counties plus the south-Hillsborough towns (config/locations.js
+// SOUTH_HILLSBOROUGH_CITIES, city-keyed, not county-keyed) are the footprint.
+const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte']);
 
 // A reachable number, not a withheld-caller-ID placeholder. Twilio delivers
 // blocked/unavailable caller ID as text ("anonymous", "unknown", "restricted",
@@ -795,6 +798,79 @@ function isMissingUnitNumber(av) {
     // so this must not claim it as a unit-only ask and skip recovery.
     && av.missingComponents.length === 1
     && av.missingComponents[0] === 'subpremise');
+}
+
+// Whole-structure services (owner ruling 2026-09-30, call-booker gates review
+// item 7): a WDO inspection or a termite pre-treat / perimeter treatment works
+// on the BUILDING, so a caller who gives a duplex address with no unit number
+// must not be held because Google wants a subpremise. Deliberately a small
+// explicit list, never a keyword match — anything not named here (interior
+// pest, bed bugs, spot/foam termite work, bait, bonds, a condo unit
+// inspection) keeps today's hold. Keys are `services.service_key`, and the
+// call must RESOLVE a bookable catalog row with one of them: a coarse label
+// with no catalog row (query failure, inactive or not-booking-enabled row) is
+// never enough, because that booking would land with no service_id.
+const WHOLE_STRUCTURE_SERVICE_KEYS = new Set([
+  'wdo_inspection',
+  'termite_pretreatment',
+  'termite_slab_pretreat',
+  'termite_trenching',
+  'termite_liquid',
+]);
+// Building types where a unit-less address still names ONE structure. condo /
+// unknown / commercial-ish types never qualify: a condo WDO is a unit-level
+// inspection, and an unknown type cannot prove it is not one.
+const WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home']);
+const UNIT_LEVEL_WORDING_RE = /\b(?:condo(?:minium)?s?|apartments?|apts?)\b/i;
+
+function isWholeStructureService({ serviceKey = null } = {}) {
+  return !!serviceKey && WHOLE_STRUCTURE_SERVICE_KEYS.has(String(serviceKey));
+}
+
+/**
+ * GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: rewrite an Address Validation verdict whose
+ * ONLY problem is the missing unit into the accepted verdict it would have been
+ * for a building-level job. Returns the SAME object untouched unless every
+ * condition holds, so gate-off (and every non-qualifying call) is
+ * byte-identical:
+ *   - the gate is on and the call's resolved service is on the allowlist;
+ *   - the verdict is exactly "PREMISE resolved, only subpremise missing"
+ *     (isMissingUnitNumber) — no other missing component;
+ *   - every other address check that deriveStatus would have applied still
+ *     holds: in service area, nothing unconfirmed, nothing replaced (a
+ *     corrected street/ZIP on this shape was never adopted, so it is not
+ *     waived either);
+ *   - the property is not commercial/HOA and not typed or worded as a
+ *     condo/apartment (unit-level work).
+ * The waived copy keeps the original evidence under
+ * `wholeStructureUnitWaived` and clears missingComponents so nothing downstream
+ * re-raises the unit ask. Persisted ai_address_validation keeps the ORIGINAL.
+ */
+function applyWholeStructureUnitWaiver(av, opts = {}) {
+  if (!opts.enabled) return av;
+  if (!isWholeStructureService(opts)) return av;
+  if (!isMissingUnitNumber(av)) return av;
+  if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
+  if (opts.commercial === true) return av;
+  if (!WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(opts.propertyType || ''))) return av;
+  if (UNIT_LEVEL_WORDING_RE.test(String(opts.text || ''))) return av;
+  return {
+    ...av,
+    status: 'validated_accept',
+    missingComponents: [],
+    wholeStructureUnitWaived: { missingComponents: [...av.missingComponents], originalStatus: av.status },
+  };
+}
+
+// Offline audits (v2-promotion-readiness, verify-v2-shadow-path, replay
+// variance) read the PERSISTED verdict, which keeps the original ambiguous
+// status. A pass that waived the unit hold stamps `wholeStructureUnitWaived` on
+// that persisted row (the processor writes it after the waiver); this rebuilds
+// the verdict the routing gate actually saw so the audits agree with
+// production. Idempotent: an in-memory waived verdict passes through.
+function reconstructWaivedAddressValidation(stored) {
+  if (!stored || !stored.wholeStructureUnitWaived || stored.status === 'validated_accept') return stored;
+  return { ...stored, status: 'validated_accept', missingComponents: [] };
 }
 
 function suppressAddressFlagsForAV(flags, addressValidation) {
@@ -1869,6 +1945,30 @@ function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   return { flags: list.filter((f) => !FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f)), satisfied };
 }
 
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT x GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: true
+// when the extraction carries the service-unclear signal the Assessment gate
+// demotes (the model's ambiguous_pest_or_service flag). With the Assessment gate
+// on, such a call books the Waves Assessment row — a service OFF the whole-
+// structure allowlist — so the unit waiver must not be what makes its address
+// "trusted". Conservative on purpose: read from the raw extraction.
+function serviceMayForceAssessment(extraction) {
+  if (!extraction) return false;
+  return Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes('ambiguous_pest_or_service');
+}
+
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the booking-shape half. Gate on (and
+// the fail-open booking it rides on), a CONFIRMED status with a start, an
+// on-the-hour start, and a trusted address (positively validated, or dispatched
+// to the verified on-file address). Callers only reach this inside the
+// opts.failOpen + confirmed-with-start block.
+function unclearServiceAssessmentApplies(extraction, opts, avPositivelyValidated) {
+  if (opts.unclearServiceAssessment !== true || !opts.failOpen) return false;
+  const scheduling = extraction.scheduling || {};
+  if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return false;
+  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at)) return false;
+  return avPositivelyValidated || dispatchesToOnFileAddress(extraction, opts);
+}
+
 function canAutoRoute(extraction, opts = {}) {
   const out = {};
   const result = canAutoRouteDecision(extraction, opts, out);
@@ -1926,7 +2026,26 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
   const knownCustomerHasAddress = hasCompleteOnFileAddress(opts.knownCustomer);
+
+  // Hoisted above the fail-open filter (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT
+  // reads it there too).
+  // A POSITIVE Address Validation verdict — Google accepted (or corrected)
+  // the stated address AND placed it in the service area. One of the two
+  // ways the central address-trust gate below is satisfied (codex round-3
+  // P1): when AV is disabled or returns not_attempted,
+  // computeDeterministicTriageFlags raises NO address flag for a populated,
+  // high-confidence address, so without this gate nothing would stand
+  // between an unvalidated address and an auto-dispatch (AGENTS.md
+  // L367-370: never silent auto-route).
+  const avPositivelyValidated = !!opts.addressValidation
+    && ['validated_accept', 'corrected'].includes(String(opts.addressValidation.status || ''))
+    && opts.addressValidation.inServiceArea === true;
   const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
+  let unclearServiceOk = false;
+  // Flags THIS gate (and only this gate) took out of the blocking set — the
+  // processor forces the Waves Assessment row for an ambiguous demotion and
+  // demotes an already-open blocking card for each (reprocess).
+  const unclearServiceDemotedFlags = [];
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -1953,27 +2072,27 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // A spoken community/subdivision ("the Lakewood Ranch property") is
     // location evidence too — without street/city/ZIP it can't be verified,
     // so it must hold for review, not fall back to the on-file primary.
+    unclearServiceOk = unclearServiceAssessmentApplies(extraction, opts, avPositivelyValidated);
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
       if (f === 'low_extraction_confidence' && knownCustomerConfidenceTrusted) { failedOpenFlags.push(f); return false; }
       if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT (owner-approved, 2026-09-30): the
+      // service being unclear must not park a booking whose time and place are
+      // both settled — the existing "Waves Assessment" catalog fallback books
+      // it and the office keeps this advisory card to set the real service.
+      // Every condition is required: gate on, CONFIRMED status with a start
+      // (this block), an ON-THE-HOUR start, and a TRUSTED address (Google
+      // positively validated it, or it dispatches to the verified on-file
+      // one). Anything less keeps the hold. The service resolver's own vetoes
+      // (unsupported / administrative-only) still run downstream and are not
+      // touched here.
+      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); return false; }
       return true;
     });
   }
 
   const startOnTheHour = confirmedStartOnTheHour(extraction.scheduling?.confirmed_start_at);
-
-  // A POSITIVE Address Validation verdict — Google accepted (or corrected)
-  // the stated address AND placed it in the service area. One of the two
-  // ways the central address-trust gate below is satisfied (codex round-3
-  // P1): when AV is disabled or returns not_attempted,
-  // computeDeterministicTriageFlags raises NO address flag for a populated,
-  // high-confidence address, so without this gate nothing would stand
-  // between an unvalidated address and an auto-dispatch (AGENTS.md
-  // L367-370: never silent auto-route).
-  const avPositivelyValidated = !!opts.addressValidation
-    && ['validated_accept', 'corrected'].includes(String(opts.addressValidation.status || ''))
-    && opts.addressValidation.inServiceArea === true;
 
   // caller_not_authorized now fires only for an EXPLICIT third party
   // (isExplicitlyNonOwner) — an 'unknown' relationship never raises it and a
@@ -2158,6 +2277,18 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     flags: finalFlags,
     failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
     ...(!avPositivelyValidated && dispatchesToOnFile ? { usesOnFileAddress: true } : {}),
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: an ambiguous-service demotion must
+    // book the Waves Assessment row, never a service the resolver or a model
+    // field happened to pick (the flag said the service is unclear), and the
+    // resolver's unsupported-call veto must read the full transcript.
+    ...(unclearServiceDemotedFlags.length ? {
+      // Set whenever this gate admitted the call by waiving EITHER flag: the
+      // processor's full-transcript unsupported-call veto rides this signal, not
+      // the (narrower) forceAssessmentService.
+      unclearServiceGateAdmitted: true,
+      unclearServiceDemotedFlags,
+      forceAssessmentService: unclearServiceDemotedFlags.includes('ambiguous_pest_or_service'),
+    } : {}),
   };
 }
 
@@ -2796,6 +2927,11 @@ module.exports = {
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   isMissingUnitNumber,
+  applyWholeStructureUnitWaiver,
+  reconstructWaivedAddressValidation,
+  serviceMayForceAssessment,
+  isWholeStructureService,
+  WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,
   recordCarriesUnit,
   deriveCallReviewBridge,

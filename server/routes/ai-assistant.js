@@ -10,6 +10,7 @@ const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
+const { withLockedRouteDecisions } = require('../services/call-routing-gates');
 
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
@@ -605,40 +606,55 @@ router.post('/admin/calls/:id/route-feedback', adminAuthenticate, requireTechOrA
     const requestedRouteDecisionId = String(req.body?.routeDecisionId || '').trim();
     const triageItemId = String(req.body?.triageItemId || '').trim() || null;
 
-    let routeDecision = null;
-    if (requestedRouteDecisionId && await tableExists('route_decisions')) {
-      routeDecision = await db('route_decisions')
-        .where({ id: requestedRouteDecisionId, call_log_id: call.id })
-        .first();
-      if (!routeDecision) return res.status(400).json({ error: 'routeDecisionId does not belong to this call' });
-    } else if (await tableExists('route_decisions')) {
-      const decisionRows = await db('route_decisions')
-        .where({ call_log_id: call.id });
-      routeDecision = preferredRouteDecisionForFeedback(decisionRows);
-    }
+    // The decision row(s) are resolved AND locked (FOR UPDATE) in the same
+    // transaction as the feedback write (withLockedRouteDecisions), so a
+    // reprocess refresh (upsertRouteDecision, same row lock) and this verdict
+    // serialize: the decision the verdict is classified against is the one it is
+    // stored on, never a row refreshed in between (codex #5371 r9 P1). The UI
+    // sends only the decision's id (not what it saw), so the lock is the fix.
+    const writeFeedback = async (conn, routeDecision) => {
+      const finalAction = String(routeDecision?.final_action_taken || '').toLowerCase();
+      const decisionKind = req.body?.decisionKind === 'triaged' || req.body?.decisionKind === 'auto_routed'
+        ? req.body.decisionKind
+        : (/^(auto_|upsert_|create_|reuse_)/.test(finalAction) ? 'auto_routed' : 'triaged');
 
-    const finalAction = String(routeDecision?.final_action_taken || '').toLowerCase();
-    const decisionKind = req.body?.decisionKind === 'triaged' || req.body?.decisionKind === 'auto_routed'
-      ? req.body.decisionKind
-      : (/^(auto_|upsert_|create_|reuse_)/.test(finalAction) ? 'auto_routed' : 'triaged');
+      const payload = {
+        call_log_id: call.id,
+        route_decision_id: routeDecision?.id || null,
+        triage_item_id: triageItemId,
+        decision_kind: decisionKind,
+        verdict,
+        wrong_fields: JSON.stringify(wrongFields),
+        note: note || null,
+        reviewed_by: actorName(req),
+        updated_at: new Date(),
+      };
 
-    const payload = {
-      call_log_id: call.id,
-      route_decision_id: routeDecision?.id || null,
-      triage_item_id: triageItemId,
-      decision_kind: decisionKind,
-      verdict,
-      wrong_fields: JSON.stringify(wrongFields),
-      note: note || null,
-      reviewed_by: actorName(req),
-      updated_at: new Date(),
+      const [row] = await conn('route_feedback')
+        .insert(payload)
+        .onConflict('call_log_id')
+        .merge(payload)
+        .returning('*');
+      return row;
     };
 
-    const [row] = await db('route_feedback')
-      .insert(payload)
-      .onConflict('call_log_id')
-      .merge(payload)
-      .returning('*');
+    let row;
+    if (await tableExists('route_decisions')) {
+      const outcome = await withLockedRouteDecisions(db, {
+        callLogId: call.id,
+        decisionId: requestedRouteDecisionId || null,
+      }, async (trx, decisionRows) => {
+        if (requestedRouteDecisionId && !decisionRows.length) return { missing: true };
+        const routeDecision = requestedRouteDecisionId
+          ? decisionRows[0]
+          : preferredRouteDecisionForFeedback(decisionRows);
+        return { row: await writeFeedback(trx, routeDecision) };
+      });
+      if (outcome.missing) return res.status(400).json({ error: 'routeDecisionId does not belong to this call' });
+      row = outcome.row;
+    } else {
+      row = await writeFeedback(db, null);
+    }
 
     res.json({ feedback: mapRouteFeedback(row) });
   } catch (err) { next(err); }

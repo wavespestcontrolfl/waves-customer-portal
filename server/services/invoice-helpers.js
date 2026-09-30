@@ -270,6 +270,25 @@ function formatCardLine(brand, last4) {
   return ` (${b.charAt(0).toUpperCase() + b.slice(1)} ending ${last4})`;
 }
 
+// A collection-fence throw that means "money may already be moving or owed
+// reconciliation on this invoice" (an in-flight or ambiguous saved-card
+// attempt, an orphan charge, a received deposit awaiting settlement) — as
+// opposed to an unexpected failure (a DB error), which proves nothing either
+// way. Customer-dunning callers exclude/skip on the former and HOLD on the
+// latter, so the two must be told apart. Codes are the ones
+// stripe.assertNoInvoiceChargeReconciliationPending and
+// estimate-deposits.assertInvoiceDepositSettlementReady throw.
+const COLLECTION_PENDING_FENCE_CODES = Object.freeze([
+  'STRIPE_CHARGE_IN_PROGRESS',
+  'STRIPE_AMBIGUOUS_OUTCOME',
+  'STRIPE_CHARGED_DB_FAILED',
+  'DEPOSIT_RECONCILIATION_REQUIRED',
+]);
+function isCollectionPendingFenceError(err) {
+  if (!err) return false;
+  return COLLECTION_PENDING_FENCE_CODES.includes(err.code) || err.reconciliationRequired === true;
+}
+
 module.exports = {
   SEND_CLAIMABLE_STATUSES,
   SEND_FINALIZABLE_STATUSES,
@@ -290,4 +309,6 @@ module.exports = {
   invoiceWithdrawnFromCustomer,
   invoiceAmountDue,
   formatCardLine,
+  COLLECTION_PENDING_FENCE_CODES,
+  isCollectionPendingFenceError,
 };
