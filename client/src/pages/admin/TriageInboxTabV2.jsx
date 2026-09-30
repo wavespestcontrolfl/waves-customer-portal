@@ -556,6 +556,12 @@ export default function TriageInboxTabV2({ isAdmin }) {
       .catch((err) => {
         setActioning(null);
         setDismissFor(null);
+        // A street-level address hold still waiting on its visit carries the
+        // server's own instruction (confirm, correct or cancel the visit).
+        if (err?.status === 409 && err?.code === "STREET_LEVEL_HOLD_PENDING" && err?.message) {
+          setError(err.message);
+          return;
+        }
         if (err?.status === 409) {
           load(mode, status);
           setError("This card changed since it loaded — review the refreshed proposals before dismissing.");
@@ -835,7 +841,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
                 const isRescheduleProposal = isTriage && !!parsePayload(item.payload)?.reschedule_proposal;
                 // A street-level address hold settles with its visit (confirm,
                 // correct or cancel it) — the server 409s Accept / Deny / Dismiss
-                // on it while the visit is unconfirmed, so no verdict buttons.
+                // on it while the visit is unconfirmed, so no verdict buttons. Dismiss
+                // stays: it is refused with the instruction while the visit is
+                // unconfirmed and closes the card once the visit was cancelled.
                 const isStreetLevelHoldCard = isTriage && item.reason_code === "outbound_booking_review" && !!parsePayload(item.payload)?.street_level_address;
                 // V1/V2 email disagreement — Accept/Deny 400/409 on this
                 // card until the confirm-email form below satisfies it.
@@ -887,7 +895,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                           Auto-routed rows keep both buttons even after a verdict
                           so an accidental deny (or a changed mind) can be flipped
                           back to accept — the verdict badge shows current state. */}
-                      {(isOpenView || !isTriage) && !isStreetLevelHoldCard && (
+                      {(isOpenView || !isTriage) && (
                         <div className="flex items-center gap-2 flex-wrap sm:shrink-0">
                           {isOpenView && (
                             <Button
@@ -899,7 +907,7 @@ export default function TriageInboxTabV2({ isAdmin }) {
                               <XCircle size={13} strokeWidth={1.75} className="mr-1" aria-hidden /> Dismiss
                             </Button>
                           )}
-                          {isRescheduleProposal ? null : isPropertyRoleCard ? (
+                          {isRescheduleProposal || isStreetLevelHoldCard ? null : isPropertyRoleCard ? (
                             <Button
                               size="sm"
                               variant="primary"

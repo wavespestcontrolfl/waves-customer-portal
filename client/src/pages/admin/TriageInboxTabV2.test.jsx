@@ -448,7 +448,7 @@ describe('street-level address hold card', () => {
     expect(screen.queryByRole('link', { name: 'Open visit' })).not.toBeInTheDocument();
   });
 
-  it('hides Accept, Deny and Dismiss (the server refuses them while the visit is unconfirmed)', async () => {
+  it('hides Accept and Deny; Dismiss stays so the card can close once the visit is cancelled (the server refuses it while the visit is unconfirmed)', async () => {
     const hold = { ...ordinary, id: 'hold', first_name: 'Hold', last_name: 'Card', reason_code: 'outbound_booking_review',
       feedback_verdict: null, payload: JSON.stringify(holdPayload) };
     adminFetch.mockImplementation(async (url) => (url.startsWith('/admin/triage?')
@@ -458,7 +458,22 @@ describe('street-level address hold card', () => {
     const card = (await screen.findByText('Hold Card')).closest('.py-4');
     expect(within(card).queryByRole('button', { name: /accept/i })).not.toBeInTheDocument();
     expect(within(card).queryByRole('button', { name: /deny/i })).not.toBeInTheDocument();
-    expect(within(card).queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: /dismiss/i })).toBeInTheDocument();
     expect(within(card).getByRole('link', { name: 'Open visit' })).toBeInTheDocument();
+  });
+
+  it('a Dismiss refused while the visit is unconfirmed shows the server instruction, not the stale-card message', async () => {
+    const hold = { ...ordinary, id: 'hold', first_name: 'Hold', last_name: 'Card', reason_code: 'outbound_booking_review',
+      feedback_verdict: null, payload: JSON.stringify(holdPayload) };
+    adminFetch.mockImplementation(async (url) => {
+      if (url.startsWith('/admin/triage?')) return { items: [hold], counts: { open: 1, resolved: 0, dismissed: 0 } };
+      throw Object.assign(new Error('Confirm, correct, or cancel the visit itself.'), { status: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+    });
+    render(<TriageInboxTabV2 />);
+    const card = (await screen.findByText('Hold Card')).closest('.py-4');
+    fireEvent.click(within(card).getByRole('button', { name: /dismiss/i }));
+    const dialogButtons = await screen.findAllByRole('button', { name: /dismiss/i });
+    fireEvent.click(dialogButtons[dialogButtons.length - 1]);
+    await waitFor(() => expect(screen.getByText('Confirm, correct, or cancel the visit itself.')).toBeInTheDocument());
   });
 });
