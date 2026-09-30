@@ -2,7 +2,6 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { qualifyNotificationLink } = require('./notification-links');
 const { isInternalTestCustomerId } = require('./internal-test-customers');
-const { adminBodyGuardAllLive } = require('../config/feature-gates');
 
 const CUSTOMER_PREFERENCE_KEYS = new Set([
   'appointment_confirmation',
@@ -140,6 +139,19 @@ function truncateAtWord(text, max) {
   return `${cut.trimEnd()}${ellipsis}`;
 }
 
+// ADMIN_BODY_GUARD_ALL through its canonical reader, asked at call time. A
+// reader that is missing or throws reads as LIVE: create() swallows its own
+// errors and returns null, so a failed gate read here would silently drop the
+// alert it was only meant to shorten.
+function bodyGuardAllLive() {
+  try {
+    const reader = require('../config/feature-gates').adminBodyGuardAllLive;
+    return typeof reader === 'function' ? reader() !== false : true;
+  } catch {
+    return true;
+  }
+}
+
 // A multi-line list body ("Follow-ups overdue:\n• item\n• item") cuts at its
 // first line break when that first line alone leaves room for the ellipsis;
 // anything else (one long line) is a plain word-boundary cut.
@@ -167,7 +179,7 @@ function applyAdminBrevityGuard({ category, title, body, detail }) {
     logger.info(`[notifications] admin title over ${MAX_ADMIN_TITLE_CHARS} chars (${category || 'notification'})`);
   }
   if (typeof body === 'string' && body.length > MAX_ADMIN_BODY_CHARS) {
-    const allLive = adminBodyGuardAllLive();
+    const allLive = bodyGuardAllLive();
     if (category === DIGEST_CATEGORY || allLive) {
       nextBody = allLive ? cutAdminBody(body) : truncateAtWord(body, MAX_ADMIN_BODY_CHARS);
       nextDetail = nextDetail && nextDetail.includes(body)
@@ -488,7 +500,12 @@ const NotificationService = {
           // A same-count backlog can contain new deadlines or reopened work.
           // Its optional version refreshes the one standing bell as well.
           const versionChanged = dedupeVersion !== undefined && existingMeta.dedupeVersion !== dedupeVersion;
-          const detailChanged = (existing.detail || null) !== (nextDetail || null);
+          // A standing row stored BEFORE the guard cut this category holds the
+          // whole text in `body` and no `detail`. The same text arriving again
+          // is not news: without this, every such row would re-ring once on
+          // the first emission after the guard went live.
+          const storedUncut = !existing.detail && Boolean(nextDetail) && existing.body === nextDetail;
+          const detailChanged = !storedUncut && (existing.detail || null) !== (nextDetail || null);
           // Routing metadata is content too: a FIX -> ACT flip with identical
           // text must still merge the new feed/kind/audience, or the owner's
           // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
@@ -502,14 +519,14 @@ const NotificationService = {
           // Compared by JSON so an itemKeys array compares by value.
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: storedUncut ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
             const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
             const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
-            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged ? { detail: nextDetail } : {}), link: nextLink,
+            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || storedUncut ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null } : {}) };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };

@@ -336,3 +336,17 @@ describe('activity-only rows never reach the admin bell', () => {
     expect(engineering.read_at).toBeNull();
   });
 });
+
+// create() swallows its own errors and returns null, so a gate reader that is
+// missing (a test or caller that mocks feature-gates without it) must read as
+// live, never throw and drop the alert.
+test('a missing ADMIN_BODY_GUARD_ALL reader reads as live: the alert is still written, cut', () => {
+  jest.isolateModules(() => {
+    jest.doMock('../config/feature-gates', () => ({ isEnabled: () => false, gates: {} }));
+    const svc = require('../services/notification-service');
+    const long = `${'word '.repeat(40)}end.`;
+    const out = svc.normalizeAdminText({ category: 'alert', title: 'T', body: long });
+    expect(out.body.length).toBeLessThanOrEqual(110);
+    expect(out.detail).toBe(long);
+  });
+});

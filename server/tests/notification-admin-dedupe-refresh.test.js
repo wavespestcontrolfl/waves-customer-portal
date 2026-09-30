@@ -368,3 +368,41 @@ test('with several rows under one key the dedupe lookup refreshes the NEWEST one
   expect(JSON.parse(mockRows.notifications[1].metadata).dedupeVersion).toBe('v2');
   expect(JSON.parse(mockRows.notifications[0].metadata).dedupeVersion).toBe('v0');
 });
+
+// A standing row written before the brevity guard covered its category holds
+// the whole text in `body` and no `detail`. The guard going live must not read
+// that as new content: the same text arriving again stays a plain dedupe.
+describe('a standing row stored uncut, before the body guard covered its category', () => {
+  const LONG = `Promises made on calls with no follow-up within an hour: ${'callback promised to a caller; '.repeat(6)}end.`;
+  const seed = (extra = {}) => mockRows.notifications.push({
+    id: 'n-old', recipient_type: 'admin', category: 'alert', title: 'Follow-ups overdue', body: LONG, detail: null,
+    link: '/admin/communications#tab=owed', read_at: new Date('2026-09-29T12:00:00Z'), created_at: new Date('2026-09-29T11:00:00Z'),
+    metadata: JSON.stringify({ dedupeKey: 'k-uncut' }), ...extra,
+  });
+
+  test('the same text re-emitted is not a change: no rewrite, no re-bell', async () => {
+    seed();
+    const again = await NotificationService.notifyAdmin('alert', 'Follow-ups overdue', LONG, { dedupeKey: 'k-uncut', refreshOnDedupe: true, link: '/admin/communications#tab=owed' });
+    expect(again.deduped).toBe(true);
+    expect(again.refreshed).toBeUndefined();
+    expect(mockUpdates).toEqual([]);
+    expect(mockRows.notifications[0].read_at).not.toBeNull();
+  });
+
+  test('different text is a change, and the rewrite stores the guard form (one-sentence body, full text in detail)', async () => {
+    seed();
+    const next = `${LONG} One more.`;
+    const moved = await NotificationService.notifyAdmin('alert', 'Follow-ups overdue', next, { dedupeKey: 'k-uncut', refreshOnDedupe: true, link: '/admin/communications#tab=owed' });
+    expect(moved.refreshed).toBe(true);
+    expect(mockRows.notifications[0].body.length).toBeLessThanOrEqual(110);
+    expect(mockRows.notifications[0].detail).toBe(next);
+  });
+
+  test('a refresh for another reason (the title moved) also stores the guard form', async () => {
+    seed();
+    const moved = await NotificationService.notifyAdmin('alert', 'Follow-ups overdue (2)', LONG, { dedupeKey: 'k-uncut', refreshOnDedupe: true, link: '/admin/communications#tab=owed' });
+    expect(moved.refreshed).toBe(true);
+    expect(mockRows.notifications[0].body.length).toBeLessThanOrEqual(110);
+    expect(mockRows.notifications[0].detail).toBe(LONG);
+  });
+});

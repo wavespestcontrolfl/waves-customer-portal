@@ -45,7 +45,7 @@ jest.mock('../services/stripe-invoice-state', () => ({
   INVOICE_COLLECTIBLE_STATUSES: [],
 }));
 jest.mock('../services/stripe-pricing', () => ({ computeChargeAmount: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: {}, adminBodyGuardAllLive: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false), gates: {} }));
 jest.mock('../services/invoice-helpers', () => ({ ...jest.requireActual('../services/invoice-helpers'), INVOICE_UNCOLLECTIBLE_STATUSES: ['void'], invoiceAmountDue: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: jest.fn(() => 'https://portal.test') }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendRefundIssued: jest.fn() }));

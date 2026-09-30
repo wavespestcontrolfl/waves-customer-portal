@@ -14,7 +14,6 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
-  adminBodyGuardAllLive: jest.fn(() => true),
 }));
 jest.mock('../services/internal-test-customers', () => ({
   isInternalTestCustomerId: jest.fn(() => false),
