@@ -44,7 +44,7 @@ function makeBuilder(table, cfg = {}) {
   const b = {};
   for (const m of [
     'join', 'leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNot', 'whereNull',
-    'whereNotNull', 'whereRaw', 'orWhereNull', 'andWhere', 'limit', 'orderBy', 'select', 'groupBy', 'max', 'as',
+    'whereNotNull', 'whereRaw', 'orWhereNull', 'andWhere', 'limit', 'orderBy', 'select', 'groupBy', 'max', 'as', 'forUpdate',
   ]) b[m] = jest.fn(() => b);
   b.first = jest.fn(() => { b._mode = 'first'; return b; });
   b.update = jest.fn((payload) => { b._mode = 'update'; updates.push({ table, payload }); return b; });
@@ -55,6 +55,46 @@ function makeBuilder(table, cfg = {}) {
     return Promise.resolve(value).then(resolve, reject);
   };
   return b;
+}
+
+// db.transaction with a REAL row lock on the booking_intents row: a
+// `SELECT ... FOR UPDATE` (forUpdate) inside a transaction waits until the
+// previous holder's callback settles (commit/rollback), like Postgres, and then
+// reads the row's CURRENT state (`lockedRow`, which a "submit" may have changed
+// while we waited). The recovery worker's final look runs on this handle; the
+// real-Postgres suite (booking-preferred-time-row-lock-postgres.test.js) proves
+// the same ordering against a live database.
+let lockedRow;
+let rowLockTail;
+const freshLockedRow = (overrides = {}) => ({
+  id: 'bi-1', phone: '+19415550101', session_id: null, captured_at: new Date('2026-06-10T13:00:00Z'),
+  suppressed: false, converted_at: null, ...overrides,
+});
+function installRowLockTransaction() {
+  rowLockTail = Promise.resolve();
+  db.transaction = jest.fn(async (cb) => {
+    const held = [];
+    const trx = (table) => {
+      if (table !== 'booking_intents') return db(table);
+      const b = makeBuilder(table, {});
+      let locking = false;
+      b.forUpdate = jest.fn(() => { locking = true; return b; });
+      b.first = jest.fn(async () => {
+        if (locking) {
+          const prior = rowLockTail;
+          let release;
+          const mine = new Promise((r) => { release = r; });
+          rowLockTail = prior.then(() => mine);
+          held.push(release);
+          await prior;
+        }
+        return lockedRow ? { ...lockedRow } : undefined;
+      });
+      return b;
+    };
+    trx.fn = db.fn;
+    try { return await cb(trx); } finally { held.forEach((r) => r()); }
+  });
 }
 
 let queues;
@@ -82,6 +122,8 @@ beforeEach(() => {
   updates.length = 0;
   queues = {};
   db.mockImplementation((table) => makeBuilder(table, (queues[table] || []).shift() || {}));
+  lockedRow = freshLockedRow();
+  installRowLockTransaction();
   isEnabled.mockReturnValue(true);
   sendCustomerMessage.mockResolvedValue({ sent: true });
   EmailTemplateLibrary.sendTemplate.mockResolvedValue({});
@@ -634,5 +676,188 @@ describe('B11 backstop — contact-linked wizard draft linked to an ESTABLISHED 
 
     expect(await _internals.runSmsStage(NOW, new Set())).toBe(1);
     expect(db.mock.calls.map((c) => c[0])).not.toContain('estimates');
+  });
+});
+
+// A preferred-time submit ("Can't find a time?") and the recovery worker meet on
+// ONE thing: the booking_intents ROW. The submit suppresses the row inside its
+// own transaction (UPDATE = row lock); the worker's final check + send hold
+// SELECT ... FOR UPDATE on the same row. Not keyed on the phone, so a visitor
+// who corrected their phone mid-session cannot slip past.
+describe('preferred-time submit vs the recovery send (intent row lock)', () => {
+  const gate = () => { let open; const p = new Promise((r) => { open = r; }); return { p, open }; };
+  const tick = () => new Promise((r) => setTimeout(r, 15));
+
+  // What the real submit does to the intent row inside ITS transaction
+  // (booking-preferred-time.js retireOpenBookingIntents(trx, ...)): take the row
+  // lock, hold it until "commit", and leave the row suppressed.
+  function submitSuppressing(hold) {
+    return db.transaction(async (trx) => {
+      await trx('booking_intents').forUpdate().first();
+      await hold;
+      lockedRow.suppressed = true;
+    });
+  }
+  function wireLeadsLookup(state) {
+    db.mockImplementation((table) => makeBuilder(table, table === 'leads'
+      ? { first: state.leadFiled ? { id: 'lead-1' } : undefined }
+      : (queues[table] || []).shift() || {}));
+  }
+
+  test('sms: a submit that got the row first — the worker waits, re-reads it suppressed, sends NOTHING', async () => {
+    const commit = gate();
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    const submit = submitSuppressing(commit.p);
+    await tick();
+    const worker = _internals.runSmsStage(NOW, new Set());
+    await tick();
+    expect(sendCustomerMessage).not.toHaveBeenCalled(); // parked on the row
+    commit.open();
+    await submit;
+    expect(await worker).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // claim released for a clean row state
+    expect(updates.some((u) => u.payload && u.payload.followup_sms_sent === false)).toBe(true);
+  });
+
+  test('sms: a worker that already holds the row — the submit waits out the send (the send counts as already happened)', async () => {
+    const sendGate = gate();
+    const order = [];
+    sendCustomerMessage.mockImplementation(async () => { order.push('send-start'); await sendGate.p; order.push('send-end'); return { sent: true }; });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // sent_at stamp
+    enqueue('booking_intents', { update: 1 }); // sibling mark
+    const worker = _internals.runSmsStage(NOW, new Set());
+    await tick();
+    expect(order).toEqual(['send-start']);
+    const submit = submitSuppressing(Promise.resolve()).then(() => order.push('submit-done'));
+    await tick();
+    expect(order).toEqual(['send-start']); // submit cannot touch the row mid-send
+    sendGate.open();
+    expect(await worker).toBe(1);
+    await submit;
+    expect(order).toEqual(['send-start', 'send-end', 'submit-done']);
+  });
+
+  test('email: same row lock — a submit that got the row first blocks the email', async () => {
+    const commit = gate();
+    enqueue('booking_intents', { rows: [intent({ last_activity_at: new Date('2026-06-09T13:00:00Z'), captured_at: new Date('2026-06-09T13:00:00Z') })] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    const submit = submitSuppressing(commit.p);
+    await tick();
+    const worker = _internals.runEmailStage(NOW, new Set());
+    await tick();
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+    commit.open();
+    await submit;
+    expect(await worker).toBe(0);
+    expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('phone corrected mid-session (A -> B): the row the submit suppressed is the row the worker locks — no send to either number', async () => {
+    // The intent row is one per SESSION, so the submit (filed under phone B,
+    // same session) suppresses the very row the worker read under phone A.
+    const commit = gate();
+    enqueue('booking_intents', { rows: [intent({ phone: '+19415550101', session_id: 'sess-1' })] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 });
+    lockedRow = freshLockedRow({ phone: '+19415550101', session_id: 'sess-1' });
+    const submit = submitSuppressing(commit.p);
+    await tick();
+    const worker = _internals.runSmsStage(NOW, new Set());
+    await tick();
+    commit.open();
+    await submit;
+    expect(await worker).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('the row was edited to a new phone after the candidate read: nothing goes to the stale number', async () => {
+    enqueue('booking_intents', { rows: [intent({ phone: '+19415550101' })] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 });
+    lockedRow = freshLockedRow({ phone: '+19415550199' });
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates.some((u) => u.payload && u.payload.followup_sms_sent === false)).toBe(true);
+  });
+
+  test('a lead filed under the same SESSION (different phone) blocks under the lock, and the suppression is written on the locked handle', async () => {
+    // The request lands after the pre-claim look: only the LAST look (under the
+    // row lock) sees it.
+    let leadLooks = 0;
+    db.mockImplementation((table) => makeBuilder(table, table === 'leads'
+      ? { first: (leadLooks += 1) >= 2 ? { id: 'lead-1' } : undefined }
+      : (queues[table] || []).shift() || {}));
+    enqueue('booking_intents', { rows: [intent({ session_id: 'sess-1' })] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 });
+    lockedRow = freshLockedRow({ session_id: 'sess-1' });
+    const trxSeen = [];
+    const realTx = db.transaction;
+    db.transaction = jest.fn((cb) => realTx((trx) => {
+      const seen = (table) => { trxSeen.push(table); return trx(table); };
+      seen.fn = trx.fn;
+      return cb(seen);
+    }));
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    // suppression + the preferred-time lookup ran on the transaction handle
+    expect(trxSeen.filter((t) => t === 'booking_intents').length).toBeGreaterThanOrEqual(2);
+    expect(trxSeen).toContain('leads');
+    expect(updates.some((u) => u.payload && u.payload.suppressed === true)).toBe(true);
+  });
+
+  test('a converted / suppressed row at lock time sends nothing', async () => {
+    for (const patch of [{ suppressed: true }, { converted_at: new Date() }]) {
+      updates.length = 0;
+      sendCustomerMessage.mockClear();
+      enqueue('booking_intents', { rows: [intent()] });
+      enqueue('messages', { first: null });
+      enqueue('booking_intents', { update: 1 });
+      lockedRow = freshLockedRow(patch);
+      expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    }
+  });
+
+  test('a lock/transaction failure means nothing is sent and the claim is released for the next tick', async () => {
+    db.transaction = jest.fn(async () => { throw new Error('lock unavailable'); });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 }); // release
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(updates.some((u) => u.payload && u.payload.followup_sms_sent === false)).toBe(true);
+  });
+
+  test('a send that succeeded but whose row-lock transaction failed to COMMIT still counts as sent (no double send next tick)', async () => {
+    const realTx = db.transaction;
+    db.transaction = jest.fn(async (cb) => { await realTx(cb); throw new Error('commit failed'); });
+    enqueue('booking_intents', { rows: [intent()] });
+    enqueue('messages', { first: null });
+    enqueue('booking_intents', { update: 1 }); // claim
+    enqueue('booking_intents', { update: 1 });
+    enqueue('booking_intents', { update: 1 });
+    expect(await _internals.runSmsStage(NOW, new Set())).toBe(1);
+    expect(updates.some((u) => u.payload && u.payload.followup_sms_sent === false)).toBe(false);
+  });
+
+  test('one chokepoint: no phone-keyed advisory lock is left in the worker, and the submit suppresses intents on its own transaction before the lead write', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const worker = fs.readFileSync(path.join(__dirname, '../services/booking-abandon-recovery.js'), 'utf8');
+    expect(worker).not.toMatch(/advisory|withPreferredTimePhoneLock/);
+    expect(worker).toMatch(/\.forUpdate\(\)/);
+    const svc = fs.readFileSync(path.join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    expect(svc.indexOf('retireOpenBookingIntents(trx,')).toBeGreaterThan(-1);
+    expect(svc.indexOf('retireOpenBookingIntents(trx,')).toBeLessThan(svc.indexOf("trx('leads').insert"));
+    expect(svc).not.toMatch(/await retireOpenBookingIntents\(db,/);
   });
 });

@@ -16,6 +16,15 @@ const {
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
+const { bookPreferredTimeLive } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const {
+  validatePreferredTimeRequest,
+  recordPreferredTimeRequest,
+  hasRecentPreferredTimeRequest,
+  noteBookingOnPreferredLeads,
+} = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
 const { resolveZoneRouteDaySlug } = require('../services/scheduling/zone-route-days');
@@ -961,6 +970,10 @@ router.get('/config', async (req, res, next) => {
       multi_service: isEnabled('multiServiceBooking'),
       // "Look for this van" scene on the confirmation step (GATE_VAN_SCENE).
       van_scene: isEnabled('vanScene'),
+      // "Can't find a time?" block + preferred day/time request form
+      // (GATE_BOOK_PREFERRED_TIME) — fail-closed dark-ship flag; the POST
+      // route also answers 404 while off.
+      preferred_time: bookPreferredTimeLive(),
       advance_days_min: config.advance_days_min ?? 1,
       advance_days_max: config.advance_days_max ?? 14,
       slot_duration_minutes: config.slot_duration_minutes ?? 60,
@@ -6036,6 +6049,12 @@ async function createSelfBooking(payload = {}) {
       } catch (err) {
         logger.warn(`[booking:confirm] replay credit redemption deferred to sweep for ${txResult.existing.id}: ${err.message}`);
       }
+      // A first attempt that committed but died before its post-commit note
+      // step leaves the customer's preferred-time request without its "customer
+      // booked" note: write it (idempotent per lead + visit; never converts).
+      if (!callbackVisit) {
+        await noteBookingOnPreferredLeads(db, { customerId: custId, booking: txResult.existing });
+      }
       return { ok: true, body: {
         booking: txResult.existing,
         confirmationCode: txResult.existing.confirmation_code,
@@ -6424,6 +6443,16 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
+    // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
+    // customer is moot once they have booked, but a booking never closes it
+    // (owner ruling 2026-09-30): the customer's open request(s) get one system
+    // note naming this visit, and staff close them. No lead is won, no funnel
+    // row touched. Best-effort; runs whatever the gate reads (a request already
+    // filed still gets the note). The replay branch does the same.
+    if (!callbackVisit) {
+      await noteBookingOnPreferredLeads(db, { customerId: custId, booking });
+    }
+
     // Persist an ad-tracked self-booking's click id onto a won lead so the
     // offline-conversion pipeline (data-manager qualified_lead / Meta CAPI) can
     // report it to Google/Meta by deterministic click id, not just hashed PII.
@@ -6674,6 +6703,22 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     const phoneDigits = String(nc.phone || b.phone || '').replace(/\D/g, '');
     if (phoneDigits.length < 10) return res.status(400).json({ error: 'valid phone required' });
     const ten = phoneDigits.slice(-10);
+
+    // A visitor who filed a "can't find a time" request asked the office to
+    // reach out — never stage an abandoned-booking recovery row (an automated
+    // text/email) for the same phone afterwards. Gate-off: untouched.
+    if (bookPreferredTimeLive()) {
+      try {
+        // Session too: a visitor who filed under one phone and then retyped another
+        // in the same funnel session is still the person who asked for a call back.
+        const captureSession = String(b.session_id == null ? '' : b.session_id).trim().slice(0, 80) || null;
+        if (await hasRecentPreferredTimeRequest(db, ten, { sessionId: captureSession })) return accepted('preferred_time_request');
+      } catch (ptErr) {
+        // Fail closed: a lookup error must not risk an automated send.
+        logger.warn(`[booking:capture-intent] preferred-time check failed — skipping capture: ${ptErr.message}`);
+        return accepted('lookup_failed');
+      }
+    }
 
     const str = (v, n) => { const s = (v == null ? '' : String(v)).trim(); return s ? s.slice(0, n) : null; };
     const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : null);
@@ -6950,6 +6995,72 @@ router.get('/embed-snippet', (req, res) => {
   res.json({ source, url: iframeSrc, snippet });
 });
 
+// Dark gate + token-route privacy headers for POST /api/booking/preferred-time.
+// server/index.js mounts this ABOVE the global cors(), the global /api/ limiter
+// and the shared body parsers (like the other dark public routes), so while the
+// gate is off every method gets the generic unknown-route 404 — no CORS 204, no
+// limiter 429, no body parse 400/413 — and every response (404, 429, 400,
+// success) carries no-store / noindex / no-referrer. The route below re-runs it
+// as its own first layer.
+const preferredTimePreParserGuard = [
+  noStore,
+  (req, res, next) => {
+    if (!bookPreferredTimeLive()) return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+    return next();
+  },
+];
+
+// Per-IP limiters for the preferred-time request (an internal lead + one
+// admin bell per new phone). Generous for a real visitor, tight against bulk
+// office-inbox spam. Same shape as capture-intent's.
+const preferredTimeLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+const preferredTimeHourlyLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 15,
+  keyGenerator: unauthenticatedAuthLimitKey,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again later.' },
+});
+
+// POST /api/booking/preferred-time — the /book "Can't find a time?" form
+// (GATE_BOOK_PREFERRED_TIME, dark). Files ONE internal lead the office answers
+// by hand and rings the admin bell; it sends NOTHING to the customer (no SMS,
+// no email) and retires any open abandoned-booking intent for the phone so the
+// recovery worker can't text them either. Gate off = the generic 404 before
+// the limiter. Proof-of-funnel: the same IP-bound token /availability mints
+// for capture-intent (the funnel always fetches availability first).
+router.post('/preferred-time', ...preferredTimePreParserGuard, preferredTimeLimiter, preferredTimeHourlyLimiter, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const parsed = validatePreferredTimeRequest(b);
+    // Honeypot: pretend success, store nothing.
+    if (parsed.honeypot) return res.json({ ok: true });
+    if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+    if (!verifyCaptureToken(b.capture_token, captureIpKey(req))) {
+      return res.status(400).json({ error: 'session_expired' });
+    }
+    const serviceKey = normalizeBookingServiceKey(b.service_id)
+      || normalizeBookingServiceKey(b.service_type)
+      || null;
+    const serviceLabel = canonicalBookingServiceLabel(b.service_id)
+      || canonicalBookingServiceLabel(b.service_type)
+      || null;
+    await recordPreferredTimeRequest(db, parsed.value, { serviceLabel, serviceKey });
+    return res.json({ ok: true });
+  } catch (err) {
+    logger.error(`[booking:preferred-time] failed: ${err.message}`);
+    return res.status(500).json({ error: 'We could not save that. Please text us instead.' });
+  }
+});
+
 // GET /api/booking/sources — aggregate by source (for admin dashboard / intelligence bar)
 router.get('/sources', async (req, res, next) => {
   try {
@@ -7002,6 +7113,7 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
   assertContactLinkedHandoffProvisional,
   suppressRecoveryIntents,
