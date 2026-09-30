@@ -15,7 +15,7 @@ const {
   computeDeterministicTriageFlags,
   suppressAddressFlagsForAV,
 } = require('../services/call-triage-flags');
-const { V2_DECISION_VERSION, V2_DECISION_VERSIONS, resolveDecisionVersion, buildRouteDecision } = require('../services/call-routing-gates');
+const { V2_DECISION_VERSION, V2_DECISION_VERSIONS, buildRouteDecision } = require('../services/call-routing-gates');
 const { wholeStructureUnitWaiverForCall } = require('../services/call-recording-processor')._test;
 
 // Google's verdict for a duplex given without a unit: the building resolved,
@@ -339,20 +339,12 @@ describe('gate wiring', () => {
     expect(src.indexOf('ai_address_validation: v2AddressValidation')).toBeLessThan(src.lastIndexOf('wholeStructureUnitWaiverForCall({'));
   });
 
-  test('the gate is a dark decision tag: base version untouched, fresh key only while live (codex r1)', () => {
+  test('no gate-specific decision version: the base version stays, the write chokepoint refreshes (main #5371)', () => {
     expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
-    expect(resolveDecisionVersion([])).toBe('v2-1.50.0');
-    expect(resolveDecisionVersion(['w'])).toBe('v2-1.50.0+w');
-    expect(resolveDecisionVersion(['u', 'w'])).toBe('v2-1.50.0+uw');
-    expect(V2_DECISION_VERSIONS).toEqual(expect.arrayContaining(['v2-1.50.0+w', 'v2-1.50.0+uw']));
-    expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
-    expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
-    expect(Math.max(...V2_DECISION_VERSIONS.map((v) => v.length))).toBeLessThanOrEqual(30);
     const args = { callLogId: 'c1', extraction: {}, finalTriageFlags: [], routingResult: { allowed: true }, action: 'x' };
     expect(buildRouteDecision(args).decision_version).toBe('v2-1.50.0');
-    expect(buildRouteDecision({ ...args, decisionVersion: resolveDecisionVersion(['w']) }).decision_version).toBe('v2-1.50.0+w');
-    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
-    expect(src).toContain("if (isEnabled('callWholeStructureNoUnit') === true) tags.push('w');");
+    expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
+    expect(V2_DECISION_VERSIONS.some((v) => v.includes('+'))).toBe(false);
   });
 });
 
