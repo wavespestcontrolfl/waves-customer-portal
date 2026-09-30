@@ -271,6 +271,47 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).toContain('Thanks for coming out.');
   });
 
+  test('customer words: bare codes in bodies and call summaries are masked; call notes are never read', async () => {
+    const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
+    const ctx = await buildCustomerWordsContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      knex: stubKnex({
+        scheduled_services: [
+          { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Service', created_at: mk(20) },
+        ],
+        service_completion_profiles: [],
+        call_log: [
+          // A summary that drops the credential noun.
+          { created_at: mk(1), direction: 'inbound', call_summary: 'Customer provided BLUE for entry to the back yard' },
+          // Operational text in notes is never customer speech.
+          { created_at: mk(2), direction: 'inbound', notes: 'Twilio create failed: 21211' },
+        ],
+        sms_log: [],
+        // A bare code as the whole body, with no quote and no anchor.
+        emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],
+      }),
+    });
+    expect(ctx.text).toContain('Customer provided [redacted] for entry to the back yard');
+    expect(ctx.text).not.toContain('BLUE');
+    expect(ctx.text).not.toContain('3355');
+    expect(ctx.text).not.toContain('Twilio create failed');
+  });
+
+  test('customer words: each line is dated in Eastern time', async () => {
+    const ctx = await buildCustomerWordsContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      originDate: new Date('2026-09-01T12:00:00Z'),
+      knex: stubKnex({
+        scheduled_services: [], service_completion_profiles: [], call_log: [], emails: [],
+        // 8:30 PM Eastern on Sep 28 is Sep 29 in UTC.
+        sms_log: [{ created_at: new Date('2026-09-29T00:30:00Z'), direction: 'inbound', message_body: 'Ants are back by the sink.' }],
+      }),
+    });
+    expect(ctx.text).toBe('Customer text 2026-09-28: Ants are back by the sink.');
+  });
+
   test('no customerId returns an empty context', async () => {
     const ctx = await buildCompletionCommsContext({ customerId: null, knex: stubKnex({}) });
     expect(ctx.text).toBe('');

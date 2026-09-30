@@ -36,6 +36,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { stripQuotedAndSignature } = require('./email/email-strip');
 const ContextAggregator = require('./context-aggregator');
+const { etDateString } = require('../utils/datetime-et');
 
 const { redactAccessCodes } = ContextAggregator;
 
@@ -290,13 +291,20 @@ async function buildCompletionCommsContext({
 // is scrubbed before it is cut, since the writer turns these into "You
 // mentioned…" copy.
 
-// Credential-shaped tokens (the redactor's 3+ digit codes, all-caps word
-// codes), masked outright wherever the context that would anchor them is gone.
-function maskCredentialShapes(text) {
-  return String(text || '').replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
+// Every customer-words line is scrubbed the same way: the canonical redactor,
+// then anything credential-shaped (three or more digits, an all-caps word)
+// masked outright. The context that anchors a bare code ("4821", "BLUE") is
+// often gone here (the Waves question is left out, a quote is stripped, a
+// summary drops the noun), and these lines become "You mentioned…" copy.
+function scrub(text) {
+  return redactAccessCodes(String(text || '')).replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
 }
-// Words that name a credential anywhere in an email.
-const CREDENTIAL_ANCHOR_RE = /\b(?:gate|codes?|lock\s*box(?:es)?|alarm|keypad|pins?|pass(?:code|word)s?|combo|combination)\b/i;
+// The communication's calendar day in Eastern time (an 8 PM text is still
+// that day in Florida).
+function etDay(value) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '' : etDateString(d);
+}
 
 // A mailbox copy of something Waves sent (Gmail SENT label or a Waves
 // address). The query already leaves these out; this guards the lines.
@@ -306,23 +314,16 @@ function wavesSentEmail(email) {
 }
 
 // Only what the customer wrote (quoted history and signature stripped, so a
-// quoted Waves promise is never read as theirs), redacted over the whole of
-// it before the preview is cut. A bare reply can answer a credential
-// question the strip removed ("What is the gate code?" → "4821"), and a
-// snippet with no body has lost its context: then anything credential-shaped
-// is masked outright.
+// quoted Waves promise is never read as theirs), scrubbed before the preview
+// is cut.
 function customerEmailText(email) {
-  const body = String(email.body_text || '').trim();
-  const text = body || String(email.snippet || '');
-  const own = redactAccessCodes(stripQuotedAndSignature(text));
-  return compactText(!body || CREDENTIAL_ANCHOR_RE.test(text) ? maskCredentialShapes(own) : own, 260);
+  return compactText(scrub(stripQuotedAndSignature(String(email.body_text || '').trim() || String(email.snippet || ''))), 260);
 }
 
 const CALLER = { inbound: 'the customer called', outbound: 'Waves called the customer' };
 
 // One entry per channel: its query, which rows count, how many are kept,
-// and its line. Every line is scrubbed; texts and subjects are also masked
-// for bare codes, because the Waves message they answer is left out.
+// and its line.
 const CUSTOMER_WORDS_CHANNELS = Object.freeze([
   {
     name: 'call',
@@ -335,15 +336,17 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
       .where({ customer_id: customerId })
       .where('created_at', '>=', floor))
       .where((q) => q.whereNull('call_outcome').orWhereNotIn('call_outcome', ['wrong_number', 'spam']))
-      .select('created_at', 'direction', 'lead_synopsis', 'notes', 'processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status')
+      .select('created_at', 'direction', 'call_summary', 'lead_synopsis', 'processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status')
       .orderBy('created_at', 'desc')
       .limit(50),
     keep: (row) => !ContextAggregator.isExcludedCall(row),
     max: 6,
-    // A raw transcript mixes both speakers, so only the summary or notes.
+    // The call's AI summary (the canonical call_summary, else the lead
+    // synopsis). Never the raw transcript, which mixes both speakers, and
+    // never notes, which also hold operational text.
     line: (row) => {
-      const summary = compactText(redactAccessCodes(row.lead_synopsis || row.notes || ''));
-      return summary && `Call ${contextDate(row.created_at)} (${CALLER[row.direction] || 'caller unknown'}; AI summary of the whole conversation, not verified): ${summary}`;
+      const summary = compactText(scrub(row.call_summary || row.lead_synopsis || ''));
+      return summary && `Call ${etDay(row.created_at)} (${CALLER[row.direction] || 'caller unknown'}; AI summary of the whole conversation, not verified): ${summary}`;
     },
     ts: (row) => row.created_at,
   },
@@ -359,8 +362,8 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
     keep: (row) => row.direction === 'inbound',
     max: 8,
     line: (row) => {
-      const summary = compactText(maskCredentialShapes(redactAccessCodes(row.message_body)), 260);
-      return summary && `Customer text ${contextDate(row.created_at)}: ${summary}`;
+      const summary = compactText(scrub(row.message_body), 260);
+      return summary && `Customer text ${etDay(row.created_at)}: ${summary}`;
     },
     ts: (row) => row.created_at,
   },
@@ -378,8 +381,8 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
     max: 6,
     line: (row) => {
       const summary = customerEmailText(row);
-      const subject = compactText(maskCredentialShapes(redactAccessCodes(row.subject)), 120);
-      return (summary || subject) && `Customer email ${contextDate(row.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`;
+      const subject = compactText(scrub(row.subject), 120);
+      return (summary || subject) && `Customer email ${etDay(row.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`;
     },
     ts: (row) => row.received_at,
   },

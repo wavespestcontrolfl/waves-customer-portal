@@ -204,10 +204,12 @@ const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
 const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
-// Every "Waves …" name but exactly "Waves Pest Control": "& Lawn Care",
-// "Waves Lawn", "Waves Pest & Lawn", "Waves Pest Services", "Waves
-// Exterminating", "Waves Company"…
-const COMPANY_NAME_RE = /\bWaves\s+(?:Pest\s+Control\s*(?:&|&amp;|and)\s*Lawn\b|Lawn\b|Pest\b(?!\s+Control\b)|(?:Termite|Mosquito|Exterminat\w*|Services?|Company|Co|Inc|LLC)\b)/i;
+// Every "Waves …" name but exactly "Waves Pest Control". Case-sensitive:
+// "Waves" followed by any capitalized word but "Pest Control" ("Waves Home
+// Services", "Waves Lawn"), or "Waves Pest Control" followed by a
+// capitalized word, "&" or "and Lawn" ("… Services", "… LLC", "… & Lawn
+// Care"). Lowercase business suffixes are caught too.
+const COMPANY_NAME_RE = /\bWaves\s+(?!Pest\s+Control\b)[A-Z&]|\bWaves\s+Pest\s+Control\s+(?:[A-Z&]|and\s+[Ll]awn\b)|\b[Ww]aves\s+(?:pest\s+control\s+)?(?:services?|llc|inc|company|lawn|home|exterminat\w*)\b/;
 // Rates and mix strength in words ("at the label rate", "the recorded mix
 // strength", "diluted").
 const RATE_RE = /\brates?\b|\bmix(?:ing)?\s+(?:strength|ratio)\b|\bdilut(?:e|ed|ion)\b|\bconcentrat(?:e|ed|ion)\b|\bper\s+(?:gallon|1,?000)\b/i;
@@ -260,6 +262,10 @@ function forwardMention(copy, pattern, extraCue = null) {
 }
 // Forward words only: "you texted us on Monday" is a past fact.
 const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
+// A property-wide absence (rule 4): "no pest activity was observed today",
+// "found no active pests during the visit". An absence tied to a place
+// ("no activity at the lanai", "within the assessed areas") passes.
+const UNSCOPED_ABSENCE_RE = /\bno\s+(?:(?:visible|active|live|signs?\s+of)\s+)?(?:pest\s+)?(?:activity|pests|insects|bugs|termites|rodents|mosquitoes|ants|roaches)\b(?![^.!?]*\b(?:at|in|on|near|along|around|under|inside|outside|by|within|behind|across)\s)/i;
 // Phrases the owner rules name that no older screen covers (rules 4, 9,
 // 13, 14).
 const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmaps?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
@@ -278,6 +284,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [SAFE_WORD_RE, 'safe_word'],
   [CHEMICAL_RE, 'chemical'],
   [OWNER_PHRASE_RE, 'owner_phrase'],
+  [UNSCOPED_ABSENCE_RE, 'unscoped_absence'],
   [REENTRY_RE, 'reentry'],
   [TIMEFRAME_RE, 'timeframe'],
   [PRICE_RE, 'price'],
