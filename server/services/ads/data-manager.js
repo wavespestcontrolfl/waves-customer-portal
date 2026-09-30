@@ -321,7 +321,6 @@ function candidateMatchScore(candidate) {
   if (candidate.wbraid || candidate.gbraid) score += 6;
   if (normalizeEmail(candidate.email)) score += 4;
   if (normalizePhone(candidate.phone)) score += 4;
-  if (googleAddressParts(candidate)) score += 1;
   if (number(candidate.conversionValue) > 0) score += 2;
   if (candidate.eventTimestamp) score += 1;
   if (candidate.leadId) score += 1;
