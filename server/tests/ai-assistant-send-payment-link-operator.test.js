@@ -29,17 +29,17 @@ describe('send_payment_link operator context', () => {
   test('an operator-confirmed send hands the operator to sendViaSMS as actorTechnicianId', async () => {
     const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1', { actorTechnicianId: 'staff-1' });
     expect(out.sent).toBe(true);
-    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, actorTechnicianId: 'staff-1' });
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: 'staff-1' });
   });
 
   test('an autonomous turn (no execution context) sends as the system — actorTechnicianId null', async () => {
     await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1');
-    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, actorTechnicianId: null });
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: null });
   });
 
   test('the operator comes from the execution context only — never from the model\'s tool input', async () => {
     await executeToolCall('send_payment_link', { invoice_id: 'inv-1', actorTechnicianId: 'forged' }, 'cust-1', {});
-    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, actorTechnicianId: null });
+    expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: 'operator', actorTechnicianId: null });
   });
 });
 

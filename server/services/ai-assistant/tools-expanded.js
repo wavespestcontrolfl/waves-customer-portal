@@ -257,7 +257,7 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
       // invoice bills (GATE_INVOICE_ISSUED_CLOSES_VISIT), the transition and
       // its audit row name the staff member who confirmed the write, not
       // the system (GitHub r4 P2 #4127).
-      const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, actorTechnicianId });
+      const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, holdExempt: 'operator', actorTechnicianId });
       // sent reflects ACTUAL delivery only — never `|| sendResult?.ok`
       // (Codex round-5 P1 #4131): a zero-due settlement (or account
       // credit covering the balance) resolves { sent: false, ok: true },

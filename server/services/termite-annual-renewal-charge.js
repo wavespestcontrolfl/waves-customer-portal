@@ -2019,7 +2019,9 @@ async function deliverInvoiceAndStampSkip(successor, kind, explanation, conn) {
   }
   const deliveryNote = delivered?.ok
     ? 'The renewal invoice was sent with its pay link.'
-    : `The renewal invoice could NOT be delivered (${delivered?.error || 'unknown error'}) — it will be retried automatically.`;
+    : delivered?.code === 'COLLECTION_HOLD_DEFER'
+      ? 'The renewal invoice is held while the customer has a collections dispute hold — it will be sent automatically once the hold is released.'
+      : `The renewal invoice could NOT be delivered (${delivered?.error || 'unknown error'}) — it will be retried automatically.`;
   if (delivered?.code === 'payer_billed') {
     // Not a failed delivery: the homeowner pay link is not owed at all.
     // Handled (off leg 7a) only once the payer bell persisted — bellOrRotate.
@@ -2973,7 +2975,12 @@ async function sendRenewalInvoice(successor) {
         source: 'termite_annual_renewal', saveCard: '1', saveRequired: '1', billingTerm: 'prepay_annual',
       },
     });
-    if (!result?.ok) {
+    if (result?.code === 'COLLECTION_HOLD_DEFER') {
+      // The direct sender refuses a pay link while the customer has a dispute
+      // hold (retryable, never terminal): the invoice stays unsent and the
+      // renewal legs' own retry (leg 7a / the sweep) delivers it after release.
+      logger.info(`[termite-annual-renewal] renewal invoice for term ${successor.id} held: collections dispute hold - delivered after release`);
+    } else if (!result?.ok) {
       logger.warn(`[termite-annual-renewal] renewal invoice delivery not ok for term ${successor.id}: ${result?.error || 'unknown'}`);
     }
     return result;

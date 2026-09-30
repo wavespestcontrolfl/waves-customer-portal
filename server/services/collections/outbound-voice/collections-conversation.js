@@ -1649,7 +1649,7 @@ class CollectionsConversation {
       // call in that window must not double-send. Only a PROVIDER-REPORTED
       // failure re-opens it; ambiguous outcomes (throw, timeout) keep it.
       this.payLinkSent = true;
-      const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true });
+      const result = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, holdExempt: 'customer' });
       if (result && result.covered_by_credit) {
         // Account credit settled the ANCHOR invoice — nothing was texted.
         // The balance is the account's (hook r3 P1): re-read the eligible

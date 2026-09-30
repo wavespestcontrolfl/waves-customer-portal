@@ -304,6 +304,14 @@ async function deliverAnnualInvoiceOrBell({
     // (invoiceSmsQueued counts as delivered, never bells) — mirrored here
     // so the queued cohort doesn't ring a false-alarm bell every sweep tick
     // until the queue actually flushes.
+    // A collections dispute hold (the direct sender refuses with the retryable
+    // COLLECTION_HOLD_DEFER): a wait, not a failure. No false-alarm bell; the
+    // invoice stays unsent and the reconciliation sweep's undelivered-invoice
+    // scan retries it (once per ET day) after the hold is released.
+    if (invoiceDelivery?.code === 'COLLECTION_HOLD_DEFER') {
+      logger.info(`[termite-annual-activation] invoice ${invoiceId} delivery deferred for estimate ${estimateId}: collections dispute hold - retried after release`);
+      return { ok: false, held: true, invoiceDelivery };
+    }
     const deliveryQueued = invoiceDelivery?.sms?.scheduled === true;
     if (!invoiceDelivery || (invoiceDelivery.ok === false && !deliveryQueued)) {
       const NotificationService = require('./notification-service');

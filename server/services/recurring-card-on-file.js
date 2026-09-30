@@ -1640,6 +1640,13 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
           logger.warn(`[recurring-cof] prepay sweep ceding estimate ${row.id}: claim superseded before fallback delivery`);
           continue;
         }
+        // The direct sender's own default-on hold check (backstop behind the
+        // pre-check above): a hold that landed in between is a wait - no alert,
+        // nothing resolved, the lease retries after the release.
+        if (fencedDelivery.result?.code === 'COLLECTION_HOLD_DEFER') {
+          logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: collections dispute hold at the sender - retried after release`);
+          continue;
+        }
         ({ settled: fallbackSettled, delivered: fallbackDelivered, creditCovered: fallbackCreditCovered } = classifyDeliveryOutcome(fencedDelivery.result));
       } catch (sendErr) {
         logger.error(`[recurring-cof] prepay sweep pay-link delivery failed for invoice ${job.invoice_id}: ${sendErr.message}`);

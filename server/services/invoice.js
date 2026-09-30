@@ -3465,6 +3465,29 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
   return claimed || null;
 }
 
+// Collections DISPUTE hold at the DIRECT sender (owner ruling 2026-09-30, the
+// chokepoint rule): sendViaSMS / sendViaSMSAndEmail build and send the pay-link
+// invoice message for every caller, so the live hold check is DEFAULT-ON here -
+// the backstop behind processScheduledSends' and the queued legs' own boundary
+// checks. A self-pay invoice whose customer has an active dispute hold (or
+// whose hold cannot be verified: fail closed) is refused with the coded,
+// retryable COLLECTION_HOLD_DEFER - never a terminal failure - BEFORE any claim,
+// credit draw or provider contact, so nothing is left to reverse. Payer-billed
+// invoices go to the payer's AP inbox and are exempt. Only operator-initiated
+// sends (admin send/resend routes, the assistant tools) and customer-initiated
+// ones (estimate accept, "text me the link") pass holdExempt; a pre-claimed send
+// (allowClaimed: the worker, or the wrapper calling its own leg) was already
+// checked by its owner. Every AUTOMATED caller must handle the refusal as a wait.
+const HOLD_EXEMPT_CALLERS = new Set(["operator", "customer"]);
+// `row` is the invoice's { customer_id, payer_id } the caller already read.
+async function directSendHoldRefusal(row, holdExempt) {
+  if (HOLD_EXEMPT_CALLERS.has(holdExempt)) return null;
+  if (!row || row.payer_id) return null;
+  const collectionHold = require("./collections/collection-hold");
+  const held = await collectionHold.dueInvoiceHeldByDisputeHold(row.customer_id);
+  return held.held ? collectionHold.holdDeferOutcome(held) : null;
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
@@ -5812,6 +5835,8 @@ const InvoiceService = {
    * Send invoice via Twilio SMS — the unified service recap + invoice message.
    */
   async sendViaSMS(invoiceId, { allowClaimed = false, claimToken = null, firstDeliveryOnly = false, overridesReviewHold = false, payUrlParams = null, operatorInitiated = false, actorTechnicianId = null, adoptsQueuedInvoiceSend = true, hasEmailLeg = false,
+    // Opt-out of the default-on dispute-hold check: 'operator' | 'customer' only.
+    holdExempt = null,
     // Internal-only: sends this same call once more after a not_zero_due
     // chokepoint outcome (Codex round-6 P2 #4131) — a caller never sets
     // this itself, so a real race can retry at most once, never loop.
@@ -5836,7 +5861,12 @@ const InvoiceService = {
     let pre = null;
     try {
       if (!allowClaimed) {
-        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+        pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id", "annual_prepay_term_id", "customer_id");
+        // Default-on dispute-hold backstop (see directSendHoldRefusal): before any claim or credit.
+        if (!_zeroDueRetried) {
+          const holdRefusal = await directSendHoldRefusal(pre, holdExempt);
+          if (holdRefusal) return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
+        }
         // A termite renewal invoice takes the same fence (claimBillToFencedSend).
         const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
         if (packetClaim?.payerBilled) {
@@ -5867,7 +5897,7 @@ const InvoiceService = {
         if (outcome.kind === "not_zero_due" && !_zeroDueRetried) {
           return this.sendViaSMS(invoiceId, {
             allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, payUrlParams,
-            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, _zeroDueRetried: true,
+            operatorInitiated, actorTechnicianId, adoptsQueuedInvoiceSend, hasEmailLeg, holdExempt, _zeroDueRetried: true,
           });
         }
         return zeroDueDirectSendOutcome(invoiceId, outcome);
@@ -6605,6 +6635,8 @@ const InvoiceService = {
       emailRecipientOverride = null,
       payUrlParams = null,
       operatorInitiated = false,
+      // Opt-out of the default-on dispute-hold check: 'operator' | 'customer' only.
+      holdExempt = null,
       // The staff user behind an operator send (attribution for the
       // invoice-issued closeout's audit row); null for automated sends.
       actorTechnicianId = null,
@@ -6627,12 +6659,21 @@ const InvoiceService = {
   ) {
     const retryOnce = () => this.sendViaSMSAndEmail(invoiceId, {
       requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-      emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
+      emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, skipAccountCreditAutoApply, expectedTotal, _zeroDueRetried: true, _underRenewalGate,
     });
+
     // Phase 2: an accrued invoice (on a payer statement) is never delivered
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
-    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id");
+    const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id", "customer_id");
+    // Default-on dispute-hold backstop (see directSendHoldRefusal): before any claim, credit or provider contact.
+    if (!allowClaimed && !_zeroDueRetried && !_underRenewalGate) {
+      const holdRefusal = await directSendHoldRefusal(accrualPre, holdExempt);
+      if (holdRefusal) {
+        return { ok: false, ...holdRefusal, error: holdRefusal.reason,
+          sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
+      }
+    }
     // Codex #4971 r24 P1: a termite RENEWAL invoice's send holds the renewal
     // gate through its ENTIRE provider handoff — not only while the claim is
     // checked (claimRenewalInvoiceForSend's clearance) — for EVERY caller,
@@ -6648,7 +6689,7 @@ const InvoiceService = {
       if (renewal) {
         return withRenewalSendGate({ id: invoiceId, annual_prepay_term_id: accrualPre.annual_prepay_term_id }, () => this.sendViaSMSAndEmail(invoiceId, {
           requestReview, reviewDelayMinutes, allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold,
-          emailRecipientOverride, payUrlParams, operatorInitiated, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
+          emailRecipientOverride, payUrlParams, operatorInitiated, holdExempt, actorTechnicianId, _zeroDueRetried, _underRenewalGate: true,
         }));
       }
     }
