@@ -73,12 +73,7 @@ function suppressionCoversEmail(email, column = 'email') {
     this.whereRaw(`LOWER(${column}) = ?`, [normalized]);
     if (mailbox) {
       this.orWhereRaw(
-        // Same dot-placement rule on the stored side: a malformed stored
-      // spelling is not an alias of the valid mailbox either.
-      `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?
-        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '.%'
-        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '%.'
-        AND POSITION('..' IN SPLIT_PART(LOWER(${column}), '@', 1)) = 0)`,
+        `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?)`,
         [mailbox.split('@')[0]],
       );
     }
