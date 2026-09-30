@@ -3439,6 +3439,17 @@ const gates = {
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
 
+  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): a
+  // still-unsure scope after the Gemini -> OpenAI Sol escalation gets one
+  // more look from Claude Fable 5.1. Ships DARK: off unless exactly 'true'.
+  // This entry is for logGateStatus only: plant-engine.js's runReferee()
+  // reads GATE_PLANT_ID_REFEREE at call time via plantIdRefereeLive().
+  plantIdReferee: process.env.GATE_PLANT_ID_REFEREE === 'true',
+  // Lawn visit assessment name referee (owner ruling 2026-09-29): this entry
+  // is for logGateStatus only; lawn-visit-assessment.js reads
+  // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
+  lawnAssessmentReferee: process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true',
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -3760,6 +3771,27 @@ function visitPrepPhotosLive() {
   return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
 }
 
+// GATE_PLANT_ID_REFEREE read at CALL time — ships DARK, off unless exactly
+// 'true' (owner ruling 2026-09-28, plant engine only — the pest engine's
+// TEXT_POLICIES.photoIdVision ladder is untouched). The one canonical reader
+// for plant-engine.js's runReferee(): on, a scope still unsure after the
+// Gemini -> OpenAI Sol escalation gets one more look from Claude Fable 5.1 as
+// a deciding vote. Off, byte-identical to the Gemini -> Sol ladder — no third
+// call, no third-vote merge.
+function plantIdRefereeLive() {
+  return process.env.GATE_PLANT_ID_REFEREE === 'true';
+}
+
+// GATE_LAWN_ASSESSMENT_REFEREE read at CALL time — ships DARK, off unless
+// exactly 'true' (owner ruling 2026-09-29). ONE gate covers both the GPT-6 Sol
+// second opinion and the Claude Fable name referee in
+// lawn-visit-assessment.js's analyzeVisit (the second opinion exists only to
+// feed the referee). Off, analyzeVisit is byte-identical to the single
+// Gemini -> Sol fallback chain: no extra call, same return shape.
+function lawnAssessmentRefereeLive() {
+  return process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -3932,4 +3964,6 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
+module.exports.plantIdRefereeLive = plantIdRefereeLive;
+module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 // gates 1775330914

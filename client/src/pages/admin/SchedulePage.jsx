@@ -63,6 +63,7 @@ import {
   tankOwnerRow,
   promoteTankOwner,
   applyTankDose,
+  amountInUnit,
   markTankEntry,
   tankPropagates,
   followTank,
@@ -71,6 +72,8 @@ import {
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
+import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import { productDimension } from "../../lib/fast-complete-products";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -261,15 +264,24 @@ function rateUnitsMatch(a, b) {
   return !!left && !!right && left === right;
 }
 // The unit dropdowns list the everyday units; catalog rows can carry a
-// label-native per-basis unit outside that list ("g/spot", "ml/inch dbh",
-// "oz/acre", "lb/100sf", "each/100sf"…). Render that unit as an extra
-// option so the prefill displays and survives a re-select instead of
-// snapping the <select> to a blank/wrong value.
-const STANDARD_RATE_UNIT_OPTIONS = ["oz", "fl_oz", "ml", "g", "lb", "gal", "oz/gal", "fl_oz/gal", "g/gal"];
-const STANDARD_AMOUNT_UNIT_OPTIONS = ["oz", "fl_oz", "ml", "g", "lb", "gal"];
+// label-native per-basis unit outside that list ("g/spot", "oz/acre",
+// "lb/100sf", "each/100sf"…). Render that unit as an extra option so the
+// prefill displays and survives a re-select instead of snapping the
+// <select> to a blank/wrong value. Never an mL unit: nothing a tech sees or
+// enters on a completion is in mL (owner ruling 2026-09-29), so a label's
+// own "ml/inch dbh" is never offered. A small liquid amount is in tsp (the
+// spoon set), which the completion body sends as fl oz.
+const STANDARD_RATE_UNIT_OPTIONS = ["oz", "fl_oz", "g", "lb", "gal", "oz/gal", "fl_oz/gal", "g/gal"];
+const STANDARD_AMOUNT_UNIT_OPTIONS = ["tsp", "oz", "fl_oz", "g", "lb", "gal"];
 export function catalogUnitOption(unit, standardOptions) {
-  if (!unit || standardOptions.includes(unit)) return null;
+  if (!unit || isMlUnit(unit) || standardOptions.includes(unit)) return null;
   return <option value={unit}>{unit.replace(/_/g, " ")}</option>;
+}
+// A catalog row with a unit in mL (the Arborjet "ml/inch dbh" injectables,
+// SUPERthrive's "ml/gal"; the same test resolveRatePrefill applies): the row
+// keeps no label unit or label ceiling, so neither rate review names mL.
+function hasMlLabelUnit(product = {}) {
+  return [product.rateUnit, product.rate_unit, product.defaultUnit, product.default_unit].some(isMlUnit);
 }
 // Base quantity unit of a per-basis catalog unit ("g/spot" -> "g"). The
 // selects render their extra options from the STABLE catalog unit (plus the
@@ -923,6 +935,16 @@ function fmtProtocolNumber(value, suffix = "") {
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
   return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })}${suffix}`;
+}
+
+// A lawn plan mix quantity as the plan serves it ("15 fl_oz"), except one in
+// mL, which reads the way the truck measures it (tsp under 1 fl oz, else
+// fl oz) on its own basis: nothing a tech sees is in mL (owner ruling
+// 2026-09-29), whatever unit a protocol product is given.
+function mixQuantityText(amount, unit) {
+  if (!isMlUnit(unit)) return `${fmtProtocolNumber(amount)} ${unit || ""}`;
+  const basis = String(unit).split("/").slice(1).join("/").trim();
+  return `${formatMeasuredAmount(amount, "ml") || "— fl oz"}${basis ? `/${basis}` : ""}`;
 }
 
 function protocolTrackForLawnType(lawnType) {
@@ -7869,12 +7891,10 @@ export function ProtocolPanel({ service, onClose }) {
                                 >
                                   {" "}
                                   <div>
-                                    {fmtProtocolNumber(areaMix?.amount)}{" "}
-                                    {areaMix?.amountUnit || ""}
+                                    {mixQuantityText(areaMix?.amount, areaMix?.amountUnit)}
                                   </div>{" "}
                                   <div style={{ color: D.muted }}>
-                                    {fmtProtocolNumber(tankMix?.amount)}{" "}
-                                    {tankMix?.amountUnit || ""}/tank
+                                    {mixQuantityText(tankMix?.amount, tankMix?.amountUnit)}/tank
                                   </div>{" "}
                                 </div>{" "}
                               </div>{" "}
@@ -10652,6 +10672,25 @@ function normalizeProductArea(product = {}, serviceType = "") {
     applicationMethod,
     areaUnit: areaRequirement?.unit || product.areaUnit || "",
     targets: Array.isArray(product.targets) ? product.targets : [],
+    // A draft saved while the form still offered mL comes back without it
+    // (owner ruling 2026-09-29): the amount in fl oz, a rate in mL cleared
+    // with its tank for the tech to enter, and an mL label unit dropped with
+    // its ceiling, as an mL-label product now starts. The tech's own rate in
+    // another unit, and the tank it drives, stay as saved.
+    ...(isMlUnit(product.amountUnit) ? {
+      amountUnit: "fl_oz",
+      totalAmount: product.totalAmount === "" || product.totalAmount == null
+        ? product.totalAmount
+        : mlToFlOz(product.totalAmount),
+    } : {}),
+    ...(isMlUnit(product.rateUnit) ? {
+      rate: "",
+      rateUnit: "",
+      carrierGallons: "",
+      carrierGallonsManual: false,
+      tankOwner: false,
+    } : {}),
+    ...(isMlUnit(product.catalogRateUnit) ? { catalogRateUnit: "", maxLabelRatePer1000: null } : {}),
   };
 }
 
@@ -10825,7 +10864,7 @@ function isNoneLikeTreeShrubValue(value = "") {
   );
 }
 
-function treeShrubCloseoutBlocksClient({
+export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
   servicePhotos,
@@ -10892,6 +10931,9 @@ function treeShrubCloseoutBlocksClient({
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
+    // Nothing a tech records is in mL (owner ruling 2026-09-29); the server
+    // refuses the same dose (tree-shrub-closeout.js).
+    else if (hasMlAmount(injection.dose)) push("Injection dose must be in tsp or fl oz, not mL.", "injectionRecord.dose");
     if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
     if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
     if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");
@@ -11090,7 +11132,7 @@ function TreeShrubCloseoutBlock({
             <input
               value={value.injectionRecord?.dose || ""}
               onChange={(e) => setInjectionField("dose", e.target.value)}
-              placeholder="Dose"
+              placeholder="Dose (tsp or fl oz)"
               style={input}
             />
           </div>
@@ -13816,7 +13858,8 @@ export function CompletionPanel({
         // area: the area still follows, the dose stays (audit P1).
         totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
           ? product.totalAmount
-          : lawnDerivedTotal(product, lawnVisitArea) } : product));
+          // In the rate's unit, or in spoons while the tech reads it in tsp.
+          : amountInUnit(lawnDerivedTotal(product, lawnVisitArea), baseUnitOf(product.rateUnit), product.amountUnit) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
@@ -16374,6 +16417,14 @@ export function CompletionPanel({
   }
   // One construction path for a selected-product row — the picker
   // (addProduct) and the default pest tank-mix seed build identical rows.
+  // tsp is the spoon set for a liquid (6 to the fl oz, sent as fl oz): offered
+  // only for a product the Fast Complete sheet also measures as a liquid
+  // (productDimension), never a granule, dust or gel bait.
+  function offersTsp(sp) {
+    const catalogRow = (products || []).find((p) => String(p.id) === String(sp.productId));
+    return productDimension(catalogRow || { name: sp.name, category: sp.category }) === "liquid";
+  }
+
   function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work on the German-roach protocol) wins over the
@@ -16463,7 +16514,7 @@ export function CompletionPanel({
           null,
         rate: prefillRate,
         rateUnit: prefillRateUnit,
-        catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
+        catalogRateUnit: hasMlLabelUnit(product) ? "" : product.rateUnit || product.rate_unit || defaultUnit,
         // A per-basis unit is a concentration/placement rate — fine as the
         // rate, but "Total used" records a real quantity (and inventory
         // deduction can't convert a concentration), so the resolver defaults
@@ -16473,7 +16524,7 @@ export function CompletionPanel({
         // r18) — the high-rate review is unit-matched (rateUnitsMatch
         // against catalogRateUnit), so the ceiling compares in the label's
         // own basis despite the field's per-1k name.
-        maxLabelRatePer1000:
+        maxLabelRatePer1000: hasMlLabelUnit(product) ? null :
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
           labelMaxRate ??
@@ -16659,6 +16710,12 @@ export function CompletionPanel({
           // gal" under a hand-picked unit and deducts the wrong inventory
           // quantity (Codex r1 P1).
           if (!p.totalAmountManual) next.totalAmount = "";
+        } else if (field === "amountUnit" && (!p.totalAmountManual || p.totalAmountSeeded)) {
+          // A Total the tech did not type (calculated, or the house seed)
+          // reads in spoons when tsp is picked and back again: 0.25 fl oz of
+          // surfactant is 1½ tsp, never "0.25 tsp" sent as 0.042 fl oz. Any
+          // other change to or from tsp withdraws it (amountInUnit).
+          next.totalAmount = amountInUnit(next.totalAmount, p.amountUnit, value);
         } else if (!next.totalAmountManual) {
           if (field === "rateUnit" && isPerGallonUnit(p.rateUnit)) {
             // A tank dose is meaningless under the new unit: re-derive from
@@ -16674,7 +16731,8 @@ export function CompletionPanel({
               next.totalAmount = "";
             }
           } else if (field === "rate" || field === "areaValue") {
-            next.totalAmount = lawnDerivedTotal(next, next.areaValue);
+            // In the rate's unit, or in spoons while the tech reads it in tsp.
+            next.totalAmount = amountInUnit(lawnDerivedTotal(next, next.areaValue), baseUnitOf(next.rateUnit), next.amountUnit);
           } else if (field === "rateUnit") {
             // Per-basis rate units (mix concentrations, spot placements,
             // per-acre…) keep Total in the base quantity unit, and can't
@@ -16683,6 +16741,8 @@ export function CompletionPanel({
             const perBasis = isPerBasisUnit(value);
             next.amountUnit = perBasis ? String(value).split("/")[0] : value;
             if (perBasis) next.totalAmount = "";
+            // A Total in spoons is recalculated in the new unit, not relabeled.
+            else if (p.amountUnit === "tsp") next.totalAmount = lawnDerivedTotal(next, next.areaValue);
           }
         }
         if (governed && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
@@ -17566,10 +17626,15 @@ export function CompletionPanel({
         // conditions as advisories on the completion by itself.
         products: selectedProducts.map((p) => ({
           productId: p.productId,
-          rate: p.rate,
+          // A rate is recorded only with its unit: a number typed while the
+          // unit is blank (an mL-label row starts that way) is no record.
+          rate: p.rateUnit ? p.rate : "",
           rateUnit: p.rateUnit,
-            totalAmount: p.totalAmount,
-            amountUnit: p.amountUnit,
+            // The server keeps no tsp: an amount in spoons goes as fl oz
+            // (lib/measure-units); every other row goes as entered.
+            ...(p.amountUnit === "tsp"
+              ? submittedAmount(p.totalAmount, p.amountUnit)
+              : { totalAmount: p.totalAmount, amountUnit: p.amountUnit }),
             applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
@@ -20027,7 +20092,6 @@ export function CompletionPanel({
                         <option value="" disabled>Unit</option>
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
-                        <option value="ml">ml</option>{" "}
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
@@ -20094,9 +20158,9 @@ export function CompletionPanel({
                       >
                         {" "}
                         <option value="" disabled>Unit</option>
+                        {offersTsp(sp) ? <option value="tsp">tsp</option> : null}{" "}
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
-                        <option value="ml">ml</option>{" "}
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
@@ -22431,7 +22495,7 @@ export function CompletionPanel({
                     <option value="" disabled>Unit</option>
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
-                    <option value="ml">ml</option> <option value="g">g</option>{" "}
+                    <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                     <option value="oz/gal">oz/gal</option>{" "}
@@ -22479,9 +22543,10 @@ export function CompletionPanel({
                   >
                     {" "}
                     <option value="" disabled>Unit</option>
+                    {offersTsp(sp) ? <option value="tsp">tsp</option> : null}{" "}
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
-                    <option value="ml">ml</option> <option value="g">g</option>{" "}
+                    <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                     {catalogUnitOption(baseUnitOf(sp.catalogRateUnit), STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
@@ -23692,7 +23757,9 @@ function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, invent
                 <div key={row.key || i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: t.font, fontSize: 13, color: t.ink }}>
                   <span>{row.name}</span>
                   <strong style={{ whiteSpace: "nowrap" }}>
-                    {amt != null ? `${formatMixAmount(amt)} ${row.rateUnit || "oz"}` : "—"}
+                    {amt == null ? "—"
+                      : isMlUnit(row.rateUnit) ? mixQuantityText(amt, row.rateUnit)
+                        : `${formatMixAmount(amt)} ${row.rateUnit || "oz"}`}
                   </strong>
                 </div>
               );

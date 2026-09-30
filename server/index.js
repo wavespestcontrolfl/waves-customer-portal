@@ -270,6 +270,16 @@ app.use('/api/ops/digest', require('./middleware/no-store').noStore, (req, res, 
 // response the page never reads, so this route sets no CORS headers.
 app.use('/api/public/blog-read-depth', require('./routes/public-blog-read-depth'));
 
+// Signed satellite image proxy (lead-form lookup, service report, portal
+// station map): serves Google imagery WITHOUT the server Maps key ever
+// reaching a customer. Mounted ABOVE the global cors() (which would otherwise
+// answer an OPTIONS preflight with a bare 204 before this router's limiter and
+// privacy headers ran), the global `/api/` limiter and the body parsers. The
+// router stamps its privacy headers + its own limiter on every request under
+// the mount and ends in a terminal generic 404, so nothing falls through.
+// <img> loads need no CORS headers, so this route sets none.
+app.use('/api/public/map-image', require('./routes/public-map-image'));
+
 // CORS — allow frontend dev server and production domain
 const { allowedOrigins } = require('./config/cors-origins');
 app.use(cors({

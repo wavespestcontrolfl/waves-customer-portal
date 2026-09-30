@@ -162,7 +162,17 @@ const LANE_RUNTIME = {
   // M3 (Codex r20): the public analyzer's fallback path converts analyzePhoto() into report findings it persists and teases without staff review.
   lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_visit_assessment: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
+  // Owner ruling 2026-09-29: the gated Fable name tie-break (GATE_LAWN_ASSESSMENT_REFEREE, dark). One extra ledger row
+  // per call, inside the same technician-reviewed visit as lawn_visit_assessment; a miss leaves Gemini's read standing.
+  lawn_assessment_referee: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
   tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  // Plant photo ID (owner rulings 2026-09-28/29): the plant engine's Gemini -> Sol ladder and its gated
+  // Fable name tie-break, both through the llm adapters (one ledger row per call). No runtime caller until
+  // the L4 route ships; customer-visible once it does. The referee is dark (GATE_PLANT_ID_REFEREE).
+  // Both run in-request with a hard timeout and a deterministic result: Gemini -> Sol, and a referee
+  // that times out or fails leaves the Gemini/Sol answer standing (interactive, never queued).
+  plant_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },

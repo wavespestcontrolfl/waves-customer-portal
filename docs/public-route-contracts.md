@@ -505,9 +505,24 @@ a termite liquid/trench/bait visit), or by an explicit normalized-name alias
 list when no EPA reg is recorded at all (a hand-entered row with no catalog
 `product_id` still carries its snapshotted `product_name`) — gets
 `applications[N].product.report_copy: { how_it_works, also_labeled_for,
-pets_kids }`. `also_labeled_for` is OMITTED (never a null/empty string) for
-the one approved product with no such line (the LESCO 90/10 Nonionic
-Surfactant — it is an adjuvant, not a pesticide). Matching is exact only —
+pets_kids }`. Since owner ruling 2026-09-29, `also_labeled_for` is a single
+composed sentence — `Labeled for {N}+ {City} pests` (e.g. "Labeled for 75+
+Bradenton pests"), or `Labeled for {N}+ pests` when no usable city is
+available — never a named pest list. `N` is the product's raw label pest
+count (`alsoLabeledForPestCount` in `server/config/report-product-copy.js`,
+each with a source/date comment) floored to a multiple of 25
+(`floorToMultipleOf25`); `City` is the visit's own city — `service.city` as
+`buildReportV1Data` already resolves it (the visit's stamped service address
+city via `COALESCE(ss.service_address_city, customers.city)`, i.e. the
+property serviced, falling back to the customer's own city), normalized for
+display (`normalizeReportCity`: trimmed, internal whitespace collapsed, and
+title-cased when the raw value is entirely upper-case or entirely lower-case; mixed case is kept as entered — never invented)
+before it is composed into the sentence (`buildAlsoLabeledForText`); a
+blank/unusable city (or none at all) drops to the no-city wording rather
+than blocking the rest of the copy. `also_labeled_for` is OMITTED (never a
+null/empty string) for products with no `alsoLabeledForPestCount` at all —
+narrow products (gel baits, granular bait, IGRs) and the LESCO 90/10
+Nonionic Surfactant (an adjuvant, not a pesticide). Matching is exact only —
 never a substring/fuzzy match, same posture as
 `pest-report-expectations.js`'s `PRODUCT_EXPECTATION_CLASS` — so a product
 absent from the config (every catalog product not on the owner-approved
@@ -2100,6 +2115,48 @@ Operational `meta.providerStatus` (credential configuration and attempted-provid
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
 `publicLookupErrors` removes provider failures and internal diagnostic messages.
+The response's `satellite.closeUrl` / `microCloseUrl` / `wideUrl` are ABSOLUTE
+short-lived signed proxy URLs (`https://<portal>/api/public/map-image/<token>`),
+never Google Static Maps URLs: the lookup builds keyed URLs internally (the
+server Maps key, which also serves Geocoding/Routes and so cannot be
+referrer-restricted), `publicSatellitePayload` re-signs only their
+center/zoom/size, and the whole success body also runs the shared Maps-key
+scrub (`scrubMapsKeysDeep`) as a last line. The marketing site's quote form
+renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
+`/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
+proxy; the ONLY way the public lookup, the customer service report
+(`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
+portal `/api/property/station-map` get a map image — none of those payloads
+carries a maps.googleapis.com URL or a key any more; staff-only surfaces such
+as admin dispatch keep direct URLs). The token is
+`v1.<base64url(lat|lng|zoom|WxH|scale|maptype|exp)>.<base64url(HMAC-SHA256)>`,
+keyed on `REPORT_PIN_SECRET` (falls back to `JWT_SECRET`) through a
+purpose-derived key, 2 h expiry for report/portal links (24 h for the lead-form lookup, whose marketing-site form cannot re-request; never more than 24 h), constant-time compare,
+fail-closed when no secret is configured (the map is omitted, never sent
+keyed). The route reads NOTHING but the path token — no query param — and
+rebuilds a keyless Static Maps URL only from the signed, range-checked values
+(lat +-90, lng +-180, zoom 1-22, size <=640x640, scale 1|2, maptype
+satellite|hybrid), appends the key inside the fetch (8 s timeout, image/*
+content-type, 4 MB cap; a dedicated `GOOGLE_STATIC_MAPS_API_KEY` is preferred,
+matching the basemap provider), and streams the bytes, so it cannot become an
+open proxy or SSRF vector. Every refusal (malformed/forged/expired token, no
+key, upstream failure) is ONE generic 404 body — including the empty token,
+`//x`, extra path segments and every non-GET/HEAD method, which a terminal
+catch-all in the router answers with the same 404 (the header stamp and the
+route limiter run router-wide, ahead of the route, so no request under the
+mount falls through to the global limiter or the app notFound; the mount is
+case-insensitive and ignores a trailing slash; a last error handler in the router answers any error raised under the mount, such as a malformed percent-encoding like `/%E0%A4%A`, with the same 404 instead of the global 500); every response including the
+404 and the 429 carries `Cache-Control: no-store` (success: `private,
+max-age=900`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
+nosniff`, `X-Robots-Tag: noindex` and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img> on
+the marketing site or a separate API origin). No server-side image cache
+(provider terms are display-only); a 60 req/min per-IP limiter (IPv6 /64
+collapsed) fronts the whole mount, which sits in `server/index.js` ABOVE the global `cors()` (it would otherwise answer an OPTIONS preflight with a bare 204 ahead of the router), the global `/api/` limiter and the body parsers.
+Regression guard: `server/tests/customer-map-no-key.test.js` fails if any
+server module outside an explicit server-only/staff-only allowlist references
+the Static Maps endpoint, and asserts the touched customer payloads carry no
+key).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,

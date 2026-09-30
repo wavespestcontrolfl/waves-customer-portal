@@ -34,7 +34,7 @@
  *
  * --force-fallback points the Gemini selector at a model id that does not
  * exist BEFORE the registry loads, so every case misses Gemini and answers on
- * the GPT-6 Astra leg — the way to prove the fallback (and its structured
+ * the GPT-6 Sol leg — the way to prove the fallback (and its structured
  * output) works before relying on it.
  *
  * READ-ONLY is enforced, not asserted: the run phase deletes the LLM ledger
@@ -96,7 +96,7 @@ function parseArgs(argv) {
     if (!spec) { console.error(`unknown argument: ${argv[i]}`); process.exit(2); }
     args[spec.key] = spec.value ? spec.parse(argv[++i]) : true;
   }
-  // analyzeVisit passes thinkingLevel to the Gemini leg only (the Astra
+  // analyzeVisit passes thinkingLevel to the Gemini leg only (the Sol
   // fallback runs at its fixed reasoning effort), so on a forced-fallback run
   // the level would change nothing while labelling every result with it —
   // a thinking-level comparison built on that would be wrong (Codex #4153 r9).
@@ -197,14 +197,14 @@ async function runReplay(args) {
   configureReplayLogging();
   for (const gate of LEDGER_GATES) delete process.env[gate];
   // The registry reads the selector at load: a nonexistent Gemini id makes
-  // every primary leg miss so the GPT-6 Astra fallback carries the run.
+  // every primary leg miss so the GPT-6 Sol fallback carries the run.
   if (args.forceFallback) process.env.MODEL_GEMINI_VISION = 'gemini-eval-forced-miss';
 
   const gates = require(path.join(REPO, 'server/config/feature-gates'));
   assertNoLedgerWrites(gates, 'before imports');
   if (!config.s3?.bucket) { console.error('S3 is not configured in this environment — run via: railway run --service waves-customer-portal node ops/agents/lawn-visit-assessment-eval.js --run …'); process.exit(2); }
   if (!(process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY)) console.error('warning: no Gemini key — every primary leg will miss (no_key)');
-  if (!process.env.OPENAI_API_KEY) console.error('warning: no OpenAI key — the GPT-6 Astra fallback cannot answer (no_key)');
+  if (!process.env.OPENAI_API_KEY) console.error('warning: no OpenAI key — the GPT-6 Sol fallback cannot answer (no_key)');
 
   const MODELS = require(path.join(REPO, 'server/config/models'));
   const PhotoService = require(path.join(REPO, 'server/services/photos'));
