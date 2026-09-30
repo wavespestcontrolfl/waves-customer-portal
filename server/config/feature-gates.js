@@ -1031,6 +1031,17 @@ const gates = {
   smsAgentBillingDisputes: gateEnvValue('GATE_SMS_AGENT_BILLING_DISPUTES'),
   smsAgentChemicalMedical: gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL'),
   smsAgentLegal: gateEnvValue('GATE_SMS_AGENT_LEGAL'),
+  // Scheduler-backed appointment offers in the texting AI (owner ruling
+  // 2026-09-29, slice 1): with smsRealAnswers ON, a text about ONE upcoming
+  // visit is offered that visit's times from the customer's own reschedule-link
+  // picker (routes/reschedule-public.js buildAvailabilityForService — service
+  // time frames, proximity routing, planning minutes, detour cap) instead of
+  // the zone-based availability finder; a visit the picker refuses gets no
+  // OPEN TIMES. Estimate / new-service identities keep the old finder for now.
+  // Dark in every environment: gate off keeps the drafter's prompts, facts
+  // block and snapshot shape byte-identical. Read at call time by
+  // server/services/sms-shadow-drafter.js — this entry is for logGateStatus only.
+  smsOffersScheduler: gateEnvValue('GATE_SMS_OFFERS_SCHEDULER'),
 
   // Voice-Corpus Miner (brand-voice loop, Phase A) — nightly mining of
   // human-authored SMS replies + consent-gated call transcripts into
