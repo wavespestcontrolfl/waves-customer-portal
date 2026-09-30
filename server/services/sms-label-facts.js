@@ -164,7 +164,7 @@ function rainfastClause(minutes) {
 // per-product line invites quoting one product's time for another's area, and
 // per-number grounding cannot tell them apart. So the section states at most
 // TWO figures, each true of the whole visit: the LONGEST re-entry and the
-// LONGEST rainfast time across the verified customer-visible products, named
+// LONGEST rainfast time (only when EVERY product has one) across the verified customer-visible products, named
 // as such and never per product or area.
 //
 // Re-entry level per product, in hours: rei_hours > 0 -> that many hours;
@@ -186,9 +186,13 @@ function wholeVisitReentryClause(products, isBanned) {
   const clause = `re-entry: keep people and pets off treated areas ${hours === 0 ? 'until dry' : `for ${plural(hours, 'hour')}`}`;
   return !isBanned || !isBanned(clause) ? clause : null;
 }
+// Same all-known rule as re-entry: ONE product without a rainfast time makes
+// the whole-visit figure unstatable (the longest of the known ones would
+// understate it), so the line is omitted and the COMPANY FACTS rain line applies.
 function wholeVisitRainfastClause(products) {
-  const minutes = products.map((p) => p.rainfastMinutes).filter((m) => Number.isFinite(m) && m > 0);
-  return minutes.length ? rainfastClause(Math.max(...minutes)) : null;
+  const minutes = products.map((p) => p.rainfastMinutes);
+  if (!minutes.length || minutes.some((m) => !Number.isFinite(m) || m <= 0)) return null;
+  return rainfastClause(Math.max(...minutes));
 }
 
 /**

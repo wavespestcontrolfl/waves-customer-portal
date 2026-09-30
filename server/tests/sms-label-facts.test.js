@@ -129,6 +129,14 @@ describe('gate on — section rendering', () => {
     expect(section([pest, product({ reiHours: 0 })]).text).toContain('until dry');
     // longest rainfast across products, omitted when none
     expect(section([product({ rainfastMinutes: 60 }), product({ rainfastMinutes: 180 })]).text).toContain('rainfast after 3 hours');
+    // all-known rule: one product with no rainfast time -> no rainfast line at all
+    const partial = section([product({ rainfastMinutes: 180 }), product({ rainfastMinutes: null })]).text;
+    expect(partial).not.toContain('rainfast');
+    expect(partial).toContain('re-entry: keep people and pets off treated areas until dry');
+    expect(section([product({ rainfastMinutes: 180 }), product({ rainfastMinutes: 0 })]).text).not.toContain('rainfast');
+    // ... and a reply quoting the one known figure is then ungrounded
+    const f = buildFactsBlock(context, { now: NOW, labelFacts: labelFacts([product({ rainfastMinutes: 180 }), product({ rainfastMinutes: null })]) });
+    expect(validateComplianceCopy({ reply: 'It is rainfast after 3 hours.', factsBlock: f }).ok).toBe(false);
     expect(section([lawn, pest]).text).not.toContain('rainfast');
     // one product with unknown re-entry makes the whole-visit re-entry unstatable
     expect(section([lawn, product({ reiHours: null, reentrySummary: null })]).text).not.toContain('re-entry');
@@ -231,7 +239,7 @@ describe('label row selection (mock knex)', () => {
 describe('compliance grounding', () => {
   beforeEach(() => { process.env[GATE] = 'true'; });
   const factsWith = (products) => buildFactsBlock(context, { now: NOW, labelFacts: labelFacts(products) });
-  const facts = () => factsWith([product({ rainfastMinutes: 180 }), product({ phrase: 'a weed control', reentrySummary: null, reiHours: 4 })]);
+  const facts = () => factsWith([product({ rainfastMinutes: 180 }), product({ phrase: 'a weed control', rainfastMinutes: 90, reentrySummary: null, reiHours: 4 })]);
   const check = (reply, factsBlock = facts()) => validateComplianceCopy({ reply, factsBlock });
 
   test('allows the grounded rainfast time, in digits, about rain', () => {
