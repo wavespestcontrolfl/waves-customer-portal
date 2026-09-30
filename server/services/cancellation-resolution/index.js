@@ -125,9 +125,37 @@ async function openCancellationCase({
   return inserted;
 }
 
+/**
+ * Release an accepted case whose action changed nothing, so it is neither
+ * replayed as a 24 h dedupe nor counted as a shown card for 12 months.
+ * Under the accept route's own per-customer lock, from a fresh read, and
+ * only while no receipt and no active or resumed plan hold stand for it:
+ * a concurrent or retried execution of the same case that did succeed is
+ * never undone. Returns whether the case was released.
+ */
+async function releaseUnappliedCase({ caseId, customerId, code }) {
+  if (!caseId || !customerId) return false;
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`cancel-accept:${customerId}`]);
+    const fresh = await trx('cancellation_cases').where({ id: caseId }).forUpdate().first('resolution_outcome', 'snapshot');
+    if (!fresh || fresh.resolution_outcome !== 'accepted') return false;
+    const snap = typeof fresh.snapshot === 'string' ? JSON.parse(fresh.snapshot) : (fresh.snapshot || {});
+    if (snap.accept_receipt) return false;
+    const standing = await trx('plan_holds').where({ cancellation_case_id: caseId }).whereIn('status', ['active', 'resumed']).first('id');
+    if (standing) return false;
+    await trx('cancellation_cases').where({ id: caseId }).update({
+      resolution_outcome: 'none',
+      snapshot: JSON.stringify({ ...snap, accept_refused: { code, at: new Date().toISOString() } }),
+      updated_at: new Date(),
+    });
+    return true;
+  });
+}
+
 module.exports = {
   GATE,
   cancelFlowV2Enabled,
   previewCancellationResolution,
   openCancellationCase,
+  releaseUnappliedCase,
 };

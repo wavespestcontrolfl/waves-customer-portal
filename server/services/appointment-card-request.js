@@ -1906,12 +1906,48 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
   // whose plan_required refusal then applies. selected_plan can only
   // change while the row is 'pending', so the completing lease below never
   // needs the guard.
-  let claimQuery = db('appointment_card_requests')
-    .where({ id: request.id, status: 'pending' });
-  claimQuery = request.selected_plan == null
-    ? claimQuery.whereNull('selected_plan')
-    : claimQuery.where({ selected_plan: request.selected_plan });
-  let claimed = await claimQuery.update({ status: 'completing', updated_at: new Date() });
+  // The claim ALSO takes this visit's scheduled-invoice mint lock (Codex
+  // #5253 follow-up — "reprice/card-completion serialization"): a plain
+  // UPDATE here raced the re-price save's own plain 'completing' read
+  // (admin-schedule.js's findCompletingCardRequestVisitId), so a claim that
+  // landed in the gap between that read and the save's commit went
+  // undetected and completed against whatever price the save had just set.
+  // The re-price save takes the SAME lock (acquireScheduledInvoiceMintLock/
+  // tryAcquireScheduledInvoiceMintLock, admin-schedule.js) before it ever
+  // reads this visit's row or checks for a 'completing' request, so one of
+  // two things now happens: the save already holds the lock and this claim
+  // blocks until it commits or rolls back, then proceeds against the
+  // settled row; or this claim holds the lock first, so the save's own
+  // acquisition blocks until this transaction commits — it then finds this
+  // row 'completing' and refuses with VISIT_BUSY_RETRY. Lock order: this is
+  // the ONLY lock this function takes here, and it is released on commit —
+  // never held across the Stripe SetupIntent re-read just below (a fresh
+  // pooled connection, no transaction) or any other network call. The final
+  // completing→completed write further down re-acquires the same lock in
+  // its OWN short transaction for the same reason.
+  const { acquireScheduledInvoiceMintLock } = require('./scheduled-invoice-mint');
+  // Eligibility is RE-READ under the lock: the pre-claim read at the top of
+  // this function ran with no lock, so a re-price save (or a free re-service
+  // conversion) that committed between that read and this claim would
+  // otherwise let the capture complete against the state it never saw. The
+  // re-read is DB-only (visit row + payer lookup, no row locks taken, no
+  // network), so the mint lock is never held across a Stripe call.
+  let claimRefusal = null;
+  let claimed = await db.transaction(async (trx) => {
+    await acquireScheduledInvoiceMintLock(trx, request.scheduled_service_id);
+    const stillNeededLocked = await secureVisitStillNeedsCard(request, { database: trx });
+    if (!stillNeededLocked.ok) {
+      claimRefusal = stillNeededLocked;
+      return 0;
+    }
+    let claimQuery = trx('appointment_card_requests')
+      .where({ id: request.id, status: 'pending' });
+    claimQuery = request.selected_plan == null
+      ? claimQuery.whereNull('selected_plan')
+      : claimQuery.where({ selected_plan: request.selected_plan });
+    return claimQuery.update({ status: 'completing', updated_at: new Date() });
+  });
+  if (claimRefusal) return claimRefusal;
   if (claimed !== 1) {
     const fresh = await db('appointment_card_requests').where({ id: request.id })
       .first('id', 'status', 'updated_at', 'stripe_setup_intent_id', 'fee_agreed_at', 'sticky_window_disclosed');
@@ -2090,17 +2126,32 @@ async function finishVerifiedSecureCapture({ request, stripePaymentMethodId, set
     } catch (err) {
       logger.warn(`[appt-card-request] disclosed-terms read failed for request ${request.id} — completing without fee consent stamp: ${err.message}`);
     }
-    await db('appointment_card_requests')
-      .where({ id: request.id, status: 'completing' })
-      .update({
-        status: 'completed',
-        stripe_setup_intent_id: setupIntentId,
-        stripe_payment_method_id: stripePaymentMethodId,
-        payment_method_id: saved?.id || null,
-        completed_at: new Date(),
-        updated_at: new Date(),
-        ...frozenFeeTerms,
-      });
+    // Re-acquires the SAME scheduled-invoice mint lock as the claim above,
+    // in its OWN short transaction (never spanning the Stripe re-read or
+    // the enrollment/consent writes above, which run on plain pooled
+    // connections with no lock held) — a re-price save that starts after
+    // the claim released the lock, finds the row 'completing' via its
+    // plain read and refuses, could otherwise still race this FINAL write
+    // if this write took no lock of its own. Taking it here means a
+    // re-price save that instead wins the lock race blocks until this
+    // transition commits (then sees 'completed', not 'completing' — its
+    // own guard has already run by the time it could acquire this lock,
+    // so this ordering only affects which of the two finishes first, never
+    // which one sees stale state).
+    await db.transaction(async (trx) => {
+      await acquireScheduledInvoiceMintLock(trx, request.scheduled_service_id);
+      await trx('appointment_card_requests')
+        .where({ id: request.id, status: 'completing' })
+        .update({
+          status: 'completed',
+          stripe_setup_intent_id: setupIntentId,
+          stripe_payment_method_id: stripePaymentMethodId,
+          payment_method_id: saved?.id || null,
+          completed_at: new Date(),
+          updated_at: new Date(),
+          ...frozenFeeTerms,
+        });
+    });
     logger.info(`[appt-card-request] capture completed for visit ${request.scheduled_service_id} (request ${request.id})`);
     return { ok: true };
   } catch (err) {

@@ -5,6 +5,11 @@ const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The bell writer is stubbed: this suite shares CI's database with the other
+// DB-gated suites, so it must not leave `agents` notification rows behind.
+// notifyAdmin receives the gap row's savepoint as opts.trx.
+const mockNotifyAdmin = jest.fn(async () => ({ id: 1 }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
 
 postgres('agent-gap-reports against PostgreSQL', () => {
   let db;
@@ -43,14 +48,41 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     return result;
   }
 
-  test('the Monday digest leaves out gaps already marked fixed, by_design or dismissed', async () => {
-    const { _private: { loadRecentGaps } } = require('../services/agent-gap-digest');
-    const open = await record({ summary: 'Synthetic digest gap still open' });
-    const fixed = await record({ summary: 'Synthetic digest gap fixed after its last sighting' });
+  test('list_gap_reports leaves out gaps already marked fixed, by_design or dismissed', async () => {
+    const open = await record({ summary: 'Synthetic list gap still open' });
+    const fixed = await record({ summary: 'Synthetic list gap fixed after its last sighting' });
     await db('agent_gap_reports').where('id', fixed.id).update({ status: 'fixed' });
-    const ids = (await loadRecentGaps()).map((row) => Number(row.id));
+    const result = await listGapReports({ days: 1 });
+    const ids = result.groups.flatMap((d) => d.gaps || []).map((g) => g.gap_id);
     expect(ids).toContain(open.id);
     expect(ids).not.toContain(fixed.id);
+  });
+
+  test('rang is true on the first sighting and a fixed reopen, false on a repeat of an open gap', async () => {
+    const first = await record({ summary: 'Synthetic ring detection gap' });
+    expect(first.rang).toBe(true);
+    const repeat = await record({ summary: 'Synthetic ring detection gap' });
+    expect(repeat.rang).toBe(false);
+    await db('agent_gap_reports').where('id', first.id).update({ status: 'fixed' });
+    const reopened = await record({ summary: 'Synthetic ring detection gap' });
+    expect(reopened).toMatchObject({ rang: true, reopened: true, status: 'new' });
+    await db('agent_gap_reports').where('id', first.id).update({ status: 'building' });
+    expect((await record({ summary: 'Synthetic ring detection gap' })).rang).toBe(false);
+  });
+
+  test('a pre-cutover open gap (belled_at NULL) rings on its next sighting, then is quiet; by_design / dismissed never ring; an insert stamps belled_at', async () => {
+    const first = await record({ summary: 'Synthetic legacy belled gap' });
+    expect((await db('agent_gap_reports').where('id', first.id).first('belled_at')).belled_at).not.toBeNull();
+    await db('agent_gap_reports').where('id', first.id).update({ belled_at: null });
+    const legacy = await record({ summary: 'Synthetic legacy belled gap' });
+    expect(legacy).toMatchObject({ rang: true, reopened: false });
+    expect((await db('agent_gap_reports').where('id', first.id).first('belled_at')).belled_at).not.toBeNull();
+    expect((await record({ summary: 'Synthetic legacy belled gap' })).rang).toBe(false);
+    for (const status of ['dismissed', 'by_design']) {
+      await db('agent_gap_reports').where('id', first.id).update({ status, belled_at: null });
+      expect((await record({ summary: 'Synthetic legacy belled gap' })).rang).toBe(false);
+      expect((await db('agent_gap_reports').where('id', first.id).first('belled_at')).belled_at).toBeNull();
+    }
   });
 
   test('list_gap_reports reports the real matching total and has_more when it caps the rows', async () => {
@@ -172,5 +204,34 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     const withClosed = await listGapReports({ days: 1, include_closed: true });
     const opsGroupClosed = withClosed.groups.find((g) => g.domain === 'ops');
     expect(opsGroupClosed.gaps.some((g) => g.gap_id === closed.id)).toBe(true);
+  });
+
+  test('a bell that fails inside its savepoint (aborted statement, null result) leaves the sighting saved and belled_at NULL', async () => {
+    mockNotifyAdmin.mockImplementationOnce(async (_c, _t, _b, opts) => {
+      // Same shape as notification-service's create(): a failed statement on
+      // the caller's connection, caught, returned as null.
+      try { await opts.trx.raw('SELECT 1/0'); } catch { return null; }
+      return { id: 1 };
+    });
+    const gap = await record({ summary: 'Synthetic failed bell gap' });
+    expect(gap.rang).toBe(false);
+    const row = await db('agent_gap_reports').where('id', gap.id).first('belled_at', 'occurrences');
+    expect(row).toMatchObject({ belled_at: null, occurrences: 1 });
+    expect(Number((await db('agent_gap_report_sightings').where('gap_id', gap.id).count('* as n'))[0].n)).toBe(1);
+    const next = await record({ summary: 'Synthetic failed bell gap' });
+    expect(next.rang).toBe(true);
+    expect((await db('agent_gap_reports').where('id', gap.id).first('belled_at')).belled_at).not.toBeNull();
+  });
+
+  test('a reopened gap whose bell fails retries on its next sighting', async () => {
+    const gap = await record({ summary: 'Synthetic reopen failed bell gap' });
+    expect(gap.rang).toBe(true);
+    await db('agent_gap_reports').where('id', gap.id).update({ status: 'fixed' });
+    mockNotifyAdmin.mockImplementationOnce(async () => null);
+    const reopened = await record({ summary: 'Synthetic reopen failed bell gap' });
+    expect(reopened).toMatchObject({ rang: false, reopened: true, status: 'new' });
+    expect((await db('agent_gap_reports').where('id', gap.id).first('belled_at')).belled_at).toBeNull();
+    const retry = await record({ summary: 'Synthetic reopen failed bell gap' });
+    expect(retry.rang).toBe(true);
   });
 });

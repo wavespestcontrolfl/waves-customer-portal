@@ -9,21 +9,24 @@
  */
 
 const mockTrigger = jest.fn(async () => undefined);
-// "Does a live engine read this stop now" — the dispatcher's own chooseEngine.
+// "Which read does the stop want now" — the read key's own currentReadKey.
 const mockIsPestStop = jest.fn(async () => false);
 jest.mock('../services/visit-prep-read-dispatch', () => ({
   dispatchVisitPrepRead: (...args) => mockTrigger(...args),
-  _internal: {
-    // true → the stop wants a pest read; a string is taken as the key itself.
-    currentReadKey: async (svc, conn) => {
-      const v = await mockIsPestStop(svc, conn);
-      return v === true ? 'pest' : (v || null);
-    },
-    storedReadKey: (r) => {
-      const parsed = typeof r === 'string' ? JSON.parse(r) : r;
-      return parsed?.engine === 'plant' ? `plant:${parsed.subject_type}` : 'pest';
-    },
+}));
+jest.mock('../services/visit-prep-read-key', () => ({
+  ...jest.requireActual('../services/visit-prep-read-key'),
+  // true → the stop wants a pest read; a string is taken as the key itself.
+  currentReadKey: async (svc, conn) => {
+    const v = await mockIsPestStop(svc, conn);
+    return v === true ? 'pest' : (v || null);
   },
+}));
+// The UNGATED shape of the stop, used only to tell a gate-degraded combo from
+// a stop that really changed.
+const mockStopShape = jest.fn(async () => ({ pest: false, plantSubject: null }));
+jest.mock('../services/visit-prep-plant-applicability', () => ({
+  stopReadShape: (...args) => mockStopShape(...args),
 }));
 
 // The stop lock itself is covered by the claim's own suites; here the
@@ -182,6 +185,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockGateOn = true;
   mockIsPestStop.mockResolvedValue(false);
+  mockStopShape.mockResolvedValue({ pest: false, plantSubject: null });
 });
 
 describe('gate', () => {
@@ -493,6 +497,66 @@ describe('case (d): a finished read made for the wrong line or subject (Codex #5
       services: [svc({ scheduled_date: TODAY_ET })],
     });
     expect(await selectCandidates(conn, NOW)).toEqual([]);
+  });
+
+  describe('combined Lawn & Pest reads (owner ruling 2026-09-30)', () => {
+    const COMBO_READ = JSON.stringify({
+      engine: 'combo', subject_type: 'lawn', pest: { status: 'done' }, plant: { status: 'done', v2: {} },
+    });
+    const withRow = (read_result, extra = {}) => fakeConn({
+      submissions: [submission({ read_status: 'done', read_result, read_attempts: 2, created_at: NOW, ...extra })],
+      services: [svc({ scheduled_date: TODAY_ET })],
+      photos: [{ submission_id: 'sub-1', s3_key: 'visitprep/a.jpg', mime_type: 'image/jpeg' }],
+    });
+
+    test('a combo read on a stop that is still that combo is never a candidate', async () => {
+      mockIsPestStop.mockResolvedValue('combo:lawn');
+      expect(await selectCandidates(withRow(COMBO_READ), NOW)).toEqual([]);
+    });
+
+    test('a pest read on a stop that gained a lawn part (now combo) is stale and re-read', async () => {
+      mockIsPestStop.mockResolvedValue('combo:lawn');
+      const conn = withRow(null, { read_attempts: 1 });
+      expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+      await sweepVisitPrepPestReads(conn, NOW);
+      expect(conn._store.submissions[0]).toMatchObject({ read_status: 'none', read_result: null, read_ref: null, read_attempts: 1 });
+      expect(mockTrigger).toHaveBeenCalledWith(expect.objectContaining({ submissionId: 'sub-1', expectStatus: ['none'] }));
+    });
+
+    test('a plant read on a stop that gained a pest part (now combo) is stale and re-read', async () => {
+      mockIsPestStop.mockResolvedValue('combo:lawn');
+      const conn = withRow(JSON.stringify({ engine: 'plant', subject_type: 'lawn', v2: {} }), { read_attempts: 1 });
+      expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+    });
+
+    test.each([
+      ['lost its lawn part', 'pest', { pest: true, plantSubject: null }],
+      ['lost its pest part', 'plant:lawn', { pest: false, plantSubject: 'lawn' }],
+    ])('a combo read on a stop that %s is stale and released to none', async (_name, want, shape) => {
+      mockIsPestStop.mockResolvedValue(want);
+      mockStopShape.mockResolvedValue(shape);
+      const conn = withRow(COMBO_READ);
+      expect((await selectCandidates(conn, NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+      await sweepVisitPrepPestReads(conn, NOW);
+      expect(conn._store.submissions[0]).toMatchObject({ read_status: 'none', read_result: null, read_ref: null, read_attempts: 2 });
+      expect(mockTrigger).toHaveBeenCalledWith(expect.objectContaining({ expectStatus: ['none'] }));
+    });
+
+    test('a combo read on a stop whose combo SUBJECT changed (lawn -> tree & shrub) is stale', async () => {
+      mockIsPestStop.mockResolvedValue('combo:tree_shrub');
+      expect((await selectCandidates(withRow(COMBO_READ), NOW)).map((c) => c.caseLabel)).toEqual([SWEEP_CASE.STALE_READ]);
+    });
+
+    test.each([
+      ['plant gate went dark (key degrades to pest)', 'pest'],
+      ['pest gate went dark (key degrades to plant)', 'plant:lawn'],
+    ])('a combo read is NOT stale just because %s: the stop is unchanged', async (_name, want) => {
+      mockIsPestStop.mockResolvedValue(want);
+      mockStopShape.mockResolvedValue({ pest: true, plantSubject: 'lawn' }); // still both parts
+      const conn = withRow(COMBO_READ);
+      expect(await selectCandidates(conn, NOW)).toEqual([]);
+      expect(mockTrigger).not.toHaveBeenCalled();
+    });
   });
 
   test('a stop that changed BACK before the release keeps its valid read: re-proved under the stop lock (Codex #5320 r11)', async () => {
