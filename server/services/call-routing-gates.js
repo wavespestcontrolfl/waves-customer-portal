@@ -421,39 +421,43 @@ function excludeReviewedDecisions(query, conn) {
 // deploy, Codex #3736 r9 P1 — Postgres cannot do a targetless DO UPDATE):
 //   1. INSERT ... ON CONFLICT DO NOTHING (the first pass for a key lands here);
 //   2. a keyed UPDATE of the refresh columns (a later pass lands here).
-// `fence` ({ callLogId, processingToken }) scopes the REFRESH to the pass that
-// still owns the call's processing_token, exactly like the processor's other
-// ownership fences (and skipped for a decision a human already reviewed) — a superseded worker can insert a first row for a key but
-// never overwrite a newer pass's decision. Returns a promise (await it).
+// `fence` ({ callLogId, processingToken }) makes BOTH statements conditional on
+// this pass still owning the call's processing_token: the ownership row is
+// locked FOR UPDATE and re-read in the same transaction as the writes (the
+// processor's own fence shape), so a superseded worker can neither insert a
+// first decision nor overwrite a newer pass's (codex #5371 r8 P1). A fence that
+// was ASKED FOR but is incomplete fails closed: nothing is written. Refreshes
+// also skip a decision a human already reviewed (excludeReviewedDecisions).
+// Returns rows refreshed / 0 / null (null = fence not held: nothing written).
 async function upsertRouteDecision(conn, decision, fence = null) {
-  await conn('route_decisions').insert(decision).onConflict().ignore();
-  const refresh = {};
-  for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
-  const update = conn('route_decisions')
-    .where({
-      call_log_id: decision.call_log_id,
-      decision_version: decision.decision_version,
-      mode: decision.mode,
-      recording_sid: decision.recording_sid,
-    })
-    .update(refresh);
-  // A REVIEWED decision is never refreshed (codex #5371 r6 P1): route_feedback
-  // points at a decision row by id and calibration joins that row's CURRENT
-  // action / reasons to the human's verdict, so mutating a reviewed row would
-  // re-attach an old verdict to a decision the reviewer never saw. The row a
-  // human judged stays exactly as judged; a later pass's different decision
-  // is simply not recorded over it.
-  excludeReviewedDecisions(update, conn);
-  if (fence) {
-    // A fence that was ASKED FOR but is incomplete (a missing processing
-    // token) fails closed: the refresh is skipped, never run unfenced.
-    if (!fence.callLogId || !fence.processingToken) return 0;
-    update.whereRaw(
-      'EXISTS (SELECT 1 FROM call_log WHERE call_log.id = ? AND call_log.processing_token = ?)',
-      [fence.callLogId, fence.processingToken],
-    );
-  }
-  return update;
+  const write = async (c) => {
+    await c('route_decisions').insert(decision).onConflict().ignore();
+    const refresh = {};
+    for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
+    // A REVIEWED decision is never refreshed (codex #5371 r6 P1): route_feedback
+    // points at a decision row by id and calibration joins that row's CURRENT
+    // action / reasons to the human's verdict, so mutating a reviewed row would
+    // re-attach an old verdict to a decision the reviewer never saw.
+    return excludeReviewedDecisions(c('route_decisions')
+      .where({
+        call_log_id: decision.call_log_id,
+        decision_version: decision.decision_version,
+        mode: decision.mode,
+        recording_sid: decision.recording_sid,
+      })
+      .update(refresh), c);
+  };
+  if (!fence) return write(conn);
+  if (!fence.callLogId || !fence.processingToken) return null;
+  return conn.transaction(async (trx) => {
+    const owned = await trx('call_log')
+      .where({ id: fence.callLogId })
+      .where('processing_token', fence.processingToken)
+      .forUpdate()
+      .first('id');
+    if (!owned) return null;
+    return write(trx);
+  });
 }
 
 function buildRouteDecision({

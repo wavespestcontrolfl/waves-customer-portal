@@ -1,7 +1,6 @@
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT (owner-approved review item, 2026-09-30).
 // A call with a CONFIRMED, ON-THE-HOUR time and a TRUSTED address must not be
-// held only because the service is unclear (ambiguous_pest_or_service, or
-// low_extraction_confidence when service_address is the only low sub-score):
+// held only because the service is unclear (ambiguous_pest_or_service):
 // the existing fail-open "Waves Assessment" catalog fallback books it, the
 // office keeps its advisory card. Gate off = today's behavior, every case.
 // Synthetic data only.
@@ -128,113 +127,53 @@ describe('ambiguous_pest_or_service', () => {
   });
 });
 
-describe('low_extraction_confidence with only service_address low', () => {
-  const lowAddressOnly = (extra = {}) => extraction({
-    confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9, urgency: 0.8, consent_capture: 0.9, ...extra },
+describe('low_extraction_confidence is NOT waived by this gate (auto-routing stays confidence-gated)', () => {
+  const lowAddressOnly = () => extraction({
+    confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9, urgency: 0.8, consent_capture: 0.9 },
   });
 
   test('the deterministic emitter really raises the flag for this shape', () => {
     const r = canAutoRoute(lowAddressOnly(), { ...GATE_OFF, addressValidation: AV_CLEAN });
-    expect(r.allowed).toBe(false);
     expect(r.flags).toContain('low_extraction_confidence');
   });
 
-  test('gate OFF: held on low_extraction_confidence', () => {
-    const r = canAutoRoute(lowAddressOnly(), GATE_OFF);
-    expect(r).toMatchObject({ allowed: false, reason: 'triage_flags' });
-    expect(r.appointmentBlockingFlags).toContain('low_extraction_confidence');
-  });
-
-  test('gate ON: fails open at BOTH the flag check and the score check', () => {
-    const r = canAutoRoute(lowAddressOnly(), GATE_ON);
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(['low_extraction_confidence']);
-    // Not the score-level exit the second check owns.
-    expect(r.reason).toBeUndefined();
-  });
-
-  test('gate ON, on-file address: allowed and flagged for the card', () => {
-    const r = canAutoRoute(lowAddressOnly(), { failOpen: true, unclearServiceAssessment: true, knownCustomer: { ...ON_FILE, addressOnly: true }, contactPhone: '+19415550100' });
-    // addressOnly (new-lead) trust never lifts confidence on its own — the new
-    // gate does, because the service-address score is the only low one.
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toContain('low_extraction_confidence');
-  });
-
-  test('gate ON, another sub-score is low too: still held', () => {
-    for (const other of [
-      { primary_service_category: 0.2 },
-      { caller_identity: 0.1 },
-      { urgency: 0.4 },
-      { consent_capture: 0.3 },
-    ]) {
-      const r = canAutoRoute(lowAddressOnly(other), GATE_ON);
-      expect(r.allowed).toBe(false);
+  test('gate OFF and gate ON behave identically: held on the flag', () => {
+    for (const opts of [GATE_OFF, GATE_ON]) {
+      const r = canAutoRoute(lowAddressOnly(), opts);
+      expect(r).toMatchObject({ allowed: false, reason: 'triage_flags' });
       expect(r.appointmentBlockingFlags).toContain('low_extraction_confidence');
+      expect(r.unclearServiceDemotedFlags).toBeUndefined();
     }
   });
 
-  test('gate ON, service_address is NOT the low one: still held', () => {
-    const r = canAutoRoute(extraction({
-      confidence: { overall: 0.3, service_address: 0.9, primary_service_category: 0.9 },
-    }), GATE_ON);
+  test('a low overall with the flag suppressed still blocks at the score check under the gate', () => {
+    // known customer trust would lift it (existing rule); the unclear-service gate must not
+    const r = canAutoRoute(lowAddressOnly(), { failOpen: true, unclearServiceAssessment: true, addressValidation: AV_CLEAN, contactPhone: '+19415550100' });
     expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toContain('low_extraction_confidence');
   });
 
-  test('gate ON, NOT confirmed / off the hour / untrusted address: still held', () => {
-    const notConfirmed = canAutoRoute(extraction({
-      confidence: lowAddressOnly().confidence,
-      scheduling: { status: 'tentative', confirmed_start_at: ON_THE_HOUR },
-    }), GATE_ON);
-    expect(notConfirmed.allowed).toBe(false);
-
-    const offHour = canAutoRoute(extraction({
-      confidence: lowAddressOnly().confidence,
-      scheduling: { status: 'confirmed', confirmed_start_at: OFF_THE_HOUR },
-    }), GATE_ON);
-    expect(offHour.allowed).toBe(false);
-    expect(offHour.appointmentBlockingFlags).toContain('low_extraction_confidence');
-
-    const untrusted = canAutoRoute(lowAddressOnly(), { failOpen: true, unclearServiceAssessment: true, contactPhone: '+19415550100' });
-    expect(untrusted.allowed).toBe(false);
-  });
-
-  test('the two checks agree: a low overall with no service_address score blocks at both', () => {
-    const r = canAutoRoute(extraction({ confidence: { overall: 0.3, primary_service_category: 0.9 } }), GATE_ON);
-    expect(r.allowed).toBe(false);
-    expect(r.appointmentBlockingFlags).toContain('low_extraction_confidence');
-  });
-
-  test('both unclear-service flags together fail open together under the gate', () => {
+  test('ambiguous + low confidence together: the ambiguous flag is waived, the confidence hold remains', () => {
     const ex = lowAddressOnly();
     ex.triage_flags = ['ambiguous_pest_or_service'];
     const r = canAutoRoute(ex, GATE_ON);
-    expect(r.allowed).toBe(true);
-    expect(r.failedOpenFlags).toEqual(expect.arrayContaining(['ambiguous_pest_or_service', 'low_extraction_confidence']));
+    expect(r.allowed).toBe(false);
+    expect(r.appointmentBlockingFlags).toEqual(['low_extraction_confidence']);
+    expect(r.failedOpenFlags).toContain('ambiguous_pest_or_service');
   });
 });
 
-describe('the transcript veto rides EVERY admission by this gate (codex r3 P1)', () => {
-  const lowAddressOnly = () => extraction({
-    confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9 },
-  });
+describe('the transcript veto rides the admission by this gate (codex r3 P1)', () => {
+  const admittedResult = () => canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
 
-  test('both waivers set the single admitted signal; only the ambiguous one forces the Assessment', () => {
-    const lowConf = canAutoRoute(lowAddressOnly(), GATE_ON);
-    expect(lowConf).toMatchObject({ allowed: true, unclearServiceGateAdmitted: true, forceAssessmentService: false });
-    const amb = canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
-    expect(amb).toMatchObject({ allowed: true, unclearServiceGateAdmitted: true, forceAssessmentService: true });
-    // gate off: neither
+  test('the admission sets the admitted signal and forces the Assessment; gate off sets neither', () => {
+    expect(admittedResult()).toMatchObject({ allowed: true, unclearServiceGateAdmitted: true, forceAssessmentService: true });
     expect(canAutoRoute(extraction(), GATE_OFF).unclearServiceGateAdmitted).toBeUndefined();
   });
 
-  test('SEO solicitor through the low-confidence path: the resolver vetoes on the transcript once the signal is passed', () => {
-    const admitted = canAutoRoute(lowAddressOnly(), GATE_ON);
-    expect(admitted.unclearServiceGateAdmitted).toBe(true);
+  test('SEO solicitor: the resolver vetoes on the transcript once the signal is passed', () => {
+    const admitted = admittedResult();
     const extracted = { matched_service: 'General Pest Control', requested_service: 'pest control', call_summary: 'Caller about pest control.' };
     const transcription = 'Agent: Hello.\nCaller: I can improve your website SEO and Google ranking for your pest control company, organic traffic guaranteed.\n';
-    // what the processor passes: fullTranscriptVeto = admitted.unclearServiceGateAdmitted
     const r = resolveSchedulableCallService(extracted, { transcription, fullTranscriptVeto: admitted.unclearServiceGateAdmitted === true });
     expect(r).toMatchObject({ ok: false, reason: 'unsupported_service' });
     expect(r.noMatch).toBeUndefined();
@@ -343,15 +282,6 @@ describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () 
   test('canAutoRoute marks the ambiguous demotion and names the flags it waived', () => {
     const r = canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
     expect(r).toMatchObject({ allowed: true, forceAssessmentService: true, unclearServiceDemotedFlags: ['ambiguous_pest_or_service'] });
-  });
-
-  test('a low-confidence-only demotion waives the flag but does not force the Assessment', () => {
-    const r = canAutoRoute(extraction({
-      confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9 },
-    }), GATE_ON);
-    expect(r.allowed).toBe(true);
-    expect(r.unclearServiceDemotedFlags).toEqual(['low_extraction_confidence']);
-    expect(r.forceAssessmentService).toBe(false);
   });
 
   test('gate off: no marker at all', () => {
@@ -516,9 +446,9 @@ describe('an open blocking card is demoted on reprocess, fenced to the owning pa
     ]));
   });
 
-  test('a superseded worker (processing token no longer held) demotes nothing', async () => {
+  test('a superseded worker (processing token no longer held) demotes nothing and reports the lost claim (null)', async () => {
     const { conn, calls } = fakeConn({ owner: false });
-    expect(await demoteOpenTriageCards(conn, 'call-1', ['ambiguous_pest_or_service'], 'stale-tok')).toBe(0);
+    expect(await demoteOpenTriageCards(conn, 'call-1', ['ambiguous_pest_or_service'], 'stale-tok')).toBeNull();
     expect(calls.some((c) => c[0] === 'triage_items')).toBe(false);
   });
 
@@ -557,16 +487,20 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
       return qb;
     };
     conn.raw = (...a) => knex.raw(...a);
+    conn.transaction = async (fn) => fn(conn);
     return { conn, sqls };
   }
+  // The route_decisions statements only (the ownership read is call_log).
+  const rd = (sqls) => sqls.filter((q) => /route_decisions/.test(q.sql));
 
   test('a TARGETLESS insert (rolling-deploy safe) then a keyed refresh of decision columns and created_at only', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
-    expect(sqls).toHaveLength(2);
-    expect(sqls[0].sql).toMatch(/insert into "route_decisions"[\s\S]*on conflict do nothing/i);
-    expect(sqls[0].sql).not.toMatch(/on conflict \(/i);
-    const upd = sqls[1].sql;
+    const w = rd(sqls);
+    expect(w).toHaveLength(2);
+    expect(w[0].sql).toMatch(/insert into "route_decisions"[\s\S]*on conflict do nothing/i);
+    expect(w[0].sql).not.toMatch(/on conflict \(/i);
+    const upd = w[1].sql;
     expect(upd).toMatch(/^update "route_decisions" set/i);
     for (const col of ROUTE_DECISION_REFRESH_COLUMNS) expect(upd).toContain(`"${col}" = ?`);
     // outcome linkage is never refreshed
@@ -577,17 +511,31 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(ROUTE_DECISION_REFRESH_COLUMNS).toContain('created_at');
   });
 
-  test('the refresh is fenced to the pass that owns the processing token', async () => {
+  test('BOTH statements run only after the ownership row is locked and re-read in the same transaction (codex r8 P1)', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
-    expect(sqls[1].sql).toMatch(/EXISTS \(SELECT 1 FROM call_log WHERE call_log\.id = \? AND call_log\.processing_token = \?\)/i);
-    expect(sqls[1].bindings.slice(-2)).toEqual(['c1', 'tok']);
+    expect(sqls[0].sql).toMatch(/from "call_log" where "id" = \? and "processing_token" = \? limit \? for update/i);
+    expect(sqls[0].bindings.slice(0, 2)).toEqual(['c1', 'tok']);
+    expect(/route_decisions/.test(sqls[0].sql)).toBe(false);
+    expect(rd(sqls)).toHaveLength(2);
+  });
+
+  test('a lost claim writes NOTHING (neither insert nor refresh) and reports null', async () => {
+    const { conn, sqls } = recordingConn();
+    const lost = async (fn) => fn(Object.assign((t) => {
+      const qb = conn(t);
+      if (t === 'call_log') qb.then = (res, rej) => Promise.resolve(undefined).then(res, rej);
+      return qb;
+    }, { raw: conn.raw, transaction: conn.transaction }));
+    conn.transaction = lost;
+    expect(await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'stale' })).toBeNull();
+    expect(rd(sqls)).toHaveLength(0);
   });
 
   test('a refresh skips a decision that has route_feedback (codex r6 P1)', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
-    expect(sqls[1].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
+    expect(rd(sqls)[1].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
   });
 
   test('the processor outcome update skips a reviewed decision too (codex r7 P1)', () => {
@@ -599,16 +547,17 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(src).toMatch(/await excludeReviewedDecisions\(outcomeUpdate, db\)\s*\.update\(\{\s*final_action_taken/);
   });
 
-  test('an incomplete fence (no processing token) fails closed: no refresh runs', async () => {
+  test('an incomplete fence (no processing token) fails closed: nothing is written', async () => {
     const { conn, sqls } = recordingConn();
-    expect(await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: undefined })).toBe(0);
-    expect(sqls).toHaveLength(1); // only the targetless insert
+    expect(await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: undefined })).toBeNull();
+    expect(sqls).toHaveLength(0);
   });
 
-  test('no fence handed: unfenced refresh (audit/backfill callers)', async () => {
+  test('no fence handed: unfenced write, no ownership read (audit/backfill callers)', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision);
-    expect(sqls[1].sql).not.toMatch(/EXISTS/);
+    expect(sqls.some((q) => /\bcall_log\b/.test(q.sql))).toBe(false);
+    expect(rd(sqls)).toHaveLength(2);
   });
 
   test('both processor lanes write through it and nothing writes a route decision with a bare ignore', () => {
@@ -673,12 +622,6 @@ describe('the offline audits run the downstream transcript veto (codex r5 P1)', 
     expect(applyUnclearServiceTranscriptVeto(blocked, extracted, seo)).toBe(blocked);
   });
 
-  test('the low-confidence-only admission is vetoed the same way', () => {
-    const r = canAutoRoute(extraction({ confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9 } }), GATE_ON);
-    expect(r.unclearServiceGateAdmitted).toBe(true);
-    expect(applyUnclearServiceTranscriptVeto(r, extracted, seo).allowed).toBe(false);
-  });
-
   test('the in-process SHADOW decision applies the same veto before it is built (codex r6 P1)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const veto = src.indexOf('routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);');
@@ -714,5 +657,32 @@ describe('a forced Assessment keeps the model summary off the customer-visible n
     expect({ call_summary: 'Agreed to a $189 roach treatment.', ...out.extractedPatch }.call_summary).toBeNull();
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     expect(src).toMatch(/bookingExtracted\.call_summary \|\| null,\n\s*\]\.filter\(Boolean\)\.join\(' '\)\.trim\(\),/);
+  });
+});
+
+describe('a failed card demotion fails closed (codex r8 P1)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  const at = src.indexOf('const demoted = await demoteOpenTriageCards(');
+  const block = src.slice(at - 200, at + 900);
+
+  test('a thrown demotion is NOT swallowed: no local try/catch lets the booking go on', () => {
+    expect(at).toBeGreaterThan(-1);
+    expect(src.slice(at - 120, at)).not.toMatch(/try \{\s*$/);
+    expect(block).not.toMatch(/demotion failed for/);
+  });
+
+  test('a lost claim abandons the pass instead of booking', () => {
+    expect(block).toMatch(/if \(demoted === null\) return abandonToPeer\('the unclear-service card demotion'\)/);
+  });
+
+  test('the admitted / force state is only set AFTER the demotion succeeded', () => {
+    expect(src.indexOf('v2ForceAssessmentService = routingResult.forceAssessmentService === true;')).toBeGreaterThan(at);
+    expect(src.indexOf('v2UnclearServiceGateAdmitted = routingResult.unclearServiceGateAdmitted === true;')).toBeGreaterThan(at);
+  });
+
+  test('the enclosing catch holds the appointment for triage (the pre-gate behavior)', () => {
+    const catchAt = src.indexOf('Routing gate error for ${callSid}: ${err.message} — failing closed (appointment only)', at);
+    expect(catchAt).toBeGreaterThan(at);
+    expect(src.slice(catchAt, catchAt + 200)).toMatch(/v2RoutingBlocked = true/);
   });
 });

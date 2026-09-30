@@ -5748,7 +5748,8 @@ function forcedAssessmentBooking({ serviceResolution, services, current, extract
 // Fenced to the OWNING pass exactly like the processor's other triage writes:
 // under the per-call triage lock, and only while this pass still holds the
 // call's processing_token (a superseded worker must not demote the current
-// pass's genuinely blocking card). Returns rows updated (0 = claim lost / none).
+// pass's genuinely blocking card). Returns rows updated (0 = nothing to demote)
+// or null when the claim is lost — the caller must NOT proceed to book then.
 async function demoteOpenTriageCards(conn, callLogId, flags, procToken) {
   if (!Array.isArray(flags) || !flags.length) return 0;
   return conn.transaction(async (trx) => {
@@ -5758,7 +5759,7 @@ async function demoteOpenTriageCards(conn, callLogId, flags, procToken) {
       .where('processing_token', procToken)
       .forUpdate()
       .first('id');
-    if (!owned) return 0;
+    if (!owned) return null;
     return trx('triage_items')
       .where({ call_log_id: callLogId, severity: 'blocking' })
       .whereIn('reason_code', flags)
@@ -10439,13 +10440,16 @@ const CallRecordingProcessor = {
             // open as `blocking` would stay red on a call that is now booked
             // — and read as an unbooked visit. Demote it in place (open /
             // in-progress rows only, blocking ones only; nothing is resolved).
+            // FAIL CLOSED: if the demotion cannot be made (a transaction error
+            // propagates to this block's catch, which holds the appointment for
+            // triage exactly as before the gate) or this pass no longer owns the
+            // call (null = claim lost: abandon), the call is NOT booked — a
+            // blocking card left standing on a booked visit is what invites a
+            // duplicate booking.
+            const demoted = await demoteOpenTriageCards(db, call.id, routingResult.unclearServiceDemotedFlags, procToken);
+            if (demoted === null) return abandonToPeer('the unclear-service card demotion');
             v2ForceAssessmentService = routingResult.forceAssessmentService === true;
             v2UnclearServiceGateAdmitted = routingResult.unclearServiceGateAdmitted === true;
-            try {
-              await demoteOpenTriageCards(db, call.id, routingResult.unclearServiceDemotedFlags, procToken);
-            } catch (demoteErr) {
-              logger.warn(`[call-proc-v2] unclear-service card demotion failed for ${maskSid(callSid)}: ${demoteErr.message}`);
-            }
             v2ApprovedExtraction = v2Extraction;
             v2UsesOnFileAddress = routingResult.usesOnFileAddress === true;
             if (v2UsesOnFileAddress) {

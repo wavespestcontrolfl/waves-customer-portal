@@ -109,6 +109,18 @@ jest.setTimeout(30000);
     expect(r[0].final_action_taken).toBe('triage_review');
   });
 
+  test('a superseded worker whose FIRST write comes late inserts nothing (codex r8 P1)', async () => {
+    // tok-new owns the call; the stale worker arrives with no row yet written.
+    const out = await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-stale' });
+    expect(out).toBeNull();
+    expect(await rows()).toHaveLength(0);
+  });
+
+  test('an incomplete fence writes nothing', async () => {
+    expect(await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: null })).toBeNull();
+    expect(await rows()).toHaveLength(0);
+  });
+
   test('a different recording is its own row', async () => {
     await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
     await upsertRouteDecision(db, { ...decision(true, 'auto_route'), recording_sid: 'RE2' }, { callLogId: callId, processingToken: 'tok-new' });
