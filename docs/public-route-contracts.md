@@ -1399,6 +1399,35 @@ evidence provenance is normalized to review-required: its recorded note remains
 visible beside confirmation guidance, while the former inferred “normal watering
 within 24 hours” instruction is removed. Historical neutral fallbacks retain
 their existing shape and wording.
+`GATE_LAWN_WATERING_RULE` (dark; gate off leaves this payload unchanged, key for
+key) expands the lawn payload with the visit's one watering instruction, built
+from the per-product rules frozen with the visit, the completion time and the
+customer's own irrigation entries (withheld after a move). When it resolves to
+hold, water-in or hold-then-water-in: `reportV2.banner`
+`{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
+`hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
+finished customer sentences with absolute Eastern clock times; `holdUntil`,
+`waterInBy` and `expiresAt` are ISO instants or `null`; the key is absent when
+there is no claim); `reportV2.aftercare` gains `evidenceSource:
+'product_instruction'`, `wateringHold` (hold states), `creditableWaterIn`
+(water-in only; a mixed visit is a hold), `holdTask` (the banner's first line
+verbatim), `ruleSource`, `holdUntil` and `waterInBy`; and
+`reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
+`{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
+end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
+never reaches the payload). Provenance: `ruleSource` is `label`, `owner` or
+`default`, the weakest source among the rules that drive the instruction; state
+`none` is asserted only when every applied product resolved to a rule and at
+least one is label- or owner-sourced, and a product with no rule contributes
+nothing (with nothing else forcing a hold or water-in the state is no claim and
+the existing fail-closed aftercare stays). The rule itself
+(`wateringRule` / `post_application_watering`) never appears on
+`applications[].product` or anywhere else in the public payload. The complete
+instruction is frozen at completion under `structured_notes.lawnReportV2`
+(first writer wins) and later reads replay it, so an edit to the customer's
+sprinkler entries after the visit never changes the minutes or times an existing
+report showed; a record with no frozen instruction regenerates it. The gate is
+part of the lawn PDF cache signature.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -1408,7 +1437,7 @@ The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Review-required or restricted
 aftercare also keeps the deterministic report before cache/model access. Lawn
-PDF render strategy `p6-aftercare-guards-20260927` regenerates older cached PDFs
+PDF render strategy `p7-watering-instruction-20260929` regenerates older cached PDFs
 to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your

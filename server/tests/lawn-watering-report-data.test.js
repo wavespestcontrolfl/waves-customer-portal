@@ -179,4 +179,58 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
     expect(JSON.stringify(withRule)).not.toMatch(/afterHold|holdUntil|product_instruction/);
     expect(JSON.parse(JSON.stringify(withRule))).toEqual(JSON.parse(JSON.stringify(withoutRule)));
   });
+
+  describe('later reads replay the frozen instruction', () => {
+    const PREFS = (headTypes) => [{ customer_id: 'cust-lawn-w1', irrigation_system_type: headTypes, irrigation_system: true }];
+    const withFrozen = (service, instruction) => ({ ...service, structured_notes: JSON.stringify({ lawnReportV2: { wateringInstruction: instruction } }) });
+    const pick = (data) => JSON.stringify({ banner: data.reportV2.banner, aftercare: data.reportV2.aftercare, customerAction: data.reportV2.snapshot.customerAction });
+
+    test('a head-type / run-minutes edit after completion does not change a frozen report', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const service = serviceWith(WATER_IN);
+      const out = {};
+      const first = await buildReportV1Data(service, 'token-w1', makeKnex(fixtures(PREFS(['rotor']))), { wateringInstructionOut: out });
+      expect(first.reportV2.banner.lines[1]).toBe('Run each zone about 40 minutes.');
+      expect(out.instruction.state).toBe('water_in');
+
+      // Frozen at completion; the customer then edits their sprinkler entries
+      // (head type and run minutes; the water balance is deliberately live).
+      const frozenService = withFrozen(service, JSON.parse(JSON.stringify(out.instruction)));
+      const edited = { ...fixtures(PREFS(['spray'])), property_preferences: [{ customer_id: 'cust-lawn-w1', irrigation_system_type: ['spray'], irrigation_run_minutes: 20, irrigation_system: true }] };
+      const replay = await buildReportV1Data(frozenService, 'token-w1', makeKnex(edited));
+      expect(pick(replay)).toBe(pick(first));
+
+      // No snapshot: the instruction is regenerated from the current entries.
+      const regenerated = await buildReportV1Data(service, 'token-w1', makeKnex(edited));
+      expect(regenerated.reportV2.banner.lines[1]).not.toBe(first.reportV2.banner.lines[1]);
+      expect(regenerated.reportV2.banner.lines[1]).toBe('Run each zone about 15 minutes.');
+    });
+
+    test('the frozen instruction also fills the afterHold overlay the same way', () => {
+      const { applyAfterHoldOverlay } = require('../services/service-report/report-data');
+      const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+      const fresh = buildWateringInstruction({ rules: [HOLD], completedAt: '2026-09-30T18:40:00Z' });
+      const frozen = JSON.parse(JSON.stringify(fresh));
+      const wc = { weekPlan: { title: 'x', afterHold: { title: 'x', detail: 'Not before {holdUntil}: skip.' } } };
+      expect(JSON.stringify(applyAfterHoldOverlay(wc, frozen))).toBe(JSON.stringify(applyAfterHoldOverlay(wc, fresh)));
+    });
+
+    test('a malformed frozen object is ignored and regenerated; a frozen null-state instruction is a frozen no-claim', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const service = serviceWith(HOLD);
+      const bad = await buildReportV1Data(withFrozen(service, { state: 'bogus', lines: 'x' }), 'token-w1', makeKnex(fixtures()));
+      expect(bad.reportV2.banner.state).toBe('hold');
+      const nullState = await buildReportV1Data(withFrozen(service, { state: null, lines: [], minutes: {} }), 'token-w1', makeKnex(fixtures()));
+      expect(nullState.reportV2.banner).toBeUndefined();
+    });
+
+    test('gate off ignores a frozen instruction entirely', async () => {
+      delete process.env.GATE_LAWN_WATERING_RULE;
+      const out = {};
+      const data = await buildReportV1Data(withFrozen(serviceWith(HOLD), { state: 'hold', lines: ['x.', 'y.'], minutes: {}, holdUntil: null }), 'token-w1', makeKnex(fixtures()), { wateringInstructionOut: out });
+      expect(data.reportV2.banner).toBeUndefined();
+      expect(data.reportV2.aftercare.evidenceSource).toBeUndefined();
+      expect(out.instruction).toBeUndefined();
+    });
+  });
 });

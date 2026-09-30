@@ -3568,6 +3568,20 @@ async function buildReportWateringInstruction({ products, service, completionTim
   });
 }
 
+// The instruction frozen at completion (lawn-report-write-gate.js, under
+// structured_notes.lawnReportV2.wateringInstruction). Later reads replay it, so
+// a sprinkler-head or run-minutes edit after the visit never rewrites the
+// minutes an old report told the customer. Shape-checked; anything else is
+// ignored and the instruction is regenerated.
+const FROZEN_INSTRUCTION_STATES = ['hold', 'water_in', 'hold_then_water_in', 'none'];
+function readFrozenWateringInstruction(structured) {
+  const frozen = structured?.lawnReportV2?.wateringInstruction;
+  if (!frozen || typeof frozen !== 'object' || Array.isArray(frozen)) return null;
+  const stateOk = frozen.state === null || FROZEN_INSTRUCTION_STATES.includes(frozen.state);
+  const linesOk = Array.isArray(frozen.lines) && frozen.lines.every((line) => typeof line === 'string');
+  return stateOk && linesOk && frozen.minutes && typeof frozen.minutes === 'object' ? frozen : null;
+}
+
 // Fill the {holdUntil} token in the plan's afterHold overlay with the hold's
 // end time, or drop the overlay when this visit has no hold. The token can
 // never survive into the payload. Returns a copy; the input is untouched.
@@ -5134,8 +5148,12 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       let wateringInstruction = null;
       if (featureGates.lawnWateringRuleLive()) {
         try {
-          wateringInstruction = await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex });
+          // Replay the frozen instruction; regenerate only when none exists.
+          wateringInstruction = readFrozenWateringInstruction(structured)
+            || await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex });
         } catch { wateringInstruction = null; }
+        // Out-param for the write gate, which freezes the complete instruction.
+        if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') opts.wateringInstructionOut.instruction = wateringInstruction;
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
         lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);

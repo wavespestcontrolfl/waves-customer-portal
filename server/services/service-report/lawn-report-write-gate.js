@@ -47,7 +47,8 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     const joined = await loadServiceRecordForPdf(service.id, knex).catch(() => null);
     const record = joined || service;
     const token = await ensureReportToken(service.id, knex);
-    const data = await buildReportV1Data(record, token, knex).catch(() => null);
+    const instructionOut = {};
+    const data = await buildReportV1Data(record, token, knex, { wateringInstructionOut: instructionOut }).catch(() => null);
     const reportV2 = data && data.reportV2;
     if (!reportV2) return empty;
 
@@ -60,12 +61,27 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       logger.warn(`[lawn-report-gate] ${blockers.length} blocker contradiction(s) on service_record ${service.id}: ${blockers.map((b) => b.code).join(', ')}`);
     }
 
+    // First writer wins for the instruction: one already frozen on the record
+    // (read fresh, right before the write) is carried over unchanged, so a
+    // re-run never replaces what the customer was first told.
+    // (Gate off: nothing was built, nothing is read or written.)
+    const existingInstruction = !instructionOut.instruction ? null : await knex('service_records').where({ id: service.id }).first('structured_notes')
+      .then((row) => parseJsonObject(row && row.structured_notes).lawnReportV2?.wateringInstruction)
+      .catch(() => null);
+    const keptInstruction = existingInstruction && typeof existingInstruction === 'object' && !Array.isArray(existingInstruction)
+      ? existingInstruction : null;
+    const wateringInstruction = keptInstruction || instructionOut.instruction || null;
+
     const frozen = {
       smsSummary: reportV2.smsSummary || null,
       // The watering banner (GATE_LAWN_WATERING_RULE), frozen beside smsSummary
       // so a later read shows what the customer was first told. Key omitted
       // when there is no banner (gate off = frozen object unchanged).
       ...(reportV2.banner ? { banner: reportV2.banner } : {}),
+      // The COMPLETE instruction (minutes, labels, provenance), so later reads
+      // replay it instead of rereading the customer's current irrigation
+      // entries. First writer wins (see keptInstruction above).
+      ...(wateringInstruction ? { wateringInstruction } : {}),
       todaysResult: fix.todaysResult || null,
       statusHeadline: reportV2.snapshot?.statusHeadline || null,
       generatedAt: new Date().toISOString(),
