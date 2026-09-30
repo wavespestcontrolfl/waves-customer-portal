@@ -619,8 +619,8 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockSms).not.toHaveBeenCalled();
   });
 
-  test('an AI booking still awaiting office review is not a visit: no hold for it, never skipped, never named as the first visit back', async () => {
-    const review = { status: 'pending', source_action: 'voice_agent', customer_confirmed: false };
+  test.each(['voice_agent', 'ai_call_pipeline_followup'])('a %s booking still awaiting the office is not a visit: no hold for it, never skipped, never named as the first visit back', async (sourceAction) => {
+    const review = { status: 'pending', source_action: sourceAction, customer_confirmed: false };
     seed({
       customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }],
       components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],

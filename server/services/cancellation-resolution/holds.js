@@ -70,12 +70,17 @@ function displayDate(dateStr) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
-// A real appointment: not a pending-rebook placeholder, and not an AI-made
-// booking still awaiting office review (the canonical classifier) — neither
-// makes a hold needed, gets skipped, or is named as the first visit back.
+// A real appointment: not a pending-rebook placeholder, and not a
+// dispatch-owned booking still pending the office's confirmation (call
+// follow-up, outbound review, voice agent — DISPATCH_OWNED_PENDING_SOURCE_
+// ACTIONS, the rows a customer may not even see yet). Neither makes a hold
+// needed, gets skipped, or is named as the first visit back.
 function isBookedAppointment(visit) {
-  const { isPendingOutboundReviewBooking } = require('../call-booking-source-actions');
-  return visit.status !== 'rescheduled' && !isPendingOutboundReviewBooking(visit);
+  if (visit.status === 'rescheduled') return false;
+  const { DISPATCH_OWNED_PENDING_SOURCE_ACTIONS } = require('../call-booking-source-actions');
+  const awaitingOffice = visit.status === 'pending' && !visit.customer_confirmed
+    && DISPATCH_OWNED_PENDING_SOURCE_ACTIONS.includes(visit.source_action);
+  return !awaitingOffice;
 }
 
 // A booked visit dated inside the pause. A 'rescheduled' row is a pending-
