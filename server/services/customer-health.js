@@ -1,4 +1,5 @@
 const db = require('../models/db');
+const { isNeverAttemptedHoldDeferral } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SIGNAL_TYPES } = require('./customer-intelligence/signal-detector');
@@ -99,7 +100,7 @@ async function computePaymentScore(customerId) {
       const total = rows.length;
       const paid = rows.filter(r => ['paid', 'completed', 'succeeded'].includes(r.status));
       const late = rows.filter(r => ['late', 'overdue', 'past_due'].includes(r.status));
-      const failed = rows.filter(r => ['failed', 'declined', 'void'].includes(r.status) && !r.superseded_by_payment_id);
+      const failed = rows.filter(r => ['failed', 'declined', 'void'].includes(r.status) && !r.superseded_by_payment_id && !isNeverAttemptedHoldDeferral(r));
 
       details.onTimeRate = total > 0 ? paid.length / total : 0;
       details.lateCount = late.length;

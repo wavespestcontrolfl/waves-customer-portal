@@ -151,7 +151,45 @@ async function recordHoldOverrideOn(database, { customerId, actorId, ip, userAge
   return true;
 }
 
+// ── Never-attempted hold deferrals ──────────────────────────────────────
+// The monthly dues cron, on an active dispute hold, writes a payments row
+// with status 'failed' and metadata.deferred_reason = 'collection_hold' (no
+// PI, retry_count 0, next_retry_at armed) purely so the retry sweep collects
+// the month after release. Stripe was NEVER contacted: nothing failed, no
+// card was declined. Every consumer that counts unsuperseded 'failed'
+// payments as payment failures (balance, billing health, dashboard alerts,
+// lead score, health/risk signals) must leave these rows out, exactly like
+// the balance endpoint always did. ONE definition, in two shapes:
+//   isNeverAttemptedHoldDeferral(row)             in-memory row filter
+//   excludeNeverAttemptedHoldDeferrals(qb, alias) SQL twin for query builders
+// Only while ARMED and never-attempted: once the sweep disarms the row
+// without superseding, or a real attempt bumps retry_count / stamps a PI,
+// it is visible debt like any other failed row.
+const HOLD_DEFERRAL_REASON = 'collection_hold';
+
+function isNeverAttemptedHoldDeferral(p) {
+  if (!p || p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
+  try {
+    const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
+    return !!(m && m.deferred_reason === HOLD_DEFERRAL_REASON);
+  } catch {
+    return false;
+  }
+}
+
+// `alias` is the payments table name/alias in the calling query. COALESCE
+// keeps the NOT() NULL-safe for rows with no metadata.
+function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
+  return query.whereRaw(
+    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL)`,
+    [HOLD_DEFERRAL_REASON],
+  );
+}
+
 module.exports = {
+  isNeverAttemptedHoldDeferral,
+  excludeNeverAttemptedHoldDeferrals,
+  HOLD_DEFERRAL_REASON,
   recordHoldOverride,
   activeDisputeHolds,
   disputeHoldExistsSql,
