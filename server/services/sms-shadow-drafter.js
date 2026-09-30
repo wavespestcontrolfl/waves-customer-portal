@@ -628,7 +628,9 @@ function validateComplianceCopy({ reply, factsBlock } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const labelFactsText = labelFactsLib.labelFactsSectionFrom(factsBlock);
   if (!reply || !hasBannedCustomerCopy(reply, { labelFactsText, rainTimeGuard: true })) return { ok: true, violations: [] };
-  return { ok: false, violations: [labelFactsText
+  // The LABEL FACTS wording only when the section actually states a figure.
+  const groundedKeys = labelFactsLib.groundedTimeKeys(labelFactsText);
+  return { ok: false, violations: [(groundedKeys.rain.size || groundedKeys.reentry.size)
     ? 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved; a rainfast or re-entry time may be given ONLY exactly as written in LABEL FACTS (digits, same number and unit, rainfast time only about rain, re-entry time only as re-entry); any other drying or re-entry time is banned; "safe once dry" with the technician confirming timing is also allowed'
     : 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'] };
 }

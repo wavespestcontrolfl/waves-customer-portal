@@ -57,7 +57,9 @@ function exactSectionSuffix() {
 function exactStructureRegexSource(label) {
   const { LABEL_SECTION_REGEX_SRC, escapeRegex } = require('./sms-label-facts');
   const company = escapeRegex(exactSectionSuffix());
-  const tail = label === 'required' ? `\n${LABEL_SECTION_REGEX_SRC}` : `(?:\n${LABEL_SECTION_REGEX_SRC})?`;
+  // 'capture' = 'required' with the label section as capture group 1 (JS only).
+  const tail = label === 'capture' ? `\n(${LABEL_SECTION_REGEX_SRC})`
+    : (label === 'required' ? `\n${LABEL_SECTION_REGEX_SRC}` : `(?:\n${LABEL_SECTION_REGEX_SRC})?`);
   return `${company}${tail}$`;
 }
 function textBeforeFirstBilling(factsBlock) {
@@ -69,11 +71,20 @@ function hasExactCompanyFacts(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
   return before !== null && new RegExp(exactStructureRegexSource('optional')).test(before);
 }
-// The LABEL FACTS section, exactly where buildFactsBlock renders it: right
-// after the company section, right before BILLING:.
-function hasExactLabelFacts(factsBlock) {
+// The LABEL FACTS section text, located ONLY by the exact structure (static
+// COMPANY FACTS -> LABEL FACTS -> first
+// BILLING:). '' when the block has no such section: a header (and a fake time)
+// typed into an SMS line, before or after the real BILLING:, is never found,
+// so it can ground nothing. Every reader of LABEL FACTS figures (compliance
+// grounding, frozen replays, the sealed contract) goes through this.
+function exactLabelFactsSection(factsBlock) {
   const before = textBeforeFirstBilling(factsBlock);
-  return before !== null && new RegExp(exactStructureRegexSource('required')).test(before);
+  if (before === null) return '';
+  const m = new RegExp(exactStructureRegexSource('capture')).exec(before);
+  return m ? m[1] : '';
+}
+function hasExactLabelFacts(factsBlock) {
+  return exactLabelFactsSection(factsBlock) !== '';
 }
 
 module.exports = {
@@ -82,6 +93,7 @@ module.exports = {
   exactStructureRegexSource,
   hasExactCompanyFacts,
   hasExactLabelFacts,
+  exactLabelFactsSection,
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
   renderCompanyFactsSection,

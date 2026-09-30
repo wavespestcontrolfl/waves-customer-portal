@@ -219,16 +219,9 @@ function renderLabelFactsSection(labelFacts, { formatDate, isBanned } = {}) {
 
 /** The LABEL FACTS section text out of a rendered facts block ('' if absent). */
 function labelFactsSectionFrom(factsBlock) {
-  const text = String(factsBlock || '');
-  const start = text.indexOf(LABEL_FACTS_HEADER_PREFIX);
-  if (start < 0) return '';
-  const lines = text.slice(start).split('\n');
-  const out = [lines[0]];
-  for (const line of lines.slice(1)) {
-    if (!line.startsWith('- ')) break;
-    out.push(line);
-  }
-  return out.join('\n');
+  // Exact-structure lookup only (never a header substring): see
+  // sms-company-facts.exactLabelFactsSection.
+  return require('./sms-company-facts').exactLabelFactsSection(factsBlock);
 }
 
 // "3 hours", "3-hour", "30 min", "1-2 hours", "1.5 hrs" (digits only: a
