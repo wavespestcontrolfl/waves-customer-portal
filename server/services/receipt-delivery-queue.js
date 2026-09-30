@@ -285,7 +285,11 @@ async function receiptEmailOptOutState(invoice) {
 }
 
 async function processReceiptDeliveryJob(job) {
-  let smsResult = null;
+  // A Text leg the visit summary carries is decided before any fallible read,
+  // so a retry after an early failure (invoice lookup) keeps that decision.
+  let smsResult = job.sms_result?.reason === TEXT_CARRIED_BY_SUMMARY
+    ? { sent: false, reason: TEXT_CARRIED_BY_SUMMARY }
+    : null;
   let emailResult = null;
   try {
     const invoice = await db('invoices').where({ id: job.invoice_id }).first();
@@ -297,8 +301,8 @@ async function processReceiptDeliveryJob(job) {
     const InvoiceService = require('./invoice');
     const { sendReceiptEmail } = require('./invoice-email');
 
-    smsResult = job.sms_result?.reason === TEXT_CARRIED_BY_SUMMARY
-      ? { sent: false, reason: TEXT_CARRIED_BY_SUMMARY }
+    smsResult = smsResult?.reason === TEXT_CARRIED_BY_SUMMARY
+      ? smsResult
       : await InvoiceService.sendReceipt(invoice.id, {
       hasEmailLeg: true,
       // Persisted payment provenance (see enqueueReceiptDelivery): a
@@ -540,10 +544,14 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
   }
 }
 
-// Set the still-queued job's Text leg as carried by the summary text. A job already
-// running or finished has had its text decided, so nothing is set (returns 0).
+// Set the still-queued job's Text leg as carried by the summary text. Only a
+// provably unsent Text leg folds: no recorded SMS outcome yet (or already
+// carried). A retry_scheduled job may already have texted (its email failed)
+// or hold an uncertain outcome; a job already running or finished has had its
+// text decided. Those set nothing (returns 0) and the stop is not folded.
 async function markTextCarriedBySummary(invoiceId) {
   return db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).whereIn('status', QUEUED_STATUSES)
+    .where((q) => q.whereNull('sms_result').orWhereRaw("sms_result->>'reason' = ?", [TEXT_CARRIED_BY_SUMMARY]))
     .update({ sms_result: JSON.stringify({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY }), updated_at: db.fn.now() });
 }
 
