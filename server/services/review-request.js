@@ -5432,6 +5432,71 @@ const ReviewService = {
   },
 
   /**
+   * An ACTIVE review cadence owns this customer's asks (its touches can sit
+   * 'deferred' where the queued-row check cannot see them). Only counted while
+   * GATE_REVIEW_SEQUENCES is ON — with the gate off the cadence cron is frozen
+   * and a stranded 'active' row must not lock the customer out forever.
+   * Fail-closed: no .catch, a DB error throws. Shared by
+   * checkUnscheduledAskGates and pendingAskState.
+   */
+  async _activeCadenceFor(customerId) {
+    const { isEnabled } = require("../config/feature-gates");
+    if (!isEnabled("reviewSequences")) return false;
+    const activeSeq = await db("review_sequences")
+      .where({ customer_id: customerId, status: "active" }).first();
+    return Boolean(activeSeq);
+  },
+
+  /**
+   * A one-off ask about to text: a composer send mid-flight, or a queued
+   * ('pending', scheduled) ASK row. Independent of cap / cooldown / cadence.
+   * Returns {outcome: 'in_flight'} | {outcome: 'already_queued', nextAllowedAt,
+   * queuedId} | null. Shared by checkUnscheduledAskGates and pendingAskState.
+   */
+  async _pendingOneOffAsk(customerId) {
+    // A composer send mid-flight: its row is claimed ('sending', fresh
+    // claimed_at) and unscheduled, so neither the queued arm below nor the
+    // delivered stats see it — yet the ask is about to text. Block every
+    // canonical one-off path for the claim's lifetime (a claim older than
+    // the stale window is reconciled by claimInlineForSend, not blocking).
+    const inFlight = await db("review_requests")
+      .where({ customer_id: customerId, status: "sending" })
+      .whereNull("sms_sent_at")
+      .where("claimed_at", ">=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
+      .first("id");
+    if (inFlight) return { outcome: "in_flight" };
+
+    const queued = await db("review_requests")
+      .where({ customer_id: customerId, status: "pending" })
+      .whereNull("sms_sent_at")
+      .whereNotNull("scheduled_for")
+      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
+      .orderBy("scheduled_for", "asc")
+      .first();
+    if (queued) {
+      // queuedId lets create()'s resend path distinguish "THIS row is the
+      // queued one — dispatch it now" from "a different ask is queued".
+      return { outcome: "already_queued", nextAllowedAt: queued.scheduled_for, queuedId: queued.id };
+    }
+    return null;
+  },
+
+  /**
+   * Whether ANY review send is pending for this customer, read independently of
+   * the eligibility outcome (an at-cap / cooldown / in-cadence customer can
+   * still have a queued one-off). Used by the portal review card, which must
+   * never hand out a link while a text is still on its way.
+   * @returns {{oneOff: null|{outcome: string, queuedId?: *, nextAllowedAt?: *}, cadence: boolean}}
+   */
+  async pendingAskState(customerId) {
+    const [oneOff, cadence] = await Promise.all([
+      this._pendingOneOffAsk(customerId),
+      this._activeCadenceFor(customerId),
+    ]);
+    return { oneOff, cadence };
+  },
+
+  /**
    * The shared gate stack for an UNSCHEDULED review ask — used by
    * sendGatedAsk (admin one-off + portal satisfaction) AND by create() for
    * manual triggers (/trigger, /tech-trigger, the intelligence-bar tool), so
@@ -5457,16 +5522,7 @@ const ReviewService = {
    */
   async checkUnscheduledAskGates(customerId, { isAsk = true } = {}) {
     if (!isAsk) return { allowed: true };
-    const { isEnabled } = require("../config/feature-gates");
-
-    if (isEnabled("reviewSequences")) {
-      // No .catch — this helper's contract is fail-closed, and a swallowed DB
-      // error here would permit a one-off ask while a cadence may already own
-      // the customer (pre-push audit r1). Matches the cap and queued checks.
-      const activeSeq = await db("review_sequences")
-        .where({ customer_id: customerId, status: "active" }).first();
-      if (activeSeq) return { allowed: false, outcome: "in_cadence" };
-    }
+    if (await this._activeCadenceFor(customerId)) return { allowed: false, outcome: "in_cadence" };
 
     const thirtyDaysAgo = Date.now() - 30 * 86400000;
     // No .catch → a DB error throws instead of silently reading as zero asks.
@@ -5476,30 +5532,8 @@ const ReviewService = {
       return { allowed: false, outcome: "cooldown" };
     }
 
-    // A composer send mid-flight: its row is claimed ('sending', fresh
-    // claimed_at) and unscheduled, so neither the queued arm below nor the
-    // delivered stats see it — yet the ask is about to text. Block every
-    // canonical one-off path for the claim's lifetime (a claim older than
-    // the stale window is reconciled by claimInlineForSend, not blocking).
-    const inFlight = await db("review_requests")
-      .where({ customer_id: customerId, status: "sending" })
-      .whereNull("sms_sent_at")
-      .where("claimed_at", ">=", new Date(Date.now() - INLINE_CLAIM_STALE_MS))
-      .first("id");
-    if (inFlight) return { allowed: false, outcome: "in_flight" };
-
-    const queued = await db("review_requests")
-      .where({ customer_id: customerId, status: "pending" })
-      .whereNull("sms_sent_at")
-      .whereNotNull("scheduled_for")
-      .whereRaw(OUTREACH.ASK_TOUCH_SQL)
-      .orderBy("scheduled_for", "asc")
-      .first();
-    if (queued) {
-      // queuedId lets create()'s resend path distinguish "THIS row is the
-      // queued one — dispatch it now" from "a different ask is queued".
-      return { allowed: false, outcome: "already_queued", nextAllowedAt: queued.scheduled_for, queuedId: queued.id };
-    }
+    const pendingOneOff = await this._pendingOneOffAsk(customerId);
+    if (pendingOneOff) return { allowed: false, ...pendingOneOff };
     return { allowed: true };
   },
 

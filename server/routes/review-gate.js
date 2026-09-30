@@ -249,6 +249,21 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       }
     }
 
+    // Referral invite email (owner ruling 2026-09-29): sent right after the
+    // customer taps through to Google. First click only (this request won the
+    // atomic claim above); the helper's customer-scoped idempotency keeps it to
+    // once per customer. Fire-and-forget — it never delays or breaks the
+    // redirect. A bare, untracked office Google URL never reaches /go, so those
+    // taps send nothing.
+    if (firstClick && request.customer_id) {
+      try {
+        const { sendReferralInviteEmail } = require('../services/referral-invite-email');
+        void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'google_review_click' });
+      } catch (err) {
+        logger.warn(`[review-gate] referral invite failed: ${err.message}`);
+      }
+    }
+
     // Latest-click stamp for the auto-link correlation, recorded ONLY once
     // every pre-redirect step has succeeded — a failed attempt falls back to
     // the rate page and must not become "latest click" evidence (pre-push P1;

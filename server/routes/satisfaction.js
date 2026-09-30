@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
 const { authenticate } = require('../middleware/auth');
-const ReviewService = require('../services/review-request');
+const { reviewCardLinkFor } = require('../services/portal-review-card');
 const { applyPropertyPredicate, resolveSessionScope, resolvedScopePayload } = require('../services/account-properties');
 
 router.use(authenticate);
@@ -29,13 +29,13 @@ const { resolveReviewLocation } = require('../config/locations');
 //   - the customer has already left a Google review (has_left_google_review);
 //   - they already clicked through a tracked review link since that visit
 //     (review_requests.redirected_at) — that is how the card stops showing;
-//   - an ask is queued / mid-send (its own text carries the link; a bare link
-//     now would let the customer review AND still get the text);
+//   - a one-off ask is queued / mid-send, whatever the cap / cooldown / cadence
+//     state (its own text would still go out after a review);
 //   - a cadence owns the customer and there is no live token to reuse (a bare
 //     URL would stop nothing and the cadence would keep chasing).
-// The link is the customer's live tokenized /api/rate/<token>/go link (the
-// click is stamped and the cadence stops), else the office's official
-// g.page/r/<id>/review URL from config/locations.js.
+// The link comes from services/portal-review-card.js: the customer's live
+// tokenized /api/rate/<token>/go link (the click is stamped and the cadence
+// stops), else the office's official g.page/r/<id>/review URL.
 router.get('/review-card', async (req, res, next) => {
   try {
     const customer = req.customer;
@@ -89,14 +89,7 @@ router.get('/review-card', async (req, res, next) => {
       storedLocationId: customer.nearest_location_id || null,
     });
 
-    // Fail closed: a DB error here throws (no card) rather than reading as "no
-    // ask in flight".
-    const gate = await ReviewService.checkUnscheduledAskGates(customer.id);
-    if (gate.outcome === 'already_queued' || gate.outcome === 'in_flight') {
-      return res.json({ card: null, propertyScope });
-    }
-    let reviewLink = await ReviewService.livePortalReviewUrlFor(customer.id).catch(() => null);
-    if (!reviewLink && gate.outcome !== 'in_cadence') reviewLink = office.googleReviewUrl || null;
+    const reviewLink = await reviewCardLinkFor(customer.id, office);
     if (!reviewLink) return res.json({ card: null, propertyScope });
 
     res.json({

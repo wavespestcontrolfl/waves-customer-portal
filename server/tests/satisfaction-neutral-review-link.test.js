@@ -21,7 +21,7 @@ jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/review-request', () => ({
   sendGatedAsk: jest.fn(),
   livePortalReviewUrlFor: jest.fn(),
-  checkUnscheduledAskGates: jest.fn(),
+  pendingAskState: jest.fn(),
 }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
@@ -59,7 +59,7 @@ beforeEach(() => {
   global.__LEFT__ = false;
   db.state.visits = [VISIT];
   db.state.clicked = null;
-  ReviewService.checkUnscheduledAskGates.mockResolvedValue({ allowed: true });
+  ReviewService.pendingAskState.mockResolvedValue({ oneOff: null, cadence: false });
   ReviewService.livePortalReviewUrlFor.mockResolvedValue(null);
 });
 
@@ -104,27 +104,22 @@ describe('GET /review-card — a link, never a send', () => {
     expect((await card()).card).toBeNull();
   });
 
-  test.each(['already_queued', 'in_flight'])('an ask %s: no card (its own text carries the link)', async (outcome) => {
-    ReviewService.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome });
+  test.each(['already_queued', 'in_flight'])('a one-off ask %s: no card, even with a live token (its own text would still go out)', async (outcome) => {
+    ReviewService.pendingAskState.mockResolvedValue({ oneOff: { outcome }, cadence: false });
     ReviewService.livePortalReviewUrlFor.mockResolvedValue(TOKEN_URL);
     expect((await card()).card).toBeNull();
     expectNothingSent();
   });
 
   test('in a cadence: the live token only — never the bare URL', async () => {
-    ReviewService.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome: 'in_cadence' });
+    ReviewService.pendingAskState.mockResolvedValue({ oneOff: null, cadence: true });
     expect((await card()).card).toBeNull();
     ReviewService.livePortalReviewUrlFor.mockResolvedValue(TOKEN_URL);
     expect((await card()).card.reviewLink).toBe(TOKEN_URL);
   });
 
-  test.each(['at_cap', 'cooldown'])('%s does not hide the card (it is a button, not an ask): office URL', async (outcome) => {
-    ReviewService.checkUnscheduledAskGates.mockResolvedValue({ allowed: false, outcome });
-    expect((await card()).card.reviewLink).toBe(office.googleReviewUrl);
-  });
-
-  test('the gate check fails closed: an error is a 500, never a card', async () => {
-    ReviewService.checkUnscheduledAskGates.mockRejectedValue(new Error('db down'));
+  test('the pending-state read fails closed: an error is a 500, never a card', async () => {
+    ReviewService.pendingAskState.mockRejectedValue(new Error('db down'));
     const res = await fetch(`${base}/satisfaction/review-card`);
     expect(res.status).toBe(500);
   });

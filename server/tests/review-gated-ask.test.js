@@ -474,3 +474,100 @@ describe('livePortalReviewUrlFor', () => {
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
   });
 });
+
+// Portal Google review card link (owner ruling 2026-09-29). Real ReviewService
+// against overlapping states: checkUnscheduledAskGates returns EARLY for
+// in_cadence / at_cap / cooldown, so those outcomes never proved that no send
+// was pending — the card reads the pending state on its own.
+describe('portal review card link vs pending sends (overlapping states)', () => {
+  const { reviewCardLinkFor } = require('../services/portal-review-card');
+  const OFFICE = { googleReviewUrl: 'https://g.page/r/office/review' };
+  const LIVE = (c) => `https://portal.test/api/rate/${c.repeat(64)}/go`;
+  const live = (c, daysBack) => sentAsk({
+    token: c.repeat(64), expires_at: new Date(Date.now() + 86400000), sms_sent_at: daysAgo(daysBack),
+  });
+  const queuedOneOff = () => sentAsk({
+    status: 'pending', sms_sent_at: null, scheduled_for: new Date(Date.now() + 3600000), token: 'q'.repeat(64),
+    expires_at: new Date(Date.now() + 86400000),
+  });
+
+  test('cooldown + a queued one-off: the gate says cooldown, the card is hidden (no older token, no bare URL)', async () => {
+    installMock({ customers: [CUSTOMER], review_requests: [live('a', 5), queuedOneOff()] });
+    expect((await ReviewService.checkUnscheduledAskGates('cust-1')).outcome).toBe('cooldown');
+    expect((await ReviewService.pendingAskState('cust-1')).oneOff).toMatchObject({ outcome: 'already_queued' });
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
+  });
+
+  test('at_cap + a queued one-off: the gate says at_cap, the card is hidden', async () => {
+    installMock({
+      customers: [CUSTOMER],
+      review_requests: [live('a', 150), live('b', 120), live('c', 90), queuedOneOff()],
+    });
+    expect((await ReviewService.checkUnscheduledAskGates('cust-1')).outcome).toBe('at_cap');
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
+  });
+
+  test('in_cadence + a queued one-off: the gate says in_cadence, the card is hidden', async () => {
+    installMock({
+      customers: [CUSTOMER],
+      review_sequences: [{ id: 'seq-1', customer_id: 'cust-1', status: 'active' }],
+      review_requests: [live('a', 2), queuedOneOff()],
+    });
+    expect((await ReviewService.checkUnscheduledAskGates('cust-1')).outcome).toBe('in_cadence');
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
+  });
+
+  test('a fresh in-flight composer claim + cooldown: hidden', async () => {
+    installMock({
+      customers: [CUSTOMER],
+      review_requests: [live('a', 5), sentAsk({ status: 'sending', sms_sent_at: null, claimed_at: new Date() })],
+    });
+    expect((await ReviewService.pendingAskState('cust-1')).oneOff).toMatchObject({ outcome: 'in_flight' });
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
+  });
+
+  test('a cadence with NO queued one-off: only the live tokenized link (its click stops the cadence), else hidden — never the bare URL', async () => {
+    installMock({
+      customers: [CUSTOMER],
+      review_sequences: [{ id: 'seq-1', customer_id: 'cust-1', status: 'active' }],
+      review_requests: [live('a', 2)],
+    });
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(LIVE('a'));
+    installMock({
+      customers: [CUSTOMER],
+      review_sequences: [{ id: 'seq-1', customer_id: 'cust-1', status: 'active' }],
+      review_requests: [],
+    });
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
+  });
+
+  test('nothing pending: cooldown / at_cap alone still show the card (live token, else the office URL)', async () => {
+    installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)] });
+    expect((await ReviewService.pendingAskState('cust-1'))).toEqual({ oneOff: null, cadence: false });
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(LIVE('a'));
+
+    installMock({
+      customers: [CUSTOMER],
+      review_requests: [sentAsk({ sms_sent_at: daysAgo(150) }), sentAsk({ sms_sent_at: daysAgo(120) }), sentAsk({ sms_sent_at: daysAgo(90), redirected_at: daysAgo(80) })],
+    });
+    expect((await ReviewService.checkUnscheduledAskGates('cust-1')).outcome).toBe('at_cap');
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(OFFICE.googleReviewUrl);
+  });
+
+  test('cadence gate off (frozen cron): a stranded active row is not a pending send', async () => {
+    mockGates.reviewSequences = false;
+    installMock({
+      customers: [CUSTOMER],
+      review_sequences: [{ id: 'seq-1', customer_id: 'cust-1', status: 'active' }],
+    });
+    expect((await ReviewService.pendingAskState('cust-1')).cadence).toBe(false);
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(OFFICE.googleReviewUrl);
+  });
+
+  test('the card path sends nothing and mints nothing', async () => {
+    const state = installMock({ customers: [CUSTOMER], review_requests: [] });
+    await reviewCardLinkFor('cust-1', OFFICE);
+    expect(state.rows.review_requests).toHaveLength(0);
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+  });
+});
