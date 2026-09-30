@@ -784,6 +784,33 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(skipped.reason).toContain('no upcoming pest appointment');
       });
 
+      test('the next visit is the next pest appointment AT THIS visit\'s property; unestablishable property with pest visits at two properties -> SKIP', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const [propA] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Parrish' }).returning('id');
+        const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
+        // This first visit happened at property A (its appointment, now completed).
+        const [done] = await db('scheduled_services').insert({
+          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: propA.id,
+        }).returning('id');
+        // Property B's pest visit comes SOONER than property A's next one.
+        await makeNextVisit(customer.id, 'quarterly', '2098-01-05', { property_id: propB.id });
+        await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propA.id });
+        const linked = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: done.id });
+        const a = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', linked, customer), mode: 'live', deps: baseDeps() });
+        expect(a.payload.next_visit_date).toBe('December 24, 2099'); // never property B's January date
+
+        // The visit carries no appointment link: two properties' pest visits cannot be told apart.
+        const other = await makeCustomer();
+        const [propC] = await db('customer_properties').insert({ customer_id: other.id, city: 'Parrish' }).returning('id');
+        const [propD] = await db('customer_properties').insert({ customer_id: other.id, city: 'Venice' }).returning('id');
+        await makeNextVisit(other.id, 'quarterly', '2098-01-05', { property_id: propC.id });
+        await makeNextVisit(other.id, 'quarterly', '2099-12-24', { property_id: propD.id });
+        const unlinked = await makeVisit({ customerId: other.id, technicianId: techId });
+        const skipped = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', unlinked, other), mode: 'live', deps: baseDeps() });
+        expect(skipped).toEqual(expect.objectContaining({ skip: true, code: 'next_visit_property_ambiguous' }));
+      });
+
       test('the rain sentence needs a COMPLETE radar read over whole days after the visit; shadow makes no external call', async () => {
         const { customer, recordId } = await scenario({});
         await db('customers').where({ id: customer.id }).update({ latitude: 27.5, longitude: -82.4 });
@@ -929,6 +956,39 @@ describeOrSkip('email division wiring (Postgres)', () => {
         for (const alias of ['monthly', 'every 6 months', '6x', 'nonsense']) {
           expect((await gate(alias)).code).toBe('plan_not_quarterly');
         }
+      });
+
+      test('plan products are read from THIS appointment\'s recurring pest series and property only: Taurus at property A never qualifies a Talak-only quarterly plan at property B', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const [propA] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Parrish' }).returning('id');
+        const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
+        const seriesA = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propA.id });
+        const seriesB = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propB.id });
+        // Property A: Taurus + contact, visits 1 and 2.
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-05-20', products: ['taurus'], scheduledServiceId: seriesA, createdAt: new Date('2026-05-20T15:00:00Z') });
+        const visitA = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-08-20', products: ['taurus', 'talak'], scheduledServiceId: seriesA, createdAt: new Date('2026-08-20T15:00:00Z') });
+        // Property B: a Talak-only quarterly plan.
+        const visitB = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-20', products: ['talak'], scheduledServiceId: seriesB });
+        const deps = baseDeps({ getActivityRatingAverages: async () => cohort });
+
+        const b = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', visitB, customer), deps });
+        expect(b).toEqual(expect.objectContaining({ skip: true, code: 'nonrepellent_not_taurus' }));
+        // Property A, on its own evidence, still qualifies.
+        const a = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', visitA, customer), deps });
+        expect(a.ok).toBe(true);
+        expect(a.payload.nonrepellent_product).toBe('Taurus SC');
+      });
+
+      test('a visit whose recurring pest series cannot be established is skipped (no series, no plan evidence)', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const lawn = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { service_type: 'Lawn Care Service' });
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: lawn });
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
       });
 
       test('SKIPs when the service record belongs to a different customer than the run\'s recipient', async () => {

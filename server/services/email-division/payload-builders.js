@@ -218,22 +218,47 @@ async function rainSinceVisitSentence({ customer, visitYmd, deps, mode }) {
 // reader's next-visit lookup excludes).
 const CLOSED_VISIT_STATUSES = ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'];
 
-// The customer's next upcoming PEST appointment, as a date string, or '' when
-// there is none. readVisitSummary's own next-visit read spans every service
-// line (a pest email could name tomorrow's lawn visit), so a builder resolves
-// it here, classifying each candidate's service type the way the completion
-// flow classifies the service line.
-async function nextPestVisitYmd({ conn, deps, customerId, serviceYmd }) {
+// A row's property, as a comparable key: its property record, else its service
+// address (line 1 + zip). '' = not recorded.
+function propertyKeyOf(row) {
+  if (!row) return '';
+  if (row.property_id) return `p:${row.property_id}`;
+  const line1 = clean(row.service_address_line1).toLowerCase();
+  return line1 ? `a:${line1}|${clean(row.service_address_zip)}` : '';
+}
+
+// The customer's next upcoming PEST appointment AT THE VISIT'S PROPERTY, as
+// { ymd } or { ambiguous: true } or { ymd: '' }. readVisitSummary's own next-
+// visit read spans every service line and every property (a pest email could
+// name tomorrow's lawn visit, or another property's pest visit), so a builder
+// resolves it here: each candidate's service type is classified the way the
+// completion flow classifies the line, and it must be at the triggering visit's
+// property. When the visit's property cannot be established, candidates are
+// accepted only if they all agree on ONE property; otherwise the answer is
+// ambiguous and the caller skips.
+async function nextPestVisit({
+  conn, deps, record, serviceYmd,
+}) {
   const today = etDateString(deps.now());
   const lowerBound = serviceYmd && serviceYmd > today ? serviceYmd : today;
+  const linked = record.scheduled_service_id
+    ? await conn('scheduled_services').where({ id: record.scheduled_service_id })
+      .first('property_id', 'service_address_line1', 'service_address_zip')
+    : null;
+  const visitKey = propertyKeyOf(linked);
   const upcoming = await conn('scheduled_services')
-    .where({ customer_id: customerId })
+    .where({ customer_id: record.customer_id })
     .whereNotIn('status', CLOSED_VISIT_STATUSES)
     .where('scheduled_date', '>=', lowerBound)
     .orderBy('scheduled_date', 'asc')
-    .select('scheduled_date', 'service_type');
-  const next = upcoming.find((row) => deps.detectServiceLine(row.service_type) === 'pest');
-  return next ? dateOnlyString(next.scheduled_date) : '';
+    .select('scheduled_date', 'service_type', 'property_id', 'service_address_line1', 'service_address_zip');
+  const pest = upcoming.filter((row) => deps.detectServiceLine(row.service_type) === 'pest');
+  if (visitKey) {
+    const next = pest.find((row) => propertyKeyOf(row) === visitKey);
+    return { ymd: next ? dateOnlyString(next.scheduled_date) : '' };
+  }
+  if (new Set(pest.map(propertyKeyOf)).size > 1) return { ambiguous: true };
+  return { ymd: pest[0] ? dateOnlyString(pest[0].scheduled_date) : '' };
 }
 
 // Every condition that makes this THE customer's first performed pest visit
@@ -295,6 +320,10 @@ async function buildFirstVisitPest({
 
   const visitYmd = dateOnlyString(summary.visitDate || record.service_date);
   const { byVisit } = await deps.getActivityRatingAverages({ conn });
+  const nextVisit = await nextPestVisit({
+    conn, deps, record, serviceYmd: visitYmd,
+  });
+  if (nextVisit.ambiguous) return skip('the customer has pest appointments at more than one property and this visit\'s property cannot be established', 'next_visit_property_ambiguous');
   const payload = {
     first_name: clean(customer.first_name),
     visit_date_short: shortDate(visitYmd),
@@ -305,9 +334,7 @@ async function buildFirstVisitPest({
     primary_active_ingredient: clean(primary.activeIngredient),
     primary_product_family_phrase: clean(primary.phrase),
     pests_named_list: listSentence(summary.pestsNamed || []),
-    next_visit_date: longDate(await nextPestVisitYmd({
-      conn, deps, customerId: record.customer_id, serviceYmd: visitYmd,
-    })),
+    next_visit_date: longDate(nextVisit.ymd || ''),
     secondary_products_sentence: secondaryProductsSentence(secondary),
     nonrepellent_band_note: nonrepellentBandNote(primary, deps),
     activity_rating_sentence: activityRatingSentence(record, byVisit, 'pest'),
@@ -335,19 +362,25 @@ async function planService(conn, deps, record) {
   const none = { pattern: '', city: '' };
   if (!record.scheduled_service_id) return none;
   const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id })
-    .first('recurring_pattern', 'recurring_parent_id', 'service_type', 'service_address_city');
+    .first('recurring_pattern', 'recurring_parent_id', 'service_type', 'service_address_city', 'property_id');
   // The plan is the PEST series: a visit that is not a pest appointment says
   // nothing about the pest plan's cadence.
   if (!visit || deps.detectServiceLine(visit.service_type) !== 'pest') return none;
-  const city = clean(visit.service_address_city);
+  // The series this appointment belongs to: its root (the parent, or itself when
+  // it is the root) and its property, so plan evidence can be held to them.
+  const identity = {
+    city: clean(visit.service_address_city),
+    rootId: visit.recurring_parent_id || record.scheduled_service_id,
+    propertyId: visit.property_id || null,
+  };
   const own = deps.normalizeRecurringPattern(visit.recurring_pattern);
-  if (own) return { pattern: own, city };
-  if (!visit.recurring_parent_id) return { pattern: '', city };
+  if (own) return { pattern: own, ...identity };
+  if (!visit.recurring_parent_id) return { pattern: '', ...identity };
   const parent = await conn('scheduled_services').where({ id: visit.recurring_parent_id })
     .first('recurring_pattern', 'service_type');
   const inherited = parent && deps.detectServiceLine(parent.service_type) === 'pest'
     ? deps.normalizeRecurringPattern(parent.recurring_pattern) : null;
-  return { pattern: inherited || '', city };
+  return { pattern: inherited || '', ...identity };
 }
 
 // Once-per-customer (B5) / once-per-estimate (C1) is a SEND-TIME rule, not the
@@ -449,15 +482,34 @@ async function whyPlanGate({ run, conn, deps }) {
   const customer = await loadCustomer(conn, customerId);
   if (!customer) return skip('customer not found', 'customer_missing');
   return {
-    record, customer, planName, city: plan.city,
+    record, customer, planName, city: plan.city, series: plan,
   };
 }
 
-// The plan's products: every performed pest visit of this customer up to
-// visit 2. The non-repellent must be Taurus SC (the product whose
-// manufacturer statement the copy quotes) and nothing else non-repellent.
-async function whyPlanProducts({ record, conn, deps }) {
+// The plan's products: every performed pest visit of THIS appointment's recurring
+// pest series (and property) up to visit 2 — never the customer's other
+// properties' visits, where a Taurus application elsewhere would otherwise
+// qualify a Talak-only plan here. The non-repellent must be Taurus SC (the
+// product whose manufacturer statement the copy quotes) and nothing else
+// non-repellent. A series that cannot be established skips.
+async function whyPlanProducts({
+  record, series, conn, deps,
+}) {
+  if (!series?.rootId) return skip('the visit\'s recurring pest series cannot be established', 'plan_series_unknown');
+  const members = await conn('scheduled_services').where('customer_id', record.customer_id)
+    .where((qb) => qb.where('id', series.rootId).orWhere('recurring_parent_id', series.rootId))
+    .select('id', 'property_id', 'service_type');
+  const memberIds = members
+    .filter((row) => deps.detectServiceLine(row.service_type) === 'pest')
+    // Same property as the triggering appointment (a NULL on either side is
+    // "not recorded", not a different property).
+    .filter((row) => !series.propertyId || !row.property_id || String(row.property_id) === String(series.propertyId))
+    .map((row) => row.id);
+  if (!memberIds.includes(record.scheduled_service_id)) {
+    return skip('the visit is not part of a recurring pest series at its property', 'plan_series_unknown');
+  }
   const planVisits = conn('service_records').where('service_records.customer_id', record.customer_id)
+    .whereIn('service_records.scheduled_service_id', memberIds)
     .where('service_records.visit_number', '<=', 2);
   deps.applyPerformedVisitHistoryFilter(planVisits, { serviceLine: 'pest' });
   const visitIds = (await planVisits.select('service_records.id')).map((row) => row.id);
@@ -479,12 +531,14 @@ async function buildWhy91Days({
   const gate = await whyPlanGate({ run, conn, deps });
   if (gate.skip) return gate;
   const {
-    record, customer, planName, city,
+    record, customer, planName, city, series,
   } = gate;
   if ((await priorSends({ conn, run, customerId: customer.id })) === 'sent') {
     return skip('this customer already has a sent lc.why_91_days email', 'already_delivered');
   }
-  const plan = await whyPlanProducts({ record, conn, deps });
+  const plan = await whyPlanProducts({
+    record, series, conn, deps,
+  });
   if (plan.skip) return plan;
 
   // Cohort floor: getActivityRatingAverages already omits a (line, visit)
