@@ -228,6 +228,99 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
       expect(after.status).toBe('skipped');
       expect(await eventTypes(runId)).not.toContain('promoted_from_shadow');
     });
+    test('a LIVE-origin run finalized shadow (would-send) by a rollback is NOT promoted by a duplicate trigger after re-enable', async () => {
+      const automation = await makeAutomation({ delay_minutes: 30 });
+      const eventId = `evt-${randomUUID().slice(0, 8)}`;
+
+      mockGate.mode = 'live';
+      const created = await trigger(automation, eventId);
+      const runId = created.results[0].run.id;
+      expect(created.results[0].run.status).toBe('scheduled');
+
+      // Rollback to shadow; the due run finalizes 'shadow' (would-send) but
+      // the row is live-origin: a dropped live send, not shadow evidence.
+      mockGate.mode = 'shadow';
+      await db('email_template_automation_runs').where({ id: runId }).update({ run_after: new Date(Date.now() - 60000) });
+      await Executor.processDueRuns({ runIds: [runId] });
+      const finalized = await db('email_template_automation_runs').where({ id: runId }).first();
+      expect(finalized.status).toBe('shadow');
+      expect(finalized.context.origin_mode).toBe('live');
+
+      mockGate.mode = 'live';
+      const replay = await trigger(automation, eventId, { executeImmediately: false });
+      expect(replay.results[0].deduped).toBe(true);
+      expect((await db('email_template_automation_runs').where({ id: runId }).first()).status).toBe('shadow');
+      expect(await eventTypes(runId)).not.toContain('promoted_from_shadow');
+    });
+
+    test('a shared idempotency key is never promoted by ANOTHER automation: the row keeps its owner and the dedupe event names it', async () => {
+      const owner = await makeAutomation();
+      const other = await makeAutomation({
+        trigger_event_key: owner.trigger_event_key,
+        idempotency_key_template: owner.idempotency_key_template,
+      });
+      const eventId = `evt-${randomUUID().slice(0, 8)}`;
+
+      // Shadow: only the owner creates the row (would-send).
+      const shadow = await Executor.processTrigger({
+        triggerEventKey: owner.trigger_event_key,
+        triggerEventId: eventId,
+        automationKey: owner.automation_key,
+        payload: { recipient_email: 'synthetic-prelive@example.com', renewal_count: 0 },
+      });
+      const runId = shadow.results[0].run.id;
+      expect(shadow.results[0].run.status).toBe('shadow');
+
+      // Live: both automations see the trigger; they share the key.
+      mockGate.mode = 'live';
+      const live = await Executor.processTrigger({
+        triggerEventKey: owner.trigger_event_key,
+        triggerEventId: eventId,
+        payload: { recipient_email: 'synthetic-prelive@example.com', renewal_count: 0 },
+        executeImmediately: false,
+      });
+      expect(live.results).toHaveLength(2);
+
+      const rows = await db('email_template_automation_runs').where({ idempotency_key: shadow.results[0].run.idempotency_key });
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(runId);
+      expect(rows[0].automation_key).toBe(owner.automation_key);
+      expect(rows[0].automation_id).toBe(owner.id);
+      const events = await db('email_template_automation_run_events').where({ run_id: runId });
+      expect(events.filter((e) => e.event_type === 'promoted_from_shadow')).toHaveLength(1);
+      const collision = events.find((e) => e.event_type === 'deduped' && e.metadata.colliding_automation_key === owner.automation_key);
+      expect(collision).toBeTruthy();
+      expect(collision.message).toContain(owner.automation_key);
+      // Nothing recorded a collision against the owner itself.
+      expect(events.filter((e) => e.event_type === 'deduped' && e.metadata.colliding_automation_key === other.automation_key)).toHaveLength(0);
+    });
+
+    test('a promotion that lands on a planned skip logs the same skipped event (with its reason) a fresh insert would; a queued promotion logs queued', async () => {
+      const automation = await makeAutomation({ conditions: JSON.stringify({ renewal_count_gt: 5 }) });
+      const queuedEvent = `evt-${randomUUID().slice(0, 8)}`;
+      const skippedEvent = `evt-${randomUUID().slice(0, 8)}`;
+
+      // Shadow: the condition passes (renewal_count 10) -> would-send rows.
+      await trigger(automation, queuedEvent, { payload: { renewal_count: 10 } });
+      const shadowSkipped = await trigger(automation, skippedEvent, { payload: { renewal_count: 10 } });
+      expect(shadowSkipped.results[0].run.status).toBe('shadow');
+
+      // Live: one replay still passes (queued), the other now fails the
+      // condition at trigger time (planned skipped).
+      mockGate.mode = 'live';
+      const q = await trigger(automation, queuedEvent, { payload: { renewal_count: 10 }, executeImmediately: false });
+      const k = await trigger(automation, skippedEvent, { payload: { renewal_count: 0 }, executeImmediately: false });
+      expect(q.results[0].deduped).toBe(false);
+      expect(k.results[0].deduped).toBe(false);
+      expect(k.results[0].run.status).toBe('skipped');
+
+      const qEvents = await db('email_template_automation_run_events').where({ run_id: q.results[0].run.id });
+      expect(qEvents.map((e) => e.event_type)).toEqual(expect.arrayContaining(['promoted_from_shadow', 'queued']));
+      const kEvents = await db('email_template_automation_run_events').where({ run_id: k.results[0].run.id });
+      expect(kEvents.map((e) => e.event_type)).toEqual(expect.arrayContaining(['promoted_from_shadow', 'skipped']));
+      const skippedRow = await db('email_template_automation_runs').where({ id: k.results[0].run.id }).first();
+      expect(kEvents.find((e) => e.event_type === 'skipped').message).toBe(skippedRow.exit_reason);
+    });
   });
 
   describe('fix 2: per-automation isolation on a shared trigger', () => {
@@ -338,6 +431,36 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
         // Untouched automations report zeros, never undefined.
         const untouched = body.automations.find((r) => !automationKeys.includes(r.automation_key));
         if (untouched) expect(untouched).toMatchObject({ would_send_30d: 0, would_block_30d: 0 });
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+    test('a promoted run stops counting as shadow evidence (would_send/would_block are disjoint from live runs)', async () => {
+      const automation = await makeAutomation();
+      const promotedEvent = `evt-${randomUUID().slice(0, 8)}`;
+      await trigger(automation, promotedEvent);
+      await trigger(automation, `evt-${randomUUID().slice(0, 8)}`);
+      mockPreflight.result = { ok: false, code: 'SUPPRESSED', reason: 'recipient suppressed' };
+      const blockedEvent = `evt-${randomUUID().slice(0, 8)}`;
+      await trigger(automation, blockedEvent);
+      mockPreflight.result = { ok: true };
+
+      // Live replays promote one would-send and the would-block run.
+      mockGate.mode = 'live';
+      await trigger(automation, promotedEvent, { executeImmediately: false });
+      await trigger(automation, blockedEvent, { executeImmediately: false });
+
+      const express = require('express');
+      const router = require('../routes/admin-email-templates');
+      const app = express();
+      app.use('/admin/email-templates', router);
+      app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
+      const server = app.listen(0);
+      try {
+        const res = await fetch(`http://127.0.0.1:${server.address().port}/admin/email-templates/automations`);
+        const body = await res.json();
+        const row = body.automations.find((r) => r.automation_key === automation.automation_key);
+        expect(row).toMatchObject({ would_send_30d: 1, would_block_30d: 0 });
       } finally {
         await new Promise((resolve) => server.close(resolve));
       }

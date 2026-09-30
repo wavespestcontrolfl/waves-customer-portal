@@ -1699,7 +1699,7 @@ describe('email template automation executor', () => {
 
   describe('idempotency: a shadow run does not block a later live attempt', () => {
     test('promotes the existing shadow row in place instead of deduping or inserting a second row', async () => {
-      const existingShadowRun = run({ status: 'shadow' });
+      const existingShadowRun = run({ status: 'shadow', context: JSON.stringify({ origin_mode: 'shadow' }) });
       const existingRunQuery = chain({ first: existingShadowRun });
       // delay_minutes:60 -> status 'scheduled', so processTrigger never
       // reaches executeRun/dispatch — isolates the promotion mechanism.
@@ -1709,7 +1709,7 @@ describe('email template automation executor', () => {
         'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
         customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
         email_template_automation_runs: [existingRunQuery, promotedRunQuery],
-        email_template_automation_run_events: [promotedLogQuery],
+        email_template_automation_run_events: [promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
       });
 
       const result = await AutomationExecutor.processTrigger({
@@ -1740,7 +1740,7 @@ describe('email template automation executor', () => {
       // The shadow row was created under an OLD address; the customer's
       // email has since been corrected, and this live replay's payload
       // (and the under-lock customers re-read) carry the NEW one.
-      const existingShadowRun = run({ status: 'shadow', recipient_email: 'old@example.com' });
+      const existingShadowRun = run({ status: 'shadow', recipient_email: 'old@example.com', context: JSON.stringify({ origin_mode: 'shadow' }) });
       const existingRunQuery = chain({ first: existingShadowRun });
       const promotedRunQuery = chain({ returning: [{ ...existingShadowRun, status: 'scheduled', recipient_email: 'sam@example.com' }] });
       const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
@@ -1748,7 +1748,7 @@ describe('email template automation executor', () => {
         'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
         customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
         email_template_automation_runs: [existingRunQuery, promotedRunQuery],
-        email_template_automation_run_events: [promotedLogQuery],
+        email_template_automation_run_events: [promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
       });
 
       await AutomationExecutor.processTrigger({
@@ -1777,6 +1777,7 @@ describe('email template automation executor', () => {
         automation_id: 'automation-1',
         template_key: 'estimate.extension_notice',
         template_version_id: 'version-1',
+        context: JSON.stringify({ origin_mode: 'shadow' }),
       });
       const existingRunQuery = chain({ first: existingShadowRun });
       const currentAutomation = automation({
@@ -1796,7 +1797,7 @@ describe('email template automation executor', () => {
         'email_template_automations as a': [chain({ result: [currentAutomation] })],
         customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
         email_template_automation_runs: [existingRunQuery, promotedRunQuery],
-        email_template_automation_run_events: [promotedLogQuery],
+        email_template_automation_run_events: [promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
       });
 
       await AutomationExecutor.processTrigger({
@@ -1820,7 +1821,7 @@ describe('email template automation executor', () => {
     test('a shadow replay of an existing shadow row still dedupes (no promotion while mode stays shadow)', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
       try {
-        const existingShadowRun = run({ status: 'shadow' });
+        const existingShadowRun = run({ status: 'shadow', context: JSON.stringify({ origin_mode: 'shadow' }) });
         const existingRunQuery = chain({ first: existingShadowRun });
         const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
         setDbQueues({
@@ -1847,7 +1848,7 @@ describe('email template automation executor', () => {
     });
 
     test('a concurrent promotion race: losing the conditional update dedupes against the row as it now stands, never a fabricated runnable row', async () => {
-      const existingShadowRun = run({ status: 'shadow' });
+      const existingShadowRun = run({ status: 'shadow', context: JSON.stringify({ origin_mode: 'shadow' }) });
       const existingRunQuery = chain({ first: existingShadowRun });
       // The conditional UPDATE (WHERE status='shadow') returns ZERO rows —
       // another replay already won and advanced the row past 'shadow'.
@@ -1898,14 +1899,14 @@ describe('email template automation executor', () => {
         'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
         customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
         email_template_automation_runs: [existingRunQuery, promotedRunQuery],
-        email_template_automation_run_events: [latestEventQuery, promotedLogQuery],
+        email_template_automation_run_events: [latestEventQuery, promotedLogQuery, chain({ returning: [{ id: 'event-2' }] })],
       });
 
       const result = await replay();
 
       expect(result.results[0].deduped).toBe(false);
       expect(promotedRunQuery.insert).not.toHaveBeenCalled();
-      expect(promotedRunQuery.where).toHaveBeenCalledWith({ id: 'run-1', status: 'skipped' });
+      expect(promotedRunQuery.where).toHaveBeenCalledWith({ id: 'run-1', status: 'skipped', automation_key: 'estimate.extension_notice' });
       expect(promotedRunQuery.whereRaw).toHaveBeenCalledWith(expect.stringContaining("= 'would_block'"));
       expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
         status: 'scheduled', attempts: 0, last_error: null, exit_reason: null, completed_at: null,
@@ -1942,8 +1943,11 @@ describe('email template automation executor', () => {
     test.each([
       ['a LIVE-origin run rolled back to shadow and finalized would_block', JSON.stringify({ origin_mode: 'live' })],
       ['a would_block row with no origin_mode stamp', JSON.stringify({})],
-    ])('%s is NOT promoted: it dedupes without even reading the ledger', async (_label, context) => {
-      const skippedRun = run({ status: 'skipped', exit_reason: 'template disabled', context });
+      ['a LIVE-origin run finalized shadow by a rollback', JSON.stringify({ origin_mode: 'live' }), 'shadow'],
+      ['a shadow row owned by ANOTHER automation (shared idempotency key)', JSON.stringify({ origin_mode: 'shadow' }), 'shadow', 'other.automation'],
+      ['a would_block row owned by ANOTHER automation', JSON.stringify({ origin_mode: 'shadow' }), 'skipped', 'other.automation'],
+    ])('%s is NOT promoted: it dedupes without even reading the ledger', async (_label, context, status = 'skipped', ownerKey = undefined) => {
+      const skippedRun = run({ status, exit_reason: 'template disabled', context, ...(ownerKey ? { automation_key: ownerKey } : {}) });
       const existingRunQuery = chain({ first: skippedRun });
       const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
       setDbQueues({

@@ -776,27 +776,48 @@ const LATEST_EVENT_IS_WOULD_BLOCK_SQL = `(
   WHERE e.run_id = email_template_automation_runs.id
     AND e.event_type <> 'deduped'
   ORDER BY e.created_at DESC LIMIT 1
-) = 'would_block' AND email_template_automation_runs.context->>'origin_mode' = 'shadow'`;
+) = 'would_block'`;
 
-// Which prior-run status (if any) a live attempt may promote in place:
-// 'shadow' (a would-send) always; 'skipped' only when the run's LATEST
-// lifecycle event (a replay's own 'deduped' audit row never counts) is the
-// shadow preflight's 'would_block' AND the run was created in shadow
-// (context.origin_mode) — never a genuine condition/exit skip, never a live
-// block (markRunSkipped logs its own later event), and never a LIVE-origin
-// run that a rollback to shadow finalized skipped/would_block (a duplicate
-// trigger after re-enable must not turn that into a fresh real send). Any
-// other status is not promotable.
-async function promotableShadowStatus(conn, existing) {
+// SQL twin of the origin check in promotableShadowStatus: only a run CREATED
+// in shadow (context.origin_mode, stamped by contextFor) is shadow evidence.
+// A live-origin run that a rollback to shadow finalized 'shadow' or
+// skipped/would_block is a dropped live send, not shadow evidence.
+const SHADOW_ORIGIN_SQL = `email_template_automation_runs.context->>'origin_mode' = 'shadow'`;
+
+// Which prior-run status (if any) a live attempt may promote in place. Only
+// a run that (1) belongs to THIS automation — idempotency_key_template is not
+// unique across the automations on a trigger, and promotion rewrites the
+// row's automation/template fields, so another automation's evidence must
+// never be adopted — and (2) was CREATED in shadow (context.origin_mode; a
+// live-origin run a rollback finalized 'shadow' or skipped/would_block is a
+// dropped live send, not shadow evidence) is promotable, and then only as:
+// 'shadow' (a would-send), or 'skipped' when the run's LATEST lifecycle event
+// (a replay's own 'deduped' audit row never counts) is the shadow preflight's
+// 'would_block' — never a genuine condition/exit skip, never a live block
+// (markRunSkipped logs its own later event). Any other status is not
+// promotable.
+async function promotableShadowStatus(conn, existing, automation) {
+  if (existing.automation_key !== automation.automation_key) return null;
+  if (asObject(existing.context).origin_mode !== 'shadow') return null;
   if (existing.status === 'shadow') return 'shadow';
   if (existing.status !== 'skipped') return null;
-  if (asObject(existing.context).origin_mode !== 'shadow') return null;
   const latest = await conn('email_template_automation_run_events')
     .where({ run_id: existing.id })
     .whereNot({ event_type: 'deduped' })
     .orderBy('created_at', 'desc')
     .first();
   return latest && latest.event_type === 'would_block' ? 'skipped' : null;
+}
+
+// The run's first lifecycle event, shared by a fresh insert and a promotion
+// so a promoted run reads exactly like a freshly created one. The parent run
+// row was written through `conn`; when conn is a transaction this event MUST
+// ride it (FK to an uncommitted parent).
+function logRunPlanned(run, { automation, status, exitReason, runAfter }, conn) {
+  return logRunEvent(run.id, status === 'skipped' ? 'skipped' : 'queued', exitReason || `Automation run ${status}`, {
+    automation_key: automation.automation_key,
+    run_after: runAfter,
+  }, conn);
 }
 
 async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy, mode }) {
@@ -821,7 +842,7 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
     // gate must let the SAME trigger go out live instead of staying a
     // terminal would_block. A genuine condition/exit skip is NOT promotable:
     // it never logs a 'would_block' event.
-    const promotableFrom = mode === 'live' ? await promotableShadowStatus(conn, existing) : null;
+    const promotableFrom = mode === 'live' ? await promotableShadowStatus(conn, existing, automation) : null;
     if (promotableFrom) {
       // The UPDATE's WHERE also re-checks the status (codex P1): two
       // concurrent replays can both read this same shadow row before
@@ -831,12 +852,13 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
       // Zero rows back means this replay lost that race — fall through to
       // an ordinary dedupe against the row as it now stands, never a
       // fabricated runnable row.
-      let promoteQuery = conn('email_template_automation_runs').where({ id: existing.id, status: promotableFrom });
+      let promoteQuery = conn('email_template_automation_runs')
+        .where({ id: existing.id, status: promotableFrom, automation_key: automation.automation_key })
+        .whereRaw(SHADOW_ORIGIN_SQL);
       if (promotableFrom === 'skipped') {
-        // Re-check the would-block fact and the shadow origin in the
-        // statement itself: the row is still promotable only while its
-        // latest ledger event is the shadow would_block (a live skip since
-        // then logs its own event) and it was created in shadow.
+        // Re-check the would-block fact in the statement itself: the row is
+        // still promotable only while its latest ledger event is the shadow
+        // would_block (a live skip since then logs its own event).
         promoteQuery = promoteQuery.whereRaw(LATEST_EVENT_IS_WOULD_BLOCK_SQL);
       }
       const promotedRows = await promoteQuery
@@ -860,6 +882,7 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
           trigger_event_id: triggerEventId || null,
           from_status: promotableFrom,
         }, conn);
+        await logRunPlanned(promotedRows[0], { automation, status, exitReason, runAfter }, conn);
         return { run: promotedRows[0], deduped: false };
       }
       const current = await conn('email_template_automation_runs').where({ id: existing.id }).first();
@@ -871,9 +894,15 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
     }
     // conn, never the global pool — see logRunEvent's contract (the parent
     // run may be uncommitted in THIS transaction; a pooled insert deadlocks).
-    await logRunEvent(existing.id, 'deduped', 'Automation trigger replay ignored by idempotency key', {
+    // A key shared with ANOTHER automation's run names that automation, so
+    // the audit row explains why this automation created nothing.
+    const collidesWith = existing.automation_key !== automation.automation_key ? existing.automation_key : null;
+    await logRunEvent(existing.id, 'deduped', collidesWith
+      ? `Automation trigger replay ignored by idempotency key (key already owned by automation ${collidesWith})`
+      : 'Automation trigger replay ignored by idempotency key', {
       trigger_event_key: triggerEventKey,
       trigger_event_id: triggerEventId || null,
+      ...(collidesWith ? { colliding_automation_key: collidesWith } : {}),
     }, conn);
     return { run: existing, deduped: true };
   }
@@ -906,12 +935,7 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
     }, conn);
     return { run: replayed, deduped: true };
   }
-  // The parent run row was just inserted through `conn`; when conn is a
-  // transaction this event MUST ride it (FK to an uncommitted parent).
-  await logRunEvent(run.id, status === 'skipped' ? 'skipped' : 'queued', exitReason || `Automation run ${status}`, {
-    automation_key: automation.automation_key,
-    run_after: runAfter,
-  }, conn);
+  await logRunPlanned(run, { automation, status, exitReason, runAfter }, conn);
   return { run, deduped: false };
 }
 

@@ -841,6 +841,17 @@ router.get('/automations', async (req, res, next) => {
       .countDistinct('e.run_id as count')
       .whereIn('e.event_type', ['would_send', 'would_block'])
       .where('e.created_at', '>=', since)
+      // Shadow-period evidence only: once a live attempt promotes the run
+      // (a LATER promoted_from_shadow event) it is a live run, so it stops
+      // counting here and the three badges (would_send / would_block /
+      // send_count) never double-count one run.
+      .whereNotExists(function notPromotedSince() {
+        this.select(db.raw('1'))
+          .from('email_template_automation_run_events as p')
+          .whereRaw('p.run_id = e.run_id')
+          .where('p.event_type', 'promoted_from_shadow')
+          .whereRaw('p.created_at > e.created_at');
+      })
       .groupBy('r.automation_key', 'e.event_type');
     const shadowMap = {};
     for (const r of shadowRows) {
