@@ -712,7 +712,9 @@ function validateComplianceCopy({ reply }) {
 // a determiner ("the"/"my"/"your"/…) plus one of these non-visit nouns.
 // Shared by both regexes below (built with `new RegExp` so the fragment
 // can't drift between them) rather than duplicated inline.
-const REVISIT_TERM_SOURCE = 'revisit(?!\\s+(?:the|my|our|your|this|that|its?|their)\\s+(?:options?|quotes?|estimates?|schedules?|pricing|prices?|billing|bills?|invoices?|accounts?|portals?|terms|plans?|polic(?:y|ies)|profiles?|details?|history)\\b)';
+// Round-26 P2: the object may also PRECEDE the verb ("options you can revisit", "the estimate link includes
+// options you'll revisit") — a customer-subject "you/they can|may|will|'ll ... revisit" is looking something over.
+const REVISIT_TERM_SOURCE = '(?<!\\b(?:you|they)(?:[\'’]ll|\\s+(?:can|could|may|might|will|would|should|want\\s+to|are\\s+able\\s+to|are\\s+welcome\\s+to))\\s+)revisit(?!\\s+(?:the|my|our|your|this|that|its?|their)\\s+(?:options?|quotes?|estimates?|schedules?|pricing|prices?|billing|bills?|invoices?|accounts?|portals?|terms|plans?|polic(?:y|ies)|profiles?|details?|history)\\b)';
 // Codex round-6 P1 (narrowed) + PR #5336 pre-push audit P1 (restored): two
 // noun sets, one per detector. RESERVICE_SPECIFIC_NOUN_SOURCE is the
 // RE-SERVICE-SPECIFIC set (re-service, reservice, re-treat(ment), re-spray,
@@ -1137,7 +1139,7 @@ function promiseLaneRegexes() {
   };
   // A coordinated modifier ("pest and lawn re-service") names both lanes.
   const any = `(?:${words.pest}|${words.lawn})`;
-  const conj = '\\s*(?:and|&|\\/)\\s*';
+  const conj = '\\s*(?:and|or|&|\\/)\\s*'; // "pest or lawn re-service" names BOTH lanes (round-26 P2)
   reservicePromiseLaneRes = ['pest', 'lawn'].map((lane) => {
     const w = `(?:${any}${conj})?${words[lane]}(?:${conj}${any})?`;
     return [lane, new RegExp(
@@ -1242,7 +1244,7 @@ function bookedReserviceLanes(factsBlock) {
 function reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions }) {
   if (!([].concat(offeredTimes || []).length || actions.some((a) => a && a.type === 'book_appointment'))) return null;
   const booked = bookedReserviceLanes(factsBlock);
-  if (!booked.length || !PEST_REPORT_TEXT_RE.test(String(inboundMessage || ''))) return null;
+  if (!booked.length || !pestReportSignal(inboundMessage, context)) return null; // pronoun-aware ("they're back" + a pest relationship)
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const lane = reportedReserviceLane(inboundMessage) || (context && customerHasPestRelationship(context) ? 'pest' : null);
   return lane && booked.includes(lane)

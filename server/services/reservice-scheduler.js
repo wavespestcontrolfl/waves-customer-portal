@@ -84,6 +84,9 @@ function laneForCallbackRow({ serviceKey, serviceType } = {}) {
   // Codex round-22 P2 (PR #5336): a rodent trapping follow-up is its own excluded specialty — it must not
   // occupy (or be counted as) the customer's PEST lane, or an ant/roach report is denied its covered callback.
   if (serviceKey === 'rodent_trapping_followup') return 'rodent';
+  // ...and the same visit recorded WITHOUT a catalog key (legacy / unlinked rows: service_type 'Rodent Trapping
+  // Follow-Up') — classified by its label before the pest fallback (Codex round-26 P2).
+  if (/\brodent\b/i.test(String(serviceType || ''))) return 'rodent';
   return /\blawn\b|\bturf\b/i.test(String(serviceType || '')) ? 'lawn' : 'pest';
 }
 
@@ -340,7 +343,11 @@ async function loadEligibleReserviceLanesStrict(customerId, dbh = db) {
 // An incidental location ("in/on/near/around/under the shrubs/trees") never
 // trips this, so when a pest noun is ALSO present the report still resolves
 // to the pest lane below.
-const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = /\b(termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?)\b/i;
+// Codex round-26 P2 (PR #5336): bed bugs are their own specialty — protocols.json (bed_bug) says "Do not merge bed
+// bug with general pest. This is a specialty treatment with separate prep, pricing, and follow-up." It is the
+// ONLY program the protocols file explicitly separates from general pest (checked: every other "separate" note
+// concerns scope within a program — rodent exclusion, palm injection billing, copper/oil tanks).
+const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = /\b(termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?|bed[- ]?bugs?)\b/i;
 const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
   // A dedicated tree & shrub service/treatment/care/program/spray call, the
   // service word on EITHER side of the noun (Codex round-9, PR #5336: "the
@@ -399,7 +406,7 @@ const RESERVICE_LANE_WORD_PATTERNS = [
 // ---------------------------------------------------------------------------
 const RESERVICE_CLAUSE_DELIMITER_RE = /[.!?;:,\n–—]+|\s-\s|\b(?:and|but|however|though|although|yet|while|whereas|plus)\b/gi;
 const RESERVICE_NEG = "(?:not|no|never|none|nor|without|cannot|can'?t|don'?t|doesn'?t|didn'?t|won'?t|wasn'?t|isn'?t|aren'?t|weren'?t|haven'?t|hasn'?t|hadn'?t|couldn'?t|wouldn'?t)";
-const RESERVICE_ANY_PEST_NOUN = `(?:${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)`;
+const RESERVICE_ANY_PEST_NOUN = `(?:bed[- ]?bugs?|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)`;
 const RESERVICE_CLAUSE_NEGATED_RE = new RegExp(
   // a negator shortly before a sighting / presence / return verb ("don't see", "aren't back", "not showing up");
   // "go away" is a report that PERSISTS ("didn't go away"), not a negated sighting

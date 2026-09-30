@@ -3134,6 +3134,13 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["I'm free at 3 if you want to talk.", false, []],
   ["Free on Thursday after 5, we can send a tech.", false, []],
   ["The re-service is free Tuesday.", true, []],
+  ["The estimate link includes options you can revisit.", false, []],
+  ["You can revisit your options any time.", false, []],
+  ["Here are the options you'll revisit when you're ready.", false, []],
+  ["We will revisit the property for free.", true, []],
+  ["We can send your free pest or lawn re-service link.", true, ['pest', 'lawn']],
+  ["Your free lawn or pest re-service is covered.", true, ['pest', 'lawn']],
+  ["We can send your free pest and lawn re-service link.", true, ['pest', 'lawn']],
   ["We can schedule a free Waves Assessment.", false, []],
   ["A free Waves Assessment visit is on us, no charge.", false, []],
   ["Your free inspection is Tuesday.", false, []],
@@ -3272,6 +3279,47 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(validateReserviceOffer({ reply: 'Your free re-service is already on the schedule for Thursday.', factsBlock: booked, intendedActions: [], inboundMessage: 'the ants are back' }).ok).toBe(true);
       expect(validateReserviceOffer({ reply: 'I can do Thursday 9-11am.', factsBlock: booked, intendedActions: [], inboundMessage: 'can I move my lawn visit?', offeredTimes: slot }).ok).toBe(true);
       expect(validateReserviceOffer({ reply: 'I can do Thursday 9-11am.', factsBlock: `X\n${reserviceFactLine(['pest'])}\nBILLING:`, intendedActions: [], inboundMessage: 'can I move my visit?', offeredTimes: slot }).ok).toBe(true);
+    });
+
+    // Codex round-26 P2s (PR #5336)
+    test('"pest or lawn" names BOTH lanes: a lawn-only customer offered it is rejected; a two-lane customer keeps both in the snapshot', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const reply = 'We can send your free pest or lawn re-service link.';
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine(['lawn'])}\nBILLING:`, intendedActions: sendLink, inboundMessage: 'hi' }).ok).toBe(false);
+      const both = validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine(['pest', 'lawn'])}\nBILLING:`, intendedActions: sendLink, inboundMessage: 'hi' });
+      expect(both).toMatchObject({ ok: true, promisedLanes: ['pest', 'lawn'] });
+    });
+
+    test('the booked-lane OPEN TIMES guard is pronoun-aware: "they\'re back" + a pest relationship + pest already booked', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const booked = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const slot = [{ date: 'Thursday, October 8', window: '9-11am' }];
+      const withHistory = { customer: { id: 'cust-1' }, serviceHistory: [{ type: 'General Pest Control' }] };
+      const args = { reply: 'I can do Thursday 9-11am.', factsBlock: booked, intendedActions: [], inboundMessage: "they're back", offeredTimes: slot };
+      const out = validateReserviceOffer({ ...args, context: withHistory });
+      expect(out.ok).toBe(false);
+      expect(out.violations[0]).toMatch(/ALREADY BOOKED/);
+      expect(validateReserviceOffer({ ...args, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [], context: withHistory }).ok).toBe(false);
+      // no pest relationship on file → not a pest report → untouched
+      expect(validateReserviceOffer({ ...args, context: { customer: { id: 'cust-1' }, serviceHistory: [] } }).ok).toBe(true);
+    });
+
+    test('bed bugs are an excluded specialty: never a general-pest report, never a free pest re-service (protocols.json bed_bug)', () => {
+      const protocols = require('../config/protocols.json');
+      expect(JSON.stringify(protocols.bed_bug)).toMatch(/Do not merge bed bug with general pest/);
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const facts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      for (const inboundMessage of ['bed bugs are back', 'the bedbugs came back', 'we found bed bugs again']) {
+        // not owed the offer...
+        expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts, intendedActions: [], inboundMessage }).ok).toBe(true);
+        // ...and a free pest re-service for it is rejected
+        expect(validateReserviceOffer({ reply: 'We can send your free pest re-service link.', factsBlock: facts, intendedActions: sendLink, inboundMessage }).ok).toBe(false);
+      }
+      expect(validateReserviceOffer({ reply: 'We can send your free bed bug re-service link.', factsBlock: facts, intendedActions: sendLink, inboundMessage: 'hello' }).ok).toBe(false);
+      // a NEGATED mention is not the specialty
+      expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts, intendedActions: [], inboundMessage: "it's not bed bugs, the ants are back" }).ok).toBe(false);
     });
 
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {

@@ -153,6 +153,19 @@ describe('laneForCallbackRow — the lane predicate', () => {
     expect(laneForCallbackRow({ serviceKey: 'rodent_trapping_followup' })).not.toBe('pest');
   });
 
+  test('an UNKEYED rodent follow-up (service_key null, service_type label only) is classified before the pest fallback (round-26 P2)', () => {
+    expect(laneForCallbackRow({ serviceKey: null, serviceType: 'Rodent Trapping Follow-Up' })).toBe('rodent');
+    expect(laneForCallbackRow({ serviceType: 'rodent trapping follow-up' })).toBe('rodent');
+    expect(laneForCallbackRow({ serviceKey: null, serviceType: 'Pest Control Re-Service' })).toBe('pest');
+  });
+
+  test('openReserviceCallbacks: an unkeyed rodent follow-up does not occupy the pest lane', async () => {
+    const { openReserviceCallbacks } = require('../services/reservice-scheduler');
+    const rows = [{ id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Rodent Trapping Follow-Up', reschedule_token: 't1', service_key: null }];
+    const chain = { leftJoin: () => chain, where: () => chain, whereIn: () => chain, orderBy: () => chain, select: async () => rows };
+    expect(await openReserviceCallbacks('cust-1', () => chain)).toEqual({});
+  });
+
   test('openReserviceCallbacks: an open rodent follow-up does not appear as a booked pest re-service (the pest lane stays bookable)', async () => {
     const { openReserviceCallbacks, reserviceLaneAvailability } = require('../services/reservice-scheduler');
     const rows = [

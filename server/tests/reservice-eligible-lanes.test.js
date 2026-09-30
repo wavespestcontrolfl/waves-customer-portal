@@ -359,6 +359,13 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['My termite inspection is Tuesday, and the ants are back', true, 'pest', false],
     ['my rodent trapping follow-up is booked but the roaches are back', true, 'pest', false],
     ['the termites are back, and my lawn service is Tuesday', true, null, true],
+    // round-26 P2: bed bugs are an excluded specialty; persistence grammar covers "keep getting/finding/having"
+    ['bed bugs are back', true, null, true],
+    ['the bedbugs came back', true, null, true],
+    ["it's not bed bugs, the ants are back", true, 'pest', false],
+    ['We keep getting ants', true, 'pest', false],
+    ['we keep finding roaches in the kitchen', true, 'pest', false],
+    ['we keep having spiders', true, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],
@@ -389,7 +396,7 @@ describe('persistence constructions share one source', () => {
   const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('../services/pest-persistence-phrases');
   const { SAVE_SALE_TEXT_RE } = require('../services/sms-shadow-drafter');
   const { isActivePestReport, mentionsAffirmed } = require('../services/reservice-scheduler');
-  test.each(['still seeing', 'still have', 'still having', 'still getting', 'still got', 'still finding', 'keep seeing', 'keep coming'])('"%s"', (phrase) => {
+  test.each(['still seeing', 'still have', 'still having', 'still getting', 'still got', 'still finding', 'keep seeing', 'keep coming', 'keep getting', 'keep finding', 'keep having'])('"%s"', (phrase) => {
     expect(new RegExp(`\\b(?:${PEST_PERSISTENCE_PHRASES_SOURCE})\\b`, 'i').test(phrase)).toBe(true);
     expect(SAVE_SALE_TEXT_RE.test(`I ${phrase} ants`)).toBe(true);
     expect(isActivePestReport(`I ${phrase} ants`)).toBe(true);
