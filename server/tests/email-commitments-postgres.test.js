@@ -111,6 +111,27 @@ postgres('Email commitments on PostgreSQL', () => {
     expect((await mockPg('emails').where({ id: email.id }).first()).operational_analysis).toMatchObject({ dropped: 0 });
   });
 
+  test('intake: an emailed payment question keeps the payment-answerable stamp SMS intake writes', async () => {
+    const { admissibleWitness } = require('../services/sms-commitment-fulfillment');
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: 'Did my payment go through? And can someone look at the ants', subject: 'Payment' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [
+      { party: 'waves', kind: 'other', description: 'did my payment go through', quote: 'Did my payment go through?',
+        basis: 'request', property_id: null, due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: true },
+      { party: 'waves', kind: 'other', description: 'look at the ants', quote: 'can someone look at the ants',
+        basis: 'request', property_id: null, due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false },
+    ], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    const rows = await mockPg('call_commitments').where({ email_id: email.id });
+    const payment = rows.find((r) => r.description === 'did my payment go through');
+    const ants = rows.find((r) => r.description === 'look at the ants');
+    expect(payment.sms_context.money_answerable).toBe(true);
+    expect(ants.sms_context.money_answerable).toBe(false);
+    const paid = { type: 'payment', ref: 'payment:p1', id: 'p1', text: 'payment succeeded' };
+    expect(admissibleWitness(paid, payment, [paid])).toBe(true);
+    expect(admissibleWitness(paid, ants, [paid])).toBe(false);
+  });
+
   // Owner diagnostic, 2026-09-29: 6 of 9 real asks in one production week
   // were classified lead_inquiry on an EXISTING customer's reply thread —
   // included here only because customer_id is set; a genuine new lead

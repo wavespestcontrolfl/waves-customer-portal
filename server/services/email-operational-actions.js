@@ -29,7 +29,7 @@ const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
 const { runExclusive } = require('../utils/cron-lock');
 const { hashExtractionSource, recordExtractionAttempt, shouldSkipExtraction, TERMINAL_STATUSES } = require('./data-hygiene/source-extraction-store');
 const { extractSmsOperations, VERSION: EXTRACTOR_VERSION } = require('./sms-operational-extractor');
-const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness } = require('./sms-commitment-fulfillment');
+const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, PAYMENT_WITNESS_KINDS } = require('./sms-commitment-fulfillment');
 const { ringOverdueBell, keptLate, resolveDueDeadline } = require('./sms-operational-actions');
 const { resolveEmailCustomerLink, personSentFilter } = require('./email/email-customer-link');
 const { stripQuotedAndSignature } = require('./email/email-strip');
@@ -141,6 +141,9 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
             speaker: direction === 'outbound' ? 'agent' : 'caller' }]),
           sms_context: { channel: 'email', basis: item.basis, due_text: item.due_text, property_id: propertyId,
             customer_id: customer.id, source_at: email.received_at,
+            // Whether a payment can answer this ask — the same stamp SMS
+            // intake writes; the verifier admits payment evidence only on it.
+            ...(PAYMENT_WITNESS_KINDS.includes(item.kind) ? { money_answerable: item.answered_by_payment === true } : {}),
             ...(item.basis === 'promise' && item.due_date ? { due_date: item.due_date } : {}) },
         };
       })).onConflict(['email_id', 'commitment_key']).ignore();
