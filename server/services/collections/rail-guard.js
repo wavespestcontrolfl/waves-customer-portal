@@ -44,6 +44,23 @@ function warnShadowWithoutPolicy() {
 }
 
 /**
+ * Active collections DISPUTE hold on the customer (owner ruling 2026-09-30:
+ * while it stands no pay link reaches them, and the Day 3-90 ladder and every
+ * other reminder rail wait, then start after the release). Consulted by every
+ * dunning/reminder rail through THESE two functions, independent of
+ * GATE_COLLECTIONS_POLICY: the gate's policy-flag denial only applies when it
+ * is on, and it reads as a durable stop. This is a transient wait - the owed
+ * touch stays pending and fires after the release. Fail closed: a lookup that
+ * cannot answer holds it too. Reads on `database` when given (savepoint on a
+ * transaction).
+ */
+async function disputeHoldHolds(customerId, database) {
+  if (!customerId) return false;
+  const { held } = await require('./collection-hold').dueInvoiceHeldByDisputeHold(customerId, database || undefined);
+  return held;
+}
+
+/**
  * Verdict-returning consult (codex r8): aggregate rails that quote a SET of
  * invoices must restrict that set to the policy's eligible ids — a boolean
  * alone lets an excluded invoice (payer re-resolved, dunning-stopped) ride
@@ -65,6 +82,10 @@ async function collectionsChannelVerdict({
   logTag = 'collections',
   database,
 }) {
+  if (await disputeHoldHolds(customerId, database)) {
+    logger.info(`[${logTag}] dispute hold: ${channel} for customer ${customerId} deferred until it is released`);
+    return { permitted: false, eligibleInvoiceIds: [], hold: true };
+  }
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
     warnShadowWithoutPolicy();
     return { permitted: true, eligibleInvoiceIds: null };
@@ -123,6 +144,10 @@ async function collectionsChannelPermitted({
   const answer = (allowed, durable = false, balanceIncomplete = false) => (detail
     ? { allowed, durable, ...(balanceIncomplete ? { balanceIncomplete } : {}) }
     : allowed);
+  if (await disputeHoldHolds(customerId, database)) {
+    logger.info(`[${logTag}] dispute hold: ${channel} for customer ${customerId} deferred until it is released`);
+    return detail ? { allowed: false, durable: false, hold: true } : false;
+  }
   if (process.env.GATE_COLLECTIONS_POLICY !== 'true') {
     warnShadowWithoutPolicy();
     return answer(true);

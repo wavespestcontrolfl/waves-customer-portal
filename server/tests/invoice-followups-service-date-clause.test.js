@@ -12,6 +12,12 @@
 // caught that the guard breaks the standard `npm test` command on any
 // non-UTC host — removed here since the fix under test no longer depends
 // on process.env.TZ).
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),

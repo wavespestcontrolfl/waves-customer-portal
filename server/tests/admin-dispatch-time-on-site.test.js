@@ -1503,7 +1503,9 @@ describe('post-commit structured_notes writers cannot clobber the correction', (
     // clear of completionSmsDeliveryUnverifiedAt once a marker-bound definite
     // rejection is proven, and the unverified-outcome stamp in the completion
     // SMS catch — both key-merges, not whole-column writes.
-    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(17);
+    // 18 with the dispute-hold hand-over marker (invoiceSenderOwnsPayLinkFor) —
+    // a key-merge too.
+    expect((source.match(/mergeRecordNotesKeys\(record\.id, /g) || []).length).toBe(18);
   });
 
   test('the lawn synthesis gate merges only its lawnReportV2 key — never the whole column (codex P1 round 3)', () => {

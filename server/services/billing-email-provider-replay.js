@@ -157,6 +157,11 @@ async function runBillingEmailProviderReplayHandoff(message, dispatch, {
       const verdict = await receiptOptOut(context, database)
         || (contracted ? await billingEmailReplayEligible(context, database) : { eligible: true });
       if (verdict?.eligible !== true) {
+        // A collections dispute hold: the schedulable hold (retryable + deferred),
+        // so the provider-retry rail waits without spending an attempt.
+        if (verdict?.holdDefer === true) {
+          return { ok: false, ...require('./collections/collection-hold').holdDeferOutcome(verdict.held) };
+        }
         const requote = context.source_entry_point === 'previsit_balance_reminder'
           && PREVISIT_SUPERSEDED_REASONS.has(verdict?.reason);
         return {

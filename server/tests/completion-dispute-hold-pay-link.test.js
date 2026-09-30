@@ -121,7 +121,7 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(src).toMatch(/const invoiceSenderOwnsPayLink = !!invoice\?\.id\s*&& String\(recordStructuredNotes\.invoiceSenderOwnsPayLinkFor \|\| ''\) === String\(invoice\.id\);/);
     const i = src.indexOf('const allowCompletionInvoiceLinkBase =');
     expect(src.slice(i, src.indexOf('const allowCompletionInvoiceLink = ', i))).toMatch(/&& !invoiceSenderOwnsPayLink;/);
-    const d = src.indexOf('} else if (declineNoticeEligibleSansHold');
+    const d = src.indexOf('} else if (paymentFailedSmsContext && !');
     expect(src.slice(d, src.indexOf(') {', d))).toMatch(/&& !invoiceSenderOwnsPayLink/);
   });
 
@@ -139,7 +139,7 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
   });
 
   test('the decline notice (which carries the pay link as its own text) is not armed under a dispute hold', () => {
-    const i = src.indexOf('} else if (declineNoticeEligibleSansHold');
+    const i = src.indexOf('} else if (paymentFailedSmsContext && !');
     expect(i).toBeGreaterThan(0);
     const cond = src.slice(i, src.indexOf(') {', i));
     expect(cond).toMatch(/&& !payLinkHeldByDisputeHold/);

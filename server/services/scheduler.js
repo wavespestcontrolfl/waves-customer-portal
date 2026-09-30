@@ -4843,7 +4843,10 @@ function initScheduledJobs() {
               `, [completedAt]),
             });
             logger.info(`[scheduled-sms] lawn notification ${msg.id} waiting after a concurrent pipeline claim — rescheduled for ${lawnPipelineRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'QUIET_HOURS_HOLD' && smsResult.nextAllowedAt) {
+          } else if (['QUIET_HOURS_HOLD', 'COLLECTION_HOLD_DEFER'].includes(smsResult.code) && smsResult.nextAllowedAt) {
+            // COLLECTION_HOLD_DEFER shares this branch: an active collections
+            // dispute hold on a delayed pay-link leg waits and sends after
+            // the release, never spending an attempt.
             // Send-window hold: a validator deferral, not a delivery
             // attempt — no provider send was tried. Handled BEFORE the
             // bounded-attempt branch and with the claimed attempt REFUNDED
@@ -4859,7 +4862,7 @@ function initScheduledJobs() {
               updated_at: completedAt,
               metadata: db.raw(`
                 COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-                  'quiet_hours_hold_at', ?::timestamptz,
+                  ?::text, ?::timestamptz,
                   'scheduled_sms_attempts',
                   GREATEST(
                     CASE
@@ -4870,7 +4873,7 @@ function initScheduledJobs() {
                     0
                   )
                 )
-              `, [completedAt]),
+              `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
           } else if (smsResult.code === 'BILLING_TEXT_LEG_IN_FLIGHT' && smsResult.nextAllowedAt) {

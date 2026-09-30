@@ -168,7 +168,9 @@ async function persistedLedgerExclusions(meta, database) {
 }
 
 async function collectionsPolicyRefusal(meta, database) {
-  if (!INVOICE_GUARDS.has(meta.source_entry_point) || process.env.GATE_COLLECTIONS_POLICY !== 'true') return null;
+  // The rail-guard consult applies a dispute hold even with the policy gate off
+  // (and is a plain permit otherwise), so it is asked for every dunning source.
+  if (!INVOICE_GUARDS.has(meta.source_entry_point)) return null;
   const permitted = await require('../collections/rail-guard').collectionsChannelPermitted({
     customerId: meta.customer_id,
     invoiceId: meta.invoice_id || null,
@@ -177,10 +179,12 @@ async function collectionsPolicyRefusal(meta, database) {
     logTag: 'billing-email-obligation-replay',
     // The rail whose email this replays (shadow spacing only).
     source: meta.source_entry_point === 'invoice_followup_sequence' ? 'invoice_followups' : meta.source_entry_point,
-    excludeLedgerIds: await persistedLedgerExclusions(meta, database),
+    // The ledger only matters to the policy gate's own spacing rules.
+    excludeLedgerIds: process.env.GATE_COLLECTIONS_POLICY === 'true' ? await persistedLedgerExclusions(meta, database) : [],
     detail: true,
     database,
   });
+  if (permitted?.hold === true) return { ...refused('collection-hold', true), holdDefer: true, held: { held: true, reason: 'hold' } };
   return permitted?.allowed === true ? null : refused('collections-policy-denied', permitted?.durable !== true);
 }
 

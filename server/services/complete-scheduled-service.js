@@ -11817,7 +11817,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && String(recordStructuredNotes.invoiceSenderOwnsPayLinkFor || '') === String(invoice.id);
     // The decline notice's own eligibility, BEFORE the hold and the sender
     // hand-over are applied: the hold hand-over asks "would this notice have
-    // carried the pay link?" with exactly the same terms the send uses.
+    // carried the pay link?". MUST stay the same terms as the notice's `else if`
+    // just below (which keeps its literal shape - source-contract tests pin it).
     const declineNoticeEligibleSansHold = !!paymentFailedSmsContext
       && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
       && !!svc.cust_phone && !!invoice?.id && !!invoiceCreated && !!payUrl
@@ -11848,9 +11849,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
       && !invoice?.payer_id;
     if (priorPaymentFailedNoticeStatus === 'sent') {
       paymentFailedNoticeSent = true;
-    } else if (declineNoticeEligibleSansHold
+    } else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
+      && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
       && !payLinkHeldByDisputeHold
-      && !invoiceSenderOwnsPayLink) {
+      && !invoiceSenderOwnsPayLink
+      && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
+      && !invoice.payer_id
+      // Backfill closeouts are quiet end-to-end — a declined backlog charge
+      // parks on the admin payment-failed bell instead of texting the
+      // customer about a visit from days/weeks ago.
+      && !isBackfillCompletion) {
       // Claim acquisition (#4131 slice 5, deferred by #4632 r2): this notice
       // carries the SAME pay link the ordinary invoice-send path delivers,
       // but used to send with no send_claim_token interaction at all — a

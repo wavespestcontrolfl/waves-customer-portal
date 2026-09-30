@@ -328,6 +328,28 @@ async function markRetryFailure(message, err, now = new Date(), { rejectedAfterS
   return updated || null;
 }
 
+// A queued row held by a collections dispute hold before any provider request:
+// back to the retry queue one hold interval out with the attempt this claim
+// consumed REFUNDED, so a long dispute never exhausts the ladder and the
+// pay-link email sends after the release.
+async function markRetryHeld(message, reason, now = new Date(), { rejectedAfterStart = false } = {}) {
+  const expectedPhase = rejectedAfterStart ? HANDOFF_PHASE_STARTED : HANDOFF_PHASE_PENDING;
+  const [updated] = await db('email_messages')
+    .where({ id: message.id, send_attempt_token: message.send_attempt_token, status: 'queued',
+      provider_handoff_attempt_token: message.send_attempt_token, provider_handoff_phase: expectedPhase })
+    .update({
+      status: 'failed',
+      error_message: emailTemplates.redactEmailAddresses(String(reason || 'collections dispute hold')).slice(0, 1000),
+      provider_retry_next_at: new Date(now.getTime() + require('./collections/collection-hold').HOLD_DEFER_MS),
+      provider_retry_count: db.raw('GREATEST(provider_retry_count - 1, 0)'),
+      provider_retry_exhausted_at: null,
+      provider_handoff_phase: rejectedAfterStart ? HANDOFF_PHASE_REJECTED : HANDOFF_PHASE_PENDING,
+      updated_at: now,
+    })
+    .returning('*');
+  return updated || null;
+}
+
 // A thrown provider request after the handoff began is ambiguous: SendGrid
 // may hold the message despite the lost response. A bearer-link summary is
 // never requeued from that state; its row settles as an uncertain delivery
@@ -666,6 +688,12 @@ async function retryOne(message) {
           return { sent: false, stopped: true, reason: 'claim_lost' };
         }
         const requote = handoff.code === 'BILLING_REPLAY_REQUOTE_REQUIRED';
+        // A collections dispute hold: wait, never spend a retry (a hold can
+        // outlast the whole ladder) - the row sends after the release.
+        if (handoff.code === require('./collections/collection-hold').HOLD_DEFER_CODE) {
+          await markRetryHeld(message, handoff.reason, new Date(), { rejectedAfterStart: state.rejected });
+          return { sent: false, held: true };
+        }
         if (handoff.retryable) {
           const err = new Error(handoff.reason);
           err.code = handoff.code;
@@ -753,6 +781,7 @@ module.exports = {
   recoverStaleClaims,
   claimDueRetries,
   markRetryFailure,
+  markRetryHeld,
   retryClaimAtProviderBoundary,
   retryOne,
   runDueRetries,

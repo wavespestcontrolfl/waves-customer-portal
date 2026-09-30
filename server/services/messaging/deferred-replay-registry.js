@@ -267,6 +267,23 @@ async function queueInvoiceOfDeadDeclineNotice(meta) {
   }
 }
 
+// A delayed pay-link text/email queued BEFORE a customer's collections dispute
+// hold was placed must wait, not send, while it stands (owner ruling
+// 2026-09-30). A recheck answer with a named retry time: the scheduler
+// reschedules to it and REFUNDS the claimed attempt, so a hold that outlasts the
+// bounded ladder never terminates the row - it sends after the release. Fail
+// closed: an unanswerable lookup waits the same way. Null = no hold.
+async function disputeHoldRecheck(customerId) {
+  const held = await require('../collections/collection-hold').dueInvoiceHeldByDisputeHold(customerId);
+  if (!held.held) return null;
+  return {
+    eligible: false,
+    reason: held.reason === 'lookup_failed' ? 'collection-hold-lookup-failed' : 'collection-hold',
+    retryable: true,
+    retryAt: new Date(Date.now() + require('../collections/collection-hold').HOLD_DEFER_MS),
+  };
+}
+
 const REGISTRY = {
   billing_retry_email_deferred: {
     // Email-only replay: the row is queued without a phone on purpose, so
@@ -406,6 +423,16 @@ const REGISTRY = {
     async recheck(meta) {
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) return collectible;
+      // A dispute hold placed after this reminder queued: wait, send after
+      // release (the customer is resolved once and reused below).
+      let followupCustomerId;
+      try {
+        followupCustomerId = await resolveFollowupCustomerId(meta);
+        const holdWait = followupCustomerId ? await disputeHoldRecheck(followupCustomerId) : null;
+        if (holdWait) return holdWait;
+      } catch (err) {
+        return failClosed('invoice-followup-hold', meta.invoice_id, err);
+      }
       // Collections policy re-consult at ACTUAL delivery time (codex
       // 2026-08-14 P1): a do_not_text/collection_hold flag or a live
       // conversation landing during the quiet-hours hold must suppress the
@@ -419,7 +446,7 @@ const REGISTRY = {
       // byte-identical replay.
       if (!gateOn && !meta.ledger_reservation_key) return { eligible: true };
       try {
-        const customerId = await resolveFollowupCustomerId(meta);
+        const customerId = followupCustomerId;
         if (!customerId) return { eligible: false, reason: 'customer-unresolved' };
         if (gateOn) {
           const { collectionsChannelPermitted } = require('../collections/rail-guard');
@@ -875,6 +902,9 @@ const REGISTRY = {
         if ([DISPOSITIONS.SUPERSEDE_BY_COLLECTOR, DISPOSITIONS.SELF_SUPERSEDE].includes(resolution.disposition)) {
           return { eligible: false, reason: resolution.reason };
         }
+        // The failure notice carries the pay link: wait out a dispute hold.
+        const holdWait = await disputeHoldRecheck(meta.customer_id);
+        if (holdWait) return holdWait;
         return { eligible: true };
       } catch (err) {
         return failClosed('billing-failure', meta.payment_id, err);
@@ -1027,7 +1057,12 @@ const REGISTRY = {
           }
           return { eligible: true };
         }
-        return invoiceStillCollectible({ invoice_id: invoiceId });
+        const collectibleVerdict = await invoiceStillCollectible({ invoice_id: invoiceId });
+        if (collectibleVerdict?.eligible === false) return collectibleVerdict;
+        // An ACH failure / action-required notice for this invoice points the
+        // customer at paying it: wait out a collections dispute hold.
+        const holdWait = await disputeHoldRecheck(meta.customer_id);
+        return holdWait || collectibleVerdict;
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);
       }

@@ -506,4 +506,141 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect((await invoice(inv)).status).toBe('scheduled');
     });
   });
+
+  // The structural sweep (owner ruling 2026-09-30): EVERY path that can deliver an
+  // invoice pay link later than the original send re-checks the live dispute hold.
+  // A hold placed after queueing keeps the leg retryable/deferred (never terminal),
+  // and the leg sends after the release.
+  describe('delayed pay-link legs: a hold placed after queueing blocks each leg, and it sends after the release', () => {
+    const accepted = { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM1' };
+    const sentInvoice = (c) => newInvoice(c, { status: 'sent', sent_at: db.fn.now() });
+    const queuedMeta = (inv, c, extra = {}) => ({ entry_point: 'invoice_send_deferred', invoice_id: inv, customer_id: c, ...extra });
+    const expectHoldDefer = (outcome) => expect(outcome).toMatchObject({
+      blocked: true, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+      nextAllowedAt: expect.any(String),
+    });
+
+    test('invoice_send_deferred Text/App legs (the shared locked provider handoff)', async () => {
+      const c = await newCustomer();
+      const inv = await sentInvoice(c);
+      const dispatch = jest.fn(async () => accepted);
+      await placeHold(c); // placed after the notice was queued
+      expectHoldDefer(await Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c), dispatch));
+      expect(dispatch).not.toHaveBeenCalled();
+      await releaseViaOpsScript(c);
+      await expect(Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c), dispatch)).resolves.toEqual(accepted);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+    });
+
+    test('invoice_send_deferred Email leg (the Email authority check on its held transaction)', async () => {
+      const c = await newCustomer();
+      const inv = await sentInvoice(c);
+      const check = () => db.transaction(async (trx) => {
+        await trx('invoices').where({ id: inv }).forUpdate().first('id');
+        return Invoices.checkDeferredInvoiceEmailDelivery(queuedMeta(inv, c), { channel: 'email', database: trx });
+      });
+      await placeHold(c);
+      expect(await check()).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true });
+      await releaseViaOpsScript(c);
+      expect(await check()).toEqual({ ok: true });
+    });
+
+    test('a hold lookup that cannot answer defers the same way (fail closed, never terminal)', async () => {
+      const c = await newCustomer();
+      const inv = await sentInvoice(c);
+      const dispatch = jest.fn(async () => accepted);
+      const lookup = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValueOnce({ held: true, reason: 'lookup_failed', error: new Error('db down') });
+      try { expectHoldDefer(await Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c), dispatch)); } finally { lookup.mockRestore(); }
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('a payer-billed invoice is exempt from the hold check (its own refusal stands, never a hold deferral)', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c, { status: 'sent', sent_at: db.fn.now(), payer_id: null });
+      await db('invoices').where({ id: inv }).update({ scheduled_send_error: 'payer_billed:7' });
+      const dispatch = jest.fn(async () => accepted);
+      const out = await Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c), dispatch);
+      expect(out.code).not.toBe('COLLECTION_HOLD_DEFER');
+      expect(dispatch).not.toHaveBeenCalled();
+    });
+
+    test('billing Email provider retry of an invoice notice (billingEmailReplayEligible) waits, then is eligible after the release', async () => {
+      const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
+      const c = await newCustomer();
+      const inv = await sentInvoice(c);
+      const meta = { source_entry_point: 'invoice_send_via_sms', invoice_id: inv, customer_id: c, category: 'invoice' };
+      await placeHold(c);
+      expect(await billingEmailReplayEligible(meta, db)).toMatchObject({ eligible: false, retryable: true, holdDefer: true });
+      await releaseViaOpsScript(c);
+      expect(await billingEmailReplayEligible(meta, db)).toEqual({ eligible: true });
+    });
+
+    test('dunning rails (Day 3-90 ladder, late-payment, balance reminders) consult rail-guard: a hold waits with the gate OFF, and lifts on release', async () => {
+      const guard = require('../services/collections/rail-guard');
+      const before = process.env.GATE_COLLECTIONS_POLICY;
+      delete process.env.GATE_COLLECTIONS_POLICY;
+      try {
+        const c = await newCustomer();
+        const inv = await sentInvoice(c);
+        const ask = (detail) => guard.collectionsChannelPermitted({ customerId: c, invoiceId: inv, channel: 'sms', purpose: 'late_payment', detail });
+        await placeHold(c);
+        expect(await ask(false)).toBe(false);
+        expect(await ask(true)).toMatchObject({ allowed: false, durable: false, hold: true });
+        expect(await guard.collectionsChannelVerdict({ customerId: c, channel: 'email', purpose: 'balance_reminder' })).toMatchObject({ permitted: false, hold: true });
+        await releaseViaOpsScript(c);
+        expect(await ask(false)).toBe(true);
+        expect(await guard.collectionsChannelVerdict({ customerId: c, channel: 'email', purpose: 'balance_reminder' })).toMatchObject({ permitted: true });
+        // a non-dispute (wrong-number fallback) hold is not a pay-link stop
+        const other = await newCustomer();
+        await placeHold(other, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
+        expect(await guard.collectionsChannelPermitted({ customerId: other, channel: 'sms', purpose: 'late_payment' })).toBe(true);
+      } finally { if (before === undefined) delete process.env.GATE_COLLECTIONS_POLICY; else process.env.GATE_COLLECTIONS_POLICY = before; }
+    });
+
+    test('dunning rails: the billing Email replay of a follow-up/late-payment source waits on a hold with the gate off', async () => {
+      const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
+      const before = process.env.GATE_COLLECTIONS_POLICY;
+      delete process.env.GATE_COLLECTIONS_POLICY;
+      try {
+        const c = await newCustomer();
+        const inv = await sentInvoice(c);
+        const meta = { source_entry_point: 'invoice_followup_sequence', invoice_id: inv, customer_id: c, category: 'invoice' };
+        await placeHold(c);
+        expect(await billingEmailReplayEligible(meta, db)).toMatchObject({ eligible: false, retryable: true, holdDefer: true });
+      } finally { if (before === undefined) delete process.env.GATE_COLLECTIONS_POLICY; else process.env.GATE_COLLECTIONS_POLICY = before; }
+    });
+
+    test('queued reminder/notice texts (invoice_followup_deferred, stripe_webhook_billing_deferred) wait with a named retry time, never terminal', async () => {
+      const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+      const c = await newCustomer();
+      const inv = await sentInvoice(c);
+      const followup = { invoice_id: inv, customer_id: c };
+      const ach = { invoice_id: inv, customer_id: c, original_message_type: 'ach_retry_notice' };
+      await placeHold(c);
+      for (const [entry, meta] of [['invoice_followup_deferred', followup], ['stripe_webhook_billing_deferred', ach]]) {
+        const verdict = await recheckDeferredReplay(entry, meta);
+        expect(verdict).toMatchObject({ eligible: false, reason: 'collection-hold', retryable: true });
+        expect(new Date(verdict.retryAt).getTime()).toBeGreaterThan(Date.now());
+      }
+      await releaseViaOpsScript(c);
+      for (const [entry, meta] of [['invoice_followup_deferred', followup], ['stripe_webhook_billing_deferred', ach]]) {
+        expect((await recheckDeferredReplay(entry, meta)).eligible).not.toBe(false);
+      }
+    });
+
+    test('the payment-retry notice replay (billing_retry_email_deferred) waits while the hold stands', async () => {
+      const { replayPaymentRetryNotice } = require('../services/billing-retry-email-obligation');
+      const c = await newCustomer();
+      const [{ id: paymentId }] = await db('payments').insert({
+        customer_id: c, amount: 100, status: 'failed', payment_date: new Date(), next_retry_at: new Date(Date.now() + 86400000), retry_count: 0, description: 'synthetic',
+      }).returning('id');
+      try {
+        await placeHold(c);
+        const { etDateString } = require('../utils/datetime-et');
+        const out = await replayPaymentRetryNotice({ customer_id: c, payment_id: paymentId, retry_date: etDateString(new Date(Date.now() + 86400000)) });
+        expect(out).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true });
+      } finally { await db('payments').where({ id: paymentId }).del(); }
+    });
+  });
 });

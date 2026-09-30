@@ -179,6 +179,11 @@ async function replayPaymentRetryNotice(meta = {}, database = db) {
   }
   const customer = await database('customers').where({ id: meta.customer_id }).first();
   if (!customer) return { sent: false, blocked: true, code: 'CUSTOMER_NOT_FOUND', deliveryOutcome: 'not_sent' };
+  // The retry notice carries the invoice pay link: while a collections dispute
+  // hold stands (or cannot be verified) it waits - the scheduled rail refunds
+  // the attempt and it sends after the release.
+  const hold = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(meta.customer_id, database);
+  if (hold.held) return { sent: false, blocked: true, ...require('./collections/collection-hold').holdDeferOutcome(hold) };
   try {
     // Eligibility on the date the notice names, not today: a pause that
     // ends before the retry date does not cancel the promised notice, and

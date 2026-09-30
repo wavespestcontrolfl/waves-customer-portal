@@ -196,15 +196,38 @@ const HOLD_DEFER_MS = 4 * 60 * 1000;
 
 // { held: true, reason: 'hold' | 'lookup_failed', error? } | { held: false }.
 // Fail closed: a lookup that cannot be answered holds the send (retried next tick).
+// On a caller's transaction the read runs in a SAVEPOINT, so a failed lookup
+// cannot leave that (lock-holding) transaction aborted (25P02).
 async function dueInvoiceHeldByDisputeHold(customerId, database = db) {
   if (!customerId) return { held: false };
   try {
-    return (await customerHasActiveCollectionHold(customerId, database))
-      ? { held: true, reason: 'hold' }
-      : { held: false };
+    const held = database.isTransaction && typeof database.transaction === 'function'
+      ? await database.transaction((sp) => customerHasActiveCollectionHold(customerId, sp))
+      : await customerHasActiveCollectionHold(customerId, database);
+    return held ? { held: true, reason: 'hold' } : { held: false };
   } catch (err) {
     return { held: true, reason: 'lookup_failed', error: err };
   }
+}
+
+// The ONE schedulable-hold answer every delayed pay-link leg returns while a
+// dispute hold stands (or cannot be verified): retryable, deferred, one cron
+// tick out. Its code is in billing-channel-routing's REPLAY_HOLD_CODES and the
+// scheduled-SMS rail refunds the claimed attempt for it, so a hold that lasts
+// days never walks a queued leg to its attempt cap: the leg waits, then sends
+// after the release.
+const HOLD_DEFER_CODE = 'COLLECTION_HOLD_DEFER';
+function holdDeferOutcome(held = { reason: 'hold' }) {
+  return {
+    code: HOLD_DEFER_CODE,
+    reason: held.reason === 'lookup_failed'
+      ? 'The collections dispute-hold lookup failed; delivery deferred'
+      : 'Customer has an active collections dispute hold; delivery deferred until it is released',
+    retryable: true,
+    deferred: true,
+    deliveryOutcome: 'not_sent',
+    nextAllowedAt: new Date(Date.now() + HOLD_DEFER_MS).toISOString(),
+  };
 }
 
 // Queue a self-pay draft invoice onto the scheduled-invoice sender - the same
@@ -266,6 +289,8 @@ function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
 
 module.exports = {
   dueInvoiceHeldByDisputeHold,
+  holdDeferOutcome,
+  HOLD_DEFER_CODE,
   queueHeldInvoiceForSender,
   HOLD_DEFER_MS,
   isNeverAttemptedHoldDeferral,

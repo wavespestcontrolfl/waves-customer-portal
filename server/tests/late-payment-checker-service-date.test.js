@@ -4,6 +4,12 @@
 // which lands on the PREVIOUS calendar day. Asserts the CORRECT behaviour (literal
 // calendar day), so it FAILS on current code if the bug is real.
 // Run: cd server && TZ=UTC npx jest --runInBand tests/audit-repro/r1-timezone-1.test.js
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/collections/contact-ledger', () => ({
   recordContact: jest.fn(async () => ({ id: 'led-1', metadata: {} })),

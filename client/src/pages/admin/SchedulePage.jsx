@@ -1342,6 +1342,7 @@ export const COMPLETION_RESUME_OWED_CODES = new Set([
   "annual_prepay_addons_alert_failed",   // annual-prepay add-ons office alert not recorded
   "annual_prepay_addons_lookup_failed",  // annual-prepay add-ons unreadable against the visit's invoice
   "first_application_coverage_changed",  // trip's combined invoice now covers the visit; the resume reuses it
+  "invoice_hold_handover_failed",        // dispute-hold: the invoice could not be queued behind the hold; the resume re-queues it
 ]);
 export function completionResumeOwedError(error) {
   // The 503 is part of the contract: a reused code on any other status is

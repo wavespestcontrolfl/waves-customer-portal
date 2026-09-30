@@ -3,6 +3,12 @@ const mockWithCustomerCommsLock = jest.fn(async (database, _customerId, fn) => f
 const mockIsEnabled = jest.fn(() => false);
 const mockEnroll = jest.fn();
 
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => {
   const fn = jest.fn();
   fn.raw = jest.fn((sql, bindings) => ({ sql, bindings }));

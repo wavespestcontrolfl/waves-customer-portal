@@ -299,6 +299,19 @@ test('a resendable eligibility refusal carries BILLING_REPLAY_RESENDABLE as its 
   expect(verdict).toEqual({ ok: false, code: BILLING_REPLAY_RESENDABLE, reason: 'invoice-send-not-finalized', retryable: false });
 });
 
+test('a collections dispute hold is the schedulable hold code: retryable + deferred, never terminal (owner ruling 2026-09-30)', async () => {
+  billingEmailReplayEligible.mockResolvedValueOnce({
+    eligible: false, reason: 'collection-hold', retryable: true, holdDefer: true, held: { held: true, reason: 'hold' },
+  });
+  let verdict;
+  dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {
+    verdict = await options.preSendCheck({ database: jest.fn() });
+  });
+  await runBillingEmailProviderReplayHandoff(message(), jest.fn());
+  expect(verdict).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+  expect(new Date(verdict.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
+});
+
 test('propagates a provider error for the retry owner to classify', async () => {
   const providerError = new Error('provider outcome unknown');
   dispatchUnderBillingEmailAuthority.mockImplementationOnce(async (options) => {

@@ -2486,6 +2486,13 @@ async function withDeferredInvoiceProviderHandoff(meta, dispatch) {
   return withCheckedInvoiceProviderHandoff(meta.invoice_id, async (trx) => {
     const refusal = await deferredInvoiceDeliveryRefusal(meta, trx);
     if (!refusal) return { ok: true };
+    // A collections dispute hold: the schedulable hold every delayed pay-link
+    // leg shares (retryable + deferred; the scheduled rail refunds the attempt).
+    if (refusal.holdDefer) {
+      const defer = require("./collections/collection-hold").holdDeferOutcome(refusal.held);
+      return { sent: false, blocked: true, ...defer, error: defer.reason,
+        validator: "check_invoice_replay_eligibility" };
+    }
     return { sent: false, blocked: true, deliveryOutcome: "not_sent",
       code: "INVOICE_REPLAY_INELIGIBLE", error: refusal.reason, reason: refusal.reason,
       retryable: refusal.retryable === true, validator: "check_invoice_replay_eligibility" };
@@ -2502,6 +2509,9 @@ async function checkDeferredInvoiceEmailDelivery(meta, { database } = {}) {
   }
   try {
     const refusal = await deferredInvoiceDeliveryRefusal(meta, database);
+    if (refusal?.holdDefer) {
+      return { ok: false, ...require("./collections/collection-hold").holdDeferOutcome(refusal.held) };
+    }
     return refusal
       ? { ok: false, code: "INVOICE_REPLAY_INELIGIBLE", reason: refusal.reason, retryable: refusal.retryable === true }
       : { ok: true };

@@ -6,6 +6,12 @@
 // while naturally-completed ones do not, and the durable-finalize set is
 // derived from the registry itself.
 
+// The dispute-hold read is not what this suite exercises (its db is a queue of
+// canned chains): no active hold. The hold behavior has its own suites.
+jest.mock('../services/collections/collection-hold', () => ({
+  ...jest.requireActual('../services/collections/collection-hold'),
+  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+}));
 jest.mock('../models/db', () => {
   const mockDb = jest.fn();
   mockDb.raw = jest.fn((expr) => expr);
@@ -1787,6 +1793,7 @@ describe('deferred-replay registry', () => {
 
     // Unchanged balance replays; legacy rows without the stamp skip the pin.
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null, total: 100, credit_applied: 0 }));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' })); // customer read for the dispute-hold recheck
     const same = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1', rendered_amount: '100.00' });
     expect(same.eligible).toBe(true);
   });
@@ -1961,8 +1968,9 @@ describe('invoice_followup_deferred × collections policy', () => {
     db.mockReturnValueOnce(firstChain({ status: 'active' }));
   }
 
-  test('gate off + legacy keyless row: no consult, no resolution, no reservation — byte-identical', async () => {
+  test('gate off + legacy keyless row: no policy consult, no reservation (one customer read for the dispute-hold recheck)', async () => {
     db.mockReturnValueOnce(firstChain(COLLECTIBLE));
+    db.mockReturnValueOnce(firstChain({ customer_id: 'cust-1' }));
     const result = await recheckDeferredReplay('invoice_followup_deferred', { invoice_id: 'inv-1' });
     expect(result.eligible).toBe(true);
     expect(collectionsChannelPermitted).not.toHaveBeenCalled();
