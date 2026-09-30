@@ -141,6 +141,34 @@ describe('estimateServiceDetailsScope', () => {
     expect(lawnScope).toBe('one_time');
   });
 
+  test('recurring lawn + one-time lawn row (toggle estimate): the one-time hint picks the one-time variant', async () => {
+    const data = {
+      result: {
+        recurring: { services: [{ service: 'lawn_care', mo: 60 }] },
+        oneTime: { items: [LAWN_ROW('one_time_lawn', 'One-Time Lawn Treatment')] },
+      },
+    };
+    const hinted = await estimateServiceDetailsScope({ ...estimateRow(data), show_one_time_option: true }, { preferOneTime: true });
+    expect(hinted.lawnScope).toBe('one_time');
+    const plain = await estimateServiceDetailsScope({ ...estimateRow(data), show_one_time_option: true });
+    expect(plain.lawnScope).toBe('recurring');
+    expect([...plain.keys]).toEqual(['lawn_care']);
+  });
+
+  test('the one-time hint never widens: no one-time lawn row means the recurring guide (or nothing)', async () => {
+    const recurringOnly = await estimateServiceDetailsScope(
+      estimateRow({ result: { recurring: { services: [{ service: 'lawn_care', mo: 60 }] } } }),
+      { preferOneTime: true },
+    );
+    expect(recurringOnly.lawnScope).toBe('recurring');
+    const nothing = await estimateServiceDetailsScope(
+      estimateRow(oneTime([{ service: 'one_time_pest', label: 'One-time pest treatment', price: 150 }])),
+      { preferOneTime: true },
+    );
+    expect(nothing.keys.size).toBe(0);
+    expect(nothing.lawnScope).toBeNull();
+  });
+
   test('a $0 or unpriced one-time lawn row does not count (not on the customer page)', async () => {
     const { keys } = await estimateServiceDetailsScope(estimateRow(oneTime([{ service: 'plugging', label: 'Lawn plugging', price: 0 }])));
     expect(keys.size).toBe(0);

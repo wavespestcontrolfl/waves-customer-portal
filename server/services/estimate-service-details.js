@@ -464,7 +464,7 @@ const SERVICE_DETAILS_COPY = {
         heading: 'Before every visit',
         bullets: [
           'Mow at least 24 hours before if mowing is due. Don’t mow the day of. Why: we need leaf surface to treat, and fresh cuts bleed product.',
-          'Sprinklers off the night before. Why: we treat a dry lawn; wet grass dilutes liquids and granules stick to the blade instead of reaching the soil.',
+          'Sprinklers off the night before a treatment visit. Why: we treat a dry lawn; wet grass dilutes liquids and granules stick to the blade instead of reaching the soil. Plugging and top dressing are the exceptions: follow their own watering steps below.',
           'Clear the lawn: toys, hoses, furniture, pet bowls, pet waste. Unlock gates. Pets and kids inside during the application.',
           'Tell us what changed: new sod, a new dog, a sprinkler repair, a brown patch that showed up this week. Text a photo. Why: the visit starts from your lawn’s history, and a change we don’t know about is a diagnosis we get wrong.',
         ],
@@ -586,6 +586,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         heading: 'Summer fertilizer rules (June 1 – September 30)',
+        scope: 'recurring',
         paragraphs: ['Manatee County, Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn fertilizer in this window. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, weed control, and iron and micronutrients to hold color. Your lawn is not skipped, and we won’t break the ordinance for you.'],
       },
     ],
@@ -622,6 +623,15 @@ const SERVICE_DETAILS_COPY = {
     // walkthrough (included + process) and every scope:'recurring' entry, so
     // a one-time customer is never promised visits, re-service, or a program.
     oneTime: {
+      ctaMicro: 'The lawn work on your estimate · Documented in your service report',
+      documentation: {
+        heading: 'Documented — no mystery treatments, no missing paperwork',
+        bullets: [
+          'The completed work produces a digital service report: what we found, what we did, any products applied, technician notes, and photos when findings warrant them.',
+          'Track your technician’s live location and estimated arrival in the Waves app once they’re en route.',
+          'Your service report is the record of what was done at YOUR home. Your estimate controls the scope and terms of this one-time work.',
+        ],
+      },
       systemBox: {
         heading: 'Your lawn service at a glance',
         rows: [
@@ -658,6 +668,7 @@ const SERVICE_DETAILS_COPY = {
         a: 'No. Treatments follow evidence, and when insecticide is applied the report names the pest or the evidence.',
       },
       {
+        scope: 'recurring',
         q: 'Do you treat nutsedge?',
         a: 'Yes, with a caveat: sedge lives in wet soil and regrows from tubers. Expect repeat treatments and expect us to point at the irrigation pattern sponsoring it.',
       },
@@ -680,7 +691,7 @@ const SERVICE_DETAILS_COPY = {
     safetyOverride: {
       heading: 'Pets, kids, and your family',
       paragraphs: [
-        'Every product we apply is EPA-registered and used by its label, which is legally binding on where it goes, at what rate, and when people and pets may return. Registration is not a promise of zero risk, and no honest company calls a pesticide risk-free.',
+        'Every pesticide we apply is EPA-registered, and every product is used by its label, which is legally binding on where it goes, at what rate, and when people and pets may return. Registration is not a promise of zero risk, and no honest company calls a pesticide risk-free.',
         'There is no single re-entry time for every visit: liquids need to dry, some granules need watering in, and weather moves both. Your report states the guidance for the products actually used. Tell us about edible gardens, beehives, ponds, chickens, play areas, and sensitive occupants before treatment.',
         'Waves Pest Control, LLC operates under Florida license JB351547 and is insured. Florida law requires a posted treatment notice at every qualifying lawn visit; your report carries the details behind the sign.',
       ],
@@ -1011,7 +1022,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
   const stationOwnership = estimateStationOwnership(estimate);
   const ownershipMatches = (marker) => marker == null || marker === stationOwnership;
   const products = await fetchRegistryProducts(serviceKey);
-  const documentation = copy.documentationOverride || {
+  const documentation = variant.documentation || copy.documentationOverride || {
     heading: DOCUMENTATION_SECTION.heading,
     bullets: serviceKey === 'lawn_care'
       ? [...DOCUMENTATION_SECTION.bullets, LAWN_DOCUMENTATION_EXTRA]
@@ -1037,7 +1048,10 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
     // documented on the lawn_care entry), markers resolved.
     sections: resolveSections(copy.sections, {
       lawnScope,
-      bermuda: (copy.sections || []).some((sec) => sec && sec.requires === 'bermuda_suppression')
+      // The Bermuda program rides a recurring lawn plan only — an add-on
+      // flag left behind after a lawn removal never reaches a one-time guide.
+      bermuda: lawnScope === 'recurring'
+        && (copy.sections || []).some((sec) => sec && sec.requires === 'bermuda_suppression')
         && estimateHasBermudaSuppression(estimate),
     }),
     process: (lawnScope === 'one_time' ? [] : (copy.process || [])).reduce((acc, step) => {
@@ -1090,7 +1104,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
     // One CTA, after the full picture — every external guide review
     // (termite, pest, mosquito) flagged the mid-document CTA as premature.
     ctaPlacement: copy.ctaPlacement || 'closing_only',
-    ctaMicro: copy.ctaMicro || null,
+    ctaMicro: variant.ctaMicro || copy.ctaMicro || null,
     products,
   };
 }

@@ -223,11 +223,21 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     expect(lawn.included).toEqual([]);
     expect(lawn.process).toEqual([]);
     expect(lawn.faq.map((f) => f.q)).toEqual([
-      'Will my lawn be weed-free?', 'Do you treat nutsedge?', 'Can you fix thin grass under my trees?', 'What if you’re not sure what’s wrong?',
+      'Will my lawn be weed-free?', 'Can you fix thin grass under my trees?', 'What if you’re not sure what’s wrong?',
     ]);
     expect(lawn.responsibilities.bullets).not.toContain('Plugging, dethatching, and top dressing are quoted separately');
-    const text = JSON.stringify({ systemBox: lawn.systemBox, sections: lawn.sections, faq: lawn.faq, responsibilities: lawn.responsibilities });
-    expect(text).not.toMatch(/9–12|per year|re-service|no charge|comprehensive/i);
+    const text = JSON.stringify({
+      systemBox: lawn.systemBox, sections: lawn.sections, faq: lawn.faq, responsibilities: lawn.responsibilities, ctaMicro: lawn.ctaMicro,
+    });
+    expect(text).not.toMatch(/9–12|per year|re-service|no charge|comprehensive|program terms|summer visits|repeat treatments/i);
+    expect(lawn.ctaMicro).toBe('The lawn work on your estimate · Documented in your service report');
+    // Documentation drops the every-visit / lawn-health-history lines (Codex r2 P0).
+    expect(lawn.documentation.heading).toBe('Documented — no mystery treatments, no missing paperwork');
+    expect(JSON.stringify(lawn.documentation)).not.toMatch(/every visit|lawn-health|frequency|guarantee/i);
+    // A Bermuda add-on flag left on the estimate (e.g. after a lawn removal)
+    // never reaches the one-time guide.
+    const leftover = await withBermudaGate('true', () => buildServiceDetailsContent('lawn_care', BERMUDA_ESTIMATE, { lawnScope: 'one_time' }));
+    expect(leftover.sections.map((sec) => sec.heading).some(isBermudaHeading)).toBe(false);
     // The one-time aftercare line replaces the recurring one.
     const after = lawn.sections.find((sec) => sec.heading === 'After every visit');
     expect(after.bullets.filter((b) => /^Call us right away/.test(b))).toHaveLength(1);
@@ -261,6 +271,8 @@ describe('lawn_care guide (revised prep & service guide)', () => {
 
   test('all lawn copy obeys the product & safety standard', () => {
     const strings = lawnStrings(SERVICE_DETAILS_COPY.lawn_care);
+    // EPA registration covers pesticides, not fertilizer (Codex r2 P1).
+    expect(strings.join('\n')).not.toMatch(/every product we apply is EPA-registered/i);
     expect(strings.length).toBeGreaterThan(40);
     for (const text of strings) {
       expect(text).not.toMatch(/\bsafe(ly)?\b/i);

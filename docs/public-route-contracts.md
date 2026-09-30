@@ -1811,7 +1811,12 @@ is a one-time lawn row (`one_time_lawn`, `plugging`, `dethatching`,
 `top_dressing`), read from the same replayed pricing bundle `/data` sends
 (`pricingBundle.oneTimeBreakdown`, stored breakdown as fallback; malformed
 data fails closed), and that estimate gets the ONE-TIME variant of the guide
-(no visit count, re-service, or recurring-program content); no other guide
+(no visit count, re-service, or recurring-program content). An estimate with
+BOTH a recurring lawn line and a one-time lawn row serves the recurring guide
+unless the request carries the one-time card's hint (`?scope=one_time` on the
+GET, `scope: 'one_time'` in the send body; the texted link keeps it) — the
+hint only picks the variant when a one-time lawn row is present and never
+widens membership; no other guide
 widens for one-time rows, and the Bermuda-removal sections render only when
 the estimate carries the bermudaSuppression add-on with
 GATE_BERMUDA_SUPPRESSION on. The same membership rule gates

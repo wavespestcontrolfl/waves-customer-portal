@@ -26506,14 +26506,21 @@ const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'deth
 // replayed pricing bundle /data sends the page (pricingBundle.oneTimeBreakdown,
 // stored breakdown as the fallback), so an engine-inputs-only estimate whose
 // page shows the guide row can also fetch it.
+// `preferOneTime` (the one-time card's `scope=one_time` hint): an estimate
+// that carries BOTH a recurring lawn line and a one-time lawn row (lawn
+// toggle estimate, one-time mode) serves the one-time variant. The hint only
+// picks the variant when a one-time lawn row is actually present — it never
+// widens `keys`, and recurring stays the default.
 // Returns { keys, lawnScope } — lawnScope is 'recurring', 'one_time', or null.
-async function estimateServiceDetailsScope(estimate) {
+async function estimateServiceDetailsScope(estimate, { preferOneTime = false } = {}) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
   const keys = new Set(
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
-  if (keys.has('lawn_care')) return { keys, lawnScope: 'recurring' };
+  const recurringLawn = keys.has('lawn_care');
+  if (recurringLawn && !preferOneTime) return { keys, lawnScope: 'recurring' };
+  let oneTimeLawn = false;
   try {
     let breakdown = null;
     try {
@@ -26521,12 +26528,13 @@ async function estimateServiceDetailsScope(estimate) {
     } catch { /* replay failed: fall back to the stored breakdown */ }
     if (!breakdown) breakdown = normalizeOneTimeBreakdown(estData);
     const items = Array.isArray(breakdown?.items) ? breakdown.items : [];
-    if (items.some((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service))) {
-      keys.add('lawn_care');
-      return { keys, lawnScope: 'one_time' };
-    }
+    oneTimeLawn = items.some((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service));
   } catch { /* malformed one-time data: no widening (fail closed) */ }
-  return { keys, lawnScope: null };
+  if (oneTimeLawn) {
+    keys.add('lawn_care');
+    return { keys, lawnScope: 'one_time' };
+  }
+  return { keys, lawnScope: recurringLawn ? 'recurring' : null };
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -26551,7 +26559,9 @@ router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, r
     }
     const serviceKey = String(req.params.serviceKey || '');
     const { serviceDetailsAvailable, buildServiceDetailsContent } = require('../services/estimate-service-details');
-    const detailsScope = serviceDetailsAvailable(serviceKey) ? await estimateServiceDetailsScope(estimate) : null;
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.query?.scope === 'one_time' })
+      : null;
     if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -26657,7 +26667,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // Generic 404, matching the GET route and the public-route contract — a
     // distinct error here would make the send endpoint a service-membership
     // oracle for bearer-token links.
-    const detailsScope = serviceDetailsAvailable(serviceKey) ? await estimateServiceDetailsScope(estimate) : null;
+    const detailsScope = serviceDetailsAvailable(serviceKey)
+      ? await estimateServiceDetailsScope(estimate, { preferOneTime: req.body?.scope === 'one_time' })
+      : null;
     if (!detailsScope || !detailsScope.keys.has(serviceKey)) {
       return res.status(404).json({ error: 'Not found' });
     }
@@ -26682,7 +26694,8 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     };
     // Same canonical host every other estimate link uses
     // (admin-estimate-persistence.estimateViewUrl).
-    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf`;
+    // A one-time guide keeps its variant through the texted link.
+    const pdfUrl = `https://portal.wavespestcontrol.com/api/estimates/${estimate.token}/service-details/${serviceKey}/pdf${detailsScope.lawnScope === 'one_time' ? '?scope=one_time' : ''}`;
 
     if (channel === 'email') {
       if (!contact.customerEmail) return res.status(400).json({ error: 'No email on this estimate' });
@@ -26706,7 +26719,7 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           triggerEventId: `estimate_service_details:${estimate.id}:${serviceKey}`,
           // One send per estimate+service+day — the button is customer-initiated
           // but a retap shouldn't stack identical emails.
-          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}:${etDateString()}`,
+          idempotencyKey: `estimate_service_details:${estimate.id}:${serviceKey}${detailsScope.lawnScope === 'one_time' ? ':one_time' : ''}:${etDateString()}`,
           categories: ['estimate_service_details'],
           // Codex round 1 on #4608 (P1): content derivation would catch the
           // estimate_url in the payload anyway, but the explicit id is

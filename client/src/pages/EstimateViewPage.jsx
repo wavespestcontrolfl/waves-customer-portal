@@ -2196,6 +2196,7 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
           customerPhone={serviceDetailsRequest.customerPhone}
           disabled={serviceDetailsRequest.disabled === true}
           preview={serviceDetailsRequest.preview === true}
+          scope="one_time"
         />
       ) : null}
     </div>
@@ -4643,7 +4644,11 @@ const DETAILS_ACTION_STYLE = (disabled) => ({
   pointerEvents: disabled ? 'none' : 'auto', opacity: disabled ? 0.6 : 1,
 });
 
-function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false, preview = false }) {
+// `scope="one_time"` (the one-time breakdown card's lawn row) asks the server
+// for the one-time variant of the guide; the server honors it only when a
+// one-time lawn row is on the estimate, so a lawn toggle estimate in one-time
+// mode never serves the recurring program guide under the one-time row.
+function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPhone, disabled = false, preview = false, scope = null }) {
   const [state, setState] = useState({ status: 'idle', channel: null, message: '' });
   if (!SERVICE_DETAILS_KEYS.has(serviceKey)) return null;
   const send = async (channel) => {
@@ -4656,7 +4661,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
       const r = await fetch(`${API_BASE}/estimates/${token}/service-details/send`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ service: serviceKey, channel }),
+        body: JSON.stringify({ service: serviceKey, channel, ...(scope === 'one_time' ? { scope } : {}) }),
       });
       const body = await r.json().catch(() => ({}));
       if (!r.ok || !body.ok) {
@@ -4692,7 +4697,7 @@ function ServiceDetailsRequestRow({ token, serviceKey, customerEmail, customerPh
               carry the action name. */}
           <a
             className="gc-section-cta"
-            href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf`}
+            href={preview ? undefined : `${API_BASE}/estimates/${token}/service-details/${serviceKey}/pdf${scope === 'one_time' ? '?scope=one_time' : ''}`}
             target={preview ? undefined : '_blank'}
             rel={preview ? undefined : 'noopener noreferrer'}
             onClick={preview ? (e) => e.preventDefault() : undefined}

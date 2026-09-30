@@ -11,8 +11,9 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const base = require('../models/migrations/20260930120000_prep_lawn_guide_revision');
-// 000001 (Codex r1) supersedes 000000; its TEMPLATES are what customers receive.
-const migration = require('../models/migrations/20260930120001_prep_lawn_guide_revision_codex_r1');
+const r1 = require('../models/migrations/20260930120001_prep_lawn_guide_revision_codex_r1');
+// 000002 supersedes 000001 supersedes 000000; its TEMPLATES are what customers receive.
+const migration = require('../models/migrations/20260930120002_prep_lawn_guide_revision_r2');
 const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES } = migration;
@@ -88,11 +89,21 @@ describe('prep.lawn revision content', () => {
   });
 });
 
-describe('supersession (Codex r1)', () => {
-  test('patches exactly the Bermuda answer and leaves every other block as 000000 shipped it', () => {
-    expect(migration.SUPERSEDES).toBe('migration:20260930120000');
+describe('supersession', () => {
+  test('000002: no re-service or next-visit promise (prep.lawn also goes to one-time lawn treatments)', () => {
+    expect(migration.SUPERSEDES).toBe('migration:20260930120001');
+    const text = JSON.stringify(TEMPLATES);
+    expect(text).not.toMatch(/re-service/i);
+    expect(text).not.toMatch(/next visit/i);
+    // Fertilizer is not EPA-registered: the claim names pesticides only.
+    expect(text).not.toMatch(/every product we apply is EPA-registered/i);
+    expect(text).toMatch(/Every pesticide we apply is EPA-registered/);
+  });
+
+  test('000001 patches exactly the Bermuda answer and leaves every other block as 000000 shipped it', () => {
+    expect(r1.SUPERSEDES).toBe('migration:20260930120000');
     const before = base.TEMPLATES[0].blocks;
-    const after = TEMPLATES[0].blocks;
+    const after = r1.TEMPLATES[0].blocks;
     expect(after).toHaveLength(before.length);
     const changed = after.filter((b, i) => JSON.stringify(b) !== JSON.stringify(before[i]));
     expect(changed).toHaveLength(1);
@@ -102,7 +113,8 @@ describe('supersession (Codex r1)', () => {
 
 describe.each([
   ['000000', base, 'migration:20260930120000'],
-  ['000001', migration, 'migration:20260930120001'],
+  ['000001', r1, 'migration:20260930120001'],
+  ['000002', migration, 'migration:20260930120002'],
 ])('publish mechanics (%s)', (_name, migration, marker) => {
   const { TEMPLATES } = migration;
   function makeKnex() {

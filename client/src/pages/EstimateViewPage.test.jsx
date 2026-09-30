@@ -925,8 +925,23 @@ describe('OneTimeBreakdownCard lawn guide row (one-time lawn lines)', () => {
   it.each(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing'])('offers the lawn_care guide on a one-time %s row', (service) => {
     render(<OneTimeBreakdownCard breakdown={lawnBreakdown(service)} serviceDetailsRequest={request} />);
     const link = screen.getByLabelText('View the PDF').closest('a');
-    expect(link.getAttribute('href')).toContain('/estimates/tok-otl/service-details/lawn_care/pdf');
+    // The one-time card asks for the one-time variant of the guide.
+    expect(link.getAttribute('href')).toMatch(/\/estimates\/tok-otl\/service-details\/lawn_care\/pdf\?scope=one_time$/);
     expect(screen.getByRole('button', { name: /Email me the PDF/ })).toBeInTheDocument();
+  });
+
+  it('the email send carries the one-time scope hint', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ ok: true, channel: 'email' }) }));
+    const prior = global.fetch;
+    global.fetch = fetchMock;
+    try {
+      render(<OneTimeBreakdownCard breakdown={lawnBreakdown('plugging')} serviceDetailsRequest={request} />);
+      fireEvent.click(screen.getByRole('button', { name: /Email me the PDF/ }));
+      await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+      expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ service: 'lawn_care', channel: 'email', scope: 'one_time' });
+    } finally {
+      global.fetch = prior;
+    }
   });
 
   it('renders no guide row when the caller did not opt in', () => {
