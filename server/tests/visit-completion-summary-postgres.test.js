@@ -4925,6 +4925,49 @@ postgres('visit summary recipient recovery', () => {
         } finally { await mockPg('email_suppressions').where({ email: fixture.primaryEmail }).del(); }
       });
 
+      // The template guard is the sender's own (resolveTemplateForSend): a disabled template,
+      // or one with no active version, is refused there and so keeps today's behavior here.
+      test.each([
+        ['unpaid', {}, 'invoice.sent', { status: 'disabled' }],
+        ['paid', { status: 'paid' }, 'invoice.receipt', { status: 'disabled' }],
+        ['unpaid', {}, 'invoice.sent', { active_version_id: null }],
+        ['paid', { status: 'paid' }, 'invoice.receipt', { active_version_id: null }],
+      ])('%s: an email template that is not sendable (case %#) keeps today\'s behavior', async (kind, options, templateKey, change) => {
+        const invoiceId = await stop(options);
+        const original = await mockPg('email_templates').where({ template_key: templateKey }).first('status', 'active_version_id');
+        await mockPg('email_templates').where({ template_key: templateKey }).update(change);
+        try {
+          await coordinate();
+          expect(await recorded()).toBeUndefined();
+          if (kind === 'paid') {
+            expect((await jobRow(invoiceId)).sms_result).toBeNull();
+          } else {
+            expect(String((await invoiceRow(invoiceId)).scheduled_send_error || '')).not.toMatch(/^BILLING_EMAIL_PENDING/);
+          }
+        } finally {
+          await mockPg('email_templates').where({ template_key: templateKey }).update(original);
+        }
+      });
+
+      test.each([['unpaid', {}], ['paid', { status: 'paid' }]])('%s: a secondary profile with its own phone but no email does not qualify on the account primary\'s email', async (kind, options) => {
+        const invoiceId = await stop(options);
+        const primaryId = randomUUID();
+        const accountId = randomUUID();
+        await mockPg('customer_accounts').insert({ id: accountId, first_name: 'Primary' });
+        await mockPg('customers').insert({ id: primaryId, first_name: 'Primary', phone: '+12025550199',
+          email: `${primaryId}@example.invalid`, account_id: accountId, is_primary_profile: true });
+        await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: accountId, is_primary_profile: false, email: null });
+        try {
+          await coordinate();
+          expect(await recorded()).toBeUndefined();
+          if (kind === 'paid') expect((await jobRow(invoiceId)).sms_result).toBeNull();
+        } finally {
+          await mockPg('customers').where({ id: fixture.customerId }).update({ account_id: null });
+          await mockPg('customers').where({ id: primaryId }).del();
+          await mockPg('customer_accounts').where({ id: accountId }).del();
+        }
+      });
+
       test('paid with the receipt email suppressed and a failed summary text: the receipt text still reaches the customer', async () => {
         await stop({ status: 'paid' });
         await mockPg('email_suppressions').insert({ email: fixture.primaryEmail, status: 'active', suppression_type: 'bounce' });

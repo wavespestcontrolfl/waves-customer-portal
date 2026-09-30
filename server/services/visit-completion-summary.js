@@ -388,7 +388,7 @@ function summaryTextStillAhead(effect) {
 async function planSummaryBillingLink(packetId, token, database = db) {
   try {
     const context = await summaryDeliveryContext(packetId, token, database);
-    const { visit, customer, prefs, visible, requested, summaryUrl } = context;
+    const { visit, customer, visible, requested, summaryUrl } = context;
     if (!visible || !requested || !summaryUrl || visit.billing_hold) return null;
     const recipient = getServiceContactSmsRecipient(customer);
     if (!recipient?.phone) return null;
@@ -399,7 +399,7 @@ async function planSummaryBillingLink(packetId, token, database = db) {
     if (!kind) return null;
     // The email leg carries the link whatever happens to the text: it must be deliverable
     // (recipient, billing choice, template, no suppression), or nothing folds.
-    if (!(await require('./messaging/billing-text-verdict').billingEmailDeliverable(kind, { customer, prefs, database }))) return null;
+    if (!(await require('./messaging/billing-text-verdict').billingEmailDeliverable(kind, invoice, { database }))) return null;
     // The summary text must still be ahead of this decision: a replay that charges after the
     // plain summary already went would otherwise leave no text carrying the link.
     if (!summaryTextStillAhead(await database('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms' })

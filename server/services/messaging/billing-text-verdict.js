@@ -57,29 +57,40 @@ async function billingTextVerdict(kind, invoice, { phone, database }) {
 /**
  * Would the canonical invoice / receipt EMAIL be sent to this customer right now?
  * The fold leaves the Email as the customer's only guaranteed path to the link, so it
- * asks what the email senders ask (invoice-email.js, email-template-library.js) and
- * fails closed: a deliverable recipient, the customer's billing choice selecting Email,
- * the receipt kill switch, the template being live, and no active suppression for the
- * address. A read failure answers no.
+ * asks the authorities the email senders themselves ask, not a mirror of them, and fails
+ * closed:
+ *  - recipient and billing channel: the sender's own resolvers on the raw customer row
+ *    they read (invoice-email.js loadInvoiceEmailContext + invoiceRecipientFor for an
+ *    invoice, resolveReceiptEmailRecipient for a receipt, plus the receipt kill switch
+ *    the receipt worker reads, receiptEmailOptOutState);
+ *  - template: the library's own send guards (resolveTemplateForSend: the template
+ *    enabled and an active version present);
+ *  - suppression: the ledger sendTemplate reads (activeSuppressionFor on that template).
+ * A read failure answers no. `invoice` is the invoice row (not mutated).
  */
-async function billingEmailDeliverable(kind, { customer, prefs, database }) {
+async function billingEmailDeliverable(kind, invoice, { database } = {}) {
   try {
     const shape = SENDER_SHAPE[kind];
     if (!shape) return false;
-    const contact = require('../customer-contact');
-    const recipients = kind === 'receipt'
-      ? contact.getReceiptEmailRecipients(customer, prefs || {}) : contact.getInvoiceEmailRecipients(customer, prefs || {});
-    if (!recipients.length) return false;
-    if (kind === 'receipt' && prefs?.payment_receipt === false) return false;
-    const explicit = explicitBillingChannels(prefs || {}, shape.category);
-    if (explicit && !explicit.includes('email')) return false;
-    const library = require('../email-template-library');
-    const loaded = await library.loadTemplateByKey(kind === 'receipt' ? 'invoice.receipt' : 'invoice.sent', database);
-    if (!loaded?.template) return false;
-    for (const recipient of recipients) {
-      if (await library.activeSuppressionFor(loaded.template, recipient.email, null, database)) return false;
+    const emailer = require('../invoice-email');
+    let recipient;
+    if (kind === 'receipt') {
+      if (!invoice.payer_id) {
+        const { receiptKillSwitch, prefsLookupFailed } = await require('../receipt-delivery-queue').receiptEmailOptOutState(invoice);
+        if (receiptKillSwitch || prefsLookupFailed) return false;
+      }
+      const resolved = await emailer.resolveReceiptEmailRecipient({ ...invoice }, { billingDeliveryCategory: shape.category });
+      if (!resolved.ok) return false;
+      recipient = resolved.recipient;
+    } else {
+      const context = await emailer.loadInvoiceEmailContext(invoice, { billingDeliveryCategory: shape.category });
+      if (context.refusal) return false;
+      recipient = emailer.invoiceRecipientFor(context.customer, context.prefs, null).recipient;
     }
-    return true;
+    if (!recipient?.email) return false;
+    const library = require('../email-template-library');
+    const { template } = await library.resolveTemplateForSend({ templateKey: kind === 'receipt' ? 'invoice.receipt' : 'invoice.sent', database });
+    return !(await library.activeSuppressionFor(template, recipient.email, undefined, database));
   } catch {
     return false;
   }
