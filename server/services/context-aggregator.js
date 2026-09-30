@@ -12,7 +12,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // reimplemented here — so the minutes the AI states match what the
 // customer would see on their own tracking link.
 const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
-const { calculateBoundedTrackingEta, finiteNumber, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
+const { calculateBoundedTrackingEta, finiteNumber, techMappingCutoff, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
 const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay } = require('./live-eta-destination');
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -681,7 +681,7 @@ async function resolveLiveEtaMinutesUncached(row, dest) {
       // vehicle's. Such a fix is bypassed for the configured device's own
       // position. An unreadable edit time cannot prove the device -> bypass the
       // cache entirely (fail closed: the Bouncie lookup by IMEI or no fact).
-      cachedNotBefore: Number.isFinite(new Date(row.tech_updated_at).getTime()) ? row.tech_updated_at : new Date(),
+      cachedNotBefore: techMappingCutoff(row.tech_updated_at),
       logPrefix: 'sms-shadow-live-eta',
     });
     if (!position) return null;

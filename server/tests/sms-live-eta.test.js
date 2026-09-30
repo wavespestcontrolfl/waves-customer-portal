@@ -1940,6 +1940,47 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-35 P2 (PR #5334): route wording is authorized by an EN-ROUTE fact only.
+describe('round 35 P2: on-site facts authorize only arrived/on-site wording', () => {
+  const onSiteFacts = 'Quarterly Pest TODAY, LIVE STATUS: tech marked on site at this visit';
+  const enRouteFacts = 'Quarterly Pest TODAY, LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+  const gateOn = (fn) => { const prior = process.env[GATE]; process.env[GATE] = 'true'; try { return fn(); } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; } };
+  test('gate on: the prompt splits route wording (en route) from arrived wording (on site)', () => {
+    const prompt = gateOn(() => buildSystemPrompt());
+    expect(prompt).toContain('ONLY when TODAY\'s visit line shows LIVE STATUS: tech marked en route');
+    expect(prompt).toContain('LIVE STATUS: tech marked on site, say only that the tech has arrived');
+    expect(prompt).toContain('never "on the way"');
+  });
+  test('gate off: the prompt keeps the exact v11 literal (byte-identical)', () => {
+    const prompt = buildSystemPrompt();
+    expect(prompt).toContain("Say the tech is on the way, running late, running ahead, or nearby unless TODAY's visit line shows LIVE STATUS en route or on site.");
+    expect(prompt).toContain('LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now.');
+    expect(prompt).not.toContain('ONLY when TODAY');
+  });
+  test.each(['Your tech is on the way.', 'Sam is running late.', 'Your technician is nearby.', "We're on our way."])('%p against an on-site-only fact is rejected', (reply) => {
+    const v = gateOn(() => validateLiveEtaMinutes({ reply, factsBlock: onSiteFacts, techNames: ['Sam'] }));
+    expect(v.ok).toBe(false);
+    expect(v.violations[0]).toMatch(/ON SITE/);
+  });
+  test.each(['Your tech has arrived.', 'Sam is on site now.', 'Your technician is here.'])('%p against an on-site fact is fine', (reply) => {
+    expect(gateOn(() => validateLiveEtaMinutes({ reply, factsBlock: onSiteFacts, techNames: ['Sam'] })).ok).toBe(true);
+  });
+  test('route wording against an en-route fact, or with an en-route stop beside an on-site one, is fine', () => {
+    expect(gateOn(() => validateLiveEtaMinutes({ reply: 'Your tech is on the way, about 9 minutes away.', factsBlock: enRouteFacts })).ok).toBe(true);
+    expect(gateOn(() => validateLiveEtaMinutes({ reply: 'Your tech is on the way.', factsBlock: `${onSiteFacts}\n${enRouteFacts}` })).ok).toBe(true);
+  });
+  test('gate off: the validator never fires', () => {
+    expect(validateLiveEtaMinutes({ reply: 'Your tech is on the way.', factsBlock: onSiteFacts }).ok).toBe(true);
+  });
+  test('a null mapping timestamp is unreadable: it bypasses the cache (the resolver never passes a null floor)', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    await resolveLiveEtaFact(baseRow({ tech_updated_at: null, tech_bouncie_imei: 'DEV-N' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].cachedNotBefore).toBeInstanceOf(Date);
+  });
+});
+
 // Codex round-34 P2s (PR #5334): first-person plural route claims; a tech named Will.
 describe('round 34 P2s: "we" route claims and technician names that are auxiliaries', () => {
   const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');

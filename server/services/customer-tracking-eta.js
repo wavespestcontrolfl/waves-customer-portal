@@ -91,7 +91,18 @@ async function calculateBoundedTrackingEta({
   }
 }
 
+// The cached-fix floor for a technician row (Codex round-34 P2): the instant the
+// tracker mapping was last edited (technicians.updated_at, stamped by the admin
+// geofence PUT). ONE rule for every caller — the SMS ETA path and the public
+// tracker — so the text and the tracking page always read the same vehicle. An
+// unreadable edit time cannot prove the device, so it fails closed to "now"
+// (bypass the tech_status cache; read the configured device directly).
+function techMappingCutoff(updatedAt) {
+  return updatedAt != null && updatedAt !== '' && Number.isFinite(new Date(updatedAt).getTime()) ? updatedAt : new Date();
+}
+
 module.exports = {
+  techMappingCutoff,
   STALE_TECH_STATUS_MS,
   FUTURE_TIMESTAMP_TOLERANCE_MS,
   CUSTOMER_TRACKING_ETA_TIMEOUT_MS,

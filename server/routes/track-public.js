@@ -41,6 +41,7 @@ const PhotoService = require('../services/photos');
 const {
   calculateBoundedTrackingEta,
   finiteNumber,
+  techMappingCutoff,
 } = require('../services/customer-tracking-eta');
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('../services/geocoder');
@@ -177,6 +178,10 @@ async function buildVehicle(service) {
   const position = await resolveFreshTechPosition({
     techId: service.technician_id,
     bouncieImei: service.tech_bouncie_imei,
+    // Same remap floor as the SMS ETA path (round-34 P2): a cached tech_status fix
+    // reported before the technician's tracker mapping was last edited may be the
+    // OLD vehicle's, so the text and the tracking page never show different vehicles.
+    cachedNotBefore: techMappingCutoff(service.tech_updated_at),
     logPrefix: 'track-public',
   });
   if (!position) return null;
@@ -441,6 +446,7 @@ router.get('/:token', async (req, res, next) => {
         db.raw(`${stampedDivergesSql('s', 'c')} as stamped_address_diverges`),
         't.name as tech_name',
         't.bouncie_imei as tech_bouncie_imei',
+        't.updated_at as tech_updated_at',
         't.photo_url as tech_photo_url',
         't.photo_s3_key as tech_photo_s3_key',
         // Customer-friendly description from the service library. Used
@@ -674,6 +680,7 @@ router._test = {
   isFreshVehicleTimestamp,
   ensureEnRouteDestinationGeocoded,
   buildSummary,
+  buildVehicle,
 };
 
 module.exports = router;

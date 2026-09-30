@@ -235,6 +235,9 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
   return (!claims.length && unreadTimed) || unreadHours || unreadNumbers;
 }
 
+// A plural technician/team/"we" subject: plural nouns (techs, technicians, drivers,
+// crews), a team, or first-person plural ("we're", "we'll", "we are/will").
+const PLURAL_STATUS_SUBJECT_RE = /\b(?:tech(?:nician)?s|drivers|crews|teams?|we(?:'re|'ll|\s+(?:are|will|should)))\b/i;
 function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [] }) {
   const drafter = require('./sms-shadow-drafter');
   const trackTokens = extractTrackTokens(fullBody);
@@ -267,6 +270,7 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames
   const unclassifiedClaim = liveContext && !classified && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unclassifiedSignalOnly: true });
   return {
     claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim, unclassifiedClaim, visitStatusMention,
+    pluralSubject: PLURAL_STATUS_SUBJECT_RE.test(outgoingBody),
     hasClaim: classified || unclassifiedClaim,
   };
 }
@@ -304,6 +308,14 @@ function draftFreshnessReason(factsGeneratedAt, now, entry = null) {
 // (Codex round-10 P2) — only an unselectable status claim is ambiguous.
 function bindStatusClaim(claim, entries) {
   if (entries.length === 1) return { entries: [...entries] };
+  // Codex round-34 P2: a PLURAL subject ("Your techs are on the way", "Our team is
+  // en route", "We're on our way") speaks for every stop, so it binds to EVERY
+  // snapshot entry of the claimed kind (en route, or on site for an arrived claim),
+  // link or not — one linked entry must not vouch for the others.
+  if (claim.pluralSubject) {
+    const pool = entries.filter((e) => (claim.arrivedClaim ? e.state === 'on_property' : e.state !== 'on_property'));
+    return { entries: pool.length ? pool : [...entries] };
+  }
   const linked = entriesForTokens(entries, claim.trackTokens);
   return linked.length ? { entries: linked } : { reason: 'eta_claim_ambiguous' };
 }

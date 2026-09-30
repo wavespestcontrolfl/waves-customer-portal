@@ -1885,3 +1885,44 @@ describe('"we" route claims and auxiliary-named technicians at send time', () =>
     expect(await run('Has Mark arrived yet?', snap(['Mark']), done)).toBeNull();
   });
 });
+
+// Codex round-35 P2 (PR #5334): a plural subject speaks for every stop.
+describe('plural route claims bind every snapshot entry, link or not', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const entry = (id, tok, extra) => ({ minutes: null, scheduledServiceIds: [id], trackTokens: [tok], state: 'en_route', ...extra });
+  const snapshot = { entries: [entry('svc-1', 'tok-1'), entry('svc-2', 'tok-2')] };
+  const row = (id, tok, extra) => ({ id, status: 'en_route', track_state: 'en_route', track_view_token: tok, track_token_expires_at: FUTURE, ...extra });
+  const run = (body, rows, snap = snapshot) => etaClaimBlockReason({ liveEtaSnapshot: snap, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+  const both = [row('svc-1', 'tok-1'), row('svc-2', 'tok-2')];
+  const secondDone = [row('svc-1', 'tok-1'), row('svc-2', 'tok-2', { status: 'completed', track_state: 'completed' })];
+
+  test.each(['Your techs are on the way.', 'Our team is en route.', "We're on our way.", 'Your technicians are running late.'])('%p with NO link: bound to every entry (was ambiguous)', async (body) => {
+    expect(await run(body, both)).toBeNull();
+    expect(await run(body, secondDone)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('with ONE linked entry the plural claim still covers the OTHER stop', async () => {
+    const body = 'Your techs are on the way: portal.wavespestcontrol.com/track/tok-1';
+    expect(await run(body, both)).toBeNull();
+    expect(await run(body, secondDone)).toBe('eta_claim_no_longer_en_route'); // the unlinked stop went terminal
+  });
+  test('a SINGULAR claim with one link binds only the linked entry (unchanged)', async () => {
+    const body = 'Your tech is on the way: portal.wavespestcontrol.com/track/tok-1';
+    expect(await run(body, secondDone)).toBeNull();
+  });
+  test('a singular claim with no link and several entries stays ambiguous (unchanged)', async () => {
+    expect(await run('Your tech is on the way.', both)).toBe('eta_claim_ambiguous');
+  });
+  test('an arrived claim in the plural binds every on-site entry; en-route entries are not required to be on site', async () => {
+    const mixed = { entries: [entry('svc-1', 'tok-1', { state: 'on_property' }), entry('svc-2', 'tok-2')] };
+    const onSite = [row('svc-1', 'tok-1', { status: 'on_site', track_state: 'on_property' }), row('svc-2', 'tok-2')];
+    expect(await run('Our team has arrived.', onSite, mixed)).toBeNull();
+    expect(await run('Our team has arrived.', [row('svc-1', 'tok-1'), row('svc-2', 'tok-2')], mixed)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('a plural en-route claim ignores an on-site entry (only en-route stops can be on the way)', async () => {
+    const mixed = { entries: [entry('svc-1', 'tok-1', { state: 'on_property' }), entry('svc-2', 'tok-2')] };
+    expect(await run('Your techs are on the way.', [row('svc-1', 'tok-1', { status: 'on_site', track_state: 'on_property' }), row('svc-2', 'tok-2')], mixed)).toBe(null);
+  });
+});
