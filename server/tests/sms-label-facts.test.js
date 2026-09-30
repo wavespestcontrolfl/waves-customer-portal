@@ -1313,17 +1313,17 @@ describe('r20: qualified weekdays, a language allowlist, and answer-shaped quest
     for (const text of ['Tuesday', 'on Tuesday you sprayed', 'last Tuesday', 'you came Tuesday, dogs ok?']) expect([text, other(text)]).toEqual([text, false]);
   });
 
-  test('2. a reply sentence of 4+ words must be verifiably en / es / pt / fr; German, Italian, Dutch and Haitian Creole timing is held', () => {
+  test('2. German, Italian, Dutch and Haitian Creole timing is held (positive evidence of an unsupported language)', () => {
     for (const reply of [
       'Bitte halten Sie Haustiere vier Stunden fern.', 'Die Hunde k\u00f6nnen nach vier Stunden wieder nach drau\u00dfen.', 'Tenga gli animali fuori per quattro ore.', 'Tenete i cani dentro per quattro ore.',
       'Kenbe chen yo andedan pou kat \u00e8 tan.', 'Houd de honden vier uur binnen alstublieft.', 'Zwei Stunden warten und dann ist es gut.',
-    ]) expect([reply, labelFactsLib.hasUnverifiableLanguage(reply), claim(reply)]).toEqual([reply, true, true]);
+    ]) expect([reply, labelFactsLib.hasUnsupportedLanguage(reply), claim(reply)]).toEqual([reply, true, true]);
     for (const reply of [
       'See you then.', 'Hola, gracias por escribir. Un compa\u00f1ero le confirmar\u00e1 su cita.', 'Sounds good, see you Tuesday.', 'Tuesday morning works great.', 'We will see you Thursday between 8 and 10 AM.',
       'Your technician will confirm the timing at the visit.', 'Thanks for reaching out, we appreciate it.', 'The office is open until 5 PM today.', 'Bonjour, un coll\u00e8gue vous confirmera votre rendez-vous.', 'Never name product brands.', 'OK',
     ]) expect([reply, claim(reply)]).toEqual([reply, false]);
   });
-  test('2. an inbound that is not verifiably English gets none on file', () => {
+  test('2. an inbound in an unsupported language gets none on file', () => {
     const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
     const forInbound = (text) => labelFactsLib.labelFactsForInbound(facts, [text], '2026-09-30');
     for (const text of ['Wann d\u00fcrfen die Hunde wieder nach drau\u00dfen gehen', 'Quando possono i cani uscire dopo il trattamento', 'Kan de hond nu naar buiten na de behandeling', 'Kilè chen yo ka soti apre tretman an']) {
@@ -1342,6 +1342,85 @@ describe('r20: qualified weekdays, a language allowlist, and answer-shaped quest
     ]) expect([reply, claim(reply, asked)]).toEqual([reply, false]);
     // a clarification question that carries a duration, a clearance word or a label claim is not exempt
     for (const reply of ['Do you want the dogs kept off for 4 hours?', 'Are the dogs okay outside now?', 'Do you know it is safe by now?', 'What if they can go out at 3?']) expect([reply, claim(reply, asked)]).toEqual([reply, true]);
+  });
+});
+
+describe('r21: only POSITIVE evidence of an unsupported language holds a reply; terse English never does', () => {
+  const held = labelFactsLib.hasUnsupportedLanguage;
+  test('terse English service updates with no function words are never held', () => {
+    const terse = [
+      'Perimeter granules applied around foundation.',
+      'Rodent bait stations checked, all clear outside garage.',
+      'Interior spray completed, kitchen and bath baseboards.',
+      'Exterior webbing removed from eaves.',
+      'Wasp nest knocked down, entry point noted.',
+      'Ant activity found near lanai slider.',
+      'Fertilizer applied, iron added to St Augustine.',
+      'Weed control applied to front lawn beds.',
+      'Chinch bug treatment applied along driveway.',
+      'Sod webworm damage observed near mailbox.',
+      'Irrigation head broken, needs repair.',
+      'Granular insecticide watered in.',
+      'Liquid barrier applied to perimeter and entry points.',
+      'Attic inspection clean, no droppings.',
+      'Roach gel placed under kitchen sink.',
+      'Fire ant mounds treated in back yard.',
+      'Mosquito larvicide applied to standing water.',
+      'Palm fertilizer applied to three palms.',
+      'Gate locked, no access to back yard.',
+      'Dog in yard, exterior only.',
+      'Tech notes: heavy thatch, recommend dethatching.',
+      'Next visit in about three months.',
+      'Quarterly service complete.',
+      'Bait stations refilled, two rodent captures.',
+      'Termite monitoring stakes inspected, no activity.',
+      'Traps set in garage rafters.',
+      'Invoice paid by card.',
+      'Balance zero, thanks.',
+      'Payment received, receipt emailed.',
+      'Estimate sent, expires Friday.',
+      'Appointment Tuesday 9-11.',
+      'Reschedule requested for Thursday afternoon.',
+      'Tech en route, arriving 10:15.',
+      'Service window 8-10 AM.',
+      'Customer not home, exterior completed.',
+      'Sprinklers off during treatment.',
+      'Reapplied granules near pool cage.',
+      'Spot treated brown patch, front lawn.',
+      'Herbicide applied to driveway cracks.',
+      'Cobwebs cleared around entry door.',
+      'Flea treatment applied to yard perimeter.',
+      'Tick control applied along fence line.',
+      'Cockroach activity noted, garage corner.',
+      'Spider webs removed, porch ceiling.',
+      'Silverfish sightings, hall closet.',
+      'Rain delayed service, rescheduled Wednesday.',
+      'Lawn mowed short, scalped patches.',
+      'Turf thin near irrigation zone.',
+      'Grub check clean.',
+      'Nutsedge spot treated.',
+      'Perimeter barrier refreshed.',
+    ];
+    expect(terse.length).toBeGreaterThanOrEqual(50);
+    for (const sentence of terse) expect([sentence, held(sentence), labelFactsLib.replyClaimsUngroundedLabelTiming(sentence, '', []) && held(sentence)]).toEqual([sentence, false, false]);
+    const { COMPANY_FACTS } = require('../services/sms-company-facts');
+    for (const fact of COMPANY_FACTS) for (const sentence of fact.split(/(?<=[.!?])\s+/)) expect([sentence, held(sentence)]).toEqual([sentence, false]);
+  });
+  test('German, Italian, Dutch and Haitian Creole timing / re-entry / rain replies are still held, with or without function words', () => {
+    for (const sentence of [
+      'Bitte halten Sie Haustiere vier Stunden fern.', 'Die Hunde k\u00f6nnen nach vier Stunden wieder nach drau\u00dfen.', 'Tenga gli animali fuori per quattro ore.', 'Aspetta due ore prima di uscire.', 'Warten Sie zwei Stunden.',
+      'Kenbe chen yo andedan pou kat \u00e8dtan.', 'Chen yo kapab soti apre de \u00e8dtan.', 'Houd de honden vier uur binnen alstublieft.', 'De honden mogen na twee uur weer naar buiten.',
+      'Der Rasen ist nach zwei Stunden trocken.', 'Il prato \u00e8 asciutto dopo due ore.', 'Gazon an s\u00e8k apre de \u00e8dtan.', 'Het gras is droog na twee uur.', 'Regen macht nichts aus.', 'La pioggia non lo lava via.', 'Wir kommen am Dienstag und danke',
+    ]) expect([sentence, held(sentence), labelFactsLib.replyClaimsUngroundedLabelTiming(sentence, '', [])]).toEqual([sentence, true, true]);
+  });
+  test('a sentence that mixes supported and unsupported function words is not held unless the unsupported ones win', () => {
+    expect(held('Please confirm the visit with the office and thank you very much')).toBe(false);
+    expect(held('Danke und bis bald ich wir')).toBe(true);
+  });
+  test('the inbound: terse English keeps the facts; an unsupported language gets none on file', () => {
+    const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
+    for (const text of ['dogs outside when?', 'kids on lawn now?', 'rain wash it off', 'Is it okay now?', 'pets out yet']) expect(labelFactsLib.labelFactsForInbound(facts, [text], '2026-09-30')).toBe(facts);
+    for (const text of ['Hunde drau\u00dfen wann?', 'cani fuori quando', 'honden buiten wanneer']) expect(labelFactsLib.labelFactsForInbound(facts, [text], '2026-09-30')).toBeNull();
   });
 });
 

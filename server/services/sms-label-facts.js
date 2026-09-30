@@ -726,7 +726,7 @@ function hasUngroundedLabelClaim(strippedText) {
   const text = canonText(strippedText).toLowerCase();
   // The clause rules are English: another language's timing words are held outright.
   // (a verbatim COMPANY FACTS sentence is owner-approved English, however few function words it has)
-  if (nonEnglishTimingWords(text) || hasUnverifiableLanguage(markCompanySentences(canonText(strippedText)))) return true;
+  if (nonEnglishTimingWords(text) || hasUnsupportedLanguage(markCompanySentences(canonText(strippedText)))) return true;
   // The reply as a whole is about label timing when it copied a sentence or
   // mentions drying, rain, pets or a stay-off anywhere.
   const replyContext = /labelsentence/.test(text) || LABEL_CONTEXT_RE.test(text);
@@ -764,44 +764,43 @@ function looksNonEnglish(text) {
   if (NON_ENGLISH_STRONG_RE.test(t)) return true;
   return (t.match(NON_ENGLISH_WEAK_RE) || []).length >= 2 || NON_ENGLISH_TIMING_VOCAB.some((v) => v.re.test(t));
 }
-// ---- Language allowlist ---------------------------------------------------
-// The clause rules are English and the vocabulary table covers es / pt / fr. Any other Latin-script language
-// (German, Italian, Haitian Creole, Dutch ...) would slip past both, so a sentence of four or more words must be
-// VERIFIABLY one of {en, es, pt, fr}: its function words (accents removed) hit an allowed profile at least once
-// (twice from eight words) and more often than every unsupported profile. A sentence that cannot be verified is held.
+// ---- Unsupported languages ------------------------------------------------
+// The clause rules are English and the vocabulary table covers es / pt / fr. Another Latin-script language (German,
+// Italian, Dutch, Haitian Creole ...) would slip past both, so a sentence is held on POSITIVE evidence only: its
+// function words hit an unsupported profile at least once and more often than the supported ones (en / es / pt / fr),
+// or it carries an unsupported language's timing / re-entry / rain vocabulary. Terse English with no function words at
+// all ("Perimeter granules applied around foundation.") shows no evidence and is never held. Non-Latin scripts are held
+// by UNREADABLE_SCRIPT_RE above.
 const wordList = (list) => new Set(list.split(/\s+/));
-const LANGUAGE_PROFILES = {
-  en: wordList('the and is are to of you your for will we it that this with can be on in at have our they not if as or so from by but do i my me us an a how what when where why about there here would could should was were has had am please thanks thank good great sounds works see soon today tomorrow tonight morning afternoon evening day days week appointment visit service treatment technician tech office team pest lawn yard home yes sure okay hi hello hey welcome help question questions let know need get back out off up all any some more one two'),
+const SUPPORTED_PROFILES = {
+  en: wordList('the and is are to of you your for will we it that this with can be on in at have our they not if as or so from by but do i my me us an a how what when where why about there here would could should was were has had am please thanks thank'),
   es: wordList('el la los las de del que y en un una es son por para con su sus se lo al muy pero como esta estan tiene puede le mi tu si ya hay ser'),
   pt: wordList('o a os as de do da dos das que e em um uma sao por para com seu sua se nao muito mas como esta estao tem pode meu voce ja ser'),
   fr: wordList('le la les des du de un une et est sont pour avec votre vos ne pas que qui dans sur ce cette il elle nous vous mon ma mes je tu ils elles ou'),
 };
 const UNSUPPORTED_PROFILES = {
-  de: wordList('der die das und ist nicht ein eine mit von zu den dem des sich auf fur sie ich wir es im nach auch nur wenn bitte danke sind wird werden konnen kann durfen haustiere hunde stunden'),
-  it: wordList('il lo gli di che sono nel della dei degli sul piu per ore dopo tenga animali fuori aspetti puo possono'),
-  ht: wordList('yo li nan pou ak pa mwen ou nou kap ki te gen kenbe chen tan edtan'),
-  nl: wordList('het een van niet voor zijn maar ook deze wordt kunnen honden uur'),
+  de: wordList('der das und ist nicht ein eine mit von zu den dem des sich auf fur sie ich wir im nach auch nur wenn bitte danke sind wird werden konnen kann durfen'),
+  it: wordList('gli di sono nel della dei degli sul piu dopo tenga aspetti puo possono'),
+  ht: wordList('nan pou ak pa mwen nou kap ki gen kenbe'),
+  nl: wordList('het een niet voor zijn maar ook deze wordt kunnen'),
 };
+// timing / re-entry / rain words of the unsupported languages, whatever else the sentence says
+const UNSUPPORTED_TIMING_RE = /(?<![\p{L}])(?:stunden?|minuten|tage|tagen|wochen|hunde?|kinder|haustiere|regen|rasen|warten|trocken|nass|drau(?:ss|ß)en|ore|minuti|giorni|settimane|cani|bambini|animali|pioggia|prato|aspettare|asciutto|fuori|uur|dagen|weken|honden|kinderen|gras|wachten|droog|buiten|edtan|minit|jou|chen|timoun|lapli|gazon|tann|sek|deyo)(?![\p{L}])/iu;
 const countHits = (words, set) => words.filter((w) => set.has(w)).length;
-function sentenceLanguageVerified(sentence) {
-  const words = wordsOf(stripMarks(sentence.toLowerCase()));
-  if (words.length < 4) return true;
-  const best = (profiles) => Math.max(...Object.values(profiles).map((set) => countHits(words, set)));
-  const allowed = best(LANGUAGE_PROFILES);
-  return allowed >= (words.length >= 8 ? 2 : 1) && allowed > best(UNSUPPORTED_PROFILES);
+const bestHits = (words, profiles) => Math.max(...Object.values(profiles).map((set) => countHits(words, set)));
+function sentenceIsUnsupportedLanguage(sentence) {
+  const plain = stripMarks(sentence.toLowerCase());
+  if (UNSUPPORTED_TIMING_RE.test(plain)) return true;
+  const words = wordsOf(plain);
+  const unsupported = bestHits(words, UNSUPPORTED_PROFILES);
+  return unsupported >= 1 && unsupported > bestHits(words, SUPPORTED_PROFILES);
 }
-/** True when some sentence of `text` cannot be verified as en / es / pt / fr (the label guards cannot read it). */
-function hasUnverifiableLanguage(text) {
-  return String(text || '').split(/[.!?\n;]+/).some((sentence) => !sentenceLanguageVerified(sentence));
+/** True when some sentence of `text` shows positive evidence of an unsupported (unreadable to the guards) language. */
+function hasUnsupportedLanguage(text) {
+  return String(text || '').split(/[.!?\n;]+/).some(sentenceIsUnsupportedLanguage);
 }
-/** True when the whole message is verifiably English (used for the inbound: anything else gets none on file). */
-function isVerifiablyEnglish(text) {
-  const words = wordsOf(stripMarks(String(text || '').toLowerCase()));
-  if (words.length < 4) return true;
-  const others = Math.max(...['es', 'pt', 'fr'].map((k) => countHits(words, LANGUAGE_PROFILES[k])), ...Object.values(UNSUPPORTED_PROFILES).map((set) => countHits(words, set)));
-  const en = countHits(words, LANGUAGE_PROFILES.en);
-  return en >= (words.length >= 8 ? 2 : 1) && en > others;
-}
+/** False only on positive evidence of an unsupported language: terse English stays English (used for the inbound). */
+const isVerifiablyEnglish = (text) => !hasUnsupportedLanguage(text);
 // The greeting "buenos dias" says no timing; everything else in the table is held.
 const NON_ENGLISH_GREETING_RE = /(?<![\p{L}])buen(?:os|as)\s+(?:dias|noches)(?![\p{L}])/giu;
 function nonEnglishTimingWords(text) {
@@ -1229,7 +1228,7 @@ module.exports = {
   inboundIsElliptical,
   answersAskedLabelQuestion,
   looksNonEnglish,
-  hasUnverifiableLanguage,
+  hasUnsupportedLanguage,
   isVerifiablyEnglish,
   nonEnglishTimingWords,
   labelFactsForInbound,
