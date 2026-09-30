@@ -14,13 +14,29 @@
  * target page itself (its keyword, or the service + city its title names),
  * because top queries are "... near me" phrasings no sibling page contains.
  *
- * Kill switch: AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+ * The fixed AI-search benchmark's target pages are planned through the same
+ * machinery. Search Console can't pick them: the guides it cares about are
+ * pages Google barely shows, so no impression count ever qualifies them, and
+ * that thin visibility is the thing extra internal links are meant to fix.
+ * They are stamped ahead of every impressions-ranked target, so the sweep
+ * ships their links first. A week plans one link each for at most
+ * AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGET_LIMIT (default 5) benchmark
+ * pages, rotating through them week by week, so the source takes a small,
+ * fixed share of the sweep and the impressions-ranked targets keep the rest.
+ * A benchmark path Search Console already chose keeps its impressions
+ * ranking; a path with no corpus page (tool and resource pages rendered by
+ * Astro, not from a content file) has no body to anchor from or link-check,
+ * so it is not planned.
+ *
+ * Kill switches: AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false and
+ * AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGETS=false, one per source.
  */
 
 const db = require('../../models/db');
 const logger = require('../logger');
 const frontmatter = require('../content-astro/frontmatter');
 const planner = require('./internal-link-planner');
+const benchmark = require('../../data/aeo-benchmark-v1.json');
 
 const TABLE = 'content_internal_link_tasks';
 const HUB_ORIGIN = 'https://www.wavespestcontrol.com/';
@@ -30,9 +46,21 @@ function envInt(name, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function enabled() {
-  return !/^(0|false|no|off)$/i.test(String(process.env.AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS || '').trim());
+function enabled(name) {
+  return !/^(0|false|no|off)$/i.test(String(process.env[name] || '').trim());
 }
+
+// Above any page's 28-day impression total, so every benchmark task outranks
+// every impressions-stamped one in the sweep's target_priority DESC order.
+const BENCHMARK_TARGET_PRIORITY = 1_000_000;
+const BENCHMARK_PATHS = [...new Set(benchmark.questions.map((q) => q.target_path))];
+// Outranking everything, the benchmark source must stay small or it starves
+// the impressions-ranked targets: the daily sweep ships at most one link PR
+// (three links), and the weekly run would otherwise queue up to five links
+// for every benchmark page. So a week plans one link (the planner's best) for
+// each of a few benchmark pages, and the starting page rotates by week so
+// every page gets its turn.
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Hub pages averaging position 8–20 (impression-weighted) over 28 days.
 // Grouped by the canonical route (query string dropped — the same
@@ -90,8 +118,12 @@ async function loadCorpus() {
 async function planGscTargets({
   limit = envInt('AUTONOMOUS_INTERNAL_LINK_GSC_TARGET_LIMIT', 10),
   minImpressions = envInt('AUTONOMOUS_INTERNAL_LINK_GSC_MIN_IMPRESSIONS', 100),
+  benchmarkLimit = envInt('AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGET_LIMIT', 5),
+  now = Date.now(),
 } = {}) {
-  if (!enabled()) return { status: 'disabled' };
+  const gscOn = enabled('AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS');
+  const benchmarkOn = enabled('AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGETS');
+  if (!gscOn && !benchmarkOn) return { status: 'disabled' };
   // Search Console keeps impressions for deleted/renamed URLs, so pages
   // are fetched in batches and the cap applies AFTER dropping pages no
   // longer in the corpus — fetching continues until the cap is filled or
@@ -100,13 +132,24 @@ async function planGscTargets({
   if (!corpus.length) return { status: 'no_corpus', targets: 0, queued: 0, candidates: 0 };
   const batchSize = Math.max(limit * 3, 30);
   const pages = [];
-  for (let offset = 0; ; offset += batchSize) {
-    const batch = await strikingDistancePages({ limit: batchSize, minImpressions, offset });
-    for (const page of batch) {
-      if (targetFacts(page.url, corpus)) pages.push(page);
-      if (pages.length >= limit) break;
+  if (gscOn) {
+    for (let offset = 0; ; offset += batchSize) {
+      const batch = await strikingDistancePages({ limit: batchSize, minImpressions, offset });
+      for (const page of batch) {
+        if (targetFacts(page.url, corpus)) pages.push({ ...page, priority: page.impressions });
+        if (pages.length >= limit) break;
+      }
+      if (pages.length >= limit || batch.length < batchSize) break;
     }
-    if (pages.length >= limit || batch.length < batchSize) break;
+  }
+  if (benchmarkOn) {
+    const chosen = new Set(pages.map((p) => new URL(p.url).pathname.replace(/\/?$/, '/')));
+    const eligible = BENCHMARK_PATHS.filter((path) => !chosen.has(path) && targetFacts(new URL(path, HUB_ORIGIN).href, corpus));
+    const start = eligible.length ? Math.floor(now / WEEK_MS) % eligible.length : 0;
+    const rotated = [...eligible.slice(start), ...eligible.slice(0, start)].slice(0, benchmarkLimit);
+    for (const path of rotated) {
+      pages.push({ url: new URL(path, HUB_ORIGIN).href, impressions: null, position: null, priority: BENCHMARK_TARGET_PRIORITY, cap: 1 });
+    }
   }
   if (!pages.length) return { status: 'no_targets', targets: 0, queued: 0, candidates: 0 };
 
@@ -116,17 +159,17 @@ async function planGscTargets({
   const summary = [];
   for (const page of pages) {
     const target = targetFacts(page.url, corpus);
-    const tasks = planner.planForTarget(target, { corpus, excludeSource });
+    const tasks = planner.planForTarget(target, { corpus, excludeSource, ...(page.cap ? { cap: page.cap } : {}) });
     const ids = [];
     for (const task of tasks) {
-      const queued = await queueInternalLinkTaskForDryRun({ ...task, target_priority: page.impressions }, null);
+      const queued = await queueInternalLinkTaskForDryRun({ ...task, target_priority: page.priority }, null);
       if (queued?.id) ids.push(queued.id);
     }
     // The refresh path of queueInternalLinkTaskForDryRun keeps the row's old
-    // priority; restamp so this week's GSC ranking decides sweep order.
-    if (ids.length) await db(TABLE).whereIn('id', ids).update({ target_priority: page.impressions });
+    // priority; restamp so this week's ranking decides sweep order.
+    if (ids.length) await db(TABLE).whereIn('id', ids).update({ target_priority: page.priority });
     taskIds.push(...ids);
-    summary.push({ url: target.url, impressions: page.impressions, position: page.position, queued: ids.length });
+    summary.push({ url: target.url, priority: page.priority, impressions: page.impressions, position: page.position, queued: ids.length });
   }
 
   let candidates = 0;
@@ -136,7 +179,7 @@ async function planGscTargets({
     candidates = (dryRun?.results || []).filter((r) => r.status === 'patch_candidate').length;
     candidates += await executor.requeueTransientDryRunFailures(dryRun?.results);
   }
-  logger.info(`[internal-link-target-planner] ${pages.length} GSC target(s): queued=${taskIds.length} candidates=${candidates}`);
+  logger.info(`[internal-link-target-planner] ${pages.length} link target(s): queued=${taskIds.length} candidates=${candidates}`);
   return { status: 'ok', targets: pages.length, queued: taskIds.length, candidates, summary };
 }
 
