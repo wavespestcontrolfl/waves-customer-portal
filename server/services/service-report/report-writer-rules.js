@@ -185,6 +185,11 @@ const COMMON_ACTIVE_INGREDIENTS = Object.freeze([
 
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 function activeIngredientPattern(name) {
+  // A name that carries digits ("2,4-D") is matched as written, spacing
+  // loose.
+  if (/\d/.test(String(name || ''))) {
+    return escapeRe(String(name).toLowerCase().trim()).replace(/\s+|(?<=[,-])|(?=[,-])/g, '\\s*');
+  }
   const words = String(name || '').toLowerCase()
     .replace(/[^a-z\s-]+/g, ' ')
     .split(/[\s-]+/)
@@ -206,8 +211,10 @@ const GENERIC_ACTIVE_WORD_RE = /^(?:iron|nitrogen|potash|potassium|phosphate|pho
 function activeIngredientNames(values) {
   return (Array.isArray(values) ? values : [])
     .filter((value) => !NON_CHEMICAL_ACTIVE_RE.test(String(value || '')))
-    .flatMap((value) => String(value || '').split(/[,;/+&()]|\band\b/i))
-    .map((part) => part.replace(/[\d.]+\s*%?/g, ' ').replace(/\s+/g, ' ').trim())
+    // A comma between digits belongs to a name ("2,4-D"), not a list.
+    .flatMap((value) => String(value || '').split(/(?<!\d),|,(?!\d)|[;/+&()]|\band\b/i))
+    // Concentrations go ("Fipronil 9.1%"); a digit inside a name stays.
+    .map((part) => part.replace(/\b\d+(?:[.,]\d+)?\s*%/g, ' ').replace(/(?:^|\s)\d+(?:\.\d+)?(?=\s|$)/g, ' ').replace(/\s+/g, ' ').trim())
     .filter((part) => part.length >= 3 && !GENERIC_ACTIVE_WORD_RE.test(part));
 }
 
@@ -256,7 +263,9 @@ const TIMEFRAME_RE = new RegExp(
   // With no number at all: "over the coming days", "in the days ahead",
   // "in the weeks to come", "over the next few weeks".
   + `|\\b(?:in|over|during|for|within)\\s+the\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}`
-  + `|\\bin\\s+the\\s+${DURATION_UNIT}\\s+ahead\\b|\\b${DURATION_UNIT}\\s+to\\s+come\\b`,
+  + `|\\bin\\s+the\\s+${DURATION_UNIT}\\s+ahead\\b|\\b${DURATION_UNIT}\\s+to\\s+come\\b`
+  // "Next month" is always ahead ("the next day" can be history).
+  + '|\\bnext\\s+(?:month|year|season|quarter)\\b',
   'i',
 );
 // The activity gauge's number or scale (rule 12) in any form: "the rating
@@ -319,6 +328,7 @@ const BARE_WEEKDAY_RE = /\b(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b/gi;
 const ABSENT_THING = String.raw`(?:activity|pests?|insects?|bugs?|termites?|rodents?|mosquito(?:e?s)?|ants?|roach(?:es)?|spiders?|fleas?|ticks?|wasps?|bees?|feeding|captures?|droppings|evidence|signs?|mud\s+tubes?|damage)`;
 const ABSENCE_RE = new RegExp([
   String.raw`\bno\s+(?:[\w-]+\s+){0,2}?${ABSENT_THING}\b`,
+  String.raw`\b(?:zero|not\s+(?:a\s+single|one|any))\s+(?:[\w-]+\s+){0,2}?${ABSENT_THING}\b`,
   String.raw`\bnone\b`,
   String.raw`\bnothing\b`,
   String.raw`\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t|do\s+not|don['’]t)\s+(?:\w+\s+)?(?:see|find|observe|notice|detect|spot)\s+(?:any\s+)?(?:[\w-]+\s+){0,2}?${ABSENT_THING}\b`,

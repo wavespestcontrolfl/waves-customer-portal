@@ -245,6 +245,10 @@ describe('writerRulesRejection', () => {
     ['The activity rating was 2.', 'gauge'],
     ['The kitchen was rated two out of five.', 'gauge'],
     ['Activity was 2 on the five-point scale.', 'gauge'],
+    ['Zero pest activity was observed across the property.', 'unscoped_absence'],
+    ['We found zero signs of pest activity across the property.', 'unscoped_absence'],
+    ['Not a single ant was seen today.', 'unscoped_absence'],
+    ['We will be back next month.', 'timeframe'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -281,6 +285,8 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('We allowed the cabinet to dry before placing bait.')).toBeNull();
     expect(writerRulesRejection('Two out of five stations had feeding.')).toBeNull();
     expect(writerRulesRejection('Activity was light at 3 stations.')).toBeNull();
+    expect(writerRulesRejection('Zero captures were recorded in the attic traps.')).toBeNull();
+    expect(writerRulesRejection('The ants were back the next day, you said.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
@@ -320,6 +326,13 @@ describe('writerRulesRejection', () => {
     expect(activeIngredientsMentioned('Treated along the wrought iron fence', 'Iron + N (foliar)')).toBe(false);
     expect(writerRulesRejection('We packed copper mesh into the gap.', { activeIngredients: ['Copper hydroxide', 'Copper'] })).toBeNull();
     expect(writerRulesRejection('We treated along the wrought iron fence.', { activeIngredients: ['Iron + N (foliar)'] })).toBeNull();
+  });
+
+  test('a catalog active with digits in its name is screened as written', () => {
+    const activeIngredients = ['2,4-D + MCPP + Dicamba'];
+    expect(writerRulesRejection('We applied 2,4-D to the weeds.', { activeIngredients })).toBe('active_ingredient');
+    expect(writerRulesRejection('We treated the weeds by the fence.', { activeIngredients })).toBeNull();
+    expect(writerRulesRejection('We applied fipronil at the slab.', { activeIngredients: ['Fipronil 9.1%, Pyriproxyfen'] })).toBe('active_ingredient');
   });
 
   test("the catalog's taxonomic Bti name still screens the Bti alias", () => {

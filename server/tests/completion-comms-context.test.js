@@ -313,6 +313,7 @@ describe('buildCompletionCommsContext', () => {
           { created_at: mk(9.2), direction: 'inbound', message_body: 'Use the side gate, the roaches are by the pool' },
           { created_at: mk(9.4), direction: 'inbound', message_body: 'Ants are coming in under the back door' },
           { created_at: mk(9.6), direction: 'inbound', message_body: 'blue is the access word for the side gate where ants are' },
+          { created_at: mk(9.8), direction: 'inbound', message_body: 'blue is how I get in through the side gate where ants are' },
         ],
         // A bare code as the whole body, with no quote and no anchor.
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],
@@ -407,6 +408,9 @@ describe('buildCompletionCommsContext', () => {
           { created_at: mk(3), direction: 'inbound', message_body: 'Booklice in the pantry again' },
           { created_at: mk(4), direction: 'inbound', message_body: 'ANTS ARE ALL OVER THE KITCHEN' },
           { created_at: mk(5), direction: 'inbound', message_body: 'ROACHES BY THE POOL, UNIT 4821' },
+          // The conditions a visit is for count too.
+          { created_at: mk(6), direction: 'inbound', message_body: 'Standing water is collecting in the buckets by the patio' },
+          { created_at: mk(7), direction: 'inbound', message_body: 'The soffit vent is loose' },
         ],
       }),
     });
@@ -415,6 +419,8 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).toContain('Booklice in the pantry again');
     expect(ctx.text).toContain('ANTS ARE ALL OVER THE KITCHEN');
     expect(ctx.text).toContain('ROACHES BY THE POOL, UNIT [redacted]');
+    expect(ctx.text).toContain('Standing water is collecting in the buckets by the patio');
+    expect(ctx.text).toContain('The soffit vent is loose');
     expect(ctx.text).not.toContain('4821');
   });
 

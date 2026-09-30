@@ -315,7 +315,7 @@ function shoutedSentence(sentence) {
 // Access details never reach the writer: a sentence about getting in (a
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
 // lowercase code ("blue", "open sesame") looks like any other word.
-const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?)\b/i;
+const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word|phrase)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in|access\s+(?:word|phrase|number|key)s?|key\s*words?|secret\s+words?|magic\s+words?|(?:I|you|we|techs?|technicians?)\s+(?:can\s+|will\s+|could\s+)?get\s+in|how\s+(?:I|you|we|to)\s+get\s+in|get\s+(?:yourself|you|me|us)\s+in)\b/i;
 // So is a sentence about working a gate, door or lock ("blue works at the
 // side gate where the ants are", "use the side gate", "punch it in at the
 // door"), pest talk or not; "ants come in under the back door" stays.
@@ -338,7 +338,11 @@ const CANONICAL_PEST_RE = new RegExp(`\\b(?:${[...new Set(PEST_TARGET_SUGGESTION
   .map((part) => part.trim().split(/[\s-]+/).pop())
   .flatMap((head) => [head, singularPest(head)])
   .filter((word) => word && word.length >= 3))].join('|')})\\b`, 'i');
-const pestTalk = (sentence) => PEST_TALK_RE.test(sentence) || CANONICAL_PEST_RE.test(sentence);
+// And the conditions a visit is for: standing water and containers for
+// mosquitoes, openings and roofline for exclusion, moisture and wood for
+// termites, and what draws pests in.
+const CONDITION_TALK_RE = /\b(?:standing\s+water|pool(?:s|ing)?\s+(?:of\s+)?water|water\s+(?:is\s+)?(?:pooling|collecting|standing)|puddles?|buckets?|saucers?|containers?|gutters?|downspouts?|breed(?:ing|s)?|soffits?|vents?|eaves?|attic|crawl\s*space|roof(?:line)?|rafters?|screens?|loose|torn|ripped|broken|rott?(?:ed|ing|en)?|wood\s+damage|soft\s+wood|leak(?:s|ing)?|moisture|damp|mulch|overgrown|debris|clutter|trash|garbage|compost|pet\s+food|bird\s*seed)\b/i;
+const pestTalk = (sentence) => PEST_TALK_RE.test(sentence) || CANONICAL_PEST_RE.test(sentence) || CONDITION_TALK_RE.test(sentence);
 function scrub(text) {
   return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
     .filter((sentence) => !accessSentence(sentence) && pestTalk(sentence))
