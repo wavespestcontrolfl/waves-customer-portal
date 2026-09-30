@@ -37,18 +37,8 @@
  */
 
 const logger = require('../logger');
-const featureGates = require('../../config/feature-gates');
+const { zoneRouteDaysLive } = require('../../config/feature-gates');
 const { etCalendarDayOf } = require('../../utils/datetime-et');
-
-// The canonical reader is feature-gates.js zoneRouteDaysLive(). This module is
-// pulled in by policy.js and find-time.js, which many suites load beside a
-// PARTIAL feature-gates mock that predates the reader — fall back to the same
-// strict env check rather than throwing on a missing export.
-function zoneRouteDaysLive() {
-  return typeof featureGates.zoneRouteDaysLive === 'function'
-    ? featureGates.zoneRouteDaysLive()
-    : process.env.GATE_ZONE_ROUTE_DAYS === 'true';
-}
 
 const ZONE_ROUTE_DAYS_KEY = 'schedule_zone_route_days';
 
@@ -96,6 +86,25 @@ async function readZoneRouteDays(conn) {
   } catch (err) {
     logger.warn(`[zone-route-days] config lookup failed (no lift this request): ${err.message}`);
     return {};
+  }
+}
+
+// Version string of the route-day policy for an offer cache key: 'off' with
+// the gate off (no db call), else the stored config text ('default' when the
+// key is absent). A gate flip or a config edit — including the `{}` kill
+// switch — therefore lands in a different key instead of serving offers built
+// under the old cap. null when the config cannot be read: the caller must not
+// cache that result (fail closed, request-scoped). Never throws.
+async function zoneRouteDaysPolicyKey(conn) {
+  if (!zoneRouteDaysLive()) return 'off';
+  try {
+    const dbh = conn || require('../../models/db');
+    const row = await dbh('system_settings').where('key', ZONE_ROUTE_DAYS_KEY).first('value');
+    if (!row) return 'default';
+    return `cfg:${typeof row.value === 'string' ? row.value : JSON.stringify(row.value)}`;
+  } catch (err) {
+    logger.warn(`[zone-route-days] policy version lookup failed (result not cached): ${err.message}`);
+    return null;
   }
 }
 
@@ -164,12 +173,12 @@ function preferRouteDayDates(dates, { zoneSlug, config }) {
 }
 
 module.exports = {
-  zoneRouteDaysLive,
   ZONE_ROUTE_DAYS_KEY,
   DEFAULT_ZONE_ROUTE_DAYS,
   DEFAULT_MAX_DETOUR_MINUTES,
   parseZoneRouteDays,
   readZoneRouteDays,
+  zoneRouteDaysPolicyKey,
   routeDayRuleFor,
   resolveZoneRouteDaySlug,
   preferRouteDayDates,

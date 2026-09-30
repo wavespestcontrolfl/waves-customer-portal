@@ -1,5 +1,5 @@
 /** Owner-selected scheduling policy. The release gate is read per operation. */
-const { gateEnvValue } = require('../../config/feature-gates');
+const { gateEnvValue, zoneRouteDaysLive } = require('../../config/feature-gates');
 const { CUSTOMER_DAY_END_MINUTES } = require('./customer-windows');
 const { etDateString, etCalendarDayOf } = require('../../utils/datetime-et');
 
@@ -65,9 +65,8 @@ const DEFAULT_MAX_DETOUR_MINUTES = 30;
 function customerMaxDetourMinutes({ date, zoneSlug, technicianId, zoneRouteDays } = {}) {
   const configured = Number.parseInt(process.env.SCHEDULING_MAX_DETOUR_MINUTES, 10);
   const base = Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_MAX_DETOUR_MINUTES;
-  if (!zoneSlug || date == null) return base;
+  if (!zoneSlug || date == null || !zoneRouteDaysLive()) return base;
   const routeDays = require('./zone-route-days');
-  if (!routeDays.zoneRouteDaysLive()) return base;
   const rule = routeDays.routeDayRuleFor(zoneRouteDays || routeDays.DEFAULT_ZONE_ROUTE_DAYS, { zoneSlug, date, technicianId });
   return rule ? Math.max(base, rule.max_detour_minutes) : base;
 }

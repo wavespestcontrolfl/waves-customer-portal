@@ -41,7 +41,7 @@ const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
-const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates } = require('./scheduling/zone-route-days');
+const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates, zoneRouteDaysPolicyKey } = require('./scheduling/zone-route-days');
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
@@ -1839,8 +1839,15 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
 
   // Cache check — keyed per (estimateId, hour bucket).
   cleanupCache(wrapperCache);
+  // Zone route day policy (GATE_ZONE_ROUTE_DAYS + system_settings
+  // schedule_zone_route_days) versioned into the key, resolved BEFORE the
+  // lookup: a gate flip or config edit (incl. the `{}` kill switch) must not
+  // serve — or hide — offers built under the old detour cap for the TTL.
+  // null = config unreadable this request: neither read nor write the cache.
+  const routeDayPolicyKey = await zoneRouteDaysPolicyKey(db);
   const cacheKey = [
     estimateId,
+    `route-days:${routeDayPolicyKey}`,
     capacityEnabled() ? 'capacity_v2' : 'legacy_capacity',
     // Lunch gate state in the key (GATE_BOOKING_LUNCH_BLOCK, owner ruling
     // 2026-09-23): a result computed while noon was offerable must never be
@@ -1883,7 +1890,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // until TTL (GH codex #3803 r1 P1).
     travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}` : 'travel-gap:off',
   ].join(':');
-  const cached = wrapperCache.get(cacheKey);
+  const cached = routeDayPolicyKey == null ? undefined : wrapperCache.get(cacheKey);
   if (cached && !serviceProfile.reservationServiceMix) {
     // The result was cached for 5 min but the bucket can straddle a lead-time
     // boundary — a slot bookable when cached (e.g. 13:00 at 10:59 ET) can be
@@ -2221,7 +2228,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // cluster-day slot stays invisible until TTL expiry. Funneled-zone
   // estimates are a small slice of traffic; recomputing beats versioning
   // the cache by schedule state. Non-funneled results keep today's caching.
-  if (funnelDays == null && !skipResultCache) {
+  if (funnelDays == null && !skipResultCache && routeDayPolicyKey != null) {
     wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
   }
   return result;

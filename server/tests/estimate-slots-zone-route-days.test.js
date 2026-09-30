@@ -154,7 +154,6 @@ describe('estimate picker — Venice address, no south visit in the window', () 
     withSettings();
   });
   afterEach(() => { jest.useRealTimers(); delete process.env.GATE_ZONE_ROUTE_DAYS; });
-  afterAll(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
 
   test('gate off: nothing is offered (empty-day round trip is over the cap)', async () => {
     const result = await getAvailableSlots('est-funnel-1', WINDOW);
@@ -210,3 +209,73 @@ describe('estimate picker — Venice address, no south visit in the window', () 
     expect(datesOf(result).size).toBe(0);
   });
 });
+
+describe('estimate picker cache — route-day policy is part of the key', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    delete process.env.GATE_ZONE_ROUTE_DAYS;
+    settingsValue = undefined;
+    estimateSlotAvailability._internals.clearCaches();
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2027-05-14T15:00:00Z'));
+    mockDb({ scheduledRows: [] });
+    withSettings();
+  });
+  afterEach(() => { jest.useRealTimers(); delete process.env.GATE_ZONE_ROUTE_DAYS; });
+
+  // Funnel gate off so the result is cacheable at all (a funnel-active result
+  // is never cached); only the route-day policy differs between calls.
+  const funnelOff = async (fn) => {
+    const { gates } = require('../config/feature-gates');
+    const prev = gates.southZoneDayFunnel;
+    gates.southZoneDayFunnel = false;
+    try { return await fn(); } finally { gates.southZoneDayFunnel = prev; }
+  };
+
+  test('config edited to {} (kill switch) is not answered from the entry cached under the lift', async () => {
+    const seq = await funnelOff(async () => {
+      const mod = estimateSlotAvailability;
+      process.env.GATE_ZONE_ROUTE_DAYS = 'true';
+      const lifted = await mod.getAvailableSlots('est-funnel-1', WINDOW);
+      const liftedAgain = await mod.getAvailableSlots('est-funnel-1', WINDOW);
+      settingsValue = '{}';
+      const killed = await mod.getAvailableSlots('est-funnel-1', WINDOW);
+      return { lifted, liftedAgain, killed };
+    });
+    expect(datesOf(seq.lifted)).toEqual(new Set(['2027-05-21']));
+    expect(seq.liftedAgain.metadata.cacheHit).toBe(true);
+    expect(datesOf(seq.killed).size).toBe(0);
+    expect(seq.killed.metadata.cacheHit).toBe(false);
+  });
+
+  test('gate flipped on after a gate-off entry was cached is not answered from that entry', async () => {
+    const seq = await funnelOff(async () => {
+      const mod = estimateSlotAvailability;
+      const off = await mod.getAvailableSlots('est-funnel-1', WINDOW);
+      process.env.GATE_ZONE_ROUTE_DAYS = 'true';
+      const on = await mod.getAvailableSlots('est-funnel-1', WINDOW);
+      return { off, on };
+    });
+    expect(datesOf(seq.off).size).toBe(0);
+    expect(datesOf(seq.on)).toEqual(new Set(['2027-05-21']));
+    expect(seq.on.metadata.cacheHit).toBe(false);
+  });
+
+  test('an unreadable config neither reads nor writes the cache', async () => {
+    const seq = await funnelOff(async () => {
+      const mod = estimateSlotAvailability;
+      process.env.GATE_ZONE_ROUTE_DAYS = 'true';
+      const inner = db.getMockImplementation();
+      db.mockImplementation((table) => {
+        if (table === 'system_settings') throw new Error('settings down');
+        return inner(table);
+      });
+      await mod.getAvailableSlots('est-funnel-1', WINDOW);
+      db.mockImplementation(inner);
+      return mod.getAvailableSlots('est-funnel-1', WINDOW);
+    });
+    expect(seq.metadata.cacheHit).toBe(false);
+  });
+});
+
+afterAll(() => { delete process.env.GATE_SCHEDULING_CAPACITY; });
