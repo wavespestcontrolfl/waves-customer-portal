@@ -29,6 +29,23 @@ const FORBIDDEN = [
   ['emoji', (t) => { const tidy = t.replace(/[ \t]{2,}/g, ' ').trim(); return stripEmoji(tidy) !== tidy; }],
 ];
 
+// One sentence: no sentence end followed by more text. A full stop after a common
+// abbreviation or a single initial ("Dr. Lee", "St. Pete", "J. Smith") is not an end.
+const ABBREVIATION = /(?:\b(?:Mr|Mrs|Ms|Dr|St|Ave|Blvd|Rd|Ln|Ct|Apt|No|vs|approx|Inc|Co|Jr|Sr|Mt|Ft|a\.m|p\.m|e\.g|i\.e)|\b[A-Z])\.$/i;
+function hasSecondSentence(text) {
+  const end = /[.?!]["')\]]?\s+(?=\S)/g;
+  for (let m = end.exec(text); m; m = end.exec(text)) {
+    const upTo = text.slice(0, m.index + 1);
+    if (!(upTo.endsWith('.') && ABBREVIATION.test(upTo))) return true;
+  }
+  return false;
+}
+
+const ACTIVITY_FEED_LINK = /^\/admin\/agents\b.*\btab=activity/;
+const isAdminLink = (link) => typeof link === 'string' && link.startsWith('/admin/');
+// A needs-you alert's link must open the work: an admin page, never the Activity feed.
+const linkIsUsable = (link) => isAdminLink(link) && !ACTIVITY_FEED_LINK.test(link);
+
 function ruleError(violations, message = `Admin alert breaks docs/admin-notifications.md: ${violations.join(', ')}`) {
   return Object.assign(new Error(message), { code: RULE_CODE, violations });
 }
@@ -50,14 +67,15 @@ function composeAdminAlert(spec = {}) {
   const whyText = typeof why === 'string' ? why.trim() : '';
   if (!whyText && severity !== 'fyi') v.push('why_missing');
   if (whyText.length > MAX_WHY_CHARS) v.push('why_too_long');
+  if (hasSecondSentence(whyText)) v.push('why_multiple_sentences');
   for (const [field, text] of [['headline', headline], ['why', whyText]]) {
     for (const [slug, hit] of FORBIDDEN) if (hit(text)) v.push(`${field}_forbidden_token:${slug}`);
   }
 
-  if (link != null && !(typeof link === 'string' && link.startsWith('/admin/'))) v.push('link_not_admin');
+  if (link != null && !isAdminLink(link)) v.push('link_not_admin');
   if (severity === 'needs-you') {
     if (!link) v.push('link_required');
-    else if (/^\/admin\/agents\b.*\btab=activity/.test(link)) v.push('link_is_activity_feed');
+    else if (ACTIVITY_FEED_LINK.test(link)) v.push('link_is_activity_feed');
   }
   if (v.length) throw ruleError(v);
   return { headline, why: whyText, link: link || null, metadata: { area, severity, subject: { type: subject.type, id }, doneWhen, who } };
@@ -93,7 +111,7 @@ async function raiseAdminAlert(category, spec = {}, opts = {}) {
     logger.warn(`[admin-alert] ${category} broke the notification rule: ${err.violations.join(', ')}`);
     if (severity === 'fyi') return { id: null, suppressed: true, reason: 'fyi' };
     return require('./notification-service').notifyAdmin(category, truncateAtWord([spec.area, spec.action].filter(Boolean).join(' — '), MAX_HEADLINE_CHARS), spec.why, {
-      ...opts, ...(spec.link ? { link: spec.link } : {}), metadata: { ...opts.metadata, ...validStructuredFields(spec), ruleViolations: err.violations },
+      ...opts, ...(linkIsUsable(spec.link) ? { link: spec.link } : {}), metadata: { ...opts.metadata, ...validStructuredFields(spec), ruleViolations: err.violations },
     });
   }
   if (spec.severity === 'broken') {

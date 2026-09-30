@@ -83,7 +83,7 @@ resolves a `person` row.
 
 | Rule | Where | State |
 |---|---|---|
-| Headline 60, why 110, Area from the list, severity / subject / done-when / who present | `composeAdminAlert` throws on a violation | enforced for every caller of the helper |
+| Headline 60, why 110 and one sentence, Area from the list, severity / subject / done-when / who present, a link that opens an admin page other than the Activity feed | `composeAdminAlert` throws on a violation | enforced for every caller of the helper |
 | Forbidden tokens in headline and why | `composeAdminAlert` throws | enforced for every caller of the helper |
 | New code must use the helper | `server/tests/admin-alert-raw-callsite-ratchet.test.js` counts raw `notifyAdmin(` call sites per file against a checked-in ceiling; a file may not gain one | ratchet |
 | No emoji in admin text | `notification-service.js` | enforced, all categories |
@@ -121,7 +121,7 @@ Then, by severity:
 
 A rule violation never costs an alert. Outside tests, a `needs-you` spec that breaks the
 rule still rings, with its headline cut to 60, the structured fields that are valid
-(area, severity, subject, done-when, who) kept, and `metadata.ruleViolations` naming the
+(area, severity, subject, done-when, who) kept, a link the rule refuses dropped, and `metadata.ruleViolations` naming the
 rules it broke, and a warning is logged with the category and rule names only. Under
 `NODE_ENV=test` the same violation throws, so the emitter's own tests catch it.
 

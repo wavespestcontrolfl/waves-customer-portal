@@ -146,6 +146,18 @@ describe('raiseAdminAlert', () => {
     expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/Zelda/);
   });
 
+  test('the fallback drops a link the rule refuses and still rings', async () => {
+    const env = process.env.NODE_ENV;
+    for (const link of ['https://example.com/x', '/admin/agents?tab=activity']) {
+      NotificationService.notifyAdmin.mockClear();
+      process.env.NODE_ENV = 'production';
+      try { await raiseAdminAlert('alert', spec({ link })); } finally { process.env.NODE_ENV = env; }
+      const opts = NotificationService.notifyAdmin.mock.calls[0][3];
+      expect(opts).not.toHaveProperty('link');
+      expect(opts.metadata.ruleViolations).toEqual(expect.arrayContaining([link.startsWith('/admin/') ? 'link_is_activity_feed' : 'link_not_admin']));
+    }
+  });
+
   test('the fallback keeps the structured fields that are valid and drops the ones that are not', async () => {
     const env = process.env.NODE_ENV;
     process.env.NODE_ENV = 'production';
@@ -159,5 +171,27 @@ describe('raiseAdminAlert', () => {
     });
     expect(metadata).not.toHaveProperty('who');
     expect(metadata.ruleViolations).toEqual(expect.arrayContaining(['who_invalid', 'why_forbidden_token:iso_date']));
+  });
+});
+
+describe('why is one sentence', () => {
+  test.each([
+    'The charge failed. Retry it now.',
+    'Is the card still valid? Ask on the next call.',
+    'Done! Nothing else to do.',
+  ])('two sentences are refused: %s', (why) => {
+    expect(() => composeAdminAlert(spec({ why }))).toThrow(expect.objectContaining({
+      violations: expect.arrayContaining(['why_multiple_sentences']),
+    }));
+  });
+
+  test.each([
+    '$1,254 never charged; the oldest is 41 days old.',
+    'Parked awaiting your approval: a.org, b.org, c.org +2 more.',
+    'Dr. Lee confirmed Sat Oct 4 at 11:00 a.m. on a call.',
+    'J. Rivera asked about the St. Pete property.',
+    'Version 2.5 of the label is on file',
+  ])('one sentence passes: %s', (why) => {
+    expect(composeAdminAlert(spec({ why })).why).toBe(why);
   });
 });
