@@ -863,6 +863,11 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
     // uses, so a payer change cannot land between the decision and the
     // withdrawal or the scheduling.
     let recollect = false;
+    // The summary text may carry this invoice's pay link (one text for the
+    // stop). Then the queue waits for the summary's delivery, which settles
+    // the wait either way (visit-completion-summary.js, settleSummaryBillingLink).
+    const holdForSummaryText = await Summary.summaryMayCarryPayLink(packet.id, token, database);
+    const { SUMMARY_TEXT_HOLD_ERROR, SUMMARY_TEXT_HOLD_MS } = require('./invoice-helpers');
     payment = await database.transaction(async (trx) => {
       const { visit, billed, payerId: owner } = await resolvePacketOwnershipLocked(packet.id, trx);
       if (owner && await withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: payment.invoiceId, visit, billed, payerId: owner })) {
@@ -870,8 +875,9 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
       }
       const scheduled = await trx('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
         .whereNull('payer_id').whereNull('payer_statement_id').update({
-          status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null,
-          updated_at: trx.fn.now(),
+          status: 'scheduled', scheduled_send_attempts: 0, updated_at: trx.fn.now(),
+          scheduled_send_at: holdForSummaryText ? new Date(Date.now() + SUMMARY_TEXT_HOLD_MS) : trx.fn.now(),
+          scheduled_send_error: holdForSummaryText ? SUMMARY_TEXT_HOLD_ERROR : null,
         });
       if (scheduled) return payment;
       // Nothing moved. A self-pay invoice already on the send queue is this

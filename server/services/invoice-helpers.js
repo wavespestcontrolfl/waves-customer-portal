@@ -144,6 +144,14 @@ function preserveWithdrawalStamp(database) {
   return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
 }
 
+// A combined-visit invoice scheduled while the visit summary text may carry
+// its pay link (visit-completion-summary.js) waits this long on the send
+// queue under this stamp, so the queue cannot text the same link first. The
+// summary's delivery settles the wait either way (settleSummaryTextHold); an
+// interrupted closeout simply lets it expire and the invoice sends as before.
+const SUMMARY_TEXT_HOLD_ERROR = 'SUMMARY_TEXT_HOLD — waiting for the visit summary text that may carry this pay link';
+const SUMMARY_TEXT_HOLD_MS = 10 * 60 * 1000;
+
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
 // The stale-claim review hold, read back from the park above: a row parked
@@ -275,6 +283,8 @@ module.exports = {
   SEND_FINALIZABLE_STATUSES,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
+  SUMMARY_TEXT_HOLD_ERROR,
+  SUMMARY_TEXT_HOLD_MS,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,

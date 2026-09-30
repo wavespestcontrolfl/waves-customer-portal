@@ -1956,6 +1956,48 @@ postgres('visit completion packet records on PostgreSQL', () => {
       .toMatchObject({ reason: 'parked_manual_reversed_packet_invoice', invoiceId: saved.body.billing.invoiceId, status: 'refunded' });
   });
 
+  test('an unpaid grouped closeout texts the customer once: the summary carries the pay link and the invoice sends only its email', async () => {
+    const summaryBody = () => sendCustomerMessage.mock.calls.map(([input]) => input.body);
+    // Unpaid, self-pay: the summary text carries the invoice's pay link and
+    // the queued invoice sends its email without a second text.
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payment_needed' } } });
+    expect(summaryBody()).toHaveLength(1);
+    expect(summaryBody()[0]).toMatch(/Review each service and its report: \S+ Pay your invoice: \S+$/);
+    const queued = await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first();
+    expect(queued).toMatchObject({ status: 'scheduled', scheduled_send_error: 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED' });
+    expect(queued.sms_sent_at).not.toBeNull();
+    const sendViaSms = jest.spyOn(InvoiceService, 'sendViaSMS');
+    jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+    expect(await InvoiceService.processScheduledSends()).toMatchObject({ sent: 1, failed: 0 });
+    expect(sendViaSms).not.toHaveBeenCalled();
+    expect(summaryBody()).toHaveLength(1);
+  });
+
+  test('an autopay-paid grouped closeout carries the receipt link in the summary text and sends no receipt text', async () => {
+    const methodId = randomUUID();
+    await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,
+      processor: 'stripe', method_type: 'card', stripe_payment_method_id: 'pm_fixture_receipt',
+      is_default: true, autopay_enabled: true, exp_month: 12, exp_year: new Date().getUTCFullYear() + 1 });
+    await mockPg('customers').where({ id: fixture.customerId }).update({ autopay_enabled: true, autopay_payment_method_id: methodId });
+    chargeInvoiceWithSavedCard.mockImplementation(async (invoiceId, _method, options) => {
+      await mockPg.transaction(async (trx) => {
+        const invoice = await trx('invoices').where({ id: invoiceId }).forUpdate().first();
+        await trx('customers').where({ id: fixture.customerId }).forUpdate().first('id');
+        await assertVisitCompletionCharge(trx, invoice, options.requireVisitCompletionPacketId);
+        await trx('invoices').where({ id: invoiceId }).update({ status: 'paid', paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_receipt' });
+      });
+    });
+    const saved = await saveVisitCompletionPacket(submission());
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'paid' } } });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/Review each service and its report: \S+ Your receipt: \S+$/);
+    expect((await mockPg('invoices').where({ id: saved.body.billing.invoiceId }).first()).receipt_sent_at).not.toBeNull();
+    // The receipt queue's text leg stands down; its email leg is separate.
+    expect(await InvoiceService.sendReceipt(saved.body.billing.invoiceId)).toEqual({ sent: false, reason: 'already-sent' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
   test.each(['active', 'completed', 'cancelled'])('the %s installment plan is checked even without a reminder sequence', async (planStatus) => {
     const methodId = randomUUID();
     await mockPg('payment_methods').insert({ id: methodId, customer_id: fixture.customerId,

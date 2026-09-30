@@ -4668,4 +4668,167 @@ postgres('visit summary recipient recovery', () => {
     expect(await Summary.reconcileSummaryEmailRecovery(message)).toEqual({ reconciled: true });
     expect(await mockPg('visit_effects').where({ id: effect.id }).first()).toMatchObject({ status: 'sent', last_error: null });
   });
+
+  // One text for a combined stop: the summary text carries the invoice's pay
+  // link (unpaid) or receipt link (paid) when it goes to the same person the
+  // invoice text would, and the invoice's own text stands down.
+  describe('the summary text carries the invoice link', () => {
+    const MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
+    const { SUMMARY_TEXT_HOLD_ERROR } = require('../services/invoice-helpers');
+
+    async function stop({ status = 'draft', sameRecipient = true, scheduled = false, invoice = {} } = {}) {
+      fixture.payload.items[0].body.sendCompletionSms = true;
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ payload: JSON.stringify(fixture.payload) });
+      if (sameRecipient) await mockPg('customers').where({ id: fixture.customerId }).update({ service_contact_phone: null });
+      const invoiceId = randomUUID();
+      await mockPg('invoices').insert({ id: invoiceId, token: randomUUID().replace(/-/g, ''), invoice_number: `FIX-${invoiceId.slice(0, 8)}`,
+        customer_id: fixture.customerId, status: scheduled ? 'scheduled' : status, total: 120, visit_completion_packet_id: fixture.packetId,
+        ...(scheduled ? { scheduled_send_at: new Date(Date.now() + 600000), scheduled_send_error: SUMMARY_TEXT_HOLD_ERROR } : {}),
+        ...invoice });
+      return invoiceId;
+    }
+    const plainBody = () => `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${require('../utils/portal-url').portalUrl(`/visit/${fixture.token}`)}`;
+    const invoiceRow = (id) => mockPg('invoices').where({ id }).first();
+    const summaryEffect = () => mockPg('visit_effects').where({ visit_id: fixture.visitId, effect_type: 'completion_sms' }).first();
+
+    afterEach(async () => {
+      await mockPg('invoices').where({ customer_id: fixture.customerId }).del();
+      await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).del();
+    });
+
+    test('an unpaid invoice for the same recipient rides the summary text, and the invoice sender then sends only its email', async () => {
+      const invoiceId = await stop();
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { state: 'done', payment: { state: 'payment_needed', invoiceId } } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const sent = sendCustomerMessage.mock.calls[0][0];
+      expect(sent.body.startsWith(`${plainBody()} Pay your invoice: `)).toBe(true);
+      expect(sent).toMatchObject({ purpose: 'service_completion', to: '+12025550123', invoiceId, metadata: { original_message_type: 'visit_summary' } });
+      // The summary token never grants billing: the pay link is the invoice's own.
+      expect(sent.body).not.toContain(fixture.token.slice(0, 8) + 'pay');
+      const queued = await invoiceRow(invoiceId);
+      expect(queued).toMatchObject({ status: 'scheduled', scheduled_send_error: MARKER });
+      expect(queued.sms_sent_at).not.toBeNull();
+      expect(new Date(queued.scheduled_send_at).getTime()).toBeLessThanOrEqual(Date.now());
+      expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: `pay_link:${invoiceId}` });
+
+      // The invoice's own sender: no second text, its email still goes.
+      const Invoice = require('../services/invoice');
+      const invoiceEmail = require('../services/invoice-email');
+      const sendSms = jest.spyOn(Invoice, 'sendViaSMS');
+      const email = jest.spyOn(invoiceEmail, 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+      expect(await Invoice.processScheduledSends()).toMatchObject({ sent: 1, failed: 0 });
+      expect(sendSms).not.toHaveBeenCalled();
+      expect(email).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'sent', scheduled_send_error: null });
+    });
+
+    test('a replay sends nothing again and finishes an invoice side the first run lost', async () => {
+      const invoiceId = await stop();
+      await runVisitCompletionPacketEffects(fixture.packetId);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      // The text was accepted but the process died before the invoice side.
+      await mockPg('invoices').where({ id: invoiceId }).update({ sms_sent_at: null, scheduled_send_error: SUMMARY_TEXT_HOLD_ERROR,
+        scheduled_send_at: new Date(Date.now() + 600000) });
+      await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'processing', error: null });
+      await runVisitCompletionPacketEffects(fixture.packetId);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      const restored = await invoiceRow(invoiceId);
+      expect(restored).toMatchObject({ status: 'scheduled', scheduled_send_error: MARKER });
+      expect(restored.sms_sent_at).not.toBeNull();
+      expect(new Date(restored.scheduled_send_at).getTime()).toBeLessThanOrEqual(Date.now());
+    });
+
+    test('a different billing recipient keeps the plain summary and the invoice sender unchanged', async () => {
+      const invoiceId = await stop({ sameRecipient: false });
+      await runVisitCompletionPacketEffects(fixture.packetId);
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ body: plainBody(), to: '+12025550124' });
+      expect(sendCustomerMessage.mock.calls[0][0].invoiceId).toBeUndefined();
+      const untouched = await invoiceRow(invoiceId);
+      expect(untouched).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
+      expect(new Date(untouched.scheduled_send_at).getTime()).toBeLessThanOrEqual(Date.now());
+      expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: null });
+    });
+
+    test('a paid invoice puts its receipt link in the summary text and the receipt text stands down', async () => {
+      const invoiceId = await stop({ status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_paid' } });
+      expect(await runVisitCompletionPacketEffects(fixture.packetId)).toMatchObject({ status: 200, body: { payment: { state: 'paid', invoiceId } } });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(sendCustomerMessage.mock.calls[0][0].body.startsWith(`${plainBody()} Your receipt: `)).toBe(true);
+      expect((await invoiceRow(invoiceId)).receipt_sent_at).not.toBeNull();
+      expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: `receipt:${invoiceId}` });
+      // The receipt queue's text leg: already covered (its email leg is separate).
+      expect(await require('../services/invoice').sendReceipt(invoiceId)).toEqual({ sent: false, reason: 'already-sent' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['a payer assigned to the customer', async () => {
+        const [payer] = await mockPg('payers').insert({ display_name: 'Fixture Property Management', ap_email: `${randomUUID()}@example.invalid`, active: true }).returning('id');
+        fixture.payerId = payer.id;
+        await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: payer.id });
+      }],
+      ['a billing hold on the visit', async () => { await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true }); }],
+    ])('%s never puts a pay link in the summary text', async (_name, arrange) => {
+      const invoiceId = await stop();
+      await arrange();
+      try {
+        await runVisitCompletionPacketEffects(fixture.packetId);
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ body: plainBody() });
+        expect(sendCustomerMessage.mock.calls[0][0].body).not.toMatch(/Pay your invoice|Your receipt/);
+        expect(['draft', 'scheduled']).toContain((await invoiceRow(invoiceId)).status);
+        expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+      } finally {
+        await mockPg('customers').where({ id: fixture.customerId }).update({ payer_id: null });
+        if (fixture.payerId) await mockPg('payers').where({ id: fixture.payerId }).del();
+      }
+    });
+
+    test('a texted STOP folds nothing and leaves the invoice sender to its own consent checks', async () => {
+      const invoiceId = await stop();
+      await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, sms_enabled: false });
+      await runVisitCompletionPacketEffects(fixture.packetId);
+      for (const [input] of sendCustomerMessage.mock.calls) expect(input.body).not.toMatch(/Pay your invoice/);
+      expect(await summaryEffect()).toMatchObject({ status: 'suppressed' });
+      expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
+    });
+
+    test('a suppression at the provider boundary releases the queue wait instead of stranding the invoice', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' });
+      await deliver();
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Pay your invoice: ');
+      const released = await invoiceRow(invoiceId);
+      expect(released).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
+      expect(new Date(released.scheduled_send_at).getTime()).toBeLessThanOrEqual(Date.now());
+    });
+
+    test('quiet hours queue the plain summary, never a frozen pay link, and release the queue wait', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, retryable: true, deferred: true,
+        code: 'QUIET_HOURS_HOLD', nextAllowedAt: new Date(Date.now() + 8 * 3600000).toISOString() });
+      expect(await deliver()).toEqual({ state: 'delivery_pending' });
+      expect((await mockPg('sms_log').where({ customer_id: fixture.customerId }).first()).message_body).toBe(plainBody());
+      expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: null, sms_sent_at: null });
+    });
+
+    test('a link that went stale before the locked handoff falls back to the plain summary', async () => {
+      const invoiceId = await stop({ scheduled: true });
+      let calls = 0;
+      sendCustomerMessage.mockImplementation(async (input) => {
+        calls += 1;
+        if (calls === 1) await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+        return handoffSender()(input);
+      });
+      // The hold lands after the plan was made (the plan reads the visit first).
+      expect(await deliver()).toEqual({ state: 'delivered' });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      expect(sendCustomerMessage.mock.calls[0][0].body).toContain('Pay your invoice: ');
+      expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
+      expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: null });
+      expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+    });
+  });
 });

@@ -7889,6 +7889,82 @@ const InvoiceService = {
   // carries the receipt. Manual single-channel operator sends (via='sms')
   // must NOT declare it: the operator explicitly chose the text, and there is
   // no email leg on that route to carry the receipt (codex round 5).
+  // The shortened receipt link a text carries. /receipt/, not /pay/: the pay
+  // page forwards paid invoices to the receipt but renders a refunded one as
+  // a "Refunded" payment page. Empty when the invoice has no token.
+  async receiptSmsUrl(invoice) {
+    const longReceiptUrl = invoice.token
+      ? `${publicPortalUrl()}/receipt/${invoice.token}`
+      : "";
+    return longReceiptUrl
+      ? shortenOrPassthrough(longReceiptUrl, {
+          kind: "receipt",
+          entityType: "invoices",
+          entityId: invoice.id,
+          customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        })
+      : "";
+  },
+
+  // The shortened pay link, minted exactly as sendViaSMS mints it, for the one
+  // other text that may carry it: the combined-visit summary
+  // (visit-completion-summary.js).
+  async payLinkSmsUrl(invoice) {
+    if (!invoice.token) return "";
+    return shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: "invoice",
+      entityType: "invoices",
+      entityId: invoice.id,
+      customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+  },
+
+  // The combined-visit summary text finished its part in this invoice's Text
+  // leg (visit-completion-summary.js). With `textCovered` the summary text
+  // carried the pay link: the queued send's Text leg is done and only its
+  // Email remains, which is exactly the state an accepted Text with a pending
+  // Email already uses (BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED: the
+  // sender treats the leg as accepted and sends the Email at once, in or out
+  // of the send window). Without it the wait the coordinator scheduled under
+  // SUMMARY_TEXT_HOLD_ERROR ends and the invoice sends as it always did.
+  // Only a still-queued self-pay row of this packet moves; a row the queue
+  // already claimed is left alone, and a replay is a no-op.
+  async settleSummaryTextHold(invoiceId, packetId, { textCovered = false, acceptedAt = new Date() } = {}) {
+    const { SUMMARY_TEXT_HOLD_ERROR } = require("./invoice-helpers");
+    const holdLike = `${SUMMARY_TEXT_HOLD_ERROR.split(" ")[0]}%`;
+    const queued = db("invoices")
+      .where({ id: invoiceId, status: "scheduled", visit_completion_packet_id: packetId })
+      .whereNull("payer_id")
+      .whereNull("payer_statement_id");
+    if (!textCovered) {
+      return queued
+        .where("scheduled_send_error", "like", holdLike)
+        .update({ scheduled_send_error: null, scheduled_send_at: db.fn.now(), updated_at: new Date() });
+    }
+    const markerLike = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}%`;
+    return queued
+      .where((q) => q.whereNull("scheduled_send_error")
+        .orWhere("scheduled_send_error", "like", holdLike)
+        .orWhere("scheduled_send_error", "like", markerLike))
+      .update({
+        sms_sent_at: db.raw("COALESCE(sms_sent_at, ?::timestamptz)", [acceptedAt]),
+        scheduled_send_at: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN NOW() ELSE scheduled_send_at END", [holdLike]),
+        scheduled_send_attempts: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN scheduled_send_attempts ELSE 0 END", [markerLike]),
+        scheduled_send_error: BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+        updated_at: new Date(),
+      });
+  },
+
+  // The combined-visit summary text carried this invoice's receipt link, so
+  // the receipt queue's Text leg stands down (its Email is unaffected): the
+  // same claim the completion text's combined receipt stamps.
+  async markReceiptCoveredBySummaryText(invoiceId) {
+    return db("invoices").where({ id: invoiceId }).whereNull("receipt_sent_at")
+      .update({ receipt_sent_at: db.fn.now(), updated_at: new Date() });
+  },
+
   /**
    * The customer-facing money facts a payment-receipt text needs: exact
    * amount collected, the " (Visa ending 4242)" card clause, and the
@@ -7903,21 +7979,7 @@ const InvoiceService = {
    * credit). Falls back to amount due when no payment row exists.
    */
   async receiptSmsFacts(invoice) {
-    const domain = publicPortalUrl();
-    // /receipt/, not /pay/: the pay page forwards paid invoices to the
-    // receipt but renders a refunded one as a "Refunded" payment page.
-    const longReceiptUrl = invoice.token
-      ? `${domain}/receipt/${invoice.token}`
-      : "";
-    const receiptUrl = longReceiptUrl
-      ? await shortenOrPassthrough(longReceiptUrl, {
-          kind: "receipt",
-          entityType: "invoices",
-          entityId: invoice.id,
-          customerId: invoice.customer_id,
-          codePrefix: invoiceShortCodePrefix(invoice),
-        })
-      : "";
+    const receiptUrl = await InvoiceService.receiptSmsUrl(invoice);
     const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
     const amount = await InvoiceService.receiptAmountFor(invoice);
     return { amount, cardLine, receiptUrl };
