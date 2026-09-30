@@ -338,7 +338,8 @@ function visitCurrentWindow(svc) {
   const range = arrivalWindowRange(start);
   const window = range ? formatSmsTimeRange(range) : null;
   if (!window) return null;
-  return { date: schedulerDayLabel({ date }), window };
+  const startMinutes = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
+  return { date: schedulerDayLabel({ date }), window, startMinutes };
 }
 
 // The picker's days for ONE visit (plus the visit's own current window), or
@@ -384,13 +385,16 @@ function pickSchedulerOfferWindows(slots) {
   return windows;
 }
 
-// The picker's slots minus the ones whose rendered arrival window is `window`.
-function excludeWindowSlots(slots, window) {
-  const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+// The picker's slots minus any whose 2-hour arrival window overlaps the
+// visit's current one (a 9:15 start is not a real alternative to a visit
+// already at 9:00) — the same overlap rule pickSchedulerOfferWindows applies
+// between offers.
+function excludeCurrentWindowSlots(slots, startMinutes) {
   return (slots || []).filter((s) => {
     const start = String(s?.startTime24 || s?.start_time || '').slice(0, 5);
-    const range = /^\d{2}:\d{2}$/.test(start) ? arrivalWindowRange(start) : null;
-    return !(range && formatSmsTimeRange(range) === window);
+    if (!/^\d{2}:\d{2}$/.test(start)) return true;
+    const minutes = Number(start.slice(0, 2)) * 60 + Number(start.slice(3, 5));
+    return Math.abs(minutes - startMinutes) >= 120;
   });
 }
 
@@ -417,7 +421,7 @@ async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
       // The visit's own current slot reads as open (the picker excludes the
       // visit itself); never offer a customer the time they already have.
       const cur = loaded.currentWindow;
-      const slots = cur && cur.date === date ? excludeWindowSlots(d.slots, cur.window) : d.slots;
+      const slots = cur && cur.date === date ? excludeCurrentWindowSlots(d.slots, cur.startMinutes) : d.slots;
       const windows = pickSchedulerOfferWindows(slots);
       if (!windows.length) continue;
       lines.push(`- ${date}: ${windows.join(', ')}`);

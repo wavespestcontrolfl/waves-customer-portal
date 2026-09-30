@@ -527,17 +527,16 @@ describe("the visit's own current slot (picker excludes the visit itself, so it 
   // visit currently 9:00-11:00 on Tue Sep 29 (window_start 09:00:00)
   const HERE = { ...SVC, scheduled_date: '2026-09-29', window_start: '09:00:00' };
 
-  test('draft: the visit\'s current window is not offered; the next feasible start takes its place', async () => {
+  test('draft: no window overlapping the visit\'s current one is offered; the next non-overlapping start takes its place', async () => {
     process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
     mockPicker({ loaded: HERE });
     const drafter = freshDrafter();
     const { days } = await drafter.fetchOpenTimesData({
       city: 'Venice', customerId: 'cust-9', schedulingIntent: true, offersFromScheduler: true, scheduledServiceId: VISIT_ID,
     });
-    // 9:00 dropped BEFORE the overlap/cap pass: 9:15 (own window 9:15-11:15) is now the first pick
-    expect(days[0].date).toBe('Tuesday, September 29');
-    expect(days[0].windows).not.toContain('9:00 AM - 11:00 AM');
-    expect(days[0].windows[0]).toBe('9:15 AM - 11:15 AM');
+    // 9:00, 9:15 and 9:30 all overlap the current 9:00-11:00 window and are
+    // dropped BEFORE the overlap/cap pass: 11:00 is now the first pick
+    expect(days[0]).toEqual({ date: 'Tuesday, September 29', windows: ['11:00 AM - 1:00 PM', '1:00 PM - 3:00 PM', '3:00 PM - 5:00 PM'] });
     // other days untouched
     expect(days[1]).toEqual({ date: 'Wednesday, September 30', windows: ['2:00 PM - 4:00 PM'] });
   });
