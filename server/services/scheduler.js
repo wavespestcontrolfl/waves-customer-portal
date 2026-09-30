@@ -1597,6 +1597,33 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // WEEKLY BOOKING-LINK TEXT CHECK — Monday 8:19am ET (owner 2026-09-29: a
+  // concise admin notification every 7 days while GATE_CALL_BOOKING_LINK_TEXT
+  // is on — sent count, top skips, or what needs a look). Minute 19 is
+  // unused by every other schedule in this file.
+  // =========================================================================
+  cron.schedule('19 8 * * 1', async () => {
+    const tickStartedAt = Date.now();
+    try {
+      const lockRes = await runExclusive('call-booking-link-weekly', async () => {
+        const { runCallBookingLinkWeeklyCheck } = require('./call-booking-link-weekly-check');
+        const result = await runCallBookingLinkWeeklyCheck();
+        logger.info(`[call-booking-link-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, problem: result.problem ?? null })}`);
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`booking-link weekly check did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
+        await recordMissedTick('call-booking-link-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`booking-link weekly check tick skipped: ${lockRes.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`Weekly booking-link check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY AGENT GAP DIGEST — Monday 8:15am ET — owner ACT email ONLY when the
   // Intelligence Bar recorded a gap report (missing capability, tool failure,
   // or blocked action) in the last 7 days; a clean week sends nothing.
