@@ -91,6 +91,14 @@ async function hasVisitToday(conn, customerId, today) {
   return liveToday.some((r) => r.id == null || !recorded.has(String(r.id).toLowerCase()));
 }
 
+// A performed record that proves no application (see readLastVisitLabelFacts): an inspection service whose type names no treatment.
+const TREATMENT_WORD_RE = /\b(?:treat\w*|spray\w*|application|control|plan|program|service\s+plan|barrier|bait\w*|fertiliz\w*|lawn|pest)\b/i;
+function isNonApplicationRecord(record) {
+  const type = String((record && record.service_type) || '');
+  const { INSPECTION_SERVICE_RE } = require('./supplies-consumption');
+  return INSPECTION_SERVICE_RE.test(type) && !TREATMENT_WORD_RE.test(type);
+}
+
 // A visit AFTER (or on the same date as) the facts' own visit that the record chain has not caught up with: a scheduled visit
 // marked completed with no completed service record linked to it (scheduled_service_id), or one left open (confirmed / en route /
 // on site / in progress) on a date up to today. Either can be a newer application whose label the last performed record does
@@ -226,7 +234,7 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   if (await hasUnrecordedVisitSince(conn, customerId, serviceDate, today)) return null;
   const visits = await performed()
     .where('service_records.service_date', serviceDate)
-    .select('service_records.id', 'service_records.structured_notes', 'service_records.service_data');
+    .select('service_records.id', 'service_records.structured_notes', 'service_records.service_data', 'service_records.service_type');
   if (!visits.length || visits.some((v) => serviceRecordSuppressesCustomerArtifacts(v))) return null;
   const recordIds = visits.map((v) => v.id);
   const snapshotByRecord = new Map(visits.map((v) => [String(v.id), readReportIdentitySnapshot({ service_data: v.service_data })]));
@@ -237,6 +245,13 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
     .select(
       'sp.id', 'sp.service_record_id', 'sp.product_id', 'sp.product_name', 'sp.active_ingredient', 'sp.product_category',
     );
+
+  // Every performed record on the date must be represented by product evidence, or the aggregate covers only a subset of what was
+  // applied. The one exception is a record that proves no application: an inspection service (the codebase's own rule, supplies-consumption's
+  // INSPECTION_SERVICE_RE: "a scheduled inspection (no application)"), and only when its service type names no treatment. Any other
+  // productless record - including one with no service type at all - means none on file.
+  const representedRecords = new Set(rows.map((r) => String(r.service_record_id)));
+  if (visits.some((v) => !representedRecords.has(String(v.id)) && !isNonApplicationRecord(v))) return null;
 
   const products = [];
   let unverified = 0;
@@ -1102,35 +1117,41 @@ const NAME_SEP_SRC = '\\s*[,!\\u2013\\u2014-]+\\s*';
 const LEADERS_RE = new RegExp('^(?:'
   + `(?:(?:hi|hello|hey|hiya|greetings)(?:\\s+there)?(?:\\s+[a-z]+)?|good\\s+(?:morning|afternoon|evening)(?:\\s+[a-z]+)?)${NAME_SEP_SRC}`
   + `|(?:thanks|thank\\s+you)(?:\\s+(?:so|very)\\s+much)?(?:\\s+for\\s+(?:reaching\\s+out|contacting\\s+us|your\\s+message|letting\\s+us\\s+know))?${NAME_SEP_SRC}`
-  // an apology opener ("So sorry about that -", "I am sorry for the trouble,") is peeled like a greeting
-  + `|(?:(?:i\\s+am|i'm|we\\s+are|we're)\\s+)?(?:(?:so|very|really|truly)\\s+)*sorry(?:\\s+(?:about|for)\\s+(?:that|this|the\\s+(?:trouble|inconvenience|wait|delay|confusion)|any\\s+(?:trouble|inconvenience)))?${NAME_SEP_SRC}|(?:our\\s+)?apologies${NAME_SEP_SRC}`
   + `|(?:good|great)\\s+question${NAME_SEP_SRC})`);
 const GREETING_ONLY_RE = /^(?:(?:hi|hello|hey|hiya|greetings)(?:\s+there)?(?:\s+[a-z]+)?|good\s+(?:morning|afternoon|evening)(?:\s+[a-z]+)?)$/;
 const TRAILERS_RE = /(?:\s*[,;–—-]+\s*|\s+)(?:thanks|thank\s+you(?:\s+(?:so|very)\s+much)?|have\s+a\s+(?:great|good|wonderful|nice|lovely)\s+(?:day|evening|weekend|one)|take\s+care|talk\s+soon)\s*$/;
-function peelFriendlyEnds(sentence) {
+// An apology opener ("So sorry about that", "I am sorry for the trouble", "I apologize for the delay", "apologies") is peeled like a
+// greeting, with or without punctuation after it: what follows is judged on its own ("Sorry feel free to use it." is held), and an
+// apology-only sentence passes only because nothing remains.
+const APOLOGY_LEAD_RE = /^(?:(?:(?:i\s+am|i'm|we\s+are|we're)\s+)?(?:(?:so|very|really|truly)\s+)*sorry(?:\s+(?:about|for)\s+(?:that|this|the\s+(?:trouble|inconvenience|wait|delay|confusion)|any\s+(?:trouble|inconvenience)))?|(?:our\s+)?apologies|i\s+apologi[sz]e(?:\s+for\s+(?:that|this|the\s+(?:trouble|inconvenience|wait|delay|confusion)))?)(?:\s*[,!\u2013\u2014-]+\s*|\s+|$)/;
+function peelFriendlyEnds(sentence, info = {}) {
   let rest = sentence.trim();
   for (let i = 0; i < 4; i += 1) {
-    const next = rest.replace(LEADERS_RE, '').replace(TRAILERS_RE, '').trim();
+    const withoutApology = rest.replace(APOLOGY_LEAD_RE, '');
+    if (withoutApology !== rest) info.apology = true;
+    const next = withoutApology.replace(LEADERS_RE, '').replace(TRAILERS_RE, '').trim();
     if (next === rest) break;
     rest = next;
   }
   return rest;
 }
+// An empathy clause after an apology ("I am sorry the spiders are back.") is not an answer: it must start with a plain report word,
+// and carry no answer force, label word, duration or clock. It is allowed ONLY behind a peeled apology.
+const EMPATHY_CLAUSE_RE = /^(?:that|this|the|to\s+hear|to\s+learn|you\s+had|you\s+have\s+had|it\s+took|it\s+was|we\s+missed|we\s+were)\b/;
+const isEmpathyClause = (rest) => EMPATHY_CLAUSE_RE.test(rest) && !hasAnswerForce(rest) && !LABEL_CONTEXT_RE.test(rest) && !hasDuration(rest) && !hasClockTime(rest);
 // (f) off-topic scheduling / billing with no answer force and no label word, clause by clause
 const isOffTopicScheduling = (sentence) => {
   const clauses = clausesOf(sentence);
   return clauses.length > 0 && clauses.every((c) => !hasAnswerForce(c.clause)
     && isSchedulingClause(c.clause, { staffCarry: c.staffCarry, clock: hasClockTime(c.clause), sentence: c.sentence }));
 };
-// (h) an apology sentence with no answer force, label word, duration or clock ("I am sorry the spiders are back.")
-const isApologySentence = (sentence) => /^(?:(?:i\s+am|i'm|we\s+are|we're)\s+)?(?:(?:so|very|really|truly)\s+)*sorry\b|^(?:our\s+)?apologies\b/.test(sentence)
-  && !hasAnswerForce(sentence) && !LABEL_CONTEXT_RE.test(sentence) && !hasDuration(sentence) && !hasClockTime(sentence);
 // The content types, the first five being the ones the unknown-question path also trusts.
-const CONTENT_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isCompanySentence, isDeferral, isSignoffSentence, isApologySentence, isOffTopicScheduling];
+const CONTENT_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isCompanySentence, isDeferral, isSignoffSentence, isOffTopicScheduling];
 const isAllowedSentence = (sentence) => {
   if (GREETING_ONLY_RE.test(sentence.trim())) return true;
-  const rest = peelFriendlyEnds(sentence);
-  return rest === '' || CONTENT_SENTENCE_TYPES.some((allowed) => allowed(rest));
+  const info = {};
+  const rest = peelFriendlyEnds(sentence, info);
+  return rest === '' || CONTENT_SENTENCE_TYPES.some((allowed) => allowed(rest)) || (info.apology === true && isEmpathyClause(rest));
 };
 
 // A QUESTION sentence is exempt from the answer checks only when it genuinely asks the CUSTOMER for information: a

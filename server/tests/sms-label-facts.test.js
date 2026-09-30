@@ -290,9 +290,10 @@ describe('label row selection (mock knex)', () => {
   });
   const read = (opts) => labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, ...opts });
   const two = [snapVisit('r2', { p1: frozen() }), snapVisit('r3', { p1: frozen() }, { structured_notes: { typedReportDelivery: 'auto_send' } })];
+  const twoRows = () => [row(), row({ id: 2, service_record_id: 'r3' })];
 
   test('newest performed date first, then ALL its records (no cap); timing comes from the frozen snapshot, not a catalog join; unverified and adjuvants omitted and counted', async () => {
-    const many = Array.from({ length: 9 }, (_, i) => snapVisit(`r${i}`, { p1: frozen(), p2: frozen({ labelVerifiedAt: null, rainfastMinutes: 60 }), p3: frozen({ category: 'adjuvant' }), p4: frozen({ category: 'water conditioner' }) }));
+    const many = Array.from({ length: 9 }, (_, i) => snapVisit(`r${i}`, { p1: frozen(), p2: frozen({ labelVerifiedAt: null, rainfastMinutes: 60 }), p3: frozen({ category: 'adjuvant' }), p4: frozen({ category: 'water conditioner' }) }, i === 0 ? {} : { service_type: 'Termite Inspection' })); // (the siblings are inspection-only: no application, no products)
     const conn = fakeConn({
       visits: many,
       rows: [
@@ -413,8 +414,26 @@ describe('label row selection (mock knex)', () => {
   });
 
   test('the date goes through date-only normalization (a Date from pg is fine)', async () => {
-    const out = await read({ conn: fakeConn({ newest: new Date('2026-06-05T00:00:00Z'), visits: two, rows: [row()] }) });
+    const out = await read({ conn: fakeConn({ newest: new Date('2026-06-05T00:00:00Z'), visits: two, rows: twoRows() }) });
     expect(out.serviceDate).toBe('2026-06-05');
+  });
+
+  test('r32: every performed record on the date needs product evidence; only an inspection-only service proves no application', async () => {
+    const twoRecords = (second) => fakeConn({ visits: [snapVisit('r2', { p1: frozen({ rainfastMinutes: 240, reentryHours: 4, reentrySummary: 'Keep people and pets off treated areas for 4 hours.' }) }), second], rows: [row()] });
+    // two records, one verified 4 h with products, one with NO product rows: the aggregate would cover a subset -> none on file
+    expect(await read({ conn: twoRecords(snapVisit('r3', {})) })).toBeNull();
+    expect(await read({ conn: twoRecords(snapVisit('r3', { p1: frozen() }, { service_type: 'Quarterly Pest Control' })) })).toBeNull();
+    expect(await read({ conn: twoRecords(snapVisit('r3', {}, { service_type: null })) })).toBeNull(); // no service type: no proof, fail closed
+    // an inspection-only sibling (the codebase's own "scheduled inspection (no application)" rule) proves none was applied: facts kept
+    for (const type of ['Termite Inspection', 'WDO Inspection', 'Rodent Inspection Service', 'inspection']) {
+      const kept = await read({ conn: twoRecords(snapVisit('r3', {}, { service_type: type })) });
+      expect([type, kept && kept.products.length, kept && kept.recordIds]).toEqual([type, 1, ['r2', 'r3']]);
+    }
+    // ...but an "inspection" that names a treatment does not qualify
+    for (const type of ['Pest Control + Termite Inspection', 'Inspection and Spray', 'Lawn Inspection Plan']) expect([type, await read({ conn: twoRecords(snapVisit('r3', {}, { service_type: type })) })]).toEqual([type, null]);
+    // a sibling WITH product rows is represented (and resolved by the usual rules)
+    const both = fakeConn({ visits: [snapVisit('r2', { p1: frozen() }), snapVisit('r3', { p1: frozen() })], rows: [row(), row({ id: 2, service_record_id: 'r3' })] });
+    expect((await read({ conn: both })).products).toHaveLength(2);
   });
 
   test('a suppressed newest visit means none on file - never an older visit', async () => {
@@ -428,7 +447,7 @@ describe('label row selection (mock knex)', () => {
   });
 
   test('a visit TODAY (live scheduled visit, completed visit without its record, unfinished record) -> none on file', async () => {
-    const base = { visits: two, rows: [row()] };
+    const base = { visits: two, rows: twoRows() };
     for (const status of ['pending', 'confirmed', 'en_route', 'on_site', 'in_progress']) {
       expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ id: 's1', status }] }) })).toBeNull();
     }
@@ -441,7 +460,7 @@ describe('label row selection (mock knex)', () => {
   });
 
   test('several completed visits today: EACH needs its own completed record (one landed record never vouches for another)', async () => {
-    const base = { visits: two, rows: [row()], newest: TODAY };
+    const base = { visits: two, rows: twoRows(), newest: TODAY };
     const s1 = { id: 's1', status: 'completed' };
     const s2 = { id: 's2', status: 'completed' };
     const r1 = { status: 'completed', scheduled_service_id: 's1' };
@@ -479,7 +498,7 @@ describe('label row selection (mock knex)', () => {
   // D: a delayed send re-verifies the label source it was drafted from.
   describe('D: send-time recheck (labelFactsSnapshotFor / labelFactsSendBlockReason)', () => {
     const okRow = { p1: frozen({ reentryHours: 4, reentrySummary: null, rainfastMinutes: 180 }) };
-    const connFor = (over = {}) => fakeConn({ visits: [snapVisit('r2', okRow)], rows: [row()], ...over });
+    const connFor = (over = {}) => fakeConn({ visits: [snapVisit('r2', okRow)], rows: [row()], ...over, ...(over.visits && !over.rows ? { rows: over.visits.map((v, i) => row({ id: i + 1, service_record_id: v.id })) } : {}) });
     const sectionOf = (lf) => labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
     let lf; let section; let reentry; let rainfast;
     beforeEach(async () => {
@@ -2028,6 +2047,23 @@ describe('r31: watering in a timing context asks both kinds; general watering ad
     expect(guard(WATERING, Q)).toBe(false); // the approved company answer is not a label copy and needs no partner
     expect(guard('Yes, go ahead and water.', Q)).toBe(true);
     expect(guard(`${WATERING} Yes, go ahead.`, Q)).toBe(true);
+  });
+});
+
+describe('r32: an apology opener is peeled; what follows must be allowed on its own', () => {
+  const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');
+  const guard = (reply) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', asked);
+  test('an apology followed by an answer is held, with or without punctuation', () => {
+    for (const reply of [
+      'Sorry feel free to use it.', 'Sorry go for it.', 'Sorry, feel free.', 'Sorry \u2014 go ahead.', 'Apologies, go ahead.', 'Apologies go for it', 'I apologize, they can go out', 'So sorry you can go out now.', "I'm sorry the dogs can't go out yet.",
+      'I am sorry they are fine now.', 'Sorry about that, have at it.',
+    ]) expect([reply, guard(reply)]).toEqual([reply, true]);
+  });
+  test('an apology alone, before a hand-off, or as an empathy clause still passes', () => {
+    for (const reply of [
+      'So sorry about that.', 'I apologize for the trouble.', 'Sorry for the delay!', 'Sorry!', 'Apologies.', 'Our apologies.', 'Sorry about that \u2014 a manager will reach out within the hour.', "I'm so sorry about that, someone will follow up within the hour.",
+      'I am sorry the spiders are back.', "Hello Catherine! I am sorry the spiders are back. Let me check with the office on what happened this morning and I will follow up shortly.", 'So sorry about that \u2014 a manager will reach out by 9 AM tomorrow morning.',
+    ]) expect([reply, guard(reply)]).toEqual([reply, false]);
   });
 });
 
