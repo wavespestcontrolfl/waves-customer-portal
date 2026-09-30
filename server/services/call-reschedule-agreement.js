@@ -927,10 +927,10 @@ function newBookingContext({ v2, transcript, callStartedAt }) {
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
   const evidence = Array.isArray(v2.evidence) ? v2.evidence : [];
-  const pinned = (fieldPath, speaker) => evidence.filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && e.speaker === speaker);
+  const pinned = (fieldPath, speaker = null) => evidence.filter((e) => e?.field_path === fieldPath && typeof e.quote === 'string' && (!speaker || e.speaker === speaker));
   // Quotes pinned to a field that appear word for word in a turn of their
   // stated speaker, plainly said wherever they appear (as for a move).
-  const grounded = (fieldPath, speaker) => pinned(fieldPath, speaker)
+  const grounded = (fieldPath, speaker = null) => pinned(fieldPath, speaker)
     .filter((e) => isPlain(turnsHolding(turns, e.quote, e.speaker), e.quote, fieldPath)).map((e) => e.quote);
   const ctx = {
     scheduling, words, started, turns, pinned, grounded, relative: scheduling.relative_date_used,

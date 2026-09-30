@@ -481,6 +481,31 @@ describe('a new booking whose final time turn omits the day: the caller\'s SELEC
   });
 });
 
+describe('a relative date the extraction resolved (positive booking case)', () => {
+  test('"Thursday eight days away at two PM" books on the resolved date; an unresolved or ungrounded one does not', () => {
+    const said = 'We will see you Thursday eight days away at two PM.';
+    const build = ({ slot = '2026-10-01T14:00:00-04:00', relativeQuote = said } = {}) => ({
+      ex: extraction({
+        scheduling: { confirmed_start_at: slot, relative_date_used: true, agreed_slot_words: { day: 'Thursday', hour: 'two', period: 'PM' } },
+        evidence: [
+          quote('/scheduling/agent_committed_booking', 'agent', said),
+          quote('/scheduling/confirmed_start_at', 'agent', said),
+          quote('/scheduling/caller_accepted_slot', 'caller', ACCEPT),
+          ...(relativeQuote ? [quote('/scheduling/relative_date_used', 'agent', relativeQuote)] : []),
+        ],
+      }),
+      transcript: transcriptOf(`Agent: ${said}`, `Caller: ${ACCEPT}`),
+    });
+    const ok = build();
+    expect(grounded(ok.ex, ok.transcript)).toMatchObject({ ok: true });
+    expect(route(ok.ex, { transcript: ok.transcript }).allowed).toBe(true);
+    const noQuote = build({ relativeQuote: null });
+    expect(grounded(noQuote.ex, noQuote.transcript)).toEqual({ ok: false, reason: 'relative_date_ungrounded' });
+    const nearest = build({ slot: THURSDAY_2PM });
+    expect(grounded(nearest.ex, nearest.transcript).ok).toBe(false);
+  });
+});
+
 describe('commercialDictatedBookingGrounded', () => {
   test('grounds a confirmed new booking with a price agreed', () => {
     expect(grounded(extraction())).toEqual({ ok: true, reason: 'dictated_booking_grounded', mode: 'staff_stated' });
