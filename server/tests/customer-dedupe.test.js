@@ -2726,15 +2726,17 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
   // codex #5394: only a DISPUTE-reason collection_hold stops automatic card
   // charges, so a merge that keeps the winner's fallback hold while releasing
   // the loser's dispute hold would silently resume charging.
-  function collisionTrx({ loserRow, winnerRow }) {
+  function collisionTrx({ loserRow, winnerRow, collideOnce = false }) {
     const updates = [];
+    const firstLocks = [];
+    let collided = 0;
     const trx = jest.fn((table) => makeChain(table, (q) => {
-      if (q.called('first')) return winnerRow;
+      if (q.called('first')) { firstLocks.push(q.called('forUpdate')); return winnerRow; }
       if (q.called('select')) return [loserRow];
       if (q.called('update')) {
         const where = q.args('where')[0];
         const patch = q.args('update')[0];
-        if (where.id === loserRow.id && !patch.released_at) { const e = new Error('duplicate key'); e.code = '23505'; throw e; }
+        if (where.id === loserRow.id && !patch.released_at && (!collideOnce || collided++ === 0)) { const e = new Error('duplicate key'); e.code = '23505'; throw e; }
         updates.push({ rowId: where.id, patch });
         return 1;
       }
@@ -2742,8 +2744,30 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
     }));
     trx.transaction = jest.fn(async (fn) => fn(trx));
     trx.fn = { now: jest.fn(() => 'CURRENT_TIMESTAMP') };
-    return { trx, updates };
+    return { trx, updates, firstLocks };
   }
+
+  it('reads the surviving hold under FOR UPDATE (the flag-only release route takes no merge lock)', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, firstLocks } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call' },
+    });
+    await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(firstLocks).toEqual([true]);
+  });
+
+  it('the winner hold was released after the collision: the loser\'s active hold moves across, never released', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
+      winnerRow: undefined,
+      collideOnce: true,
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(updates).toEqual([{ rowId: 'L1', patch: { customer_id: 'W' } }]);
+    expect(result).toMatch(/moved 1, released 0/);
+  });
 
   it('winner fallback hold + loser DISPUTE hold: the surviving winner row is promoted to the dispute reason', async () => {
     const { repointFlagsReleaseCollisions } = dedupe._test;
