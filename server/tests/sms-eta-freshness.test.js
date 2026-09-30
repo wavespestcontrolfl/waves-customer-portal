@@ -2249,3 +2249,36 @@ describe('future on-site wording with a vague time is a timed claim -> unbound',
     expect(await run(body)).not.toBe('eta_claim_unbound');
   });
 });
+
+// Codex round-47 P2 (PR #5334): "made it" arrivals at send time.
+describe('"made it" completed-arrival claims at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const snapshot = (extra) => ({ entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', ...extra }] });
+  const rows = (extra) => [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const onSite = { status: 'on_site', track_state: 'on_property' };
+  const done = { status: 'completed', track_state: 'completed' };
+  const run = (body, snap, extra) => etaClaimBlockReason({ liveEtaSnapshot: snap, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows(extra)) });
+
+  test.each(['The technician made it to your house.', 'He made it.', "We've made it."])('%p needs the on-property state: blocked while still en route', async (body) => {
+    expect(await run(body, snapshot())).toBe('eta_claim_no_longer_en_route');
+  });
+  test.each(['The technician made it to your house.', 'He made it.'])('%p passes once the visit is on property, blocked again once it is done', async (body) => {
+    const onProp = snapshot({ state: 'on_property' });
+    expect(await run(body, onProp, onSite)).toBeNull();
+    expect(await run(body, onProp, done)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('a recorded technician name works; with no snapshot and the gate on it fails closed', async () => {
+    expect(await run('Sam made it there.', snapshot({ technicianNames: ['Sam'] }))).toBe('eta_claim_no_longer_en_route');
+    const prior = process.env.GATE_SMS_REAL_ANSWERS; process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    try {
+      expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'Sam made it there.', techNames: ['Sam'], now: NOW, dbh: fakeDb([]) })).toBe('eta_claim_no_snapshot');
+      expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'The technician made it to your house.', now: NOW, dbh: fakeDb([]) })).toBe('eta_claim_no_snapshot');
+    } finally { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; }
+  });
+  test.each(["The technician hasn't made it yet.", 'Has he made it?', 'Once the tech made it there I will text you.', 'The tech made it there tomorrow.'])('%p keeps its exemption: untouched even on a done visit', async (body) => {
+    expect(await run(body, snapshot(), done)).toBeNull();
+  });
+});

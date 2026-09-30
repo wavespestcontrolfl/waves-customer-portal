@@ -1960,6 +1960,43 @@ describe('round 42 P2: tech_names plumbing (source pins)', () => {
   });
 });
 
+// Codex round-47 P2 (PR #5334): "made it (there)" is a completed arrival.
+describe('round 47 P2: "made it" completed arrivals', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  const sam = { techNames: ['Sam'] };
+  test.each([
+    'The technician made it to your house.', 'He made it.', 'The crew made it here.', 'Our team just made it to your property.', 'The technician finally made it.',
+    'They made it to your home.', 'The tech already made it there.',
+  ])('%p is a completed-arrival claim and visit-status vocabulary', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('first-person and recorded-name forms', () => {
+    for (const t of ['We made it to your home.', "We've made it.", 'We just made it there.']) {
+      expect(bodyClaimsCompletedArrival(t)).toBe(true);
+      expect(bodyMentionsVisitStatus(t)).toBe(true);
+    }
+    expect(bodyClaimsCompletedArrival('Sam made it there.', sam)).toBe(true);
+    expect(bodyMentionsVisitStatus('Sam made it to your house.', sam)).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam made it there.')).toBe(false);
+    expect(bodyClaimsCompletedArrival('Sam made it there.', { techNames: ['Dana'] })).toBe(false);
+  });
+  test.each([
+    "The technician hasn't made it yet.", 'The tech has not made it there.', 'Did the tech make it there?', 'Has he made it?', 'Is Sam making it?',
+    'Once the tech made it there I will text you.', 'The tech made it there tomorrow.', 'The tech will make it there soon.',
+    'The technician made it easy.', 'I made it to the office.', 'Your payment made it to us.', 'They made it up.', 'The team made it a priority.',
+  ])('%p is not a completed-arrival claim (negated / question / conditional / future day / not an arrival)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('draft-time: "made it there" against an en-route fact is rejected like "has arrived"', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: 'The technician made it to your house.', factsBlock: 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
 // Codex round-45 P2 (PR #5334): future on-site wording with a vague time is a timed arrival claim.
 describe('round 45 P2: "will be on site soon" is a timed arrival claim', () => {
   test.each([
