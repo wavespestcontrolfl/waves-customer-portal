@@ -183,6 +183,15 @@ describeOrSkip('email division wiring (Postgres)', () => {
     return row.id;
   }
 
+  // A COMPLETED appointment that belongs to a recurring pest plan (a series root).
+  async function makeDoneRecurring(customerId, extra = {}) {
+    const [row] = await db('scheduled_services').insert({
+      customer_id: customerId, scheduled_date: '2026-09-20', service_type: 'Quarterly Pest Control Service',
+      status: 'completed', recurring_pattern: 'quarterly', service_address_city: 'Parrish', ...extra,
+    }).returning('id');
+    return row.id;
+  }
+
   async function makeEstimate(customerId, email, overrides = {}) {
     const id = randomUUID();
     await db('estimates').insert({
@@ -395,10 +404,15 @@ describeOrSkip('email division wiring (Postgres)', () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
       const techId = await makeTech();
-      const scheduledId = await makeNextVisit(customer.id);
+      const [propA] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Parrish' }).returning('id');
+      const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
+      const scheduledId = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propA.id });
+      const scheduledB = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propB.id });
+      // Two properties, each its own recurring series: two ELIGIBLE second visits for one customer.
       const visit1 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
       const visit2 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
-      const visit2b = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-21', products: ['taurus', 'talak'], scheduledServiceId: scheduledId, createdAt: new Date('2026-09-21T15:00:00Z') });
+      await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 3, date: '2026-06-21', products: ['taurus'], scheduledServiceId: scheduledB, createdAt: new Date('2026-06-21T15:00:00Z') });
+      const visit2b = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 4, date: '2026-09-21', products: ['taurus', 'talak'], scheduledServiceId: scheduledB, createdAt: new Date('2026-09-21T15:00:00Z') });
       const automation = await makeAutomation({
         trigger_event_key: 'service_report.ready', template_key: 'lc.why_91_days', suppression_group_key: 'service_operational',
         idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
@@ -417,7 +431,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
 
       const first = await report(visit1);
       expect(first.status).toBe('skipped');
-      expect(first.exit_reason).toContain('second pest visit');
+      expect(first.exit_reason).toContain('second performed pest visit');
       const second = await report(visit2);
       expect(second.status).toBe('sent');
       expect(second.idempotency_key).not.toBe(first.idempotency_key);
@@ -628,10 +642,14 @@ describeOrSkip('email division wiring (Postgres)', () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
       const techId = await makeTech();
-      const scheduledId = await makeNextVisit(customer.id);
+      const [propA] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Parrish' }).returning('id');
+      const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
+      const scheduledId = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propA.id });
+      const scheduledB = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propB.id });
       const visit1 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
       const visit2 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
-      const visit2b = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-21', products: ['taurus', 'talak'], scheduledServiceId: scheduledId, createdAt: new Date('2026-09-21T15:00:00Z') });
+      await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 3, date: '2026-06-21', products: ['taurus'], scheduledServiceId: scheduledB, createdAt: new Date('2026-06-21T15:00:00Z') });
+      const visit2b = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 4, date: '2026-09-21', products: ['taurus', 'talak'], scheduledServiceId: scheduledB, createdAt: new Date('2026-09-21T15:00:00Z') });
       const automation = await makeAutomation({
         trigger_event_key: 'service_report.ready', template_key: 'lc.why_91_days', suppression_group_key: 'service_operational',
         idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
@@ -700,13 +718,13 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(await db('marketing_email_ledger').where({ customer_id: customer.id, email_key: 'lc.why_91_days', status: 'sent' })).toHaveLength(1);
     });
 
-    test('B5: a crash after an accepted delivery, then the record is renumbered: the reclaimed run is finalized sent (recovery precedes the builder)', async () => {
+    test('B5: a crash after an accepted delivery, then the record is reclassified as a callback: the reclaimed run is finalized sent (recovery precedes the builder)', async () => {
       const { customer, visit2, report } = await whyScenario();
       sendTemplate.mockImplementation(libraryLike());
       const first = await report(visit2);
       expect(first.status).toBe('sent');
       await db('marketing_email_ledger').where({ idempotency_key: first.idempotency_key }).update({ status: 'reserved', sent_at: null, email_message_id: null, reason: null });
-      await db('service_records').where({ id: visit2 }).update({ visit_number: 3 }); // the builder would now skip it
+      await db('service_records').where({ id: visit2 }).update({ is_callback: true }); // the builder would now skip it (a callback is not a plan visit)
       await reclaim(first);
       const recovered = await Executor.executeRun(first.id);
       expect(recovered.status).toBe('sent');
@@ -717,13 +735,36 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(ledger[0].reason).toBe('reconciled_from_email_messages');
     });
 
-    test('B5: the record is renumbered AFTER the build, before the provider handoff: refused at the boundary, nothing sent', async () => {
+    test('B5: the record is reclassified as a callback AFTER the build, before the provider handoff: refused at the boundary, nothing sent', async () => {
       const { visit2, report } = await whyScenario();
-      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => db('service_records').where({ id: visit2 }).update({ visit_number: 3 }) }));
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => db('service_records').where({ id: visit2 }).update({ is_callback: true }) }));
       const run = await report(visit2);
       expect(run.status).toBe('skipped');
       expect(run.exit_reason).toContain('no longer eligible');
       expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
+    test('shadow applies the once-rule too: two concurrent qualifying B5 reports record exactly ONE would_send, the other would_block once_already_counted; a live replay still promotes the winner', async () => {
+      const { customer, visit2, visit2b, report } = await whyScenario();
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      const [a, b] = await Promise.all([report(visit2), report(visit2b)]);
+      const statuses = [a.status, b.status].sort();
+      expect(statuses).toEqual(['shadow', 'skipped']);
+      const loser = a.status === 'skipped' ? a : b;
+      const winner = a.status === 'shadow' ? a : b;
+      const blocked = (await db('email_template_automation_run_events').where({ run_id: loser.id, event_type: 'would_block' }))[0];
+      expect(blocked.metadata).toEqual(expect.objectContaining({ guard: 'once_already_counted' }));
+      expect(await db('email_template_automation_run_events').where({ run_id: loser.id, event_type: 'would_send' })).toHaveLength(0);
+      expect(sendTemplate).not.toHaveBeenCalled();
+      expect(await db('marketing_email_ledger').where({ customer_id: customer.id })).toHaveLength(0);
+
+      // Gate goes live: the SAME winner run is promoted in place (#5418) and sends.
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      sendTemplate.mockImplementation(libraryLike());
+      const winnerRecord = winner.entity_id;
+      const promoted = await report(winnerRecord);
+      expect(promoted.id).toBe(winner.id);
+      expect(promoted.status).toBe('sent');
     });
 
     test('a queued first-visit report that will never qualify does not block the second-visit send', async () => {
@@ -737,7 +778,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
       // The queued sibling, when it runs, is skipped on its own merits.
       const later = await Executor.executeRun(queuedFirst.id);
       expect(later.status).toBe('skipped');
-      expect(later.exit_reason).toContain('second pest visit');
+      expect(later.exit_reason).toContain('second performed pest visit');
       expect(sendTemplate).toHaveBeenCalledTimes(1);
     });
 
@@ -864,7 +905,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
 
       test('skips (never renders a blank) when a required fact is missing: no upcoming PEST visit, no primary product, not first visit, wrong customer, non-pest line', async () => {
         const noNext = await makeCustomer();
-        const noNextRecord = await makeVisit({ customerId: noNext.id, technicianId: await makeTech() });
+        const noNextRecord = await makeVisit({ customerId: noNext.id, technicianId: await makeTech(), scheduledServiceId: await makeDoneRecurring(noNext.id) });
         const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', noNextRecord, noNext), mode: 'live', deps: baseDeps() });
         expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'no_upcoming_pest_visit' }));
 
@@ -904,7 +945,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         await db('scheduled_services').insert({
           customer_id: lawnOnly.id, scheduled_date: tomorrow, service_type: 'Lawn Care Service', status: 'confirmed',
         });
-        const lawnRecord = await makeVisit({ customerId: lawnOnly.id, technicianId: techId });
+        const lawnRecord = await makeVisit({ customerId: lawnOnly.id, technicianId: techId, scheduledServiceId: await makeDoneRecurring(lawnOnly.id) });
         const skipped = await Builders.buildEmailDivisionPayload({
           run: runFor('lc.first_visit_pest', lawnRecord, lawnOnly), mode: 'live', deps: baseDeps(),
         });
@@ -919,7 +960,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
         // This first visit happened at property A (its appointment, now completed).
         const [done] = await db('scheduled_services').insert({
-          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: propA.id,
+          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: propA.id, recurring_pattern: 'quarterly',
         }).returning('id');
         // Property B's pest visit comes SOONER than property A's next one.
         await makeNextVisit(customer.id, 'quarterly', '2098-01-05', { property_id: propB.id });
@@ -928,7 +969,8 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const a = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', linked, customer), mode: 'live', deps: baseDeps() });
         expect(a.payload.next_visit_date).toBe('December 24, 2099'); // never property B's January date
 
-        // The visit carries no appointment link: two properties' pest visits cannot be told apart.
+        // The visit carries no appointment link: two properties' recurring pest plans cannot be told apart,
+        // so it cannot be shown to belong to an active recurring plan at ITS property: skipped.
         const other = await makeCustomer();
         const [propC] = await db('customer_properties').insert({ customer_id: other.id, city: 'Parrish' }).returning('id');
         const [propD] = await db('customer_properties').insert({ customer_id: other.id, city: 'Venice' }).returning('id');
@@ -936,7 +978,27 @@ describeOrSkip('email division wiring (Postgres)', () => {
         await makeNextVisit(other.id, 'quarterly', '2099-12-24', { property_id: propD.id });
         const unlinked = await makeVisit({ customerId: other.id, technicianId: techId });
         const skipped = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', unlinked, other), mode: 'live', deps: baseDeps() });
-        expect(skipped).toEqual(expect.objectContaining({ skip: true, code: 'next_visit_property_ambiguous' }));
+        expect(skipped).toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
+      });
+
+      test('a ONE-TIME first pest visit, plus a separately booked future one-off pest appointment, is NOT a recurring plan: skipped (no "re-service between visits" promise)', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const [oneTime] = await db('scheduled_services').insert({
+          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', recurring_pattern: 'one_time',
+        }).returning('id');
+        await makeNextVisit(customer.id, 'one_time', '2099-12-24'); // a separately booked one-off pest visit
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: oneTime.id });
+        const result = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
+        // The same first visit, with a real recurring series at its property, is fine.
+        const recurring = await makeCustomer();
+        const doneId = await makeDoneRecurring(recurring.id);
+        await makeNextVisit(recurring.id, 'quarterly', '2099-12-24');
+        const ok = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', await makeVisit({ customerId: recurring.id, technicianId: techId, scheduledServiceId: doneId }), recurring), mode: 'live', deps: baseDeps(),
+        });
+        expect(ok.ok).toBe(true);
       });
 
       test('the rain sentence: coordinates come from the VISITED property, a complete radar read over whole days after the visit; shadow makes no external call', async () => {
@@ -988,7 +1050,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const customer = await makeCustomer();
         const techId = await makeTech();
         const scheduledId = await makeNextVisit(customer.id, pattern);
-        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
         const recordId = await makeVisit({
           customerId: customer.id, technicianId: techId, visitNumber, products, scheduledServiceId: scheduledId, date: '2026-09-20',
         });
@@ -1020,6 +1082,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const none = await makeCustomer();
         const techId = await makeTech();
         const scheduledId = await makeNextVisit(none.id);
+        await makeVisit({ customerId: none.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['talak'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
         const recordId = await makeVisit({ customerId: none.id, technicianId: techId, visitNumber: 2, products: ['talak'], scheduledServiceId: scheduledId });
         const r2 = await Builders.buildEmailDivisionPayload({
           run: runFor('lc.why_91_days', recordId, none), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
@@ -1057,7 +1120,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const customer = await makeCustomer({ city: 'Bradenton' }); // the customer record's city is another property
         const techId = await makeTech();
         const scheduledId = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { service_address_city: 'Parrish' });
-        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
         const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
         const intel = jest.fn(async ({ city }) => `In September our technicians treated ghost ants at 61% of our 90 visits in ${city}.`);
         const result = await Builders.buildEmailDivisionPayload({
@@ -1068,7 +1131,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
 
         const legacy = await makeCustomer({ city: 'Bradenton' });
         const legacyScheduled = await makeNextVisit(legacy.id, 'quarterly', '2099-12-24', { service_address_city: null });
-        await makeVisit({ customerId: legacy.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+        await makeVisit({ customerId: legacy.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: legacyScheduled, createdAt: new Date('2026-06-20T15:00:00Z') });
         const legacyRecord = await makeVisit({ customerId: legacy.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: legacyScheduled });
         intel.mockClear();
         const dropped = await Builders.buildEmailDivisionPayload({
@@ -1089,7 +1152,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
             extra = { recurring_parent_id: parentId };
           }
           const scheduledId = await makeNextVisit(customer.id, pattern, '2099-12-24', extra);
-          await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+          await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
           const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
           return Builders.buildEmailDivisionPayload({
             run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
@@ -1117,8 +1180,9 @@ describeOrSkip('email division wiring (Postgres)', () => {
         // Property A: Taurus + contact, visits 1 and 2.
         await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-05-20', products: ['taurus'], scheduledServiceId: seriesA, createdAt: new Date('2026-05-20T15:00:00Z') });
         const visitA = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-08-20', products: ['taurus', 'talak'], scheduledServiceId: seriesA, createdAt: new Date('2026-08-20T15:00:00Z') });
-        // Property B: a Talak-only quarterly plan.
-        const visitB = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-20', products: ['talak'], scheduledServiceId: seriesB });
+        // Property B: a Talak-only quarterly plan (its own first and second visits).
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 3, date: '2026-06-20', products: ['talak'], scheduledServiceId: seriesB, createdAt: new Date('2026-06-20T15:00:00Z') });
+        const visitB = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 4, date: '2026-09-20', products: ['talak'], scheduledServiceId: seriesB });
         const deps = baseDeps({ getActivityRatingAverages: async () => cohort });
 
         const b = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', visitB, customer), deps });
@@ -1127,6 +1191,30 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const a = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', visitA, customer), deps });
         expect(a.ok).toBe(true);
         expect(a.payload.nonrepellent_product).toBe('Taurus SC');
+      });
+
+      test('the ordinal is the visit\'s place among the PERFORMED, NON-CALLBACK visits of its own plan: property B\'s first visit is not "visit 2" (visit_number counts across properties), and a callback does not count', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const [propA] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Parrish' }).returning('id');
+        const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
+        const seriesA = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propA.id });
+        const seriesB = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: propB.id });
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-03-20', products: ['taurus'], scheduledServiceId: seriesA, createdAt: new Date('2026-03-20T15:00:00Z') });
+        // Property B's FIRST visit: the customer-level visit_number says 2.
+        const firstAtB = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-06-20', products: ['taurus', 'talak'], scheduledServiceId: seriesB, createdAt: new Date('2026-06-20T15:00:00Z') });
+        const deps = baseDeps({ getActivityRatingAverages: async () => cohort });
+        const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', firstAtB, customer), deps });
+        expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'not_second_visit' }));
+
+        // B's real second visit, with a callback in between (a re-service, not a plan visit).
+        await db('service_records').insert({
+          id: randomUUID(), customer_id: customer.id, service_date: '2026-07-20', service_type: 'Pest Callback', service_line: 'pest', status: 'completed',
+          scheduled_service_id: seriesB, is_callback: true, created_at: new Date('2026-07-20T15:00:00Z'),
+        }).then(() => {});
+        const secondAtB = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 9, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: seriesB });
+        const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', secondAtB, customer), deps });
+        expect(r2.ok).toBe(true);
       });
 
       test('a visit whose recurring pest series cannot be established is skipped (no series, no plan evidence)', async () => {
@@ -1155,9 +1243,15 @@ describeOrSkip('email division wiring (Postgres)', () => {
           run: runFor('lc.why_91_days', monthly.recordId, monthly.customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
         });
         expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
-        const third = await scenario({ visitNumber: 3 });
+        // The plan's THIRD performed visit: visit 1 and 2 already happened in the same series.
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const scheduledId = await makeNextVisit(customer.id);
+        await makeVisit({ customerId: customer.id, technicianId: techId, date: '2026-03-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-03-20T15:00:00Z') });
+        await makeVisit({ customerId: customer.id, technicianId: techId, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
+        const thirdRecord = await makeVisit({ customerId: customer.id, technicianId: techId, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
         const r2 = await Builders.buildEmailDivisionPayload({
-          run: runFor('lc.why_91_days', third.recordId, third.customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+          run: runFor('lc.why_91_days', thirdRecord, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
         });
         expect(r2).toEqual(expect.objectContaining({ skip: true, code: 'not_second_visit' }));
       });
@@ -1284,6 +1378,24 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(r3.ok).toBe(true);
         expect(intel).not.toHaveBeenCalled();
         expect(r3.payload.area_intel_sentence).toBe('');
+      });
+
+      test('address_short is the STREET half by the canonical parse: a leading unit ("Unit 4, 100 Beach Rd, ...") never becomes the address', async () => {
+        const customer = await makeCustomer();
+        for (const [address, expected, city] of [
+          ['Unit 4, 100 Beach Rd, Parrish, FL 34219', '100 Beach Rd', 'Parrish'],
+          ['Apt 2B, 55 Main St, Venice, FL 34285', '55 Main St', 'Venice'],
+          ['100 Beach Rd Unit 4, Parrish, FL 34219', '100 Beach Rd', 'Parrish'],
+          ['123 Example St, Parrish, FL 34219', '123 Example St', 'Parrish'],
+        ]) {
+          const estimateId = await makeEstimate(customer.id, customer.email, { address });
+          const intel = jest.fn(async () => null);
+          const result = await Builders.buildEmailDivisionPayload({
+            run: runFor('nurture.expired_1', estimateId, customer), mode: 'shadow', deps: consultDeps({ getAreaIntelSentence: intel }),
+          });
+          expect({ address, short: result.payload.address_short }).toEqual({ address, short: expected });
+          expect(intel).toHaveBeenCalledWith(expect.objectContaining({ city })); // the city comes from the same parse
+        }
       });
 
       test('an estimate aged out with NO expires_at still shows its effective expiry date (never blank, never a skip): the run\'s expires_on, else the flip time', async () => {

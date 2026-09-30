@@ -13,7 +13,7 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
 const {
   hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
-  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE,
+  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, onceScopeFor,
 } = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
@@ -1674,6 +1674,8 @@ async function finalizeShadowRun(run, automation, executionPayload = {}, refusal
     });
     return blocked || { ...run, status: 'skipped', exit_reason: preflight.reason || 'would_block' };
   }
+  const onceScope = onceScopeFor(run);
+  if (onceScope) return finalizeShadowOnce(run, onceScope, wouldSendMetadata);
   const [updated] = await db('email_template_automation_runs').where({ id: run.id }).update({
     status: 'shadow',
     last_error: null,
@@ -1682,6 +1684,41 @@ async function finalizeShadowRun(run, automation, executionPayload = {}, refusal
   }).returning('*');
   await logRunEvent(run.id, 'would_send', 'Shadow mode: would have sent — nothing dispatched', wouldSendMetadata);
   return updated || { ...run, status: 'shadow' };
+}
+
+// The shadow twin of the once-per-customer (B5) / once-per-estimate (C1) guard:
+// live, exactly one send wins the scope, so shadow must not record several
+// would_sends for it (that would overstate what live would send). Under the SAME
+// per-customer advisory lock the ledger's reservation takes, the first shadow run
+// to settle for the scope is the winner (status 'shadow', would_send); a later
+// one records would_block (once_already_counted). Only shadow-ORIGIN 'shadow' runs
+// count, and a winner stops counting the moment a live replay promotes it (#5418:
+// promotion rewrites its status), so this never interferes with shadow->live
+// promotion — a would_block run is itself promotable (its latest event is
+// would_block) and live then decides through the real once guard.
+async function finalizeShadowOnce(run, scope, wouldSendMetadata) {
+  return db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${run.recipient_id || run.entity_id}`]);
+    const rivals = trx('email_template_automation_runs')
+      .where({ template_key: run.template_key, status: 'shadow' })
+      .whereNot({ id: run.id })
+      .whereRaw(SHADOW_ORIGIN_SQL);
+    if (scope === 'estimate') rivals.where({ entity_type: 'estimate', entity_id: String(run.entity_id) });
+    else rivals.where({ recipient_id: String(run.recipient_id) });
+    if (await rivals.first('id')) {
+      const reason = 'an earlier shadow run already counts for this customer (or estimate): live sends it once';
+      const [blocked] = await trx('email_template_automation_runs').where({ id: run.id }).update({
+        status: 'skipped', exit_reason: reason, last_error: null, completed_at: new Date(), updated_at: new Date(),
+      }).returning('*');
+      await logRunEvent(run.id, 'would_block', reason, { ...wouldSendMetadata, guard: 'once_already_counted' }, trx);
+      return blocked || { ...run, status: 'skipped', exit_reason: reason };
+    }
+    const [updated] = await trx('email_template_automation_runs').where({ id: run.id }).update({
+      status: 'shadow', last_error: null, completed_at: new Date(), updated_at: new Date(),
+    }).returning('*');
+    await logRunEvent(run.id, 'would_send', 'Shadow mode: would have sent — nothing dispatched', wouldSendMetadata, trx);
+    return updated || { ...run, status: 'shadow' };
+  });
 }
 
 // The ledger sends to the address its eligibility judged: the customer's
