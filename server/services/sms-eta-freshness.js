@@ -106,10 +106,19 @@ const ETA_FRESHNESS_WINDOW_MS = 15 * 60 * 1000;
 //   - the path is EXACTLY /track/<token> (case-insensitive, Codex round-10:
 //     the React route isn't case-sensitive) with nothing but sentence
 //     punctuation after it — no extra path segments, query, or fragment;
-//   - it HAS a host (a bare "/track/<token>" names no origin at all).
+//   - it HAS a host (a bare "/track/<token>" names no origin at all); the
+//     comparison is host[:port] (single-label hosts like localhost:5173
+//     included — round-14 P2).
 // The captured token keeps its own case (tokens are case-sensitive). Any
 // untrusted /track/ link is a `violation`, refused outright.
-const TRACK_URL_RE = /(?:(?<![\w./@:-])((?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?))?\/track\/([A-Za-z0-9_-]*)([^\s]*)/gi;
+// Host forms: dotted names (with optional scheme/port) — and, so a
+// CLIENT_URL=http://localhost:5173 style configured origin is recognized
+// (Codex round-14 P2), a SINGLE-label host when a scheme or a :port makes it
+// unambiguous ("http://localhost", "localhost:5173"). A bare word before
+// "/track/" with neither is not a host. host[:port] is compared to the
+// configured origin's, so a different port is a different host.
+const TRACK_HOST_SRC = '(?:https?:\\/\\/(?:[a-z0-9-]+\\.)*[a-z0-9-]+(?::\\d+)?|(?:[a-z0-9-]+\\.)+[a-z0-9-]+(?::\\d+)?|[a-z0-9-]+:\\d+)';
+const TRACK_URL_RE = new RegExp(`(?:(?<![\\w./@:-])(${TRACK_HOST_SRC}))?\\/track\\/([A-Za-z0-9_-]*)([^\\s]*)`, 'gi');
 const TRAILING_PUNCTUATION_RE = /^[.,;:!?)\]"'>]*$/;
 
 function canonicalPortalHost() {

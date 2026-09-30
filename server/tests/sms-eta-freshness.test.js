@@ -1097,6 +1097,26 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
         expect(await check(body)).toBeNull();
       });
 
+      // Codex round-14 P2: a single-label host with a port (a CLIENT_URL of
+      // http://localhost:5173) is a real host, compared as host:port.
+      test('a localhost:port configured origin is recognized; other ports/hosts and a truly hostless link are refused', async () => {
+        const prior = process.env.PUBLIC_PORTAL_URL;
+        process.env.PUBLIC_PORTAL_URL = 'http://localhost:5173';
+        try {
+          expect(await check('Track: localhost:5173/track/tok-1')).toBeNull();
+          expect(await check('Track: http://localhost:5173/track/tok-1')).toBeNull();
+          expect(await check('Track: LOCALHOST:5173/Track/tok-1.')).toBeNull();
+          expect(await check('Track: localhost:5174/track/tok-1')).toBe('eta_claim_link_untrusted');
+          expect(await check('Track: http://localhost/track/tok-1')).toBe('eta_claim_link_untrusted');
+          expect(await check('Track: portal.wavespestcontrol.com/track/tok-1')).toBe('eta_claim_link_untrusted');
+          expect(await check('Track: evil:5173/track/tok-1')).toBe('eta_claim_link_untrusted');
+          expect(await check('Track: /track/tok-1')).toBe('eta_claim_link_untrusted');
+          expect(await check('Track: localhost:5173/track/tok-1/extra')).toBe('eta_claim_link_untrusted');
+        } finally {
+          if (prior === undefined) delete process.env.PUBLIC_PORTAL_URL; else process.env.PUBLIC_PORTAL_URL = prior;
+        }
+      });
+
       test('the configured portal origin is what is trusted (PUBLIC_PORTAL_URL)', async () => {
         const prior = process.env.PUBLIC_PORTAL_URL;
         process.env.PUBLIC_PORTAL_URL = 'https://portal.example.test';

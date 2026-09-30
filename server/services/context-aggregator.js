@@ -26,7 +26,7 @@ const { gateEnvValue } = require('../config/feature-gates');
 // (545/545 upcoming in prod); en_route/on_site cover the same-day in-progress
 // case a texting customer may hit. The value lives in the canonical
 // visit-context module; the rationale above is this consumer's.
-const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+const { UPCOMING_SERVICE_STATUSES, TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
 
 // Calls the extractor affirmatively classified as not-a-real-conversation
 // with this customer — their summaries must never ground an SMS reply.
@@ -822,6 +822,20 @@ const UPCOMING_SERVICE_COLUMNS = [
   'ss.lat as service_lat', 'ss.lng as service_lng',
   'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city',
 ];
+// The live-row query selects by customer + customer-facing track_state +
+// TODAY, independent of the operational status list (Codex round-14 P2, PR
+// #5334): markEnRoute writes track_state first and syncs `status` best-effort,
+// so a row can read `rescheduled` (or any other non-UPCOMING status) while the
+// tracking page already shows the live vehicle — UPCOMING_SERVICE_STATUSES
+// would have excluded it. Terminal rows (completed / cancelled / skipped /
+// no_show) stay excluded: customerTrackState treats those as not live.
+function liveServicesQuery(customer) {
+  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id')
+    .where('ss.customer_id', customer.id)
+    .where('ss.scheduled_date', etDateString())
+    .whereIn('ss.track_state', LIVE_TRACK_STATES)
+    .whereNotIn('ss.status', TERMINAL_ROW_STATUSES);
+}
 const dateOrderKey = (row) => (row.scheduled_date instanceof Date ? row.scheduled_date.getTime() : Date.parse(row.scheduled_date) || 0);
 // Live rows the limited list is missing go IN; non-live rows come off the end
 // to stay at `cap`; the original date order is restored (stable).
@@ -841,7 +855,7 @@ function mergeLiveUpcoming(limited, liveRows, cap = 3) {
 async function loadUpcomingServices(customer, includeLiveEta) {
   const limited = await upcomingServicesBase(customer).orderBy('ss.scheduled_date').limit(3).select(...UPCOMING_SERVICE_COLUMNS);
   if (!includeLiveEta) return limited;
-  const liveRows = await upcomingServicesBase(customer).whereIn('ss.track_state', LIVE_TRACK_STATES).orderBy('ss.scheduled_date').limit(10).select(...UPCOMING_SERVICE_COLUMNS);
+  const liveRows = await liveServicesQuery(customer).orderBy('ss.scheduled_date').limit(10).select(...UPCOMING_SERVICE_COLUMNS);
   return mergeLiveUpcoming(limited, liveRows);
 }
 

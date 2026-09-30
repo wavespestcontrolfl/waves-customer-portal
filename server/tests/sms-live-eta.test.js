@@ -490,7 +490,7 @@ describe('upcoming services keep a live visit the limit(3) would drop (round 13 
         jest.doMock('../models/db', () => jest.fn(() => {
           let isLive = false;
           const chain = {};
-          for (const m of ['leftJoin', 'where', 'orderBy', 'limit']) chain[m] = () => chain;
+          for (const m of ['leftJoin', 'where', 'whereNotIn', 'orderBy', 'limit']) chain[m] = () => chain;
           chain.whereIn = (col) => { if (col === 'ss.track_state') isLive = true; return chain; };
           chain.select = async () => { if (isLive) { calls.live += 1; return liveRows; } calls.base += 1; return limitedRows; };
           return chain;
@@ -500,6 +500,52 @@ describe('upcoming services keep a live visit the limit(3) would drop (round 13 
       return { agg, calls };
     }
     afterEach(() => { jest.dontMock('../models/db'); });
+
+    // Codex round-14 P2: the live-row query is independent of the operational
+    // status list. An in-memory query engine models the two constraints.
+    function loadWithRows(allRows) {
+      let agg;
+      jest.isolateModules(() => {
+        jest.doMock('../models/db', () => jest.fn(() => {
+          const filters = [];
+          let cap = Infinity;
+          const chain = {};
+          chain.leftJoin = () => chain;
+          chain.where = (col, opOrVal, maybeVal) => {
+            const [op, val] = maybeVal === undefined ? ['=', opOrVal] : [opOrVal, maybeVal];
+            filters.push((r) => (op === '>=' ? String(r[col.replace('ss.', '')]) >= String(val) : String(r[col.replace('ss.', '')]) === String(val)));
+            return chain;
+          };
+          chain.whereIn = (col, list) => { filters.push((r) => list.includes(r[col.replace('ss.', '')])); return chain; };
+          chain.whereNotIn = (col, list) => { filters.push((r) => !list.includes(r[col.replace('ss.', '')])); return chain; };
+          chain.orderBy = () => chain;
+          chain.limit = (n) => { cap = n; return chain; };
+          chain.select = async () => allRows.filter((r) => filters.every((f) => f(r))).slice(0, cap);
+          return chain;
+        }));
+        agg = require('../services/context-aggregator');
+      });
+      return agg;
+    }
+
+    test('a `rescheduled` row with a live track_state (markEnRoute status sync failed) is still found; terminal rows and other days are not', async () => {
+      const today = require('../utils/datetime-et').etDateString();
+      const mk = (id, status, track_state, scheduled_date = today) => ({ id, customer_id: 'c1', status, track_state, scheduled_date });
+      const rows = [
+        mk('p1', 'confirmed', 'scheduled'), mk('p2', 'confirmed', 'scheduled'), mk('p3', 'confirmed', 'scheduled'),
+        mk('split', 'rescheduled', 'en_route'),
+        mk('done', 'completed', 'en_route'), mk('cxl', 'cancelled', 'on_property'), mk('skip', 'skipped', 'en_route'),
+        mk('tomorrow', 'rescheduled', 'en_route', '2999-01-01'),
+      ];
+      const agg = loadWithRows(rows);
+      const out = await agg.loadUpcomingServices({ id: 'c1' }, true);
+      expect(out.map((r) => r.id)).toContain('split');
+      for (const gone of ['done', 'cxl', 'skip', 'tomorrow']) expect(out.map((r) => r.id)).not.toContain(gone);
+      expect(out).toHaveLength(3);
+      // Without LIVE ETA the split-state row is (as before) not requested at all.
+      const plain = await agg.loadUpcomingServices({ id: 'c1' }, false);
+      expect(plain.map((r) => r.id)).not.toContain('split');
+    });
 
     test('includeLiveEta false: only the original limited query runs (byte-identical rows)', async () => {
       const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-09-30')];
