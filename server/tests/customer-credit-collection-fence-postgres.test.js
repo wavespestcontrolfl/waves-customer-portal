@@ -1,4 +1,4 @@
-// requireNoCollectionPending against real Postgres (disposable schema on a
+// dunningDraw against real Postgres (disposable schema on a
 // private QA / isolated CI database; skipped without APP_TEST_DATABASE_URL).
 // The customer-dunning credit draw must not consume account credit while a
 // saved-card attempt is submitted-but-unresolved (or an orphan charge exists):
@@ -17,12 +17,26 @@ jest.mock('../services/estimate-deposits', () => ({
   assertInvoiceDepositSettlementReady: (...a) => mockDepositReady(...a),
 }));
 
+// The live payer resolve is replaced by a reader of scheduled_services.payer_id
+// on the connection it is handed, so the tests prove WHICH connection (the
+// apply's own transaction) and WHEN (under lock) it is asked, without the
+// payer tables. The real resolver is covered by its own suites.
+const mockPayerSeen = [];
+jest.mock('../services/payer', () => ({
+  resolveForInvoice: async ({ database, scheduledServiceId }) => {
+    mockPayerSeen.push({ isTransaction: database.isTransaction === true });
+    if (!scheduledServiceId) return { payerId: null };
+    const row = await database('scheduled_services').where({ id: scheduledServiceId }).first('payer_id');
+    return { payerId: row?.payer_id || null };
+  },
+}));
+
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `credit_fence_${randomUUID().replaceAll('-', '')}`;
 jest.setTimeout(30000);
 
-postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', () => {
+postgres('applyAccountCreditToInvoice dunningDraw (PostgreSQL)', () => {
   let admin;
   let app;
   let CustomerCredit;
@@ -49,12 +63,23 @@ postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', 
       t.decimal('credit_applied', 12, 2).defaultTo(0);
       t.uuid('payer_id');
       t.string('stripe_payment_intent_id');
+      t.uuid('scheduled_service_id');
       t.string('scheduled_send_error');
       t.string('prepaid_prev_status');
       t.timestamp('prepaid_at');
       t.string('prepaid_by');
       t.timestamp('paid_at');
       t.timestamp('updated_at');
+    });
+    await app.schema.createTable('scheduled_services', (t) => {
+      t.uuid('id').primary();
+      t.uuid('customer_id');
+      t.uuid('payer_id');
+    });
+    await app.schema.createTable('invoice_followup_sequences', (t) => {
+      t.uuid('id').primary();
+      t.uuid('invoice_id');
+      t.string('status');
     });
     await app.schema.createTable('payment_plans', (t) => {
       t.uuid('id');
@@ -130,7 +155,7 @@ postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', 
 
   test('control: a clean invoice draws credit as before', async () => {
     const f = await seed();
-    const out = await apply(f, { requireNoCollectionPending: true });
+    const out = await apply(f, { dunningDraw: true });
     expect(out).toMatchObject({ applied: 40 });
     const s = await state(f);
     expect(Number(s.inv.credit_applied)).toBe(40);
@@ -140,7 +165,7 @@ postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', 
   test('a fresh in-progress saved-card claim: no credit consumed', async () => {
     const f = await seed();
     await attempt(f, { stale: false, submitted: true });
-    const out = await apply(f, { requireNoCollectionPending: true });
+    const out = await apply(f, { dunningDraw: true });
     expect(out).toMatchObject({ applied: 0, skipped: 'collection_pending' });
     const s = await state(f);
     expect(Number(s.inv.credit_applied)).toBe(0);
@@ -151,7 +176,7 @@ postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', 
   test('a stale SUBMITTED claim: no credit consumed AND its promotion to ambiguous commits (sentinel, not throw)', async () => {
     const f = await seed();
     const id = await attempt(f, { stale: true, submitted: true });
-    const out = await apply(f, { requireNoCollectionPending: true });
+    const out = await apply(f, { dunningDraw: true });
     expect(out).toMatchObject({ applied: 0, skipped: 'collection_pending', pendingCode: 'STRIPE_AMBIGUOUS_OUTCOME' });
     expect((await app('stripe_invoice_charge_attempts').where({ id }).first('status')).status).toBe('ambiguous');
     const s = await state(f);
@@ -161,7 +186,7 @@ postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', 
   test('an unresolved orphan charge: no credit consumed', async () => {
     const f = await seed();
     await app('stripe_orphan_charges').insert({ invoice_id: f.invoiceId, resolved: false, stripe_payment_intent_id: 'pi_synthetic_orphan' });
-    const out = await apply(f, { requireNoCollectionPending: true });
+    const out = await apply(f, { dunningDraw: true });
     expect(out).toMatchObject({ applied: 0, skipped: 'collection_pending', pendingCode: 'STRIPE_CHARGED_DB_FAILED' });
     expect(Number((await state(f)).cust.account_credits)).toBe(40);
   });
@@ -186,11 +211,77 @@ postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', 
     });
     await new Promise((r) => setTimeout(r, 300)); // the receipt owns the lock
     let settled = false;
-    const draw = apply(f, { requireNoCollectionPending: true }).then((out) => { settled = true; return out; });
+    const draw = apply(f, { dunningDraw: true }).then((out) => { settled = true; return out; });
     await new Promise((r) => setTimeout(r, 600));
     expect(settled).toBe(false); // blocked behind the receipt's ledger lock
     release();
     await receipt;
     expect(await draw).toMatchObject({ applied: 40 });
+  });
+
+  describe('eligibility is re-decided under the lock, not taken from the pre-read', () => {
+    async function candidate({ sequence = 'active' } = {}) {
+      const f = await seed();
+      f.serviceId = randomUUID();
+      await app('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, payer_id: null });
+      await app('invoices').where({ id: f.invoiceId }).update({ scheduled_service_id: f.serviceId });
+      if (sequence) await app('invoice_followup_sequences').insert({ id: randomUUID(), invoice_id: f.invoiceId, status: sequence });
+      return f; // ...and the resolver's pre-read would have listed it as an active, self-pay candidate
+    }
+
+    test('control: an active, self-pay candidate draws, and the payer was re-resolved on the apply\'s own transaction', async () => {
+      mockPayerSeen.length = 0;
+      const f = await candidate();
+      expect(await apply(f, { dunningDraw: true })).toMatchObject({ applied: 40 });
+      expect(mockPayerSeen).toEqual([{ isTransaction: true }]);
+    });
+
+    test('a payer assigned to the visit AFTER the read: no credit consumed', async () => {
+      const f = await candidate();
+      await app('scheduled_services').where({ id: f.serviceId }).update({ payer_id: randomUUID() });
+      expect(await apply(f, { dunningDraw: true })).toMatchObject({ applied: 0, skipped: 'payer_billed' });
+      const s = await state(f);
+      expect(Number(s.cust.account_credits)).toBe(40);
+      expect(Number(s.inv.credit_applied)).toBe(0);
+    });
+
+    test.each(['stopped', 'paused', 'autopay_hold', 'completed'])('the sequence turned %s AFTER the read: no credit consumed', async (status) => {
+      const f = await candidate();
+      await app('invoice_followup_sequences').where({ invoice_id: f.invoiceId }).update({ status });
+      const out = await apply(f, { dunningDraw: true });
+      expect(out).toMatchObject({ applied: 0 });
+      expect(out.skipped).toMatch(/dunning_/);
+      expect(Number((await state(f)).cust.account_credits)).toBe(40);
+    });
+
+    test('no sequence row (a quiet member) still draws', async () => {
+      const f = await candidate({ sequence: null });
+      expect(await apply(f, { dunningDraw: true })).toMatchObject({ applied: 40 });
+    });
+
+    test('a withdrawal stamp on the locked row: no credit consumed', async () => {
+      const f = await candidate();
+      await app('invoices').where({ id: f.invoiceId }).update({ scheduled_send_error: 'payer_billed:payer-1' });
+      expect(await apply(f, { dunningDraw: true })).toMatchObject({ applied: 0, skipped: 'payer_billed' });
+    });
+
+    test('a payer assignment that COMMITS while the draw waits on the visit lock is seen (the re-resolve is under the visit lock)', async () => {
+      const f = await candidate();
+      let release;
+      const held = new Promise((resolve) => { release = resolve; });
+      const assigner = app.transaction(async (trx) => {
+        await trx('scheduled_services').where({ id: f.serviceId }).forUpdate().first('id');
+        await held;
+        await trx('scheduled_services').where({ id: f.serviceId }).update({ payer_id: randomUUID() });
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      let settled = false;
+      const draw = apply(f, { dunningDraw: true }).then((o) => { settled = true; return o; });
+      await new Promise((r) => setTimeout(r, 500));
+      expect(settled).toBe(false); // waiting on the visit row
+      release();
+      await assigner;
+      expect(await draw).toMatchObject({ applied: 0, skipped: 'payer_billed' });
+    });
   });
 });

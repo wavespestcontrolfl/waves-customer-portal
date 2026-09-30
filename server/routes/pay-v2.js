@@ -19,7 +19,7 @@ const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoice
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
-// Moved to services/pay-combined.js (dunning consolidation) — re-exported below unchanged.
+// Lives in services/pay-combined.js (shared with the customer-dunning set); import it from there.
 const { invoiceCreditWouldFullyCover } = require('../services/pay-combined');
 
 /**
@@ -1673,4 +1673,3 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
 module.exports = router;
 module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
 module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
-module.exports.invoiceCreditWouldFullyCover = invoiceCreditWouldFullyCover;

@@ -340,6 +340,11 @@ async function resolveDunnableSet(customerId, { database = db, now = new Date() 
  * caller, so threading a handle in would strand a credit-covered invoice with
  * dunning still armed. The reads below use the shared pool for the same reason
  * (a draw must never be visible only inside an uncommitted caller handle).
+ *
+ * The reads below only choose CANDIDATES. Every eligibility decision that
+ * matters is re-made inside each draw's own locked transaction (`dunningDraw`
+ * in customer-credit.js): collection fence, sequence active/none, live payer,
+ * and — subsuming the microdeposit pre-check — no attached PaymentIntent.
  */
 async function applyCreditBeforeResolve(customerId) {
   const { autoApplyAccountCreditIfEnabled } = require('../customer-credit');
@@ -354,10 +359,12 @@ async function applyCreditBeforeResolve(customerId) {
       logger.warn(`[customer-dunning] credit draw skipped for invoice ${inv.id}: microdeposit state unreadable: ${err.message}`);
     }
     if (mdPending) continue;
-    // requireNoCollectionPending: the reconciliation fence runs INSIDE the
-    // draw's own transaction under the invoice lock (a fence checked before
-    // the draw could race a saved-card attempt that submits in between).
-    const drawn = await autoApplyAccountCreditIfEnabled(inv.id, { requireNoCollectionPending: true });
+    // dunningDraw: the pre-read above only chose this invoice as a CANDIDATE.
+    // Inside the draw's own transaction, under the invoice lock, it re-decides
+    // the collection fence, the sequence status (active / none) and the live
+    // payer — a decision made from this earlier read could race a saved-card
+    // submit, a stop / pause, or a payer assignment landing in between.
+    const drawn = await autoApplyAccountCreditIfEnabled(inv.id, { dunningDraw: true });
     if (drawn?.applied > 0) draws.push({ invoiceId: String(inv.id), amount: drawn.applied });
   }
   return draws;

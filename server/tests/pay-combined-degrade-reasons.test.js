@@ -5,8 +5,8 @@
 // return values are unchanged (null or the sibling rows), the setup-seam
 // throws are unchanged, and the caller's `database` now reaches the payer
 // resolve too (a boundary check inside a held transaction must not need a
-// second pool connection). invoiceCreditWouldFullyCover moved here with a
-// `database` param; pay-v2 re-exports the same function.
+// second pool connection). invoiceCreditWouldFullyCover lives here with a
+// `database` param (pay-v2 imports it; it no longer re-exports it).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
 const mockGates = { autoApplyAccountCredit: true };
@@ -194,8 +194,9 @@ describe('the caller\'s database handle reaches the payer resolve', () => {
     }));
     expect(mockOpenBalance).toHaveBeenCalledWith('cust-1', expect.objectContaining({ database: handle }));
     expect(mockStopped).toHaveBeenCalledWith(['s1'], { database: handle });
-    // Default callers (the pay page, money seams) keep the writing fence.
-    expect(mockReconcile).toHaveBeenCalledWith('s1', handle, { readOnly: false });
+    // Default callers (the pay page, money seams) keep the writing fence: the
+    // very same two-argument call they always made.
+    expect(mockReconcile.mock.calls).toEqual([['s1', handle]]);
   });
 
   test('readOnly reaches the sibling reconciliation fence', async () => {
@@ -210,7 +211,7 @@ describe('the caller\'s database handle reaches the payer resolve', () => {
   });
 });
 
-describe('invoiceCreditWouldFullyCover (hoisted from pay-v2)', () => {
+describe('invoiceCreditWouldFullyCover (lives in pay-combined)', () => {
   const invoice = { customer_id: 'cust-1', total: 100, credit_applied: 0 };
   const dbReturning = (row) => {
     const handle = jest.fn(() => ({ where: () => ({ first: jest.fn(async () => row) }) }));

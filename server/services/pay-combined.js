@@ -150,6 +150,20 @@ function makeDegrade(onDegrade) {
   };
 }
 
+// The setup-seam abort verdicts (they reach the route, never degrade to a
+// single-invoice charge): a resolved third-party payer, or resolution that
+// could not be verified.
+function setupSeamAbort(payerBilled) {
+  const err = new Error(payerBilled
+    ? 'This invoice is billed to a third-party payer and can no longer be paid from this page — refreshing.'
+    : 'Could not verify billing ownership for this invoice — please try again in a moment.');
+  err.statusCode = 409;
+  err.staleBalance = true;
+  if (payerBilled) err.payerBilledAnchor = true;
+  err.combinedSetupAbort = true;
+  return err;
+}
+
 /**
  * The sibling invoices a combined charge for `anchorInvoice` would collect,
  * or null when the combined flow must not engage (gate off, payer-billed
@@ -163,15 +177,20 @@ function makeDegrade(onDegrade) {
  * an unexpected selection failure reports 'incomplete'. `database` is
  * threaded into the payer resolve as well as every read below it.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null, onDegrade, readOnly = false } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId, throwOnPayerAnchor, releaseAbandonedPaymentIntents, onAbandonedReleased, onDegrade, readOnly } = {}) {
+  // The option flags are only ever truth-tested (an absent flag is falsy), so
+  // they carry no defaults; `database` is the one option with a real default.
   const degrade = makeDegrade(onDegrade);
   let errorReason = 'incomplete';
   try {
-    if (!isEnabled('payIncludeBalance')) return degrade('gate_off');
-    if (!anchorInvoice?.customer_id) return degrade('incomplete');
-    // A payer-billed or statement-accrued anchor is the third party's money —
-    // never fan the homeowner's balance into it.
-    if (anchorInvoice.payer_id || anchorInvoice.payer_statement_id) return degrade('payer_anchor');
+    // Early exits, first hit wins. A payer-billed or statement-accrued anchor
+    // is the third party's money — never fan the homeowner's balance into it.
+    const earlyExit = [
+      [!isEnabled('payIncludeBalance'), 'gate_off'],
+      [!anchorInvoice?.customer_id, 'incomplete'],
+      [anchorInvoice?.payer_id || anchorInvoice?.payer_statement_id, 'payer_anchor'],
+    ].find(([hit]) => hit);
+    if (earlyExit) return degrade(earlyExit[1]);
     // LIVE anchor payer resolution (codex r6 P1): a payer assigned via the
     // scheduled service or customer default AFTER invoice creation leaves
     // invoices.payer_id null — the raw-column check above would let
@@ -183,45 +202,32 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
     // degrading to single-invoice would still charge the homeowner debt
     // that now belongs to third-party AP — e.g. a payer edit that won the
     // shared advisory lock while this setup was queued behind it.
-    {
-      const PayerService = require('./payer');
-      let resolved;
-      try {
-        resolved = await PayerService.resolveForInvoice({
-          customerId: String(anchorInvoice.customer_id),
-          ...(anchorInvoice.scheduled_service_id ? { scheduledServiceId: String(anchorInvoice.scheduled_service_id) } : {}),
-          throwOnError: true,
-          database,
-        });
-      } catch (resolveErr) {
-        if (resolveErr.combinedSetupAbort) throw resolveErr;
-        // Resolution UNCERTAINTY at the setup seam aborts too (codex r16
-        // P1): "the lookup is down" is not "no payer" — minting an
-        // anchor-only PI on an unproven self-pay anchor could charge the
-        // homeowner debt a just-assigned payer now owns. The GET path
-        // still degrades (a read must not 500).
-        if (throwOnPayerAnchor) {
-          const err = new Error('Could not verify billing ownership for this invoice — please try again in a moment.');
-          err.statusCode = 409;
-          err.staleBalance = true;
-          err.combinedSetupAbort = true;
-          throw err;
-        }
-        errorReason = 'payer_unresolved';
-        throw resolveErr; // outer catch degrades (GET / non-seam callers)
-      }
-      if (resolved?.payerId) {
-        if (throwOnPayerAnchor) {
-          const err = new Error('This invoice is billed to a third-party payer and can no longer be paid from this page — refreshing.');
-          err.statusCode = 409;
-          err.staleBalance = true;
-          err.payerBilledAnchor = true;
-          err.combinedSetupAbort = true;
-          throw err;
-        }
-        logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
-        return degrade('payer_anchor');
-      }
+    let resolved = null;
+    let resolveErr = null;
+    try {
+      resolved = await require('./payer').resolveForInvoice({
+        customerId: String(anchorInvoice.customer_id),
+        ...(anchorInvoice.scheduled_service_id ? { scheduledServiceId: String(anchorInvoice.scheduled_service_id) } : {}),
+        throwOnError: true,
+        database,
+      });
+    } catch (err) {
+      if (err.combinedSetupAbort) throw err;
+      resolveErr = err;
+    }
+    const payerBilled = Boolean(resolved?.payerId);
+    // Resolution UNCERTAINTY at the setup seam aborts too (codex r16 P1):
+    // "the lookup is down" is not "no payer" — minting an anchor-only PI on an
+    // unproven self-pay anchor could charge the homeowner debt a just-assigned
+    // payer now owns. The GET path still degrades (a read must not 500).
+    if (throwOnPayerAnchor && (resolveErr || payerBilled)) throw setupSeamAbort(payerBilled);
+    if (resolveErr) {
+      errorReason = 'payer_unresolved';
+      throw resolveErr; // outer catch degrades (GET / non-seam callers)
+    }
+    if (payerBilled) {
+      logger.info(`[pay-combined] anchor invoice ${anchorInvoice.invoice_number} resolves to payer ${resolved.payerId} — combined flow disabled`);
+      return degrade('payer_anchor');
     }
 
     let incomplete = null;
@@ -282,49 +288,39 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       }
       eligible.push(inv);
     }
-    if (!eligible.length) return degrade('none');
     // Saved-card/orphan reconciliation fence per sibling (codex r13 P1): a
     // sibling with an unresolved charge attempt or orphaned charge may
     // ALREADY be collected — a combined PI capturing its share too would
     // double-collect, and the webhook's post-capture quarantine is too
     // late. Drop such siblings from the selection (graceful — the anchor
     // still pays alone or with the clean siblings); the locked verifier
-    // re-checks at every money seam.
-    {
-      const StripeService = require('./stripe');
-      const cleared = [];
-      for (const inv of eligible) {
-        // Read-only callers (the customer-dunning resolver, which asserts the
-        // set in a message) run the SAME per-member predicate as the anchor:
-        // a recognised pending state excludes the sibling; an unexpected
-        // failure proves nothing, so the selection is incomplete (the caller
-        // holds) rather than a set built on an unread fence.
+    // re-checks at every money seam. Read-only callers (the customer-dunning
+    // resolver, which asserts the set in a message) run the SAME per-member
+    // predicate as the anchor: a recognised pending state excludes the
+    // sibling, and an unexpected failure proves nothing, so the selection is
+    // incomplete (the caller holds) rather than a set built on an unread fence.
+    const StripeService = require('./stripe');
+    const fenceOne = readOnly
+      ? (inv) => memberCollectionPending(inv, { database })
+      : (inv) => StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database).then(() => null);
+    const cleared = [];
+    for (const inv of eligible) {
+      let verdict = null;
+      try {
+        verdict = await fenceOne(inv);
+      } catch (fenceErr) {
         if (readOnly) {
-          let verdict;
-          try {
-            verdict = await memberCollectionPending(inv, { database });
-          } catch (checkErr) {
-            logger.warn(`[pay-combined] sibling ${inv.invoice_number} collection check unreadable (${checkErr.code || checkErr.message}) — read-only selection incomplete`);
-            return degrade('incomplete');
-          }
-          if (verdict) {
-            logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${verdict.reason}`);
-          } else {
-            cleared.push(inv);
-          }
-          continue;
+          logger.warn(`[pay-combined] sibling ${inv.invoice_number} collection check unreadable (${fenceErr.code || fenceErr.message}) — read-only selection incomplete`);
+          return degrade('incomplete');
         }
-        try {
-          await StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly });
-          cleared.push(inv);
-        } catch (fenceErr) {
-          logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${fenceErr.message}`);
-        }
+        verdict = { reason: fenceErr.message };
       }
-      if (!cleared.length) return degrade('none');
-      eligible.length = 0;
-      eligible.push(...cleared);
+      if (verdict) logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${verdict.reason}`);
+      else cleared.push(inv);
     }
+    if (!cleared.length) return degrade('none');
+    eligible.length = 0;
+    eligible.push(...cleared);
     if (eligible.length > MAX_COMBINED_SIBLINGS) {
       logger.warn(`[pay-combined] customer ${anchorInvoice.customer_id} has ${eligible.length} eligible siblings (cap ${MAX_COMBINED_SIBLINGS}) — combined flow disabled for this session`);
       return degrade('over_cap');
@@ -333,7 +329,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
   } catch (err) {
     // Setup-seam abort verdicts (payer-billed anchor OR resolution
     // uncertainty) must reach the route, never degrade to single-invoice.
-    if (err.combinedSetupAbort || err.payerBilledAnchor) throw err;
+    if (err.combinedSetupAbort) throw err; // setupSeamAbort sets it on every abort verdict
     logger.warn(`[pay-combined] sibling selection failed for invoice ${anchorInvoice?.id}: ${err.message} — combined flow disabled for this session`);
     return degrade(errorReason);
   }

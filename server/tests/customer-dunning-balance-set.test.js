@@ -414,7 +414,7 @@ describe('applyCreditBeforeResolve (runner only)', () => {
     // each draw is its own transaction: no caller trx is threaded in (so the
     // credit helper still runs the full-coverage side effects itself), and the
     // collection fence rides INSIDE that transaction via the opt-in option
-    for (const call of mockAutoApply.mock.calls) expect(call[1]).toEqual({ requireNoCollectionPending: true });
+    for (const call of mockAutoApply.mock.calls) expect(call[1]).toEqual({ dunningDraw: true });
   });
 
   test('takes no database handle (a caller\'s handle would make the helper skip its full-coverage side effects)', () => {
