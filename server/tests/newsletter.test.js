@@ -1484,6 +1484,17 @@ describe('sendgrid newsletter suppression ledger writes', () => {
     expect(q.update).toHaveBeenCalled();
   });
 
+  test('a Gmail bounce matches the subscriber by mailbox identity (any spelling), not by id', async () => {
+    const { client, calls } = fakeClient();
+    await handleNewsletterEvent({ event: 'bounce', type: 'bounce', email: 'John.Doe+home@googlemail.com' }, {
+      id: 'delivery-6', send_id: 'send-6', subscriber_id: 17, email: 'John.Doe+home@googlemail.com',
+    }, client);
+    const q = calls.newsletter_subscribers[0];
+    expect(q.where).not.toHaveBeenCalled();
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("IN ('gmail.com', 'googlemail.com')"), ['johndoe']);
+    expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ last_bounced_at: expect.any(Date) }));
+  });
+
   test('opt-outs are never fenced by address: unsubscribe and spam complaint always apply', async () => {
     for (const ev of [
       { event: 'spamreport', email: 'Old.Typo@Example.com' },

@@ -94,4 +94,35 @@ function suppressionCoversColumnSql(suppressionColumn, recipientColumn) {
     + ` AND ${GOOGLE_MAILBOX_SQL.mailbox(suppressionColumn)} = ${GOOGLE_MAILBOX_SQL.mailbox(recipientColumn)}))`;
 }
 
-module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, GOOGLE_DOT_INSENSITIVE_DOMAINS };
+/**
+ * Which newsletter_subscribers rows a bounce lands on. Takes a fresh
+ * `db('newsletter_subscribers')` builder and the delivery's subscriber id and
+ * mailed address.
+ *
+ * - No recorded mailed address: the plain id match (nothing to fence on).
+ * - A Google mailed address: EVERY row on that Gmail mailbox (dots, +tag,
+ *   googlemail spellings), matched by identity and not by id. The inbox is
+ *   what bounced, so every subscriber row for it takes the bounce, and a late
+ *   bounce for one spelling still lands when the row was stored under another.
+ *   An address on another mailbox (a merged-away typo) still does not match.
+ * - Any other address: the delivery's row, fenced to the exact LOWER/TRIM
+ *   address, as before (dots and +tags are significant off Google).
+ *
+ * Bounce writes only. Opt-outs stay unfenced at their call sites.
+ */
+function subscriberRowsForBounce(query, subscriberId, mailedEmail) {
+  const mailed = String(mailedEmail || '').trim().toLowerCase();
+  const { googleMailboxIdentity, GOOGLE_MAILBOX_SQL } = require('./customer-comms-lock');
+  const mailbox = mailed ? googleMailboxIdentity(mailed) : null;
+  if (mailbox) {
+    const column = 'TRIM(email)';
+    return query.whereRaw(
+      `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?)`,
+      [mailbox.split('@')[0]],
+    );
+  }
+  const byId = query.where({ id: subscriberId });
+  return mailed ? byId.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : byId;
+}
+
+module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, subscriberRowsForBounce, GOOGLE_DOT_INSENSITIVE_DOMAINS };

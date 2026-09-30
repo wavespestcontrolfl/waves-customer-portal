@@ -32,6 +32,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { subscriberRowsForBounce } = require('../utils/email-equivalence');
 const logger = require('../services/logger');
 
 const SVIX_ID = 'svix-id';
@@ -137,9 +138,11 @@ async function handleEvent(ev) {
           // delivery was mailed to, exactly as the SendGrid handler does: a
           // late bounce from the dead old mailbox must not bounce-count the
           // corrected address. The complaint (opt-out) below is never fenced.
-          const bouncedQ = db('newsletter_subscribers').where({ id: delivery.subscriber_id });
-          const mailed = String(delivery.email || '').trim().toLowerCase();
-          await (mailed ? bouncedQ.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : bouncedQ).update({
+          // Matched by Gmail mailbox identity (any spelling, every row on the
+          // inbox); exact LOWER/TRIM for other domains.
+          await subscriberRowsForBounce(
+            db('newsletter_subscribers'), delivery.subscriber_id, delivery.email,
+          ).update({
             bounce_count: db.raw('COALESCE(bounce_count,0) + 1'),
             last_bounced_at: now,
             updated_at: now,

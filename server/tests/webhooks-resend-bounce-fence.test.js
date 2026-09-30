@@ -60,6 +60,18 @@ describe('Resend webhook subscriber writes after a subscriber merge', () => {
     expect(u.ops.find((o) => o[0] === 'update')[1]).toHaveProperty('last_bounced_at');
   });
 
+  test('a Gmail bounce matches by mailbox identity across every row on the inbox, not by id', async () => {
+    mockDelivery = { id: 'd1', send_id: 's1', subscriber_id: 7, email: 'John.Doe+home@googlemail.com', bounced_at: null };
+    await post('email.bounced');
+    const [u] = subscriberUpdates();
+    expect(u.ops.some((o) => o[0] === 'where')).toBe(false);
+    const [, sql, bind] = u.ops.find((o) => o[0] === 'whereRaw');
+    expect(sql).toMatch(/IN \('gmail\.com', 'googlemail\.com'\)/);
+    expect(sql).toMatch(/TRIM\(email\)/);
+    expect(bind).toEqual(['johndoe']);
+    expect(u.ops.find((o) => o[0] === 'update')[1]).toHaveProperty('last_bounced_at');
+  });
+
   test('a delivery with no recorded address keeps the plain id match', async () => {
     mockDelivery = { id: 'd1', send_id: 's1', subscriber_id: 7, email: null, bounced_at: null };
     await post('email.bounced');
