@@ -453,3 +453,92 @@ describe('consent (r2)', () => {
     expect(r.toRemove).toBe(1);
   });
 });
+
+
+describe('address identifier (name + ZIP)', () => {
+  const jo = { fn: 'h:joann', ln: 'h:oneil', zp: '34221' };
+  const person = { firstName: 'Mrs. Jo-Ann', lastName: "O'Neil Jr.", zip: '34221-1234' };
+  const ingests = () => global.fetch.mock.calls.filter((c) => /audienceMembers:ingest$/.test(c[0])).map((c) => JSON.parse(c[1].body));
+  const removes = () => global.fetch.mock.calls.filter((c) => /audienceMembers:remove$/.test(c[0])).map((c) => JSON.parse(c[1].body));
+  const savedMembers = () => JSON.parse(inserts.filter((i) => i.table === 'ad_audience_syncs').pop().row.member_keys);
+  const addressOf = (e) => ({ address: { givenName: e.fn, familyName: e.ln, regionCode: 'US', postalCode: e.zp } });
+
+  test('hashExtras: hashed names, unhashed 5-digit ZIP — only when both names AND ZIP exist', () => {
+    expect(GCM._private.hashExtras({ email: 'a@x.com', ...person })).toEqual(jo);
+    expect(GCM._private.hashExtras({ firstName: 'Jo', zip: '34221' })).toBeNull();
+    expect(GCM._private.hashExtras({ firstName: 'Jo', lastName: 'Lee' })).toBeNull();
+  });
+  test('toUserData appends the address identifier (email/phone first, well under the 10-identifier cap)', () => {
+    expect(toUserData(['h:e', 'h:p'], jo).userIdentifiers).toEqual([{ emailAddress: 'h:e' }, { phoneNumber: 'h:p' }, addressOf(jo)]);
+    expect(toUserData(['h:e', ''], null).userIdentifiers).toEqual([{ emailAddress: 'h:e' }]);
+  });
+  test('a new member ingests with the address and persists its extras beside the [email,phone] identity', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'r1' });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: null, ...person }]);
+    await GCM.syncAudience('customers', {});
+    expect(ingests()[0].audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:a@x.com' }, addressOf(jo)]);
+    expect(savedMembers()).toEqual([expect.objectContaining({ d: ['h:a@x.com', ''], e: jo })]);
+  });
+  test('ROLLOUT: already-uploaded members are enriched by re-ingesting — never removed, no churn', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'r2' });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: null, ...person }]);
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''] }], pending: [] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toAdd: 0, toRemove: 0, toEnrich: 1, memberCount: 1 });
+    expect(removes()).toEqual([]);
+    expect(ingests()[0].audienceMembers).toHaveLength(1);
+    expect(savedMembers()).toEqual([expect.objectContaining({ e: jo })]);
+    // next run: unchanged extras → no call
+    stateRow = { member_keys: savedMembers(), pending: [] };
+    global.fetch = okFetch({});
+    expect(await GCM.syncAudience('customers', {})).toMatchObject({ toAdd: 0, toRemove: 0, toEnrich: 0 });
+    expect(global.fetch.mock.calls.some((c) => /audienceMembers:(ingest|remove)$/.test(c[0]))).toBe(false);
+  });
+  test('an enrichment is held while a remove sharing its handle is in flight, and state keeps the OLD extras', async () => {
+    configure({ allow: true });
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] } });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: null, ...person }]);
+    stateRow = {
+      member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''] }],
+      pending: [{ requestId: 'rm', op: 'remove', at: recentIso(), members: [{ k: 'customer:x', d: ['h:a@x.com', 'h:other'] }] }],
+    };
+    await GCM.syncAudience('customers', {});
+    expect(ingests()).toEqual([]);
+    expect(savedMembers()).toEqual([{ k: 'customer:c1', d: ['h:a@x.com', ''] }]);
+  });
+  test('removal of an enriched member sends the address too; a legacy member removes with email/phone only', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'rm' });
+    mockCollectCustomers.mockResolvedValue([]);
+    stateRow = { member_keys: [
+      { k: 'customer:new', d: ['h:new@x.com', ''], e: jo },
+      { k: 'customer:old', d: ['h:old@x.com', ''] },
+    ], pending: [] };
+    await GCM.syncAudience('customers', {});
+    const ids = removes()[0].audienceMembers.map((m) => m.userData.userIdentifiers);
+    expect(ids).toEqual([[{ emailAddress: 'h:new@x.com' }, addressOf(jo)], [{ emailAddress: 'h:old@x.com' }]]);
+  });
+  test('a stale row sharing a current member\'s name+ZIP handle is retained, not removed', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'x' });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'new@x.com', phone: null, ...person }]);
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:old@x.com', ''], e: jo }], pending: [] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toAdd: 1, toRemove: 0, retained: 1 });
+    expect(removes()).toEqual([]);
+  });
+  test('consent: an opted-out row is removed (with its address) even though a current member shares the name+ZIP', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'rm' });
+    tableData.email_suppressions = [{ email: 'optout@x.com' }];
+    mockCollectLeads.mockResolvedValue([{ key: 'lead:l2', email: 'fine@x.com', phone: null, ...person }]);
+    stateRow = { member_keys: [{ k: 'lead:l1', d: ['h:optout@x.com', ''], e: jo }], pending: [] };
+    const r = await GCM.syncAudience('unbooked_leads', {});
+    expect(r.consentRemovals).toBe(1);
+    expect(removes()[0].audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:optout@x.com' }, addressOf(jo)]);
+    // the household twin is dropped from state so it re-adds next run (one-cycle flicker, guaranteed removal)
+    expect(r.deferredReAdds).toBe(1);
+  });
+});

@@ -15,6 +15,7 @@ const logger = require('../logger');
 const { etDateString, addETDays } = require('../../utils/datetime-et');
 const { runExclusive } = require('../../utils/cron-lock');
 const { loadMarketingSuppression, normPhone: consentNormPhone } = require('./ad-audience-consent');
+const matchFields = require('./ad-match-fields');
 
 let _googleapis;
 function getGoogle() {
@@ -124,12 +125,16 @@ function sha256Hex(value) {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function hashedUserData({ email, phone }) {
+const googleAddressParts = (src) => matchFields.googleAddressParts(src, sha256Hex);
+
+function hashedUserData({ email, phone, firstName, lastName, city, state, zip }) {
   const identifiers = [];
   const normalizedEmail = normalizeEmail(email);
   const normalizedPhone = normalizePhone(phone);
   if (normalizedEmail) identifiers.push({ emailAddress: sha256Hex(normalizedEmail) });
   if (normalizedPhone) identifiers.push({ phoneNumber: sha256Hex(normalizedPhone) });
+  const address = googleAddressParts({ firstName, lastName, city, state, zip });
+  if (address) identifiers.push({ address });
   return identifiers.length ? { userIdentifiers: identifiers.slice(0, 10) } : null;
 }
 
@@ -282,6 +287,7 @@ function matchKeys(candidate, event = null) {
     gbraid: !!candidate.gbraid,
     email: !!normalizeEmail(candidate.email),
     phone: !!normalizePhone(candidate.phone),
+    address: !!(userData?.userIdentifiers || []).some((u) => u.address),
     userIdentifiers: userData?.userIdentifiers?.length || 0,
   };
 }
@@ -315,6 +321,7 @@ function candidateMatchScore(candidate) {
   if (candidate.wbraid || candidate.gbraid) score += 6;
   if (normalizeEmail(candidate.email)) score += 4;
   if (normalizePhone(candidate.phone)) score += 4;
+  if (googleAddressParts(candidate)) score += 1;
   if (number(candidate.conversionValue) > 0) score += 2;
   if (candidate.eventTimestamp) score += 1;
   if (candidate.leadId) score += 1;
@@ -372,9 +379,23 @@ function dedupeCandidatesByTransaction(candidates = []) {
   ));
 }
 
+// Name/address for a conversion: the row's own person first, the linked
+// customer as fallback (see ad-match-fields.mergeIdentity). Lead rows have no
+// state column, so state only ever comes from the linked customer.
+function leadIdentity(row) {
+  return matchFields.mergeIdentity(
+    { firstName: row.first_name, lastName: row.last_name, city: row.city, zip: row.zip },
+    { firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
+  );
+}
+
 function mapLeadCandidate(row) {
   const eventTimestamp = toRfc3339(row.converted_at || row.first_contact_at || row.created_at);
   return {
+    ...leadIdentity(row),
+    // Meta external_id: the linked customer id when there is one (so the Lead
+    // and the later Purchase are the same person), else lead:<id>.
+    externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId: row.id }),
     conversionType: 'qualified_lead',
     sourceTable: 'leads',
     sourceId: row.id,
@@ -423,11 +444,18 @@ function mapCompletedJobCandidate(row) {
   const leadPhone = row.lead_phone || null;
   const customerEmail = row.customer_email || null;
   const customerPhone = row.customer_phone || null;
+  const leadId = row.lead_id || estimateLeadId(row.estimate_data);
   return {
+    // The customer record is canonical for a completed job; the lead is the fallback.
+    ...matchFields.mergeIdentity(
+      { firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
+      { firstName: row.lead_first_name, lastName: row.lead_last_name, city: row.lead_city, zip: row.lead_zip },
+    ),
+    externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId }),
     conversionType: 'completed_job_revenue',
     sourceTable: 'estimate_actuals',
     sourceId: row.id,
-    leadId: row.lead_id || estimateLeadId(row.estimate_data),
+    leadId,
     estimateId: row.estimate_id || null,
     customerId: row.customer_id || null,
     invoiceId: row.invoice_id || null,
@@ -491,6 +519,10 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       'l.status',
       'l.email',
       'l.phone',
+      'l.first_name',
+      'l.last_name',
+      'l.city',
+      'l.zip',
       'l.gclid',
       'l.wbraid',
       'l.gbraid',
@@ -499,6 +531,11 @@ async function collectQualifiedLeadCandidates({ since, endDate, limit = MAX_LIMI
       'l.fbp',
       'c.email as customer_email',
       'c.phone as customer_phone',
+      'c.first_name as customer_first_name',
+      'c.last_name as customer_last_name',
+      'c.city as customer_city',
+      'c.state as customer_state',
+      'c.zip as customer_zip',
       'ls.name as source_name',
       'ls.source_type',
       'ls.channel',
@@ -559,6 +596,10 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
       'l.id as lead_id',
       'l.email as lead_email',
       'l.phone as lead_phone',
+      'l.first_name as lead_first_name',
+      'l.last_name as lead_last_name',
+      'l.city as lead_city',
+      'l.zip as lead_zip',
       'l.gclid',
       'l.wbraid',
       'l.gbraid',
@@ -567,6 +608,11 @@ async function collectCompletedJobCandidates({ since, endDate, limit = MAX_LIMIT
       'l.fbp',
       'c.email as customer_email',
       'c.phone as customer_phone',
+      'c.first_name as customer_first_name',
+      'c.last_name as customer_last_name',
+      'c.city as customer_city',
+      'c.state as customer_state',
+      'c.zip as customer_zip',
       'inv.invoice_id',
       'inv.invoice_total',
       'inv.invoice_status',
@@ -620,7 +666,11 @@ async function applyMarketingConsent(conversionType, candidates) {
   const cleaned = candidates.map((candidate, i) => {
     if (flags[i] || (candidate.transactionId && suppressedTransactions.has(candidate.transactionId))) {
       suppressed += 1;
-      return { ...candidate, email: null, phone: null, consentSuppressed: true };
+      // Name/ZIP/city/state/external_id identify the same person, so they go
+      // with email/phone — an opted-out person is never matchable through them.
+      return {
+        ...candidate, email: null, phone: null, ...matchFields.nullIdentityFields(), consentSuppressed: true,
+      };
     }
     const ph = consentNormPhone(candidate.phone);
     if (ph && sup.invalidPhones.has(ph)) {
@@ -1093,6 +1143,7 @@ module.exports = {
     configurationFor,
     dedupeCandidatesByTransaction,
     destinationFor,
+    googleAddressParts,
     hashedUserData,
     mapCompletedJobCandidate,
     mapLeadCandidate,
