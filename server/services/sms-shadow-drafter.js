@@ -1054,17 +1054,30 @@ function draftIntendedActions(raw) {
 // decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that
 // hold a decision row (agent-decision-send-checks, scheduler.js); NO_DECISION (no row behind the body)
 // keeps the strict, snapshot-or-named-lane behavior.
+// True when a decision's intended actions include the send-reservice-link escalation (or any
+// escalate whose note names the re-service).
+function reserviceCarriesLinkAction(actions) {
+  return Array.isArray(actions) && actions.some((a) => a && a.type === 'escalate' && /reservice/i.test(String(a.note || '')));
+}
 const NO_DECISION = { none: true };
 async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta: meta = NO_DECISION }) {
   const body = String(outgoingBody || '');
-  if (!isReserviceOfferPromise(body)) return null;
+  // STRUCTURAL BACKSTOP (pre-push audit P1, PR #5336): a decision whose intended_actions carry the
+  // send-reservice-link action ALWAYS revalidates its snapshot lanes live, whatever the (possibly
+  // edited) body says — the detector may miss a promise ("I'll get a tech back out for the ants, no
+  // cost to you"). Body detection only ADDS checks (a body promising more / an excluded
+  // specialty); it is never the only trigger.
+  const promise = isReserviceOfferPromise(body);
+  if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
   // Codex round-7 (PR #5336): checked BEFORE any snapshot fallback — an edit that
   // swaps the promised service for an excluded specialty names no pest/lawn lane.
-  if (reserviceExcludedSpecialtyInPromise(body)) {
+  // (Non-promise bodies contribute nothing below: promiseText is empty, so no lane or specialty is read from it.)
+  const promiseText = promise ? body : '';
+  if (reserviceExcludedSpecialtyInPromise(promiseText)) {
     return 're-service promise names an excluded specialty (termites/rodents/mosquitoes/tree & shrub) the link cannot book';
   }
-  const snapshotLanes = ['pest', 'lawn'].filter((lane) => [].concat(promisedLanes || []).includes(lane));
-  const namedLanes = namedReserviceLanesInText(body);
+  const snapshotLanes = ['pest', 'lawn'].filter((lane) => [].concat(promisedLanes).includes(lane));
+  const namedLanes = namedReserviceLanesInText(promiseText);
   const lanes = namedLanes.length ? namedLanes : snapshotLanes;
   // Where the promised lanes come from, resolved ONCE (Codex round-14): the draft-time snapshot; the
   // body's own named lanes when no decision backs it; a grandfathered pre-deploy decision (older
@@ -1084,7 +1097,7 @@ async function reservicePromiseStillEligible({ outgoingBody, customerId, promise
   }
   if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
   const factsLanes = eligibleReserviceLanes(meta.factsBlock === undefined ? draftRow.facts_block : meta.factsBlock);
-  const candidates = lanes.length ? lanes : (factsLanes.length ? factsLanes : ['pest', 'lawn']);
+  const candidates = [lanes, factsLanes, ['pest', 'lawn']].find((set) => set.length);
   return reserviceLanesBlockedReason(candidates, await liveReserviceLaneState(customerId), !lanes.length);
 }
 
@@ -3301,6 +3314,7 @@ module.exports = {
   isReserviceOfferPromise,
   namedReserviceLanesInText,
   reservicePromiseStillEligible,
+  reserviceCarriesLinkAction,
   validateComplianceCopy,
   hasBannedCustomerCopy,
   PEST_REPORT_TEXT_RE,

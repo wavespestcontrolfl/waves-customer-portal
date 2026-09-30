@@ -2552,6 +2552,66 @@ describe('free re-service is an entitlement resolved through the existing mechan
       });
     });
 
+    // Pre-push audit P1 (PR #5336): the action-carrying decision is ALWAYS revalidated, so the
+    // detector missing a promise can never let it through.
+    describe('structural backstop: a decision carrying send_reservice_link always revalidates its snapshot lanes', () => {
+      const missed = 'We will have someone stop by again for the ants, no cost to you.';
+      const meta = { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] };
+
+      test('the phrasing really is one the body detector misses', () => {
+        expect(require('../services/sms-shadow-drafter').isReserviceOfferPromise(missed)).toBe(false);
+      });
+
+      test('blocked when the snapshot lane is no longer bookable; passes when it is', async () => {
+        await expect(loadWith({ lanes: ['pest'], booked: ['pest'] }).drafter.reservicePromiseStillEligible({ outgoingBody: missed, customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta })).resolves.toMatch(/already booked/);
+        await expect(loadWith({ lanes: [] }).drafter.reservicePromiseStillEligible({ outgoingBody: missed, customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta })).resolves.toMatch(/no longer eligible/);
+        await expect(loadWith({ lanes: ['pest'] }).drafter.reservicePromiseStillEligible({ outgoingBody: missed, customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta })).resolves.toBeNull();
+      });
+
+      test('through the real immediate-send check; a decision WITHOUT the action and a non-promise body is untouched', async () => {
+        loadWith({ lanes: [], booked: [] });
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        const withAction = { id: 'd1', customer_id: 'cust-1', suggested_message: missed, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: ['pest'], intended_actions: meta.intendedActions }), prompt_version: 'house_voice_v12_real_answers2' };
+        await expect(agentDecisionSendBlockReason({ decision: withAction, outgoingBody: missed })).resolves.toMatch(/re-service promise unsendable/);
+        await expect(agentDecisionSendBlockReason({ decision: { ...withAction, input_snapshot: JSON.stringify({ intended_actions: [] }) }, outgoingBody: missed })).resolves.toBeNull();
+      });
+    });
+
+    // Pre-push audit P1 #2 (PR #5336): the scheduled-send recheck never blocks a plain non-promise
+    // message on its own plumbing.
+    describe('scheduledReserviceBlockReason (scheduler.js recheck)', () => {
+      const throwingDb = () => { throw new Error('db down'); };
+      const rowDb = (row) => () => ({ where: () => ({ first: async () => row }) });
+
+      test('DB throw on a NON-promise scheduled send → sends', async () => {
+        loadWith({ lanes: ['pest'] });
+        const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'Your balance is $95, due at the next visit.', dbh: throwingDb })).resolves.toBeNull();
+      });
+
+      test('DB throw on a re-service PROMISE → blocked (fail closed)', async () => {
+        loadWith({ lanes: ['pest'] });
+        const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: "We'll send your free pest re-service link now.", dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
+      });
+
+      test('decision carrying the action: a missed-promise body is revalidated (blocked when booked, sends when bookable)', async () => {
+        const missed = 'We will have someone stop by again for the ants, no cost to you.';
+        const row = { customer_id: 'cust-1', prompt_version: 'house_voice_v12_real_answers2', input_snapshot: JSON.stringify({ reservice_lanes_snapshot: ['pest'], intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }] }) };
+        loadWith({ lanes: ['pest'], booked: ['pest'] });
+        await expect(require('../services/agent-decision-send-checks').scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, dbh: rowDb(row) })).resolves.toMatch(/already booked/);
+        loadWith({ lanes: ['pest'] });
+        await expect(require('../services/agent-decision-send-checks').scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, dbh: rowDb(row) })).resolves.toBeNull();
+      });
+
+      test('an ordinary decision (no action) with a non-promise body sends without touching eligibility', async () => {
+        const { loadEligibleReserviceLanes } = loadWith({ lanes: [] });
+        const row = { customer_id: 'cust-1', prompt_version: 'house_voice_v12_real_answers2', input_snapshot: JSON.stringify({ intended_actions: [] }) };
+        await expect(require('../services/agent-decision-send-checks').scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'See you Tuesday!', dbh: rowDb(row) })).resolves.toBeNull();
+        expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
+      });
+    });
+
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,
     // conjunctions, purpose clauses, new nouns, plurals, waive/comp wording), denials
     // and idioms. [sentence, isPromise, promisedLanes].

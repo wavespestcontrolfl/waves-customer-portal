@@ -4353,30 +4353,15 @@ function initScheduledJobs() {
             let reserviceStale = false;
             let reserviceReason = null;
             if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
-              try {
-                const { reservicePromiseStillEligible } = require('./sms-shadow-drafter');
-                const reserviceDecision = await db('agent_decisions')
-                  .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'customer_id', 'prompt_version');
-                let reserviceSnapshot = reserviceDecision?.input_snapshot;
-                if (typeof reserviceSnapshot === 'string') {
-                  try { reserviceSnapshot = JSON.parse(reserviceSnapshot); } catch { reserviceSnapshot = null; }
-                }
-                const reason = await reservicePromiseStillEligible({
-                  outgoingBody: msg.message_body,
-                  customerId: reserviceDecision?.customer_id || msg.customer_id || null,
-                  promisedLanes: reserviceSnapshot?.reservice_lanes_snapshot || null,
-                  // Codex round-9 (PR #5336): same pre-deploy grandfathering as the immediate send path.
-                  decisionMeta: { promptVersion: reserviceDecision?.prompt_version, draftId: reserviceSnapshot?.draft_id || null, intendedActions: Array.isArray(reserviceSnapshot?.intended_actions) ? reserviceSnapshot.intended_actions : null },
-                });
-                if (reason) {
-                  reserviceStale = true;
-                  reserviceReason = reason;
-                }
-              } catch (err) {
-                logger.warn(`[scheduler] re-service promise revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+              // Shared with the immediate send path (agent-decision-send-checks): a plain
+              // non-promise message is never blocked by this recheck's own plumbing.
+              const { scheduledReserviceBlockReason } = require('./agent-decision-send-checks');
+              const reason = await scheduledReserviceBlockReason({
+                agentDecisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, fallbackCustomerId: msg.customer_id || null, dbh: db,
+              });
+              if (reason) {
                 reserviceStale = true;
-                reserviceReason = 'reservice_recheck_failed';
+                reserviceReason = reason;
               }
             }
             if (anchorStale || amountsStale || openTimesStale || slaStale || reserviceStale) {
