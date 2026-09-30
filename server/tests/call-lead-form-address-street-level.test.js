@@ -74,7 +74,7 @@ describe('gate off: nothing changes', () => {
     const verdict = {
       status: 'street_level_form_accept', inServiceArea: true,
       address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
-      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
     };
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer).toBeNull();
   });
@@ -118,13 +118,14 @@ describe('gate on: street-level match on a web-form address', () => {
     const verdict = {
       status: 'street_level_form_accept', inServiceArea: true,
       address: { line1: '1234 sample newbuild trl', line2: '', city: 'parrish', state: 'fl', zip: '34219' },
-      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219' },
+      streetLevel: { granularity: 'ROUTE', route: 'Sample Newbuild Trail', zip: '34219', areaBasis: 'google_zip' },
     };
     const ctx = (c, v = verdict) => buildFailOpenRoutingContext({ call: { direction: 'inbound', ai_validation: { on_file_address_validation: v } }, customer: c, contactPhone: ANI, failOpenEnabled: true });
     expect(ctx(customer).options.knownCustomer).toMatchObject({ addressOnly: true, addressLine1: '1234 Sample Newbuild Trl' });
     expect(ctx({ ...customer, address_line1: '99 Moved Ln' }).options.knownCustomer).toBeNull();
     expect(ctx(customer, { ...verdict, streetLevel: undefined }).options.knownCustomer).toBeNull();
     expect(ctx(customer, { ...verdict, inServiceArea: null }).options.knownCustomer).toBeNull();
+    expect(ctx(customer, { ...verdict, streetLevel: { granularity: 'ROUTE', route: 'x', zip: '34219' } }).options.knownCustomer).toBeNull();   // no recorded area basis
   });
 
   test('Google reporting the county in area is fine; a county out of area is not', async () => {
@@ -239,7 +240,7 @@ describe('street type is part of the street (codex pre-push P1)', () => {
 
   test('the form-provenance check keeps the street type too', async () => {
     const known = lead({ address_line1: '1234 Sample Palm Dr' });
-    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, limit: async () => [{ address, zip: '34219' }] });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [{ first_contact_channel: 'form', address, zip: '34219' }] });
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Drive, Parrish, FL 34219'))).toBe(true);
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Dr Parrish FL 34219'))).toBe(true);
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Court, Parrish, FL 34219'))).toBe(false);
@@ -248,7 +249,7 @@ describe('street type is part of the street (codex pre-push P1)', () => {
 
   test('the WHOLE street must match: an extra directional or street word never hides as a city (codex pre-push r2 P1)', async () => {
     const known = lead({ address_line1: '1234 Sample Palm Dr' });
-    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, limit: async () => [{ address, zip: null }] });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, orderBy() { return this; }, limit: async () => [{ first_contact_channel: 'form', address, zip: null }] });
     for (const typed of [
       '1234 Sample Palm Drive East',
       '1234 Sample Palm Drive East, Parrish, FL 34219',
@@ -272,7 +273,8 @@ describe('onFileAddressIsFromWebForm', () => {
       whereIn: (col, vals) => { calls.push({ col, vals }); return q; },
       whereNull: (col) => { calls.push({ isNull: col }); return q; },
       select: () => q,
-      limit: async () => rows,
+      orderBy: () => q,
+      limit: async () => rows.map((r) => ({ first_contact_channel: 'form', ...r })),
     };
     return q;
   };
@@ -283,7 +285,6 @@ describe('onFileAddressIsFromWebForm', () => {
     expect(await onFileAddressIsFromWebForm(known, connWith([{ address: '1234 Sample Newbuild Trail, Parrish, FL 34219', zip: '34219' }], calls))).toBe(true);
     expect(calls).toEqual(expect.arrayContaining([
       { table: 'leads', where: { customer_id: 'lead-1' } },
-      { col: 'first_contact_channel', vals: ['form', 'website_quote'] },
       { isNull: 'deleted_at' },
     ]));
     // A different house, street or ZIP on the form is not the on-file address.
@@ -308,5 +309,69 @@ describe('buildStreetLevelReadbackItem', () => {
     expect(buildStreetLevelReadbackItem({ knownCaller: out, routingResult: { usesOnFileAddress: false }, callLogId: 'c' })).toBeNull();
     expect(buildStreetLevelReadbackItem({ knownCaller: lead(), routingResult: { usesOnFileAddress: true }, callLogId: 'c' })).toBeNull();
     expect(buildStreetLevelReadbackItem({ knownCaller: null, routingResult: null, callLogId: 'c' })).toBeNull();
+  });
+});
+
+describe('codex round 1 on #5381', () => {
+  test('P1: Google must affirm the area itself — its own ZIP and state, or a service county', async () => {
+    gateOn();
+    const run = (verdict) => trustValidatedNewLeadAddress(lead(), { validate: async () => verdict, extraction: confirmed(), isFormAddress: yesForm });
+    const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Parrish', state: 'FL', postal_code: '34219', ...extra });
+    // No county and no ZIP or state from Google: the form's ZIP alone is not a witness.
+    expect((await run(routeLevel({ normalized: n({ postal_code: null }) }))).addressTrusted).toBe(false);
+    expect((await run(routeLevel({ normalized: n({ state: null }) }))).addressTrusted).toBe(false);
+    expect((await run(routeLevel({ normalized: n({ postal_code: '34203' }) }))).addressTrusted).toBe(false);
+    // Google's own ZIP and state agree: trusted, and the basis is recorded.
+    const zipOnly = await run(routeLevel());
+    expect(zipOnly.addressTrusted).toBe(true);
+    expect(zipOnly.onFileAddressVerdict.streetLevel.areaBasis).toBe('google_zip');
+    const county = await run(routeLevel({ inServiceArea: true, county: 'Manatee County' }));
+    expect(county.onFileAddressVerdict.streetLevel.areaBasis).toBe('google_county');
+  });
+
+  test('P1: the whole house number counts, alphabetic suffix included', async () => {
+    const known = lead({ address_line1: '123A Sample Newbuild Trl' });
+    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [{ first_contact_channel: 'form', address, zip: '34219' }] });
+    expect(await onFileAddressIsFromWebForm(known, conn('123A Sample Newbuild Trail, Parrish, FL 34219'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn('123B Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn('123 Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(lead({ address_line1: '123 Sample Newbuild Trl' }), conn('123A Sample Newbuild Trail, Parrish, FL 34219'))).toBe(false);
+    // Google rewriting the house number is not the form's house.
+    gateOn();
+    const g = (street) => routeLevel({ normalized: { street_line_1: street, city: 'Parrish', state: 'FL', postal_code: '34219' } });
+    expect(streetLevelMatch(known, g('123A Sample Newbuild Trail'))).toMatchObject({ granularity: 'ROUTE' });
+    expect(streetLevelMatch(known, g('123B Sample Newbuild Trail'))).toBeNull();
+    expect(streetLevelMatch(known, g('Sample Newbuild Trail'))).toMatchObject({ granularity: 'ROUTE' });
+  });
+
+  test('P2: a web form attached to a call-origin lead counts; a call-only lead does not', async () => {
+    const known = lead();
+    const conn = (rows) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => rows });
+    const formAddr = { line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    // Voicemail text-back / phone-match attach: channel stays 'call', the form's typed address is in extracted_data.
+    for (const stage of ['lead_webhook_received', 'property_lookup_started', 'quote_calculated']) {
+      expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '9 Call Spoken Ln', extracted_data: { stage, address: formAddr } }]))).toBe(true);
+    }
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', extracted_data: JSON.stringify({ stage: 'lead_webhook_received', address: formAddr }) }]))).toBe(true);
+    // The form's typed address must be the on-file one.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', extracted_data: { stage: 'lead_webhook_received', address: { ...formAddr, line1: '1299 Sample Newbuild Trl' } } }]))).toBe(false);
+    // A call-origin lead with no form evidence (the call's own address lives in leads.address) never qualifies.
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', zip: '34219', extracted_data: { source: 'voice_agent' } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', extracted_data: { stage: 'voicemail', address: formAddr } }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'call', address: '1234 Sample Newbuild Trl', extracted_data: null }]))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'manual', address: '1234 Sample Newbuild Trl', zip: '34219' }]))).toBe(false);
+  });
+
+  test('P1: the card is built for the booking transaction, not written at approval', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+    // The only writer of the item is inside the scheduled_services transaction, unguarded, after the visit insert.
+    const writes = src.split('v2StreetLevelReadbackItem').length - 1;
+    expect(src).toMatch(/v2StreetLevelReadbackItem = buildStreetLevelReadbackItem\(/);
+    const insertAt = src.indexOf("await trx('triage_items')\n                      .insert({\n                        ...v2StreetLevelReadbackItem");
+    const visitInsertAt = src.indexOf(".insert(insertData)");
+    expect(insertAt).toBeGreaterThan(visitInsertAt);
+    expect(src).not.toMatch(/db\('triage_items'\)\s*\.insert\(streetLevelReadback\)/);
+    expect(writes).toBeGreaterThanOrEqual(4);
   });
 });

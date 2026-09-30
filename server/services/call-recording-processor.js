@@ -1554,38 +1554,70 @@ function streetNameKey(line) {
     .map((t) => DIRECTIONAL_ABBREV[t] || t).join('').replace(/[^a-z0-9]/g, '');
 }
 const zip5Of = (zip) => (String(zip || '').match(/^\d{5}/) || [''])[0];
+const alnum = (v) => String(v || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+// The COMPLETE primary number of a street line, alphabetic suffix included:
+// "123B Main St" is not "123 Main St" and not "123A Main St". Empty when the
+// line does not open with a number.
+function houseNumberOf(line) {
+  const token = String(line || '').trim().split(/\s+/)[0] || '';
+  // Digits with at most one letter suffix (or a hyphenated range); an ordinal like "14th" opens a street name, not an address.
+  return /^\d+(?:-\d+|[a-z])?$/i.test(token) ? alnum(token) : '';
+}
+// leads.extracted_data.stage values the web forms stamp. A form typed onto a
+// lead a call created (the voicemail text-back and phone-match attaches keep
+// first_contact_channel 'call') still leaves its own typed address here.
+const FORM_LEAD_STAGES = new Set(['lead_webhook_received', 'property_lookup_started', 'quote_calculated']);
+function parseJsonObjectSafe(v) {
+  if (v && typeof v === 'object') return v;
+  try { const o = JSON.parse(v); return o && typeof o === 'object' ? o : null; } catch { return null; }
+}
+// The address a lead row's own web form typed: the form channels' address
+// columns, or — for a call-origin lead a form attached to — the normalized
+// address the form wrote into extracted_data. Never a call-derived address:
+// call writers never put an address in extracted_data.
+function formTypedAddressOf(row) {
+  if (FORM_LEAD_CHANNELS.includes(row.first_contact_channel)) {
+    const typed = String(row.address || '').trim();
+    if (!typed) return null;
+    const parsed = parseRawAddress(typed);
+    return { line1: parsed.line1, city: parsed.city, zip: parsed.zip || row.zip };
+  }
+  const ex = parseJsonObjectSafe(row.extracted_data);
+  const addr = parseJsonObjectSafe(ex?.address);
+  if (!ex || !FORM_LEAD_STAGES.has(ex.stage) || !addr || !String(addr.line1 || '').trim()) return null;
+  return { line1: String(addr.line1).trim(), city: addr.city, zip: addr.zip };
+}
 // True when the customer's on-file street is what their own web form typed:
-// a live form lead linked to the customer whose address is the same house
-// and street. A call-created lead, or an address only a call ever wrote, has
-// no such row. Any lookup failure fails closed.
+// a live lead linked to the customer whose form-typed address is the same
+// house (whole number, suffix included) and the whole same street, city and
+// ZIP. An address only a call ever wrote has no such row. Any lookup failure
+// fails closed.
 async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
   try {
     if (!knownCaller?.id) return false;
     const line1 = String(knownCaller.addressLine1 || '').trim();
-    const house = (line1.match(/^\d+/) || [''])[0];
+    const house = houseNumberOf(line1);
     const name = streetNameKey(line1);
     if (!house || !name) return false;
     const rows = await conn('leads')
       .where({ customer_id: knownCaller.id })
-      .whereIn('first_contact_channel', FORM_LEAD_CHANNELS)
       .whereNull('deleted_at')
-      .select('address', 'zip')
+      .orderBy('created_at', 'desc')
+      .select('address', 'zip', 'first_contact_channel', 'extracted_data')
       .limit(25);
     const zip = zip5Of(knownCaller.addressZip);
-    const city = String(knownCaller.addressCity || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const city = alnum(knownCaller.addressCity);
     return rows.some((row) => {
-      const typed = String(row.address || '').trim();
-      if (!typed || (typed.match(/^\d+/) || [''])[0] !== house) return false;
-      if (row.zip && zip5Of(row.zip) !== zip) return false;
+      const typed = formTypedAddressOf(row);
+      if (!typed || houseNumberOf(typed.line1) !== house) return false;
       // The WHOLE street must match, type and directional included — a form
       // typing "Sample Palm Drive East" is not the saved "Sample Palm Dr".
       // Whatever follows the street (city, state, ZIP) is parsed off first, so
       // an extra street word can never hide as a city: the parsed city must be
       // the one on file, and a ZIP, when given, the same ZIP.
-      const parsed = parseRawAddress(typed);
-      if (streetNameKey(parsed.line1) !== name) return false;
-      if (parsed.city && parsed.city.toLowerCase().replace(/[^a-z0-9]/g, '') !== city) return false;
-      if (parsed.zip && zip5Of(parsed.zip) !== zip) return false;
+      if (streetNameKey(typed.line1) !== name) return false;
+      if (typed.city && alnum(typed.city) !== city) return false;
+      if (typed.zip && zip5Of(typed.zip) !== zip) return false;
       return true;
     });
   } catch (err) {
@@ -1595,26 +1627,39 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
 }
 // Pure: does Google's answer for the on-file address qualify as street-level
 // on the SAME street, in area? Returns the evidence to persist, else null.
+// Google must AFFIRM the area itself: either it placed the point in a service
+// county, or — when it has no coordinates for a new-build street — it returned
+// the very ZIP and state on file, and that ZIP is one we serve. The form's own
+// ZIP is never the only witness.
 function streetLevelMatch(knownCaller, verdict) {
   if (!verdict || verdict.status !== 'missing_component' || verdict.granularity !== 'ROUTE') return null;
   if (verdict.inServiceArea === false) return null;
   const line1 = String(knownCaller.addressLine1 || '').trim();
-  if (!/^\d+/.test(line1)) return null;             // no house number: nothing to read back
+  const house = houseNumberOf(line1);
+  if (!house) return null;                           // no house number: nothing to read back
   const zip = zip5Of(knownCaller.addressZip);
-  if (!SERVICE_AREA_ZIP5.has(zip)) return null;      // in-area ZIP is the area proof when Google has no county
+  if (!SERVICE_AREA_ZIP5.has(zip)) return null;
   const n = verdict.normalized || {};
   const formName = streetNameKey(line1);
   if (!formName || formName !== streetNameKey(n.street_line_1)) return null;
-  if (n.postal_code && zip5Of(n.postal_code) !== zip) return null;
-  if (n.state && normalizeState(n.state) !== SERVICE_STATE) return null;
-  return { granularity: 'ROUTE', route: String(n.street_line_1 || '').trim() || null, zip };
+  const googleHouse = houseNumberOf(n.street_line_1);
+  if (googleHouse && googleHouse !== house) return null;   // Google rewrote the house number
+  if (zip5Of(n.postal_code) !== zip) return null;          // Google's own ZIP must be present and match
+  if (normalizeState(n.state) !== SERVICE_STATE) return null;
+  return {
+    granularity: 'ROUTE',
+    route: String(n.street_line_1 || '').trim() || null,
+    zip,
+    areaBasis: verdict.inServiceArea === true ? 'google_county' : 'google_zip',
+  };
 }
 function applyStreetLevelFormVerdict(knownCaller, verdict) {
   // Re-checked here so an offline replay of a persisted verdict honors the
   // gate and the same bounds the live pass applied.
   if (!streetLevelFormAddressGateOn()) return knownCaller;
   if (verdict?.inServiceArea !== true || verdict?.streetLevel?.granularity !== 'ROUTE') return knownCaller;
-  if (!/^\d+/.test(String(knownCaller.addressLine1 || '').trim())) return knownCaller;
+  if (!['google_county', 'google_zip'].includes(verdict.streetLevel.areaBasis)) return knownCaller;
+  if (!houseNumberOf(knownCaller.addressLine1)) return knownCaller;
   if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
   knownCaller.addressTrusted = true;
   knownCaller.addressOnly = true;
@@ -9740,6 +9785,7 @@ const CallRecordingProcessor = {
     let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
+    let v2StreetLevelReadbackItem = null;
     // The customer the on-file PROOF above was computed against, plus the
     // address snapshot compared — Step 3 below may retain or reconcile the
     // call to a DIFFERENT canonical customer than knownCaller (codex P1:
@@ -10394,20 +10440,13 @@ const CallRecordingProcessor = {
             // the visit books to the address the lead typed into their form,
             // which Google confirmed only to the street — the office reads
             // the house number back before the visit. Existing reason code
-            // address_readback (advisory, address_review lane). Only when the
-            // booking really dispatches to that on-file address.
-            const streetLevelReadback = buildStreetLevelReadbackItem({
+            // address_readback (advisory, address_review lane). Only BUILT here;
+            // it is written inside the booking transaction, with the visit it
+            // warns about, so it can never outlive a booking that did not land
+            // and a booking can never land without it.
+            v2StreetLevelReadbackItem = buildStreetLevelReadbackItem({
               knownCaller, routingResult, callLogId: call.id, extraction: v2Extraction, onFileAddress,
             });
-            if (streetLevelReadback) {
-              try {
-                await db('triage_items')
-                  .insert(streetLevelReadback)
-                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
-              } catch (fe) {
-                logger.warn(`[call-proc-v2] street-level address read-back insert failed for ${maskSid(callSid)}: ${fe.message}`);
-              }
-            }
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
             // them as ADVISORY review items so the office confirms the field
@@ -17170,6 +17209,19 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
+                  // Street-level web-form address: the read-back card commits
+                  // with the visit it warns about. Deliberately NOT caught — a
+                  // card that cannot be recorded rolls the booking back (held
+                  // for review through the approved-but-unbooked fallback), so
+                  // the unvalidated house never dispatches without its warning.
+                  if (v2StreetLevelReadbackItem && onFileAuthority.useOnFileAddress) {
+                    await trx('triage_items')
+                      .insert({
+                        ...v2StreetLevelReadbackItem,
+                        payload: JSON.stringify({ ...JSON.parse(v2StreetLevelReadbackItem.payload), scheduled_service_id: created.id }),
+                      })
+                      .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+                  }
                   // Visit groups (visit-group-scope.md §2): stamp at
                   // scheduling — a confirmed phone booking never passes
                   // through the job-status pending→confirmed regroup hook.
