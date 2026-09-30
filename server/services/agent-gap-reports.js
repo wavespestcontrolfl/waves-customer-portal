@@ -237,6 +237,10 @@ async function upsertGapRow(row) {
         occurrences: trx.raw('agent_gap_reports.occurrences + 1'),
         last_seen_at: now,
         status: trx.raw("CASE WHEN agent_gap_reports.status = 'fixed' THEN 'new' ELSE agent_gap_reports.status END"),
+        // A reopen clears the old ring: the reopen's own bell re-stamps it in
+        // the savepoint, and if that bell is not written the gap stays
+        // unrung, so its next sighting retries.
+        belled_at: trx.raw("CASE WHEN agent_gap_reports.status = 'fixed' THEN NULL ELSE agent_gap_reports.belled_at END"),
         domain: trx.raw('COALESCE(agent_gap_reports.domain, EXCLUDED.domain)'),
         closest_tool: trx.raw('COALESCE(agent_gap_reports.closest_tool, EXCLUDED.closest_tool)'),
         attempted: trx.raw('COALESCE(EXCLUDED.attempted, agent_gap_reports.attempted)'),

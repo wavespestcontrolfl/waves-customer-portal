@@ -142,6 +142,7 @@ describe('agent-gap-reports', () => {
       expect(merge.domain.__raw).toMatch(/COALESCE\(agent_gap_reports.domain, EXCLUDED.domain\)/);
       expect(merge.closest_tool.__raw).toMatch(/COALESCE\(agent_gap_reports.closest_tool, EXCLUDED.closest_tool\)/);
       expect(merge.attempted.__raw).toMatch(/COALESCE\(EXCLUDED.attempted, agent_gap_reports.attempted\)/);
+      expect(merge.belled_at.__raw).toMatch(/WHEN agent_gap_reports.status = 'fixed' THEN NULL ELSE agent_gap_reports.belled_at/);
       expect(dbMock.transaction).toHaveBeenCalledTimes(1);
       expect(sightings).toEqual([{ gap_id: '7', seen_at: expect.any(Date) }]);
     });

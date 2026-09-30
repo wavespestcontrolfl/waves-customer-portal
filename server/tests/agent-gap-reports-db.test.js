@@ -222,4 +222,16 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     expect(next.rang).toBe(true);
     expect((await db('agent_gap_reports').where('id', gap.id).first('belled_at')).belled_at).not.toBeNull();
   });
+
+  test('a reopened gap whose bell fails retries on its next sighting', async () => {
+    const gap = await record({ summary: 'Synthetic reopen failed bell gap' });
+    expect(gap.rang).toBe(true);
+    await db('agent_gap_reports').where('id', gap.id).update({ status: 'fixed' });
+    mockNotifyAdmin.mockImplementationOnce(async () => null);
+    const reopened = await record({ summary: 'Synthetic reopen failed bell gap' });
+    expect(reopened).toMatchObject({ rang: false, reopened: true, status: 'new' });
+    expect((await db('agent_gap_reports').where('id', gap.id).first('belled_at')).belled_at).toBeNull();
+    const retry = await record({ summary: 'Synthetic reopen failed bell gap' });
+    expect(retry.rang).toBe(true);
+  });
 });
