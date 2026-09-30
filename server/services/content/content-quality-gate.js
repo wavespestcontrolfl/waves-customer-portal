@@ -698,12 +698,17 @@ function checkLocalBusinessServiceSchema(draft) {
 // escapes and string concatenation as the renderer sees them); anything but
 // a static string reads as empty. Unicode spaces collapse to a plain space.
 // boxPropInfo → { text, opaque }: opaque when the prop is an expression
-// that is not a static string (a conditional, a variable…) — the renderer
+// that is not a static string (a conditional, a variable…), or when the box
+// carries a JSX spread — the renderer
 // shows SOMETHING the checks cannot read, so callers fail closed (Codex r8
 // on #5272).
 function boxPropInfo(tag, name) {
-  const { eachJsxAttr } = require('./content-guardrails')._internals;
+  const { eachJsxAttr, hasAttrSpreadAfter } = require('./content-guardrails')._internals;
   const attrs = String(tag).replace(/^<BottomLineBox\b/, '').replace(/\/?>\s*$/, '');
+  // A JSX spread ({...{recommendation: "Call today."}}) can set or override
+  // any prop at render time, and eachJsxAttr skips spreads, so every prop
+  // of a box that carries one is opaque (fails closed).
+  if (hasAttrSpreadAfter(attrs)) return { text: '', opaque: true };
   // A repeated prop renders its LAST value; rather than guess, a box that
   // repeats verdict/recommendation is opaque and fails closed (Codex r9 on
   // #5272).

@@ -900,3 +900,23 @@ describe('#5272 r9: escape-aware box tag, duplicate props', () => {
   });
 });
 
+
+// Later-queue from #5272 r10: eachJsxAttr skips spreads, so a spread that
+// overrides a literal prop was read as the literal.
+describe('verdict box with a JSX spread fails closed', () => {
+  test.each([
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." {...{recommendation: "Call today."}} />'],
+    ['<BottomLineBox {...{verdict: "Yes, they sting."}} recommendation="Seal gaps." />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." { /* c */ ...props} />'],
+  ])('%s', (tag) => {
+    const body = `${tag}\n\nMore.`;
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+  });
+  test('a spread box has no readable verdict for the answer-first check', () => {
+    const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;
+    const body = '<BottomLineBox verdict="Yes, fire ants sting." recommendation="Seal gaps." {...extra} />\n\nMore.';
+    expect(checkAnswerInFirstParagraph({ body }, { customer_signal: { normalized_question: 'Do fire ants sting?' } }))
+      .toEqual({ ok: false, reason: 'verdict_box_has_no_verdict' });
+  });
+});
