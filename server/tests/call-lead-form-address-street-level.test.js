@@ -488,6 +488,9 @@ describe('visit hold (owner ruling 2026-09-30)', () => {
     expect(js.indexOf("const legacyRow = await t('scheduled_services')")).toBeLessThan(js.indexOf("code: 'STREET_LEVEL_ADDRESS_HOLD'"));
     const rb = read('../services/rebooker.js');
     expect(rb.split('refuseStreetLevelAddressHold(service);').length - 1).toBe(2);   // rescheduleOnce + rescheduleSeries
+    // Tech and geofence starts (markEnRoute, markOnProperty, markComplete) stand down too.
+    const tt = read('../services/track-transitions.js');
+    expect(tt.split("return { ok: false, reason: 'street_level_address_hold' };").length - 1).toBe(3);
     const oc = read('../services/outbound-review-confirm.js');
     expect(oc).toMatch(/isStreetLevelAddressHold\(row\)\) \{\s*return false;/);   // no lazy activation of a held row
   });

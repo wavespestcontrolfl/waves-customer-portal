@@ -523,6 +523,11 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
 async function markEnRouteCore(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  // A street-level web-form booking holds pending until the office confirms
+  // its address (owner ruling 2026-09-30): a tech or geofence cannot start it.
+  if (require('./call-booking-source-actions').isStreetLevelAddressHold(svc)) {
+    return { ok: false, reason: 'street_level_address_hold' };
+  }
   // Visit-sibling expected-state fence (codex #3603 r9): a fan-out write
   // for a row that no longer is the row the fan-out locked (rescheduled /
   // detached in between) is refused rather than applied to the new attempt.
@@ -939,6 +944,11 @@ async function maybeSendArrivalSms(svc, serviceId, actingTechId, claimArrivedAt 
 async function markOnProperty(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  // A street-level web-form booking holds pending until the office confirms
+  // its address (owner ruling 2026-09-30): a tech or geofence cannot start it.
+  if (require('./call-booking-source-actions').isStreetLevelAddressHold(svc)) {
+    return { ok: false, reason: 'street_level_address_hold' };
+  }
   // Visit-sibling expected-state fence (codex #3603 r9): a fan-out write
   // for a row that no longer is the row the fan-out locked (rescheduled /
   // detached in between) is refused rather than applied to the new attempt.
@@ -1248,6 +1258,11 @@ async function markOnProperty(serviceId, opts = {}) {
 async function markComplete(serviceId, opts = {}) {
   const svc = await loadService(serviceId);
   if (!svc) return { ok: false, reason: 'not_found' };
+  // A street-level web-form booking holds pending until the office confirms
+  // its address (owner ruling 2026-09-30): a tech or geofence cannot start it.
+  if (require('./call-booking-source-actions').isStreetLevelAddressHold(svc)) {
+    return { ok: false, reason: 'street_level_address_hold' };
+  }
   if (!opts.allowFutureDate && isFutureScheduledDate(svc.scheduled_date)) {
     return { ok: false, reason: 'future_scheduled_date' };
   }
