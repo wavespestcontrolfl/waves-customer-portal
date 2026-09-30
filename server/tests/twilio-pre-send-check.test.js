@@ -1492,4 +1492,20 @@ describe('providerPreSendCheck placement at the TRUE provider boundary (round 43
     expect(providerPreSendCheck).toHaveBeenCalledTimes(1);
     expect(providerPreSendCheck.afterMarker).not.toHaveBeenCalled();
   });
+  // Round 46: the auto-send executor keys its "release, don't fail" path on this exact result shape, so the
+  // pre-marker refusal and the post-marker (afterMarker) refusal must surface IDENTICALLY.
+  test('a retryable LIVE_ETA_CHECK_FAILED_AT_BOUNDARY refusal surfaces with the same shape from the pre-marker and the post-marker invocation', async () => {
+    const verdict = { ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_recheck_failed)', retryable: true };
+    const pre = jest.fn(async () => verdict);
+    const preResult = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck: pre });
+
+    const ok = jest.fn(async () => ({ ok: true }));
+    ok.afterMarker = jest.fn(async () => verdict);
+    const postResult = await TwilioService.sendSMS(TO, 'Reminder body', { messageType: 'manual', fromNumber: FROM, providerPreSendCheck: ok, onDispatchStart: jest.fn(async () => {}), onDispatchAbort: jest.fn(async () => {}) });
+
+    const pick = ({ success, preSendBlocked, code, error, retryable, deliveryOutcome }) => ({ success, preSendBlocked, code, error, retryable, deliveryOutcome });
+    expect(pick(preResult)).toEqual({ success: false, preSendBlocked: true, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', error: 'live ETA unsendable (eta_claim_recheck_failed)', retryable: true, deliveryOutcome: 'not_sent' });
+    expect(pick(postResult)).toEqual(pick(preResult));
+    expect(mockTwilioCreate).not.toHaveBeenCalled();
+  });
 });

@@ -485,6 +485,15 @@ async function hasActiveAutoSendClaim(dbh, { threadLast10, customerId, recentMin
 }
 
 /** Mark a claim whose send was blocked/failed/errored. The draft stays 'shadow'. */
+// A provider-boundary refusal that means the live-ETA recheck could not READ the state (Codex
+// round-46 P2): the boundary predicate reports LIVE_ETA_CHECK_FAILED_AT_BOUNDARY (retryable) — from
+// either invocation, the pre-marker run or the post-marker `afterMarker` re-run, which surface
+// the same code — and nothing reached the provider. It is an infrastructure outcome, not a verdict.
+function isRetryableEtaBoundaryRefusal(result) {
+  return Boolean(result) && result.sent !== true && result.deliveryOutcome === 'not_sent'
+    && result.retryable === true && result.code === 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY';
+}
+
 // Release a claim that never reached the provider WITHOUT recording a failed auto-send (the row
 // was inserted as CLAIM_STATUS by claimAutoSend moments ago, so removing it restores the
 // pre-claim state). Only while still CLAIM_STATUS; errors are logged, never thrown.
@@ -922,6 +931,17 @@ async function settleAutoSendOutcome({ claim, result, draftId, intent, customerI
   if (isAmbiguousProviderOutcome(result)) {
     logger.warn(`[sms-auto-send] provider outcome uncertain (decision ${claim.decisionId}) — claim retained for reconciliation`);
     return { sent: false, reason: 'provider_uncertain', ambiguous: true, decisionId: claim.decisionId };
+  }
+
+  if (isRetryableEtaBoundaryRefusal(result)) {
+    // Same release path as the early executor check: release the claim (never auto_send_failed),
+    // settle the reservation, reopen parked siblings; the verified draft falls through to a
+    // human-visible suggestion that the reviewer-send seam rechecks again.
+    logger.warn(`[sms-auto-send] live ETA recheck unreadable at the provider boundary (decision ${claim.decisionId}); releasing the claim (retryable)`);
+    await require('./sms-suggest-mode').settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    await releaseClaim(claim.decisionId);
+    await reopenParked('Auto-send paused: the live ETA could not be rechecked — suggestion reopened.');
+    return { sent: false, reason: result.code, retryable: true };
   }
 
   const notSentReason = result?.sent ? `suppressed:${result.providerMessageId || 'unknown'}` : (result?.code || 'not_sent');

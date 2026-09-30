@@ -268,3 +268,62 @@ describe('auto-send: an unreadable ETA recheck releases the claim instead of fai
     expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
   });
 });
+
+// Codex round-46 P2 (PR #5334): a retryable provider-boundary refusal (LIVE_ETA_CHECK_FAILED_AT_BOUNDARY) is released,
+// not failed — for BOTH invocations the sender makes (the pre-marker run and the post-marker `afterMarker` re-run).
+describe('auto-send: a retryable ETA refusal at the provider boundary releases the claim', () => {
+  const SNAP = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  afterEach(() => { drafter.findEtaMinutesClaims.mockReset().mockReturnValue([]); });
+
+  // Mimics twilio.js: turns a predicate verdict into the not-sent result sendCustomerMessage returns.
+  const refusalFrom = (verdict) => ({ sent: false, success: false, deliveryOutcome: 'not_sent', preSendBlocked: true, code: verdict.code, reason: verdict.reason, retryable: verdict.retryable === true });
+  const released = async (r) => {
+    expect(r).toMatchObject({ sent: false, reason: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+    expect(decisions.del).toHaveBeenCalledTimes(1);
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(false);
+    expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '33333333-3333-4333-8333-333333333333' });
+  };
+
+  test('pre-marker invocation: the predicate cannot read the state -> released (not auto_send_failed)', async () => {
+    // executor's own check passes (no claim), the boundary predicate then sees a claim it cannot verify (db read throws)
+    drafter.findEtaMinutesClaims.mockReturnValueOnce([]).mockReturnValue([{ minutes: 9, index: 0 }]);
+    sendCustomerMessage.mockImplementationOnce(async (input) => refusalFrom(await input.providerPreSendCheck({ channel: 'sms' })));
+    const r = await attempt({ reply: 'The tech is 9 minutes away.', liveEtaSnapshot: SNAP, factsGeneratedAt: new Date() });
+    await released(r);
+  });
+
+  test('post-marker invocation (afterMarker re-run): the same refusal is released the same way', async () => {
+    drafter.findEtaMinutesClaims.mockReturnValueOnce([]).mockReturnValueOnce([]).mockReturnValue([{ minutes: 9, index: 0 }]);
+    sendCustomerMessage.mockImplementationOnce(async (input) => {
+      const first = await input.providerPreSendCheck({ channel: 'sms' });
+      expect(first).toEqual({ ok: true }); // passes before the marker
+      expect(typeof input.providerPreSendCheck.afterMarker).toBe('function');
+      return refusalFrom(await input.providerPreSendCheck.afterMarker({ channel: 'sms' })); // fails after it
+    });
+    const r = await attempt({ reply: 'The tech is 9 minutes away.', liveEtaSnapshot: SNAP, factsGeneratedAt: new Date() });
+    await released(r);
+  });
+
+  test('a TERMINAL boundary refusal (real stale verdict) still fails the claim', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => refusalFrom({ code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_no_longer_en_route)', retryable: false }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(r).toMatchObject({ sent: false, reason: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
+  });
+
+  test('other retryable refusals (consent lookup, quiet hours) are NOT released by this path — only the ETA boundary code', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => ({ sent: false, deliveryOutcome: 'not_sent', code: 'QUIET_HOURS_HOLD', retryable: true }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(r).toMatchObject({ sent: false, reason: 'QUIET_HOURS_HOLD' });
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(decisions.update.mock.calls.some(([patch]) => patch && patch.status === autoSend.FAILED_STATUS)).toBe(true);
+  });
+
+  test('a refusal that may have reached the provider is never released', async () => {
+    sendCustomerMessage.mockImplementationOnce(async () => ({ sent: false, deliveryOutcome: 'uncertain', code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true }));
+    const r = await attempt({ reply: 'Sounds good, thanks!' });
+    expect(decisions.del).not.toHaveBeenCalled();
+    expect(r.reason).not.toBe('LIVE_ETA_CHECK_FAILED_AT_BOUNDARY');
+  });
+});
