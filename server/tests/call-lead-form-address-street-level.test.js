@@ -382,7 +382,7 @@ describe('codex round 1 on #5381', () => {
     // The only writer of the item is inside the scheduled_services transaction, unguarded, after the visit insert.
     const writes = src.split('v2StreetLevelReadbackItem').length - 1;
     expect(src).toMatch(/v2StreetLevelReadbackItem = buildStreetLevelReadbackItem\(/);
-    const insertAt = src.indexOf('await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem');
+    const insertAt = src.indexOf('await recordStreetLevelReadbackFor(created);');
     const visitInsertAt = src.indexOf(".insert(insertData)");
     expect(insertAt).toBeGreaterThan(visitInsertAt);
     expect(src).not.toMatch(/db\('triage_items'\)\s*\.insert\(streetLevelReadback\)/);
@@ -449,8 +449,71 @@ describe('codex round 2 on #5381', () => {
 
     test('the booking transaction uses the helper, unguarded', () => {
       const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-      expect(src).toContain('await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem, created.id);');
+      expect(src).toContain('await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem, row.id, { callLogId: call.id });');
+      expect(src).toContain('await recordStreetLevelReadbackFor(created);');
       expect(src).not.toMatch(/\.\.\.v2StreetLevelReadbackItem,[\s\S]{0,200}\.ignore\(\)/);
     });
+  });
+});
+
+describe('codex round 3 on #5381', () => {
+  const src = () => require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
+
+  test('P2: a county Google confirms on the routing allowlist (DeSoto) is the area proof; without a county the ZIP set still governs', () => {
+    gateOn();
+    const desoto = lead({ city: 'Arcadia', zip: '34266' });
+    const n = (extra) => ({ street_line_1: 'Sample Newbuild Trail', city: 'Arcadia', state: 'FL', postal_code: '34266', ...extra });
+    const withCounty = routeLevel({ inServiceArea: true, county: 'DeSoto County', normalized: n() });
+    expect(streetLevelMatch(desoto, withCounty)).toMatchObject({ granularity: 'ROUTE', areaBasis: 'google_county' });
+    // County-confirmed: Google's ZIP may be absent, but a conflicting one still rejects, and state must be FL.
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ postal_code: null }) }))).toMatchObject({ areaBasis: 'google_county' });
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ postal_code: '34203' }) }))).toBeNull();
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: true, normalized: n({ state: 'GA' }) }))).toBeNull();
+    // No county: a ZIP outside the served set is refused even when Google echoes it.
+    expect(streetLevelMatch(desoto, routeLevel({ inServiceArea: null, normalized: n() }))).toBeNull();
+    // ...and an out-of-area county never qualifies, whatever the ZIP.
+    expect(streetLevelMatch(lead(), routeLevel({ inServiceArea: false }))).toBeNull();
+    // Manatee with no county still works through the ZIP path.
+    expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_zip' });
+  });
+
+  test('P1: the upsert takes the shared per-call triage lock first', async () => {
+    gateOn();
+    const order = [];
+    const conn = Object.assign(() => ({ insert: () => ({ onConflict: () => ({ merge: () => ({ returning: async () => { order.push('upsert'); return [{ id: 1 }]; } }) }) }) }), {
+      raw: (sql, bindings) => { if (/advisory/.test(sql)) order.push(['lock', sql, bindings]); return sql; },
+      fn: { now: () => 'now' },
+    });
+    const k = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
+    const item = buildStreetLevelReadbackItem({ knownCaller: k, routingResult: { usesOnFileAddress: true }, callLogId: 'call-1', extraction: confirmed() });
+    await recordStreetLevelReadback(conn, item, 'visit-9');
+    expect(order[0][0]).toBe('lock');
+    expect(order[0][1]).toMatch(/pg_advisory_xact_lock/);
+    expect(order[0][2]).toEqual(['triage-call-review', 'call-1']);
+    expect(order[1]).toBe('upsert');
+  });
+
+  test('P1: a reprocess that reuses the booking (call-linked reuse and idempotency reuse) refiles the card too', () => {
+    const s = src();
+    const calls = s.split('await recordStreetLevelReadbackFor(').length - 1;
+    expect(calls).toBe(3);   // fresh insert, findExistingCallAppointment reuse, idempotency-conflict reuse
+    expect(s).toMatch(/if \(existing\) \{\s*reusedExistingSchedule = true;\s*await recordStreetLevelReadbackFor\(existing\);/);
+    expect(s).toMatch(/if \(existingByKey\) \{\s*reusedExistingSchedule = true;\s*await recordStreetLevelReadbackFor\(existingByKey\);/);
+    expect(s).toMatch(/await recordStreetLevelReadbackFor\(created\);/);
+    // Only this call's own AI booking, never an attached human booking or a dead row; proof must bind.
+    const helper = s.slice(s.indexOf('const recordStreetLevelReadbackFor'), s.indexOf('const existing = await findExistingCallAppointment'));
+    expect(helper).toContain("booking_source || 'phone_call') !== 'phone_call'");
+    expect(helper).toContain("['cancelled', 'rescheduled', 'skipped']");
+    expect(helper).toContain('authority.useOnFileAddress');
+    // address_readback stays out of SUPERSEDE_KEPT_REASON_CODES: the AV low-confidence read-back keeps its replace-on-new-recording semantics.
+    expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).not.toContain('address_readback');
+  });
+
+  test('P2: the call-level review state opens once the card has committed with the booking', () => {
+    const s = src();
+    expect(s).toMatch(/if \(streetLevelReadbackFiled && svc && !svc\.__held && !bridgeNeedsConfirmation\.includes\('address_readback'\)\) \{\s*bridgeNeedsConfirmation\.push\('address_readback'\);/);
+    // The push comes after the booking transaction resolved, never inside it.
+    expect(s.indexOf("bridgeNeedsConfirmation.push('address_readback')")).toBeGreaterThan(s.indexOf('const svc = await db.transaction(async (trx) => {'));
+    expect(s.indexOf("bridgeNeedsConfirmation.push('address_readback')")).toBeGreaterThan(s.indexOf('await recordStreetLevelReadbackFor(existingByKey)'));
   });
 });
