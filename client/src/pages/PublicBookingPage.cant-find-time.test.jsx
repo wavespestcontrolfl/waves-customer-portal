@@ -5,7 +5,6 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { MemoryRouter } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import PublicBookingPage from './PublicBookingPage';
-import { ESTIMATE_QUOTE_URL } from '../lib/estimateMarketingRedirects';
 
 vi.mock('../components/AddressAutocomplete', () => ({
   default: ({ value, onChange, onSelect, placeholder }) => (

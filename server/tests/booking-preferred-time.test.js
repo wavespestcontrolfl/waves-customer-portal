@@ -13,7 +13,6 @@ jest.setTimeout(30000);
 
 const mockOps = [];            // { table, op, arg }
 let mockExistingLead = null;   // what a phone lookup on leads returns
-let mockRecentIntentSkip = false;
 
 function builder(table) {
   const b = {
@@ -112,7 +111,6 @@ beforeEach(() => {
   nextIp();
   mockOps.length = 0;
   mockExistingLead = null;
-  mockRecentIntentSkip = false;
   mockTriggerNotification.mockClear();
   mockSendCustomerMessage.mockClear();
   mockSendSMS.mockClear();
