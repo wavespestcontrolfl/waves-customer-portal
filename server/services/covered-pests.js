@@ -9,9 +9,11 @@
  * sowbug for pillbug, cockroach for roach). A test asserts every covered pest in that row is matched.
  *
  * Deliberately NOT here: the excluded specialties (termites, mosquitoes — reservice-scheduler's excluded-specialty list;
- * and every pest under the estimate copy's "Separate services": German roaches, fleas, bed bugs, rodents, wildlife —
- * SEPARATE_SERVICE_PEST_NOUN_SOURCES below). Generic words (pest, bug) and ticks / bees / hornets (in NEITHER row of the
- * copy) stay as pest nouns for continuity.
+ * every pest under the estimate copy's "Separate services": German roaches, fleas, bed bugs, rodents, wildlife —
+ * SEPARATE_SERVICE_PEST_NOUN_SOURCES below; and the pests the CATALOG sells as their own services — ticks (tick_control /
+ * flea_tick) and bees (bee_wasp_removal) — CATALOG_SEPARATE_PEST_NOUN_SOURCES below). The classifier that authorizes / requires
+ * the covered re-service reads ONLY this covered row (plus synonyms; hornets ride with wasps — the company facts cover hornet
+ * nests on regular visits). Generic words (pest, bug) stay for the broad prescreen. (Codex round-34 P2, PR #5336)
  */
 const COVERED_PEST_NOUN_SOURCES = Object.freeze([
   'pests?',
@@ -32,8 +34,6 @@ const COVERED_PEST_NOUN_SOURCES = Object.freeze([
   'hornets?',
   'stink\\s*bugs?',
   'boxelder\\s*bugs?',
-  'bees?',
-  'ticks?',
 ]);
 
 /**
@@ -102,4 +102,16 @@ const unmappedTurf = TURF_INSECT_ITEMS.filter((item) => !Object.prototype.hasOwn
 if (unmappedTurf.length) throw new Error(`covered-pests: map these "Covered turf insects" items to a noun source: ${unmappedTurf.join(', ')}`);
 const TURF_INSECT_NOUN_SOURCES = Object.freeze(TURF_INSECT_ITEMS.map((item) => TURF_INSECT_ITEM_SOURCES[item]));
 
-module.exports = { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_ITEMS, SEPARATE_SERVICE_PEST_NOUN_SOURCES, TURF_INSECT_ITEMS, TURF_INSECT_NOUN_SOURCES };
+/**
+ * Pests the service CATALOG sells as their own services (models/migrations service_library: tick_control, flea_tick,
+ * bee_wasp_removal) and the covered-pests row does not list: an EXCLUDED specialty (never a free general-pest re-service),
+ * keyed by the catalog service_key that sells them (a test asserts each key is in the migrations).
+ */
+const CATALOG_SEPARATE_PEST_ITEM_SOURCES = Object.freeze({
+  tick_control: 'ticks?',
+  flea_tick: 'ticks?',
+  bee_wasp_removal: '(?:honey\\s*)?bees?',
+});
+const CATALOG_SEPARATE_PEST_NOUN_SOURCES = Object.freeze([...new Set(Object.values(CATALOG_SEPARATE_PEST_ITEM_SOURCES))]);
+
+module.exports = { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_ITEMS, SEPARATE_SERVICE_PEST_NOUN_SOURCES, TURF_INSECT_ITEMS, TURF_INSECT_NOUN_SOURCES, CATALOG_SEPARATE_PEST_ITEM_SOURCES, CATALOG_SEPARATE_PEST_NOUN_SOURCES };

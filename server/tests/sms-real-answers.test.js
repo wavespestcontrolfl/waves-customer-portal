@@ -3661,6 +3661,61 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(out.violations[0]).toMatch(/does not say this customer is eligible|eligible/);
     });
 
+    // Codex round-34 P2s (PR #5336)
+    test('a scheduled Waves Assessment / free inspection appointment is NOT a booked re-service claim (no lane default to pest)', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const send = async (body, { booked = null, open = {} } = {}) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: [], open, bookable: [], verified: true, hasRecurringPlan: false }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'lead-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        for (const ok of [
+          'Your free inspection appointment is scheduled Thursday.',
+          'Your free inspection visit is booked for Thursday, 9-11 AM.',
+          'Your Waves Assessment is scheduled for Thursday.',
+          'Your free assessment appointment is set for tomorrow.',
+        ]) await expect(send(ok)).resolves.toBeNull();
+        // a real re-service claim with no snapshot is still blocked
+        await expect(send('Your pest re-service is scheduled Thursday.')).resolves.toMatch(/reservice_booking_changed/);
+        // ...and an assessment sentence does not hide a separate re-service claim in the same reply
+        await expect(send('Your Waves Assessment is scheduled Thursday. Your pest re-service is scheduled Friday.')).resolves.toMatch(/reservice_booking_changed/);
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
+    test('an asserted time against a live callback with NO valid window_start is blocked (cannot be verified)', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const send = async (body, windowStart) => {
+          const booked = { pest: { date: '2026-10-08', windowStart } };
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true, hasRecurringPlan: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        for (const windowStart of [null, undefined, '', 'garbage']) {
+          await expect(send('Your pest re-service is scheduled for Thursday, 9-11 AM.', windowStart)).resolves.toMatch(/reservice_booking_changed/);
+          await expect(send('Your pest re-service is scheduled for Thursday at 9.', windowStart)).resolves.toMatch(/reservice_booking_changed/);
+          // a day-only reference against a window-less callback is fine (no time to verify)
+          await expect(send('Your pest re-service is scheduled for Thursday.', windowStart)).resolves.toBeNull();
+        }
+        await expect(send('Your pest re-service is scheduled for Thursday, 9-11 AM.', '09:00')).resolves.toBeNull();
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
     test('an edited body asserting a DIFFERENT time/window than the live callback is blocked (live Thursday 9:00, edited to 1–3 PM)', async () => {
       const dt = require('../utils/datetime-et');
       const realEt = dt.etDateString;

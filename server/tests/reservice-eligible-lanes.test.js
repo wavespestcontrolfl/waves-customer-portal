@@ -253,7 +253,7 @@ describe('RESERVICE_LANE_WORD_PATTERNS — the one shared lane vocabulary (Codex
 
   test('every noun the pest-report prescreen accepts (bar the excluded specialties) resolves to the pest lane', () => {
     const { PEST_REPORT_TEXT_RE } = require('../services/sms-shadow-drafter');
-    for (const noun of ['ants', 'roaches', 'spiders', 'ticks', 'wasps', 'bees', 'silverfish', 'scorpions', 'earwigs', 'centipedes', 'millipedes', 'bugs', 'pests']) {
+    for (const noun of ['ants', 'roaches', 'spiders', 'wasps', 'silverfish', 'scorpions', 'earwigs', 'centipedes', 'millipedes', 'bugs', 'pests']) {
       const text = `${noun} are back`;
       expect(PEST_REPORT_TEXT_RE.test(text)).toBe(true);
       expect(reportedReserviceLane(text)).toBe('pest');
@@ -532,12 +532,25 @@ describe('covered-pest noun source', () => {
     expect(RESERVICE_PEST_NOUNS_SOURCE).not.toMatch(/flea/);
   });
 
-  test('ticks / bees / hornets appear in NEITHER pest row of the copy, so they keep their prior pest-noun handling', () => {
-    const row = coveredRow().toLowerCase();
-    for (const noun of ['tick', 'bees', 'hornet']) expect(row).not.toContain(noun);
-    const { SEPARATE_SERVICE_ITEMS } = require('../services/covered-pests');
-    for (const noun of ['tick', 'bee', 'hornet']) expect(SEPARATE_SERVICE_ITEMS.join(' ')).not.toContain(noun);
-    for (const noun of ['ticks', 'bees', 'hornets']) expect(reportedReserviceLane(`the ${noun} are back`)).toBe('pest');
+  // Codex round-34 P2: the classifier that requires the covered re-service reads ONLY the covered row (plus synonyms).
+  // Catalog-sold separate pests (ticks: tick_control / flea_tick; bees: bee_wasp_removal) are excluded specialties.
+  test('ticks and bees are catalog-sold separate services → excluded specialties (lane null), not a covered re-service report', () => {
+    const { CATALOG_SEPARATE_PEST_ITEM_SOURCES, CATALOG_SEPARATE_PEST_NOUN_SOURCES } = require('../services/covered-pests');
+    expect(Object.keys(CATALOG_SEPARATE_PEST_ITEM_SOURCES).sort()).toEqual(['bee_wasp_removal', 'flea_tick', 'tick_control']);
+    expect(CATALOG_SEPARATE_PEST_NOUN_SOURCES).toHaveLength(2);
+    // each key really is a service the catalog sells (migrations)
+    const fs = require('fs');
+    const path = require('path');
+    const dir = path.join(__dirname, '../models/migrations');
+    const all = fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+    for (const key of Object.keys(CATALOG_SEPARATE_PEST_ITEM_SOURCES)) expect(all).toContain(`'${key}'`);
+    for (const text of ['the ticks are back', 'ticks are everywhere again', 'the bees are back', 'honeybees are back', 'we keep seeing bees', 'we found ticks']) {
+      expect(reportedReserviceLane(text)).toBeNull();
+      expect(reportedReserviceExcludedSpecialty(text)).toBe(true);
+    }
+    // the covered nouns no longer include them; wasps (covered) and hornets (a wasp synonym) stay pest
+    expect(RESERVICE_PEST_NOUNS_SOURCE).not.toMatch(/ticks|bees/);
+    for (const noun of ['wasps', 'hornets']) expect(reportedReserviceLane(`the ${noun} are back`)).toBe('pest');
   });
 
   test('every pest the estimate copy lists as covered resolves to the pest lane (and specialties do not)', () => {

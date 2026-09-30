@@ -1028,7 +1028,7 @@ const RESERVICE_DENIAL_SCAN_RE = new RegExp(RESERVICE_DENIAL_RE.source, 'gi');
 // "free re-service / retreat / follow-up visit / callback".
 const RESERVICE_OTHER_PRODUCT_RE = new RegExp(
   '\\bwaves\\s+assessments?(?:\\s+(?:visit|appointment|inspection))?\\b'
-  + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))'
+  + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)(?:\\s+(?:visit|appointment|call))?\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))'
   // Codex round-28 P2: a TERMINAL callback reference — completed / canceled / missed / expired — is factual history,
   // not a new offer. Only the reference itself is blanked, so a separate new offer in the same reply still counts.
   + '|\\b(?:(?:your|the|our|that|this|a)\\s+)?(?:(?:free|complimentary|no[- ]charge|pest|lawn|previous|last|earlier|original|scheduled|booked)\\s+){0,3}(?:re-?service|re-?treat(?:ment)?|call-?back|revisit|follow-?up)(?:\\s+(?:visit|appointment|treatment))?\\s+(?:was|were|has\\s+been|have\\s+been|had\\s+been|got|is\\s+now)\\s+(?:already\\s+)?(?:canceled|cancelled|completed|missed|skipped|closed|resolved|finished|done|expired|rescheduled|no-?showed)\\b'
@@ -1052,8 +1052,13 @@ function reserviceFactShowsNoPlan(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL));
   return !!line && /^FREE RE-SERVICE:\s*not eligible \(no recurring plan on file\)\s*$/.test(line.trim());
 }
+// ONE helper for the different-product carve-out (Waves Assessment, a scheduled free inspection / assessment, terminal callback
+// history): blanked length-preservingly. Shared by the offer detector and the booked-callback claim reader (round-34 P2).
+function blankOtherProducts(rawText) {
+  return String(rawText).replace(RESERVICE_OTHER_PRODUCT_RE, (m) => ' '.repeat(m.length));
+}
 function reserviceOfferSpans(rawText) {
-  const text = rawText.replace(RESERVICE_OTHER_PRODUCT_RE, (m) => ' '.repeat(m.length));
+  const text = blankOtherProducts(rawText);
   return RESERVICE_OFFER_SPAN_RES
     .flatMap((rx) => [...text.matchAll(rx)].filter((m) => m[0]).map((m) => [m.index, m.index + m[0].length]));
 }
@@ -1719,7 +1724,9 @@ function reserviceBookedClaims(body, snapshot) {
   const qualifiedVisitRe = /\b(?:free|complimentary|no[- ]charge|at\s+no\s+(?:additional\s+)?(?:charge|cost)|follow-?up|call-?back)\b/i;
   const visitNounRe = /\b(?:visit|appointment|treatment|service|trip)s?\b/i;
   const claims = [];
-  for (const sentence of String(body).split(/[.!?\n]+/)) {
+  // Codex round-34 P2: a scheduled Waves Assessment / free inspection is a different product, never a booked re-service claim
+  // (and never defaults to the pest lane) — the same carve-out the offer detector uses.
+  for (const sentence of blankOtherProducts(String(body)).split(/[.!?\n]+/)) {
     const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
     if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
     if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) continue;
@@ -1757,14 +1764,14 @@ async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
     }
     // a clock time must state the FULL live arrival window (both endpoints): a lone "9 AM" would turn the two-hour
     // arrival window into an exact-arrival promise (AGENTS.md — arrival copy is window_start → +120 min, display-only)
-    if (claim.times.length && live.windowStart) {
-      const windowMinutes = reserviceLiveWindowMinutes(String(live.windowStart).slice(0, 5));
-      if (windowMinutes) {
-        const matches = (t, minutes) => (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720);
-        const onlyEndpoints = claim.times.every((t) => windowMinutes.some((minutes) => matches(t, minutes)));
-        const hasBoth = windowMinutes.every((minutes) => claim.times.some((t) => matches(t, minutes)));
-        if (!onlyEndpoints || !hasBoth) return true;
-      }
+    // Codex round-34 P2: an asserted time against a callback with NO valid window_start cannot be verified → block
+    if (claim.times.length) {
+      const windowMinutes = live.windowStart ? reserviceLiveWindowMinutes(String(live.windowStart).slice(0, 5)) : null;
+      if (!windowMinutes) return true;
+      const matches = (t, minutes) => (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720);
+      const onlyEndpoints = claim.times.every((t) => windowMinutes.some((minutes) => matches(t, minutes)));
+      const hasBoth = windowMinutes.every((minutes) => claim.times.some((t) => matches(t, minutes)));
+      if (!onlyEndpoints || !hasBoth) return true;
     }
     return false;
   };
