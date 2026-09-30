@@ -25,6 +25,15 @@
 // Dispatch CompletionPanel — before any attempt may have reached the
 // server; so does "+ Other product" when the product list did not load.
 //
+// Customer text (dark, GATE_FAST_COMPLETE_RECAP, `service.recapEnabled`): off,
+// the sheet pins sendCompletionSms / requestReview / includePayLink to false
+// and the customer gets nothing. On, it asks for the ONE fixed re-service text
+// (customerRecapMode 'reservice_fixed'); the SERVER builds it from the saved
+// facts (address, where, pests, products) and sends it through its normal send
+// path, so consent, STOP and opt-out checks still apply. No customer wording
+// lives here, no review ask and no pay link go with it, and after Complete the
+// tech sees the exact text that went (or why none did) from the response.
+//
 // The layout is compact (three/four-across choice rows, the note behind a
 // tap) so the choices fit a typical phone screen; the Complete button is
 // pinned in the footer either way.
@@ -312,7 +321,24 @@ function techTipsOf(form, tipsAvailable) {
   return custom ? { ids: [], custom } : { ids: form.tipId ? [form.tipId] : [], custom: null };
 }
 
-function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable }) {
+// Gate on: the completion text is asked for in the server's fixed re-service
+// mode (services/reservice-fixed-recap.js). The review ask and the pay link
+// stay off, as on a re-service they always were (fast-complete scope: "leave it
+// off on re-services").
+const CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: true,
+  requestReview: false,
+  includePayLink: false,
+  customerRecapMode: 'reservice_fixed',
+};
+// Today's body: no customer text, no review ask, no pay link.
+const NO_CUSTOMER_RECAP_FLAGS = {
+  sendCompletionSms: false,
+  requestReview: false,
+  includePayLink: false,
+};
+
+function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailable, recapEnabled }) {
   const targets = targetsOf(form);
   // Where rides each product row too: service_products.application_area
   // comes only from the row (the full form sends the same comma-joined string).
@@ -340,12 +366,9 @@ function completionBody(form, rows, { visitIdentity, ratingAllowed, tipsAvailabl
     ...(ratingAllowed ? { clientPestRating: ACTIVITY_LEVELS.find((a) => a.value === form.activity)?.rating ?? null } : {}),
     technicianNotes: form.note.trim(),
     techTips: techTipsOf(form, tipsAvailable),
-    // The customer recap text ships in a later Fast Complete PR; until then
-    // this path sends none. No review ask on a re-service (adopted
-    // 2026-09-26), and a free callback never carries a pay link.
-    sendCompletionSms: false,
-    requestReview: false,
-    includePayLink: false,
+    // Gate off (GATE_FAST_COMPLETE_RECAP): no customer text, review ask or pay
+    // link. Gate on: the fixed re-service text; the server composes it.
+    ...(recapEnabled ? CUSTOMER_RECAP_FLAGS : NO_CUSTOMER_RECAP_FLAGS),
   };
 }
 
@@ -448,10 +471,10 @@ function useFastCompleteSubmit({ base, request }) {
     setError('');
     const body = pendingBodyRef.current || { idempotencyKey: keyRef.current, ...buildBody() };
     try {
-      await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
+      const result = await request(`${base}/complete`, { method: 'POST', body: JSON.stringify(body) });
       pendingBodyRef.current = null;
       setFailure(null);
-      setDone({ summary });
+      setDone({ summary, customerText: result?.customerText || null });
       // Saved: the done view can be dismissed (Close, Escape, backdrop).
       setSubmitting(false);
       inFlight.current = false;
@@ -614,6 +637,7 @@ function SheetBody({ service, request, ctx, submission, locked, photos, dictatio
         <div className="tech-visit-card">
           <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
           <p>{submission.done.summary}</p>
+          <CustomerTextResult outcome={submission.done.customerText} />
         </div>
         <div className="tech-visit-actions">
           <Button className="tech-visit-action tech-visit-complete tech-visit-wide" onClick={() => onCompleted?.()}>Next stop</Button>
@@ -753,7 +777,9 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     if (missingReason && !submission.hasPendingBody()) return;
     const names = rows.filter((row) => row.active).map((row) => row.name).join(', ');
     submission.submit(
-      () => completionBody(form, rows, { visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable }),
+      () => completionBody(form, rows, {
+        visitIdentity: ctx.visitIdentity, ratingAllowed: ctx.rating.allowed, tipsAvailable, recapEnabled: recapOn(service),
+      }),
       `${names} · ${targetsOf(form).join(', ')}`,
     );
   };
@@ -824,6 +850,25 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
         </div>
       </footer>
       {picker.sheet}
+    </div>
+  );
+}
+
+// Only an exact true turns the customer recap on (GATE_FAST_COMPLETE_RECAP,
+// delivered as the schedule row's fastCompleteRecapEnabled).
+const recapOn = (service) => service?.recapEnabled === true;
+
+// After Complete: the exact text the server sent (its words, shown as sent),
+// or why none went. Nothing when the sheet never asked for one.
+function CustomerTextResult({ outcome }) {
+  if (!outcome) return null;
+  const { sent, queued, body, reason } = outcome;
+  return (
+    <div data-testid="fast-complete-text-result">
+      {sent && <p className="tech-visit-muted">Text sent to the customer:</p>}
+      {!sent && queued && <p className="tech-visit-muted">Text queued: {reason}.</p>}
+      {!sent && !queued && <p className="tech-visit-muted">No text sent: {reason}.</p>}
+      {body && <blockquote data-testid="fast-complete-text-body">{body}</blockquote>}
     </div>
   );
 }

@@ -408,9 +408,21 @@ recurring pest, plus:
   (`GATE_RESERVICE_REPORT_COPY`).
 - Fast Complete's `completionBody` sends `visitOutcome`, products (method,
   targets, area, amount and unit, rate and unit, and linear ft for perimeter
-  spray), `areasServiced`, the rating and `technicianNotes`. It sends **no
-  customer text and no photos**, so `fast_complete_customer_text` is a
-  **gap** with no writer.
+  spray), `areasServiced`, the rating and `technicianNotes`. Photos are
+  staged and promoted at completion, not sent in the body.
+- `fast_complete_customer_text` (storage `structured_notes.completionSmsStatus`)
+  has a **gated writer**. With `GATE_FAST_COMPLETE_RECAP` off (the default) the
+  sheet pins `sendCompletionSms`, `requestReview` and `includePayLink` to
+  `false` and the customer gets no text. With it on, the sheet posts
+  `customerRecapMode: 'reservice_fixed'` (review ask and pay link stay off) and
+  **no `customerRecap`**. The server, only while both gates are on and the
+  visit is a pest re-service, sends **one** fixed text built from the saved
+  address, areas and product targets and methods
+  (`services/reservice-fixed-recap.js`), never AI and never signed, through its
+  normal consent-checked path, and stores the sent body in
+  `structured_notes.completionSmsBody`. The "keep kids and pets off" sentence
+  needs a recorded liquid application; a clause with no recorded fact is
+  dropped.
 
 ### Lawn (`lawn`)
 Catalog: `lawn_care_6week`, `lawn_care_monthly`, `lawn_care_quarterly`,
@@ -624,10 +636,6 @@ listed here, and every bullet here is still a gap fact on that line.
   section has no product fallback.** `buildWork` in `cockroach-report-v2.js`
   reads only the `work_completed` chips. A visit that recorded products but
   no chips shows no work.
-- `reservice_pest.fast_complete_customer_text`: **Fast Complete sends no
-  customer text.** `FastCompleteSheet.jsx` `completionBody` sends no
-  `customerRecap` and sets `sendCompletionSms: false`, so the fact has no
-  writer.
 
 ## Data-quality and writer gaps
 

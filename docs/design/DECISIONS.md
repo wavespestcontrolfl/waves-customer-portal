@@ -2728,3 +2728,62 @@ idea, the pre-referee `legFailureReason` short-circuit, the rule that the
 referee's own quality verdict joins `photoReadFor` and an unusable referee
 read merges nothing, and admin-only `internal.referee` diagnostics. Full
 detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
+
+## 2026-09-29 — Fast Complete customer text: one fixed template, server-built (dark)
+
+Fast Complete (`FastCompleteSheet.jsx`, pest re-service, `GATE_RESERVICE_FAST_COMPLETE`)
+pinned `sendCompletionSms`, `requestReview` and `includePayLink` to `false`, so a
+re-service closed through it sent the customer nothing. This is PR D of the
+Fast Complete scope (`~/fast-complete-scope-20260926.md`), building the adopted
+decision 5: the customer text is one fixed template, never AI, never signed.
+
+New dark gate `GATE_FAST_COMPLETE_RECAP` (registry key `fastCompleteRecap`, exact
+`true`, read at load). It rides the schedule payload per service as
+`fastCompleteRecapEnabled`, like `reserviceFastCompleteEnabled`, and reaches the
+sheet as `service.recapEnabled`. Kill switch: unset the variable.
+
+The sheet, with the gate on, posts `sendCompletionSms: true`,
+`customerRecapMode: 'reservice_fixed'`, `requestReview: false` and
+`includePayLink: false` (the scope says leave the review ask off on
+re-services), and no `customerRecap`. No customer wording lives on the client.
+`completeScheduledService` honors the mode only while both dark gates are on
+server-side and the live completion profile is `pest_re_service`. A request that
+is not honored sends no completion text at all, never the templated one, so a
+stale sheet cannot cause a second kind of text.
+
+The one text, built in `services/reservice-fixed-recap.js` from the saved
+facts and sent through the existing send path (consent, STOP, opt-out and phone
+checks unchanged; message type stays the completion family's, template key
+`reservice_fixed_recap`):
+
+> Your re-service at 1234 Oak Bend Dr is done. We treated inside and outside for
+> ants. Keep kids and pets off treated areas until dry. Details: <report link>
+
+- Address: the visit's stamped street, else the customer's.
+- Where: from `areas_serviced` (inside, outside, "inside and outside", the
+  garage, joined naturally). Pests: the product rows' saved targets, deduplicated
+  and lowercased; a name that is too long, has symbols or trips the banned
+  customer-copy screen is dropped.
+- "Keep kids and pets off treated areas until dry." only when a saved product
+  row was applied wet (spot treatment, perimeter or broadcast spray, foliar,
+  fog, pin stream). Bait, granular, station and trunk-injection rows leave it out.
+- A clause whose fact is missing is dropped whole: no pests gives "We treated
+  inside."; no areas and no pests gives "Your re-service at X is done. Details:
+  <link>" plus the safety line where it applies.
+- It replaces the templated `service_complete` text, the AI recap and the
+  review suffix on this path: exactly one text. It is not built with
+  `completion-recap.js smsRecap`, so no "- Waves" sign-off (the no-signature
+  ruling). The sent body is stored on `structured_notes.completionSmsBody`
+  (with `completionSmsRecapMode`), where the closeout status already reads it.
+
+After Complete the `/complete` response carries `customerText` (only when the
+sheet asked): `{ sent, body }` with the exact text, `{ queued, body }` when the
+send window holds it, or `{ sent: false, reason }` (no phone, opted out or
+blocked, failed, gate off). The sheet shows the text as sent, or "No text sent:
+<reason>." Gate off, either gate, is byte-identical to before.
+
+Visit-facts registry: `reservice_pest.fast_complete_customer_text` moves from
+`status: 'gap'` to a real fact (storage `structured_notes.completionSmsStatus`,
+writers `complete-scheduled-service.js` and, gated, the sheet via
+`customerRecapMode`, reader `closeout-status.js`), and its Known-gaps bullet is
+removed.

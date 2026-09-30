@@ -211,6 +211,7 @@ const INTERIOR_REENTRY_BACKFILL = 'server/scripts/backfill-interior-reentry-advi
 const TRACE_ELIGIBILITY = 'server/services/service-report/trace-eligibility.js';
 const VISIT_TIMELINE = 'server/services/service-report/visit-timeline.js';
 const COMPANION_COMPLETIONS = 'server/services/service-report/companion-completions.js';
+const CLOSEOUT_STATUS = 'server/services/closeout-status.js';
 
 /** A writer that submits the fact under `writerSymbol` instead of the storage key. */
 const via = (file, writerSymbol) => Object.freeze({ file, writerSymbol });
@@ -1242,14 +1243,18 @@ const VISIT_FACTS_CONTRACT = {
       ...photoFacts(),
       {
         key: 'fast_complete_customer_text',
-        label: 'Customer recap text from Fast Complete',
-        capture: ['voice', 'tap'],
-        storage: null,
-        writers: [],
-        readers: [],
+        label: 'Completion text to the customer from Fast Complete (dark, GATE_FAST_COMPLETE_RECAP)',
+        capture: ['derived'],
+        // The text itself is composed by the server
+        // (services/reservice-fixed-recap.js: one fixed template built from the
+        // saved address, areas, product targets and methods; never AI, never
+        // signed); its delivery is what this line records. Fast Complete's only
+        // part is asking for it.
+        storage: 'structured_notes.completionSmsStatus',
+        writers: [COMPLETE_SERVICE, via(FAST_COMPLETE_SHEET, 'customerRecapMode')],
+        readers: [{ file: CLOSEOUT_STATUS, section: 'Comms fact (completion text sent / failed / deferred)' }],
         whenMissing: 'hidden',
-        status: 'gap',
-        notes: 'FastCompleteSheet.jsx completionBody sends no customerRecap (and sendCompletionSms:false, requestReview:false): a re-service closed through Fast Complete carries no customer-facing text.',
+        notes: 'Writer is GATED: with GATE_FAST_COMPLETE_RECAP off (default) FastCompleteSheet.jsx completionBody pins sendCompletionSms:false, requestReview:false, includePayLink:false and a re-service closed through it carries no customer text. With it on, the sheet posts customerRecapMode \'reservice_fixed\' (review ask and pay link stay off) and NO customerRecap; the server, only while both gates are on and the visit is a pest re-service, sends ONE fixed text ("Your re-service at <street> is done. We treated <where> for <pests>. Keep kids and pets off treated areas until dry. Details: <link>", the safety line only with a recorded liquid application, a clause dropped when its fact is missing) through its normal consent-checked path, and stores the sent body in structured_notes.completionSmsBody.',
       },
     ],
   },
