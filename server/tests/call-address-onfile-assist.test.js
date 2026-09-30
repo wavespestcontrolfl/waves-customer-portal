@@ -172,6 +172,12 @@ describe('item 4 — isStreetOnlyRequest', () => {
     const nj = { street_line_1: '7417 Monteverdi', raw_text: '7417 Monteverdi NJ' };
     expect(isStreetOnlyRequest(nj, lines(nj))).toBe(false);
   });
+  test('a spoken city that repeats a street word is still locality (codex r3 P1)', () => {
+    const v = { street_line_1: '100 Venice Avenue', raw_text: '100 Venice Avenue, Venice' };
+    expect(isStreetOnlyRequest(v, lines(v))).toBe(false);
+    const same = { street_line_1: '100 Venice Avenue', raw_text: '100 Venice Ave' };
+    expect(isStreetOnlyRequest(same, lines(same))).toBe(true);
+  });
   test('a bare house number names no street', () => {
     const n = { street_line_1: '7417' };
     expect(isStreetOnlyRequest(n, lines(n))).toBe(false);
@@ -486,7 +492,13 @@ describe('spoken street must resemble the on-file street for the locality assist
     expect(streetResemblesOnFile('Maple', 'Marple Way')).toBe(false);
     expect(streetResemblesOnFile('Oak', 'Oak Hill Drive')).toBe(false);
     expect(streetResemblesOnFile('Oak Hill', 'Oak Hill Drive')).toBe(true);
-    expect(streetResemblesOnFile('Oak Hill', 'Oak Hill Drive North')).toBe(true);
+    // An on-file direction must be spoken: East and West are different streets (codex r3 P1).
+    expect(streetResemblesOnFile('Oak Hill', 'Oak Hill Drive North')).toBe(false);
+    expect(streetResemblesOnFile('Oak Hill Drive North', 'Oak Hill Drive North')).toBe(true);
+    expect(streetResemblesOnFile('4th Avenue', '4th Avenue East')).toBe(false);
+    expect(streetResemblesOnFile('4th Avenue East', '4th Avenue East')).toBe(true);
+    expect(streetResemblesOnFile('4th Ave E', '4th Avenue East')).toBe(true);
+    expect(streetResemblesOnFile('4th Avenue West', '4th Avenue East')).toBe(false);
     expect(streetResemblesOnFile('Monteverdi Drive', 'Monteverdi Way')).toBe(false);
     expect(streetResemblesOnFile('Sunset', 'Monteverdi Way')).toBe(false);
     expect(streetResemblesOnFile('Monteverdi Way Extension', 'Monteverdi Way')).toBe(false);

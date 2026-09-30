@@ -79,18 +79,20 @@ const CANON = {
 };
 const canon = (t) => CANON[t] || t;
 
-// Trailing words that name a street TYPE or a direction, never a different street.
+// Trailing words that name a street TYPE, never a different street. Directions
+// are NOT here: "4th Avenue East" and "4th Avenue West" are different streets,
+// so a direction the on-file street carries must be spoken to match.
 const STREET_TYPE_WORDS = new Set([
   'street', 'avenue', 'drive', 'road', 'lane', 'court', 'boulevard', 'circle', 'place', 'trail', 'way', 'parkway',
   'terrace', 'loop', 'run', 'path', 'cove', 'pass', 'point', 'walk', 'bend', 'crossing', 'trace', 'row',
-  'north', 'south', 'east', 'west', 'ne', 'nw', 'se', 'sw',
 ]);
 
 /**
  * Does the spoken street name name the on-file street? Exact, token for token
  * ("Monteverdi Wy" = "Monteverdi Way", abbreviations read as their long form):
- * the spoken name may leave off trailing street-TYPE or direction words the
- * on-file street carries ("Monteverdi" for "Monteverdi Way"), and nothing else.
+ * the spoken name may leave off trailing street-TYPE words the on-file street
+ * carries ("Monteverdi" for "Monteverdi Way"), and nothing else: an on-file
+ * direction ("East") must be spoken.
  * No fuzzy matching: a one-letter difference is often a different street, and
  * a spoken "Oak" does not name "Oak Hill Drive". A bare ordinal ("4th") does
  * not name "4th Avenue East": numbered grids repeat the number across streets
@@ -116,8 +118,20 @@ function rawTextAddsLocality(serviceAddress) {
   const sa = serviceAddress || {};
   const raw = tokensOf(sa.raw_text);
   if (!raw.length) return false;
-  const street = new Set(tokensOf(`${sa.street_line_1 || ''} ${sa.street_line_2 || ''}`).flatMap((t) => [t, canon(t)]));
-  return raw.some((t) => !street.has(t) && !street.has(canon(t)) && !RAW_FILLER.has(t));
+  // A multiset: each structured street word accounts for ONE spoken word, so a
+  // city that repeats a street word ("100 Venice Avenue, Venice") still counts.
+  const remaining = new Map();
+  for (const t of tokensOf(`${sa.street_line_1 || ''} ${sa.street_line_2 || ''}`).map(canon)) {
+    remaining.set(t, (remaining.get(t) || 0) + 1);
+  }
+  return raw.some((t) => {
+    const key = canon(t);
+    if (remaining.get(key) > 0) {
+      remaining.set(key, remaining.get(key) - 1);
+      return false;
+    }
+    return !RAW_FILLER.has(t);
+  });
 }
 
 /**
