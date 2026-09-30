@@ -747,14 +747,35 @@ function mentionsAffirmed(text, termRe) {
 // active clause (a bare lawn complaint, "tell me more about ants") every surviving clause is read.
 const RESERVICE_TURF_INSECT_RE = new RegExp(`\\b(?:${TURF_INSECT_NOUN_SOURCES.join('|')})\\b`, 'i');
 const RESERVICE_TURF_INSECT_G_RE = new RegExp(RESERVICE_TURF_INSECT_RE.source, 'gi');
+// Codex round-41 P2 (scope-dependent): the general pest plan covers fire-ant MOUNDS NEAR THE STRUCTURE (estimate-service-details "Covered
+// pests"); fire-ant control across the lawn is included only when the proposal says so ("Covered turf insects"). A fire-ant report with a
+// lawn / yard location and no structure word is therefore scope-dependent — not an automatic pest re-service (treated like an excluded
+// specialty: no owed / forced offer, a promise is rejected, a person decides).
+const RESERVICE_FIRE_ANT_RE = /\bfire[- ]?ants?\b/i;
+const RESERVICE_YARD_LOCATION_RE = /\b(?:in|on|across|throughout|over|around|all\s+over)\s+(?:(?:the|my|our|your)\s+)?(?:(?:front|back|side|whole|entire)\s+)*(?:lawn|yard|grass|turf|sod)\b/i;
+const RESERVICE_STRUCTURE_LOCATION_RE = /\b(?:house|home|structure|foundation|walls?|kitchen|bathroom|garage|patio|lanai|porch|pool\s+cage|screen|inside|indoors?|door|windows?|slab|building|bedroom|roof|eaves?|attic)\b/i;
+function fireAntYardClause(clause) {
+  const c = String(clause || '');
+  return RESERVICE_FIRE_ANT_RE.test(c) && RESERVICE_YARD_LOCATION_RE.test(c) && !RESERVICE_STRUCTURE_LOCATION_RE.test(c);
+}
+const EXCLUDED_ALWAYS_G_RE = new RegExp(EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE.source, 'gi');
+const TREE_SHRUB_G_RE = new RegExp(TREE_SHRUB_SPECIALTY_ISSUE_RE.source, 'gi');
 // Codex round-39 P2: the SET of lanes the active report names, in ['pest','lawn'] order — "Ants and chinch bugs are back" reports BOTH.
-// [] for nothing reported / an excluded specialty. reportedReserviceLane is the single-lane view (null when the set is not exactly one).
+// Codex round-42 P2: an excluded specialty in the SAME report no longer erases the covered lane — "Ants are back and termites are back"
+// keeps pest (the specialty nouns are stripped before reading lanes; reportedReserviceExcludedSpecialty marks the specialty separately).
+// [] for nothing reported / a specialty-only report. reportedReserviceLane is the single-lane view (null when the set is not exactly one,
+// or when a specialty rides along).
 function reportedReserviceLanes(text) {
   const facts = reservicePestReportFacts(text);
-  if (!facts.survivingText.trim() || reportedReserviceExcludedSpecialty(text)) return [];
-  const active = activePestClauses(facts.asserted);
+  if (!facts.survivingText.trim()) return [];
+  const excluded = reportedReserviceExcludedSpecialty(text);
+  const activeAll = activePestClauses(facts.asserted);
+  const active = activeAll.filter((clause) => !fireAntYardClause(clause));
+  if (activeAll.length && !active.length) return []; // only a scope-dependent fire-ant-in-the-yard report
+  if (excluded && !active.length) return [];
   const basis = active.length ? active.join(' , ') : facts.survivingText;
-  const located = basis.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
+  let located = basis.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
+  if (excluded) located = located.replace(EXCLUDED_ALWAYS_G_RE, ' ').replace(TREE_SHRUB_G_RE, ' ');
   // TURF insects (chinch bugs, mole crickets, armyworms, grubs, sod webworms) are LAWN, matched before the generic
   // household nouns they contain (Codex round-33 P2)
   const turfHit = RESERVICE_TURF_INSECT_RE.test(located);
@@ -764,6 +785,7 @@ function reportedReserviceLanes(text) {
   return [hasPest && 'pest', hasLawn && 'lawn'].filter(Boolean);
 }
 function reportedReserviceLane(text) {
+  if (reportedReserviceExcludedSpecialty(text)) return null;
   const lanes = reportedReserviceLanes(text);
   return lanes.length === 1 ? lanes[0] : null; // several lanes reported — let the reply itself name them
 }
@@ -783,7 +805,8 @@ function reportedReserviceExcludedSpecialty(text) {
   // health complaint, "my termites") every surviving clause is read.
   const active = activePestClauses(facts.asserted);
   const s = active.length ? active.join(' , ') : facts.survivingText;
-  return EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE.test(s) || TREE_SHRUB_SPECIALTY_ISSUE_RE.test(s);
+  return EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE.test(s) || TREE_SHRUB_SPECIALTY_ISSUE_RE.test(s)
+    || (active.length ? active.some(fireAntYardClause) : fireAntYardClause(s));
 }
 
 // Statuses that keep a callback "open" for the lane dedupe: booked

@@ -531,6 +531,17 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['I need palm treatment, the palm bugs are back', true, null, true],
     ['the palmetto bugs are back', true, 'pest', false],
     ['the ants are back in the palm tree', true, 'pest', false],
+    // Codex round-42 P2: a specialty riding with a covered pest keeps the covered lane in the SET (single-lane view stays null)
+    ['Ants are back and termites are back', true, null, true],
+    ['Ants and termites are back', true, null, true],
+    // Codex round-42 P2: fire ants with a lawn / yard location are scope-dependent (general plan = mounds near the structure)
+    ['Fire ants are back across the lawn', true, null, true],
+    ['Fire ants are back in the yard', true, null, true],
+    ['Fire ants are all over the front yard again', true, null, true],
+    ['Fire ants are back near the house', true, 'pest', false],
+    ['Fire ant mounds are back by the foundation', true, 'pest', false],
+    ['Fire ants are back around the house and in the yard', true, 'pest', false],
+    ['Ghost ants are back in the yard', true, 'pest', false],
     // several reported lanes: active, but the single-lane view is null (see reportedReserviceLanes below)
     ['Ants and chinch bugs are back', true, null, false],
   ];
@@ -548,6 +559,11 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     expect(reportedReserviceLanes('Chinch bugs are back')).toEqual(['lawn']);
     expect(reportedReserviceLanes('the ants are back')).toEqual(['pest']);
     expect(reportedReserviceLanes('the termites are back')).toEqual([]);
+    // Codex round-42 P2: the covered lane survives a specialty in the same report; a specialty-only or yard-fire-ant report has none
+    expect(reportedReserviceLanes('Ants are back and termites are back')).toEqual(['pest']);
+    expect(reportedReserviceLanes('Ants and chinch bugs are back, and the termites too are back')).toEqual(['pest', 'lawn']);
+    expect(reportedReserviceLanes('Fire ants are back across the lawn')).toEqual([]);
+    expect(reportedReserviceLanes('Fire ants are back near the house')).toEqual(['pest']);
     expect(reportedReserviceLanes('thanks for the visit')).toEqual([]);
   });
 

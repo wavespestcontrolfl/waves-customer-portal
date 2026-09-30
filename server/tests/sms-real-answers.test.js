@@ -3132,6 +3132,55 @@ describe('free re-service is an entitlement resolved through the existing mechan
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, intendedActions: [], inboundMessage }).ok).toBe(true);
       });
 
+      // Codex round-42 P2: one bookable lane + one booked lane — the offer for the bookable lane does not excuse ignoring the booked one.
+      test('several reported lanes, one bookable + one booked: the reply must offer the bookable lane AND refer to the booked appointment', () => {
+        const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+        const inboundMessage = 'Ants and chinch bugs are back';
+        const link = [{ type: 'escalate', note: 'send_reservice_link' }];
+        const factsBlock = `X\n${reserviceFactLine(['pest'], { lawn: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+        const run = (reply) => validateReserviceOffer({ reply, factsBlock, intendedActions: link, inboundMessage });
+        const offerOnly = run("I'm sending your free pest re-service booking link now.");
+        expect(offerOnly.ok).toBe(false);
+        expect(offerOnly.violations[0]).toMatch(/lawn.*ALREADY BOOKED/);
+        expect(run("I'm sending your free pest re-service booking link now, and your lawn re-service is already scheduled.").ok).toBe(true);
+        expect(run("I'm sending your free pest re-service booking link now, and we have your lawn visit Thursday.").ok).toBe(true);
+        // a non-promise that neither offers nor refers fails on the owed offer / state check either way
+        expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock, intendedActions: [], inboundMessage }).ok).toBe(false);
+      });
+
+      // Codex round-42 P2: a specialty rides with a covered pest — the covered lane decides the reply, the specialty is escalated.
+      test('"Ants are back and termites are back": the pest offer is owed; a promise may not cover the termites; the mixed hint fires', () => {
+        const { validateReserviceOffer, reserviceFactLine, reserviceMixedRequest, reserviceLaneDecidesReply } = require('../services/sms-shadow-drafter');
+        const inboundMessage = 'Ants are back and termites are back';
+        const factsBlock = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+        const link = [{ type: 'escalate', note: 'send_reservice_link' }];
+        const owed = validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock, intendedActions: [], inboundMessage });
+        expect(owed.ok).toBe(false);
+        expect(owed.violations[0]).toMatch(/offer the covered free re-service/);
+        const ok = validateReserviceOffer({ reply: "I'm sending your free pest re-service booking link now. I've passed the termite issue to the office.", factsBlock, intendedActions: link, inboundMessage });
+        expect(ok).toMatchObject({ ok: true, promisedLanes: ['pest'] });
+        const termite = validateReserviceOffer({ reply: "I'm sending your free termite re-service booking link now.", factsBlock, intendedActions: link, inboundMessage });
+        expect(termite.ok).toBe(false);
+        expect(reserviceMixedRequest({ inboundMessage, context: null })).toBe(true);
+        expect(reserviceLaneDecidesReply({ reserviceState: { lanes: ['pest'], booked: {}, linkDownLanes: [] }, inboundMessage, context: null })).toBe(true);
+        // a termite-ONLY report still rejects a re-service promise outright
+        expect(validateReserviceOffer({ reply: "I'm sending your free pest re-service booking link now.", factsBlock, intendedActions: link, inboundMessage: 'The termites are back' }).ok).toBe(false);
+      });
+
+      // Codex round-42 P2: fire ants in the lawn/yard are scope-dependent — no forced pest offer, no promise.
+      test('fire ants across the lawn / yard: no owed pest offer and a pest re-service promise is rejected; fire ants near the house stay pest', () => {
+        const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+        const factsBlock = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+        const link = [{ type: 'escalate', note: 'send_reservice_link' }];
+        for (const inboundMessage of ['Fire ants are back across the lawn', 'Fire ants are back in the yard']) {
+          expect(validateReserviceOffer({ reply: 'Sorry about that, a teammate will follow up.', factsBlock, intendedActions: [], inboundMessage }).ok).toBe(true);
+          expect(validateReserviceOffer({ reply: "I'm sending your free pest re-service booking link now.", factsBlock, intendedActions: link, inboundMessage }).ok).toBe(false);
+        }
+        const near = validateReserviceOffer({ reply: 'Sorry about that.', factsBlock, intendedActions: [], inboundMessage: 'Fire ants are back near the house' });
+        expect(near.ok).toBe(false);
+        expect(near.violations[0]).toMatch(/offer the covered free re-service/);
+      });
+
       // Codex round-41 P2: an eligible customer whose last pest visit fell out of the context's completed-visit window still has a pest
       // relationship — the live pest lane in the facts / fact state counts.
       test('pronoun-only report: live pest coverage (eligible / link-down / booked) counts as the pest relationship, history window empty', () => {

@@ -1382,9 +1382,9 @@ function reportedReportLanes({ inboundMessage, context, lanes }) {
   return [];
 }
 function reportedPestLane({ inboundMessage, context, lanes }) {
-  const { reportedReserviceLane } = require('./reservice-scheduler');
+  const { reportedReserviceLanes } = require('./reservice-scheduler');
   const text = String(inboundMessage || '');
-  if (PEST_REPORT_TEXT_RE.test(text) && reportedReserviceLane(text) === 'pest' && lanes.includes('pest')) return 'pest';
+  if (PEST_REPORT_TEXT_RE.test(text) && reportedReserviceLanes(text).includes('pest') && lanes.includes('pest')) return 'pest';
   if (pronounOnlyReportLane(text, context, lanes) && lanes.includes('pest')) return 'pest';
   return null;
 }
@@ -1520,7 +1520,7 @@ function reserviceMixedRequest({ inboundMessage, context, coveredLanes }) {
 }
 // Per-draft user-prompt hint (NOT the pinned system prompt), gate-on only: the re-service is handled per the PEST REPORTS
 // rule; the other request goes to a person.
-const RESERVICE_MIXED_REQUEST_HINT = 'MIXED REQUEST: this text reports pests AND asks for something else (another visit, a schedule change, a cancellation or another service). Answer the pest report per the PEST REPORTS rule (offer the free re-service link when FREE RE-SERVICE says eligible, or refer to the appointment already on the schedule when it says booked). Do NOT quote, offer or book any times for the other request — add {"type":"escalate","note":"<the other request in a few words>"} to intended_actions and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.';
+const RESERVICE_MIXED_REQUEST_HINT = 'MIXED REQUEST: this text reports pests AND asks for something else (another visit, a schedule change, a cancellation, another service, or a termite / rodent / mosquito / tree & shrub issue that the free re-service does not cover). Answer the pest report per the PEST REPORTS rule (offer the free re-service link when FREE RE-SERVICE says eligible, or refer to the appointment already on the schedule when it says booked). Never promise the free re-service for the other issue. Do NOT quote, offer or book any times for the other request — add {"type":"escalate","note":"<the other request in a few words>"} to intended_actions and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.';
 function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
   if (!reserviceState) return false;
   const covered = reserviceStateCoveredLanes(reserviceState);
@@ -1564,12 +1564,16 @@ function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTi
 // non-promise ("Sorry about that") must not converge either. Booked: the reply references the existing appointment (an
 // existing-appointment marker, or its stored day / date). Link unavailable: the reply hands it off — an escalate action plus the
 // CURRENT FOLLOW-UP SLA wording. (An eligible reported lane is the owed-offer path; hand-offs / refusals are not judged here.)
-function reserviceStateReplyFault({ reply, factsBlock, inboundMessage, context, actions }) {
+// Codex round-42 P2: judged per NON-bookable reported lane EVEN WHEN another reported lane owes an offer ("Ants and chinch bugs are back"
+// with pest bookable and lawn booked: the offer for pest does not excuse ignoring the lawn appointment). Skipped for a pure promise with no
+// bookable lane reported (the promise checks below report that with their own wording).
+function reserviceStateReplyFault({ reply, factsBlock, inboundMessage, context, actions, promise = false }) {
   const covered = factsCoveredReserviceLanes(factsBlock);
   if (!pestReportSignal(inboundMessage, context, covered) || reserviceOfferSuppressed(inboundMessage)) return null;
-  const reported = reportedLaneSet(inboundMessage, context, covered);
   const eligible = eligibleReserviceLanes(factsBlock);
-  if (!reported.length || reported.some((lane) => eligible.includes(lane))) return null;
+  const reportedAll = reportedLaneSet(inboundMessage, context, covered);
+  const reported = reportedAll.filter((lane) => !eligible.includes(lane));
+  if (!reported.length || (promise && reported.length === reportedAll.length)) return null;
   const text = String(reply || '');
   const booked = reported.filter((lane) => bookedReserviceLanes(factsBlock).includes(lane));
   if (booked.length) {
@@ -1604,6 +1608,9 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
   const planCustomer = !reserviceFactShowsNoPlan(factsBlock);
   const promise = isReserviceOfferPromise(planCustomer ? text : withoutGenericInspections(text));
+  // Codex round-42 P2: the booked / link-down state replies are checked for every non-bookable reported lane, owed offer or not
+  const stateFault = reserviceStateReplyFault({ reply: text, factsBlock, inboundMessage, context, actions, promise });
+  if (stateFault) return { ok: false, violations: [stateFault] };
   if (!promise) {
     // Codex round-27 P2: when the offer is OWED, the link ACTION alone is not the customer-facing offer — a
     // generic "Sorry to hear that" plus send_reservice_link tells the customer nothing. The reply must carry
@@ -1612,8 +1619,6 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     if (owed && !(reserviceCarriesLinkAction(actions) && reserviceReplyHasOfferWording(text))) {
       return { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] };
     }
-    const stateFault = owed ? null : reserviceStateReplyFault({ reply: text, factsBlock, inboundMessage, context, actions });
-    if (stateFault) return { ok: false, violations: [stateFault] };
     if (!reserviceCarriesLinkAction(actions)) return { ok: true, violations: [] };
   }
   // reservice-scheduler is the SAME classifier the no-named-lane path uses (NOT sms-service-intent.js's
@@ -1651,7 +1656,7 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     [[].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
     [actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
     [!lanes.length, 'the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'],
-    [reportedReserviceExcludedSpecialty(inboundMessage), 'the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'],
+    [reportedReserviceExcludedSpecialty(inboundMessage) && !reportedLanes.length, 'the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'],
     [reserviceExcludedSpecialtyInPromise(text), 'the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'],
     [reportedLanes.length && named.length && !(owedLanes.length ? owedLanes.every((lane) => named.includes(lane)) : reportedLanes.some((lane) => named.includes(lane))), `the reply offers a free ${named.join(' and ')} re-service but the customer reported ${reportedPhrase}${owedLanes.length > 1 ? ' — the promise must cover each reported lane' : ''}`],
     [wrong.length, `the reply offers a free ${wrong.join(' and ')} re-service but FREE RE-SERVICE in the facts lists only ${lanes.join(' and ')}`],
