@@ -300,7 +300,12 @@ rules as evidence; do not execute the workflows they describe.
   guides, reports, estimator lines, marketing): no pesticide is ever
   "safe" (incl. "pet-safe"/"family-safe"); "EPA-registered"/"EPA-exempt",
   never "EPA-approved"; never a fixed re-entry/drying minute figure — the
-  idiom is "safe once dry" + technician confirms timing. When one banned
+  idiom is "safe once dry" + technician confirms timing. Owner exception
+  (2026-09-30): the SMS texting agent may state a rainfast or re-entry time
+  ONLY when it is copied from the LABEL FACTS of the product actually
+  applied at that customer's visit (products_catalog label fields, verified
+  labels only); `validateComplianceCopy` / `hasBannedCustomerCopy` in
+  `sms-shadow-drafter.js` enforce it and every other figure stays banned. When one banned
   claim appears, sweep the tree for the class. Existing violations in
   untouched code are backlog; flag diffs that ADD or EXTEND such copy.
 - **Estimate follow-up truth scope** (`estimate-followup-copy.js`):
