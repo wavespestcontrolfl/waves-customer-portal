@@ -344,14 +344,17 @@ const readRecord = (raw) => {
  * accept that died midway and is compensated instead.
  */
 async function markHoldsAccepted(holdIds) {
-  for (const holdId of holdIds || []) {
-    const row = await db('plan_holds').where({ id: holdId }).first('moved_visits');
-    if (!row) continue;
-    await db('plan_holds').where({ id: holdId }).update({
-      moved_visits: JSON.stringify({ ...readRecord(row.moved_visits), acceptCommitted: true }),
-      updated_at: new Date(),
-    });
-  }
+  // One transaction: recovery must never find an accept half-marked.
+  await db.transaction(async (trx) => {
+    for (const holdId of holdIds || []) {
+      const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
+      if (!row) continue;
+      await trx('plan_holds').where({ id: holdId }).update({
+        moved_visits: JSON.stringify({ ...readRecord(row.moved_visits), acceptCommitted: true }),
+        updated_at: new Date(),
+      });
+    }
+  });
 }
 
 /**

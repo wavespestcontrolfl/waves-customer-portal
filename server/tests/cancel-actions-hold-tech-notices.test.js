@@ -164,4 +164,5 @@ test('the accept is marked as standing before any skip runs; a marking failure u
   })).rejects.toThrow('db down');
   expect(mockCancelHold).toHaveBeenCalledWith('h-lawn_care', { compensateVisits: true });
   expect(mockSkips).not.toHaveBeenCalled();
+  expect(mockEmit).not.toHaveBeenCalled();
 });

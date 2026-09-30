@@ -250,8 +250,8 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
   // its Away Mode write also stands.
   const techNotices = results.flatMap((r) => r.techNotices || []);
   if (!deferTechNotices) {
-    emitHoldTechNotices(techNotices);
     await markAcceptedOrUndo(results.map((r) => r.holdId));
+    emitHoldTechNotices(techNotices);
     await applyHoldSkips(results);
     await sendDueRestartTexts(results.map((r) => r.holdId));
   }
@@ -288,8 +288,8 @@ async function executeAwayPairing(ctx) {
   // Holds and Away Mode both stand: the moved visits' techs hear now, and
   // the visits inside the pause are skipped.
   const holds = require('./holds');
-  holds.emitHoldTechNotices(techNotices);
   await markAcceptedOrUndo(hold.holds);
+  holds.emitHoldTechNotices(techNotices);
   await holds.applyHoldSkips(holdResults);
   await holds.sendDueRestartTexts(hold.holds);
   return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
