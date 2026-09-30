@@ -26202,6 +26202,7 @@ router._test = {
   isDuplicateActiveSeries,
   resolveDuplicateActiveSeries,
   normalizeTopUpWindow,
+  assignableRecurringTemplateTechnicianId,
   TOPUP_MAX_INSERTS_PER_SERIES_PER_RUN,
   latestLiveSeriesVisit,
   acquireRecurringSeriesMaintenanceLock,
