@@ -28,7 +28,7 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
-const { renderCompanyFactsSection, reserviceBookingLine } = require('./sms-company-facts');
+const { renderCompanyFactsSection } = require('./sms-company-facts');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -365,50 +365,25 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
 // customer, a lookup error or a timeout all resolve to [] (not eligible).
 // Returns null when the gates are off (no fact is rendered at all).
 async function fetchReserviceLanes({ customerId } = {}) {
-  const state = await fetchReserviceState({ customerId });
-  return state ? state.lanes : null;
-}
-
-// fetchReserviceLanes plus whether the customer has a reservice_token on
-// file (the app-booking page cannot open without one) and which eligible
-// lanes are still bookable (no open callback on the lane). Same gates, same
-// fail-closed behavior; null when the gates are off.
-async function fetchReserviceState({ customerId } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')) return null;
-  if (!customerId) return { lanes: [], hasToken: false, bookableLanes: [] };
+  if (!customerId) return [];
   let timer = null;
   try {
-    const { reserviceSelfServeEnabled, reserviceLanesForCustomer, openReserviceCallbacks } = require('./reservice-scheduler');
-    if (!reserviceSelfServeEnabled()) return { lanes: [], hasToken: false, bookableLanes: [] };
+    const { reserviceSelfServeEnabled, reserviceLanesForCustomer } = require('./reservice-scheduler');
+    if (!reserviceSelfServeEnabled()) return [];
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
     const lookup = (async () => {
-      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-      if (!row || row.active === false) return { lanes: [], hasToken: false, bookableLanes: [] };
-      const eligible = await reserviceLanesForCustomer(row);
-      const lanes = Array.isArray(eligible) ? eligible.filter((l) => l === 'pest' || l === 'lawn') : [];
-      const hasToken = Boolean(row.reservice_token);
-      // Lanes the booking page would still let them book: the SAME open-
-      // callback lookup reservice-public.js resolveLaneState uses
-      // (reservice-scheduler.openReserviceCallbacks) — a lane that already
-      // has an open free visit is not bookable. Its own failure only drops
-      // the app-booking line (bookableLanes []), never the eligibility fact.
-      let bookableLanes = [];
-      if (hasToken && lanes.length) {
-        try {
-          const open = await openReserviceCallbacks(row.id);
-          bookableLanes = lanes.filter((lane) => !open[lane]);
-        } catch (err) {
-          logger.warn(`[sms-shadow] open re-service callback lookup failed (${err.message}); omitting app-booking line`);
-        }
-      }
-      return { lanes, hasToken, bookableLanes };
+      const row = await db('customers').where({ id: customerId }).first('id', 'active', 'waveguard_tier', 'monthly_rate');
+      if (!row || row.active === false) return [];
+      return reserviceLanesForCustomer(row);
     })();
-    return await Promise.race([lookup, timeout]);
+    const lanes = await Promise.race([lookup, timeout]);
+    return Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [];
   } catch (err) {
     logger.warn(`[sms-shadow] free re-service eligibility lookup failed (${err.message}); treating as not eligible`);
-    return { lanes: [], hasToken: false, bookableLanes: [] };
+    return [];
   } finally {
     if (timer) clearTimeout(timer);
   }
@@ -1402,17 +1377,8 @@ function buildFactsBlock(context, extras = {}) {
   // COMPANY FACTS (owner rulings 2026-09-29/30): owner-approved company
   // knowledge, gate-on only, ordinary per-draft facts the verifier grounds
   // against like any other section. '' gate-off (byte-identical).
-  // The re-service app-booking line follows the static section, only while
-  // the FREE RE-SERVICE fact above is positive AND the customer can actually
-  // open the booking page: self-serve on and a reservice_token on file (the
-  // portal schedule payload, routes/schedule.js, withholds the URL without
-  // one). extras.reserviceAppBookable is resolved upstream with the lanes.
-  const reserviceBookable = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
-    && Array.isArray(extras.reserviceLanes) && extras.reserviceLanes.length > 0
-    && extras.reserviceAppBookable === true
-    && require('../config/feature-gates').isEnabled('reserviceSelfServe');
   const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? `${renderCompanyFactsSection()}${reserviceBookable ? `${reserviceBookingLine()}\n` : ''}`
+    ? renderCompanyFactsSection()
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -1965,9 +1931,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     });
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
-  const reserviceState = presetFactsBlock ? null : await fetchReserviceState({ customerId: context?.customer?.id || null });
-  const reserviceLanes = reserviceState ? reserviceState.lanes : null;
-  const reserviceAppBookable = reserviceState ? reserviceState.hasToken === true && reserviceState.bookableLanes.length > 0 : false;
+  const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -1980,7 +1944,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceAppBookable, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -2611,7 +2575,6 @@ module.exports = {
   liveServiceType,
   serviceIdentityFor,
   fetchReserviceLanes,
-  fetchReserviceState,
   reserviceFactLine,
   validateReserviceOffer,
   validateComplianceCopy,

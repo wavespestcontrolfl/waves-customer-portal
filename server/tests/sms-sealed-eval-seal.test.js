@@ -66,12 +66,12 @@ const cand = (id, intent, createdAt) => ({
 // BILLING: line (Codex #5392 r3 P2), not a header LIKE, so its clause binds
 // the delimiter + exact suffixes; SLA and FREE RE-SERVICE stay LIKE markers.
 const {
-  BILLING_DELIMITER: D_, exactSectionSuffixes: exactSuffixes_,
+  BILLING_DELIMITER: D_, exactSectionSuffix: exactSuffix_,
 } = require('../services/sms-company-facts');
-const [EXACT_PLAIN, EXACT_BOOKING] = exactSuffixes_();
+const EXACT = exactSuffix_();
 const CONTRACT_BINDINGS = [
   '%FOLLOW-UP SLA RIGHT NOW:%',
-  D_, D_, EXACT_PLAIN.length, EXACT_PLAIN, D_, EXACT_BOOKING.length, EXACT_BOOKING,
+  D_, D_, EXACT.length, EXACT,
   '%FREE RE-SERVICE:%',
 ];
 

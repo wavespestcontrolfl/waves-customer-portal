@@ -1691,17 +1691,16 @@ describe('free re-service is an entitlement resolved through the existing mechan
     expect(buildFactsBlock(CONTEXT, { reserviceLanes: [] })).toContain('FREE RE-SERVICE: not eligible');
     expect(buildFactsBlock(CONTEXT)).toContain('FREE RE-SERVICE: not eligible'); // no lanes passed
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
-    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE:');
+    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE');
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
     delete process.env.GATE_SMS_REAL_ANSWERS;
-    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE:');
+    expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE');
   });
 
-  function loadWith({ lanes = ['pest'], selfServe = true, row = { id: 'cust-1', active: true }, throws = false, open = {}, openThrows = false } = {}) {
+  function loadWith({ lanes = ['pest'], selfServe = true, row = { id: 'cust-1', active: true }, throws = false } = {}) {
     jest.resetModules();
     const reserviceLanesForCustomer = jest.fn(async () => { if (throws) throw new Error('boom'); return lanes; });
-    const openReserviceCallbacks = jest.fn(async () => { if (openThrows) throw new Error('open boom'); return open; });
-    jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => selfServe, reserviceLanesForCustomer, openReserviceCallbacks }));
+    jest.doMock('../services/reservice-scheduler', () => ({ reserviceSelfServeEnabled: () => selfServe, reserviceLanesForCustomer }));
     jest.doMock('../models/db', () => {
       const db = jest.fn(() => ({ where: () => ({ first: async () => row }) }));
       return db;
@@ -1721,31 +1720,6 @@ describe('free re-service is an entitlement resolved through the existing mechan
     await expect(loadWith({ row: null }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
     await expect(loadWith({}).drafter.fetchReserviceLanes({ customerId: null })).resolves.toEqual([]);
     await expect(loadWith({ throws: true }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
-  });
-
-  test('fetchReserviceState: hasToken follows the customer row reservice_token; fails closed', async () => {
-    const row = (t) => ({ id: 'cust-1', active: true, reservice_token: t });
-    await expect(loadWith({ row: row('tok') }).drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest'], hasToken: true, bookableLanes: ['pest'] });
-    await expect(loadWith({ row: row(null) }).drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest'], hasToken: false, bookableLanes: [] });
-    const closed = { lanes: [], hasToken: false, bookableLanes: [] };
-    await expect(loadWith({ throws: true }).drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual(closed);
-    await expect(loadWith({ selfServe: false }).drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual(closed);
-  });
-
-  test('fetchReserviceState: a lane with an open callback is not bookable (same lookup reservice-public uses)', async () => {
-    const row = { id: 'cust-1', active: true, reservice_token: 'tok' };
-    const both = loadWith({ row, lanes: ['pest', 'lawn'], open: { pest: { id: 's1' } } });
-    await expect(both.drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest', 'lawn'], hasToken: true, bookableLanes: ['lawn'] });
-    // every eligible lane already booked: eligible (FREE RE-SERVICE unchanged) but nothing bookable
-    const all = loadWith({ row, lanes: ['pest'], open: { pest: { id: 's1' } } });
-    await expect(all.drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest'], hasToken: true, bookableLanes: [] });
-    // the open-callback lookup failing drops only the app-booking lane list
-    const failing = loadWith({ row, openThrows: true });
-    await expect(failing.drafter.fetchReserviceState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest'], hasToken: true, bookableLanes: [] });
-    // no token: the callbacks are never looked up
-    const noTok = loadWith({ row: { id: 'cust-1', active: true } });
-    await noTok.drafter.fetchReserviceState({ customerId: 'cust-1' });
-    expect(require('../services/reservice-scheduler').openReserviceCallbacks).not.toHaveBeenCalled();
   });
 
   test('fetchReserviceLanes: either gate off → null (no fact rendered, mechanism never consulted)', async () => {

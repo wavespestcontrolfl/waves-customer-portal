@@ -62,7 +62,7 @@ const VERDICTS = ['draft_better', 'equivalent', 'human_better', 'draft_unsafe', 
 const COMPANY_FACTS_JUDGE_CAP = 3000;
 function sanitizeFactsForJudge(block) {
   const { EXEMPLAR_INJECTION_RE } = require('./sms-shadow-drafter');
-  const { renderCompanyFactsSection, RESERVICE_BOOKING_LABEL } = require('./sms-company-facts');
+  const { renderCompanyFactsSection } = require('./sms-company-facts');
   const lines = String(block || '')
     .split('\n')
     .filter((line) => !EXEMPLAR_INJECTION_RE.test(line));
@@ -76,19 +76,14 @@ function sanitizeFactsForJudge(block) {
   //
   // The exemption is EXACT (Codex #5392 r2 P2): it applies only when the
   // block carries the current static render byte-for-byte, immediately
-  // before the FIRST "BILLING:" line (where buildFactsBlock puts it), plus
-  // the known per-draft RE-SERVICE BOOKING line (one bounded line) between
-  // it and BILLING:. A header typed into a
-  // multi-line SMS sits in the thread, AFTER the real BILLING: line and never
-  // in that spot, so it is ordinary text under the cap.
+  // before the FIRST "BILLING:" line (where buildFactsBlock puts it). A header
+  // typed into a multi-line SMS sits in the thread, AFTER the real BILLING:
+  // line and never in that spot, so it is ordinary text under the cap.
   const staticLines = renderCompanyFactsSection().replace(/\n$/, '').split('\n');
-  const perDraftLine = (l) => l.startsWith(`${RESERVICE_BOOKING_LABEL} `) && l.length <= 600;
   const billing = lines.indexOf('BILLING:');
   let start = -1;
   if (billing > 0) {
-    let k = billing;
-    while (k > 0 && perDraftLine(lines[k - 1])) k -= 1;
-    const s0 = k - staticLines.length;
+    const s0 = billing - staticLines.length;
     if (s0 >= 0 && staticLines.every((l, n) => lines[s0 + n] === l)) start = s0;
   }
   let section = '';

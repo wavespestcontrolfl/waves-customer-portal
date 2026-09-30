@@ -41,7 +41,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const {
-  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffixes, hasExactCompanyFacts,
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffix, hasExactCompanyFacts,
 } = require('./sms-company-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
@@ -200,9 +200,9 @@ function compatibleWhereRaw(markers, forbidden = []) {
   const bindings = [];
   const add = (marker, negate) => {
     if (marker === COMPANY_FACTS_HEADER) {
-      const [plain, withBooking] = exactSectionSuffixes();
-      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND (right(split_part(${col}, ?::text, 1), ?::int) = ?::text OR right(split_part(${col}, ?::text, 1), ?::int) = ?::text))`);
-      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, plain.length, plain, BILLING_DELIMITER, withBooking.length, withBooking);
+      const exact = exactSectionSuffix();
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);
     } else {
       clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
       bindings.push(`%${marker}%`);

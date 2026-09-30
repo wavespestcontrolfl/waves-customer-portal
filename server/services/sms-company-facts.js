@@ -35,46 +35,31 @@ function renderCompanyFactsSection() {
   return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.map((f) => `- ${f}`).join('\n')}\n`;
 }
 
-// ---- Per-draft line (rendered right after the static section) ----------
-//
-// Only when the FREE RE-SERVICE fact is positive AND the customer can open
-// the self-serve booking page (the caller checks: complaints gate, eligible
-// lanes, GATE_RESERVICE_SELF_SERVE, a reservice_token on file); otherwise
-// nothing about app booking.
-const RESERVICE_BOOKING_LABEL = 'RE-SERVICE BOOKING:';
-function reserviceBookingLine() {
-  return `${RESERVICE_BOOKING_LABEL} when the customer sees pests again after a visit and FREE RE-SERVICE above says they are eligible, offer the free re-service and mention they can book it in the Waves app. Do not explain why pests are still showing.`;
-}
-
 // ---- Trusted presence check (sealed-eval compatibility) -----------------
 //
 // A header substring is NOT proof a block carried the section: a customer's
 // multi-line SMS in the thread can contain the header text. The real section
-// sits directly before the FIRST "BILLING:" line (buildFactsBlock's spot),
-// optionally followed by the one RE-SERVICE BOOKING line. So a block "has"
-// COMPANY FACTS only when the text before that first BILLING: line ends with
-// the exact static render (+ the booking line). Any edit to COMPANY_FACTS text
+// sits directly before the FIRST "BILLING:" line (buildFactsBlock's spot), so
+// a block "has" COMPANY FACTS only when the text before that first BILLING:
+// line ends with the exact static render. Any edit to COMPANY_FACTS text
 // therefore needs a new version suffix (old items no longer match).
 const BILLING_DELIMITER = '\nBILLING:\n';
-function exactSectionSuffixes() {
-  const section = renderCompanyFactsSection();
-  return [`\n${section.replace(/\n$/, '')}`, `\n${section}${reserviceBookingLine()}`];
+function exactSectionSuffix() {
+  return `\n${renderCompanyFactsSection().replace(/\n$/, '')}`;
 }
 function hasExactCompanyFacts(factsBlock) {
   const facts = String(factsBlock || '');
   const at = facts.indexOf(BILLING_DELIMITER);
   if (at < 0) return false;
   const before = facts.slice(0, at);
-  return exactSectionSuffixes().some((suffix) => before.endsWith(suffix));
+  return before.endsWith(exactSectionSuffix());
 }
 
 module.exports = {
   BILLING_DELIMITER,
-  exactSectionSuffixes,
+  exactSectionSuffix,
   hasExactCompanyFacts,
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
-  RESERVICE_BOOKING_LABEL,
   renderCompanyFactsSection,
-  reserviceBookingLine,
 };
