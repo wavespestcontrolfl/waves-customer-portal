@@ -13,6 +13,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const migration = require('../models/migrations/20260930170000_prep_lawn_guide_revision');
+// Follow-up (#5441 r1 P2): one-time-neutral wording over 170000.
+const followup = require('../models/migrations/20260930190000_prep_lawn_one_time_neutral');
 const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES, MIGRATION_MARKER } = migration;
@@ -112,11 +114,79 @@ describe('one-time-safe copy', () => {
   });
 });
 
-describe('publish mechanics', () => {
+describe('20260930190000 one-time-neutral wording', () => {
+  test('supersedes 170000 and changes exactly the three visit-wording blocks', () => {
+    expect(followup.SUPERSEDES).toBe(MIGRATION_MARKER);
+    const before = TEMPLATES[0].blocks;
+    const after = followup.TEMPLATES[0].blocks;
+    expect(after).toHaveLength(before.length);
+    const changed = after.filter((b, i) => JSON.stringify(b) !== JSON.stringify(before[i]));
+    expect(changed.map((b) => b.type)).toEqual(['heading', 'paragraph', 'callout']);
+  });
+
+  // Live-version patching (#5442 r1 P1): an admin edit made after 170000 is kept.
+  function liveKnex(priorBlocks, extra = {}) {
+    const state = { inserted: [], templateUpdates: [], versionUpdates: [] };
+    const template = { id: 't-1', template_key: 'prep.lawn', active_version_id: 'v-1' };
+    const prior = { id: 'v-1', template_id: 't-1', version_number: 7, status: 'active', subject: 'S', preview_text: 'P', blocks: JSON.stringify(priorBlocks), ...extra };
+    const table = (name) => {
+      const q = {
+        where: jest.fn(() => q), forUpdate: jest.fn(() => q), orderBy: jest.fn(() => q),
+        first: jest.fn(async () => (name === 'email_templates' ? template : prior)),
+        insert: jest.fn((row) => ({ returning: jest.fn(async () => { const v = { id: 'v-new', ...row }; state.inserted.push(v); return [v]; }) })),
+        update: jest.fn(async (patch) => { (name === 'email_templates' ? state.templateUpdates : state.versionUpdates).push(patch); return 1; }),
+      };
+      return q;
+    };
+    const knex = jest.fn(table);
+    knex.transaction = jest.fn(async (fn) => fn(jest.fn(table)));
+    knex.schema = { hasTable: jest.fn(async () => true) };
+    return { knex, state };
+  }
+
+  test('patches the LIVE version: an unrelated admin edit survives', async () => {
+    const edited = JSON.parse(JSON.stringify(TEMPLATES[0].blocks));
+    edited[0] = { ...edited[0], content: `${edited[0].content} (admin-added sentence)` };
+    const { knex, state } = liveKnex(edited);
+    await followup.up(knex);
+    expect(state.inserted).toHaveLength(1);
+    const published = JSON.parse(state.inserted[0].blocks);
+    expect(published[0].content).toMatch(/admin-added sentence/);
+    expect(JSON.stringify(published)).not.toMatch(/first visit|each visit/i);
+  });
+
+  test('skips publication when a patch no longer matches exactly once', async () => {
+    const edited = JSON.parse(JSON.stringify(TEMPLATES[0].blocks)).filter((b) => b.content !== 'Before your first visit');
+    const { knex, state } = liveKnex(edited);
+    await followup.up(knex);
+    expect(state.inserted).toHaveLength(0);
+    expect(state.templateUpdates).toHaveLength(0);
+  });
+
+  test('skips a version with a custom plain-text body', async () => {
+    const { knex, state } = liveKnex(TEMPLATES[0].blocks, { text_body: 'custom' });
+    await followup.up(knex);
+    expect(state.inserted).toHaveLength(0);
+  });
+
+  test('no first-visit / each-visit wording; headings are service-neutral', () => {
+    const text = JSON.stringify(followup.TEMPLATES);
+    expect(text).not.toMatch(/first visit|each visit|every visit|next visit/i);
+    const headings = followup.TEMPLATES[0].blocks.filter((b) => b.type === 'heading').map((b) => b.content);
+    expect(headings).toEqual(['What we need from you', 'Before we arrive', 'Pets & kids', 'What to expect after']);
+  });
+});
+
+describe.each([
+  ['170000', migration, '[]'],
+  // The follow-up patches the live version, so its prior carries 170000's blocks.
+  ['190000', followup, JSON.stringify(migration.TEMPLATES[0].blocks)],
+])('publish mechanics (%s)', (_name, migration, priorBlocks) => {
+  const { TEMPLATES, MIGRATION_MARKER } = migration;
   function makeKnex({ insertError = null, casMoves = 1 } = {}) {
     const state = {
       template: { id: 't-1', template_key: 'prep.lawn', active_version_id: 'v-1' },
-      versions: [{ id: 'v-1', template_id: 't-1', version_number: 3, status: 'active', subject: 'Subj', preview_text: 'Prev', blocks: '[]' }],
+      versions: [{ id: 'v-1', template_id: 't-1', version_number: 3, status: 'active', subject: 'Subj', preview_text: 'Prev', blocks: priorBlocks }],
       templateUpdates: [],
       versionUpdates: [],
       inserted: [],
