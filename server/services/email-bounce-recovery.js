@@ -200,7 +200,7 @@ async function correctedAddressSuppressed(bouncedMessage, correctedEmail) {
   let rows;
   try {
     rows = await db('email_suppressions')
-      .whereRaw('LOWER(email) = ?', [String(correctedEmail).trim().toLowerCase()])
+      .where(require('../utils/email-equivalence').suppressionCoversEmail(correctedEmail))
       .where({ status: 'active' });
   } catch (err) {
     // Fail CLOSED: if we can't verify suppression state we must not resend.

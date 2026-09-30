@@ -102,7 +102,10 @@ async function raiseAdminAlertWithReopen(category, title, body, opts = {}) {
     return NotificationService.notifyAdmin(category, title, body, raiseOpts);
   };
   const result = callerTrx ? await run(callerTrx) : await db.transaction(run);
-  return { ...result, rang: !result.deduped || (result.refreshed === true && result.rung !== false) };
+  // A suppressed result (an internal test customer: notification-service's
+  // central suppression inserts nothing) never rang, so it never uses up a
+  // caller's per-run ring cap.
+  return { ...result, rang: !result.suppressed && (!result.deduped || (result.refreshed === true && result.rung !== false)) };
 }
 
 module.exports = { closeAdminAlertKeys, openAdminAlertKeys, raiseAdminAlertWithReopen };

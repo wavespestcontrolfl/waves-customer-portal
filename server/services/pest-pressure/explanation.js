@@ -9,6 +9,10 @@ const COPY = Object.freeze({
   insufficient: 'Pest Pressure will appear once enough service data is available.',
   first_marker:
     'This is your first Pest Pressure score. Future reports will compare this number against prior visits to show whether pest activity is improving, stable, or increasing.',
+  // Earlier visits exist but were scored on the pre-#4741 scale, so nothing is
+  // comparable yet. Same approved sentence the report email uses
+  // (service-report/pressure-trend.js buildCustomerSummary).
+  rescaled: 'Pressure trend will appear after more visits.',
   improving: 'Pest pressure is improving compared with the previous service period.',
   stable_low: 'Pest pressure remains low. No significant activity was found during this service period.',
   stable_other: 'Pest pressure is stable compared with the previous service period.',
@@ -27,6 +31,7 @@ function resolveCustomerSummary({ trend, label, dataCompleteness }) {
     return COPY.insufficient;
   }
   if (trend === 'first_marker') return COPY.first_marker;
+  if (trend === 'rescaled') return COPY.rescaled;
   if (trend === 'improving') return COPY.improving;
   if (trend === 'stable') {
     return isLowOrVeryLow(label && label.key) ? COPY.stable_low : COPY.stable_other;

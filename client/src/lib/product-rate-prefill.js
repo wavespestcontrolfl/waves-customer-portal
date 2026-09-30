@@ -10,6 +10,9 @@
 //      products with no catalog rate
 //   3. per-basis display default's LOW bound in its label-native unit
 //      ("0.1 g/spot", "4 fl_oz/100gal", …)
+// A product whose label rate is kept in mL takes none of these but the house
+// default: nothing on a completion is in mL (resolveRatePrefill).
+import { TSP_PER_FL_OZ, isMlUnit } from "./measure-units";
 
 // A "/"-suffixed display unit is a label rate in the label's own basis — mix
 // concentration ("fl_oz/gal", "fl_oz/100gal"), spot placement ("g/spot"),
@@ -80,10 +83,29 @@ export function promoteTankOwner(rows = []) {
   return heir ? rows.map((row) => (row === heir ? { ...row, tankOwner: true } : row)) : rows;
 }
 
+// A quantity the tech did not type (a tank dose, a rate x area total, a house
+// seed) under the amount unit the tech picked. Spoons and fluid ounces are one
+// measure (6 tsp to the fl oz, owner ruling 2026-09-27), so the number
+// converts; any other change to or from tsp withdraws it for the tech to enter
+// (a bare "oz" may be a dry weight) — never "0.25 tsp" for 0.25 fl oz. Changes
+// between other units keep each caller's own rule and pass through.
+export function amountInUnit(amount, fromUnit, toUnit) {
+  if (fromUnit === toUnit || (fromUnit !== "tsp" && toUnit !== "tsp")) return amount;
+  if (amount === "" || amount == null) return amount;
+  const n = Number(amount);
+  if (!Number.isFinite(n)) return "";
+  // Four decimals, as a derived tank dose keeps (derivedTankTotal).
+  if (fromUnit === "fl_oz" && toUnit === "tsp") return Math.round(n * TSP_PER_FL_OZ * 10000) / 10000;
+  if (fromUnit === "tsp" && toUnit === "fl_oz") return Math.round((n / TSP_PER_FL_OZ) * 10000) / 10000;
+  return "";
+}
+
 // A per-gallon row with the technician's gallons behind it shows rate x
-// gallons in the rate's own base unit — whatever cleared it earlier. Applied
-// as the closing step of every row update, so a handler that blanks a derived
-// total it cannot express does not have to know about tanks.
+// gallons in the rate's own base unit — whatever cleared it earlier — or, for
+// a fl oz dose the tech reads in spoons, in tsp (the completion body sends it
+// as fl oz). Applied as the closing step of every row update, so a handler
+// that blanks a derived total it cannot express does not have to know about
+// tanks.
 export function applyTankDose(row) {
   if (!isPerGallonUnit(row.rateUnit)) return row;
   // A SEEDED total is a house default, not a technician entry: it is marked
@@ -95,11 +117,14 @@ export function applyTankDose(row) {
   const dose = derivedTankTotal(row.rate, row.carrierGallons);
   if (row.totalAmountSeeded && dose === "") return row;
   // Clearing the gallons clears the dose: derivedTankTotal returns "" without
-  // a volume, so this one call covers both halves of the rule.
+  // a volume, so this one call covers both halves of the rule. A tsp pick
+  // stays: snapping it back to fl oz would record spoons typed next as fl oz.
+  const baseUnit = String(row.rateUnit).split("/")[0];
+  const amountUnit = row.amountUnit === "tsp" && baseUnit === "fl_oz" ? "tsp" : baseUnit;
   return {
     ...row,
-    amountUnit: String(row.rateUnit).split("/")[0],
-    totalAmount: dose,
+    amountUnit,
+    totalAmount: amountInUnit(dose, baseUnit, amountUnit),
     totalAmountManual: false,
     totalAmountSeeded: false,
   };
@@ -279,6 +304,23 @@ export function resolveRatePrefill(product = {}, { applicationMethod = "", servi
     !isAdjuvantProduct(product) &&
     applicationMethod === "perimeter_spray" &&
     serviceLine === "pest";
+  // A label rate kept in mL (Arborjet's "ml/inch dbh", Palm-Jet's "ml/palm",
+  // a supplement's "ml/gal") is never prefilled or offered: nothing a tech
+  // sees or enters on a completion is in mL (owner ruling 2026-09-27; every
+  // service 2026-09-29). The row starts with a blank rate and its amount in
+  // fl oz; the catalog keeps the label's own figure. The pest house default
+  // is 4 oz, never the label's mL, so it still applies.
+  if ([product.defaultUnit, product.default_unit, product.rateUnit, product.rate_unit].some(isMlUnit)) {
+    return {
+      rate: usePestSprayDefault ? 4 : "",
+      labelMaxRate: null,
+      rateUnit: usePestSprayDefault ? "oz" : "",
+      amountUnit: usePestSprayDefault ? "oz" : "fl_oz",
+      usePestSprayDefault,
+      perBasisUnit: false,
+      defaultUnit: "",
+    };
+  }
   // Per-basis products carry their verified label rate in the legacy
   // display fields (default_rate "0.2-0.8" + default_unit "fl_oz/gal").
   // When there is no per-1k rate and the pest 4-oz house default doesn't

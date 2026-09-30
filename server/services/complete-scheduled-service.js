@@ -1666,12 +1666,12 @@ function parseJsonObject(value) {
   return {};
 }
 
-function normalizeCompletionTextArray(value, limit = 20) {
+function normalizeCompletionTextArray(value, limit = COMPLETION_TEXT_MAX_ENTRIES) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
   const out = [];
   for (const item of value) {
-    const text = String(item || '').trim().replace(/\s+/g, ' ').slice(0, 240);
+    const text = String(item || '').trim().replace(COMPLETION_WHITESPACE, ' ').slice(0, COMPLETION_TEXT_MAX_LENGTH);
     if (!text) continue;
     const key = text.toLowerCase();
     if (seen.has(key)) continue;
@@ -1709,13 +1709,21 @@ function completedProtocolActionScopes(actions, scopeEntries, serviceLine) {
     .filter(Boolean);
 }
 
+// Marker-line grammar shared with the admin completion panel (SchedulePage.jsx)
+// so its active-marker detection and pruning match this parser exactly.
+const COMPLETION_MARKER_GRAMMAR = require('../../shared/completion-marker-grammar.json');
+const COMPLETION_MARKER_LINE = new RegExp(COMPLETION_MARKER_GRAMMAR.lineSource);
+const COMPLETION_WHITESPACE = new RegExp(COMPLETION_MARKER_GRAMMAR.whitespaceSource, 'g');
+const COMPLETION_TEXT_MAX_LENGTH = COMPLETION_MARKER_GRAMMAR.maxLength;
+const COMPLETION_TEXT_MAX_ENTRIES = COMPLETION_MARKER_GRAMMAR.maxEntries;
+
 function taggedCompletionNoteLines(notes, tags) {
   const tagSet = new Set(tags.map((tag) => tag.toLowerCase()));
   return String(notes || '')
     .split(/\r?\n/)
     .map((line) => line.trim())
     .map((line) => {
-      const match = line.match(/^\[([^\]]+)\]\s*(.+)$/);
+      const match = line.match(COMPLETION_MARKER_LINE);
       if (!match) return null;
       return { tag: match[1].toLowerCase(), text: match[2].trim() };
     })

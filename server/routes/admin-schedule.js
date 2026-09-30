@@ -17577,13 +17577,23 @@ async function liveUpcomingSeriesVisits(conn, parentId) {
 // completion and Charge Now reuse it at the OLD price.
 // It also discovers invoices linked through a service record or a
 // combined-visit packet (Codex r2 P1 on #5253), so money or a live invoice
-// on an indirectly linked invoice blocks too. A free re-service conversion
-// gets no exemption (owner ruling 2026-09-28, #5253 r3: "same rule as any
-// re-price") — staff void or release first. None of the three
-// existing callers (the plan trim, the series-cancel fee rails, the price/
-// service sibling propagation before this option was threaded onto it) ever
-// needed to know about an invoice nobody has paid — so this stays opt-in,
-// default false, keeping every pre-existing call byte-identical.
+// on an indirectly linked invoice blocks too. One more indirect link
+// (owner-ordered follow-up to #5253, Codex round 9):
+//   - a combined first-application invoice for a non-anchor member visit.
+//     estimate-converter.js stamps EVERY covered member (anchor and
+//     siblings alike) with the SAME invoice id on
+//     scheduled_services.first_application_invoice_id — a link deliberately
+//     separate from invoices.scheduled_service_id (which only ever names the
+//     anchor) — so a member visit's own re-price has no other way to find
+//     the invoice covering it (memberBillingInvoiceRows: any non-void
+//     invoice on the anchor that bills the member by its own lines).
+// A free re-service conversion gets no exemption (owner ruling 2026-09-28,
+// #5253 r3: "same rule as any re-price") — staff void or release first. None
+// of the three existing callers (the plan trim, the series-cancel fee rails,
+// the price/service sibling propagation before this option was threaded
+// onto it) ever needed to know about an invoice nobody has paid — so this
+// stays opt-in, default false, keeping every pre-existing call
+// byte-identical.
 // Money committed at the ESTIMATE level for a visit created or adopted from
 // one (Codex r8 P1 on #5253) — invisible to findBillingCoveredVisits, which
 // keys on the visit: a received, not-yet-applied estimate deposit (keyed by
@@ -17610,6 +17620,73 @@ async function findEstimateScopedCommitment(conn, estimateId) {
     if (term) return 'on an annual prepay invoice that is still open at the old price';
   }
   return null;
+}
+
+// Combined first-application invoices that still bill each member visit
+// (owner ruling 2026-09-29 on #5301 — the simple rule, no replacement-chain
+// tracing): every NON-void invoice on the member's anchor visit, plus the
+// stamp itself, that bills THIS member by its own lines — an itemized
+// invoice names each visit it bills (client_id scheduled_<id>_primary,
+// which every service mint writes); an unitemized base-application invoice
+// ("First service application") bills every member; the live stamp bills
+// its members by construction. Locks: the anchor's mint lock is TRIED
+// first (invoice creation serializes on it, so no new invoice appears
+// before this save commits), then the candidate invoices are locked AND
+// read in one NOWAIT statement. Contention is a VISIT_BUSY_RETRY, never a
+// wait (this save already holds a visit row; the card-charge path locks
+// invoice then visit). Returns rows in findBillingCoveredVisits' shape.
+async function memberBillingInvoiceRows(conn, ids) {
+  const stamps = await conn('scheduled_services as ss')
+    .join('invoices as inv', 'inv.id', 'ss.first_application_invoice_id')
+    .whereIn('ss.id', ids)
+    .select('ss.id as member_id', 'inv.id as stamp_id', 'inv.scheduled_service_id as anchor_id');
+  if (stamps.length === 0) return [];
+  const busy = () => Object.assign(
+    new Error('An invoice for this visit is being updated or charged right now — try the price change again in a moment.'),
+    { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+  );
+  const anchorIds = [...new Set(stamps.map((row) => row.anchor_id).filter(Boolean).map(String))].sort();
+  const stampIds = [...new Set(stamps.map((row) => String(row.stamp_id)))].sort();
+  let candidates;
+  try {
+    const { tryAcquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+    for (const anchorId of anchorIds) {
+      if (!(await tryAcquireScheduledInvoiceMintLock(conn, anchorId))) throw busy();
+    }
+    candidates = await conn('invoices')
+      .where(function () { this.whereIn('id', stampIds).orWhereIn('scheduled_service_id', anchorIds); })
+      .whereNotIn('status', require('../services/invoice').CANCELLED_SERVICE_RESOLVED_STATUSES)
+      .orderBy('id')
+      .forUpdate()
+      .noWait()
+      .select('id', 'status', 'scheduled_service_id', 'credit_applied', 'line_items', 'stripe_payment_intent_id', 'total');
+  } catch (err) {
+    if (err?.code !== '55P03') throw err;
+    throw busy();
+  }
+  const billedIds = (inv) => {
+    let items = inv.line_items;
+    if (typeof items === 'string') { try { items = JSON.parse(items); } catch { items = []; } }
+    items = Array.isArray(items) ? items : [];
+    const itemized = items.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ''))?.[1]).filter(Boolean);
+    const aggregate = itemized.length === 0 && items.some((li) => /^first (service )?application$/i.test(String(li?.description || '').trim()));
+    return { itemized, aggregate };
+  };
+  return stamps.flatMap(({ member_id: member, stamp_id: stampId, anchor_id: anchorId }) => candidates
+    .filter((inv) => String(inv.id) === String(stampId) || String(inv.scheduled_service_id) === String(anchorId))
+    .filter((inv) => {
+      const { itemized, aggregate } = billedIds(inv);
+      return String(inv.id) === String(stampId) || aggregate || itemized.includes(String(member));
+    })
+    .map((inv) => ({
+      scheduled_service_id: member,
+      status: inv.status,
+      credit_applied: inv.credit_applied ?? 0,
+      line_items: inv.line_items,
+      stripe_payment_intent_id: inv.stripe_payment_intent_id ?? null,
+      total: inv.total,
+      _openReason: 'attached to a combined first-application invoice that is still open at the old price',
+    })));
 }
 
 async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
@@ -17745,6 +17822,14 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
           );
         invoiced.push(...packetLinked);
       }
+      // Combined first-application invoice, non-anchor member (see the
+      // comment above this function). scheduled_services.first_application_
+      // invoice_id is the only durable link for a member other than the
+      // anchor — invoices.scheduled_service_id names only the anchor.
+      // hasColumn-guarded: the column postdates some schemas.
+      if (await conn.schema.hasColumn('scheduled_services', 'first_application_invoice_id')) {
+        invoiced.push(...await memberBillingInvoiceRows(conn, ids));
+      }
     }
     const hasDepositCreditLine = (items) => {
       try {
@@ -17775,8 +17860,11 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
         // Completion and Charge Now reuse any live attached invoice, so it
         // would keep billing the OLD price (Codex r1 P1: a $0 draft too) —
         // the same "any live invoice" rule the sibling propagation already
-        // applies (Codex #3505 r7, owner decision).
-        mark(inv.scheduled_service_id, 'attached to an invoice that is still open at the old price');
+        // applies (Codex #3505 r7, owner decision). The combined
+        // first-application read above tags its rows with a more specific
+        // `_openReason` so the refusal names which invoice is still open;
+        // every other source falls back to the generic wording.
+        mark(inv.scheduled_service_id, inv._openReason || 'attached to an invoice that is still open at the old price');
       }
     }
   }

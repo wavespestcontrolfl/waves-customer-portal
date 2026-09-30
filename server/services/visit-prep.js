@@ -502,7 +502,10 @@ async function createVisitPrepSubmission({
     }
   }
 
-  // PR 5 — automatic pest read (GATE_VISIT_PREP_PEST_READ). This is THE
+  // PR 5 — automatic photo read (GATE_VISIT_PREP_PEST_READ,
+  // GATE_VISIT_PREP_PLANT_READ). ONE dispatch (visit-prep-read-dispatch.js)
+  // picks the single engine for the stop, so the photos are downloaded once
+  // (Codex #5320 r9). This is THE
   // single place a submission is created (both today's public
   // appointment-page POST and the upcoming customer-auth app route call
   // through here), so hooking it here — rather than in either route —
@@ -512,21 +515,22 @@ async function createVisitPrepSubmission({
   // never awaited, so a slow or failing vision call can never add latency
   // to, or fail, the customer's own upload response. Only for a NEW
   // submission (`result.created`) — an all-duplicate resubmit stored
-  // nothing new to read. A lazy require keeps the pest v2 engine (and the
-  // species catalog it loads) out of every caller of this module that
+  // nothing new to read. A lazy require keeps the v2 engines (and the
+  // catalogs they load) out of every caller of this module that
   // never actually creates a submission.
   // Gate first, and the engine module (catalog + validators, built at load)
   // is required only on the next tick, never on this response path
   // (Codex #5305 r3 P2). The upload is already committed: a failure to load
   // or start the read is logged, never a 500 to the customer.
-  if (result.created && require('../config/feature-gates').visitPrepPestReadLive()) {
+  const gatesNow = require('../config/feature-gates');
+  if (result.created && (gatesNow.visitPrepPestReadLive() || gatesNow.visitPrepPlantReadLive())) {
     const readArgs = { submissionId: result.submissionId, svc: result.current, photos: result.photos };
     setImmediate(() => {
       try {
-        require('./visit-prep-pest-read').triggerVisitPrepPestRead(readArgs)
-          .catch((err) => logger.error(`[visit-prep] pest read trigger failed for submission ${readArgs.submissionId}: ${err.message}`));
+        require('./visit-prep-read-dispatch').dispatchVisitPrepRead(readArgs)
+          .catch((err) => logger.error(`[visit-prep] read dispatch failed for submission ${readArgs.submissionId}: ${err.message}`));
       } catch (err) {
-        logger.error(`[visit-prep] pest read could not start for submission ${readArgs.submissionId}: ${err.message}`);
+        logger.error(`[visit-prep] read could not start for submission ${readArgs.submissionId}: ${err.message}`);
       }
     });
   }
@@ -656,13 +660,17 @@ function parseJsonMaybe(value) {
 // `v2`), the SAME JSON shape the customer Photo ID route stores.
 // A read runs in-process after the submission commits; a redeploy or
 // crash mid-read would otherwise leave 'pending' on the row forever. A
-// read still pending this long after the photos arrived is shown as
-// failed (quiet) instead of "Photo read pending".
+// read still pending this long after it was CLAIMED (read_claimed_at; the
+// submission time for rows claimed before that column) is shown as failed
+// (quiet) instead of "Photo read pending" — timed from the claim so a read
+// the recovery sweep starts long after the photos arrived stays pending
+// while it runs (Codex #5320 r10 P2).
 const READ_PENDING_STALE_MS = 15 * 60 * 1000;
 
-function effectiveReadStatus(status, createdAt, now = Date.now()) {
+function effectiveReadStatus(status, createdAt, now = Date.now(), claimedAt = null) {
   if (status !== 'pending') return status;
-  const at = createdAt instanceof Date ? createdAt.getTime() : new Date(createdAt).getTime();
+  const from = claimedAt || createdAt;
+  const at = from instanceof Date ? from.getTime() : new Date(from).getTime();
   return Number.isFinite(at) && now - at > READ_PENDING_STALE_MS ? 'failed' : status;
 }
 
@@ -679,6 +687,81 @@ function answerName(v2) {
 }
 
 const asList = (value) => (Array.isArray(value) ? value : []);
+
+// The plant sibling of readFactsFromContract, for a DONE row produced by
+// GATE_VISIT_PREP_PLANT_READ (visit-prep-plant-read.js) — built ONLY from
+// fixed engine/catalog fields, the same discipline: a wording tier (a fixed
+// enum), APPROVED catalog common names (the identified turf/plant species,
+// and the named condition when the workup names one), the catalog's own
+// `fits`/`not_yet` strings for the top possibility (plant-engine.js
+// visibleStringsFor/notYetFor — catalog-authored text, not model prose),
+// a fixed next-step template, a referral kind, and the catalog's own
+// `safety_line`/boolean safety flags. No product or rate guidance.
+// `resultRow` is the parsed `read_result` jsonb ({ v2, internal,
+// subject_type }) — the SAME split (v2 customer/tech-safe, internal
+// admin-only) the pest read keeps, just stored together since nothing else
+// ever reads this column back. Carries `kind: 'plant'` so the tech UI can
+// tell it apart from a pest read's shape — an ADDITIVE field, never added
+// to readFactsFromContract's own pest shape (an existing, tested contract).
+// The top possibility and the workup's identified plant — both optional,
+// normalized to plain objects once here so the fields below read them with
+// ordinary dot access instead of a repeated chain of `?.`s (kept complexity
+// low; split out of plantReadFactsFromResult for the same reason
+// answerName() is split out of readFactsFromContract above).
+// Which engine made a claimed read: the plant read keeps an engine marker in
+// read_result from its claim on; a claimed row without one is the pest
+// read's. Unclaimed rows (none / unsupported) have no origin.
+function readOrigin(readStatus, plantResult) {
+  if (!['pending', 'done', 'failed'].includes(readStatus)) return null;
+  return plantResult && (plantResult.engine === 'plant' || plantResult.v2) ? 'plant' : 'pest';
+}
+
+// Every catalog safety line the read carries (the identified plant, each
+// named weed, each condition possibility), deduplicated, so a warning on
+// the plant is never dropped for one on the top condition (Codex #5320 r1).
+function plantSafetyLines(v2) {
+  const plant = (v2.subject && v2.subject.plant) || {};
+  const weeds = asList(v2.subject && v2.subject.weeds);
+  const lines = [plant.safety_line, ...weeds.map((w) => w && w.safety_line), ...asList(v2.possibilities).map((p) => p && p.safety_line)];
+  return [...new Set(lines.filter(Boolean))];
+}
+
+function plantTopFields(v2) {
+  const top = (Array.isArray(v2.possibilities) && v2.possibilities[0]) || {};
+  const plant = (v2.subject && v2.subject.plant) || {};
+  const answerLevel = (v2.answer || {}).level;
+  return {
+    conditionName: answerLevel === 'entry' ? (top.common_name || null) : null,
+    fits: asList(top.fits),
+    notYet: asList(top.not_yet),
+    plantCommonName: plant.common_name || null,
+    // The approved weeds the engine named (at most two; plant-engine.js
+    // workupSubjectFor): a weed-focused photo whose headline is only "Weeds
+    // in the lawn" still tells the tech which ones.
+    weedNames: [...new Set(asList(v2.subject && v2.subject.weeds).map((w) => w && w.common_name).filter(Boolean))],
+    safetyLines: plantSafetyLines(v2),
+    hazards: top.safety || plant.safety || null,
+  };
+}
+
+function plantReadFactsFromResult(status, resultRow) {
+  if (status === 'done' && !resultRow) return { status: 'failed' };
+  if (status !== 'done') return { status };
+  const v2 = resultRow.v2 || {};
+  const answer = v2.answer || {};
+  const nextStep = v2.next_step_hint || {};
+  const referral = v2.referral || {};
+  return {
+    status,
+    kind: 'plant',
+    subjectType: resultRow.subject_type || v2.subject_type || null,
+    wordingTier: answer.wording || null,
+    headline: answer.headline || null,
+    nextStepText: nextStep.text || null,
+    referralKind: referral.kind || null,
+    ...plantTopFields(v2),
+  };
+}
 
 function readFactsFromContract(status, contract) {
   // A 'done' row whose stored result is gone or unreadable (a purge, the
@@ -712,20 +795,63 @@ function readFactsFromContract(status, contract) {
 const FINAL_CHECK_SNAPSHOT = { isolationLevel: 'repeatable read', readOnly: true };
 
 // The stop's final member set and, when asked, whether it is still a pest
-// stop, from one consistent snapshot. A conn without transactions (unit-test
-// fakes) runs the same reads directly.
-async function finalStopSnapshot(svc, conn, needPest) {
+// stop and/or still a lawn/tree & shrub stop, from one consistent snapshot.
+// A conn without transactions (unit-test fakes) runs the same reads
+// directly.
+async function finalStopSnapshot(svc, conn, needPest, needPlant) {
   const run = async (c) => {
     const current = await stillOnTechStop(svc, c);
     const stillPest = needPest
       ? await require('./visit-prep-pest-applicability').membersArePest([...current], c)
       : true;
-    return { current, stillPest };
+    // Sibling of stillPest for GATE_VISIT_PREP_PLANT_READ — 'lawn' |
+    // 'tree_shrub' | null, so a stop reclassified away from a plant subject
+    // (or into a pest one, which owns the read instead) never shows a
+    // stale plant read (Codex-#5305-r16/r17-style freshness, applied to
+    // the plant sibling).
+    const plantSubject = needPlant
+      ? await require('./visit-prep-plant-applicability').subjectForMembers([...current], c)
+      : null;
+    return { current, stillPest, plantSubject };
   };
   // Inside a caller's transaction (or a test fake) the reads already share
   // that connection; only a pool-level conn opens the snapshot.
   if (typeof conn.transaction !== 'function' || conn.isTransaction) return run(conn);
   return conn.transaction((trx) => run(trx), FINAL_CHECK_SNAPSHOT);
+}
+
+// The read line one submission gets, or null when neither read feature is
+// live. Each engine's kill switch hides its stored reads too (Codex #5305 r1
+// P1). A claimed read (pending/done/failed) is shown only by the engine that
+// made it, and only while the stop still suits that engine and, for a plant
+// read, that subject (lawn vs tree_shrub; Codex #5320 r1/r3). An unclaimed
+// row on a stop a live engine suits hasn't been read YET, so an
+// 'unsupported' written by the other engine is served as 'none' and the
+// panel keeps polling (Codex #5320 r3 P2). Otherwise 'unsupported'.
+function servedRead(s, ctx) {
+  const read = servedReadLine(s, ctx);
+  // An unread row the recovery sweep may still pick up today: the panel
+  // keeps re-reading the brief for it, so a recovered read reaches a brief
+  // that is already open (Codex #5320 r10 P2). Nothing extra is shown.
+  if (read?.status === 'none' && ctx.recoveryLive && new Date(s.created_at) >= ctx.todayStart) {
+    return { ...read, awaiting: true };
+  }
+  return read;
+}
+
+function servedReadLine(s, ctx) {
+  const status = effectiveReadStatus(s.read_status || 'none', s.created_at, Date.now(), s.read_claimed_at);
+  const plantResult = s.read_result ? parseJsonMaybe(s.read_result) : null;
+  const origin = readOrigin(s.read_status, plantResult);
+  const shownStatus = !origin && status === 'unsupported' ? 'none' : status;
+  if (ctx.readsLive && ctx.stillPest && origin !== 'plant') {
+    return readFactsFromContract(shownStatus, s.read_ref ? ctx.contractsByRef.get(s.read_ref) : null);
+  }
+  const subjectMatches = !plantResult?.subject_type || plantResult.subject_type === ctx.plantSubject;
+  if (ctx.plantReadsLive && ctx.plantSubject && origin !== 'pest' && subjectMatches) {
+    return plantReadFactsFromResult(shownStatus, plantResult);
+  }
+  return ctx.readsLive || ctx.plantReadsLive ? { status: 'unsupported' } : null;
 }
 
 async function customerFlaggedFacts(svc, conn = db) {
@@ -734,7 +860,7 @@ async function customerFlaggedFacts(svc, conn = db) {
   const submissions = await conn('visit_prep_submissions')
     .whereIn('scheduled_service_id', ids)
     .orderBy('created_at', 'asc')
-    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note', 'read_status', 'read_ref');
+    .select('id', 'scheduled_service_id', 'created_at', 'topic', 'location_on_property', 'note', 'read_status', 'read_ref', 'read_result', 'read_claimed_at');
   if (submissions.length === 0) return null;
   const photos = await conn('visit_prep_photos')
     .whereIn('submission_id', submissions.map((s) => s.id))
@@ -757,6 +883,7 @@ async function customerFlaggedFacts(svc, conn = db) {
   // customer's note and photos are still served, just without a read
   // (Codex #5305 r14 P2).
   let readsLive = require('../config/feature-gates').visitPrepPestReadLive();
+  let plantReadsLive = require('../config/feature-gates').visitPrepPlantReadLive();
   const contractsByRef = new Map();
   if (readsLive) {
     try {
@@ -771,41 +898,51 @@ async function customerFlaggedFacts(svc, conn = db) {
     }
   }
 
-  // Membership and pest-ness are read in ONE repeatable-read snapshot (the
-  // FINAL_CHECK_SNAPSHOT pattern of estimate-consultation-offer.js), so the
-  // member set that filters what is served and the member set judged pest
-  // are the same rows at the same instant (Codex #5305 r16/r17 P1). Checked
-  // for running reads too, so "Photo read pending" never outlives a
-  // reclassification (r13). The applicability module never loads the
-  // vision engine here.
-  const needPest = readsLive && submissions.some((s) => s.read_status === 'done' || s.read_status === 'pending');
+  // Membership and pest-ness/plant-ness are read in ONE repeatable-read
+  // snapshot (the FINAL_CHECK_SNAPSHOT pattern of
+  // estimate-consultation-offer.js), so the member set that filters what is
+  // served and the member set judged pest/plant are the same rows at the
+  // same instant (Codex #5305 r16/r17 P1, applied to the plant sibling
+  // too). Checked for running reads too, so "Photo read pending" never
+  // outlives a reclassification (r13). The applicability modules never
+  // load a vision engine here.
+  // Applicability is resolved for every row whenever an engine is live, so
+  // an unclaimed row ('none', or 'unsupported' written by the engine that
+  // doesn't apply) on a stop a live engine suits stays pollable instead of
+  // reading 'unsupported' (Codex #5320 r2/r3 P2).
+  const needPest = readsLive;
+  const needPlant = plantReadsLive;
   let snapshot;
   try {
-    snapshot = await finalStopSnapshot(svc, conn, needPest);
+    snapshot = await finalStopSnapshot(svc, conn, needPest, needPlant);
   } catch (err) {
-    if (!needPest) throw err;
+    if (!needPest && !needPlant) throw err;
     logger.warn(`[visit-prep] read applicability failed for ${svc.id}: ${err.message}`);
     readsLive = false;
-    snapshot = { current: await stillOnTechStop(svc, conn), stillPest: true };
+    plantReadsLive = false;
+    snapshot = { current: await stillOnTechStop(svc, conn), stillPest: true, plantSubject: null };
   }
-  const { current, stillPest } = snapshot;
+  const { current, stillPest, plantSubject } = snapshot;
   const kept = submissions.filter((s) => current.has(String(s.scheduled_service_id)));
   if (kept.length === 0) return null;
 
-  return kept.map((s) => ({
-    id: s.id,
-    sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
-    topic: s.topic || null,
-    locationOnProperty: s.location_on_property || null,
-    note: s.note || null,
-    photoIds: photoIdsBySubmission.get(s.id) || [],
-    // The read's own kill switch hides stored reads too (Codex #5305 r1 P1).
-    ...(readsLive ? {
-      read: stillPest
-        ? readFactsFromContract(effectiveReadStatus(s.read_status || 'none', s.created_at), s.read_ref ? contractsByRef.get(s.read_ref) : null)
-        : { status: 'unsupported' },
-    } : {}),
-  }));
+  const recoveryLive = require('../config/feature-gates').visitPrepReadSweepLive();
+  const todayStart = require('./visit-prep-read-claim').etDayStart();
+  return kept.map((s) => {
+    const entry = {
+      id: s.id,
+      sentAt: s.created_at instanceof Date ? s.created_at.toISOString() : new Date(s.created_at).toISOString(),
+      topic: s.topic || null,
+      locationOnProperty: s.location_on_property || null,
+      note: s.note || null,
+      photoIds: photoIdsBySubmission.get(s.id) || [],
+    };
+    const read = servedRead(s, {
+      readsLive, plantReadsLive, stillPest, plantSubject, contractsByRef, recoveryLive, todayStart,
+    });
+    if (read) entry.read = read;
+    return entry;
+  });
 }
 
 module.exports = {
@@ -822,6 +959,6 @@ module.exports = {
   customerFlaggedFacts,
   techStopMemberIds,
   _internal: {
-    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract, effectiveReadStatus,
+    detectedImageMime, mimeFamily, stripHtml, prepareUploadFile, prepareFiles, normalizeSubmissionFields, deleteUploadedObject, stopMemberIds, normalizeToJpeg, readFactsFromContract, plantReadFactsFromResult, effectiveReadStatus,
   },
 };

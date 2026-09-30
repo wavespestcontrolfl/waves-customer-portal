@@ -29,6 +29,12 @@
  *  3. PREPAY COVERAGE GAPS — annual stamps the completion validator cannot
  *     verify, missing or conflicting stamps on linked paid terms, or a missing
  *     or replaced manual series allocation. Includes overdue live visits.
+ *  4. CHURNED CUSTOMER WITH LIVE WORK — a customer whose live pipeline_stage is
+ *     'churned' (not soft-deleted) who still has a live upcoming visit or an
+ *     invoice that never reached the customer (draft / scheduled). Catches a
+ *     churn done outside the app's cancel path (a direct database edit skips
+ *     its steps, leaving open visits on the books and a draft unvoided). One
+ *     bell per customer; it clears once the work is cancelled or voided.
  *
  * Accepted-plan gaps also start from the accepted estimate, covering missing
  * recurrence, applications, and matching cadence/property evidence.
@@ -84,12 +90,16 @@ const UPCOMING_WINDOW_DAYS = 14;
 // the bells per run so it drains over ticks instead of flooding.
 const MAX_ALERTS_PER_RUN = 10;
 
-// The four bell classes, by dedupeKey prefix. Only the watchdog raises under
+// The bell classes, by dedupeKey prefix. Only the watchdog raises under
 // these prefixes, so an open row under one is this module's to close.
 const UNPRICED_PREFIX = 'unpriced-series:';
 const LAWN_GAP_PREFIX = 'lawn-email-gap:';
 const PREPAY_PREFIX = 'prepay-coverage:';
 const ACCEPTED_PREFIX = 'accepted-schedule:';
+const CHURNED_PREFIX = 'churned-live-work:';
+// Invoice statuses that have not reached the customer (the status column has no
+// CHECK; 'send_failed' is an estimate status, never an invoice one).
+const UNSENT_INVOICE_STATUSES = ['draft', 'scheduled'];
 // A prepay-coverage visit in these statuses stays open for a person even with
 // the gap gone from the scan: a completed visit is where the billing mistake
 // happens, and a rescheduled one moved its coverage question elsewhere.
@@ -348,6 +358,161 @@ async function judgePrepayGaps(row, paidTermById) {
   return { annualCovered, issues };
 }
 
+// Class 5: a customer churned OUTSIDE the app's cancel steps (the owner's
+// scope, 2026-09-29 alert follow-ups decision 1) whose leftover work those
+// steps would still clean up. The cancel processor mints
+// customers.churn_episode_id on every whole-account churn and every
+// reactivation path clears it, so a churned row without one was churned some
+// other way: a stage flip, a direct database write, or a processor churn from
+// before the stamp shipped. A stamped row went through the cancel steps, and
+// what they leave (paid visits kept to term_end, visits parked for review, a
+// refund owed) is deliberate, never residue. For the unstamped, the steps'
+// own work list:
+//   - a live visit the sweep would pull: live by the churn guard's
+//     tracker-aware rule (whereVisitRowLive), except one an end-at-term lapse
+//     keeps (keptLapseVisitIds);
+//   - a series anchor still marked recurring_ongoing;
+//   - a paid prepay term still covering that nobody decided (coveredTermsAsOf
+//     with a term_end floor, as findActivePrepayTerm reads it). A decided
+//     lapse, 'cancelled' with renewal_decision 'cancel', is the renewal
+//     machinery's own outcome;
+//   - a payment_pending prepay term whose invoice is still payable and not
+//     yet collected (findPendingPrepayInvoice's rule);
+//   - an invoice the cancel would void that never reached the customer: draft
+//     or scheduled, not archived, no delivery stamp, not parked on invoice.js's
+//     BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED marker, and linked by
+//     invoice.js's visit link (scheduled_service_id, or a service record of
+//     the visit) to a visit the sweep would pull or one already cancelled. An
+//     invoice for finished work is an earned receivable, not this page's.
+// Set-based: one query, an EXISTS per leg, the counts as correlated
+// subselects. The live pipeline_stage is the churn marker; a merge
+// soft-deletes, so deleted_at must be null. Known limit: a stamp that a
+// promotion out of churned never cleared (self-booking-plan-sync's tier
+// alignment) hides a later out-of-band churn of that row.
+const CHANNEL_ACCEPTED_MARKER = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
+
+// The visits an end-at-term lapse keeps, by the cancel's own identity: the
+// term's canonical covered rows (coverageRowsForTerm, the set
+// liveCoveredKeepIds hands the sweep as keepVisitIds), not a rescheduled
+// rebook, dated through term_end (keepThrough). This is the impact preview's
+// `kept` rule. A linked row outside that set (another family, one past the
+// sold count) is pulled, so it still pages. Only paid lapses of unstamped
+// churned customers.
+async function keptLapseVisitIds(todayET) {
+  const renewals = require('./annual-prepay-renewals');
+  const { coverageRowsForTerm, dateOnly } = renewals._private;
+  const terms = await renewals.coveredTermsAsOf(db, null)
+    .join('customers as c', 'c.id', 't.customer_id')
+    .where('c.pipeline_stage', 'churned').whereNull('c.deleted_at').whereNull('c.churn_episode_id')
+    .where({ 't.status': 'cancelled', 't.renewal_decision': 'cancel', 't.cancel_disposition': 'end_at_term' })
+    .where('t.term_end', '>=', todayET)
+    .select('t.*');
+  const kept = [];
+  for (const term of terms) {
+    const keepThrough = dateOnly(term.term_end);
+    for (const row of await coverageRowsForTerm(term)) {
+      if (row.status !== 'rescheduled' && dateOnly(row.scheduled_date) <= keepThrough) kept.push(row.id);
+    }
+  }
+  return kept;
+}
+
+async function findChurnedLiveWork(todayET) {
+  const { whereVisitRowLive } = require('./customer-lifecycle-guard');
+  const renewals = require('./annual-prepay-renewals');
+  const collected = renewals._private.PREPAY_INVOICE_COLLECTED_STATUSES;
+  const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
+  const cancelled = [...INVOICE_CANCELLED_STATUSES];
+  const kept = await keptLapseVisitIds(todayET);
+  // A visit the cancel's sweep would pull. whereVisitRowLive's columns are
+  // unqualified, so they bind to the innermost visit alias.
+  const sweepWouldPull = (alias) => function pulled() {
+    this.where(function liveRow() { whereVisitRowLive(this, todayET); }).whereNotIn(`${alias}.id`, kept);
+  };
+  const legs = {
+    live_visits: () => db('scheduled_services as sv').whereRaw('sv.customer_id = c.id').where(sweepWouldPull('sv')),
+    ongoing_series: () => db('scheduled_services as so').whereRaw('so.customer_id = c.id').where('so.recurring_ongoing', true),
+    // 'cancelled' is covered only as a decided lapse (coveredTermsAsOf's
+    // lapsedRenewalStillInTerm arm), so this drops exactly those.
+    prepay_terms: () => renewals.coveredTermsAsOf(db, null).whereRaw('t.customer_id = c.id').where('t.term_end', '>=', todayET)
+      .whereNot('t.status', 'cancelled'),
+    // Still payable AND not yet collected: a collected invoice whose term has
+    // not advanced yet is paid coverage (the prepay_terms leg), never an
+    // unpaid invoice. The exact, NULL-safe complement of
+    // wherePrepayInvoiceCollected (status IN collected OR paid_at set), so a
+    // status-less unpaid invoice still counts.
+    pending_prepay_invoices: () => db('annual_prepay_terms as pt').join('invoices as pi', 'pi.id', 'pt.prepay_invoice_id')
+      .whereRaw('pt.customer_id = c.id').where('pt.status', 'payment_pending')
+      .whereRaw(`lower(COALESCE(pi.status, '')) NOT IN (${cancelled.map(() => '?').join(', ')})`, cancelled)
+      .whereRaw(`COALESCE(pi.status, '') NOT IN (${collected.map(() => '?').join(', ')})`, collected)
+      .whereNull('pi.paid_at'),
+    // The customer's own: a third-party payer's invoice (payer_id), one
+    // accrued on a payer's NET statement (payer_statement_id, never sent on
+    // its own) or one withdrawn to the payer (invoice-helpers.js's
+    // payer_billed: stamp) is the payer's receivable, never the churned
+    // customer's to void.
+    unsent_invoices: () => db('invoices as inv').whereRaw('inv.customer_id = c.id').whereNull('inv.archived_at')
+      .whereIn('inv.status', UNSENT_INVOICE_STATUSES)
+      .whereNull('inv.payer_id').whereNull('inv.payer_statement_id')
+      .whereNull('inv.sent_at').whereNull('inv.sms_sent_at').whereNull('inv.email_sent_at').whereNull('inv.viewed_at')
+      .whereRaw("COALESCE(inv.scheduled_send_error, '') NOT LIKE ?", [`${CHANNEL_ACCEPTED_MARKER}%`])
+      .whereRaw("COALESCE(inv.scheduled_send_error, '') NOT LIKE 'payer\\_billed:%'")
+      .whereExists(function forWorkTheCancelUndoes() {
+        this.select(db.raw('1')).from('scheduled_services as lv')
+          .where(function linkedVisit() {
+            this.whereRaw('lv.id = inv.scheduled_service_id')
+              .orWhereRaw('lv.id = (SELECT sr.scheduled_service_id FROM service_records sr WHERE sr.id = inv.service_record_id)');
+          })
+          .where(function pulledOrCancelled() { this.whereIn('lv.status', ['cancelled', 'canceled']).orWhere(sweepWouldPull('lv')); });
+      }),
+  };
+  const names = Object.keys(legs);
+  return db('customers as c')
+    .where('c.pipeline_stage', 'churned')
+    .whereNull('c.deleted_at')
+    .whereNull('c.churn_episode_id')
+    .where(function anyLiveWork() {
+      names.forEach((name, i) => this[i ? 'orWhereExists' : 'whereExists'](legs[name]().select(db.raw('1'))));
+    })
+    .select('c.id', ...names.map((name) => legs[name]().select(db.raw('count(*)::int')).as(name)))
+    .orderBy('c.id');
+}
+
+// What each count names in the bell, most pressing first.
+const LIVE_WORK_WORDS = [
+  ['live_visits', 'live visit'],
+  ['ongoing_series', 'ongoing series'],
+  ['prepay_terms', 'active prepay term'],
+  ['pending_prepay_invoices', 'unpaid prepay invoice'],
+  ['unsent_invoices', 'unsent invoice'],
+];
+
+// The class's alerts, or a failed flag when the check threw (an unknown live
+// set: the close pass then leaves the class's standing bells alone). The bell
+// is one per customer; its text follows the work that is left through a quiet
+// refresh that never re-rings it.
+async function churnedLiveWorkAlerts(todayET) {
+  try {
+    const rows = await findChurnedLiveWork(todayET);
+    const alerts = rows.map((r) => {
+      const counts = Object.fromEntries(LIVE_WORK_WORDS.map(([name]) => [name, Number(r[name]) || 0]));
+      const parts = LIVE_WORK_WORDS.filter(([name]) => counts[name] > 0)
+        .map(([name, word]) => `${counts[name]} ${word}${counts[name] === 1 ? '' : (word.endsWith('series') ? '' : 's')}`);
+      return [
+        `${CHURNED_PREFIX}${r.id}`,
+        'Churned customer still has live work',
+        `Still on the books for a churned customer: ${parts.join(', ')}. Cancel or void it through the app ("Cancel plan…" and the invoice tools).`,
+        { customer_id: r.id, ...counts },
+        { link: `/admin/customers?customerId=${encodeURIComponent(r.id)}`, refreshOnDedupe: true, ringOnRefresh: () => false },
+      ];
+    });
+    return { alerts, failed: false };
+  } catch (err) {
+    logger.error(`[schedule-integrity] churned-customer live-work check failed: ${err.message}`);
+    return { alerts: [], failed: true };
+  }
+}
+
 async function runInner({ now = new Date() } = {}) {
   const todayET = etDateString(now);
 
@@ -520,8 +685,14 @@ async function runInner({ now = new Date() } = {}) {
       { link: `/admin/customers?customerId=${encodeURIComponent(gap.customerId)}`, refreshOnDedupe: true, dedupeVersion: gap.evidenceKey },
   ]));
 
+  // Last: a churned customer's leftover work never starves the money pages
+  // above under the per-run cap.
+  const churned = await churnedLiveWorkAlerts(todayET);
+  alerts.push(...churned.alerts);
+
   const delivered = await deliverAlerts({
     alerts, episodes, now, horizonDay: etDateString(horizon), lawnGapCheckFailed, acceptedScheduleCheckFailed,
+    churnedWorkCheckFailed: churned.failed,
   });
 
   return {
@@ -534,6 +705,8 @@ async function runInner({ now = new Date() } = {}) {
 
     acceptedScheduleGaps: acceptedGaps.length,
     acceptedScheduleCheckFailed,
+    churnedLiveWork: churned.alerts.length,
+    churnedWorkCheckFailed: churned.failed,
     // alerted, plus closed / closePassFailed under episodes.
     ...delivered,
   };
@@ -542,7 +715,7 @@ async function runInner({ now = new Date() } = {}) {
 // Delivers one run's findings: rings them in order, capped at
 // MAX_ALERTS_PER_RUN real rings, and — under episodes — closes every
 // standing bell the findings no longer name (closeResolvedAlerts).
-async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed }) {
+async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFailed, acceptedScheduleCheckFailed, churnedWorkCheckFailed }) {
   let alerted = 0;
   const capped = () => {
     if (alerted < MAX_ALERTS_PER_RUN) return false;
@@ -583,7 +756,9 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
     // or was just refreshed) is not a NEW alert for this run's count. Under
     // episodes the cap counts REAL rings: a row created or re-rung (a reopen,
     // or a refresh that rang) — never a silent dedupe onto a standing row.
-    if (episodes ? !created.rang : created.deduped) return false;
+    // A suppressed alert (an internal test customer) made no bell in either
+    // mode, so it never takes a cap slot from a real one.
+    if (created.suppressed || (episodes ? !created.rang : created.deduped)) return false;
     alerted += 1;
     return true;
   };
@@ -606,6 +781,7 @@ async function deliverAlerts({ alerts, episodes, now, horizonDay, lawnGapCheckFa
   const skipPrefixes = [];
   if (lawnGapCheckFailed) skipPrefixes.push(LAWN_GAP_PREFIX);
   if (acceptedScheduleCheckFailed) skipPrefixes.push(ACCEPTED_PREFIX);
+  if (churnedWorkCheckFailed) skipPrefixes.push(CHURNED_PREFIX);
   try {
     return { alerted, closed: await closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, skipPrefixes }), closePassFailed: false };
   } catch (err) {
@@ -839,6 +1015,8 @@ async function closeResolvedAlerts({ now, liveKeys, deliveredKeys, horizonDay, s
   closed += await closeLawnAlerts({ absentOf, close, liveKeys, deliveredKeys });
   closed += await close(await absentOf(ACCEPTED_PREFIX), 'gap resolved');
   closed += await closePrepayAlerts({ absentOf, close, liveKeys, deliveredKeys, horizonDay });
+  // Cleaned up, or the customer came back (reactivated / merged away).
+  closed += await close(await absentOf(CHURNED_PREFIX), 'no live work left');
   return closed;
 }
 
@@ -855,6 +1033,7 @@ module.exports = {
   _completedUnpricedSince: completedUnpricedSince,
   _unpricedSeriesAlerts: unpricedSeriesAlerts,
   _closeResolvedAlerts: closeResolvedAlerts,
+  _findChurnedLiveWork: findChurnedLiveWork,
   UPCOMING_WINDOW_DAYS,
   MAX_ALERTS_PER_RUN,
 };

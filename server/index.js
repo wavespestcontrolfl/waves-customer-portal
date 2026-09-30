@@ -461,6 +461,11 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
 
+// Estimate map-image proxy: privacy headers + the dark overlay 404 must land
+// BEFORE the global limiter, or an over-budget IP gets a 429 (and no
+// no-store/CORP) from a route that is supposed to be dark / generic.
+app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
+
 app.use('/api/', limiter);
 
 // Stricter rate limit for auth endpoints

@@ -63,6 +63,7 @@ import {
   tankOwnerRow,
   promoteTankOwner,
   applyTankDose,
+  amountInUnit,
   markTankEntry,
   tankPropagates,
   followTank,
@@ -71,6 +72,8 @@ import {
   normalizeApplicationMethod,
   resolveRatePrefill,
 } from "../../lib/product-rate-prefill";
+import { hasMlAmount, isMlUnit, mlToFlOz, submittedAmount } from "../../lib/measure-units";
+import { productDimension } from "../../lib/fast-complete-products";
 import {
   isPestDefaultMixVisit,
   pestDefaultMixSelections,
@@ -105,6 +108,7 @@ import {
 import termiteTreatmentMethods from "../../../../shared/termite-treatment-methods.json";
 import AREA_SCOPES from "../../../../shared/treatment-area-scopes.json";
 import legacyCompletionAreas from "../../../../shared/legacy-completion-areas.json";
+import completionMarkerGrammar from "../../../../shared/completion-marker-grammar.json";
 import { useFeatureFlagReady } from "../../hooks/useFeatureFlag";
 import useSpeechDictation from "../../hooks/useSpeechDictation";
 import { Mic, MicOff } from "lucide-react";
@@ -260,15 +264,24 @@ function rateUnitsMatch(a, b) {
   return !!left && !!right && left === right;
 }
 // The unit dropdowns list the everyday units; catalog rows can carry a
-// label-native per-basis unit outside that list ("g/spot", "ml/inch dbh",
-// "oz/acre", "lb/100sf", "each/100sf"…). Render that unit as an extra
-// option so the prefill displays and survives a re-select instead of
-// snapping the <select> to a blank/wrong value.
-const STANDARD_RATE_UNIT_OPTIONS = ["oz", "fl_oz", "ml", "g", "lb", "gal", "oz/gal", "fl_oz/gal", "g/gal"];
-const STANDARD_AMOUNT_UNIT_OPTIONS = ["oz", "fl_oz", "ml", "g", "lb", "gal"];
+// label-native per-basis unit outside that list ("g/spot", "oz/acre",
+// "lb/100sf", "each/100sf"…). Render that unit as an extra option so the
+// prefill displays and survives a re-select instead of snapping the
+// <select> to a blank/wrong value. Never an mL unit: nothing a tech sees or
+// enters on a completion is in mL (owner ruling 2026-09-29), so a label's
+// own "ml/inch dbh" is never offered. A small liquid amount is in tsp (the
+// spoon set), which the completion body sends as fl oz.
+const STANDARD_RATE_UNIT_OPTIONS = ["oz", "fl_oz", "g", "lb", "gal", "oz/gal", "fl_oz/gal", "g/gal"];
+const STANDARD_AMOUNT_UNIT_OPTIONS = ["tsp", "oz", "fl_oz", "g", "lb", "gal"];
 export function catalogUnitOption(unit, standardOptions) {
-  if (!unit || standardOptions.includes(unit)) return null;
+  if (!unit || isMlUnit(unit) || standardOptions.includes(unit)) return null;
   return <option value={unit}>{unit.replace(/_/g, " ")}</option>;
+}
+// A catalog row with a unit in mL (the Arborjet "ml/inch dbh" injectables,
+// SUPERthrive's "ml/gal"; the same test resolveRatePrefill applies): the row
+// keeps no label unit or label ceiling, so neither rate review names mL.
+function hasMlLabelUnit(product = {}) {
+  return [product.rateUnit, product.rate_unit, product.defaultUnit, product.default_unit].some(isMlUnit);
 }
 // Base quantity unit of a per-basis catalog unit ("g/spot" -> "g"). The
 // selects render their extra options from the STABLE catalog unit (plus the
@@ -306,12 +319,59 @@ export function completionAreasForTypedFindings({ typedAreaKey, findingsValues, 
   // value; new typed selections remain authoritative once present.
   return typedAreas.length ? typedAreas : (genericAreas || []);
 }
+// One parser for every marker line ("[Tag] text"), built from the same
+// grammar the server reads (shared/completion-marker-grammar.json): whitespace
+// after the closing bracket is optional, so "[Protocol]Label" is a live marker
+// here exactly when the server reconstructs it. Active-marker detection,
+// pruning and the completed-actions count all go through this, so they cannot
+// disagree (codex P2 #5051). `tag` is lowercased, `text` trimmed.
+const MARKER_LINE_RX = new RegExp(completionMarkerGrammar.lineSource);
+const ENTRY_WHITESPACE_RX = new RegExp(completionMarkerGrammar.whitespaceSource, "g");
+const ENTRY_MAX_LENGTH = completionMarkerGrammar.maxLength;
+const ENTRY_MAX_COUNT = completionMarkerGrammar.maxEntries;
+// Problems a submit would otherwise hide: the server keeps at most
+// ENTRY_MAX_COUNT entries per list and cuts each to ENTRY_MAX_LENGTH, so the
+// client rejects instead of losing text silently. Each row is
+// [label, everyEntryThatPersists, linesToLengthCheck], both already through
+// normalizedEntries.
+export function entryLimitProblems(rows) {
+  return rows.flatMap(([label, entries, lines]) => [
+    ...(entries.length > ENTRY_MAX_COUNT
+      ? [`${label}: at most ${ENTRY_MAX_COUNT} entries total (${entries.length} entered)`]
+      : []),
+    ...(lines.some((line) => line.length > ENTRY_MAX_LENGTH)
+      ? [`${label}: keep each line under ${ENTRY_MAX_LENGTH} characters`]
+      : []),
+  ]);
+}
+// The entries a submit will actually persist, per the server's
+// normalizeCompletionTextArray (same shared constants): trim, collapse
+// whitespace, drop empties, dedupe case-insensitively on the persisted
+// (length-capped) form. Text is returned uncut so the caller can REJECT an
+// over-long entry instead of losing its tail silently.
+export function normalizedEntries(lines) {
+  const seen = new Set();
+  return lines
+    .map((line) => String(line || "").trim().replace(ENTRY_WHITESPACE_RX, " "))
+    .filter((text) => {
+      const key = text.slice(0, ENTRY_MAX_LENGTH).toLowerCase();
+      return text && !seen.has(key) && seen.add(key);
+    });
+}
+const PROTOCOL_MARKER_TAGS = ["protocol", "protocol optional", "action"];
+function parseMarkerLine(line) {
+  const match = String(line || "").trim().match(MARKER_LINE_RX);
+  return match ? { tag: match[1].toLowerCase(), text: match[2].trim() } : null;
+}
+function markerLines(notes) {
+  return String(notes || "").split("\n").map(parseMarkerLine).filter(Boolean);
+}
+function markerTexts(notes, tags) {
+  const wanted = new Set(tags);
+  return markerLines(notes).filter((entry) => wanted.has(entry.tag)).map((entry) => entry.text);
+}
 export function labelsPresentInMarkerNotes(notes, labels) {
-  const markerValues = new Set(String(notes || "")
-    .split("\n")
-    .filter((line) => /^\s*\[[^\]]+\]\s/.test(line))
-    .map((line) => line.replace(/^\s*\[[^\]]+\]\s*/, "").trim().toLowerCase())
-    .filter(Boolean));
+  const markerValues = new Set(markerLines(notes).map((entry) => entry.text.toLowerCase()));
   return (Array.isArray(labels) ? labels : []).filter((label) => (
     markerValues.has(String(label || "").trim().toLowerCase())
   ));
@@ -320,15 +380,61 @@ export function labelsPresentInMarkerNotes(notes, labels) {
 // marker lines back out of the technician notes as completed actions, so a
 // dropped label must leave the notes too. Only the markers for `labels` go;
 // every other line (a free-typed action included) stays.
-function withoutProtocolMarkerLines(notes, labels) {
+export function withoutProtocolMarkerLines(notes, labels) {
   const drop = new Set(labels.map((label) => String(label || "").trim().toLowerCase()));
   return String(notes || "")
     .split("\n")
     .filter((line) => {
-      const match = line.trim().match(/^\[(?:protocol|protocol optional|action)\]\s*(.+)$/i);
-      return !match || !drop.has(match[1].trim().toLowerCase());
+      const entry = parseMarkerLine(line);
+      return !entry
+        || !PROTOCOL_MARKER_TAGS.includes(entry.tag)
+        || !drop.has(entry.text.toLowerCase());
     })
     .join("\n");
+}
+// Submit-time allowlist for restored/selected protocol action labels. First
+// rule with an opinion decides (true keep / false drop / null pass); no
+// opinion at all drops the label. Table-driven so handleSubmit carries no
+// branching for it.
+const SAVED_TREATMENT_SCOPES = new Set(["interior", "exterior"]);
+const PROTOCOL_ACTION_RULES = [
+  // Specialty preset lanes (any service) accept only the preset's own actions
+  // — membership cannot be bypassed by saved scope (codex P2 r7 #3701).
+  (label, c) => (c.specialtyProtocolActions.length
+    ? c.specialtyProtocolActions.some((action) => action.label === label)
+    : null),
+  // Saved treatment scope stays authoritative only while the action source is
+  // unavailable (still loading, or loaded with no items). Once a completion
+  // actions load returns items, THAT list is the allowlist (codex P2 r13 #5051).
+  (label, c) => (!(c.protocolActionsLoaded && c.protocolActions.length)
+    && SAVED_TREATMENT_SCOPES.has(c.actionScopeByLabel[label]?.scope)
+    ? true
+    : null),
+  // Non-lawn keeps its fallback-chip labels; lawn requires a product-backed
+  // action from the loaded list (or an enabled field action).
+  (label, c) => !c.isLawn
+    || (c.completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label))
+    || (c.protocolActionsLoaded
+      && c.protocolActions.some((action) => (action.label || action.note || action.raw || "") === label)),
+];
+export function protocolActionAllowed(label, context) {
+  return Boolean(PROTOCOL_ACTION_RULES.map((rule) => rule(label, context)).find((verdict) => verdict !== null));
+}
+// What a submit sends for protocol actions: the labels that pass the
+// allowlist, plus the notes with the rejected labels' marker lines removed
+// (the server rebuilds actions from those markers), plus the merged
+// completed-actions list the payload cap is checked against.
+export function reconcileProtocolActions({ labels, notes, context }) {
+  const reportProtocolActions = labels.filter((label) => protocolActionAllowed(label, context));
+  const reportTechnicianNotes = withoutProtocolMarkerLines(
+    notes,
+    labels.filter((label) => !reportProtocolActions.includes(label)),
+  );
+  const completedActions = normalizedEntries([
+    ...reportProtocolActions,
+    ...markerTexts(reportTechnicianNotes, PROTOCOL_MARKER_TAGS),
+  ]);
+  return { reportProtocolActions, reportTechnicianNotes, completedActions };
 }
 // Specialty preset actions carry a default scope, but the treated areas say
 // where the work actually happened: when every classified area sits on one
@@ -829,6 +935,16 @@ function fmtProtocolNumber(value, suffix = "") {
   const n = Number(value);
   if (!Number.isFinite(n)) return String(value);
   return `${n.toLocaleString(undefined, { maximumFractionDigits: 3 })}${suffix}`;
+}
+
+// A lawn plan mix quantity as the plan serves it ("15 fl_oz"), except one in
+// mL, which reads the way the truck measures it (tsp under 1 fl oz, else
+// fl oz) on its own basis: nothing a tech sees is in mL (owner ruling
+// 2026-09-29), whatever unit a protocol product is given.
+function mixQuantityText(amount, unit) {
+  if (!isMlUnit(unit)) return `${fmtProtocolNumber(amount)} ${unit || ""}`;
+  const basis = String(unit).split("/").slice(1).join("/").trim();
+  return `${formatMeasuredAmount(amount, "ml") || "— fl oz"}${basis ? `/${basis}` : ""}`;
 }
 
 function protocolTrackForLawnType(lawnType) {
@@ -7775,12 +7891,10 @@ export function ProtocolPanel({ service, onClose }) {
                                 >
                                   {" "}
                                   <div>
-                                    {fmtProtocolNumber(areaMix?.amount)}{" "}
-                                    {areaMix?.amountUnit || ""}
+                                    {mixQuantityText(areaMix?.amount, areaMix?.amountUnit)}
                                   </div>{" "}
                                   <div style={{ color: D.muted }}>
-                                    {fmtProtocolNumber(tankMix?.amount)}{" "}
-                                    {tankMix?.amountUnit || ""}/tank
+                                    {mixQuantityText(tankMix?.amount, tankMix?.amountUnit)}/tank
                                   </div>{" "}
                                 </div>{" "}
                               </div>{" "}
@@ -10558,6 +10672,25 @@ function normalizeProductArea(product = {}, serviceType = "") {
     applicationMethod,
     areaUnit: areaRequirement?.unit || product.areaUnit || "",
     targets: Array.isArray(product.targets) ? product.targets : [],
+    // A draft saved while the form still offered mL comes back without it
+    // (owner ruling 2026-09-29): the amount in fl oz, a rate in mL cleared
+    // with its tank for the tech to enter, and an mL label unit dropped with
+    // its ceiling, as an mL-label product now starts. The tech's own rate in
+    // another unit, and the tank it drives, stay as saved.
+    ...(isMlUnit(product.amountUnit) ? {
+      amountUnit: "fl_oz",
+      totalAmount: product.totalAmount === "" || product.totalAmount == null
+        ? product.totalAmount
+        : mlToFlOz(product.totalAmount),
+    } : {}),
+    ...(isMlUnit(product.rateUnit) ? {
+      rate: "",
+      rateUnit: "",
+      carrierGallons: "",
+      carrierGallonsManual: false,
+      tankOwner: false,
+    } : {}),
+    ...(isMlUnit(product.catalogRateUnit) ? { catalogRateUnit: "", maxLabelRatePer1000: null } : {}),
   };
 }
 
@@ -10731,7 +10864,7 @@ function isNoneLikeTreeShrubValue(value = "") {
   );
 }
 
-function treeShrubCloseoutBlocksClient({
+export function treeShrubCloseoutBlocksClient({
   closeout,
   productFlags,
   servicePhotos,
@@ -10798,6 +10931,9 @@ function treeShrubCloseoutBlocksClient({
     if (!String(injection.sizeClassOrDbh || "").trim()) push("Injection record requires DBH or palm size class.", "injectionRecord.sizeClassOrDbh");
     if (!String(injection.product || "").trim()) push("Injection record requires product.", "injectionRecord.product");
     if (!String(injection.dose || "").trim()) push("Injection record requires dose.", "injectionRecord.dose");
+    // Nothing a tech records is in mL (owner ruling 2026-09-29); the server
+    // refuses the same dose (tree-shrub-closeout.js).
+    else if (hasMlAmount(injection.dose)) push("Injection dose must be in tsp or fl oz, not mL.", "injectionRecord.dose");
     if (treeShrubNumber(injection.numberOfPorts) === null) push("Injection record requires number of ports.", "injectionRecord.numberOfPorts");
     if (!String(injection.targetIssue || "").trim()) push("Injection record requires target issue.", "injectionRecord.targetIssue");
     if (!String(injection.followUpDate || "").trim()) push("Injection record requires follow-up date.", "injectionRecord.followUpDate");
@@ -10996,7 +11132,7 @@ function TreeShrubCloseoutBlock({
             <input
               value={value.injectionRecord?.dose || ""}
               onChange={(e) => setInjectionField("dose", e.target.value)}
-              placeholder="Dose"
+              placeholder="Dose (tsp or fl oz)"
               style={input}
             />
           </div>
@@ -13357,7 +13493,9 @@ export function CompletionPanel({
     const method = String(p?.applicationMethod || p?.method || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
     return (!!method && !["bait_placement", "station_check", "trunk_injection"].includes(method))
       || isNonBaitPesticideSelection(p);
-  }) || Object.values(actionScopeByLabel).some((meta) => meta?.treatmentApplied === true);
+  }) || activeSelectedLabels(selectedProtocolActionLabels).some((label) => (
+    actionScopeByLabel[label]?.treatmentApplied === true && actionScopeByLabel[label]?.dryDown !== false
+  ));
   // Re-entry stepper seeds (owner rule 2026-08-11): what a hands-off
   // completion would persist for this visit. Re-fetched whenever spray
   // evidence appears/disappears so a bait/inspection identity that gains a
@@ -13720,7 +13858,8 @@ export function CompletionPanel({
         // area: the area still follows, the dose stays (audit P1).
         totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
           ? product.totalAmount
-          : lawnDerivedTotal(product, lawnVisitArea) } : product));
+          // In the rate's unit, or in spoons while the tech reads it in tsp.
+          : amountInUnit(lawnDerivedTotal(product, lawnVisitArea), baseUnitOf(product.rateUnit), product.amountUnit) } : product));
   }, [lawnDefaultsEnabled, lawnVisitArea, selectedProducts]);
   useEffect(() => {
     if (!completionImprovements || !isLawn) return;
@@ -15796,6 +15935,27 @@ export function CompletionPanel({
     // and it clears an untouched installed draft.
     if (generating) return;
     invalidateGeneratedReportOnTypedEdit();
+    const markerTags = kind === "protocol"
+      ? new Set(PROTOCOL_MARKER_TAGS)
+      : new Set([kind === "observation" ? "found" : "next"]);
+    const normalizedLabel = String(label || "").trim().toLowerCase();
+    // Marker lines reconstruct structured selections on the server. Remove a
+    // matching marker even when edited generated prose remains detached.
+    // Grammar matches the server parser (taggedCompletionNoteLines,
+    // complete-scheduled-service.js): optional whitespace after the closing
+    // bracket, not required — a tech-typed "[Action]Label" with no space
+    // still reconstructs on the server, so the client must delete it too
+    // (codex P2 r3, thread on SchedulePage.jsx:15660).
+    setNotes((current) => current
+      .split("\n")
+      .filter((line) => {
+        const entry = parseMarkerLine(line);
+        return !entry
+          || !markerTags.has(entry.tag.trim())
+          || entry.text.toLowerCase() !== normalizedLabel;
+      })
+      .join("\n")
+      .trim());
     if (kind === "protocol") {
       setSelectedProtocolActionLabels((prev) =>
         prev.filter((item) => item !== label),
@@ -15846,10 +16006,7 @@ export function CompletionPanel({
   // photo-caption context the same way. The textarea text still merges for
   // gate-off and restored drafts; the server dedupes.
   function taggedNoteLines(tag) {
-    const rx = new RegExp(`^\\[${tag}\\]\\s*(.+)$`, "i");
-    return freeTextLines(notes)
-      .map((line) => line.match(rx)?.[1]?.trim() || "")
-      .filter(Boolean);
+    return markerTexts(notes, [tag]);
   }
   function uniqueLines(lines) {
     const seen = new Set();
@@ -16146,11 +16303,16 @@ export function CompletionPanel({
       (isLawn && lawnAssessmentReady === "failed");
     return { payload, hasReportInput };
   }
-  function recordActionScope(label, scope, treatmentApplied) {
-    if (!label || (scope !== "interior" && scope !== "exterior")) return;
+  function recordActionScope(label, scope, treatmentApplied, dryDown) {
+    const scoped = scope === "interior" || scope === "exterior";
+    if (!label || !scoped) return;
     setActionScopeByLabel((prev) => ({
       ...prev,
-      [label]: { scope, treatmentApplied: treatmentApplied === true },
+      [label]: {
+        scope,
+        treatmentApplied: treatmentApplied === true,
+        ...(dryDown === false ? { dryDown: false } : {}),
+      },
     }));
   }
   function applyProtocolAction(action, { conflictLabels = [] } = {}) {
@@ -16167,7 +16329,7 @@ export function CompletionPanel({
     // the same metadata, and the product is already on the visit — so it
     // must not clear a valid untouched report (codex r80).
     if (
-      selectedProtocolActionLabels.includes(noteText)
+      activeSelectedLabels(selectedProtocolActionLabels).includes(noteText)
       && (!action.product?.id
         || selectedProducts.find((p) => p.productId === action.product.id))
     ) {
@@ -16175,7 +16337,7 @@ export function CompletionPanel({
     }
     const detachedAfterInvalidation = invalidateGeneratedReportOnTypedEdit();
     appendUniqueLabel(setSelectedProtocolActionLabels, noteText);
-    recordActionScope(noteText, action.scope, action.treatmentApplied);
+    recordActionScope(noteText, action.scope, action.treatmentApplied, action.dryDown);
     if (!detachedAfterInvalidation) {
       const conflictSet = new Set(conflictLabels);
       const prefix = action.conditional ? "Protocol optional" : "Protocol";
@@ -16255,6 +16417,14 @@ export function CompletionPanel({
   }
   // One construction path for a selected-product row — the picker
   // (addProduct) and the default pest tank-mix seed build identical rows.
+  // tsp is the spoon set for a liquid (6 to the fl oz, sent as fl oz): offered
+  // only for a product the Fast Complete sheet also measures as a liquid
+  // (productDimension), never a granule, dust or gel bait.
+  function offersTsp(sp) {
+    const catalogRow = (products || []).find((p) => String(p.id) === String(sp.productId));
+    return productDimension(catalogRow || { name: sp.name, category: sp.category }) === "liquid";
+  }
+
   function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work on the German-roach protocol) wins over the
@@ -16344,7 +16514,7 @@ export function CompletionPanel({
           null,
         rate: prefillRate,
         rateUnit: prefillRateUnit,
-        catalogRateUnit: product.rateUnit || product.rate_unit || defaultUnit,
+        catalogRateUnit: hasMlLabelUnit(product) ? "" : product.rateUnit || product.rate_unit || defaultUnit,
         // A per-basis unit is a concentration/placement rate — fine as the
         // rate, but "Total used" records a real quantity (and inventory
         // deduction can't convert a concentration), so the resolver defaults
@@ -16354,7 +16524,7 @@ export function CompletionPanel({
         // r18) — the high-rate review is unit-matched (rateUnitsMatch
         // against catalogRateUnit), so the ceiling compares in the label's
         // own basis despite the field's per-1k name.
-        maxLabelRatePer1000:
+        maxLabelRatePer1000: hasMlLabelUnit(product) ? null :
           product.maxLabelRatePer1000 ??
           product.max_label_rate_per_1000 ??
           labelMaxRate ??
@@ -16540,6 +16710,12 @@ export function CompletionPanel({
           // gal" under a hand-picked unit and deducts the wrong inventory
           // quantity (Codex r1 P1).
           if (!p.totalAmountManual) next.totalAmount = "";
+        } else if (field === "amountUnit" && (!p.totalAmountManual || p.totalAmountSeeded)) {
+          // A Total the tech did not type (calculated, or the house seed)
+          // reads in spoons when tsp is picked and back again: 0.25 fl oz of
+          // surfactant is 1½ tsp, never "0.25 tsp" sent as 0.042 fl oz. Any
+          // other change to or from tsp withdraws it (amountInUnit).
+          next.totalAmount = amountInUnit(next.totalAmount, p.amountUnit, value);
         } else if (!next.totalAmountManual) {
           if (field === "rateUnit" && isPerGallonUnit(p.rateUnit)) {
             // A tank dose is meaningless under the new unit: re-derive from
@@ -16555,7 +16731,8 @@ export function CompletionPanel({
               next.totalAmount = "";
             }
           } else if (field === "rate" || field === "areaValue") {
-            next.totalAmount = lawnDerivedTotal(next, next.areaValue);
+            // In the rate's unit, or in spoons while the tech reads it in tsp.
+            next.totalAmount = amountInUnit(lawnDerivedTotal(next, next.areaValue), baseUnitOf(next.rateUnit), next.amountUnit);
           } else if (field === "rateUnit") {
             // Per-basis rate units (mix concentrations, spot placements,
             // per-acre…) keep Total in the base quantity unit, and can't
@@ -16564,6 +16741,8 @@ export function CompletionPanel({
             const perBasis = isPerBasisUnit(value);
             next.amountUnit = perBasis ? String(value).split("/")[0] : value;
             if (perBasis) next.totalAmount = "";
+            // A Total in spoons is recalculated in the new unit, not relabeled.
+            else if (p.amountUnit === "tsp") next.totalAmount = lawnDerivedTotal(next, next.areaValue);
           }
         }
         if (governed && field === "applicationArea" && !p.lawnPlanManualFields?.includes("areaValue")) {
@@ -17006,6 +17185,24 @@ export function CompletionPanel({
         return;
       }
     }
+    // Lawn closeouts enforce the product-backed rule at submit too: a
+    // draft saved before the scout/task rows were filtered out can restore
+    // labels the selector no longer offers — they must not persist as
+    // completed protocol actions (allowlist rules: PROTOCOL_ACTION_RULES).
+    // The server also rebuilds actions from marker notes, so rejected
+    // selections leave the notes too and validation sees what the server will.
+    const { reportProtocolActions, reportTechnicianNotes, completedActions } = reconcileProtocolActions({
+      labels: activeSelectedLabels(selectedProtocolActionLabels),
+      notes,
+      context: {
+        specialtyProtocolActions,
+        protocolActions,
+        protocolActionsLoaded,
+        actionScopeByLabel,
+        isLawn,
+        completionImprovements,
+      },
+    });
     // The server normalizer silently trims each observation/recommendation
     // line to 240 chars and keeps at most 20 entries — reject oversized
     // input here instead of letting the saved report lose text without
@@ -17016,34 +17213,25 @@ export function CompletionPanel({
     // (codex r8: the typed recommendation is appended last and vanished
     // first).
     {
-      const freeTextProblems = [];
-      const mergedCounts = [
-        [
-          "Observations",
-          activeSelectedLabels(selectedObservationLabels).length +
-            observationFreeText().length,
-          observationFreeText(),
-        ],
-        [
-          "Recommendations",
-          activeSelectedLabels(selectedRecommendationLabels).length +
-            recommendationFreeText().length +
-            (isTypedFindings && typedRecommendations.trim() ? 1 : 0),
-          recommendationFreeText(),
-        ],
-      ];
-      for (const [label, mergedCount, lines] of mergedCounts) {
-        if (mergedCount > 20) {
-          freeTextProblems.push(
-            `${label}: at most 20 entries total (${mergedCount} entered)`,
-          );
-        }
-        // the merged lines ([Found]/[Next] and parked ones included) are what
-        // persist — a long tagged line would otherwise be sliced at 240
-        if (lines.some((line) => line.length > 240)) {
-          freeTextProblems.push(`${label}: keep each line under 240 characters`);
-        }
-      }
+      // Counted on the entries the server will persist (trim, whitespace
+      // collapse, case-insensitive dedupe — normalizedEntries), so a
+      // whitespace-variant duplicate of a chip label never counts twice. The
+      // typed recommendation is intentionally packed to one 240-char entry
+      // at submit, so it counts but is not length-rejected.
+      const observationEntries = normalizedEntries([
+        ...activeSelectedLabels(selectedObservationLabels),
+        ...observationFreeText(),
+      ]);
+      const recommendationEntries = normalizedEntries([
+        ...activeSelectedLabels(selectedRecommendationLabels),
+        ...recommendationFreeText(),
+        ...(isTypedFindings && typedRecommendations.trim() ? [typedRecommendations] : []),
+      ]);
+      const freeTextProblems = entryLimitProblems([
+        ["Completed actions", completedActions, completedActions],
+        ["Observations", observationEntries, normalizedEntries(observationFreeText())],
+        ["Recommendations", recommendationEntries, normalizedEntries(recommendationFreeText())],
+      ]);
       if (freeTextProblems.length) {
         alert(`Shorten these before submitting — ${freeTextProblems.join("; ")}.`);
         return;
@@ -17358,28 +17546,6 @@ export function CompletionPanel({
           service.id,
         );
       }
-      // Lawn closeouts enforce the product-backed rule at submit too: a
-      // draft saved before the scout/task rows were filtered out can restore
-      // labels the selector no longer offers — they must not persist as
-      // completed protocol actions. Only applied once the (filtered) action
-      // set has loaded; pest keeps its fallback-chip labels untouched.
-      // Specialty preset lanes (any service) accept only the preset's own
-      // actions — a restored label from a previously served list is stale
-      // and must not reach the customer report (codex P2 r7 #3701).
-      const reportProtocolActions = activeSelectedLabels(
-        selectedProtocolActionLabels,
-      ).filter(
-        (label) =>
-          specialtyProtocolActions.length > 0
-            ? specialtyProtocolActions.some((action) => action.label === label)
-            : !isLawn ||
-              (completionImprovements && LAWN_FIELD_ACTIONS.some((action) => action.note === label)) ||
-              (protocolActionsLoaded &&
-                protocolActions.some(
-                  (action) =>
-                    (action.label || action.note || action.raw || "") === label,
-                )),
-      );
       const reportProtocolActionScopes = reportProtocolActions
         .map((label) => {
           const meta = actionScopeByLabel[label];
@@ -17390,6 +17556,7 @@ export function CompletionPanel({
               ? specialtyActionScope({ areas: completionAreasServiced, defaultScope: meta.scope })
               : meta.scope,
             treatmentApplied: meta.treatmentApplied === true,
+            ...(meta.dryDown === false ? { dryDown: false } : {}),
           };
         })
         .filter(Boolean);
@@ -17434,7 +17601,7 @@ export function CompletionPanel({
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
-        technicianNotes: notes,
+        technicianNotes: reportTechnicianNotes,
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
@@ -17459,10 +17626,15 @@ export function CompletionPanel({
         // conditions as advisories on the completion by itself.
         products: selectedProducts.map((p) => ({
           productId: p.productId,
-          rate: p.rate,
+          // A rate is recorded only with its unit: a number typed while the
+          // unit is blank (an mL-label row starts that way) is no record.
+          rate: p.rateUnit ? p.rate : "",
           rateUnit: p.rateUnit,
-            totalAmount: p.totalAmount,
-            amountUnit: p.amountUnit,
+            // The server keeps no tsp: an amount in spoons goes as fl oz
+            // (lib/measure-units); every other row goes as entered.
+            ...(p.amountUnit === "tsp"
+              ? submittedAmount(p.totalAmount, p.amountUnit)
+              : { totalAmount: p.totalAmount, amountUnit: p.amountUnit }),
             applicationMethod: productApplicationMethod(p, serviceTypeForArea),
           applicationArea:
             p.applicationArea ||
@@ -19920,7 +20092,6 @@ export function CompletionPanel({
                         <option value="" disabled>Unit</option>
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
-                        <option value="ml">ml</option>{" "}
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
@@ -19987,9 +20158,9 @@ export function CompletionPanel({
                       >
                         {" "}
                         <option value="" disabled>Unit</option>
+                        {offersTsp(sp) ? <option value="tsp">tsp</option> : null}{" "}
                         <option value="oz">oz</option>{" "}
                         <option value="fl_oz">fl oz</option>{" "}
-                        <option value="ml">ml</option>{" "}
                         <option value="g">g</option>{" "}
                         <option value="lb">lb</option>{" "}
                         <option value="gal">gal</option>{" "}
@@ -22324,7 +22495,7 @@ export function CompletionPanel({
                     <option value="" disabled>Unit</option>
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
-                    <option value="ml">ml</option> <option value="g">g</option>{" "}
+                    <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                     <option value="oz/gal">oz/gal</option>{" "}
@@ -22372,9 +22543,10 @@ export function CompletionPanel({
                   >
                     {" "}
                     <option value="" disabled>Unit</option>
+                    {offersTsp(sp) ? <option value="tsp">tsp</option> : null}{" "}
                     <option value="oz">oz</option>{" "}
                     <option value="fl_oz">fl oz</option>{" "}
-                    <option value="ml">ml</option> <option value="g">g</option>{" "}
+                    <option value="g">g</option>{" "}
                     <option value="lb">lb</option>{" "}
                     <option value="gal">gal</option>{" "}
                     {catalogUnitOption(baseUnitOf(sp.catalogRateUnit), STANDARD_AMOUNT_UNIT_OPTIONS)}{" "}
@@ -23585,7 +23757,9 @@ function ProtocolMixSummary({ protocol, mixItems = [], carrierGalPer1000, invent
                 <div key={row.key || i} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontFamily: t.font, fontSize: 13, color: t.ink }}>
                   <span>{row.name}</span>
                   <strong style={{ whiteSpace: "nowrap" }}>
-                    {amt != null ? `${formatMixAmount(amt)} ${row.rateUnit || "oz"}` : "—"}
+                    {amt == null ? "—"
+                      : isMlUnit(row.rateUnit) ? mixQuantityText(amt, row.rateUnit)
+                        : `${formatMixAmount(amt)} ${row.rateUnit || "oz"}`}
                   </strong>
                 </div>
               );

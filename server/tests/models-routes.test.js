@@ -84,6 +84,41 @@ describe('models registry — cross-provider routing', () => {
     expect(M.TEXT_POLICIES.photoIdVision.fallback).toEqual({ provider: 'openai', model: M.OPENAI_FRONTIER });
   });
 
+  test('plantIdVision runs Gemini first and GPT-6 Sol second, no Claude (owner 2026-09-28) — the pest engine keeps photoIdVision unchanged', () => {
+    const M = require('../config/models');
+    expect(M.TEXT_POLICIES.plantIdVision.primary).toEqual({ provider: 'gemini', model: M.GEMINI_VISION_BEST });
+    expect(M.TEXT_POLICIES.plantIdVision.fallback).toEqual({ provider: 'openai', model: M.OPENAI_PLANT_ID });
+    expect(M.OPENAI_PLANT_ID).not.toBe(M.OPENAI_FRONTIER);
+    // The pest engine's own ladder is untouched by the 2026-09-28 ruling.
+    expect(M.TEXT_POLICIES.photoIdVision.fallback).toEqual({ provider: 'openai', model: M.OPENAI_FRONTIER });
+  });
+
+  test('plantIdReferee is a single-leg Anthropic route on Claude Fable at effort high (owner 2026-09-28), outside the two-provider TEXT_POLICIES map', () => {
+    const M = require('../config/models');
+    expect(M.ROUTES.plantIdReferee).toEqual({ provider: 'anthropic', model: M.PLANT_ID_REFEREE, effort: 'high' });
+    expect(M.PLANT_ID_REFEREE).toBe(process.env.MODEL_PLANT_ID_REFEREE || 'claude-fable-5-1');
+    expect(M.MODEL_CATALOG[M.PLANT_ID_REFEREE].requires).toBe('deep');
+  });
+
+  test('MODEL_OPENAI_PLANT_ID and MODEL_PLANT_ID_REFEREE env overrides flow into the registry', () => {
+    const savedOpenai = process.env.MODEL_OPENAI_PLANT_ID;
+    const savedReferee = process.env.MODEL_PLANT_ID_REFEREE;
+    jest.resetModules();
+    process.env.MODEL_OPENAI_PLANT_ID = 'gpt-plant-canary';
+    process.env.MODEL_PLANT_ID_REFEREE = 'claude-fable-canary';
+    try {
+      const M = require('../config/models');
+      expect(M.OPENAI_PLANT_ID).toBe('gpt-plant-canary');
+      expect(M.TEXT_POLICIES.plantIdVision.fallback.model).toBe('gpt-plant-canary');
+      expect(M.PLANT_ID_REFEREE).toBe('claude-fable-canary');
+      expect(M.ROUTES.plantIdReferee.model).toBe('claude-fable-canary');
+    } finally {
+      if (savedOpenai === undefined) delete process.env.MODEL_OPENAI_PLANT_ID; else process.env.MODEL_OPENAI_PLANT_ID = savedOpenai;
+      if (savedReferee === undefined) delete process.env.MODEL_PLANT_ID_REFEREE; else process.env.MODEL_PLANT_ID_REFEREE = savedReferee;
+      jest.resetModules();
+    }
+  });
+
   test('photoCaptions honors the shared GEMINI_VISION_MODEL override like the other photo lanes', () => {
     const prev = process.env.GEMINI_VISION_MODEL;
     process.env.GEMINI_VISION_MODEL = 'gemini-pinned-rollback';

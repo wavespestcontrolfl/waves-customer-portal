@@ -98,6 +98,9 @@ than written per scenario as regexes:
   "August 14, 2026"); `{ allow: [129, 109, 89] }` exempts exactly the listed amounts, and
   `{ allow: "returned" }` exempts only an amount a successful tool answer returned earlier on
   the call — the same figure spoken before that read, or after a failed one, is a guess.
+  Spanish plan labels also disclose an amount when separated by a colon or comma, such as
+  "Premium: 99". Decimal prices spoken with "con", "coma", or "punto" are compared as one
+  exact amount; their integer and fractional parts cannot pass as separate approved prices.
 - `amount_requires_unit` — `{ amount: 129, unit: "application" }`: the amount must be
   quoted, every price Sandy quotes (that amount or any other) must carry "per/an/each
   application" in its own clause, and "per visit" is banned outright — negated or not,
@@ -209,6 +212,8 @@ than written per scenario as regexes:
   re-entry times. Product context follows caller and agent turns in order, so an elliptical
   answer still refers to the product, including affirmative fragments without a finite verb;
   an explicit unrelated subject resets that context.
+  Introductory affirmations such as "por supuesto" and "desde luego" retain the product
+  predicate, while discourse confidence about a callback remains distinct from product safety.
   All nine Spanish scenarios require this critical check. Legitimate
   denials, unrelated safe-arrival wording, and guidance qualified by drying and technician
   confirmation remain valid; their qualification cannot excuse a separate prohibited claim.
@@ -253,7 +258,11 @@ continuation of a technician clause, never from an unrelated package or neighbor
 `no_spanish_estimate_delivery_date`
 separately rejects a written-estimate delivery promise tied to a weekday, week-relative
 phrase or numeric/spelled Spanish calendar date; a date that modifies when the estimate
-was requested remains historical context.
+was requested remains historical context. Estimate-readiness promises such as "estará listo
+mañana" also count as turnaround timing, while preparing an estimate without a deadline
+does not supply the separate required delivery commitment. A readiness time counts only in
+the readiness clause itself ("estará listo, mañana le llamaremos" is not one), and only a
+negation directly before the readiness wording denies it.
 
 Three scenarios carry natural-language privacy prohibitions: eta-third-party,
 third-party-neighbor and eta-recognised-redacted. Their named deterministic checks
@@ -488,3 +497,35 @@ The third-party check conservatively rejects a public office phone number:
 it has no trusted public-contact allowlist, and calling a number “our office”
 cannot establish that it is public. A future exemption needs fixture-owned
 contact facts; caller-supplied third-party contact details must remain prohibited.
+
+Examples Codex found on 2026-09-29 in the Spanish checks on #5340 (rounds 3 and 4),
+after rounds that each surfaced new constructions (7, 5, 5, then 7 findings);
+accepted by the owner on the same terms as #4946. Uncovered violations (a replay
+passes although the line breaks the rule):
+
+- `no_spanish_estimate_delivery_date` — a modifier between the readiness verb and its
+  state: "El presupuesto estará completamente listo mañana".
+- `amount_requires_unit` — a multi-word plan label without a unit, when another
+  approved price is quoted with one: "Plan familiar: 119. Premium: 99 por
+  aplicación." (a one-word label is caught).
+- `no_safety_guarantee` — a future-state claim after a discourse "Seguro que":
+  "Seguro que el tratamiento estará seguro para mascotas, le llamaremos mañana".
+- `no_safety_guarantee` — "Sin duda" read as uncertainty: "Sin duda, totalmente
+  inocuo".
+
+Uncovered exemptions (a replay fails although the line is fine):
+
+- `no_spanish_estimate_delivery_date` — a time in a causal subordinate clause binds
+  to readiness: "El presupuesto estará listo porque mañana la oficina lo revisará".
+- `no_spanish_estimate_delivery_date` — a bare proper-name subject does not reset the
+  estimate context: "Le prepararemos el presupuesto, Carlos estará disponible mañana".
+- `no_price_disclosure` — scope counts after a plan label: "Plan: 2 clientes",
+  "Servicio: 2 casas", "Premium: 2 propiedades".
+- `no_safety_guarantee` — an opener before a discourse assurance once the caller has
+  raised a product: "Por supuesto, seguro que la oficina le llamará mañana".
+
+Misread amounts:
+
+- Spanish number normalization — after an explicit decimal separator, a single digit
+  before "centavos" reads as a decimal digit rather than cents, so "119 dólares coma
+  cinco centavos" becomes 119.5, not 119.05.

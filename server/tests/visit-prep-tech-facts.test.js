@@ -87,7 +87,7 @@ describe('customerFlaggedFacts', () => {
 
   test('ungrouped stop with submissions: shaped entries, ordered photo ids, no S3 keys/URLs', async () => {
     const conn = fakeConn({
-      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
       visit_prep_submissions: [
         {
           id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T23:42:00Z'),
@@ -114,6 +114,30 @@ describe('customerFlaggedFacts', () => {
     }]);
     // Never S3 keys or URLs in facts (scope §7).
     expect(JSON.stringify(facts)).not.toMatch(/visitprep|s3_key|signed:\/\//);
+  });
+
+  test('an unread submission from today is marked awaiting only while the recovery sweep is live (Codex #5320 r10)', async () => {
+    // Only the clock is frozen (a fixed 1 PM ET), so "40 minutes ago" is
+    // always today in ET, whatever time the suite runs.
+    jest.useFakeTimers({
+      now: new Date('2026-10-01T17:00:00Z'),
+      doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask', 'clearTimeout', 'clearInterval', 'clearImmediate'],
+    });
+    const seed = () => fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
+      visit_prep_submissions: [{
+        id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(Date.now() - 40 * 60 * 1000), read_status: 'none',
+      }],
+      visit_prep_photos: [],
+    });
+    expect((await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, seed()))[0].read).toEqual({ status: 'none' });
+    process.env.GATE_VISIT_PREP_READ_SWEEP = 'true';
+    try {
+      expect((await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, seed()))[0].read).toEqual({ status: 'none', awaiting: true });
+    } finally {
+      delete process.env.GATE_VISIT_PREP_READ_SWEEP;
+      jest.useRealTimers();
+    }
   });
 
   test('grouped stop: resolves CURRENT membership, not the submission\'s own snapshotted visit_id', async () => {
@@ -148,7 +172,7 @@ describe('customerFlaggedFacts', () => {
 
   test('submissions exist for the stop but none carry photos yet (note-only submission)', async () => {
     const conn = fakeConn({
-      scheduled_services: [{ id: 'svc-1', visit_id: null }],
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
       visit_prep_submissions: [
         { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: 'other', location_on_property: null, note: 'Ants near the mailbox' },
       ],
@@ -308,6 +332,11 @@ describe('effectiveReadStatus (a read interrupted by a redeploy never sticks on 
   });
   test('pending older than 15 minutes reads as failed', () => {
     expect(effectiveReadStatus('pending', created, created.getTime() + 16 * 60 * 1000)).toBe('failed');
+  });
+  test('a read claimed long after the photos were sent is timed from its claim (Codex #5320 r10)', () => {
+    const claimed = new Date(created.getTime() + 3 * 60 * 60 * 1000);
+    expect(effectiveReadStatus('pending', created, claimed.getTime() + 5 * 60 * 1000, claimed)).toBe('pending');
+    expect(effectiveReadStatus('pending', created, claimed.getTime() + 16 * 60 * 1000, claimed)).toBe('failed');
   });
   test('other statuses pass through', () => {
     for (const s of ['none', 'done', 'failed', 'unsupported']) {
@@ -584,5 +613,235 @@ describe('stopPhotoViewUrls', () => {
     // members) by the query itself — the fake conn's whereIn over
     // scheduled_service_id models that.
     expect(urls.map((u) => u.id)).toEqual(['photo-A']);
+  });
+});
+
+// GATE_VISIT_PREP_PLANT_READ — the lawn / tree & shrub sibling of the pest
+// read's own facts coverage above. These tests exercise ONLY the additive
+// plant path; none of them touch GATE_VISIT_PREP_PEST_READ, so the pest
+// suite above is unaffected.
+describe('plantReadFactsFromResult', () => {
+  const { plantReadFactsFromResult } = visitPrep._internal;
+
+  test('a done row carries only fixed engine/catalog fields, kind=plant', () => {
+    const facts = plantReadFactsFromResult('done', {
+      subject_type: 'lawn',
+      v2: {
+        answer: { level: 'entry', wording: 'likely', headline: 'Likely: Brown Patch' },
+        subject: { plant: { common_name: 'St. Augustinegrass' } },
+        possibilities: [{
+          common_name: 'Brown Patch', fits: ['Roughly circular brown patch'], not_yet: ['A smoke-ring edge'], safety_line: null, safety: null,
+        }],
+        next_step_hint: { kind: 'inspection', text: 'A technician checks this on your next visit.' },
+        referral: null,
+      },
+    });
+    expect(facts).toEqual({
+      status: 'done',
+      kind: 'plant',
+      subjectType: 'lawn',
+      wordingTier: 'likely',
+      headline: 'Likely: Brown Patch',
+      plantCommonName: 'St. Augustinegrass',
+      weedNames: [],
+      conditionName: 'Brown Patch',
+      fits: ['Roughly circular brown patch'],
+      notYet: ['A smoke-ring edge'],
+      nextStepText: 'A technician checks this on your next visit.',
+      referralKind: null,
+      safetyLines: [],
+      hazards: null,
+    });
+  });
+
+  test('a weed-focused read names the approved weeds the engine found (Codex #5320 r13)', () => {
+    const facts = plantReadFactsFromResult('done', {
+      subject_type: 'lawn',
+      v2: {
+        answer: { level: 'symptom', wording: null, headline: 'Weeds in the lawn' },
+        subject: { plant: null, weeds: [{ common_name: 'Spotted Spurge', wording: 'likely' }, { common_name: 'Dollarweed', wording: 'possibly' }] },
+        possibilities: [],
+      },
+    });
+    expect(facts.weedNames).toEqual(['Spotted Spurge', 'Dollarweed']);
+  });
+
+  test('a symptom-level (unnamed) answer carries no conditionName', () => {
+    const facts = plantReadFactsFromResult('done', {
+      subject_type: 'lawn',
+      v2: {
+        answer: { level: 'symptom', wording: null, headline: 'Brown patches in the lawn' },
+        subject: { plant: null },
+        possibilities: [],
+        next_step_hint: { kind: 'unclear', text: "We can't tell from these photos; a technician can take a look on your next visit." },
+        referral: null,
+      },
+    });
+    expect(facts.conditionName).toBeNull();
+    expect(facts.wordingTier).toBeNull();
+    expect(facts.headline).toBe('Brown patches in the lawn');
+  });
+
+  test('a done row with no stored result reads as failed, never an empty result', () => {
+    expect(plantReadFactsFromResult('done', null)).toEqual({ status: 'failed' });
+  });
+
+  test('non-done statuses pass through untouched', () => {
+    for (const s of ['none', 'pending', 'failed', 'unsupported']) {
+      expect(plantReadFactsFromResult(s, null)).toEqual({ status: s });
+    }
+  });
+});
+
+describe('customerFlaggedFacts — plant read integration (GATE_VISIT_PREP_PLANT_READ)', () => {
+  beforeEach(() => {
+    process.env.GATE_VISIT_PREP_PHOTOS = 'true';
+    process.env.GATE_VISIT_PREP_PLANT_READ = 'true';
+    process.env.GATE_VISIT_FACTS = 'true';
+  });
+  afterEach(() => {
+    delete process.env.GATE_VISIT_PREP_PHOTOS;
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
+    delete process.env.GATE_VISIT_FACTS;
+  });
+
+  test('a lawn stop with a DONE plant read serves the plant shape from read_result', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        {
+          id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: 'Brown spots', read_status: 'done', read_ref: null,
+          read_result: JSON.stringify({
+            subject_type: 'lawn',
+            v2: {
+              answer: { level: 'entry', wording: 'likely', headline: 'Likely: Brown Patch' },
+              subject: { plant: { common_name: 'St. Augustinegrass' } },
+              possibilities: [{ common_name: 'Brown Patch', fits: ['Roughly circular brown patch'], not_yet: [] }],
+              next_step_hint: { kind: 'inspection', text: 'A technician checks this on your next visit.' },
+              referral: null,
+            },
+          }),
+        },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read.status).toBe('done');
+    expect(facts[0].read.kind).toBe('plant');
+    expect(facts[0].read.conditionName).toBe('Brown Patch');
+  });
+
+  test('a stop reclassified to pest after a plant read shows unsupported, not a stale plant line', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Pest Control' }],
+      visit_prep_submissions: [
+        {
+          id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_result: JSON.stringify({ subject_type: 'lawn', v2: { answer: { level: 'entry', wording: 'likely' }, possibilities: [{ common_name: 'Brown Patch' }] } }),
+        },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a PENDING PEST read on a stop reclassified to lawn is not shown as a plant read (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_result: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a fresh unclaimed (none) row on a lawn stop stays none, so the tech panel keeps polling', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'none', read_result: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'none' });
+  });
+
+  test('an unclaimed row the pest engine marked unsupported on a lawn stop reads none (the plant read hasn\'t claimed yet)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'unsupported', read_result: null },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'none' });
+  });
+
+  test('a DONE lawn read on a stop reclassified to tree & shrub is not shown (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Tree & Shrub Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'done', read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn', v2: { answer: { headline: 'Likely: Dollar spot' } } }) },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a PENDING lawn read on a stop reclassified to tree & shrub is not shown (unsupported)', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Quarterly Tree & Shrub Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_result: JSON.stringify({ engine: 'plant', subject_type: 'lawn' }) },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'unsupported' });
+  });
+
+  test('a PENDING plant read on a currently-lawn stop shows pending', async () => {
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date(), topic: null, location_on_property: null, note: null, read_status: 'pending', read_result: JSON.stringify({ engine: 'plant' }) },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0].read).toEqual({ status: 'pending' });
+  });
+
+  test('plant-read gate off: stored plant reads are not served at all', async () => {
+    delete process.env.GATE_VISIT_PREP_PLANT_READ;
+    const conn = fakeConn({
+      scheduled_services: [{ id: 'svc-1', visit_id: null, service_type: 'Weekly Lawn Care' }],
+      visit_prep_submissions: [
+        { id: 'sub-1', scheduled_service_id: 'svc-1', created_at: new Date('2026-09-30T10:00:00Z'), topic: null, location_on_property: null, note: null, read_status: 'done', read_result: JSON.stringify({ subject_type: 'lawn', v2: {} }) },
+      ],
+      visit_prep_photos: [],
+    });
+    const facts = await customerFlaggedFacts({ id: 'svc-1', visit_id: null }, conn);
+    expect(facts[0]).not.toHaveProperty('read');
+  });
+});
+
+describe('plant read safety lines (Codex #5320 r1)', () => {
+  const { plantReadFactsFromResult } = visitPrep._internal;
+  test('every catalog safety line (plant, weeds, every possibility) is kept, deduplicated', () => {
+    const read = plantReadFactsFromResult('done', {
+      engine: 'plant',
+      v2: {
+        answer: { wording: 'likely', level: 'entry', headline: 'Likely: Citrus canker' },
+        subject: { plant: { common_name: 'Citrus', safety_line: 'Citrus leaves can upset pets.' }, weeds: [{ safety_line: 'Spotted spurge sap irritates skin.' }] },
+        possibilities: [{ common_name: 'Citrus canker', safety_line: null }, { safety_line: 'Spotted spurge sap irritates skin.' }],
+      },
+    });
+    expect(read.safetyLines).toEqual(['Citrus leaves can upset pets.', 'Spotted spurge sap irritates skin.']);
   });
 });

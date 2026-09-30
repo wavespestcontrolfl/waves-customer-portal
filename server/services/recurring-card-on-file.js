@@ -740,10 +740,6 @@ async function completeRecurringCardEnrollment({
   // AFTER this moment, so a delayed recovery never silently re-enables a
   // revoked authorization.
   authorizedAt = null,
-  // GATE_SIGNUP_SINGLE_EMAIL (estimate accept route): { estimateId,
-  // onboardingKey } — the Auto Pay confirmation becomes a durable owed record
-  // written inside the enrollment transaction (see autopay-enrollment.js).
-  signupOwed = null,
 }) {
   if (!customerId || !stripePaymentMethodId) return { enrolled: false, reason: 'missing_args' };
   try {
@@ -801,7 +797,6 @@ async function completeRecurringCardEnrollment({
       details: { via: 'recurring_card_on_file', estimate_id: estimateId, setup_intent_id: setupIntentId },
       scheduledServiceId,
       ...(authorizedAt ? { authorizedAt } : {}),
-      ...(signupOwed ? { signupOwed } : {}),
     });
     if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
       logger.warn(`[recurring-cof] enrollment refused (${enrollment.reason}) for customer ${customerId} pm ${saved?.id}`);
@@ -809,11 +804,7 @@ async function completeRecurringCardEnrollment({
       return { enrolled: false, reason: enrollment.reason };
     }
     logger.info(`[recurring-cof] customer ${customerId} card saved + Auto Pay enrolled at accept (estimate ${estimateId})`);
-    return {
-      enrolled: true,
-      paymentMethodRowId: saved?.id || null,
-      ...(enrollment.owedEmailId ? { owedEmailId: enrollment.owedEmailId, confirmationMethodRowId: enrollment.methodId } : {}),
-    };
+    return { enrolled: true, paymentMethodRowId: saved?.id || null };
   } catch (err) {
     logger.error(`[recurring-cof] enrollment failed post-accept for customer ${customerId}: ${err.message}`);
     await alertEnrollmentNeedsReview({ customerId, estimateId, reason: err.message });

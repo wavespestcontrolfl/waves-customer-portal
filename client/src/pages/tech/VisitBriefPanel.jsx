@@ -28,6 +28,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
+import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
 import { formatETDateTime } from '../../lib/timezone';
 import {
   fmtMoney,
@@ -236,10 +237,31 @@ function formatVisitPrepReadLine(read) {
   return parts.join(' ');
 }
 
+// GATE_VISIT_PREP_PLANT_READ — the lawn / tree & shrub counterpart of the
+// pest read above. `entry.read.kind === 'plant'` carries ONLY fixed
+// server-computed fields too (see visit-prep.js's plantReadFactsFromResult):
+// a wording tier, APPROVED catalog common names, a fixed headline template,
+// the catalog's own `fits`/`notYet` strings, the catalog's own fixed
+// every catalog `safetyLines` entry, and fixed next-step/referral text. Same rule as the pest
+// line: every label here is this module's own, no free model text.
+function formatVisitPrepPlantReadLine(read) {
+  if (!read || read.status !== 'done') return null;
+  const parts = [];
+  parts.push(`${read.headline || "We couldn't tell from these photos"}.`);
+  if (read.plantCommonName && read.plantCommonName !== read.conditionName) parts.push(`Plant: ${read.plantCommonName}.`);
+  if (read.weedNames?.length) parts.push(`Weeds: ${read.weedNames.join(', ')}.`);
+  if (read.fits?.length) parts.push(`Fits: ${read.fits.join('; ')}.`);
+  if (read.notYet?.length) parts.push(`Not yet seen: ${read.notYet.join('; ')}.`);
+  for (const line of read.safetyLines || []) parts.push(line);
+  if (read.nextStepText) parts.push(read.nextStepText);
+  if (read.referralKind) parts.push(`Refer: ${String(read.referralKind).replace(/_/g, ' ')}.`);
+  return parts.join(' ');
+}
+
 function VisitPrepReadLine({ read }) {
   if (!read) return null;
   if (read.status === 'done') {
-    const line = formatVisitPrepReadLine(read);
+    const line = read.kind === 'plant' ? formatVisitPrepPlantReadLine(read) : formatVisitPrepReadLine(read);
     if (!line) return null;
     return <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read (AI suggestion, not confirmed): {line}</p>;
   }
@@ -324,6 +346,10 @@ function useVisitPrepPhotoUrls(serviceId, active, request, photoSignature) {
 const READ_PENDING_POLL_MS = 30 * 1000;
 const READ_PENDING_MAX_POLLS = 30;
 const READ_START_GRACE_MS = 2 * 60 * 1000;
+// A read the server says the recovery sweep may still start (`awaiting`)
+// is waited on at a slower pace: the sweep runs every 15 minutes, so 30
+// polls a minute apart cover its next two passes (Codex #5320 r10 P2).
+const READ_AWAITING_POLL_MS = 60 * 1000;
 
 function useRefreshWhileReadPending(customerFlagged, onRefresh) {
   // The budget belongs to the set of reads being waited on: a new pending
@@ -333,9 +359,14 @@ function useRefreshWhileReadPending(customerFlagged, onRefresh) {
   // too, so a brief fetched in that gap still picks up the result
   // (Codex #5305 r11). Nothing extra is shown for it.
   const now = Date.now();
-  const pendingKey = (customerFlagged || []).filter((entry) => entry.read?.status === 'pending'
-    || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS))
-    .map((entry) => entry.id).join(',');
+  const soon = (entry) => entry.read?.status === 'pending'
+    || (entry.read?.status === 'none' && now - new Date(entry.sentAt).getTime() < READ_START_GRACE_MS);
+  const entries = customerFlagged || [];
+  const waited = entries.filter((entry) => soon(entry) || (entry.read?.status === 'none' && entry.read?.awaiting));
+  // Keyed by status too: an awaited read the sweep claims (none → pending)
+  // starts a fresh budget at the faster pace (Codex #5320 r11 P2).
+  const pendingKey = waited.map((entry) => `${entry.id}:${entry.read?.status}`).join(',');
+  const pollMs = waited.some(soon) ? READ_PENDING_POLL_MS : READ_AWAITING_POLL_MS;
   const polls = useRef({ key: '', count: 0 });
   if (polls.current.key !== pendingKey) polls.current = { key: pendingKey, count: 0 };
   // The latest callback in a ref: parent re-renders (inline retry callbacks,
@@ -355,9 +386,9 @@ function useRefreshWhileReadPending(customerFlagged, onRefresh) {
       Promise.resolve(typeof refreshRef.current === 'function' ? refreshRef.current() : null)
         .catch(() => {})
         .finally(() => { if (!cancelled) setRefreshTick((n) => n + 1); });
-    }, READ_PENDING_POLL_MS);
+    }, pollMs);
     return () => { cancelled = true; clearTimeout(timer); };
-  }, [pendingKey, refreshTick]);
+  }, [pendingKey, refreshTick, pollMs]);
 }
 
 function CustomerFlaggedSection({ serviceId, customerFlagged, request, onRefresh }) {
@@ -579,13 +610,22 @@ function WdoBriefSection({ brief }) {
 }
 
 // One protocol-window / history product line — label facts only, exactly
-// as the brief stored them.
+// as the brief stored them, but never in mL (rateText).
 function productLine(p) {
   const bits = [p?.name];
-  if (p?.ratePer1000 != null && p?.rateUnit) bits.push(`${p.ratePer1000} ${p.rateUnit}/1000 sq ft`);
-  else if (p?.rate != null && p?.rateUnit) bits.push(`${p.rate} ${p.rateUnit}`);
+  if (p?.ratePer1000 != null && p?.rateUnit) bits.push(`${rateText(p.ratePer1000, p.rateUnit)}/1000 sq ft`);
+  else if (p?.rate != null && p?.rateUnit) bits.push(rateText(p.rate, p.rateUnit));
   if (p?.role) bits.push(p.role);
   return bits.filter(Boolean).join(' · ');
+}
+
+// A stored rate in its stored unit, except a rate in mL, which reads in fl oz
+// on its own basis ("5 ml/gal" is "0.169 fl oz/gal"): nothing a tech sees is
+// in mL (owner ruling 2026-09-29).
+function rateText(value, unit) {
+  if (!isMlUnit(unit)) return `${value} ${unit}`;
+  const basis = String(unit).split('/').slice(1).join('/').trim();
+  return `${mlToFlOz(value)} fl oz${basis ? `/${basis}` : ''}`;
 }
 
 // The served generic visit brief's guidance the tech actually preps from:

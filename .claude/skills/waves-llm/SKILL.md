@@ -171,6 +171,29 @@ a provider issue never causes a gap:
   on the same species keeps the lower confidence, otherwise it is the lone
   answer (downgraded a notch); a risky runner-up whose second look never
   came back makes the upload an inspection-first consultation.
+  **Plant photo ID ruling 2026-09-28, narrowed 2026-09-29** (replaces the
+  09-26 ruling above FOR THE PLANT ENGINE ONLY — the pest engine's
+  `photoIdVision` ladder is unchanged): `plant-engine.js`'s `identifyPlantV2`
+  (lawn/tree/shrub/palm photo ID) uses `TEXT_POLICIES.plantIdVision`: Gemini
+  3.8 Flash first, GPT-6 Sol (`OPENAI_PLANT_ID`, its own selector off
+  `OPENAI_FRONTIER`) as the second opinion, sequential, same trigger rules as
+  `photoIdVision`. Beyond that: Claude Fable 5.1 at effort `high`
+  (`MODELS.ROUTES.plantIdReferee`, single-leg, no automatic fallback) gets
+  one more look at the same photos as a deciding vote — ships DARK behind
+  `GATE_PLANT_ID_REFEREE` (`server/config/feature-gates.js`'s
+  `plantIdRefereeLive()`, read at call time). Owner ruling 2026-09-29
+  narrowed the referee to a plant-NAME **tie-break only**: it fires ONLY in
+  identify mode, and ONLY for an identity lane (turf/weeds for a lawn, host
+  for tree_shrub/palm) where Gemini and Sol DISAGREED — never for a workup, a
+  missing second opinion, or a low-confidence agreement. Its own top either
+  matches one side of the disagreement (that side goes first, wording capped
+  at `likely`, never `pretty_sure`) or it doesn't — a third name or no usable
+  answer leaves the lane exactly as the escalation left it (no partial
+  credit, no appended candidate). Gate off (default): the ladder is
+  byte-identical to Gemini → Sol, no third call. This is the ONE place in
+  the repo an LLM call site is intentionally single-provider with a Fable leg
+  outside `EXTREME`/`DEEP` — do not copy this shape elsewhere without a
+  fresh owner ruling.
   **Estimate-image ruling 2026-09-25:** `satellite-analyzer.js` and
   `property-lookup-v2.js` use `TEXT_POLICIES.estimateVision`: Gemini 3.8 Flash
   first, GPT-6 Sol only when Gemini fails or its output is invalid. No Claude,

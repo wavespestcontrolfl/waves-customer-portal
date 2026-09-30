@@ -63,6 +63,14 @@ const SELECTORS = [
   // the same thinking floor deep.js does and reads past thinking blocks and
   // refusals, so the Opus 5.5 default and the models like it are pickable.
   { key: 'NEWSLETTER', env: 'MODEL_NEWSLETTER', description: 'Newsletter writer + event curation scoring (owner ruling 2026-09-27: Opus 5.5, effort max)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  // deep: true — same rationale as NEWSLETTER above: its only call site
+  // (plant-engine.js's runReferee, ROUTES.plantIdReferee) reaches the model
+  // through llm/call.js#dispatch, which already floors max_tokens for
+  // always-thinking models and reads past thinking blocks/refusals. Its
+  // default (Fable 5.1) is itself a requires:'deep' catalog model. cap:
+  // 'vision' (Codex #5307 r1 finding 6) — the referee call sends the SAME
+  // photos every other photo-model selector below sends, not text alone.
+  { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; dark behind GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   { key: 'SMS_SONNET', env: 'MODEL_SMS_SONNET', description: 'Every SMS draft route', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'CALL_EXTRACTION_ANTHROPIC', env: 'MODEL_CALL_EXTRACTION_ANTHROPIC', description: 'Call extraction Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 25-call bake-off route; run a new bake-off to move it' } },
   { key: 'CALL_RESEARCH_ANTHROPIC', env: 'MODEL_CALL_RESEARCH_ANTHROPIC', description: 'Call-research miner Claude fallback leg', accepts: { providers: ['anthropic'], cap: 'text' }, lock: { kind: 'benchmark', label: 'Bake-off pinned', detail: 'fallback leg of the 7-arm bake-off route' } },
@@ -71,6 +79,7 @@ const SELECTORS = [
   { key: 'OPENAI_FRONTIER', env: 'MODEL_OPENAI_FRONTIER', description: 'Frontier OpenAI vision — lawn visit assessment backup leg and the pest identifier\'s second look (Astra)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_ESTIMATE_VISION', env: 'MODEL_OPENAI_ESTIMATE_VISION', description: 'Estimate satellite/property image fallback (Sol)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_IMAGE_SCREEN', env: 'MODEL_OPENAI_IMAGE_SCREEN', description: 'Generated-image screen (Sol) — blog image text/logo/uniform/van check', accepts: { providers: ['openai'], cap: 'vision' } },
+  { key: 'OPENAI_PLANT_ID', env: 'MODEL_OPENAI_PLANT_ID', description: 'Plant/tree/shrub/palm photo ID second opinion (Sol)', accepts: { providers: ['openai'], cap: 'vision' } },
   { key: 'OPENAI_FAST', env: 'MODEL_OPENAI_FAST', description: 'Cheap structured classification (Luna)', accepts: { providers: ['openai'], cap: 'text' } },
   { key: 'OPENAI_SMS_DRAFT', env: 'MODEL_OPENAI_SMS_DRAFT', description: 'Sealed-eval Luna leg (follows OPENAI_FAST unless set)', derivesFrom: 'OPENAI_FAST', accepts: { providers: ['openai'], cap: 'text' }, lock: { kind: 'measurement', label: 'Measurement probe', detail: 'frozen exam leg; changing it invalidates the sealed-eval ranking' } },
   { key: 'GEMINI_VISION_BEST', env: 'MODEL_GEMINI_VISION', description: 'Gemini leg of the photo lanes', accepts: { providers: ['gemini'], cap: 'vision' } },
@@ -100,6 +109,7 @@ const ROUTE_SELECTOR = {
   smsDraftDefault: 'SMS_SONNET',
   smsDraftSaveSale: 'SMS_SONNET',
   smsToneRewrite: 'SMS_SONNET',
+  plantIdReferee: 'PLANT_ID_REFEREE',
 };
 const POLICY_SELECTOR = {
   report: { primary: 'OPENAI_REPORT_WRITER', fallback: 'FLAGSHIP' },
@@ -114,6 +124,7 @@ const POLICY_SELECTOR = {
   photoCaptions: { primary: 'GEMINI_VISION_BEST', fallback: 'VISION' },
   lawnVisitAssessment: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
   photoIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_FRONTIER' },
+  plantIdVision: { primary: 'GEMINI_VISION_BEST', fallback: 'OPENAI_PLANT_ID' },
   visitBrief: { primary: 'WORKHORSE', fallback: 'OPENAI_BALANCED' },
   jobCardParagraph: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   deepAnalysis: { primary: 'DEEP', fallback: 'OPENAI_REPORT_WRITER' },
@@ -248,7 +259,7 @@ const secondSocialImageChainModel = nthSocialImageChainModel(1);
 // resolves to the same model as the one before it is not called: it is emitted
 // with `skipped: true` (kept for dependency math, hidden by the card); ladders
 // without the flag call every leg.
-const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by eight photo lanes';
+const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by nine photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
 // adapter (llm/call.js) folds the system prompt into the user turn, so moving
@@ -344,6 +355,18 @@ const LANES = [
   // then the prior Gemini, and reaches ChatGPT's best vision model when both
   // miss OR Gemini is unsure / lists a runner-up of different risk. No Claude.
   L('pest_id', 'Pest identification (customer photo)', 'pest-identification.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), T('GEMINI_VISION_FALLBACK'), { skipsEqualLeg: true, inbound: true, retry: P('photoIdVision', 'fallback'), note: `Gemini-first (owner 2026-09-26); OpenAI takes a second look when Gemini misses, scores itself under PHOTO_ID_ESCALATE_BELOW, or lists a runner-up of different risk · ${SHARED_GEMINI_PIN}` }),
+  // Sequential ladder, same shape as pest_id above (owner ruling 2026-09-28,
+  // TEXT_POLICIES.plantIdVision): identifyPlantV2 tries Gemini, then reaches
+  // GPT-6 Sol (its own OPENAI_PLANT_ID selector) when a scope misses, scores
+  // low, or disagrees. L3 only — no route wires it in yet (Codex #5307 r7
+  // finding 3: this lane previously had zero entries, so the switchboard
+  // showed zero blast radius for both PLANT_ID_VISION legs).
+  L('plant_id', 'Plant/tree/shrub/palm photo ID (lawn + tree/shrub/palm)', 'photo-id-v2/plant-engine.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('plantIdVision', 'fallback'), { inbound: true, note: `L3 only, no runtime caller yet; Gemini-first, Sol second opinion (owner ruling 2026-09-28) · ${SHARED_GEMINI_PIN}` }),
+  // The gated tie-break referee (owner ruling 2026-09-29, narrowed from
+  // 09-28): identify mode only, and only for an identity lane where Gemini
+  // and Sol disagreed. Single leg, no automatic fallback — Fable missing,
+  // invalid, or out of budget leaves the escalation result unchanged.
+  L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude
@@ -584,6 +607,8 @@ const LANE_AREA = {
   voice_relay_collections: 'voice',
   voice_relay_judge: 'voice',
   pest_id: 'photos',
+  plant_id: 'photos',
+  plant_id_referee: 'photos',
   lawn_assess: 'photos',
   lawn_visit_assessment: 'photos',
   tree_shrub: 'photos',
@@ -730,6 +755,8 @@ const LANE_DESCRIBE = {
   voice_relay_collections: 'Speaks with customers on collections calls',
   voice_relay_judge: 'Grades Sandy\'s eval calls against each scenario\'s spec',
   pest_id: 'Identifies the pest in a customer photo',
+  plant_id: 'Identifies the grass, weed, shrub or palm in a customer photo, and what may be wrong with it',
+  plant_id_referee: 'Breaks a tie when the two photo models name different plants (dark)',
   lawn_assess: 'Assesses lawn health from a customer photo',
   lawn_visit_assessment: 'Assesses all lawn visit photos for technician review',
   tree_shrub: 'Assesses trees and shrubs from a photo',

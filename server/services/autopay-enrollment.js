@@ -59,14 +59,13 @@ const BANK_ALIASES = ['ach', 'us_bank_account'];
  *   every other caller.
  * @returns {{ enrolled: boolean, reason?: string, methodId?: string, inChargeMethodId?: string, sendEnrollmentConfirmation?: Function }}
  */
-async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, scheduledServiceId = null, invoiceId = null, signupOwed = null, dbh = db }) {
+async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymentMethodId, source, details = {}, authorizedAt = null, scheduledServiceId = null, invoiceId = null, dbh = db }) {
   if (!customerId || (!paymentMethodId && !stripePaymentMethodId)) {
     return { enrolled: false, reason: 'missing_args' };
   }
 
   let target;
   let inChargeMethodId;
-  let owedEmailId = null;
   const outcome = await dbh.transaction(async (trx) => {
     // Serialize per customer: FOR UPDATE on the customer row makes the
     // read → unset-defaults → set-target → customer-pointer sequence below
@@ -196,21 +195,6 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
     await trx('customers')
       .where({ id: customerId })
       .update({ autopay_enabled: true, autopay_payment_method_id: inChargeMethodId });
-    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL; the estimate accept route
-    // only): the confirmation email this fresh enrollment would send becomes a
-    // durable owed record written in THIS transaction — it commits or rolls back
-    // with the enrollment, so a crash after commit can never lose it. Written
-    // in a savepoint and only for the method that is actually in charge (the
-    // same condition the inline send below uses); a failed write returns null
-    // and the confirmation then sends inline exactly as it always has.
-    if (signupOwed && String(target.id) === String(inChargeMethodId)) {
-      owedEmailId = await require('./signup-single-email').recordOwedAutopay(trx, {
-        customerId,
-        paymentMethodRowId: target.id,
-        estimateId: signupOwed.estimateId,
-        onboardingKey: signupOwed.onboardingKey,
-      });
-    }
     return null; // enrolled — post-commit side effects run below
   });
   if (outcome) return outcome;
@@ -261,14 +245,13 @@ async function enrollConsentedMethod({ customerId, paymentMethodId, stripePaymen
       } catch { /* best-effort */ }
     }
     : null;
-  if (sendEnrollmentConfirmation && !runningInCallerTrx && !owedEmailId) {
+  if (sendEnrollmentConfirmation && !runningInCallerTrx) {
     sendEnrollmentConfirmation();
   }
   return {
     enrolled: true,
     methodId: target.id,
     inChargeMethodId,
-    ...(owedEmailId ? { owedEmailId } : {}),
     ...(runningInCallerTrx && sendEnrollmentConfirmation ? { sendEnrollmentConfirmation } : {}),
   };
 }

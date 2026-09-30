@@ -658,7 +658,7 @@ async function activeSuppressionsFor(template, email, suppressionGroupKey, datab
   if (!email) return [];
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   const rows = await database('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
     .where({ status: 'active' });
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
     return rows.filter((row) => GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));

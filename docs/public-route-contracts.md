@@ -505,9 +505,24 @@ a termite liquid/trench/bait visit), or by an explicit normalized-name alias
 list when no EPA reg is recorded at all (a hand-entered row with no catalog
 `product_id` still carries its snapshotted `product_name`) — gets
 `applications[N].product.report_copy: { how_it_works, also_labeled_for,
-pets_kids }`. `also_labeled_for` is OMITTED (never a null/empty string) for
-the one approved product with no such line (the LESCO 90/10 Nonionic
-Surfactant — it is an adjuvant, not a pesticide). Matching is exact only —
+pets_kids }`. Since owner ruling 2026-09-29, `also_labeled_for` is a single
+composed sentence — `Labeled for {N}+ {City} pests` (e.g. "Labeled for 75+
+Bradenton pests"), or `Labeled for {N}+ pests` when no usable city is
+available — never a named pest list. `N` is the product's raw label pest
+count (`alsoLabeledForPestCount` in `server/config/report-product-copy.js`,
+each with a source/date comment) floored to a multiple of 25
+(`floorToMultipleOf25`); `City` is the visit's own city — `service.city` as
+`buildReportV1Data` already resolves it (the visit's stamped service address
+city via `COALESCE(ss.service_address_city, customers.city)`, i.e. the
+property serviced, falling back to the customer's own city), normalized for
+display (`normalizeReportCity`: trimmed, internal whitespace collapsed, and
+title-cased when the raw value is entirely upper-case or entirely lower-case; mixed case is kept as entered — never invented)
+before it is composed into the sentence (`buildAlsoLabeledForText`); a
+blank/unusable city (or none at all) drops to the no-city wording rather
+than blocking the rest of the copy. `also_labeled_for` is OMITTED (never a
+null/empty string) for products with no `alsoLabeledForPestCount` at all —
+narrow products (gel baits, granular bait, IGRs) and the LESCO 90/10
+Nonionic Surfactant (an adjuvant, not a pesticide). Matching is exact only —
 never a substring/fuzzy match, same posture as
 `pest-report-expectations.js`'s `PRODUCT_EXPECTATION_CLASS` — so a product
 absent from the config (every catalog product not on the owner-approved
@@ -821,6 +836,45 @@ absent bearer also keeps public behavior. An expired
 access token gets the refreshable 401 only when the customers-only gate needs
 that identity. An estimate-linked request keeps the estimate account instead
 of inheriting an ambient portal session.
+Quote-wizard handoff identity at `/api/booking/confirm` (customers-only gate
+on): the wizard links its draft estimate to any existing customer matching
+the unverified phone/email the anonymous quoter typed, and hands the token
+back to that same caller, so a token-verified pricing handoff (`pricing_
+estimate_id` + `estimate_token`) whose draft is linked to an ESTABLISHED
+customer is not identity. The gate binds it exactly as before (same address
+fix-it when the street matches no account property), and the refusal — 409
+telling the customer to sign in with the portal code — is applied inside the
+booking transaction under the customer row lock, after the address bind and
+signed-slot validation and against the customer's CURRENT stage (a lead
+promoted meanwhile is caught), so it is not an early "is this contact a
+customer" probe and a typed phone plus a street match never books on someone
+else's account. Residual: a caller who already holds the phone, the street
+and a valid signed slot can still see the 409 for an established customer
+versus the normal flow for a lead. Preserved: a verified portal bearer still
+books (identity from the token, address-bound to the account); the
+staff/system accept link (`source_estimate_id` + namespaced `accept_token`)
+still books as the estimate's customer; a draft linked to a row still in a
+pre-customer pipeline stage (the quoter's own freshly minted lead) or to no
+customer keeps the quoter's own booking; an identical retry of a booking that
+already committed (same draft, slot and customer, and the typed phone — or the
+email that linked the draft — is the customer's) still reaches the idempotent
+replay. No message is sent on the refusal: the refusal retires the open
+abandoned-booking recovery intents carrying that HMAC-verified draft id (only the id — neither the typed nor the stored contact ever widens it), and
+`/api/booking/capture-intent` writes such a handoff's row already suppressed
+(and retires any staged for the draft). Every accepted capture-intent request
+answers one constant `200 {"ok": true}` — no `skipped`, `created`/`updated` or
+`intent_id` fields — whatever was staged, skipped, suppressed or errored (the
+clients are fire-and-forget and read no body), so it is no probe for whether a
+contact is a customer or has a recent booking; only the request-shape 400
+(`valid phone required`) differs. "Blocked" is judged account-wide by one
+shared classifier used by confirmation, capture-intent and the recovery worker:
+the draft-linked customer row or any sibling property row on its account being
+an established customer, ARCHIVED (archiving never re-opens the handoff), or the
+draft's customer row being missing (fail closed) blocks it. The
+suppression writes are best effort: the abandoned-booking recovery worker
+re-checks at send time (SMS and email) and skips, marking suppressed, any intent
+whose draft is so linked — a lookup error skips that tick — so a failed
+suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -1766,6 +1820,52 @@ builder is fail-closed, so a config where the rental cannot actually
 price 404s instead of rendering a one-column comparison; 60 req/min
 limit, `no-store`/`no-referrer` headers; no product-registry, vendor, or
 cost data — customer-priced figures only).
+`/api/estimates/:token/map/satellite` and `/api/estimates/:token/map/overlay`
+(read-only token-scoped satellite image proxy, B12; the ONLY way a customer
+surface gets a map image — /data, the SSR page, the PDF render pass and the
+show-your-work payload carry these paths and never a maps.googleapis.com URL,
+because that URL carried the server's Google Maps key, the same key Geocoding
+and Routes use, which cannot be referrer-restricted; `/data` and the SSR HTML
+also run a last-line scrub that strips any maps.googleapis.com `key=` (raw or
+HTML/JSON-escaped separators: `&amp;`, `&#38;`, `&#x26;`, `\u0026`), any
+`key=AIza...` token or bare Google-key shape (so a rotated or staff-pasted key
+that differs from the configured one is caught too) and blanks the literal key
+— the SSR path scrubs its SOURCE values before renderPage escapes them, then
+scrubs the finished HTML as a backstop, and stored `estimates.satellite_url` rows that already
+hold a keyed URL are redacted on output — no migration). A small guard (`mapImagePreGuard`) is mounted in
+`server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter,
+scoped to exactly what Express routes to these two handlers (GET and HEAD,
+case-insensitive path, optional trailing slash): it stamps `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` and `Cross-Origin-Resource-Policy:
+cross-origin` first — so the router.param malformed-token 404 and the global
+and route limiters' 429s inherit them, and a successful image overwrites
+Cache-Control — and answers the dark overlay's generic 404 there, before the
+global limiter can turn it into a 429. Token format gate
+(router.param) + ONE generic 404 body (`Estimate not found`, `no-store`) for
+every refusal — malformed/unknown token, callSideBlock, a row that is not
+`isEstimateCustomerViewable` (drafts, expired, archived, send_failed 404; the
+group-link view bypass matches `/:token/data`; there is NO staff-preview or
+signed-pdf-pin bypass because an <img> carries neither), no usable stored map,
+and upstream failure — so the route is not an existence oracle. The route
+reads NOTHING from the caller's query string: `/map/satellite` rebuilds a
+keyless Static Maps URL from the estimate's OWN stored `satellite_url`
+(`estimate_data.satelliteUrl` fallback), keeping only allow-listed,
+range-checked params (center, zoom 1-22, size <=640x640, maptype
+satellite|hybrid, format, scale 1|2; markers/path/signature dropped) and
+refusing any non-`https://maps.googleapis.com/maps/api/staticmap` value, so it
+cannot become an open proxy or an SSRF vector; `/map/overlay` rebuilds the
+parcel-outline URL from the cached property_lookups row (dark while
+`estimateShowYourWork` is off: the gate check runs BEFORE the limiter and any
+DB work, so a dark route answers the generic 404, never 429). The server key
+is appended only inside the fetch (8 s timeout, image/* content-type and 4 MB
+cap enforced, nothing logged but a URL-free warn); a bounded in-memory cache
+(64 entries, 10 min) keeps one token from fanning out into unlimited Google
+fetches, and a 30 req/min per-IP limiter fronts it. Success streams the bytes
+with `Cache-Control: private, max-age=3600`, `Referrer-Policy: no-referrer`,
+`X-Content-Type-Options: nosniff`, and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img>
+when the SPA is built against a separate API origin via VITE_API_URL).
+Admin-only surfaces keep their direct URLs).
 `/api/estimates/:token/service-details/send` (write; emails or texts that
 same packet to the contact info ALREADY ON the estimate — the destination
 is NEVER caller-supplied (body carries only `service` + `channel`), so

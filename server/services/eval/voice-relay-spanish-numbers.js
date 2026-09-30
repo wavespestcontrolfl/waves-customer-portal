@@ -188,14 +188,30 @@ const PRICE_VERB_WORD_RUN_RE = new RegExp(`(\\b${PRICE_VERB_ES}\\s+(?:de\\s+)?)(
 // whole "<words> con <words|digits> (centavos)" phrase converts FIRST, in
 // one step, whenever it reads as a price (a whole of 10+, cents 1–99, and a
 // price context right after it).
-const WHOLE_AND_CENTS_WORDS_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})con\\s+(\\d{1,2}(?!\\d)\\s*|${NUMBER_RUN_RE_SRC})(?:centavos?\\s*)?(?=(?:d[oó]lares?\\b|por\\b|cada\\b|al\\b|[.,;!?]|$))`, 'gi');
+const DECIMAL_CONNECTOR = '(con|coma|punto|point)';
+const WHOLE_AND_CENTS_WORDS_RE = new RegExp(`\\b(${NUMBER_RUN_RE_SRC})${DECIMAL_CONNECTOR}\\s+(\\d{1,2}(?!\\d)\\s*|${NUMBER_RUN_RE_SRC})(?:centavos?\\s*)?(?=(?:d[oó]lares?\\b|por\\b|cada\\b|al\\b|[.,;!?]|$))`, 'gi');
+function decimalDigits(run, connector) {
+  const raw = strip(run).trim();
+  let digits;
+  if (/^\d{1,2}$/.test(raw)) digits = raw;
+  else {
+    const words = raw.split(/\s+/).filter((word) => word !== 'y');
+    digits = words.length > 1 && words.every((word) => word in UNIDADES && UNIDADES[word] < 10)
+      ? words.map((word) => UNIDADES[word]).join('')
+      : String(parseSpanishCardinal(raw));
+  }
+  if (!/^\d{1,2}$/.test(digits)) return null;
+  if (connector === 'con') return Number(digits) <= 99 ? digits.padStart(2, '0') : null;
+  return digits;
+}
 function convertWholeAndCents(text) {
-  return text.replace(WHOLE_AND_CENTS_WORDS_RE, (match, wholeRun, centsRun) => {
+  return text.replace(WHOLE_AND_CENTS_WORDS_RE, (match, wholeRun, connector, centsRun) => {
     const whole = parseSpanishCardinal(wholeRun);
-    const t = centsRun.trim();
-    const cents = /^\d{1,2}$/.test(t) ? Number(t) : parseSpanishCardinal(t);
-    if (!Number.isFinite(whole) || whole < 10 || !Number.isInteger(cents) || cents < 1 || cents > 99) return match;
-    return `${whole}.${String(cents).padStart(2, '0')}${/\s$/.test(match) ? ' ' : ''}`;
+    const fraction = decimalDigits(centsRun, connector.toLowerCase());
+    // A whole below 10 is a price only with an explicit decimal separator:
+    // "nueve punto noventa y nueve" is 9.99, "dos con cinco" stays words.
+    if (!Number.isFinite(whole) || (whole < 10 && connector.toLowerCase() === 'con') || fraction === null) return match;
+    return `${whole}.${fraction}${/\s$/.test(match) ? ' ' : ''}`;
   });
 }
 
@@ -208,7 +224,10 @@ function isBareAnnualCount(amount) {
 }
 
 function convertPriceWordRuns(text) {
-  const out = convertWholeAndCents(text).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord, otherUnit, yearUnit) => {
+  // A digit-led decimal ("119 punto nueve nueve por aplicación") merges
+  // before the word-run pass: that pass would otherwise sum the fraction's
+  // digit words ("nueve nueve" → 18) and leave "119 punto 18".
+  const out = mergeCents(convertWholeAndCents(text)).replace(PRICE_WORD_RUN_RE, (match, run, currencyWord, otherUnit, yearUnit) => {
     const amount = parseSpanishCardinal(run);
     if (!Number.isFinite(amount)) return match;
     if (currencyWord) return `${amount} ${currencyWord}`;
@@ -239,17 +258,16 @@ const PLAN_COPULA_WORD_RUN_RE = new RegExp(`(\\b${PLAN_NOUN_ES}\\b[^.!?;,\\d]{0,
 // The cents may already be digits: an earlier pass converts "noventa y
 // nueve" before "por aplicación" on its own, so both forms are accepted.
 const CENTS_SRC = `(?:\\d{1,2}(?!\\d)\\s*|${NUMBER_RUN_RE_SRC})`;
-const CENTS_AFTER_CURRENCY_RE = new RegExp(`\\b(\\d+)\\s*(d[oó]lares?)\\s+con\\s+(${CENTS_SRC})\\s*(?:centavos?)?`, 'gi');
-const CENTS_BARE_RE = new RegExp(`\\b(\\d+)\\s+con\\s+(${CENTS_SRC})(?:\\s*centavos?)?(?=\\s*(?:d[oó]lares?\\b|por\\b|cada\\b|al\\b|[.,;!?]|$))`, 'gi');
+const CENTS_AFTER_CURRENCY_RE = new RegExp(`\\b(\\d+)\\s*(d[oó]lares?)\\s+${DECIMAL_CONNECTOR}\\s+(${CENTS_SRC})\\s*(?:centavos?)?`, 'gi');
+const CENTS_BARE_RE = new RegExp(`\\b(\\d+)\\s+${DECIMAL_CONNECTOR}\\s+(${CENTS_SRC})(?:\\s*centavos?)?(?=\\s*(?:d[oó]lares?\\b|por\\b|cada\\b|al\\b|[.,;!?]|$))`, 'gi');
 function mergeCents(text) {
-  const cents = (run) => { const t = run.trim(); const c = /^\d{1,2}$/.test(t) ? Number(t) : parseSpanishCardinal(t); return Number.isInteger(c) && c >= 1 && c <= 99 ? String(c).padStart(2, '0') : null; };
-  const a = text.replace(CENTS_AFTER_CURRENCY_RE, (match, whole, currency, run) => {
-    const cc = cents(run);
-    return cc ? `${whole}.${cc} ${currency}${/\s$/.test(match) ? ' ' : ''}` : match;
+  const a = text.replace(CENTS_AFTER_CURRENCY_RE, (match, whole, currency, connector, run) => {
+    const fraction = decimalDigits(run, connector.toLowerCase());
+    return fraction !== null ? `${whole}.${fraction} ${currency}${/\s$/.test(match) ? ' ' : ''}` : match;
   });
-  return a.replace(CENTS_BARE_RE, (match, whole, run) => {
-    const cc = cents(run);
-    return cc ? `${whole}.${cc}${/\s$/.test(match) ? ' ' : ''}` : match;
+  return a.replace(CENTS_BARE_RE, (match, whole, connector, run) => {
+    const fraction = decimalDigits(run, connector.toLowerCase());
+    return fraction !== null ? `${whole}.${fraction}${/\s$/.test(match) ? ' ' : ''}` : match;
   });
 }
 

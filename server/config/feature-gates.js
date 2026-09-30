@@ -127,7 +127,8 @@
  *   GATE_SMS_LINK_WRAP=true (every portal link in an outbound customer/lead SMS becomes a tracked /l/<code> short link stamped to the text it went out in, so clicks show for ALL texts including manual ones typed with a full link — services/messaging/sms-link-wrap.js, wired at the sendCustomerMessage choke point before countSegments. Strict opt-in, read at call time via smsLinkWrapLive(). Customer/lead SMS only, never internal or MMS bodies, never non-portal hosts or links already /l/; any shortener error keeps the original link and logs a warn — never blocks a send. Dark = every body byte-identical to today.)
  *   GATE_OUTLINK_TRACKING=true (prep guides: every link to an OUTSIDE site — Amazon, Chewy, Elanco, Bravecto, ... — in the prep email and the public /prep/:token page is rewritten at RENDER time to /go/<code> on the portal host, which logs the click (template key, prep visit, customer, sha256 ip hash, UA; bots skipped) and 302s to the exact original URL. Destinations are pre-registered outbound_links rows keyed by a hash of the URL — the route never reads a URL from the request, so it is not an open redirect — and are never tagged or altered. Own-site, portal, mailto and tel links are untouched; the prep PDF keeps direct links; template content is never edited. Strict opt-in, read at call time via outlinkTrackingLive(). The /go route itself stays live in every state so links already sent keep working after the gate is turned off. Off = byte-identical to today. Sends nothing to a customer.)
  *   GATE_VISIT_PREP_PEST_READ=true (PR 5 — automatic pest read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPestReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live (the tech facts block is the only place a read is shown). Triggered from services/visit-prep.js's createVisitPrepSubmission — the ONE place a submission is created — fire-and-forget AFTER the submission's own transaction commits, never on the request path. A submission whose visit is a pest-only service (pest-production-calibration.js isPestOnlyServiceType — never a WDO inspection or assessment; a grouped stop counts if ANY live member at the same physical stop is), runs the same photo-id-v2 identifyPestV2 the app's Photo ID route calls and stores the result in pest_identifications with source='visit_prep', mode='internal' (already an allowed mode — no migration on that table). Lawn / tree & shrub / anything else resolves straight to read_status='unsupported', no engine call. VISIT_PREP_READ_DAILY_CAP (default 40) is this feature's OWN cap, separate from Photo ID's; a capped or failed read never blocks the submission — the technician still gets the photos, just with read_status='failed'. See docs in services/visit-prep-pest-read.js.)
- *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep pest read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires visitPrepPestReadLive(). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same triggerVisitPrepPestRead for at most 10 of TODAY's (ET) submissions on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), and 'unsupported' where the stop is now a pest stop (an unsupported row checked and still not pest is skipped for an hour). Pending and failed rows are never retried. One retry per row per case (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP like a first read. A batch with failed retries fails the job run (job_health).)
+ *   GATE_VISIT_PREP_PLANT_READ=true (sibling of GATE_VISIT_PREP_PEST_READ — automatic lawn / tree & shrub read of a visit-prep submission's photos, dark. Strict opt-in, read at call time via visitPrepPlantReadLive(); ALSO requires GATE_VISIT_PREP_PHOTOS and GATE_VISIT_FACTS live, same as the pest read. Triggered from the SAME single place, services/visit-prep.js's createVisitPrepSubmission, as its own independent fire-and-forget call — never disturbs the pest-read or tech-alert hooks there. A submission whose stop is a strict lawn-only or tree & shrub-only service (visit-prep-plant-applicability.js isLawnOnlyServiceType/isTreeShrubOnlyServiceType — never WDO, termite, or a Waves Assessment) AND is NOT also a pest stop ("pest wins" on a mixed stop — the pest read owns it instead) runs the merged photo-id-v2 lawn/plant engine (identifyPlantV2, photo-id-v2/plant-engine.js — L3, no customer route yet) and stores the workup on the submission's own `read_result` jsonb column (no second table; the pest read's `read_ref` is untouched). Anything else resolves straight to read_status='unsupported', no engine call. Shares the pest read's SAME VISIT_PREP_READ_DAILY_CAP (default 40) and the same advisory lock key — deliberately ONE cap across both engines, not a second one; a capped or failed read never blocks the submission. See docs in services/visit-prep-plant-read.js.)
+ *   GATE_VISIT_PREP_READ_SWEEP=true (visit-prep read recovery sweep, dark. Strict opt-in via visitPrepReadSweepLive(); ALSO requires a live read engine (visitPrepPestReadLive() or visitPrepPlantReadLive()). Every 15 minutes (scheduler.js, checked BEFORE the cron lock, so off = no query, no write) it re-runs the same dispatchVisitPrepRead (services/visit-prep-read-dispatch.js, which runs only live engines) for at most 10 submissions from the last 14 ET days on still-upcoming, join-eligible visits: read_status 'none' older than 15 minutes (never attempted: photo load failed, claim error, stop moved), 'unsupported' where a live engine now reads the stop, and a 'done' or 'failed' read made by the wrong engine or subject for the stop as it is now (released to 'none', then re-read; a row checked and needing nothing is skipped for an hour). Pending rows, and failed rows on the line they failed on, are never retried. One retry per row per case, per settled attempt for a stale read (activity_log markers); each retry claims only from the status it selected and counts against VISIT_PREP_READ_DAILY_CAP on the ET day it runs, like a first read. A batch with failed retries fails the job run (job_health).)
  *   GATE_CUSTOMER_ACTIVITY_TIMELINE=true (read-only Activity timeline on the admin customer screen: what a customer was sent (texts, emails) and what they did (link clicks, page views, text replies; email opens/clicks and raw token-page views are listed but never counted as engagement), merged from existing tables by services/customer-activity-timeline.js and served by GET /api/admin/customers/:id/activity. Strict opt-in, read at call time via customerActivityTimelineLive(). Dark = the route answers { enabled: false } and the panel renders nothing. Reads only; sends nothing to a customer and writes nothing.)
  *
  * In development, most gates are OPEN by default so you can test locally.
@@ -190,10 +191,16 @@ const gates = {
   // visitPrepPestReadLive() at call time below (its own strict opt-in,
   // ALSO requiring visitPrepPhotosLive()).
   visitPrepPestRead: process.env.GATE_VISIT_PREP_PEST_READ === 'true',
-  // Visit prep pest read — recovery sweep. Registered for logGateStatus
+  // Visit prep photos — automatic lawn / tree & shrub read (sibling of the
+  // pest read above). Registered for logGateStatus only;
+  // services/visit-prep-plant-read.js reads visitPrepPlantReadLive() at
+  // call time below (its own strict opt-in, ALSO requiring
+  // visitPrepPhotosLive() and GATE_VISIT_FACTS).
+  visitPrepPlantRead: process.env.GATE_VISIT_PREP_PLANT_READ === 'true',
+  // Visit prep read — recovery sweep. Registered for logGateStatus
   // only; services/visit-prep-pest-read-sweep.js reads
   // visitPrepReadSweepLive() at call time below (its own strict opt-in,
-  // ALSO requiring visitPrepPestReadLive()).
+  // ALSO requiring a live read engine).
   visitPrepReadSweep: process.env.GATE_VISIT_PREP_READ_SWEEP === 'true',
   // SMS portal-link wrap. Registered for logGateStatus only; the choke point
   // reads smsLinkWrapLive() at call time below so a flip needs no redeploy.
@@ -3433,6 +3440,13 @@ const gates = {
   // GATE_PREVISIT_BALANCE_5DAY at call time.
   previsitBalance5Day: process.env.GATE_PREVISIT_BALANCE_5DAY === 'true',
 
+  // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): a
+  // still-unsure scope after the Gemini -> OpenAI Sol escalation gets one
+  // more look from Claude Fable 5.1. Ships DARK: off unless exactly 'true'.
+  // This entry is for logGateStatus only: plant-engine.js's runReferee()
+  // reads GATE_PLANT_ID_REFEREE at call time via plantIdRefereeLive().
+  plantIdReferee: process.env.GATE_PLANT_ID_REFEREE === 'true',
+
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
   // card_cancel_refusals in services/appointment-cancel-impact.js). Ships DARK: off unless exactly
@@ -3754,6 +3768,17 @@ function visitPrepPhotosLive() {
   return process.env.GATE_VISIT_PREP_PHOTOS === 'true';
 }
 
+// GATE_PLANT_ID_REFEREE read at CALL time — ships DARK, off unless exactly
+// 'true' (owner ruling 2026-09-28, plant engine only — the pest engine's
+// TEXT_POLICIES.photoIdVision ladder is untouched). The one canonical reader
+// for plant-engine.js's runReferee(): on, a scope still unsure after the
+// Gemini -> OpenAI Sol escalation gets one more look from Claude Fable 5.1 as
+// a deciding vote. Off, byte-identical to the Gemini -> Sol ladder — no third
+// call, no third-vote merge.
+function plantIdRefereeLive() {
+  return process.env.GATE_PLANT_ID_REFEREE === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -3811,15 +3836,30 @@ function visitPrepPestReadLive() {
     && process.env.GATE_VISIT_FACTS === 'true';
 }
 
+// GATE_VISIT_PREP_PLANT_READ read at CALL time — strict `=== 'true'`, own
+// switch, sibling of visitPrepPestReadLive() for the lawn / tree & shrub
+// counterpart (photo-id-v2/plant-engine.js's identifyPlantV2 — merged L3,
+// no customer route yet; this lane's own daily-cap claim is its only
+// runtime caller today). ALSO requires visitPrepPhotosLive() and
+// GATE_VISIT_FACTS, same convention and same reason as the pest read gate.
+// The canonical reader for services/visit-prep-plant-read.js; the
+// visitPrepPlantRead gates-map entry above is for logGateStatus only.
+function visitPrepPlantReadLive() {
+  return process.env.GATE_VISIT_PREP_PLANT_READ === 'true' && visitPrepPhotosLive()
+    && process.env.GATE_VISIT_FACTS === 'true';
+}
+
 // GATE_VISIT_PREP_READ_SWEEP read at CALL time — strict `=== 'true'`, same
 // convention as visitPrepPestReadLive(). The canonical reader for
 // services/visit-prep-pest-read-sweep.js. ALSO requires
-// visitPrepPestReadLive() (which itself cascades to visitPrepPhotosLive()
-// and GATE_VISIT_FACTS) — a stray flip of this gate alone, with the read
-// lane itself dark, must retry nothing. The visitPrepReadSweep gates-map
+// a live read engine — visitPrepPestReadLive() or visitPrepPlantReadLive()
+// (each cascades to visitPrepPhotosLive() and GATE_VISIT_FACTS) — a stray
+// flip of this gate alone, with both read lanes dark, must retry nothing.
+// The sweep re-dispatches through visit-prep-read-dispatch.js, which runs
+// only the live engines. The visitPrepReadSweep gates-map
 // entry above is for logGateStatus only.
 function visitPrepReadSweepLive() {
-  return process.env.GATE_VISIT_PREP_READ_SWEEP === 'true' && visitPrepPestReadLive();
+  return process.env.GATE_VISIT_PREP_READ_SWEEP === 'true' && (visitPrepPestReadLive() || visitPrepPlantReadLive());
 }
 
 // GATE_STAMPED_ZERO_FREE read at CALL time — strict `=== 'true'`, same
@@ -3919,10 +3959,11 @@ function outlinkTrackingLive() {
   return process.env.GATE_OUTLINK_TRACKING === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.signupSingleEmailLive = signupSingleEmailLive;
+module.exports.plantIdRefereeLive = plantIdRefereeLive;
 // gates 1775330914

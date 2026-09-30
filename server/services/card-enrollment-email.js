@@ -130,155 +130,96 @@ async function chargeTimingLine(customerId, { tender = 'your card', verb = 'char
   return `After each completed service, ${tender} is ${verb} that service's amount automatically, and you get a receipt every time.`;
 }
 
-// The Auto Pay confirmation's payload + agreement of record, resolved ONCE
-// for both consumers: sendAutopayEnrollmentConfirmation (the standalone
-// email) and the one-signup-email lane (estimate-accepted-email.js embeds the
-// same payload as its Payment section — GATE_SIGNUP_SINGLE_EMAIL). Every rule
-// lives here so the two can never disagree about what counts as a copy of the
-// customer's authorization: the GATE_CARD_ENROLLMENT_EMAILS kill switch, a
-// usable customer email, the method family (card vs bank wording), the
-// ENROLLMENT-scoped qualifying consent row (hold-scoped and pre-v8 rows never
-// qualify) and its STORED snapshot verbatim.
-// Returns { ok:false, reason } when no confirmation applies (reason is logged
-// by the caller), else { ok:true, ... } carrying the template key, the full
-// payload and the idempotency key the standalone email sends under.
-async function resolveAutopayConfirmation({ customerId, paymentMethodRowId } = {}) {
-  if (!emailsEnabled() || !customerId || !paymentMethodRowId) return { ok: false, reason: 'gate_off_or_missing_args', silent: true };
-  const { customer, email } = await loadCustomerEmail(customerId);
-  if (!customer) {
-    return { ok: false, reason: `no usable email for customer ${customerId}; skipping autopay confirmation` };
-  }
-  const pm = await db('payment_methods')
-    .where({ id: paymentMethodRowId, customer_id: customerId })
-    .first('id', 'stripe_payment_method_id', 'card_brand', 'last_four', 'method_type', 'bank_name', 'bank_last_four');
-  // Method family selects the template (Codex #2698 r1 established the
-  // rule; the portal ACH lane shipped the bank variant): card wording
-  // over an ACH debit authorization — or vice versa — is wrong on both
-  // counts. Unknown method families still skip.
-  const methodType = clean(pm?.method_type || 'card').toLowerCase();
-  const isBank = methodType === 'ach' || methodType === 'us_bank_account';
-  if (pm && methodType !== 'card' && !isBank) {
-    return { ok: false, reason: `unknown method family (${methodType}) for customer ${customerId}; autopay confirmation skipped (no matching template)` };
-  }
-  // The customer's copy must be the EXACT text they agreed to — the
-  // STORED ledger snapshot, not whatever copy is deployed at send time
-  // (a consent-version wording bump must never rewrite history —
-  // Codex #2698 r1). The agreement of record is the newest ENROLLMENT-
-  // SCOPED, enrollment-QUALIFYING consent (Codex r3): hold-scoped rows
-  // ('estimate_card_hold') only authorize one visit's completion charge,
-  // and pre-v8 rows never authorized recurring charges — a later hold on
-  // the same card, or a legacy row, must never become "Your
-  // authorization" in this email. No qualifying row → NO send: an
-  // authorization copy is a copy of a stored agreement, never fabricated
-  // from the currently-deployed text.
-  if (!pm?.stripe_payment_method_id) {
-    return { ok: false, reason: `no stripe payment method row for customer ${customerId}; autopay confirmation skipped (no agreement of record)` };
-  }
-  const consentRows = await db('payment_method_consents')
-    .where({ customer_id: customerId, stripe_payment_method_id: pm.stripe_payment_method_id })
-    .select('id', 'source', 'consent_text_version', 'consent_text_snapshot', 'created_at');
-  const consentRow = (consentRows || [])
-    .filter((r) => !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source)
-      && consentVersionQualifiesForEnrollment(r.consent_text_version)
-      && clean(r.consent_text_snapshot))
-    .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0] || null;
-  if (!consentRow) {
-    return { ok: false, reason: `no enrollment-scoped consent for customer ${customerId}; autopay confirmation skipped (no agreement of record)` };
-  }
-  const templateKey = isBank ? 'autopay.enrollment_confirmation_ach' : 'autopay.enrollment_confirmation';
-  const timingLine = await chargeTimingLine(customerId, isBank
-    ? { tender: 'your bank account', verb: 'debited' }
-    : { tender: 'your card', verb: 'charged' });
-  const methodLine = isBank ? bankLineFor(pm) : cardLineFor(pm);
-  return {
-    ok: true,
-    customer,
-    email,
-    isBank,
-    templateKey,
-    consentVersion: consentRow.consent_text_version,
-    methodLine,
-    timingLine,
-    authorizationText: clean(consentRow.consent_text_snapshot),
-    payload: {
-      first_name: clean(customer.first_name) || 'there',
-      ...(isBank
-        ? { bank_line: methodLine, debit_timing_line: timingLine }
-        : { card_line: methodLine, charge_timing_line: timingLine }),
-      authorization_text: clean(consentRow.consent_text_snapshot),
-      customer_portal_url: portalUrl('/login'),
-      company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
-      company_email: BILLING_EMAIL,
-    },
-    // Keyed on the CONSENT VERSION, not the row id (Codex r2 + r3): the
-    // browser /consent path and the Stripe webhook can race on the same
-    // SetupIntent and insert TWO rows for one authorization — both
-    // snapshot the same deployed version, so version-keying collapses
-    // the duplicate that row-id keying double-sent. The r2 behavior it
-    // must keep: a re-authorization under BUMPED consent copy is a new
-    // agreement → new version → fresh copy; a re-authorization under
-    // identical copy is deduped — the customer already holds a verbatim
-    // copy of that exact agreement for this method.
-    idempotencyKey: `${templateKey}:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
-  };
-}
-
-// The Payment section of the one-signup-email (GATE_SIGNUP_SINGLE_EMAIL):
-// the SAME resolution the standalone email uses, shaped as the combined
-// template's variables. null when no confirmation applies — the caller then
-// sends no Payment section and the standalone email keeps its own rules.
-async function buildAutopayPaymentSection({ customerId, paymentMethodRowId } = {}) {
-  const resolved = await resolveAutopayConfirmation({ customerId, paymentMethodRowId });
-  if (!resolved.ok) return null;
-  const label = clean(resolved.methodLine).replace(/^your\s+/i, '');
-  return {
-    authorizationText: resolved.authorizationText,
-    variables: {
-      payment_heading: 'Payment',
-      payment_method_label: `${label.charAt(0).toUpperCase()}${label.slice(1)}`,
-      payment_timing_line: resolved.timingLine,
-      authorization_intro: 'Your Auto Pay authorization, exactly as you agreed to it:',
-      authorization_text: resolved.authorizationText,
-      payment_manage_line: 'You can turn Auto Pay off or remove your payment method anytime in the Waves app or your customer portal.',
-    },
-  };
-}
-
-// { outcome: 'sent' | 'skipped' | 'failed', result } — the same send as ever, with
-// the three endings told apart: a deterministic skip (gate off, no email, no
-// agreement of record) is final, a thrown failure is not. The durable owed-email
-// resolver (signup-single-email.js) retries on 'failed'.
-async function sendAutopayEnrollmentConfirmationDetailed({ customerId, paymentMethodRowId } = {}) {
+async function sendAutopayEnrollmentConfirmation({ customerId, paymentMethodRowId } = {}) {
   try {
-    const resolved = await resolveAutopayConfirmation({ customerId, paymentMethodRowId });
-    if (!resolved.ok) {
-      if (!resolved.silent) logger.info(`[card-enrollment-email] ${resolved.reason}`);
-      return { outcome: 'skipped', result: null };
+    if (!emailsEnabled() || !customerId || !paymentMethodRowId) return null;
+    const { customer, email } = await loadCustomerEmail(customerId);
+    if (!customer) {
+      logger.info(`[card-enrollment-email] no usable email for customer ${customerId}; skipping autopay confirmation`);
+      return null;
     }
+    const pm = await db('payment_methods')
+      .where({ id: paymentMethodRowId, customer_id: customerId })
+      .first('id', 'stripe_payment_method_id', 'card_brand', 'last_four', 'method_type', 'bank_name', 'bank_last_four');
+    // Method family selects the template (Codex #2698 r1 established the
+    // rule; the portal ACH lane shipped the bank variant): card wording
+    // over an ACH debit authorization — or vice versa — is wrong on both
+    // counts. Unknown method families still skip.
+    const methodType = clean(pm?.method_type || 'card').toLowerCase();
+    const isBank = methodType === 'ach' || methodType === 'us_bank_account';
+    if (pm && methodType !== 'card' && !isBank) {
+      logger.info(`[card-enrollment-email] unknown method family (${methodType}) for customer ${customerId}; autopay confirmation skipped (no matching template)`);
+      return null;
+    }
+    // The customer's copy must be the EXACT text they agreed to — the
+    // STORED ledger snapshot, not whatever copy is deployed at send time
+    // (a consent-version wording bump must never rewrite history —
+    // Codex #2698 r1). The agreement of record is the newest ENROLLMENT-
+    // SCOPED, enrollment-QUALIFYING consent (Codex r3): hold-scoped rows
+    // ('estimate_card_hold') only authorize one visit's completion charge,
+    // and pre-v8 rows never authorized recurring charges — a later hold on
+    // the same card, or a legacy row, must never become "Your
+    // authorization" in this email. No qualifying row → NO send: an
+    // authorization copy is a copy of a stored agreement, never fabricated
+    // from the currently-deployed text.
+    if (!pm?.stripe_payment_method_id) {
+      logger.info(`[card-enrollment-email] no stripe payment method row for customer ${customerId}; autopay confirmation skipped (no agreement of record)`);
+      return null;
+    }
+    const consentRows = await db('payment_method_consents')
+      .where({ customer_id: customerId, stripe_payment_method_id: pm.stripe_payment_method_id })
+      .select('id', 'source', 'consent_text_version', 'consent_text_snapshot', 'created_at');
+    const consentRow = (consentRows || [])
+      .filter((r) => !NON_ENROLLMENT_CONSENT_SOURCES.has(r.source)
+        && consentVersionQualifiesForEnrollment(r.consent_text_version)
+        && clean(r.consent_text_snapshot))
+      .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0] || null;
+    if (!consentRow) {
+      logger.info(`[card-enrollment-email] no enrollment-scoped consent for customer ${customerId}; autopay confirmation skipped (no agreement of record)`);
+      return null;
+    }
+    const templateKey = isBank ? 'autopay.enrollment_confirmation_ach' : 'autopay.enrollment_confirmation';
+    const timingLine = await chargeTimingLine(customerId, isBank
+      ? { tender: 'your bank account', verb: 'debited' }
+      : { tender: 'your card', verb: 'charged' });
     const result = await EmailTemplateLibrary.sendTemplate({
-      templateKey: resolved.templateKey,
-      to: resolved.email,
-      payload: resolved.payload,
+      templateKey,
+      to: email,
+      payload: {
+        first_name: clean(customer.first_name) || 'there',
+        ...(isBank
+          ? { bank_line: bankLineFor(pm), debit_timing_line: timingLine }
+          : { card_line: cardLineFor(pm), charge_timing_line: timingLine }),
+        authorization_text: clean(consentRow.consent_text_snapshot),
+        customer_portal_url: portalUrl('/login'),
+        company_phone: WAVES_SUPPORT_PHONE_DISPLAY,
+        company_email: BILLING_EMAIL,
+      },
       recipientType: 'customer',
       recipientId: customerId,
-      idempotencyKey: resolved.idempotencyKey,
-      triggerEventId: resolved.idempotencyKey,
+      // Keyed on the CONSENT VERSION, not the row id (Codex r2 + r3): the
+      // browser /consent path and the Stripe webhook can race on the same
+      // SetupIntent and insert TWO rows for one authorization — both
+      // snapshot the same deployed version, so version-keying collapses
+      // the duplicate that row-id keying double-sent. The r2 behavior it
+      // must keep: a re-authorization under BUMPED consent copy is a new
+      // agreement → new version → fresh copy; a re-authorization under
+      // identical copy is deduped — the customer already holds a verbatim
+      // copy of that exact agreement for this method.
+      idempotencyKey: `${templateKey}:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
+      triggerEventId: `${templateKey}:${customerId}:${paymentMethodRowId}:${consentRow.consent_text_version}`,
       categories: ['autopay_enrollment_confirmation'],
       suppressProviderErrorLog: true,
     });
-    logger.info(`[card-enrollment-email] autopay confirmation sent for customer ${customerId} (${resolved.isBank ? 'bank' : 'card'})`);
-    return { outcome: 'sent', result };
+    logger.info(`[card-enrollment-email] autopay confirmation sent for customer ${customerId} (${isBank ? 'bank' : 'card'})`);
+    return result;
   } catch (err) {
     const reason = err.status
       ? `SendGrid ${err.status}`
       : EmailTemplateLibrary.redactEmailAddresses(err.message);
     logger.error(`[card-enrollment-email] autopay confirmation failed for customer ${customerId}: ${reason}`);
-    return { outcome: 'failed', result: null };
+    return null;
   }
-}
-
-async function sendAutopayEnrollmentConfirmation(args = {}) {
-  return (await sendAutopayEnrollmentConfirmationDetailed(args)).result;
 }
 
 // Auto Pay setup INVITATION — the email leg of the appointment card-request
@@ -467,8 +408,6 @@ async function sendCardHoldConfirmation({ estimateId, customerId } = {}) {
 
 module.exports = {
   sendAutopayEnrollmentConfirmation,
-  sendAutopayEnrollmentConfirmationDetailed,
-  buildAutopayPaymentSection,
   sendAutopaySetupInvitation,
   sendCardHoldConfirmation,
   _private: { cardLineFor, emailsEnabled },
