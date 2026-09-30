@@ -107,6 +107,9 @@ describe('booking.js — self-serve callers build through buildFunnelAvailabilit
     expect(callStart).toBeGreaterThan(-1);
     // no raw builder call between the route's start and its funnel call
     expect(src.slice(at, callStart)).not.toContain('buildBookingAvailability(');
+    // and each opts into the same online-booking arrival grace, so the texting
+    // AI never offers a narrower set than the /book screens show
+    expect(src.slice(callStart, src.indexOf('});', callStart))).toContain('bookArrivalGrace: true');
   });
 });
 
