@@ -2280,6 +2280,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
       "Your plan doesn't include a free re-service.",
       'We are not able to offer a complimentary visit.',
       'We are not yet eligible for a free re-service.',
+      // Codex round-8 P2: a negator directly on the price word is a denial.
+      'This re-service is not free.',
+      "The visit isn't complimentary.",
+      'The re-service is not covered at no cost.',
+      "The visit isn't free.",
     ];
     test.each(DENIALS)('%s → a denial, NOT a promise', (text) => {
       expect(isReserviceOfferPromise(text)).toBe(false);
@@ -2296,8 +2301,25 @@ describe('free re-service is an entitlement resolved through the existing mechan
       "we can't offer a refund, however a complimentary visit is on us",
       'We cannot offer a refund and will send a free re-service.',
       'We cannot offer a refund and a free re-service is on us.',
+      // Codex round-8 P2: a copula BEFORE "free" no longer excludes it.
+      "Your visit is free; we'll text the booking link now.",
+      'The re-service is free.',
+      'The visit is free of charge.',
     ])('%s → still a promise (price-word negation / separate affirmative clause / unrelated denial)', (text) => {
       expect(isReserviceOfferPromise(text)).toBe(true);
+    });
+
+    // Round-8 P2 #1 end to end: a copular free-visit promise gets the eligibility AND
+    // the send_reservice_link action checks, and "free to <verb>" idioms still don't.
+    test('"Your visit is free; we\'ll text the booking link now." → eligibility + send-link action are enforced', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const reply = "Your visit is free; we'll text the booking link now.";
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'still have ants', intendedActions: [] }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(true);
     });
 
     test.each(DENIALS.slice(0, 2))('%s → passes draft validation for an ineligible customer (nothing to validate)', (reply) => {

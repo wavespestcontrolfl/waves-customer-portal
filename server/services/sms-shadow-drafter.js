@@ -534,12 +534,16 @@ const RESERVICE_SPECIFIC_NOUN_SOURCE = `re-?service|re-?treat(?:ment)?|re-?spray
 // re-service promise, so "free estimate" stays out; "free inspection" is a
 // technician visit, so it stays in.
 const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|visit|trip|treatment|service|callback|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))`;
-// "free" as a price word, not an idiom: never "feel free to ...", "you are /
-// you're free to ...", "free of/from ...", and not "free estimate/quote/
-// consultation". The other alternatives are the explicit no-charge
-// wordings, including "won't charge you for ..." and "on us" (but not
-// "count/rely on us").
-const FREE_OFFER_WORD_SOURCE = "(?:(?<!(?:\\b(?:feel|are|is|be)|['’]re)\\s+)\\bfree\\b(?!\\s+(?:to|of|from)\\b)(?!\\s+(?:estimates?|quotes?|consultations?)\\b)"
+// "free" as a price word, not an idiom: excluded when "free" is followed by
+// "to <verb>" / "from ..." / "of ..." (except "free of charge"), so "feel
+// free to call", "you are / you're free to return", "free of pests" never
+// count — but a copula BEFORE it does not exclude it ("Your visit is free",
+// "the re-service is free", "it's free of charge" are promises; PR #5336
+// Codex round-8 P2). "Feel free" without "to" stays excluded, and a "free
+// estimate/quote/consultation" is not a re-service promise. The other
+// alternatives are the explicit no-charge wordings, including "won't charge
+// you for ..." and "on us" (but not "count/rely on us").
+const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)\\bfree\\b(?!\\s+(?:to|from)\\b)(?!\\s+of\\b(?!\\s+charge\\b))(?!\\s+(?:estimates?|quotes?|consultations?)\\b)"
   + "|complimentary|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)|at no (?:additional )?(?:charge|cost)"
   + "|(?<!\\b(?:count|rely|depend|counting|relying|depending)\\s)on us|on the house"
   + "|(?:won['’]?t|will\\s+not|don['’]?t|do\\s+not)\\s+charge(?:\\s+you)?)";
@@ -580,6 +584,10 @@ const RESERVICE_COVERAGE_RE = new RegExp(
 const RESERVICE_DENIAL_RE = new RegExp(
   '\\b(?:'
   + 'not\\s+(?:currently\\s+|presently\\s+|yet\\s+)?(?:eligible|covered|included|qualified)'
+  // Codex round-8 P2: a negator directly on the PRICE WORD is a denial too ("This
+  // re-service is not free", "isn't complimentary", "not at no charge"); the
+  // negation INSIDE a price word ("won't charge you", "no charge") is not.
+  + "|(?:not|isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+|actually\\s+|always\\s+)?(?:free|complimentary|at\\s+no\\s+(?:additional\\s+)?(?:charge|cost))\\b"
   + "|(?:isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+)?(?:covered|included|eligible)"
   + "|(?:can['’]?t|cannot|can\\s+not|won['’]?t\\s+be\\s+able\\s+to|will\\s+not\\s+be\\s+able\\s+to|unable\\s+to|not\\s+able\\s+to)\\s+(?:to\\s+)?(?:offer|send|schedule|provide|book|give|do|arrange)"
   + '|no\\s+longer\\s+(?:eligible|qualif(?:y|ies|ied)|covered|included)'
