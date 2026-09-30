@@ -262,7 +262,13 @@ function acceptingEmail() {
     const existing = mockEmailMessages.find((m) => m.idempotency_key === args.idempotencyKey);
     if (existing) return { sent: true, deduped: true, message: existing };
     let dispatched = false;
-    await args.withProviderHandoff(async () => { dispatched = true; });
+    // The library's provider work: asynchronous preparation (markers, link
+    // guard), then the caller's final boundary check, then the request.
+    await args.withProviderHandoff(async (database, providerBoundaryCheck) => {
+      await new Promise((resolve) => { setImmediate(resolve); });
+      if (providerBoundaryCheck) await providerBoundaryCheck({ database });
+      dispatched = true;
+    });
     if (!dispatched) return { sent: false, blocked: true, reason: 'aborted_by_caller_before_dispatch' };
     const message = {
       id: `em-${mockEmailMessages.length + 1}`, idempotency_key: args.idempotencyKey, trigger_event_id: args.triggerEventId,
@@ -1350,6 +1356,55 @@ describe('operator send-now', () => {
     expect(auth.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
     expect(mockSendMessage.mock.calls[0][0].operatorInitiated).toBe(true);
     expect(Schedule.claim).toHaveBeenCalledWith(SCHEDULE_ID, NOW, expect.objectContaining({ force: true }));
+  });
+
+  describe('the operator email re-checks at the FINAL provider boundary (after provider preparation)', () => {
+    const operatorEmailOnly = () => { customer.phone = null; };
+    const boundaryReads = () => mockResolve.mock.calls.filter(([, opts]) => opts?.database === MOCK_TRX).length;
+
+    test('unchanged set: one email, and the boundary ran twice on the comms-lock transaction (before preparation and at the final check)', async () => {
+      operatorEmailOnly();
+      const out = await run({ operatorInitiated: true, force: true });
+      expect(out.outcome).toBe('advanced');
+      expect(mockEmailMessages).toHaveLength(1);
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(boundaryReads()).toBe(2);
+    });
+
+    test('an invoice paid DURING provider preparation vetoes the send: no email, a retryable refusal, the reservation reopened — then the re-render sends the new set once', async () => {
+      operatorEmailOnly();
+      const changed = makeSet(['inv-a', 'inv-b']);
+      let n = 0;
+      // 1 = set read, 2 = the handoff's first check, 3 = the FINAL check (the invoice was paid meanwhile), then stable
+      mockResolve.mockImplementation(async () => { n += 1; return n <= 2 ? live : changed; });
+      const out = await run({ operatorInitiated: true, force: true });
+      expect(ContactLedger.markSendFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'DUNNING_SET_CHANGED' }));
+      // the refused attempt never reached the provider; the re-render sent the CURRENT set, once
+      expect(mockEmailMessages).toHaveLength(1);
+      expect(JSON.parse(mockEmailMessages[0].payload_snapshot).invoice_count).toBe('2');
+      expect(out.outcome).toBe('advanced');
+    });
+
+    test('a set that keeps changing is refused at the final check every time: nothing is sent, the step is held retryable, the reservation stays reopened', async () => {
+      operatorEmailOnly();
+      const second = makeSet(['inv-a', 'inv-b'], { totalCents: 20001, digest: 'd-second' });
+      let n = 0;
+      // attempt 1: set read (1), first check (2, unchanged), FINAL check (3, changed) => refused;
+      // re-render: fresh read (4) = `second`, first check (5) passes, FINAL check (6+) changed again
+      mockResolve.mockImplementation(async () => {
+        n += 1;
+        if (n <= 2) return live;
+        if (n === 3) return makeSet(['inv-a', 'inv-b'], { totalCents: 20000, digest: 'd-first' });
+        if (n <= 5) return second;
+        return makeSet(['inv-a'], { totalCents: 12900, digest: 'd-third' });
+      });
+      const out = await run({ operatorInitiated: true, force: true });
+      expect(out.outcome).toBe('held');
+      expect(mockEmailMessages).toHaveLength(0);
+      expect(mockLedger.some((r) => r.metadata.delivered === true)).toBe(false);
+      expect(rowFor('email').metadata.send_failed).toBe(true);
+      expect(Schedule.advance).not.toHaveBeenCalled();
+    });
   });
 
   test('the operator email handoff refuses (no email) when the set changed, on the comms-lock transaction handle', async () => {

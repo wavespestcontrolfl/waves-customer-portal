@@ -110,19 +110,51 @@ async function sendTextLeg(ctx, channel, ledger) {
  * The operator send's provider handoff: a customer-comms transaction that runs
  * the boundary on ITS handle, then dispatches (the analogue of
  * billing-email-sender's selfPayOnlyHandoff). Fail-closed.
+ *
+ * It mirrors billing-channel-email-authority's verifyAndDispatch: the check runs
+ * once before the provider work, and AGAIN as the `providerBoundaryCheck` the
+ * template library calls after its asynchronous marker and SendGrid preparation,
+ * immediately before the request. A set that changed in between (an invoice
+ * paid, a credit applied) vetoes the send there: `state.boundaryBlock` records
+ * the retryable refusal, the tagged throw aborts the dispatch, and the outcome is
+ * the same `{ ok: false }` the normal authority returns.
  */
 function boundaryOnlyHandoff(snapshot, state) {
+  const check = Boundary.check(snapshot);
+  const refuse = (verdict) => blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
   return async (dispatch) => {
-    return withCustomerCommsLock(db, snapshot.customerId, async (trx) => {
-      const verdict = await Boundary.check(snapshot)({ database: trx });
-      if (verdict.ok !== true) {
-        state.boundaryBlock = blocked(verdict.code, verdict.reason, { retryable: verdict.retryable === true });
-        return { ok: false };
-      }
-      state.handoffStarted = true;
-      await dispatch();
-      return { ok: true };
-    });
+    try {
+      return await withCustomerCommsLock(db, snapshot.customerId, async (trx) => {
+        const verdict = await check({ database: trx });
+        if (verdict.ok !== true) {
+          state.boundaryBlock = refuse(verdict);
+          return { ok: false };
+        }
+        const providerBoundaryCheck = async ({ database } = {}) => {
+          const final = await check({ database: database || trx, providerBoundary: true });
+          if (final.ok !== true) {
+            state.boundaryBlock = refuse(final);
+            const veto = new Error(state.boundaryBlock.reason);
+            veto.code = state.boundaryBlock.code;
+            veto.retryable = state.boundaryBlock.retryable;
+            veto.providerBoundaryBlocked = true;
+            throw veto;
+          }
+          state.handoffStarted = true;
+          return { ok: true };
+        };
+        state.providerPreparationStarted = true;
+        await dispatch(trx, providerBoundaryCheck);
+        if (state.boundaryBlock) return { ok: false };
+        state.providerAccepted = true;
+        return { ok: true };
+      });
+    } catch (err) {
+      if (state.providerAccepted) return { ok: true };
+      // A final-boundary veto is a definite refusal, however it was thrown.
+      if (state.boundaryBlock && !state.handoffStarted) return { ok: false };
+      throw err;
+    }
   };
 }
 
