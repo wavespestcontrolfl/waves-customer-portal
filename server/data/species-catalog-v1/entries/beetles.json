@@ -1822,5 +1822,125 @@
     "action": "monitor",
     "season_basis": "observed",
     "verification": []
+  },
+  {
+    "slug": "shot-hole-borers-ambrosia-beetles",
+    "kind": "organism",
+    "common_name": "Shot-hole Borers & Ambrosia Beetles",
+    "aka": [
+      "Tea Shot-hole Borer"
+    ],
+    "aliases": [
+      "shot hole borer",
+      "shot hole borers",
+      "shothole borer",
+      "ambrosia beetle",
+      "ambrosia beetles",
+      "tea shot hole borer",
+      "euwallacea"
+    ],
+    "scientific_name": "Scolytinae",
+    "rank": "subfamily",
+    "group": "beetles",
+    "subgroup": "weevils",
+    "site_category": "Plant pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Toothpick-like columns of frass pushing out of the bark, or white sugary crust around small holes",
+      "Small round entry holes in the bark, often no bigger than a pinhead",
+      "Branch dieback or a declining tree, often one that was already stressed",
+      "Beetles are tiny and usually not seen; the frass and holes are the clue"
+    ],
+    "look_alikes": [
+      {
+        "slug": "powderpost-beetle",
+        "difference": "Powderpost beetles work dry, seasoned wood and leave fine powder; shot-hole borers and ambrosia beetles attack living or stressed trees and leave frass columns.",
+        "next_photo": "A wide shot showing whether the holes are in a living tree or in finished wood, then a close-up of the frass.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "drywood-termite-frass",
+        "difference": "Drywood termite pellets are tiny, uniform and pile up under wood; borer frass pushes out of bark as thin, toothpick-like columns or a sugary crust.",
+        "next_photo": "A close-up of the frass shape and where it is coming from, tree bark or structural wood.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage",
+      "beetle"
+    ],
+    "verdict": "call",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": true,
+      "referral": "arborist"
+    },
+    "urgency": "moderate",
+    "copy": {
+      "what_it_means": "Toothpick-like frass or a sugary crust around small holes in bark, with branch dieback, can suggest shot-hole borers or ambrosia beetles. A photo cannot identify the beetle; an arborist looks at what stressed the tree and whether it is worth saving.",
+      "fact": "Ambrosia beetles farm a fungus inside the wood as food, and most kinds go after trees that are already stressed or dying."
+    },
+    "tech_notes": "Find the small entry holes and frass columns; look for whatever stressed the tree (flooding, drought, wounds, root problems). Invasive shot-hole borers can also attack apparently healthy trees, so refer to an arborist rather than a routine service visit.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/fr422"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Placed in beetles/weevils (Scolytinae is a subfamily of Curculionidae) as a group-level entry, not a single species. Service line is tree_shrub with an arborist referral instead of line none: the v1-map test requires any pest-section entry with line none to sit in an all-none group, and beetles is mixed. FR422 page could not be read directly (see verification)."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "specialist",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Toothpick-like frass and entry-hole details",
+        "note": "From the owner brief. The FR422 page returned HTTP 410 to the fetch tool; a UF/IFAS search result confirms the title (Diagnosis and Management of the Invasive Shot Hole Borers) and the white sugary \"volcano\" sign on avocado, but the frass description was not read from the page."
+      }
+    ]
   }
 ]

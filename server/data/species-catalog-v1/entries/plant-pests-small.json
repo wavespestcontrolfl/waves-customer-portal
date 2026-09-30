@@ -1447,5 +1447,459 @@
     "action": "report",
     "season_basis": "observed",
     "verification": []
+  },
+  {
+    "slug": "cuban-laurel-thrips",
+    "kind": "organism",
+    "common_name": "Cuban Laurel Thrips",
+    "aka": [
+      "Leaf-gall Thrips of Ficus"
+    ],
+    "aliases": [
+      "cuban laurel thrips",
+      "leaf gall thrips",
+      "ficus leaf gall thrips",
+      "gynaikothrips ficorum"
+    ],
+    "scientific_name": "Gynaikothrips ficorum",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "larva",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "New ficus leaves roll or fold tightly along the midrib into a curled gall",
+      "Sunken purplish-red spots on the tender new leaves",
+      "Curled leaves turn tough and yellow as they age",
+      "Small black thrips and pale larvae live inside the rolled leaf"
+    ],
+    "look_alikes": [
+      {
+        "slug": "ficus-whitefly",
+        "difference": "Ficus whitefly causes yellowing and leaf drop with pale nymphs on flat leaf undersides; Cuban laurel thrips cause tightly curled, purple-spotted new leaves.",
+        "next_photo": "A close-up of a curled leaf and a flat leaf underside on the same hedge.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "chilli-thrips",
+        "difference": "Chilli thrips scorch and bronze new growth without rolling it into tight galls; Cuban laurel thrips roll leaves into a tube with dark thrips inside.",
+        "next_photo": "A close-up of a curled new leaf, then a photo of the leaf gently unrolled.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      3,
+      4,
+      5,
+      9,
+      10
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Tightly curled new leaves with purple spots on a Ficus microcarpa hedge or tree can suggest Cuban laurel thrips, mostly a cosmetic problem. A photo cannot confirm it; a technician unrolls a curled leaf to look for the thrips inside.",
+      "fact": "Cuban laurel thrips live and breed inside the rolled leaf, so a full generation can develop within a single curled gall."
+    },
+    "tech_notes": "Unroll a curled leaf and look for black adult thrips and pale larvae inside; the damage is mainly cosmetic. Check that the plant is Ficus microcarpa (Cuban laurel), the main host.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/publication/IN599"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). IN599 says breeding is continuous through the year with no monthly calendar, so peak_months [3, 4, 5, 9, 10] come from the owner brief."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Peak months [3, 4, 5, 9, 10]",
+        "note": "From the owner brief; IN599 documents year-round breeding (about 30 days per generation) but no monthly peak."
+      }
+    ]
+  },
+  {
+    "slug": "magnolia-white-scale",
+    "kind": "organism",
+    "common_name": "Magnolia White Scale",
+    "aka": [
+      "False Oleander Scale"
+    ],
+    "aliases": [
+      "magnolia white scale",
+      "false oleander scale",
+      "pseudaulacaspis cockerelli"
+    ],
+    "scientific_name": "Pseudaulacaspis cockerelli",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": "scale-insects",
+    "site_category": "Plant pests",
+    "stages": [
+      "crawler",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Flat, white to grayish crusts stuck to leaves and stems",
+      "Yellow spots on the upper leaf surface, larger than the scales beneath",
+      "Heavy infestations can cause yellowing and leaf drop, especially on croton",
+      "Found on many hosts, including croton, gardenia and magnolia"
+    ],
+    "look_alikes": [
+      {
+        "slug": "cycad-aulacaspis-scale",
+        "difference": "Cycad aulacaspis scale coats the fronds of king sago and other cycads; magnolia white scale is found on broadleaf shrubs such as croton and gardenia.",
+        "next_photo": "A wide shot of the whole plant, then a close-up of the crusts on one leaf.",
+        "photo_can_confirm": true
+      },
+      {
+        "slug": "tea-scale",
+        "difference": "Tea scale is brown flecking on leaf undersides, mostly camellia and holly; magnolia white scale forms white crusts on leaves and stems of many hosts.",
+        "next_photo": "A close-up of the crust color and whether it is on the leaf top, underside or stem.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "crawler",
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "White crusts on the leaves and stems of croton, gardenia or magnolia can suggest magnolia white scale, and heavy infestations can cause leaf drop. A technician checks whether the scales are alive and whether live crawlers are present before choosing a next step.",
+      "fact": "False oleander scale is a poor name for it; UF/IFAS records more than 100 host plants in Florida, including croton, gardenia and magnolia."
+    },
+    "tech_notes": "Crush a crust to see whether the scale underneath is alive (dead scales stay on the plant); check for live crawlers, since they are the vulnerable stage. Note the host and any leaf drop.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/in306"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). peak_months left empty: no Florida monthly peak is documented in IN306."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": []
+  },
+  {
+    "slug": "crapemyrtle-aphid",
+    "kind": "organism",
+    "common_name": "Crapemyrtle Aphid",
+    "aka": [],
+    "aliases": [
+      "crapemyrtle aphid",
+      "crape myrtle aphid",
+      "crepe myrtle aphid",
+      "tinocallis kahawaluokalani"
+    ],
+    "scientific_name": "Tinocallis kahawaluokalani",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Sticky, shiny honeydew coating leaves and stems, and anything under the tree",
+      "Black sooty mold growing on the honeydew",
+      "Pale to bright yellow aphids with black markings, feeding on the leaf surface",
+      "Found on crape myrtle, often building up as the season warms"
+    ],
+    "look_alikes": [
+      {
+        "slug": "aphid",
+        "difference": "Other aphids are green, black or orange and cluster on many plants; crapemyrtle aphids are pale yellow with black spots and stay on crape myrtle.",
+        "next_photo": "A close-up of the insects on a leaf, and a wide shot showing the plant is crape myrtle.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "sooty-mold",
+        "difference": "Sooty mold is only the black coating; the crapemyrtle aphid is the sap-feeding insect whose honeydew feeds it.",
+        "next_photo": "A close-up of the leaf surface checking for small yellow insects among the black coating.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10
+    ],
+    "peak_months": [
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Sticky leaves with a black sooty coating on a crape myrtle can suggest crapemyrtle aphid, which is mostly a cosmetic problem. A technician checks the leaves for the small yellow aphids that leave the honeydew behind.",
+      "fact": "The black coating on crape myrtle is a mold growing on aphid honeydew, so it often shows up before anyone spots the small yellow insects."
+    },
+    "tech_notes": "Look for pale yellow aphids with black markings on the leaf surface; the honeydew and sooty mold usually show first. UF/IFAS notes populations typically escape natural enemies in late July and August, so peak_months may run later than listed.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/in663"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Owner brief placed the aphids on leaf undersides; IN663 describes them feeding on the upper leaf surface, so the entry follows the source."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": [
+      {
+        "claim": "Peak months [5, 6, 7]",
+        "note": "From the owner brief. IN663 says populations escape natural enemies near the end of July and early August in Florida, so the peak may include August."
+      }
+    ]
+  },
+  {
+    "slug": "citrus-rust-mite",
+    "kind": "organism",
+    "common_name": "Citrus Rust Mite",
+    "aka": [],
+    "aliases": [
+      "citrus rust mite",
+      "rust mite",
+      "phyllocoptruta oleivora"
+    ],
+    "scientific_name": "Phyllocoptruta oleivora",
+    "rank": "species",
+    "group": "plant-pests-small",
+    "subgroup": null,
+    "site_category": "Plant pests",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Bronzed or russeted, rough-looking rind on citrus fruit",
+      "Damage on young fruit can look like rough, sharkskin-like russeting",
+      "Damage is mostly to the surface of the rind; the fruit inside is usually fine",
+      "Mites are far too small to see without a hand lens"
+    ],
+    "look_alikes": [
+      {
+        "slug": "spider-mites",
+        "difference": "Spider mites stipple and web leaves; citrus rust mites mark the fruit rind (and sometimes leaves) with bronzing or russeting and no webbing.",
+        "next_photo": "A close-up of the fruit rind and of a nearby leaf underside, checking for webbing.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "florida-wax-scale",
+        "difference": "Wax scale forms raised, waxy pinkish bumps on twigs and leaves; rust mite damage is a flat bronzed or rough discoloration of the rind.",
+        "next_photo": "A close-up of the rind and a nearby twig, checking for raised waxy bumps.",
+        "photo_can_confirm": true
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "trees-shrubs"
+    ],
+    "looks": [
+      "plant-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "peak_months": [
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "tree_shrub",
+      "key": null,
+      "label": "Tree & Shrub Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "A bronzed or rough, russeted rind on citrus fruit can suggest citrus rust mite, which usually affects how the fruit looks rather than what is inside. A photo cannot confirm it; a technician checks the fruit surface with a hand lens.",
+      "fact": "Citrus rust mites are far too small to see unaided, so the bronzed or russeted rind is usually the first sign anyone notices."
+    },
+    "tech_notes": "Check the fruit surface with a 10x hand lens; damage is mainly cosmetic on fruit for home use. UF/IFAS reports populations rising in May to July.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/cg002"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Source is the commercial citrus production guide; months match its May-July rise and possible late-October increase."
+    },
+    "role": "plant_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "observed",
+    "verification": []
   }
 ]

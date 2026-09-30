@@ -1208,5 +1208,133 @@
       "outcome": "manageable",
       "recovery_note": "Density often recovers over a few weeks once nutrition and watering are corrected."
     }
+  },
+  {
+    "slug": "sugarcane-mosaic-virus-lvn",
+    "kind": "disease",
+    "common_name": "Sugarcane Mosaic Virus (lethal viral necrosis)",
+    "aka": [
+      "Lethal Viral Necrosis",
+      "LVN"
+    ],
+    "aliases": [
+      "sugarcane mosaic virus",
+      "lethal viral necrosis",
+      "st augustine mosaic",
+      "st augustinegrass mosaic virus"
+    ],
+    "scientific_name": "Sugarcane mosaic virus",
+    "rank": "species",
+    "group": "turf-diseases",
+    "subgroup": null,
+    "site_category": "Lawn problems",
+    "stages": [],
+    "sign_of": [],
+    "traits": [
+      "Broken yellow and light-green streaks running between the veins of the blades",
+      "Blotchy, mosaic-looking patterns in the lawn, most obvious in fall and winter",
+      "Streaked turf can turn to dying patches on susceptible St. Augustinegrass such as Floratam"
+    ],
+    "look_alikes": [],
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage",
+      "yellowing"
+    ],
+    "verdict": "call",
+    "role": "plant_disease",
+    "risk": "low",
+    "action": "inspection",
+    "season_basis": "observed",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "occasional",
+    "active_months": [
+      9,
+      10,
+      11,
+      12,
+      1,
+      2,
+      3,
+      4
+    ],
+    "peak_months": [
+      10,
+      11,
+      12,
+      1
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": true,
+      "referral": null
+    },
+    "urgency": "high",
+    "copy": {
+      "what_it_means": "Broken yellow and light-green streaks, then dying patches, in St. Augustinegrass can suggest sugarcane mosaic virus (lethal viral necrosis). Fungicides and pesticides do not control it. A technician suspects it, photographs it and sends a sample to a lab for confirmation.",
+      "fact": "UF/IFAS reports the most severe damage on Floratam and Provista St. Augustinegrass, and mowers moved between yards can spread it if they are not cleaned."
+    },
+    "tech_notes": "Suspect, photograph and send a sample to the UF/IFAS Plant Diagnostic Center for confirmation. Fungicides and pesticides do not control this virus. Sanitation matters: let mowers and tools dry or clean them before moving between properties.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://ask.ifas.ufl.edu/pp313"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). outcome is set to manageable rather than no_cure: the catalog rule for no_cure entries forbids a lawn service line, and this is a lawn-line disease. PP313 supports the fall/winter symptom cycle and Floratam susceptibility."
+    },
+    "verification": [],
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Broken yellow and light-green streaks running between the veins of the blades",
+        "Blotchy, mosaic-looking patterns that build in fall and winter",
+        "Streaked patches that dry out and die back on susceptible St. Augustinegrass"
+      ],
+      "required_signature": {
+        "text": "A photo of broken yellow streaks can raise concern, but only a lab test confirms sugarcane mosaic virus; a technician collects and sends the sample.",
+        "elements": [
+          "Broken yellow and light-green streaks running between the veins of the blades"
+        ],
+        "confirmable_by": "lab"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bug damage is confined to hot, sunny turf with insects present; mosaic streaking shows as yellow-green streaks on the blades with no insects.",
+          "next_observation": "Pour soapy water on the edge of the patch and watch for small black-and-white bugs, or a technician checks.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [
+        "cool_wet"
+      ],
+      "outcome": "manageable",
+      "recovery_note": "Mild streaking often persists year-round, and some recovery is possible in spring, but there is no recovery from the virus itself."
+    }
   }
 ]

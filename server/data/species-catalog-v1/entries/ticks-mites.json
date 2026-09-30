@@ -687,5 +687,123 @@
       "notes": "Could not load the UF/IFAS EDIS 'Mites That Attack Humans' (IG086) page directly in this session (server returned 410); facts cross-checked against Wikipedia's rodent mite dermatitis summary and general search results citing that same IFAS publication and a UF tropical fowl mite Featured Creatures page. Per audit item 26 / BRIEF Revision 3: look_alikes[0].photo_can_confirm set to false (bite-pattern comparison); softened a 'removing the source is what stops the bites' method-outcome claim in copy. Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
       "approval_hash": "b354cc1b9cbdd057c1a9ef9b92a389033bef79b18f658fc131c748b812fa7894"
     }
+  },
+  {
+    "slug": "bermudagrass-mite",
+    "kind": "organism",
+    "common_name": "Bermudagrass Mite",
+    "aka": [],
+    "aliases": [
+      "bermudagrass mite",
+      "bermuda grass mite",
+      "bermudagrass witches broom",
+      "eriophyes cynodoniensis"
+    ],
+    "scientific_name": "Eriophyes cynodoniensis",
+    "rank": "species",
+    "group": "ticks-mites",
+    "subgroup": "mites",
+    "site_category": "Lawn",
+    "stages": [
+      "nymph",
+      "adult"
+    ],
+    "sign_of": [],
+    "traits": [
+      "Tufted, bushy witches-broom growth at the tips of bermudagrass runners",
+      "Short internodes, so leaves bunch together on a stunted shoot",
+      "Mites are far too small to see without a hand lens; the swollen tuft is the clue",
+      "Seen most in late spring and summer, often in stressed or heavily fed turf"
+    ],
+    "look_alikes": [
+      {
+        "slug": "hunting-billbug",
+        "difference": "Billbug damage is dead, easily pulled stems with sawdust-like frass at the base; mite damage is bushy, tufted growth that stays green.",
+        "next_photo": "A close-up of the tuft and a stem pulled from it, checking for sawdust-like frass at the base.",
+        "photo_can_confirm": false
+      },
+      {
+        "slug": "spider-mites",
+        "difference": "Spider mites stipple and web leaf surfaces on plants; bermudagrass mites live hidden inside swollen tufts of the grass and distort its growth.",
+        "next_photo": "A close-up of the affected tuft, then a wide shot showing which plant it is growing on.",
+        "photo_can_confirm": false
+      }
+    ],
+    "size": "tiny",
+    "where": [
+      "lawn-garden"
+    ],
+    "looks": [
+      "lawn-damage"
+    ],
+    "verdict": "watch",
+    "safety": {
+      "stings": false,
+      "bites": false,
+      "venomous": false,
+      "irritant": false,
+      "disease_vector": false,
+      "structural": false,
+      "allergen": false,
+      "protected": false,
+      "toxic_to_pets": false,
+      "regulated": false
+    },
+    "safety_line": null,
+    "range": "common",
+    "active_months": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12
+    ],
+    "peak_months": [
+      5,
+      6,
+      7
+    ],
+    "service": {
+      "line": "lawn",
+      "key": null,
+      "label": "Lawn Care",
+      "inspection_first": false,
+      "referral": null
+    },
+    "urgency": "low",
+    "copy": {
+      "what_it_means": "Tufted, bushy growth with short, bunched leaves on bermudagrass can suggest bermudagrass mite, a microscopic pest that distorts new growth. A photo cannot confirm it; a technician checks the tufts with a hand lens and weighs the season and turf stress.",
+      "fact": "Bermudagrass mites are too small to see unaided, so the swollen, tufted growth they cause is usually what gets noticed first."
+    },
+    "tech_notes": "Check swollen tufts with a hand lens for mites between the leaf sheaths. Mowing low (scalping) in late spring is reported to help; confirm against the source before advising. Consider turf stress, fertility and irrigation.",
+    "links": {
+      "site_page": null,
+      "guides": []
+    },
+    "legacy_slugs": [],
+    "sources": [
+      "https://edis.ifas.ufl.edu/publication/in1217"
+    ],
+    "review": {
+      "status": "draft",
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). Source page could not be read directly (see verification); symptom wording is consistent with UF/IFAS bermudagrass mite research (witches-broom, shortened internodes)."
+    },
+    "role": "lawn_pest",
+    "risk": "low",
+    "action": "monitor",
+    "season_basis": "year_round",
+    "verification": [
+      {
+        "claim": "Scalping in late spring helps",
+        "note": "From the owner brief. The IN1217 page returned HTTP 410 to the fetch tool, so this statement and the months [5, 6, 7] were not checked against the source text."
+      }
+    ]
   }
 ]
