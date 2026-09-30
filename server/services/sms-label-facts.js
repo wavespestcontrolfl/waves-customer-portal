@@ -25,6 +25,7 @@ const logger = require('./logger');
 const { classifyProduct, PRODUCT_FAMILIES } = require('./email-division/visit-products');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('./pest-pressure/first-visit');
 const { serviceRecordSuppressesCustomerArtifacts } = require('./pest-pressure/history-filter');
+const { readReportIdentitySnapshot, canonicalProductId } = require('./service-report/report-identity-snapshot');
 const { dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 
@@ -60,39 +61,83 @@ function singleLine(text, cap) {
 
 // A visit TODAY (live scheduled visit, an unfinished record, or a completed
 // visit whose service record has not landed yet) means "the last visit" is
-// stale for any question about today's application.
+// stale for any question about today's application. Each completed scheduled
+// service is matched to a completed service record BY ITS OWN ID
+// (service_records.scheduled_service_id): one landed record never vouches for
+// another completed visit that has none yet.
 async function hasVisitToday(conn, customerId, today) {
   const liveToday = await conn('scheduled_services')
     .where({ customer_id: customerId, scheduled_date: today })
     .whereNotIn('status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
-    .select('status');
+    .select('id', 'status');
   const recordsToday = await conn('service_records')
     .where({ customer_id: customerId, service_date: today })
-    .select('status');
+    .select('status', 'scheduled_service_id');
   if (liveToday.some((r) => r.status !== 'completed')) return true;
   if (recordsToday.some((r) => r.status !== 'completed')) return true;
-  return liveToday.length > 0 && !recordsToday.some((r) => r.status === 'completed');
+  const recorded = new Set(recordsToday
+    .filter((r) => r.scheduled_service_id != null)
+    .map((r) => String(r.scheduled_service_id).toLowerCase()));
+  return liveToday.some((r) => r.id == null || !recorded.has(String(r.id).toLowerCase()));
+}
+
+// The applied product's report facts FROZEN at completion
+// (service_data.reportIdentitySnapshot.productFacts, keyed by canonical
+// product id; complete-scheduled-service.js + pest-recap.js write it from
+// approvedReportProductFacts). Timing is read ONLY from here, never from the
+// live products_catalog row, so a later catalog edit cannot rewrite what a
+// past visit's label said. null = no verified snapshot for this product (no
+// snapshot on the record, product absent from it, or not approved at
+// completion): fail closed.
+function frozenFactsFor(row, snapshot) {
+  const map = snapshot && snapshot.productFacts && typeof snapshot.productFacts === 'object' ? snapshot.productFacts : null;
+  if (!map) return null;
+  const id = canonicalProductId(row.product_id);
+  let facts = null;
+  if (id) {
+    facts = Object.prototype.hasOwnProperty.call(map, id) ? map[id] : null;
+  } else {
+    // service_products.product_id is ON DELETE SET NULL: fall back to the
+    // frozen name, as the report does.
+    const name = String(row.product_name || '').trim().toLowerCase();
+    facts = name ? (Object.values(map).find((f) => f && String(f.name || '').trim().toLowerCase() === name) || null) : null;
+  }
+  return facts && typeof facts === 'object' ? facts : null;
+}
+
+// The snapshot writes rei_hours through Number(), so a catalog NULL (unknown)
+// is frozen as 0, indistinguishable from the residential "0 = until dry"
+// value. Trust a frozen 0 only when the frozen summary itself says until dry.
+function frozenReiHours(frozen) {
+  const hours = frozen.reentryHours == null ? null : Number(frozen.reentryHours);
+  if (hours !== 0) return hours;
+  const summary = String(frozen.reentrySummary || '');
+  return UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) ? 0 : null;
 }
 
 // One joined row -> a customer-visible verified product, 'unverified' (counted,
 // omitted) or null (adjuvant / water conditioner / not customer-visible).
-function productFromRow(row) {
+// `frozen` is the product's snapshot facts (frozenFactsFor), or null.
+function productFromRow(row, frozen) {
+  const f = frozen || {};
+  const catalogCategory = f.category || row.catalog_category;
+  const catalogProductType = f.productType || row.catalog_product_type;
   const family = classifyProduct({
     productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
-    catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
+    catalogCategory, catalogProductType,
   });
   const def = PRODUCT_FAMILIES[family];
   if (!def || !def.customerVisible) return null;
-  if ([row.product_category, row.catalog_category, row.catalog_product_type, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)))) return null;
-  if (!row.label_verified_at) return 'unverified';
+  if ([row.product_category, catalogCategory, catalogProductType, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)))) return null;
+  if (!f.labelVerifiedAt) return 'unverified';
   return {
     // A neutral customer-facing type ("an insecticide"), never the brand.
     phrase: def.phrase || 'a product',
-    rainfastMinutes: row.rainfast_minutes == null ? null : Number(row.rainfast_minutes),
-    reiHours: row.rei_hours == null ? null : Number(row.rei_hours),
-    reentrySummary: row.reentry_summary || null,
-    reentryText: row.reentry_text || null,
-    labelVerifiedAt: row.label_verified_at,
+    rainfastMinutes: f.rainfastMinutes == null ? null : Number(f.rainfastMinutes),
+    reiHours: frozenReiHours(f),
+    reentrySummary: f.reentrySummary || null,
+    reentryText: null,
+    labelVerifiedAt: f.labelVerifiedAt,
   };
 }
 
@@ -112,9 +157,11 @@ function productFromRow(row) {
  *      whose service record has not landed, or an unfinished record) gets none
  *      on file: the last visit's figures must never answer about today's
  *      application.
- * Products come from service_products joined to products_catalog on
- * product_id. Fail closed: an unverified label is omitted and counted, an
- * adjuvant / water conditioner is omitted.
+ * Products come from service_products; their label TIMING is read from the
+ * facts frozen at completion on each record (service_data.reportIdentitySnapshot
+ * .productFacts, see frozenFactsFor), never the live catalog. Fail closed: a
+ * product with no verified snapshot is omitted and counted (so the whole visit
+ * is none on file), an adjuvant / water conditioner is omitted.
  */
 async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateString() } = {}) {
   if (!customerId) return null;
@@ -133,24 +180,24 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   if (!serviceDate) return null;
   const visits = await performed()
     .where('service_records.service_date', serviceDate)
-    .select('service_records.id', 'service_records.structured_notes');
+    .select('service_records.id', 'service_records.structured_notes', 'service_records.service_data');
   if (!visits.length || visits.some((v) => serviceRecordSuppressesCustomerArtifacts(v))) return null;
   const recordIds = visits.map((v) => v.id);
+  const snapshotByRecord = new Map(visits.map((v) => [String(v.id), readReportIdentitySnapshot({ service_data: v.service_data })]));
 
   const rows = await conn('service_products as sp')
     .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
     .whereIn('sp.service_record_id', recordIds)
     .orderBy([{ column: 'sp.applied_at', order: 'asc' }, { column: 'sp.id', order: 'asc' }])
     .select(
-      'sp.id', 'sp.product_name', 'sp.active_ingredient', 'sp.product_category',
+      'sp.id', 'sp.service_record_id', 'sp.product_id', 'sp.product_name', 'sp.active_ingredient', 'sp.product_category',
       'pc.category as catalog_category', 'pc.product_type as catalog_product_type',
-      'pc.rainfast_minutes', 'pc.rei_hours', 'pc.reentry_summary', 'pc.reentry_text', 'pc.label_verified_at',
     );
 
   const products = [];
   let unverified = 0;
   for (const row of rows) {
-    const p = productFromRow(row);
+    const p = productFromRow(row, frozenFactsFor(row, snapshotByRecord.get(String(row.service_record_id)) || null));
     if (p === 'unverified') unverified += 1;
     else if (p) products.push(p);
   }
@@ -310,6 +357,10 @@ function sentenceAt(text, i) {
   return { text: text.slice(s, e), start: s };
 }
 
+// A clock time: "2 PM", "2:30", "14:00", "noon", "midnight", "by 5", "until 5".
+// A bare "by/until/till N" is a clock time unless a unit follows ("by 5 hours").
+const CLOCK_TIME_RE = /(?<![\w.:])(?:(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)|noon\b|midnight\b|(?:by|until|till)\s+(?:1[0-2]|[1-9])(?![\d:]|\.\d|\s*(?:-|–|to)\s*\d|\s*(?:%|percent|minutes?|mins?|hours?|hrs?|days?|weeks?|inch|inches|feet|ft|gallons?|oz|ounces?|times|treatments?|people|pets?|dogs?|kids?)\b))/gi;
+
 // Which KIND of label time a duration is, from the words it is grammatically
 // attached to: within a short span of the duration itself, in the same
 // clause, a rainfast / wash-off / rain word (rain kind), a re-entry / stay-off /
@@ -379,7 +430,10 @@ function neutralizeGroundedTimes(text, sectionText) {
   return src.replace(TIME_EXPR_RE, (whole, _a, _b, _u, offset) => {
     const key = timeKey([whole, _a, _b, _u]);
     const kind = timeKind(src, offset, whole.length);
-    const grounded = (kind === 'rain' && rain.has(key)) || ((kind === 'reentry' || kind === null || kind === 'schedule') && reentry.has(key));
+    // Only a duration classified as that kind may consume that kind's keys: a
+    // null / schedule duration ("give it 4 hours", "the tech arrives in 4
+    // hours") is left visible to the older compliance screens.
+    const grounded = (kind === 'rain' && rain.has(key)) || (kind === 'reentry' && reentry.has(key));
     return grounded ? 'LABELTIME' : whole;
   });
 }
@@ -408,6 +462,12 @@ function hasUngroundedLabelTime(text, sectionText) {
     if (k === null && rain.has(key) && !reentry.has(key)) return true;
   }
   for (const m of src.matchAll(SPELLED_TIME_RE)) {
+    const k = timeKind(src, m.index, m[0].length);
+    if (k && k !== 'schedule') return true;
+  }
+  // Label facts are durations, so no clock time ("after 2 PM", "by 5", "until
+  // noon") is groundable: one attached to rain / drying / re-entry wording is held.
+  for (const m of src.matchAll(CLOCK_TIME_RE)) {
     const k = timeKind(src, m.index, m[0].length);
     if (k && k !== 'schedule') return true;
   }

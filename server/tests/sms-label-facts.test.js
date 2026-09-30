@@ -205,24 +205,32 @@ describe('label row selection (mock knex)', () => {
     conn.calls = calls;
     return conn;
   }
+  // The applied-product row (service_products + catalog CLASSIFICATION columns only:
+  // timing is never read from the live catalog) and the facts frozen at completion.
   const row = (over) => ({
-    id: 1, product_name: 'Some Product', active_ingredient: 'bifenthrin', product_category: 'insecticide',
-    catalog_category: 'insecticide', catalog_product_type: null,
-    rainfast_minutes: 180, rei_hours: 0, reentry_summary: 'Keep people and pets off treated areas until dry.', reentry_text: null,
-    label_verified_at: '2026-05-28', ...over,
+    id: 1, service_record_id: 'r2', product_id: 'p1', product_name: 'Some Product', active_ingredient: 'bifenthrin', product_category: 'insecticide',
+    catalog_category: 'insecticide', catalog_product_type: null, ...over,
+  });
+  const frozen = (over) => ({
+    productType: 'pesticide', name: 'Some Product', category: 'insecticide',
+    rainfastMinutes: 180, reentryHours: 0, reentrySummary: 'Keep people and pets off treated areas until dry.',
+    labelVerifiedAt: '2026-05-28', ...over,
+  });
+  const snapVisit = (id, productFacts, extra = {}) => ({
+    id, structured_notes: null, service_data: productFacts === undefined ? {} : { reportIdentitySnapshot: { version: 1, productFacts } }, ...extra,
   });
   const read = (opts) => labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, ...opts });
-  const two = [{ id: 'r2', structured_notes: null }, { id: 'r3', structured_notes: { typedReportDelivery: 'auto_send' } }];
+  const two = [snapVisit('r2', { p1: frozen() }), snapVisit('r3', { p1: frozen() }, { structured_notes: { typedReportDelivery: 'auto_send' } })];
 
-  test('newest performed date first, then ALL its records (no cap); joins service_products to products_catalog; unverified and adjuvants omitted and counted', async () => {
-    const many = Array.from({ length: 9 }, (_, i) => ({ id: `r${i}`, structured_notes: null }));
+  test('newest performed date first, then ALL its records (no cap); timing comes from the frozen snapshot, not a catalog join; unverified and adjuvants omitted and counted', async () => {
+    const many = Array.from({ length: 9 }, (_, i) => snapVisit(`r${i}`, { p1: frozen(), p2: frozen({ labelVerifiedAt: null, rainfastMinutes: 60 }), p3: frozen({ category: 'adjuvant' }), p4: frozen({ category: 'water conditioner' }) }));
     const conn = fakeConn({
       visits: many,
       rows: [
-        row({ id: 1 }),
-        row({ id: 2, product_name: 'Unverified Thing', label_verified_at: null, rainfast_minutes: 60 }),
-        row({ id: 3, product_name: 'LESCO 90/10 Nonionic Surfactant', active_ingredient: 'nonionic surfactant', product_category: 'adjuvant', catalog_category: 'adjuvant' }),
-        row({ id: 4, product_name: 'Buffer', active_ingredient: 'acidifier', product_category: 'water conditioner', catalog_category: 'water conditioner' }),
+        row({ id: 1, service_record_id: 'r0' }),
+        row({ id: 2, service_record_id: 'r0', product_id: 'p2', product_name: 'Unverified Thing' }),
+        row({ id: 3, service_record_id: 'r0', product_id: 'p3', product_name: 'LESCO 90/10 Nonionic Surfactant', active_ingredient: 'nonionic surfactant', product_category: 'adjuvant', catalog_category: 'adjuvant' }),
+        row({ id: 4, service_record_id: 'r0', product_id: 'p4', product_name: 'Buffer', active_ingredient: 'acidifier', product_category: 'water conditioner', catalog_category: 'water conditioner' }),
       ],
     });
     const out = await read({ conn });
@@ -235,7 +243,9 @@ describe('label row selection (mock knex)', () => {
     expect(conn.calls.some((q) => q.ops.some((o) => o[0] === 'max'))).toBe(true);
     const productQuery = conn.calls.find((q) => q.table === 'service_products as sp');
     expect(productQuery.ops).toContainEqual(['whereIn', 'sp.service_record_id', many.map((m) => m.id)]);
-    expect(productQuery.ops.some((o) => o[0] === 'leftJoin' && o[1] === 'products_catalog as pc')).toBe(true);
+    // the live catalog is joined for classification only: no timing column is selected
+    const selected = productQuery.ops.filter((o) => o[0] === 'select').flatMap((o) => o.slice(1)).join(' ');
+    expect(selected).not.toMatch(/rainfast_minutes|rei_hours|reentry_|label_verified_at/);
     // performed = completed + not a non-performed outcome; report posture is NOT part of the selection
     const performedQ = conn.calls.filter((q) => q.table === 'service_records' && q.ops.some((o) => o[0] === 'max' || (o[0] === 'select' && o[1] === 'service_records.id')));
     expect(performedQ).toHaveLength(2);
@@ -243,6 +253,52 @@ describe('label row selection (mock knex)', () => {
       expect(q.ops).toContainEqual(['where', 'service_records.status', 'completed']);
       expect(q.ops.some((o) => o[0] === 'whereRaw' && /visitOutcome/.test(o[1]) && !/typedReportDelivery/.test(o[1]))).toBe(true);
     }
+    expect(performedQ[1].ops.find((o) => o[0] === 'select')).toContain('service_records.service_data');
+  });
+
+  test('timing is FROZEN: live catalog columns on the row are ignored; the record snapshot decides', async () => {
+    const live = { rainfast_minutes: 999, rei_hours: 99, reentry_summary: 'Do not re-enter for 99 hours.', label_verified_at: '2026-09-29' };
+    const out = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ rainfastMinutes: 120, reentryHours: 4 }) })], rows: [row(live)] }) });
+    expect(out.products[0]).toMatchObject({ rainfastMinutes: 120, reiHours: 4 });
+    // a live "verified" catalog row cannot vouch for a product the snapshot did not verify
+    for (const visits of [
+      [snapVisit('r2', { p1: frozen({ labelVerifiedAt: null }) })], // unverified at completion
+      [snapVisit('r2', { p1: null })], // not approved at completion
+      [snapVisit('r2', { p9: frozen() })], // product absent from the snapshot
+      [snapVisit('r2', undefined)], // pre-snapshot record
+      [snapVisit('r2', { p1: frozen() }, { service_data: { reportIdentitySnapshot: { version: 1 } } })], // snapshot without productFacts
+      [snapVisit('r2', { p1: frozen() }, { service_data: 'not json' })],
+    ]) {
+      expect(await read({ conn: fakeConn({ visits, rows: [row(live)] }) })).toBeNull();
+    }
+    // jsonb as a string parses; a per-record snapshot: r3's product has none -> the visit is none on file
+    const str = snapVisit('r2', undefined, { service_data: JSON.stringify({ reportIdentitySnapshot: { version: 1, productFacts: { p1: frozen() } } }) });
+    expect((await read({ conn: fakeConn({ visits: [str], rows: [row()] }) })).products).toHaveLength(1);
+    const mixed = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen() }), snapVisit('r3', undefined)], rows: [row(), row({ id: 2, service_record_id: 'r3' })] }) });
+    expect(mixed.unverifiedCount).toBe(1);
+    expect(labelFactsLib.renderLabelFactsSection(mixed, { formatDate: (d) => d })).toBe('');
+  });
+
+  test('a deleted catalog row (product_id null) is found in the snapshot by its frozen name; ids are matched case-insensitively', async () => {
+    const byName = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ name: 'Some Product', rainfastMinutes: 90 }) })], rows: [row({ product_id: null })] }) });
+    expect(byName.products[0].rainfastMinutes).toBe(90);
+    expect(await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ name: 'Other' }) })], rows: [row({ product_id: null })] }) })).toBeNull();
+    const upper = await read({ conn: fakeConn({ visits: [snapVisit('r2', { abcd: frozen() })], rows: [row({ product_id: 'ABCD' })] }) });
+    expect(upper.products).toHaveLength(1);
+  });
+
+  test('a frozen re-entry of 0 (a catalog NULL is frozen as 0) is "until dry" only when the frozen summary says so', async () => {
+    const zero = (reentrySummary) => read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ reentryHours: 0, reentrySummary }) })], rows: [row()] }) });
+    expect((await zero('Keep people and pets off treated areas until dry.')).products[0].reiHours).toBe(0);
+    for (const summary of [null, 'Follow the product label and technician service report before re-entering treated areas.', 'See label.']) {
+      const out = await zero(summary);
+      expect(out.products[0].reiHours).toBeNull();
+      expect(labelFactsLib.renderLabelFactsSection(out, { formatDate: (d) => d })).toContain('rainfast after 3 hours');
+      expect(labelFactsLib.renderLabelFactsSection(out, { formatDate: (d) => d })).not.toContain('re-entry');
+    }
+    // a positive frozen figure stands on its own
+    const four = await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ reentryHours: 4, reentrySummary: null }) })], rows: [row()] }) });
+    expect(four.products[0].reiHours).toBe(4);
   });
 
   test('the date goes through date-only normalization (a Date from pg is fine)', async () => {
@@ -263,20 +319,45 @@ describe('label row selection (mock knex)', () => {
   test('a visit TODAY (live scheduled visit, completed visit without its record, unfinished record) -> none on file', async () => {
     const base = { visits: two, rows: [row()] };
     for (const status of ['pending', 'confirmed', 'en_route', 'on_site', 'in_progress']) {
-      expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ status }] }) })).toBeNull();
+      expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ id: 's1', status }] }) })).toBeNull();
     }
     // completed today but its service record has not landed yet
-    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ status: 'completed' }] }) })).toBeNull();
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ id: 's1', status: 'completed' }] }) })).toBeNull();
     // an unfinished record dated today
-    expect(await read({ conn: fakeConn({ ...base, recordsToday: [{ status: 'in_progress' }] }) })).toBeNull();
-    // ...but a completed visit whose record has landed is today's real last visit; cancelled/skipped rows never block
-    expect(await read({ conn: fakeConn({ ...base, newest: TODAY, scheduledToday: [{ status: 'completed' }], recordsToday: [{ status: 'completed' }] }) })).not.toBeNull();
+    expect(await read({ conn: fakeConn({ ...base, recordsToday: [{ status: 'in_progress', scheduled_service_id: null }] }) })).toBeNull();
+    // ...but a completed visit whose OWN record has landed is today's real last visit; cancelled/skipped rows never block
+    expect(await read({ conn: fakeConn({ ...base, newest: TODAY, scheduledToday: [{ id: 's1', status: 'completed' }], recordsToday: [{ status: 'completed', scheduled_service_id: 's1' }] }) })).not.toBeNull();
+  });
+
+  test('several completed visits today: EACH needs its own completed record (one landed record never vouches for another)', async () => {
+    const base = { visits: two, rows: [row()], newest: TODAY };
+    const s1 = { id: 's1', status: 'completed' };
+    const s2 = { id: 's2', status: 'completed' };
+    const r1 = { status: 'completed', scheduled_service_id: 's1' };
+    const r2 = { status: 'completed', scheduled_service_id: 's2' };
+    // s2 has no record yet -> none on file, whichever order the rows come in
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [s1, s2], recordsToday: [r1] }) })).toBeNull();
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [s2, s1], recordsToday: [r1] }) })).toBeNull();
+    // a record linked to some OTHER visit (or to none) does not count for s2
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [s1, s2], recordsToday: [r1, { status: 'completed', scheduled_service_id: null }] }) })).toBeNull();
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [s1, s2], recordsToday: [r1, { status: 'completed', scheduled_service_id: 's9' }] }) })).toBeNull();
+    // both landed -> today's visits are the real last visit; ids compare case-insensitively
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [s1, s2], recordsToday: [r1, r2] }) })).not.toBeNull();
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ id: 'S1', status: 'completed' }], recordsToday: [r1] }) })).not.toBeNull();
+    // a scheduled row read without an id can never be matched
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ status: 'completed' }], recordsToday: [r1] }) })).toBeNull();
+    // the queries carry the columns the match needs
+    const conn = fakeConn({ ...base, scheduledToday: [s1], recordsToday: [r1] });
+    await read({ conn });
+    const sel = (table) => conn.calls.filter((q) => q.table === table).flatMap((q) => q.ops.filter((o) => o[0] === 'select').flatMap((o) => o.slice(1)));
+    expect(sel('scheduled_services')).toContain('id');
+    expect(sel('service_records')).toContain('scheduled_service_id');
   });
 
   test('no visit, no customer, or nothing verified -> null', async () => {
     expect(await labelFactsLib.readLastVisitLabelFacts({ customerId: null })).toBeNull();
     expect(await read({ conn: fakeConn({ newest: null, visits: [], rows: [] }) })).toBeNull();
-    expect(await read({ conn: fakeConn({ visits: two, rows: [row({ label_verified_at: null })] }) })).toBeNull();
+    expect(await read({ conn: fakeConn({ visits: [snapVisit('r2', { p1: frozen({ labelVerifiedAt: null }) })], rows: [row()] }) })).toBeNull();
   });
 
   test('fetchLabelFacts is fail-safe: a DB error resolves to null', async () => {
@@ -365,6 +446,54 @@ describe('compliance grounding', () => {
     expect(check('Give it 3 hours and you are all set.', f).ok).toBe(true); // not a label figure at all: base lists decide
     const g = factsWith([product({ rainfastMinutes: 240, reiHours: 4, reentrySummary: null })]); // same figure both kinds
     expect(check('Give it 4 hours and the pups are good to go.', g).ok).toBe(true);
+  });
+
+  test('only a duration classified as that kind consumes its figure: a null / schedule 4 hours stays visible', () => {
+    const f = factsWith([product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })]); // rainfast 3 h, re-entry 4 h
+    const sec = labelFactsLib.labelFactsSectionFrom(f);
+    // classified re-entry / rain: consumed
+    expect(labelFactsLib.neutralizeGroundedTimes('Keep pets off the treated areas for 4 hours.', sec)).toBe('Keep pets off the treated areas for LABELTIME.');
+    expect(labelFactsLib.neutralizeGroundedTimes('It is rainfast after 3 hours.', sec)).toBe('It is rainfast after LABELTIME.');
+    // no trigger, or a scheduling time: NOT consumed, the older screens still see the duration
+    for (const reply of ['Give it 4 hours.', 'The tech arrives in 4 hours, and rain will be fine then.', "We'll be back out in 4 hours."]) {
+      expect(labelFactsLib.neutralizeGroundedTimes(reply, sec)).toBe(reply);
+    }
+    // a rainfast-only figure with no trigger is still held (earlier behavior), the re-entry figure is not
+    const g = labelFactsLib.labelFactsSectionFrom(factsWith([product({ rainfastMinutes: 120, reiHours: 0 })]));
+    expect(labelFactsLib.hasUngroundedLabelTime('Give it 2 hours.', g)).toBe(true);
+    expect(labelFactsLib.hasUngroundedLabelTime('Give it 4 hours.', sec)).toBe(false);
+    // ...and the drafter sees the null 4 hours too (it no longer disappears before the older lists run)
+    expect(hasBannedCustomerCopy('Give it 4 hours.', { labelFactsText: sec, rainTimeGuard: true })).toBe(hasBannedCustomerCopy('Give it 4 hours.'));
+    expect(hasBannedCustomerCopy('The tech arrives in 4 hours, and rain will be fine then.', { labelFactsText: sec, rainTimeGuard: true }))
+      .toBe(hasBannedCustomerCopy('The tech arrives in 4 hours, and rain will be fine then.'));
+  });
+
+  test('a clock time attached to rain / re-entry / drying wording is held; scheduling clock times pass', () => {
+    const noRain = factsWith([product({ reiHours: 0 })]); // no rainfast fact
+    const withRain = facts();
+    for (const f of [noRain, withRain]) {
+      for (const reply of [
+        'Rain after 2 PM is fine.',
+        'Rain is fine after 2:30.',
+        'Rain after 2 p.m. will not matter.',
+        'Rain by 5 is fine.',
+        'It will not wash off if it rains before 14:00.',
+        'Keep the dogs off the lawn until noon.',
+        'Keep pets off the treated areas by 5.',
+        'Wait until 5 to let the kids back out.',
+        'Keep the kids off until midnight.',
+        'It will be dry by 3 PM.',
+      ]) expect(check(reply, f).ok).toBe(false);
+    }
+    for (const reply of [
+      "We'll be there at 2 PM, rain is expected.",
+      'The tech arrives by 5 PM, and rain will be fine then.',
+      'Your appointment is at 9 am, rain or shine.',
+      'Keep people and pets off treated areas until dry.',
+      'It is rainfast after 3 hours.',
+    ]) expect(check(reply, withRain).ok).toBe(true);
+    // a unit after the number is a duration, not a clock time
+    expect(check('Keep pets off until 4 hours have passed.', withRain).ok).toBe(true);
   });
 
   test('"dry"/"drying" is its own kind that nothing grounds, even when the number is the re-entry figure', () => {
