@@ -6008,7 +6008,7 @@ async function createSelfBooking(payload = {}) {
           const replayBooked = await db('scheduled_services')
             .where({ self_booking_id: txResult.existing.id })
             .first();
-          await convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null });
+          await convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null, bookedAt: txResult.existing.created_at || null });
         } catch (err) {
           logger.warn(`[booking:confirm] replay preferred-time conversion failed for ${txResult.existing.id} (non-blocking): ${err.message}`);
         }
@@ -6411,7 +6411,17 @@ async function createSelfBooking(payload = {}) {
     // same helper.
     let preferredLeadConverted = false;
     if (!callbackVisit) {
-      preferredLeadConverted = (await convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: serviceRow })).converted > 0;
+      // One booking = at most one won lead: when the conversion above already
+      // won an originating lead (a quote-wizard lead on a provisional customer,
+      // say), the phone-matched preferred-time lead is the same appointment and
+      // must not be won too (a second funnel row -> a second reported
+      // conversion). The helper leaves it open with a note.
+      preferredLeadConverted = (await convertPreferredTimeLeadsOnBooking(db, {
+        customerId: custId,
+        booking: serviceRow,
+        bookedAt: booking?.created_at || serviceRow?.created_at || null,
+        wonLeadIds: leadConversion?.converted ? (leadConversion.leadIds || []) : null,
+      })).converted > 0;
     }
 
     // Persist an ad-tracked self-booking's click id onto a won lead so the

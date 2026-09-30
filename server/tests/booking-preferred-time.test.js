@@ -20,6 +20,7 @@ let mockRetireError = null;    // makes the booking_intents suppression UPDATE t
 let mockLeadSettled = false;    // the bell's just-before re-read finds the lead already converted/closed
 let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
+let mockWonLeads = [];         // won leads (other types) a customer's booking already produced
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
 
@@ -38,7 +39,8 @@ function builder(table) {
     limit: () => b,
     select: () => b,
     then: (resolve, reject) => Promise.resolve(
-      table === 'leads' ? mockOpenLeads
+      table === 'leads as won_lead' ? mockWonLeads
+      : table === 'leads' ? mockOpenLeads
         : table === 'self_booked_appointments as sba' ? (mockBookedList || (mockBookedSince ? [mockBookedSince] : []))
           : [],
     ).then(resolve, reject),
@@ -174,6 +176,7 @@ beforeEach(() => {
   mockLeadUpdateRows = 1;
   mockRetireError = null;
   mockBookedSince = null;
+  mockWonLeads = [];
   mockLeadSettled = false;
   mockBookedList = null;
   mockScheduledService = null;
@@ -492,6 +495,34 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
+  const wonBookedAt = new Date('2026-09-29T15:00:00Z');
+  const wonNotes = () => mockOps.filter((o) => o.table === 'lead_activities' && o.op === 'insert');
+  test('one-booking-one-win, post-commit reconcile path: the booking already won a lead -> the bell stays silent AND the preferred lead is not won (left open, noted)', async () => {
+    mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: wonBookedAt };
+    mockWonLeads = [{ id: 'quote-lead-9' }];
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    expect(wonNotes()).toHaveLength(1);
+    expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update' && 'status' in o.arg)).toHaveLength(0);
+  });
+
+  test('one-booking-one-win, post-commit reconcile path: a booking with NO other won lead still wins the preferred lead (unchanged)', async () => {
+    mockBookedSince = { id: 'sba-1', customer_id: 'cust-1', created_at: wonBookedAt };
+    mockWonLeads = [];
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockMarkConverted).toHaveBeenCalledTimes(1);
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
   test('a free callback visit inside the reconcile window is not an acquisition: no conversion, the lead stays open and rings', async () => {
     mockBookedSince = { id: 'sba-1', customer_id: 'cust-1' };
     mockScheduledService = { id: 'ss-1', self_booking_id: 'sba-1', is_callback: true };
@@ -780,6 +811,75 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
     expect(mockMarkConverted).not.toHaveBeenCalled();
   });
 
+  describe('one booking = at most one won lead (codex #5399 r8 P1)', () => {
+    const openLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    const bookedAt = new Date('2026-09-29T15:00:00Z');
+    const noteInserts = () => mockOps.filter((o) => o.table === 'lead_activities' && o.op === 'insert');
+    beforeEach(() => {
+      mockCustomer = { phone: '+19415550100' };
+      mockOpenLeads = [{ id: 'lead-1' }];
+      mockExistingLead = openLead;
+    });
+
+    test('normal confirm path: the booking already won an originating lead (leadConversion) -> the preferred lead is NOT won; left open with a note', async () => {
+      const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null, bookedAt, wonLeadIds: ['quote-lead-9'] });
+      expect(out).toEqual({ converted: 0, alreadyWon: true });
+      expect(mockMarkConverted).not.toHaveBeenCalled();
+      // no raw status write, no funnel write, nothing sent
+      expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update')).toHaveLength(0);
+      expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
+      expect(noteInserts()).toHaveLength(1);
+      expect(noteInserts()[0].arg).toMatchObject({ lead_id: 'lead-1', activity_type: 'note' });
+      expect(JSON.parse(noteInserts()[0].arg.metadata)).toEqual({ reason: 'booking_already_won', wonLeadIds: ['quote-lead-9'] });
+      expect(mockSendSMS).not.toHaveBeenCalled();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('no won lead from the booking: the preferred lead converts exactly as before (hint absent, lookup empty)', async () => {
+      mockWonLeads = [];
+      const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null, bookedAt, wonLeadIds: null });
+      expect(out).toEqual({ converted: 1 });
+      expect(mockMarkConverted).toHaveBeenCalledTimes(1);
+      expect(noteInserts()).toHaveLength(0);
+    });
+
+    test('replay / post-commit path (no leadConversion in hand): a won lead of this customer converted since the booking -> skip the win', async () => {
+      mockWonLeads = [{ id: 'quote-lead-9' }];
+      const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null, bookedAt });
+      expect(out).toEqual({ converted: 0, alreadyWon: true });
+      expect(mockMarkConverted).not.toHaveBeenCalled();
+      // the lookup is scoped: this customer, won, not the preferred-time type, converted at/after the booking (minus slack)
+      const wonQuery = mockDb.mock.calls.filter((c) => c[0] === 'leads as won_lead');
+      expect(wonQuery).toHaveLength(1);
+    });
+
+    test('the won-lead note is written once per lead (a replay does not stack notes)', async () => {
+      mockWonLeads = [{ id: 'quote-lead-9' }];
+      await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt });
+      expect(noteInserts()).toHaveLength(1);
+    });
+
+    test('an ambiguous phone still converts nothing and never reaches the won-lead lookup', async () => {
+      mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
+      mockWonLeads = [{ id: 'quote-lead-9' }];
+      expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt })).toEqual({ converted: 0, ambiguous: true });
+      expect(mockDb.mock.calls.filter((c) => c[0] === 'leads as won_lead')).toHaveLength(0);
+    });
+
+    test('a failed won-lead lookup is ambiguous, not "won": the lead converts as before', async () => {
+      mockDb.mockImplementation((table) => {
+        if (table === 'leads as won_lead') throw new Error('db down');
+        return builder(table);
+      });
+      try {
+        const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt });
+        expect(out).toEqual({ converted: 1 });
+      } finally {
+        mockDb.mockImplementation((table) => builder(table));
+      }
+    });
+  });
+
   test('no customer / no phone: nothing is touched; a failure never reaches the booking', async () => {
     expect(await convertPreferredTimeLeadsOnBooking(mockDb, {})).toEqual({ converted: 0 });
     mockCustomer = { phone: null };
@@ -813,8 +913,11 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
     const replayStart = src.indexOf('if (txResult.existing) {');
     const replayEnd = src.indexOf('const { booking, serviceRow } = txResult;');
     expect(replayStart).toBeGreaterThan(-1);
-    expect(src.slice(replayStart, replayEnd)).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null })');
-    expect(src.slice(replayEnd)).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: serviceRow })');
+    expect(src.slice(replayStart, replayEnd)).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId, booking: replayBooked || null, bookedAt: txResult.existing.created_at || null })');
+    const normal = src.slice(replayEnd);
+    expect(normal).toContain('convertPreferredTimeLeadsOnBooking(db, {\n        customerId: custId,\n        booking: serviceRow,');
+    // ...and the normal path hands the helper the conversion it just ran, so it can skip a second win.
+    expect(normal).toContain('wonLeadIds: leadConversion?.converted ? (leadConversion.leadIds || []) : null');
     expect(src).toMatch(/leadConverted: !!leadConversion\?\.converted \|\| preferredLeadConverted/);
     // No raw status write anywhere in the service.
     const svc = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');

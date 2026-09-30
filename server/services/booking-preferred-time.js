@@ -198,7 +198,8 @@ async function lockPhone(trx, phone) {
  * booking's conversion took the (just filed) preferred-time lead — via
  * convertPreferredTimeLeadsOnBooking, the same lifecycle path /confirm runs, so
  * a Waves Assessment booking or an ambiguous phone still leaves the lead open.
- * Runs AFTER the submit's commit: a booking that commits later than this check
+ * Also true when the booking already produced another won lead (one booking =
+ * at most one win): that request is moot too, so it must not ring. Runs AFTER the submit's commit: a booking that commits later than this check
  * finds the committed lead and converts it itself; one that committed earlier
  * is seen here. Never throws.
  */
@@ -211,7 +212,7 @@ async function reconcileBookingSince(db, { phone, since }) {
       .whereNot('sba.status', 'cancelled')
       .orderBy('sba.created_at', 'desc')
       .limit(10)
-      .select('sba.id', 'sba.customer_id');
+      .select('sba.id', 'sba.customer_id', 'sba.created_at');
     // A free re-service callback is a warranty visit, not an acquisition:
     // createSelfBooking (normal + replay paths) skips the lead conversion for a
     // callbackVisit, so this recovery path must too. Take the newest booking
@@ -227,8 +228,15 @@ async function reconcileBookingSince(db, { phone, since }) {
       break;
     }
     if (!booked) return false;
-    const out = await convertPreferredTimeLeadsOnBooking(db, { customerId: booked.customer_id, booking: service });
-    return out.converted > 0;
+    const out = await convertPreferredTimeLeadsOnBooking(db, {
+      customerId: booked.customer_id,
+      booking: service,
+      bookedAt: booked.created_at || null,
+    });
+    // A booking that already produced its ONE won lead (see
+    // convertPreferredTimeLeadsOnBooking) leaves the preferred-time lead open
+    // for staff but is just as "already booked" for the bell.
+    return out.converted > 0 || !!out.alreadyWon;
   } catch (err) {
     logger.warn(`[booking:preferred-time] booking reconcile failed: ${err.message}`);
     return false;
@@ -435,6 +443,63 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   return { created, leadId };
 }
 
+// The ONE-BOOKING-ONE-WIN rule (codex #5399 r8 P1). A booking's conversion
+// (quote-wizard / estimate / recurring-series lead) may already have won an
+// ORIGINATING lead for the booked customer; a phone-matched preferred-time lead
+// is then the same appointment, and winning it too would advance a second
+// ad_service_attribution row to 'booked' — one appointment reported and
+// uploaded as two conversions. markConverted links the win to the customer
+// (leads.customer_id) and stamps converted_at, so "this booking already won a
+// lead" is: a live WON lead of another type for this customer converted at or
+// after the booking was created (60 s of app/DB clock slack, the same
+// tolerance the submit-side reconcile uses). Returns the won lead ids ([] when
+// none). Reads only; a failed read answers [] (the caller then proceeds as
+// before rather than blocking a conversion on an ambiguous read).
+async function wonLeadIdsForBooking(db, { customerId, bookedAt }) {
+  if (!customerId || !bookedAt) return [];
+  try {
+    const since = new Date(new Date(bookedAt).getTime() - 60 * 1000);
+    if (Number.isNaN(since.getTime())) return [];
+    const rows = await db('leads as won_lead')
+      .where('won_lead.customer_id', customerId)
+      .where('won_lead.status', 'won')
+      .whereNull('won_lead.deleted_at')
+      .whereNot('won_lead.lead_type', LEAD_TYPE)
+      .where('won_lead.converted_at', '>=', since)
+      .select('won_lead.id');
+    return (rows || []).map((r) => r.id).filter(Boolean);
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] won-lead lookup failed for customer=${customerId}: ${err.message}`);
+    return [];
+  }
+}
+
+// Retire-without-a-win. There is no status that closes a lead "handled" without
+// the funnel reading it as lost ('duplicate', 'unresponsive' and the rest all
+// collapse to funnel 'lost' via lead-funnel-bridge, and a raw status write
+// would skip the bridge), so none is invented: the preferred-time lead stays
+// OPEN, and this leaves a note on it naming the appointment's won lead so the
+// office can close it. No bell fires for it (reconcileBookingSince reports it
+// handled). Idempotent per lead; best-effort.
+async function noteBookingAlreadyWon(db, { leadId, wonLeadIds }) {
+  try {
+    const seen = await db('lead_activities')
+      .where({ lead_id: leadId, activity_type: 'note' })
+      .whereRaw("metadata::jsonb->>'reason' = 'booking_already_won'")
+      .first('id');
+    if (seen) return;
+    await db('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'note',
+      description: `Customer booked on /book; that booking already won another lead (${wonLeadIds.join(', ') || 'see the customer'}), so this request was NOT counted as a second win. Close it if nothing else is needed.`,
+      performed_by: 'system',
+      metadata: JSON.stringify({ reason: 'booking_already_won', wonLeadIds }),
+    });
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] note on lead ${leadId} failed: ${err.message}`);
+  }
+}
+
 /**
  * A customer who just completed a booking no longer needs the office to chase
  * their preferred-time request: convert THE open preferred-time lead for the
@@ -453,13 +518,18 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
  * phone-matched lead ('ambiguous_contact'). Those stay open for staff. Nothing
  * is retired without a win.
  *
+ * One booking = at most one won lead: when the booking already won another
+ * lead (`wonLeadIds` from the caller's own conversion, else the customer's won
+ * lead converted since `bookedAt`), this one is NOT won — it stays open with a
+ * note and { alreadyWon: true } is returned (no bell; see noteBookingAlreadyWon).
+ *
  * Idempotent (a converted lead is no longer open) so the normal commit path and
  * the txResult.existing replay path can both call it. Never throws into the
  * booking. Returns { converted, ambiguous } — converted is 1 only when
  * markConverted actually won its conditional write, so the caller can tell
  * attributeSelfBooking that the funnel entry is the lead's.
  */
-async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null } = {}) {
+async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null, bookedAt = null, wonLeadIds = null } = {}) {
   if (!customerId) return { converted: 0 };
   try {
     const customer = await db('customers').where({ id: customerId }).first('phone');
@@ -475,6 +545,18 @@ async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = nu
     if (open.length > 1) {
       logger.warn(`[booking:preferred-time] ${open.length} open preferred-time leads for customer=${customerId}'s phone — not converting any (ambiguous); staff resolve`);
       return { converted: 0, ambiguous: true };
+    }
+    // One booking, at most one won lead: when the booking already won another
+    // lead (the caller's own conversion result, or — for the replay and
+    // post-commit reconcile paths that have no such result — the customer's
+    // won lead converted since the booking was created), do not win this one.
+    const alreadyWonIds = (Array.isArray(wonLeadIds) && wonLeadIds.length)
+      ? wonLeadIds
+      : await wonLeadIdsForBooking(db, { customerId, bookedAt: bookedAt || (booking && booking.created_at) || null });
+    if (alreadyWonIds.length) {
+      logger.info(`[booking:preferred-time] booking for customer=${customerId} already won lead(s) ${alreadyWonIds.join(',')} — leaving preferred-time lead ${open[0].id} unconverted (one booking, one win)`);
+      await noteBookingAlreadyWon(db, { leadId: open[0].id, wonLeadIds: alreadyWonIds });
+      return { converted: 0, alreadyWon: true };
     }
     const { convertLeadFromEvent } = require('./lead-estimate-link');
     const result = await convertLeadFromEvent({
