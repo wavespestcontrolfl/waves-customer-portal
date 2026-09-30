@@ -623,7 +623,14 @@ const SERVICE_DETAILS_COPY = {
     // walkthrough (included + process) and every scope:'recurring' entry, so
     // a one-time customer is never promised visits, re-service, or a program.
     oneTime: {
+      // The recurring program walkthrough does not apply to one-time work.
+      included: [],
+      process: [],
       ctaMicro: 'The lawn work on your estimate · Documented in your service report',
+      complianceExtras: [
+        'Florida law requires a conspicuous treatment notice when pesticides are applied to lawns or exterior foliage — we post it whenever a qualifying application is made, and your service report carries the full details behind the sign.',
+        'Local fertilizer ordinances: Manatee County, the City of Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn and landscape fertilizers from June 1 through September 30. The property address determines which ordinance applies, and any fertilizer we apply follows it.',
+      ],
       documentation: {
         heading: 'Documented — no mystery treatments, no missing paperwork',
         bullets: [
@@ -1012,17 +1019,23 @@ function resolveSections(sections, { lawnScope, bermuda }) {
 // options.lawnScope: 'one_time' when the estimate's only lawn work is a
 // one-time lawn row (the route decides); anything else is the recurring guide.
 async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {}) {
-  const copy = SERVICE_DETAILS_COPY[serviceKey];
-  if (!copy) return null;
-  const lawnScope = options.lawnScope === 'one_time' && copy.oneTime ? 'one_time' : 'recurring';
-  const variant = lawnScope === 'one_time' ? copy.oneTime : {};
+  const baseCopy = SERVICE_DETAILS_COPY[serviceKey];
+  if (!baseCopy) return null;
+  const lawnScope = options.lawnScope === 'one_time' && baseCopy.oneTime ? 'one_time' : 'recurring';
+  // ONE merge point for the one-time variant: every field below reads from
+  // `copy`, so a oneTime entry overrides the recurring field it names —
+  // nothing is patched field by field downstream. The full-content test in
+  // estimate-service-details.test.js scans every rendered field of the
+  // one-time guide for recurring-program promises.
+  const { oneTime: oneTimeCopy, ...recurringCopy } = baseCopy;
+  const copy = lawnScope === 'one_time' ? { ...recurringCopy, ...oneTimeCopy } : recurringCopy;
   // Ownership-marked entries (systemBox rows, process steps, FAQ) keep only
   // the variant matching this estimate; unmarked entries always render. The
   // marker never reaches renderers.
   const stationOwnership = estimateStationOwnership(estimate);
   const ownershipMatches = (marker) => marker == null || marker === stationOwnership;
   const products = await fetchRegistryProducts(serviceKey);
-  const documentation = variant.documentation || copy.documentationOverride || {
+  const documentation = copy.documentation || copy.documentationOverride || {
     heading: DOCUMENTATION_SECTION.heading,
     bullets: serviceKey === 'lawn_care'
       ? [...DOCUMENTATION_SECTION.bullets, LAWN_DOCUMENTATION_EXTRA]
@@ -1042,8 +1055,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
     customerPhone: formatGuidePhone(estimate.customer_phone),
     address: estimate.address || null,
     estimateSlug: estimate.estimate_slug || null,
-    // One-time lawn estimates skip the recurring program walkthrough.
-    included: lawnScope === 'one_time' ? [] : copy.included,
+    included: copy.included || [],
     // Generic ordered blocks rendered right after the systemBox (schema
     // documented on the lawn_care entry), markers resolved.
     sections: resolveSections(copy.sections, {
@@ -1054,7 +1066,7 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
         && (copy.sections || []).some((sec) => sec && sec.requires === 'bermuda_suppression')
         && estimateHasBermudaSuppression(estimate),
     }),
-    process: (lawnScope === 'one_time' ? [] : (copy.process || [])).reduce((acc, step) => {
+    process: (copy.process || []).reduce((acc, step) => {
       if (typeof step === 'string') { acc.push(step); return acc; }
       if (step && typeof step === 'object' && ownershipMatches(step.ownership)) acc.push(step.text);
       return acc;
@@ -1090,7 +1102,6 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
     // point customers at a selector that is intentionally absent. Env read
     // at request time; the marker element never reaches renderers either way.
     systemBox: (() => {
-      if (variant.systemBox) return variant.systemBox;
       if (!copy.systemBox) return null;
       const bondGateOn = ['1', 'true', 'on'].includes(String(process.env.GATE_TERMITE_BOND_OPTION || '').toLowerCase());
       const rows = (copy.systemBox.rows || [])
@@ -1100,11 +1111,11 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
         .map((row) => (Array.isArray(row) && row.length > 2 ? [row[0], row[1]] : row));
       return { ...copy.systemBox, rows };
     })(),
-    responsibilities: variant.responsibilities || copy.responsibilities || null,
+    responsibilities: copy.responsibilities || null,
     // One CTA, after the full picture — every external guide review
     // (termite, pest, mosquito) flagged the mid-document CTA as premature.
     ctaPlacement: copy.ctaPlacement || 'closing_only',
-    ctaMicro: variant.ctaMicro || copy.ctaMicro || null,
+    ctaMicro: copy.ctaMicro || null,
     products,
   };
 }

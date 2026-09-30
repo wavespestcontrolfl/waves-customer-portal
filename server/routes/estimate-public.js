@@ -26775,7 +26775,9 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // per estimate+service, underscore-safe; never a different packet)
     // covers restarts, best-effort: its failure never blocks the send.
     const tenDigits = String(contact.customerPhone).replace(/\D/g, '').slice(-10);
-    const dedupKey = `${estimate.id}:${serviceKey}:${tenDigits}`;
+    // The lawn guide's one-time variant is a different packet (its own link):
+    // it gets its own claim so neither variant dedups the other.
+    const dedupKey = `${estimate.id}:${serviceKey}${oneTimeLawnGuide ? ':one_time' : ''}:${tenDigits}`;
     const claimKey = dedupKey;
     // Codex round 3 on #4608 (P0): stamps the claim row's outcome durably so
     // a concurrent loser's poll can read the SAME refusal — best-effort,
@@ -26834,18 +26836,26 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     // form. The bare URL is a substring of the scheme-ful one, so matching on
     // it also still finds rows logged before this send moved onto the chokepoint.
     const pdfUrlBare = stripSmsUrlScheme(pdfUrl);
-    const recentPacketSend = async () => db('sms_log')
-      .where({ direction: 'outbound', message_type: 'estimate_service_details' })
-      .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
-      // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
-      // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
-      // so a row matches on the raw URL OR on a code minted for that exact URL.
-      .where(function packetLinkInBody() {
-        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
-          .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
-      })
-      .whereRaw("created_at >= NOW() - interval '10 minutes'")
-      .first();
+    const recentPacketSend = async () => {
+      let q = db('sms_log')
+        .where({ direction: 'outbound', message_type: 'estimate_service_details' })
+        .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
+        // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
+        // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
+        // so a row matches on the raw URL OR on a code minted for that exact URL.
+        .where(function packetLinkInBody() {
+          this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrlBare])
+            .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
+        })
+        .whereRaw("created_at >= NOW() - interval '10 minutes'");
+      // The recurring lawn URL is a prefix of the one-time one, so a one-time
+      // text must not dedup a recurring request. (A wrapped body carries only
+      // /l/<code>, never the raw URL, so this never excludes a short-link row.)
+      if (serviceKey === 'lawn_care' && !oneTimeLawnGuide) {
+        q = q.whereRaw('strpos(COALESCE(message_body, \'\'), ?) = 0', [`${pdfUrlBare}?scope=one_time`]);
+      }
+      return q.first();
+    };
     const sendPromise = (async () => {
       // Claim acquired = fresh insert OR takeover of a claim older than the
       // window (a crashed winner never blocks forever). Claim-infra failure

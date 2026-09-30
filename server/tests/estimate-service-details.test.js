@@ -222,6 +222,24 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     expect(watering.paragraphs.join(' ')).toMatch(/watering restriction in force for your address/);
   });
 
+  test('the WHOLE one-time guide (every rendered field but products) carries no recurring-program promise', async () => {
+    // Chokepoint test (Codex r2–r4 each found one more field): scan every
+    // string the one-time content hands the renderer, not a chosen list.
+    const lawn = await withBermudaGate('true', () => buildServiceDetailsContent('lawn_care', BERMUDA_ESTIMATE, { lawnScope: 'one_time' }));
+    const { products: _products, ...rendered } = lawn;
+    const strings = [];
+    const walk = (node, path) => {
+      if (typeof node === 'string') strings.push([path, node]);
+      else if (Array.isArray(node)) node.forEach((n, i) => walk(n, `${path}[${i}]`));
+      else if (node && typeof node === 'object') Object.entries(node).forEach(([k, v]) => walk(v, `${path}.${k}`));
+    };
+    walk(rendered, 'content');
+    // Promise language only — neutral "before every visit" prep wording is fine.
+    const RECURRING = /9–12|per year|re-service|no charge|comprehensive|your plan|plan is active|lawn program|built into the program|turf-specific program|next visit|summer visits|repeat treatments|lawn-health|frequency|guarantee|callback|Bermuda removal from/i;
+    const hits = strings.filter(([path, text]) => path !== 'content.estimateUrl' && RECURRING.test(text));
+    expect(hits).toEqual([]);
+  });
+
   test('the one-time variant drops every recurring-program promise (Codex r1 P1)', async () => {
     const lawn = await withBermudaGate('true', () => buildServiceDetailsContent('lawn_care', {}, { lawnScope: 'one_time' }));
     expect(lawn.systemBox.heading).toBe('Your lawn service at a glance');
