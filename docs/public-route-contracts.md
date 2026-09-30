@@ -2098,7 +2098,7 @@ nosniff`, `X-Robots-Tag: noindex` and `Cross-Origin-Resource-Policy:
 cross-origin` (helmet defaults to same-origin, which would block the <img> on
 the marketing site or a separate API origin). No server-side image cache
 (provider terms are display-only); a 60 req/min per-IP limiter (IPv6 /64
-collapsed) is mounted on the route before the global `/api/` limiter.
+collapsed) fronts the whole mount, which sits in `server/index.js` ABOVE the global `cors()` (it would otherwise answer an OPTIONS preflight with a bare 204 ahead of the router), the global `/api/` limiter and the body parsers.
 Regression guard: `server/tests/customer-map-no-key.test.js` fails if any
 server module outside an explicit server-only/staff-only allowlist references
 the Static Maps endpoint, and asserts the touched customer payloads carry no

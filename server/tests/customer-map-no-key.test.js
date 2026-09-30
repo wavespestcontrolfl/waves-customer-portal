@@ -208,4 +208,15 @@ describe('static guard: keyed Static Maps URLs stay server-only / staff-only', (
       'services/service-report/satellite-treatment-map.js',
     ]);
   });
+
+  test('the signed map proxy is mounted above the global cors(), limiter and body parsers', () => {
+    const src = files.find((f) => f.rel === 'index.js').src;
+    const mount = src.indexOf("app.use('/api/public/map-image'");
+    expect(mount).toBeGreaterThan(-1);
+    for (const later of ['app.use(cors(', "app.use('/api/', limiter)", 'app.use(express.json(']) {
+      const at = src.indexOf(later);
+      expect(at).toBeGreaterThan(-1);
+      expect([later, mount < at]).toEqual([later, true]);
+    }
+  });
 });
