@@ -4962,5 +4962,126 @@ postgres('visit summary recipient recovery', () => {
       await require('../services/invoice').processScheduledSends();
       expect(convert).toHaveBeenCalledWith({ source: 'invoice_sent', customerId: fixture.customerId });
     });
+
+    // The fold asks the canonical senders' own verdict (billingTextVerdict): the
+    // billing choice, receipt toggles, template switches and account credit each
+    // keep today's separate text, at plan time and again under the handoff lock.
+    describe.each([
+      ['pay link', { scheduled: true }],
+      ['receipt', { status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_verdict' } }],
+    ])('%s', (name, stopOptions) => {
+      const isReceipt = name === 'receipt';
+      const templateKey = isReceipt ? 'invoice_receipt' : 'invoice_sent';
+      const folded = () => (isReceipt ? / Your receipt: / : / Pay your invoice: /);
+      // Runs before the first send attempt reaches its locked handoff: the rows
+      // change after the plan was made.
+      const changeBeforeHandoff = (change) => {
+        let calls = 0;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          calls += 1;
+          if (calls === 1) await change();
+          return handoffSender()(input);
+        });
+      };
+      const expectPlainFallback = async (invoiceId) => {
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(folded());
+        expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
+        expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: null });
+        const row = await invoiceRow(invoiceId);
+        expect(row.receipt_sent_at).toBeNull();
+        expect(row.sms_sent_at).toBeNull();
+      };
+      afterEach(async () => { await mockPg('sms_templates').where({ template_key: templateKey }).update({ is_active: true }); });
+
+      test('a billing choice moved away from Text between the plan and the handoff sends the plain summary', async () => {
+        const invoiceId = await stop(stopOptions);
+        await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, invoice_channels: ['sms', 'email'], payment_receipt_channels: ['sms', 'email'] });
+        changeBeforeHandoff(() => mockPg('notification_prefs').where({ customer_id: fixture.customerId })
+          .update(isReceipt ? { payment_receipt_channels: ['email'] } : { invoice_channels: ['email'] }));
+        await deliver();
+        await expectPlainFallback(invoiceId);
+      });
+
+      test('a disabled SMS template keeps the plain summary, at plan time and when it changes before the handoff', async () => {
+        const invoiceId = await stop(stopOptions);
+        await mockPg('sms_templates').where({ template_key: templateKey }).update({ is_active: false });
+        await deliver();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toBe(plainBody());
+        expect(await summaryEffect()).toMatchObject({ status: 'sent', provider_id: null });
+        expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+      });
+
+      test('a template switched off between the plan and the handoff sends the plain summary', async () => {
+        const invoiceId = await stop(stopOptions);
+        changeBeforeHandoff(() => mockPg('sms_templates').where({ template_key: templateKey }).update({ is_active: false }));
+        await deliver();
+        await expectPlainFallback(invoiceId);
+      });
+    });
+
+    test('a receipt toggle turned off before the handoff sends the plain summary', async () => {
+      const invoiceId = await stop({ status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_toggle' } });
+      await mockPg('notification_prefs').insert({ customer_id: fixture.customerId });
+      let calls = 0;
+      sendCustomerMessage.mockImplementation(async (input) => {
+        calls += 1;
+        if (calls === 1) await mockPg('notification_prefs').where({ customer_id: fixture.customerId }).update({ payment_confirmation_sms: false });
+        return handoffSender()(input);
+      });
+      await deliver();
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+      expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
+      expect((await invoiceRow(invoiceId)).receipt_sent_at).toBeNull();
+    });
+
+    test.each([
+      ['no deliverable email: the canonical path falls back to Text, so the receipt rides the summary', null, true],
+      ['a deliverable email: the canonical path sends the email only, so the summary stays plain', 'holder@example.invalid', false],
+    ])('a legacy email-only receipt choice with %s', async (_name, email, folds) => {
+      const invoiceId = await stop({ status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: 'pi_fixture_legacy' } });
+      await mockPg('customers').where({ id: fixture.customerId }).update({ email });
+      await mockPg('notification_prefs').insert({ customer_id: fixture.customerId, payment_receipt_channel: 'email' });
+      await deliver();
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      if (folds) expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/ Your receipt: /);
+      else expect(sendCustomerMessage.mock.calls[0][0].body).toBe(plainBody());
+      expect(Boolean((await invoiceRow(invoiceId)).receipt_sent_at)).toBe(folds);
+    });
+
+    describe('account credit', () => {
+      const creditOn = () => mockPg('customers').where({ id: fixture.customerId }).update({ auto_apply_account_credit: true, account_credits: 500 });
+
+      test('credit the send queue would apply first keeps the plain summary and leaves the invoice to the queue', async () => {
+        const invoiceId = await stop({ scheduled: true });
+        await creditOn();
+        await deliver();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toBe(plainBody());
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: null, sms_sent_at: null });
+      });
+
+      test('credit that arrives between the plan and the handoff sends the plain summary', async () => {
+        const invoiceId = await stop({ scheduled: true });
+        let calls = 0;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          calls += 1;
+          if (calls === 1) await creditOn();
+          return handoffSender()(input);
+        });
+        await deliver();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+        expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
+        expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+      });
+
+      test('a customer who has not opted into automatic credit still gets the folded pay link', async () => {
+        await stop({ scheduled: true });
+        await mockPg('customers').where({ id: fixture.customerId }).update({ auto_apply_account_credit: false, account_credits: 500 });
+        await deliver();
+        expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/ Pay your invoice: /);
+      });
+    });
   });
 });

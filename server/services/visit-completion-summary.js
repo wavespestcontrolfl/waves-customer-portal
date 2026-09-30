@@ -6,6 +6,7 @@ const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
 const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
 const { createDefaultCustomerRows } = require('./customer-default-rows');
+const { invoiceAmountDue } = require('./invoice-helpers');
 
 const VISIT_SUMMARY_TOKEN_RE = /^[a-f0-9]{64}$/;
 
@@ -359,25 +360,28 @@ function summaryOutcomeAmbiguous(effect) {
 // it lands) belongs in this function beside the payer checks.
 // `preSchedule` asks before the coordinator has queued the invoice (draft).
 async function summaryBillingLinkPlan(context, packetId, { preSchedule = false } = {}) {
-  const { visit, customer, prefs, database, visible, requested, summaryUrl } = context;
-  if (!visible || !requested || !summaryUrl || visit.billing_hold || prefs?.sms_enabled === false) return null;
+  const { visit, customer, database, visible, requested, summaryUrl } = context;
+  if (!visible || !requested || !summaryUrl || visit.billing_hold) return null;
   const recipient = getServiceContactSmsRecipient(customer);
   if (!recipient?.phone) return null;
   const invoice = await database('invoices').where({ visit_completion_packet_id: packetId }).first();
   if (!invoice?.token || invoice.customer_id !== visit.customer_id || invoice.payer_id || invoice.payer_statement_id) return null;
-  const holder = await database('customers').where({ id: invoice.customer_id }).whereNull('deleted_at').first('phone');
-  if (!holder?.phone || !sameSmsDestination(holder.phone, recipient.phone)) return null;
-  const { invoiceAmountDue } = require('./invoice-helpers');
   if (!(invoiceAmountDue(invoice) > 0)) return null;
-  const channels = require('./billing-delivery-channels').billingChannelsPayload(prefs || {});
-  const textOnly = (list) => list.includes('sms') && !list.includes('push');
-  if (invoice.status === 'paid') {
-    if (invoice.receipt_sent_at || prefs?.payment_receipt === false || prefs?.payment_confirmation_sms === false
-      || !textOnly(channels.paymentConfirmationChannels)) return null;
-    return { kind: 'receipt', invoiceId: invoice.id };
-  }
-  if (!(preSchedule ? invoice.status === 'draft' : summaryPayLinkQueued(invoice)) || !textOnly(channels.invoiceChannels)) return null;
-  return { kind: 'pay_link', invoiceId: invoice.id };
+  const kind = invoice.status === 'paid' ? 'receipt' : 'pay_link';
+  if (kind === 'receipt' ? invoice.receipt_sent_at : !(preSchedule ? invoice.status === 'draft' : summaryPayLinkQueued(invoice))) return null;
+  if (!(await summaryLinkSendable(database, invoice, kind, recipient.phone))) return null;
+  return { kind, invoiceId: invoice.id };
+}
+
+// Whether the canonical invoice/receipt text would go to the person the summary
+// text goes to, right now: the invoice text's phone (the account holder's) is
+// that number, and billingTextVerdict, the canonical senders' own verdict
+// (consent and billing channel choice, template kill switch, account credit).
+// One function, asked at plan time and again under the handoff lock.
+async function summaryLinkSendable(database, invoice, kind, recipientPhone) {
+  const holder = await database('customers').where({ id: invoice.customer_id }).whereNull('deleted_at').first('phone');
+  if (!holder?.phone || !sameSmsDestination(holder.phone, recipientPhone)) return false;
+  return (await require('./messaging/billing-text-verdict').billingTextVerdict(kind, invoice, { phone: holder.phone, database })).ok;
 }
 
 // Read at the handoff under the held customer row (payer writers commit under
@@ -391,18 +395,20 @@ async function summaryBillingLinkPlan(context, packetId, { preSchedule = false }
 // skipped while its row is held (the drain takes rows SKIP LOCKED) and one
 // already running is stale here. Job row before invoice row, as the receipt
 // worker takes them.
-async function summaryBillingLinkLive(trx, link, visitId, { lock = false } = {}) {
+async function summaryBillingLinkLive(trx, link, visitId, { lock = false, recipientPhone } = {}) {
   if (lock && link.kind === 'receipt') {
     const job = await trx('receipt_delivery_jobs').where({ invoice_id: link.invoiceId }).forUpdate().first('status');
     if (job?.status === 'running') return false;
   }
   const query = trx('invoices').where({ id: link.invoiceId });
   if (lock) query.forUpdate();
-  const invoice = await query.first('status', 'payer_id', 'payer_statement_id', 'receipt_sent_at', 'scheduled_send_error');
+  const invoice = await query.first();
   const visit = await trx('service_visits').where({ id: visitId }).first('billing_hold');
   if (!invoice || !visit || visit.billing_hold || invoice.payer_id || invoice.payer_statement_id) return false;
-  if (link.kind === 'receipt') return invoice.status === 'paid' && !invoice.receipt_sent_at;
-  return summaryPayLinkQueued(invoice);
+  if (link.kind === 'receipt' ? invoice.status !== 'paid' || invoice.receipt_sent_at : !summaryPayLinkQueued(invoice)) return false;
+  // The plan's own question again, on the rows held now: a billing choice, a
+  // receipt toggle, a template switch or account credit that changed since.
+  return summaryLinkSendable(trx, invoice, link.kind, recipientPhone);
 }
 
 async function summaryBillingLinkText(link) {
@@ -459,7 +465,7 @@ async function sendSummarySms({ packet, visit, member, customer, summaryUrl, req
               && currentPrefs.service_completed !== false
               && sameSmsDestination(getServiceContactSmsRecipient(current).phone, recipient.phone);
             if (!allowed) return false;
-            if (link && !(await summaryBillingLinkLive(trx, link, visit.id, { lock: phase === 'dispatch' }))) {
+            if (link && !(await summaryBillingLinkLive(trx, link, visit.id, { lock: phase === 'dispatch', recipientPhone: recipient.phone }))) {
               linkStale = true;
               return false;
             }

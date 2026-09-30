@@ -631,6 +631,23 @@ async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system'
 }
 
 /**
+ * Whether the seam auto-apply (autoApplyAccountCreditIfEnabled) would draw
+ * credit against this invoice right now: the gate, the customer's own opt-in
+ * and a balance the same computeApplication would spend. A read on the
+ * caller's connection (the handoff holds the customer row, so the balance
+ * cannot move under it); a read failure answers yes, since an unknown balance
+ * must not put a full-price pay link in front of the customer.
+ */
+async function autoApplyWouldApply(invoice, dbh = db) {
+  try {
+    if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return false;
+    if (!(await customerAutoApplyEnabled(invoice.customer_id, dbh))) return false;
+    const balance = await getBalance(invoice.customer_id, dbh);
+    return computeApplication({ total: invoice.total, creditApplied: invoice.credit_applied, balance }).applyAmt > 0;
+  } catch { return true; }
+}
+
+/**
  * Reverse a specific amount of auto-applied account credit on a still-collectible
  * invoice — return it to the customer's balance and reduce credit_applied by the
  * same amount (never below 0). Used when a seam applied credit but delivery then
@@ -731,6 +748,7 @@ module.exports = {
   computeApplication,
   applyAccountCreditToInvoice,
   autoApplyAccountCreditIfEnabled,
+  autoApplyWouldApply,
   runPostFullCoverageSideEffects,
   reverseAppliedCredit,
   reverseCreditAndStampPayer,
