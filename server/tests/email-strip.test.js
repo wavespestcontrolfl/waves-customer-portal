@@ -105,4 +105,11 @@ describe('ownReplySubject', () => {
     expect(ownReplySubject('Re: Booked you for Friday 9am', ['Please reschedule Friday'])).toBe('Booked you for Friday 9am');
     expect(ownReplySubject('Estimate attached', [])).toBe('Estimate attached');
   });
+
+  test('a forwarded subject is never the sender\'s own words, even the first in its thread', () => {
+    expect(ownReplySubject('Fwd: Please cancel service', [])).toBe('');
+    expect(ownReplySubject('FW: Please cancel service', [])).toBe('');
+    expect(ownReplySubject('Re: Fwd: Please cancel service', [])).toBe('');
+    expect(ownReplySubject('Forward this to Adam please', [])).toBe('Forward this to Adam please');
+  });
 });

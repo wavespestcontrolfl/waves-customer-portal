@@ -271,18 +271,15 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const body = normalize(message.message_body);
   // An email's subject is part of the grounded source (email channel only —
   // the SMS lane has no subject and this stays a no-op for it): a quote may
-  // sit in the subject when the body does not hold it. The body still
-  // qualifies such a quote ("Cancel Friday" over "Actually, do not cancel
-  // Friday"), so every text check below (negation, clock, question) reads
-  // subject and body together, never the subject alone.
+  // sit in the subject or the body. Either one qualifies the other ("Cancel
+  // Friday" over "Actually, do not cancel Friday", or the reverse), so every
+  // text check below (negation, clock, question) reads subject and body
+  // together, whichever of them holds the quote.
   const subject = channel === 'email' ? normalize(message.subject) : '';
   const rawSubject = channel === 'email' ? String(message.subject || '') : '';
-  const sourceOf = (item) => {
-    const quote = normalize(item.quote);
-    return subject && !body.includes(quote) && subject.includes(quote)
-      ? { text: [subject, body].filter(Boolean).join('\n'), raw: [rawSubject, message.message_body].filter(Boolean).join('\n') }
-      : { text: body, raw: message.message_body };
-  };
+  const source = subject
+    ? { text: [subject, body].filter(Boolean).join('\n'), raw: [rawSubject, message.message_body].filter(Boolean).join('\n') }
+    : { text: body, raw: message.message_body };
   // An opening reminder idiom is affirmative; keep every later qualifier
   // visible so "don't forget to NOT call" still requires human review.
   const instructionOf = (text) => text.replace(/^(?:please\s+)?(?:don['’]t|do not)\s+forget\s+to\b/i, '');
@@ -303,7 +300,6 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const promiseKind = (item) => (kindBelongsToParty('waves', item.kind) && kindEvident(item) ? item.kind : 'other');
   const obligations = (captureCommitments && message.message_body.length <= obligationLimit ? parsed.obligations : []).filter((item) => {
     if (!grounded(item)) return false;
-    const source = sourceOf(item);
     const instruction = instructionOf(source.text);
     if (!normalize(item.quote).includes(normalize(item.description))) return false;
     if (outbound) return item.party === 'waves' && item.basis === 'promise' && item.promise_firm === true;
@@ -315,7 +311,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
     if (!kindEvident(item)) return false;
     return item.basis === 'request' ? item.party === 'waves' : item.party === 'customer';
   }).map((item) => {
-    const body = sourceOf(item).text;
+    const body = source.text;
     const timingGrounded = item.due_text && normalize(item.quote).includes(normalize(item.due_text));
     // An omitted timing field (or shortened quote) cannot silently discard
     // a clock stated in the source. Ambiguous association needs review;

@@ -103,7 +103,7 @@ function emailPlainText(row) {
 }
 
 // A reply's subject counts as its own words only when it is new text: not
-// the thread's subject again behind "Re:"/"Fwd:" (every reply carries
+// the thread's subject again behind "Re:" (every reply carries
 // that, so it would make an empty reply look like an answer). Returns the
 // subject without its reply prefixes, or '' when it says nothing new.
 const REPLY_PREFIX = /^\s*(?:re|fwd?|aw|sv)\s*(?:\[\d+\])?\s*:\s*/i;
@@ -112,7 +112,11 @@ function withoutReplyPrefixes(subject) {
   while (REPLY_PREFIX.test(text)) text = text.replace(REPLY_PREFIX, '');
   return text.replace(/\s+/g, ' ').trim();
 }
+// A forwarded subject is someone else's words, never the sender's: "Fwd:
+// Please cancel service" asks nothing of its own.
+const FORWARD_PREFIX = /^\s*(?:(?:re|aw|sv)\s*(?:\[\d+\])?\s*:\s*)*fwd?\s*(?:\[\d+\])?\s*:/i;
 function ownReplySubject(subject, threadSubjects = []) {
+  if (FORWARD_PREFIX.test(decodeEntities(subject))) return '';
   const own = withoutReplyPrefixes(subject);
   if (!own) return '';
   const seen = new Set(threadSubjects.map((s) => withoutReplyPrefixes(s).toLowerCase()));

@@ -131,6 +131,10 @@ describe('sms-operational-extractor channel param', () => {
       const reversed = groundExtraction(ask('Cancel Friday', 'Cancel Friday'),
         { message: baseMessage('Actually, do not cancel Friday after all', { subject: 'Cancel Friday' }), channel: 'email' });
       expect(reversed.obligations).toHaveLength(0);
+      // And the reverse: a subject qualifies a quote grounded in the body (Codex #5422 r2).
+      const subjectNegates = groundExtraction(ask('Cancel Friday', 'Cancel Friday'),
+        { message: baseMessage('Cancel Friday', { subject: 'Do not cancel Friday' }), channel: 'email' });
+      expect(subjectNegates.obligations).toHaveLength(0);
       const negated = groundExtraction(ask('reschedule Friday', 'reschedule Friday'),
         { message: baseMessage('Thanks', { subject: 'Do not reschedule Friday' }), channel: 'email' });
       expect(negated.obligations).toHaveLength(0);
