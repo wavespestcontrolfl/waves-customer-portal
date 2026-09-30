@@ -47,7 +47,11 @@ const PRICES_PER_M = Object.freeze({
   // one place Anthropic ids may be spelled), $10/$50 per the claude-api skill
   // price table (2026-09-25). Anthropic's output_tokens already include
   // thinking. An overridden referee model has no price here (costUsd null).
-  [DEFAULTS.LAWN_ASSESSMENT_REFEREE]: { input: 10, output: 50, reasoningSeparate: false },
+  // Anthropic reports cache writes/reads OUTSIDE input_tokens (the adapter
+  // always sets a system-prompt breakpoint): 5-minute write 1.25x = $12.50,
+  // read $0.25 (claude-api skill, Fable 5.1). OpenAI/Gemini count cached
+  // tokens inside input_tokens, so they carry no cache fields here.
+  [DEFAULTS.LAWN_ASSESSMENT_REFEREE]: { input: 10, output: 50, reasoningSeparate: false, cacheWrite: 12.5, cacheRead: 0.25 },
 });
 
 // A pg DATE arrives as a Date (local midnight) or 'YYYY-MM-DD'; either way the
@@ -180,7 +184,9 @@ function costUsd(model, usage) {
   const outputBase = numberOrNull(usage.output_tokens);
   if (input == null || outputBase == null) return null;
   const output = outputBase + (price.reasoningSeparate ? (numberOrNull(usage.reasoning_tokens) || 0) : 0);
-  return Math.round(((input * price.input) + (output * price.output)) / 1e6 * 1e4) / 1e4;
+  const cache = price.cacheWrite == null ? 0
+    : ((numberOrNull(usage.cache_write_tokens) || 0) * price.cacheWrite) + ((numberOrNull(usage.cached_input_tokens) || 0) * price.cacheRead);
+  return Math.round(((input * price.input) + (output * price.output) + cache) / 1e6 * 1e4) / 1e4;
 }
 
 // Exclude only failures known to occur before dispatch. Executed requests

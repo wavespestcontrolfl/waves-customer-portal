@@ -9,6 +9,7 @@ jest.mock('../services/llm/call', () => ({ ...jest.requireActual('../services/ll
 jest.mock('knex', () => jest.fn());
 jest.mock('../services/photos', () => ({ getPhotoBase64: jest.fn() }));
 
+const MODELS = require('../config/models');
 const evalLib = require('../services/eval/lawn-visit-assessment-eval');
 const { PROMPT_VERSION, PROMPT_DIGEST } = require('../services/lawn-visit-input');
 
@@ -111,6 +112,8 @@ describe('scoring', () => {
     expect(evalLib.costUsd('gemini-3.8-flash', { input_tokens: 1_000_000, output_tokens: 500_000, reasoning_tokens: 500_000 })).toBe(0.75 + 3.75);
     expect(evalLib.costUsd('gpt-6-astra', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(1.5); // reasoning not billed twice
     expect(evalLib.costUsd('mystery', { input_tokens: 1 })).toBeNull();
+    // Anthropic cache writes/reads sit outside input_tokens and are priced on top (Codex #5362 r2).
+    expect(evalLib.costUsd(MODELS.DEFAULTS.LAWN_ASSESSMENT_REFEREE, { input_tokens: 100_000, output_tokens: 10_000, cache_write_tokens: 100_000, cached_input_tokens: 1_000_000 })).toBe(3);
     expect(evalLib.costUsd('gpt-6-sol', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(0.3);
     expect(evalLib.costUsd('claude-fable-5-1', { input_tokens: 100_000, output_tokens: 10_000 })).toBe(1.5);
     expect(evalLib.costUsd('gpt-6-astra', null)).toBeNull();

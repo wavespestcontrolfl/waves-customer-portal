@@ -195,14 +195,16 @@ function describeDispute(dispute) {
 /** The referee's system prompt: a short role + the shared agronomy reference,
  * then the "two earlier reads disagreed on" block. Read A is Gemini, read B is
  * Sol; merging is `mergeReferee`'s job. */
-function buildRefereeSystem(disputes) {
-  return `# ROLE
+// Static on purpose: callAnthropic puts one cache breakpoint on the whole
+// system block, so the per-visit disputes ride in the request text
+// (buildRefereeDisputes) and the long shared reference is cached across
+// visits (Codex #5362 r2).
+const REFEREE_SYSTEM = `# ROLE
 You are a Southwest Florida lawn diagnostician acting as a NAME referee for one
 technician lawn visit. You see the same numbered photos two earlier reads saw.
 You only settle what something IS called; you do not score, rate, or describe anything else.
-
-# TWO EARLIER READS DISAGREED ON
-${disputes.map(describeDispute).join('\n')}
+The message lists the items two earlier reads disagreed on, under
+"TWO EARLIER READS DISAGREED ON".
 
 # HOW TO ANSWER
 Look at the photos yourself first: both earlier reads may be wrong. For each item
@@ -211,9 +213,14 @@ or "neither" when neither is supported or the photos cannot settle it. Apply the
 same naming discipline as the visit rubric below: name a specific cause only when
 its Required signature is visible; otherwise prefer "neither" to a confident wrong
 name. Scores, severities and confidence are not part of this question.
-Return ONLY the JSON object the schema describes — one answer per item id above.
+Return ONLY the JSON object the schema describes — one answer per listed item id.
 
 ${CURATED_REFERENCE}`;
+function buildRefereeSystem() { return REFEREE_SYSTEM; }
+
+/** The per-visit part of the referee request: the disputed items. */
+function buildRefereeDisputes(disputes) {
+  return `# TWO EARLIER READS DISAGREED ON\n${disputes.map(describeDispute).join('\n')}`;
 }
 
 /** The picks Fable gave, keyed by dispute id; ids/picks outside the schema
@@ -250,6 +257,7 @@ async function boundedDispatch(route, payload, capMs) {
 }
 
 // ── Merge ────────────────────────────────────────────────────────────────
+const lowerConfidence = (a, b) => ((CONFIDENCE_RANK[b] ?? 0) < (CONFIDENCE_RANK[a] ?? 0) ? b : a);
 const capAtModerate = (confidence) => ((CONFIDENCE_RANK[confidence] ?? 0) > CONFIDENCE_RANK.moderate ? 'moderate' : confidence);
 
 /** Apply Fable's picks to a COPY of Gemini's raw answer. Only two things can
@@ -270,13 +278,16 @@ function mergeReferee(geminiJson, solJson, disputes, picks) {
       if (pick === 'b') merged.grass_type = solJson.grass_type;
     } else {
       const target = merged.findings[dispute.geminiIndex];
+      let confidence = target.confidence;
       if (pick === 'b') {
         const sol = solJson.findings[dispute.solIndex];
         target.name = sol.name;
         target.customer_wording = sol.customer_wording;
         target.confirmation_step = sol.confirmation_step;
+        // Sol's cause never reads surer than Sol itself rated it (Codex #5362 r2).
+        confidence = lowerConfidence(confidence, sol.confidence);
       }
-      target.confidence = capAtModerate(target.confidence);
+      target.confidence = capAtModerate(confidence);
     }
     settled.push(dispute.id);
   }
@@ -331,8 +342,8 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
 
     const route = MODELS.ROUTES.lawnAssessmentReferee;
     const result = await boundedDispatch(route, {
-      system: buildRefereeSystem(disputes),
-      text: `${buildUserText(visit.photoCount, visit.context)}\n\nSettle only the disputed names listed in the system prompt.`,
+      system: buildRefereeSystem(),
+      text: `${buildUserText(visit.photoCount, visit.context)}\n\n${buildRefereeDisputes(disputes)}\n\nSettle only the disputed names listed above.`,
       images: visit.images,
       jsonMode: true,
       jsonSchema: REFEREE_SCHEMA,
@@ -373,6 +384,7 @@ module.exports = {
   mergeReferee,
   usablePicks,
   buildRefereeSystem,
+  buildRefereeDisputes,
   REFEREE_SCHEMA,
   REFEREE_MAX_MS,
   SECOND_OPINION_MAX_MS,

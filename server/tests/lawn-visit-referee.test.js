@@ -219,8 +219,11 @@ describe('a name disagreement draws Fable', () => {
     });
     expect(referee.REFEREE_MAX_MS).toBe(60 * 1000);
     expect(payload.images).toEqual(dispatchWithFallback.mock.calls[0][1].images);
-    expect(payload.system).toContain('TWO EARLIER READS DISAGREED ON');
-    expect(payload.system).toContain('d1: what the finding in photo 1 is — A: "Chinch bug damage"; B: "Brown patch"');
+    // The system prompt is static (cached across visits); the disputes ride in the text (Codex #5362 r2).
+    expect(payload.system).toBe(referee.buildRefereeSystem());
+    expect(payload.system).not.toContain('Chinch bug damage');
+    expect(payload.text).toContain('TWO EARLIER READS DISAGREED ON');
+    expect(payload.text).toContain('d1: what the finding in photo 1 is — A: "Chinch bug damage"; B: "Brown patch"');
     expect(payload.text).toContain('Assess the lawn in the 2 numbered photos');
   });
 
@@ -253,6 +256,13 @@ describe('a name disagreement draws Fable', () => {
     expect(result.findings[0].confidence).toBe('moderate');
     expect(result.findings[1]).toEqual(baseline.findings[1]);
     expect(result.referee).toMatchObject({ outcome: 'settled', disputes: [{ pick: 'a', settled: true }] });
+  });
+
+  test('pick b never reads surer than Sol rated its own cause (Codex #5362 r2)', async () => {
+    setup(fableOk([{ id: 'd1', pick: 'b' }]), { solOverrides: { findings: [named('Brown patch', { confidence: 'low' })] } });
+    const result = await analyzeVisit({ photos });
+    expect(result.findings[0]).toMatchObject({ confidence: 'low' });
+    expect(result.referee).toMatchObject({ outcome: 'settled' });
   });
 
   test('a cap never RAISES a lower confidence', async () => {
@@ -320,7 +330,7 @@ describe('a name disagreement draws Fable', () => {
     dispatch.mockResolvedValueOnce(solOk(s)).mockResolvedValueOnce(fableOk([{ id: 'd1', pick: 'b' }]));
     const settled = await analyzeVisit({ photos });
     expect(settled.grassType).toBe('st_augustine');
-    expect(dispatch.mock.calls[1][1].system).toContain('d1: the grass type — A: "bahia"; B: "st_augustine"');
+    expect(dispatch.mock.calls[1][1].text).toContain('d1: the grass type — A: "bahia"; B: "st_augustine"');
     expect(settled.referee.disputes[0]).toMatchObject({ kind: 'grass_type', pick: 'b', settled: true });
 
     dispatch.mockReset();
