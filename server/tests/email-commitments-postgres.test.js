@@ -582,6 +582,21 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(replies.some((r) => r.id === echo.id)).toBe(false);
   });
 
+  test('a reply with body words still carries a new subject as evidence', async () => {
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const sourceAt = new Date(Date.now() - 10 * 60000);
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', subject: 'Please reschedule Friday',
+      received_at: new Date(sourceAt.getTime() - 60000) });
+    const answer = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null, subject: 'Re: Booked you for Monday 9am',
+      body_text: 'Thanks', label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + 60000) });
+    const message = { id: randomUUID(), customer_id: customerId, direction: 'inbound', created_at: sourceAt,
+      from_phone: '+12025550101', to_phone: '+12025550101', any_customer_phone: true };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, { kind: 'other', party: 'waves', sms_context: { basis: 'request' } }, message, new Date());
+    const reply = evidence.records.find((r) => r.type === 'email_reply' && r.id === answer.id);
+    expect(reply.text).toBe('Subject: Booked you for Monday 9am\nThanks');
+  });
+
   test('with the email gate off, a staff Gmail reply is no evidence for a live SMS ask (dark launch)', async () => {
     const sourceAt = new Date();
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', received_at: new Date(sourceAt.getTime() - 60000) });

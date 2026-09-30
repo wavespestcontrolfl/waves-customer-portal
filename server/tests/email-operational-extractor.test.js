@@ -122,10 +122,15 @@ describe('sms-operational-extractor channel param', () => {
       expect(result.obligations).toHaveLength(0);
     });
 
-    test('email: the negation check reads the source the quote came from', () => {
-      const result = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
+    test('email: the negation check reads subject and body together for a subject-grounded quote', () => {
+      // The body qualifies the subject's ask, as it would qualify the same
+      // words in the body itself (Codex #5422 r1).
+      const hedged = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
         { message: baseMessage('Not sure yet, will let you know', { subject: 'Please reschedule Friday' }), channel: 'email' });
-      expect(result.obligations).toHaveLength(1);
+      expect(hedged.obligations).toHaveLength(0);
+      const reversed = groundExtraction(ask('Cancel Friday', 'Cancel Friday'),
+        { message: baseMessage('Actually, do not cancel Friday after all', { subject: 'Cancel Friday' }), channel: 'email' });
+      expect(reversed.obligations).toHaveLength(0);
       const negated = groundExtraction(ask('reschedule Friday', 'reschedule Friday'),
         { message: baseMessage('Thanks', { subject: 'Do not reschedule Friday' }), channel: 'email' });
       expect(negated.obligations).toHaveLength(0);

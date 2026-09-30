@@ -353,18 +353,15 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // 16000-char body cap for the whole check).
       // A send with no words of its own (only quoted history, only a
       // signature) is no reply at all, so it never witnesses one.
-      // A reply with no body words of its own may still answer in its
-      // subject — but only a subject that is new text, never the thread's
-      // subject behind "Re:" (ownReplySubject).
+      // A reply's subject is part of its words too ("Booked you for Monday
+      // 9am" over a body of "Thanks") — but only a subject that is new text,
+      // never the thread's subject behind "Re:" (ownSubjectInThread).
       const rows = [];
       for (const { row, linkedCustomerId } of resolved) {
         if (String(linkedCustomerId) !== String(customerId)) continue;
         const { body_html: _html, ...rest } = row;
-        let text = stripQuotedAndSignature(emailPlainText(row));
-        if (!text && row.subject) {
-          const own = await ownSubjectInThread(conn, row, LIMIT);
-          if (own) text = `Subject: ${own}`;
-        }
+        const own = row.subject ? await ownSubjectInThread(conn, row, LIMIT) : '';
+        const text = [own && `Subject: ${own}`, stripQuotedAndSignature(emailPlainText(row))].filter(Boolean).join('\n');
         if (text) rows.push({ ...rest, body_text: text });
       }
       rows.truncated = candidates.length > EMAIL_REPLY_RAW_LIMIT || rows.length > LIMIT;

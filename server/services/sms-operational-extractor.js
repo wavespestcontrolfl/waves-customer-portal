@@ -271,15 +271,17 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const body = normalize(message.message_body);
   // An email's subject is part of the grounded source (email channel only —
   // the SMS lane has no subject and this stays a no-op for it): a quote may
-  // sit in the subject when the body does not hold it, and every text check
-  // below (negation, clock, question) then reads the subject, the source the
-  // quote actually came from, never the body it is absent from.
+  // sit in the subject when the body does not hold it. The body still
+  // qualifies such a quote ("Cancel Friday" over "Actually, do not cancel
+  // Friday"), so every text check below (negation, clock, question) reads
+  // subject and body together, never the subject alone.
   const subject = channel === 'email' ? normalize(message.subject) : '';
   const rawSubject = channel === 'email' ? String(message.subject || '') : '';
   const sourceOf = (item) => {
     const quote = normalize(item.quote);
     return subject && !body.includes(quote) && subject.includes(quote)
-      ? { text: subject, raw: rawSubject } : { text: body, raw: message.message_body };
+      ? { text: [subject, body].filter(Boolean).join('\n'), raw: [rawSubject, message.message_body].filter(Boolean).join('\n') }
+      : { text: body, raw: message.message_body };
   };
   // An opening reminder idiom is affirmative; keep every later qualifier
   // visible so "don't forget to NOT call" still requires human review.
