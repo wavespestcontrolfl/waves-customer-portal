@@ -597,6 +597,18 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(reply.text).toBe('Subject: Booked you for Monday 9am\nThanks');
   });
 
+  test('a subject first carried deep in a long thread is still no new text when a later reply repeats it', async () => {
+    const { ownSubjectsInThreads } = require('../services/email/email-strip');
+    const threadId = randomUUID();
+    const start = Date.now() - 3 * 3600000;
+    for (let i = 0; i < 60; i += 1) {
+      await insertEmail({ gmail_thread_id: threadId, subject: 'Re: Estimate', received_at: new Date(start + i * 60000) });
+    }
+    await insertEmail({ gmail_thread_id: threadId, subject: 'Booked you for Monday 9am', received_at: new Date(start + 61 * 60000) });
+    const echo = await insertEmail({ gmail_thread_id: threadId, subject: 'Re: Booked you for Monday 9am', received_at: new Date(start + 62 * 60000) });
+    expect((await ownSubjectsInThreads(mockPg, [echo])).get(echo.id)).toBe('');
+  });
+
   test('with the email gate off, a staff Gmail reply is no evidence for a live SMS ask (dark launch)', async () => {
     const sourceAt = new Date();
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', received_at: new Date(sourceAt.getTime() - 60000) });

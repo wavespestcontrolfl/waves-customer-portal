@@ -38,16 +38,25 @@ function decodeEntities(text) {
 // Every pattern is searched INLINE (no `^`/`$` anchors that would require a
 // real line break) — matches only its OWN cut point; the earliest match
 // across all of them wins.
+const MONTH = String.raw`(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?`;
+const QUOTE_HEADER_SHAPE = [
+  String.raw`\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}`,
+  String.raw`\b${MONTH}\s+\d{1,2}\b`,
+  String.raw`\b\d{1,2}\s+${MONTH}`,
+  String.raw`\b\d{1,2}:\d{2}\b`,
+  String.raw`[^\s<>@]+@[^\s<>@]+\.[a-z]{2,}`,
+].join('|');
 const CUT_PATTERNS = [
   // Gmail/most clients, weekday OR numeric-date form, decoded-entity email
   // address tolerated: "On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@x.com>
   // wrote:" / "On 09/09/2026 8:29 AM, Jane <jane@x.com> wrote:". Bounded gap
   // so an unrelated later "wrote:" elsewhere in a long body never anchors here.
   // Any-case "On" (clients vary), and the header span (up to the FIRST
-  // "wrote:") must carry a digit or an '@' — a date or an address — so ordinary prose like
-  // "on Tuesday the tech wrote: we are coming" is never read as a quote header
-  // (audit, 2026-09-30).
-  /\bOn\s(?=.{0,150}?\swrote:)(?:(?!\swrote:).){0,150}?[\d@]/i,
+  // "wrote:") must carry a real header shape: a date (09/09/2026, Sep 22,
+  // 22 Sep), a clock time (3:21) or an email address. A bare number or word
+  // is prose ("On ticket 123 the technician wrote: ..." and "on Tuesday the
+  // tech wrote: ..." are the new message, never a quote header).
+  new RegExp(String.raw`\bOn\s(?=(?:(?!\swrote:).){0,150}?\swrote:)(?:(?!\swrote:).){0,150}?(?:${QUOTE_HEADER_SHAPE})`, 'i'),
   // Outlook: a long underscore rule immediately before the quoted header
   // block, e.g. "________________________________\nFrom: Jane <jane@x.com>".
   /_{10,}\s*From:/i,
@@ -109,8 +118,8 @@ function emailPlainText(row) {
 // Reply and forward prefixes, English and the common localized clients'
 // (German AW/WG, Spanish/Italian RE/RV/R/I, French TR, Dutch Antw/Doorst,
 // Nordic SV/VS/VB/VL, Portuguese ENC).
-const FORWARD_WORDS = String.raw`fwd?|wg|rv|tr|enc|doorst|vb|vl`;
-const REPLY_PREFIX = new RegExp(String.raw`^\s*(?:re|aw|sv|vs|antw|${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:\s*`, 'i');
+const FORWARD_WORDS = String.raw`fwd?|wg|rv|tr|enc|doorst|vb|vl|i`;
+const REPLY_PREFIX = new RegExp(String.raw`^\s*(?:re|r|aw|sv|vs|antw|${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:\s*`, 'i');
 function withoutReplyPrefixes(subject) {
   let text = decodeEntities(subject).trim();
   while (REPLY_PREFIX.test(text)) text = text.replace(REPLY_PREFIX, '');
@@ -118,7 +127,7 @@ function withoutReplyPrefixes(subject) {
 }
 // A forwarded subject is someone else's words, never the sender's: "Fwd:
 // Please cancel service" asks nothing of its own.
-const FORWARD_PREFIX = new RegExp(String.raw`^\s*(?:(?:re|aw|sv|vs|antw)\s*(?:\[\d+\])?\s*:\s*)*(?:${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:`, 'i');
+const FORWARD_PREFIX = new RegExp(String.raw`^\s*(?:(?:re|r|aw|sv|vs|antw)\s*(?:\[\d+\])?\s*:\s*)*(?:${FORWARD_WORDS})\s*(?:\[\d+\])?\s*:`, 'i');
 function ownReplySubject(subject, threadSubjects = []) {
   if (FORWARD_PREFIX.test(decodeEntities(subject))) return '';
   const own = withoutReplyPrefixes(subject);
@@ -130,19 +139,18 @@ function ownReplySubject(subject, threadSubjects = []) {
 // Only messages sent BEFORE each one count: a later reply repeats its
 // subject behind "Re:", and would otherwise blank the subject of the very
 // email that first wrote it. Returns Map(email id -> own subject or '').
-const THREAD_SUBJECT_ROWS = 50;
 async function ownSubjectsInThreads(conn, rows) {
   const own = new Map();
   const threadIds = [...new Set(rows.filter((r) => String(r?.subject || '').trim() && r.gmail_thread_id && r.received_at)
     .map((r) => r.gmail_thread_id))];
-  // Each thread's oldest messages first, capped per thread, so the subject a
-  // thread started with is always read and no long thread starves another.
-  const stored = threadIds.length ? await conn.select('id', 'gmail_thread_id', 'subject', 'received_at')
-    .from(conn('emails').whereIn('gmail_thread_id', threadIds).whereNotNull('subject')
-      .select('id', 'gmail_thread_id', 'subject', 'received_at',
-        conn.raw('row_number() over (partition by gmail_thread_id order by received_at, id) as thread_seq'))
-      .as('thread_subjects'))
-    .where('thread_seq', '<=', THREAD_SUBJECT_ROWS) : [];
+  // Each distinct subject a thread carries, once, at its first appearance:
+  // a subject is new text for an email only when no earlier message in its
+  // thread carried it, however long the thread (a thread holds few distinct
+  // subjects even when it holds many messages).
+  const stored = threadIds.length ? await conn('emails').whereIn('gmail_thread_id', threadIds).whereNotNull('subject')
+    .distinctOn('gmail_thread_id', 'subject').orderBy([{ column: 'gmail_thread_id' }, { column: 'subject' },
+      { column: 'received_at' }, { column: 'id' }])
+    .select('id', 'gmail_thread_id', 'subject', 'received_at') : [];
   const at = (r) => new Date(r.received_at).getTime();
   for (const row of rows) {
     if (!String(row?.subject || '').trim()) { own.set(row?.id, ''); continue; }

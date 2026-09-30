@@ -89,6 +89,11 @@ describe('stripQuotedAndSignature', () => {
       expect(stripQuotedAndSignature('Sounds good. on Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: see you then')).toBe('Sounds good.');
     });
 
+    test('a bare number is no header shape: prose with a ticket number before "wrote:" is kept (Codex #5422 r4)', () => {
+      const body = 'On ticket 123 the technician wrote: please reschedule Friday';
+      expect(stripQuotedAndSignature(body)).toBe(body);
+    });
+
     test('the digit or address must sit inside the header, before the first "wrote:"', () => {
       const body = 'On Tuesday the tech wrote: come at 3 and On Friday he wrote: no';
       expect(stripQuotedAndSignature(body)).toBe(body);
@@ -114,9 +119,10 @@ describe('ownReplySubject', () => {
     expect(ownReplySubject('Re: Fwd: Please cancel service', [])).toBe('');
     expect(ownReplySubject('Forward this to Adam please', [])).toBe('Forward this to Adam please');
     // Localized clients' forward prefixes (Codex #5422 r3).
-    for (const prefix of ['WG', 'RV', 'TR', 'ENC', 'Doorst', 'VB', 'VL', 'AW: WG']) {
+    for (const prefix of ['WG', 'RV', 'TR', 'ENC', 'Doorst', 'VB', 'VL', 'AW: WG', 'I', 'R: I']) {
       expect(ownReplySubject(`${prefix}: Please cancel service`, [])).toBe('');
     }
     expect(ownReplySubject('AW: Please cancel service', ['Please cancel service'])).toBe('');
+    expect(ownReplySubject('R: Please cancel service', ['Please cancel service'])).toBe('');
   });
 });
