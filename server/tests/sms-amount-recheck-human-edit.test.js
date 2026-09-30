@@ -256,3 +256,51 @@ describe('a Zelle receipt written as "is paid" is not treated as an offer', () =
     await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', zelleInvoiceId: null, dbh })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
 });
+
+// Codex round-24 P1: the send-time path applies the SAME unrecognized-assertion rule as the draft validator.
+describe('an edited unrecognized payment assertion is not "fresh" at send time', () => {
+  const { outgoingAmountsStale, amountFreeStatusClaimStale, bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
+  const drafter = require('../services/sms-shadow-drafter');
+  const V = require('../services/payment-receipt-vocabulary');
+  const STALE = { stale: true, reason: 'amount_no_longer_authorized' };
+  const UNRECOGNIZED = ['Your payment settled.', 'Your payment is all squared away.', 'We are in receipt of your payment.', 'Your payment landed safely.'];
+
+  test.each(UNRECOGNIZED)('%s — blocked with a paid row AND without (nothing recognizes the wording)', async (body) => {
+    expect(drafter.enumeratePaymentClaims(body, {}).claims).toEqual([]); // the enumerator has no claim for it...
+    expect(bodyNeedsPaymentRecheck(body)).toBe(true); // ...but the prescreen / scheduler gate flags it
+    for (const rows of [[paid], []]) {
+      ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(rows));
+      await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual(STALE);
+      await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual(STALE);
+      // a human-edited pre-v12 body takes the same path (trustOwedAmounts excuses owed figures only)
+      await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v11', trustOwedAmounts: true, dbh })).resolves.toEqual(STALE);
+    }
+  });
+  test('draft and send agree: replyQuotesUngroundedAmount says ungrounded for the same body and context', () => {
+    for (const body of UNRECOGNIZED) expect({ body, draft: drafter.replyQuotesUngroundedAmount(body, ctx([paid]), { byMeaning: true }) }).toEqual({ body, draft: true });
+  });
+  test('a recognized claim is still judged normally at send (paid row => grounded, none => stale)', async () => {
+    const body = "We haven't received your payment yet."; // recognized not_received denial
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([]));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([paid]));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual(STALE);
+  });
+  test('clearly non-assertive clauses are still fresh, with no billing read', async () => {
+    ContextAggregator.getContextForCustomer.mockClear();
+    for (const body of ['You can pay with the link below.', 'Can you tell me when you paid?', 'Please use your personal pay link.', 'See you Tuesday!']) {
+      await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual({ stale: false });
+    }
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+  test('the send-time gate is a superset of the draft rule: whatever the draft fails closed on, the prescreen flags', () => {
+    const samples = ['Your payment settled.', 'An unpaid invoice is on your account.', 'Everything is squared away and paid.', 'Your deposit is fine.',
+      'Your transfer is sorted.', 'The charge is fine.', 'Your refund is on its way.', 'You are all paid up.', 'Your balance is zero.', 'Chargeback resolved.'];
+    for (const s of samples) {
+      if (V.unrecognizedPaymentAssertion(s)) expect({ s, flagged: V.mayAssertPaymentStatus(s) }).toEqual({ s, flagged: true });
+    }
+  });
+  test('no customer on an unrecognized assertion fails closed (cannot be judged)', async () => {
+    await expect(amountFreeStatusClaimStale({ customerId: null, body: 'Your payment settled.', strict: true, dbh })).resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+  });
+});

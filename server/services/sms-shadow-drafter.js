@@ -2204,6 +2204,13 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
   if (claim.family === 'unpaid') return !(INVOICE_COLLECTIBLE_STATUSES.has(status) && Number(pool[0].amountDue) > 0);
   return INVOICE_STATUS_FAMILY[status] !== claim.family;
 }
+// Does this clause need the payment validation at all? EXACTLY the two ways clauseUngrounded can reject it:
+// the enumerator found a claim to bind, or it is an UNRECOGNIZED payment assertion (round-22 fail-closed rule).
+// The send-time recheck gates its billing read on this same function (Codex round-24 P1), so draft and send
+// can never disagree about whether a clause is judged.
+function paymentClauseNeedsValidation(clause, env = {}) {
+  return enumeratePaymentClaims(clause, env).claims.length > 0 || unrecognizedPaymentAssertion(clause);
+}
 function clauseUngrounded(clause, env) {
   const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
   // Price grammar left once readable figures (and any zero-balance span) are masked is a price the
@@ -4011,6 +4018,7 @@ module.exports = {
   paymentAckPolarity,
   classifyPaymentClause,
   enumeratePaymentClaims,
+  paymentClauseNeedsValidation,
   paymentIdentityFromText,
   paymentRowMatchesIdentity,
   paymentStatusClaimKind,

@@ -365,7 +365,7 @@ function paymentStatusPromptLine() {
 // payment words, so it is a guaranteed superset of paymentStatusPhraseClaim —
 // a phrase added to the table is automatically screened in (Codex round-9 P1).
 const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
-  `\\b(?:payments?|paid|account|transfers?|deposits?|charges?|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
+  `\\b(?:payments?|paid|unpaid|account|transfers?|deposits?|charges?|zelle|ach|refund(?:ed|s)?|disputed?|chargeback|${
     phrasePattern([...Object.values(PAYMENT_STATUS_VOCABULARY).flatMap((f) => [...f.phrases]), ...SETTLEMENT_PHRASES])
   })\\b`,
   'i',

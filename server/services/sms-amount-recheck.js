@@ -126,7 +126,7 @@ const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bz
 // "Thanks for processing my Zelle payment!" / "Thank you, the Zelle payment
 // cleared" read as a historical RECEIPT exactly like a bare verb does.
 const {
-  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment, zeroBalanceClaim,
+  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment, zeroBalanceClaim, unrecognizedPaymentAssertion,
 } = require('./payment-receipt-vocabulary');
 const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
@@ -330,15 +330,18 @@ async function amountFreeStatusClaimStale({
   // cannot assert a payment status — skip the drafter + billing re-read
   // entirely (gratitude/scheduling copy on the auto-send lane).
   if (!mayAssertPaymentStatus(text)) return { stale: false };
-  // ONE enumerator with the draft validator (Codex round-18 P1): a clause needs the billing recheck
-  // exactly when the drafter's own claim enumeration finds a claim in it. (A caller that mocks the
-  // drafter down to a stub falls back to the individual predicates.)
+  // ONE decision with the draft validator (Codex round-18/24 P1): a clause needs the billing recheck exactly
+  // when clauseUngrounded would judge it — the enumerator finds a claim, OR it is an UNRECOGNIZED payment
+  // assertion (fail closed: "Your payment settled." is never fresh just because no phrase knows it).
+  // (A caller that mocks the drafter down to a stub falls back to the individual predicates + the same
+  // vocabulary-level unrecognized-assertion rule.)
+  const inboundText = String(inboundMessage || '');
   const hasStatusClaim = text.split(CLAUSE_SPLIT_RE).some((clause) => (
-    typeof drafter.enumeratePaymentClaims === 'function'
-      ? drafter.enumeratePaymentClaims(clause, { inboundText: String(inboundMessage || '') }).claims.length > 0
+    typeof drafter.paymentClauseNeedsValidation === 'function'
+      ? drafter.paymentClauseNeedsValidation(clause, { inboundText })
       : (drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null
         || paymentStatusPhraseClaim(clause, inboundNamesPayment(inboundMessage)) != null
-        || zeroBalanceClaim(clause))));
+        || zeroBalanceClaim(clause) || unrecognizedPaymentAssertion(clause))));
   if (!hasStatusClaim) return { stale: false };
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {
