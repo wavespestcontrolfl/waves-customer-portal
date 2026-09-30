@@ -13,7 +13,8 @@
  *     staff browsers carrying the signed `waves_admin` marker cookie (set by
  *     admin-auth at login), and IPs in WAVES_ADMIN_IPS. No row for those.
  *   - Dedupes in the SAME statement: a view is skipped when the same
- *     page + subject + ip_hash already has a row inside the dedupe window
+ *     page + subject + ip_hash + customer_id (null-safe: a lead's null
+ *     customer only matches null) already has a row inside the dedupe window
  *     (default DEDUPE_MINUTES; callers may pass `dedupeMinutes`). The track
  *     page polls its data endpoint every 30s while a tech is en route, so it
  *     passes a longer window (a whole tracking session is one view). The
@@ -22,6 +23,16 @@
  *     The check lives in SQL (INSERT ... WHERE NOT EXISTS) so it holds across
  *     pods and deploys; two simultaneous first loads can both pass it (no
  *     unique constraint) — an accepted, rare double count.
+ *   - A customer-attributed view is written only while that customer is live
+ *     (deleted_at IS NULL), checked in the SAME statement with FOR SHARE. A
+ *     customer merge (executeMerge) holds the loser row FOR UPDATE until it
+ *     commits and soft-deletes it in the same transaction, so a beacon racing
+ *     the merge blocks on that lock, re-reads the row as deleted and writes
+ *     nothing; a plain EXISTS would have passed on the pre-commit snapshot and
+ *     left a row on the retired record after the merge's FK sweep.
+ *   - `dedupeForever: true` (with a subjectId) drops the ip, time and
+ *     subject_type conditions: page + subject + customer is unique for good. For subjects
+ *     that are a stable id for one event (a push notification id).
  *
  * ip_hash is sha256 of the client IP, hex — identical to short_code_clicks.
  */
@@ -33,6 +44,8 @@ const logger = require('./logger');
 const { isBotUserAgent } = require('../utils/bot-ua');
 
 const DEDUPE_MINUTES = 10;
+// Page value whose (customer, subject) pair is unique by partial index (see the migration).
+const PUSH_OPEN_PAGE = 'push:open';
 const UA_MAX = 500;
 
 // Mirrors estimate-public.js (private there, 28k-line file): comma list of
@@ -102,7 +115,7 @@ function logViewFailure(what, page, subjectType, err) {
  * skipped or failed). Callers should NOT await it on the response path.
  */
 function recordPageView({
-  req, page, customerId = null, subjectType = null, subjectId = null, dedupeMinutes = DEDUPE_MINUTES,
+  req, page, customerId = null, subjectType = null, subjectId = null, dedupeMinutes = DEDUPE_MINUTES, dedupeForever = false,
 } = {}) {
   try {
     if (!req || !page) return Promise.resolve(false);
@@ -114,6 +127,17 @@ function recordPageView({
     const subjId = subjectId == null ? null : String(subjectId);
     const custId = customerId || null;
     const windowMinutes = Number.isInteger(dedupeMinutes) && dedupeMinutes > 0 ? dedupeMinutes : DEDUPE_MINUTES;
+    // dedupeForever: the subject_id is a stable id for ONE event (a push notification),
+    // so the same page + customer + subject is never written twice, whatever
+    // the ip or how much later a duplicate arrives. Needs a subject id.
+    const forever = dedupeForever === true && subjId != null;
+    // The NOT EXISTS check alone is racy (two concurrent beacons both pass it), so a
+    // forever push open is also backed by the partial unique index from migration
+    // 20260929200000; ON CONFLICT swallows the loser of that race. The conflict
+    // target must repeat the index predicate exactly.
+    const conflictClause = forever && page === PUSH_OPEN_PAGE
+      ? `ON CONFLICT (customer_id, page, subject_id) WHERE page = '${PUSH_OPEN_PAGE}' AND subject_id IS NOT NULL DO NOTHING`
+      : '';
 
     return Promise.resolve(db.raw(
       `INSERT INTO customer_page_views (customer_id, page, subject_type, subject_id, ip_hash, user_agent)
@@ -121,12 +145,19 @@ function recordPageView({
        WHERE NOT EXISTS (
          SELECT 1 FROM customer_page_views
          WHERE page = ?::text
-           AND subject_type IS NOT DISTINCT FROM ?::text
            AND subject_id IS NOT DISTINCT FROM ?::text
-           AND ip_hash IS NOT DISTINCT FROM ?::text
-           AND viewed_at > now() - (?::int * interval '1 minute')
-       )`,
-      [custId, page, subjType, subjId, ipHash, ua, page, subjType, subjId, ipHash, windowMinutes],
+           AND customer_id IS NOT DISTINCT FROM ?::uuid
+           AND (?::boolean OR (
+             subject_type IS NOT DISTINCT FROM ?::text
+             AND ip_hash IS NOT DISTINCT FROM ?::text
+             AND viewed_at > now() - (?::int * interval '1 minute')
+           ))
+       )
+       AND (?::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM customers WHERE id = ?::uuid AND deleted_at IS NULL FOR SHARE
+       ))
+       ${conflictClause}`,
+      [custId, page, subjType, subjId, ipHash, ua, page, subjId, custId, forever, subjType, ipHash, windowMinutes, custId, custId],
     )).then((res) => !!(res && (res.rowCount === undefined || res.rowCount > 0)))
       .catch((err) => {
         logViewFailure('insert', page, subjType, err);

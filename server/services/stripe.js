@@ -165,7 +165,13 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
 // lease that proves a bound PI is a dead session rather than a live page.
 const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
 
-async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db) {
+// readOnly: reach a verdict without writing (a READ ONLY transaction or a pure
+// resolver such as customer-dunning's). ANY unresolved claimed/ambiguous
+// attempt is pending: a stale submitted claim reads as ambiguous (what the
+// writing path promotes it to), and a stale pre-submit or fresh claim reads as
+// in progress (STRIPE_CHARGE_IN_PROGRESS) — a read never releases a claim
+// whose worker may still commit. Nothing is updated.
+async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false } = {}) {
   let chargeAttempt = await database('stripe_invoice_charge_attempts')
     .where({ invoice_id: invoiceId })
     .whereIn('status', ['claimed', 'ambiguous'])
@@ -173,7 +179,14 @@ async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = 
     .first('id', 'status', 'stripe_payment_intent_id', 'idempotency_key', 'submitted_at', 'created_at');
   if (chargeAttempt) {
     let ambiguous = chargeAttempt.status === 'ambiguous';
-    if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
+    if (!ambiguous && readOnly) {
+      // Nothing is released or promoted here, and a stale PRE-submit claim
+      // stays fenced: the original worker can still commit its submission
+      // after we looked, so a read cannot conclude "released". Stale +
+      // submitted reads as ambiguous (what the writing path promotes it to);
+      // stale pre-submit and fresh both read as in progress.
+      if (savedCardClaimIsStale(chargeAttempt) && savedCardClaimWasSubmitted(chargeAttempt)) chargeAttempt.status = 'ambiguous';
+    } else if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
       if (!savedCardClaimWasSubmitted(chargeAttempt)) {
         const released = await releaseStalePreSubmitSavedCardClaim(chargeAttempt, database).catch((releaseErr) => {
           logger.error(`[stripe] could not release stale pre-submit saved-card claim ${chargeAttempt.id}: ${releaseErr.message}`);

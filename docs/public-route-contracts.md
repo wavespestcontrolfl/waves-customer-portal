@@ -771,7 +771,22 @@ cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
 `SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
-from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+from HQ). Staff and phone booking see every fit. **Zone route days**
+(`GATE_ZONE_ROUTE_DAYS`, owner 2026-09-29, default OFF): when on, that cap is
+lifted per candidate for an address in a configured zone on that zone's route
+weekday, so an empty route day can be offered and seeded (default: Friday for
+Venice / North Port, lifted cap 150 minutes; override with the
+`system_settings` key `schedule_zone_route_days`, e.g.
+`{"venice":{"weekdays":[5],"max_detour_minutes":150,"technician_id":null}}`;
+`{}` switches the lift off, a `technician_id` pins it to one technician). The
+zone is resolved from the request's coordinates (nearest `service_zones`
+center within 35 miles, so 'North Venice' / 'Northport' resolve), passed to the
+finder as `zoneSlug` by `/api/booking/availability` (and everything sharing its
+builder) and the estimate slot routes, and only ever raises the cap — route
+feasibility (return time, overcommit, arrival window, travel gap) is still
+checked. The estimate picker's south-zone funnel seeds the route day first. The phone
+agent, office Find-a-Time, the Intelligence Bar and auto-dispatch are not
+customer-facing and never had the cap. The finder's per-slot `return_time`
 (modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
 fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through
@@ -955,7 +970,8 @@ and still accepted at commit — `arrival-route.js`'s `verifyArrivalCapacity`
 — only while its certified delay stays within that same grace, tighter than
 but never wider than the existing 120-minute arrival promise every capacity
 booking already carries.
-**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — narrowed from an earlier
+**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314; `/book` later joined under its own
+gate and opt-in — see "Online-booking arrival grace" below — narrowed from an earlier
 draft that also covered `/book` and public reschedule): those two surfaces'
 commit paths (`createSelfBooking`, the rebooker's single-visit move) each
 run a STRICT pre-verify travel probe ahead of their capacity check, so a
@@ -1025,6 +1041,86 @@ booking tools never opt in and are unaffected. Default 0 is byte-identical
 to before this lane. A slotId minted before this v3 bump fails verification
 once (the same accepted trade the v1→v2 canonical-string bump already made)
 — the client's existing "pick another time" 409 recovery re-signs fresh.
+**Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
+2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
+and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the
+surfaces whose commit is `createSelfBooking`: `/api/booking/availability`,
+`/find-slots`, the `/capture-intent` revalidation, public re-service and
+inspection booking — each passes `bookArrivalGrace: true` to
+`buildBookingAvailability`, which takes effect only with mid-route insertion
+(`capacityPlacement`, i.e. `bookInsertionOffersLive()`: `GATE_BOOK_CAPACITY_
+COMMIT` + `GATE_SCHEDULING_CAPACITY`), the new gate, and a positive
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES` for the slot's date (0 on a same-day pick).
+The **phone agent** (its commit stays end-of-day only), **public reschedule**
+(its rebooker commit still runs the strict pre-verify travel probe), office
+Find-a-Time, the Intelligence Bar and auto-dispatch never opt in and are
+byte-identical. Gate off (or grace 0) is today's strict drive+15-minute
+travel-gap offer and commit, byte for byte, on every surface.
+
+*Why.* Fable's read-only production runs found find-time seeing 8 bookable
+Parrish days at cap 30 while `/book` showed 3: every dropped slot failed
+`/book`'s own both-neighbour travel-gap mirror, because
+`find-time.js`'s `packCapacityEnds` tested each group's earliest pick against
+the previous stop ONLY and its latest pick against the next stop ONLY, so a
+pick that cleared its own neighbour but crowded the other survived find-time
+and was then dropped by the mirror — often emptying 4-7-stop days. The commit
+side had the mirror image: `findConflictingVisits`' strict travel probe ran
+before `verifyArrivalCapacity` and refused any buffer shortfall, so a
+grace-kept offer would have 409'd.
+
+*The one rule* (`services/scheduling/book-arrival-grace.js`, read by find-time's
+`packCapacityEnds`, `/book`'s offer mirror in `buildBookingAvailability`, and
+`createSelfBooking`'s commit probe — so offer and commit cannot drift):
+1. A real window overlap is never waived (the commit's own SQL overlap probe
+   and the raw-window check in `travel-gap.js` keep refusing it).
+2. Only the travel BUFFER against the PREVIOUS stop may be waived, and only
+   when that stop is committed and assigned to THIS technician and the
+   whole-route arrival simulation's own delay for this slot is within grace
+   (`arrival_delay_minutes` at offer, `verifyArrivalCapacity`'s fit at commit).
+   The NEXT stop's side is never waived — the next customer's promised start is
+   not this customer's to spend — nor an unassigned or other-technician stop, a
+   live hold (every hold on the route must clear the strict gap), or an
+   interview.
+3. `packCapacityEnds` (`/book` mode) checks every candidate against EVERY
+   route neighbour under rule 1-2 BEFORE a group picks its earliest/latest
+   endpoint, so a later candidate that clears both sides is never lost to an
+   earlier one that crowds the far side. Without the gate the default
+   one-neighbour-per-side pick is unchanged (the estimate picker's grace
+   still opts in through `arrivalGrace: true` and keeps its own rule).
+4. Independently of any gap, a graced build never offers a slot whose
+   simulated arrival delay is past the grace, because the commit's
+   `verifyArrivalCapacity(…, { arrivalGraceMinutes })` would refuse it:
+   `createSelfBooking` now passes the OFFER's grace (the guard test
+   `verify-arrival-capacity-grace-callers-guard.test.js` counts it).
+
+*Commit.* `createSelfBooking` tolerates a strict-probe clash only when the
+offer was graced, a prepared capacity proof exists, and EVERY clash is a
+previous-side `travel_gap` row (a row that starts before the candidate;
+`findConflictingVisits` itself is unchanged and stays tech-blind) on the same
+assigned committed technician;
+everything else stays `SLOT_TAKEN`. The grace it enforces is the exact value
+that justified the offer: a signed `/book` offer carries it as an HMAC-bound
+field (`slot_sig` = `<exp>.<grace>.<sig>`, only when grace > 0; a zero-grace
+offer keeps the exact `<exp>.<sig>` shape), never a live re-read; an internal
+callback booking (re-service, inspection — no signed field, offer proof is a
+same-request rebuild) reads the live grace for its date.
+
+*Zero grace is the gate off.* Grace mode applies only where the applicable
+grace is positive: a build whose range has no positive-grace date (env unset/0)
+is plain insertion mode, and per slot a zero-grace date (a same-day pick)
+keeps the old one-neighbour packing, the strict mirror, the
+`BOOK_INSERTION_OFFER_POLICY` tag and the `<exp>.<sig>` field.
+
+*Flip safety.* Every `/book` offer for a positive-grace date carries
+`BOOK_ARRIVAL_GRACE_OFFER_POLICY` (`utils/slot-offer-token.js`) instead of
+`BOOK_INSERTION_OFFER_POLICY`, and `/confirm` verifies with
+`bookOfferPolicyLive(date)`, so a gate flip in either direction between mint and
+confirm fails the signature into the standard "pick your time again" 409
+(same mechanism as `GATE_BOOK_CAPACITY_COMMIT`, #5231). Tests:
+`book-arrival-grace-parity.test.js` (real whole-route simulation +
+find-time + commit probe, both directions, gate on and off),
+`booking-availability-arrival-grace.test.js` (offer mirror + signing),
+`booking-confirm-signed-offer.test.js` (commit matrix), `slot-offer-token.test.js`.
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.
@@ -1425,6 +1521,51 @@ evidence provenance is normalized to review-required: its recorded note remains
 visible beside confirmation guidance, while the former inferred “normal watering
 within 24 hours” instruction is removed. Historical neutral fallbacks retain
 their existing shape and wording.
+`GATE_LAWN_WATERING_RULE` (dark; gate off leaves this payload unchanged, key for
+key) expands the lawn payload with the visit's one watering instruction, built
+from the per-product rules frozen with the visit, the completion time and the
+customer's own irrigation entries (withheld after a move). When it resolves to
+hold, water-in or hold-then-water-in: `reportV2.banner`
+`{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
+`hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
+finished customer sentences with absolute Eastern clock times; `holdUntil`,
+`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+has dried" hold has no printed duration and `expiresAt: null` (dryness is a
+condition, so no instruction that waits for drying, including one followed by a
+water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
+`holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
+"ended" note past it; the key is absent when there is no claim).
+`reportV2.aftercare` is a record of the visit and never changes by the clock
+(owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
+`wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
+is a hold), `holdTask` (the banner's first line verbatim, or its first two lines
+for hold-then-water-in), `waterInTask` (the banner's first line verbatim, for a
+water-in that earns no plan credit; it stays the customer's task in the hero,
+the follow-up card and the assistant within the visit's plan week), `ruleSource`,
+`holdUntil` and `waterInBy`; and
+`reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
+`{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
+end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
+never reaches the payload). Provenance: `ruleSource` is `label`, `owner` or
+`default`, the weakest source among the rules that drive the instruction; state
+`none` is asserted only when every applied product resolved to a rule and at
+least one is label- or owner-sourced; any applied product with no rule makes
+the whole visit no claim (no banner, no product_instruction aftercare, the
+existing fail-closed aftercare stays), whatever the other products say. The rule itself
+(`wateringRule` / `post_application_watering`) never appears on
+`applications[].product` or anywhere else in the public payload. The complete
+instruction is frozen at completion under `structured_notes.lawnWateringFreeze`
+(first writer wins, atomically) and later reads replay it, so an edit to the customer's
+sprinkler entries after the visit never changes the minutes or times an existing
+report showed; a record with no frozen instruction regenerates it. Only the treatment-specific sentences are frozen; the one
+sentence that depends on the weekly plan ("follow this week's plan", or "that
+counts toward this week's watering" for a water-in shallower than the plan's
+run) is composed on each render from the plan present on that render.
+`reportV2.aftercare.watering` carries every treatment sentence. A render whose
+watering inputs could not be read (customer preferences or the catalog) omits
+the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
+such a render is served but never cached, and a pinned delivery defers. The gate is
+part of the lawn PDF cache signature.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -1434,7 +1575,7 @@ The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Review-required or restricted
 aftercare also keeps the deterministic report before cache/model access. Lawn
-PDF render strategy `p6-aftercare-guards-20260927` regenerates older cached PDFs
+PDF render strategy `p7-watering-instruction-20260929` regenerates older cached PDFs
 to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
@@ -2662,8 +2803,9 @@ nothing in the request names or changes the target. The query carries only an
 HMAC-signed attribution context (template key, customer id, visit or project
 id, surface — row ids only, NEVER the bearer prep token, which would land in
 the request log; it is resolved to ids at render time) — an invalid signature is ignored, never trusted. Human clicks log
-to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs still redirect but
-log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
+to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs and staff — the
+`waves_admin` marker cookie or `WAVES_ADMIN_IPS`, the same `shouldRecord`
+filter `/l` uses — still redirect but log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
 is on, but the route stays live regardless of the gate so links already sent
 keep working. Destinations are never tagged or altered.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
@@ -3725,8 +3867,12 @@ against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
-`{ error: 'service_area_unavailable' }`, recoverable), else the box test
-`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
+DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
+is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
+DeSoto ZIP); elsewhere in the box is in. Out of area 422s
 `{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
 address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day
@@ -3792,26 +3938,37 @@ contract as security-critical).
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).
 `/api/review/:token` (GET + POST; token-gated customer review flow — GET
-returns the review-request context by token, POST submits the customer's
-review. No auth beyond the review-request token. Baseline guards
+returns the review-request context by token. POST is RETIRED (owner ruling
+2026-09-29, the 1-10 rating is gone): it answers 410 Gone with no DB access
+(it used to be an unauthenticated rating write that stamped the click fields and
+fired a referral invite). No auth beyond the review-request token. Baseline guards
 (`server/routes/review-public.js`): `REVIEW_TOKEN_RE` format gate (the
 shape `services/review-request.js` mints — 32-64 url-safe chars) via
 `router.param` before any DB read, one generic 404 body for malformed,
-unknown, and expired tokens on both verbs, a router-wide 30 req/min limiter
+unknown, and expired tokens on GET, a router-wide 30 req/min limiter
 on the shared IPv6-safe `rateLimitKey`, and the shared `noStore` privacy
 headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
 stamps open state and returns customer name data, so those guards are the
 whole defense.)
-`/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-`/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
-rating flow from a review-request link — high → the nearest GBP
-write-a-review URL, low → private feedback capture. Router-wide url-safe
+`/api/rate/:token` (+ `/:token/go`) (review-gate; token-scoped thank-you
+page from a review-request link. The 1-10 rating, its feedback form and the AI
+review writer are retired (owner ruling 2026-09-29): the page GET returns
+`reviewUrl` — ALWAYS the tracked `/api/rate/:token/go` link (whatever
+GATE_REVIEW_DIRECT_LINK says), null for a customer already
+marked as a reviewer — and the page shows one "Open Google" button; going to
+Google is always the customer's own click. `POST /:token/score`, `/:token/submit`
+and `/:token/generate-review` no longer exist (404). Finalized (legacy-rated)
+requests answer `alreadySubmitted` with no button. Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
-GET and score/submit writes carry a 30/min limiter. `/:token/go` is the
-GATE_REVIEW_DIRECT_LINK tracked redirect: the same 32–64 URL-safe token format gate, 30
+GET carries a 30/min limiter. `/:token/go` is the
+tracked redirect (ALWAYS live, not gate-dependent; GATE_REVIEW_DIRECT_LINK now only decides whether ask texts and emails link here or to the /rate thank-you page): the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
-the customer's active review cadence, and 302s to the location's GBP review
+EVERY later review-ask path for the customer in one click (`ReviewService.stopFutureAsks`: the clicked request's cadence and any active/deferred cadence, a cadence parked for visit-summary recovery, queued one-off asks, due Day-3 follow-ups; run best-effort under the per-customer `review-send:<customerId>` lock with a bounded ~2 s wait; the stamp/claim lands first and every review sender re-checks `redirected_at` at SEND time (`services/review-click-guard.js`), so the customer is never kept from Google: `/go` always 302s once the click is recorded. A send already past its guard when the click lands may still deliver that one in-flight text), fire-and-forgets the referral invite
+email on the FIRST tracked click only (`sendReferralInviteEmail`, trigger
+`google_review_click`, once per customer; owner ruling 2026-09-29; never
+delays or breaks the redirect; bot fetches, expired, finalized and
+already-reviewed requests send nothing), and 302s to the location's GBP review
 URL — every failure path degrades to the /rate page, and the ONLY redirect
 targets are config/locations.js googleReviewUrl values (never
 request-derived). ONE deliberate non-failure carve-out (owner ruling,

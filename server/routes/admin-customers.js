@@ -2722,7 +2722,11 @@ router.get('/:id/properties', requireAdmin, async (req, res, next) => {
     const customerProperties = require('../services/customer-properties');
     await customerProperties.ensurePrimaryProperty(req.params.id).catch(() => {});
     const properties = await customerProperties.listProperties(req.params.id);
-    res.json({ properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM') });
+    res.json({
+      properties, canChangeAppointmentAddress, canChangePrimary: require('../config/feature-gates').gateEnvValue('GATE_IB_PLATFORM'),
+      // Read once here so the panel mounts per-row area editors only when on.
+      propertyServiceAreas: require('../services/property-service-areas').propertyServiceAreasEnabled(),
+    });
   } catch (err) { next(err); }
 });
 

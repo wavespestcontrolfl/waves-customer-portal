@@ -247,6 +247,10 @@ async function sendOne({
   to, fromEmail, fromName, subject, html, text, replyTo, headers, categories, asmGroupId, attachments,
   customArgs, suppressErrorLog, disableTracking = false, estimateIds, templateKey, withheldLinkPolicy,
   database, providerBoundaryCheck = async () => ({ ok: true }),
+  // Per-request bound override for callers that hold a connection/lock across
+  // the call and must not wait out the 120 s default (e.g. the newsletter
+  // confirmation). Default unchanged for every other caller.
+  timeoutMs,
 }) {
   if (!to || !subject) throw new Error('sendOne: to + subject required');
 
@@ -290,7 +294,7 @@ async function sendOne({
   const res = await fetch(`${API_BASE}/mail/send`, {
     method: 'POST',
     headers: authHeaders(),
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, REQUEST_TIMEOUT_MS) : REQUEST_TIMEOUT_MS),
     body: JSON.stringify(payload),
   });
   if (!res.ok) {

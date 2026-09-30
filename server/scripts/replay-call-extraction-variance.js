@@ -1015,6 +1015,8 @@ function routeForV2(extraction, contactPhone, helpers, addressValidation = null,
   // back to review. Replaying without it over-counts auto-routes.
   if (conflictCheck) {
     route = conflictCheck.demote(route, conflictCheck.extractedV1, conflictCheck.knownCaller);
+    // The gate's downstream full-transcript service veto (live path parity).
+    if (conflictCheck.veto) route = conflictCheck.veto(route, conflictCheck.extractedV1, conflictCheck.transcription);
   }
   return {
     allowed: !!route.allowed,
@@ -1280,7 +1282,12 @@ async function replayCall(call, context) {
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
-  const storedAvRaw = parseJson(call.ai_address_validation, null);
+  const storedAvUnwaived = parseJson(call.ai_address_validation, null);
+  // A whole-structure unit waiver (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT) was decided
+  // for the PRIOR extraction's service and property. It rebuilds for the prior
+  // route only; a fresh extraction is judged on the unwaived verdict unless it
+  // names the same service and property type (codex #5378 pre-push P1).
+  const storedAvRaw = require('../services/call-triage-flags').reconstructWaivedAddressValidation(storedAvUnwaived);
   // Effective-verdict reconstruction (codex round-12 P2, mirroring the
   // readiness script): a recovered address routed on the recovery's ACCEPTING
   // verdict while the ORIGINAL unresolvable one was persisted — the
@@ -1323,10 +1330,14 @@ async function replayCall(call, context) {
     customer: linkedCustomer,
     contactPhone,
     failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+    unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
   });
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.
-  const conflictCheck = { demote: CRP.demoteFailOpenOnV1AddressConflict, extractedV1: legacyFlat, knownCaller };
+  const conflictCheck = {
+    demote: CRP.demoteFailOpenOnV1AddressConflict, veto: CRP.applyUnclearServiceTranscriptVeto, extractedV1: legacyFlat, knownCaller, transcription: call.transcription,
+  };
   const priorV2Route = priorV2Valid ? routeForV2(priorV2, contactPhone, helpers, storedAv, failOpenContext, conflictCheck) : null;
   const scheduled = await findLegacyScheduledService(db, call, scheduledColumns);
 
@@ -1384,10 +1395,14 @@ async function replayCall(call, context) {
 
   const currentExtraction = current.status === 'valid' ? current.extraction : null;
   const currentFlat = currentExtraction ? helpers.flatView(currentExtraction) : null;
+  const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+  const storedAvForCurrent = (!recoveredCard && storedAvRaw !== storedAvUnwaived && priorV2Valid && currentExtraction
+    && waiverInputs(priorV2) !== waiverInputs(currentExtraction))
+    ? storedAvUnwaived : storedAv;
   const currentRoute = currentExtraction
     ? routeForV2(currentExtraction, contactPhone, helpers,
-      avVerdictForExtraction(storedAv, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
-      failOpenContext, conflictCheck)
+      avVerdictForExtraction(storedAvForCurrent, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
+      failOpenContext, { ...conflictCheck, transcription: transcriptForExtraction })
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];

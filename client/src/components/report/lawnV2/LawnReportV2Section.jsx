@@ -14,6 +14,7 @@
 
 import {
   PrintContext,
+  LawnWateringBanner,
   LawnSnapshotHero,
   LawnFollowUpCard,
   LawnInsightCards,
@@ -31,6 +32,8 @@ export default function LawnReportV2Section({ data, print = false }) {
   return (
     <PrintContext.Provider value={print}>
     <div className="report-v2-embed" style={{ maxWidth: 720, margin: '0 auto', padding: '8px 16px 0' }}>
+      {/* The server-built watering instruction leads the report when present. */}
+      {data.banner ? <LawnWateringBanner banner={data.banner} /> : null}
       {data.snapshot ? <LawnSnapshotHero snapshot={data.snapshot}>
         {(data.photos?.length || data.photoSummary) ? <LawnPhotoStrip photos={data.photos} summary={data.photoSummary} embedded /> : null}
       </LawnSnapshotHero> : null}

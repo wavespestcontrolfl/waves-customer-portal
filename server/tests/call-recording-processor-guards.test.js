@@ -2431,6 +2431,22 @@ describe('dropped-call text honors the disclaimed-number hold, both directions (
   });
 });
 
+// Owner 2026-09-30: a caller who said no to texts on THIS call gets no
+// dropped-call text. Read from the live V2 extraction (the row may not be
+// saved yet); the sender itself checks every earlier call with the number.
+describe('dropped-call text honors a "no texts" said on the call itself', () => {
+  const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+  const blockStart = src.indexOf('if (droppedMidIntake && leadId) {');
+  const declinedIdx = src.indexOf('genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true', blockStart);
+  const realSendIdx = src.indexOf('sendDroppedCallAddressRequest({', blockStart);
+
+  test('the decline check sits before the real send and skips with said_no_texts', () => {
+    expect(declinedIdx).toBeGreaterThan(blockStart);
+    expect(realSendIdx).toBeGreaterThan(declinedIdx);
+    expect(src.slice(declinedIdx, realSendIdx)).toContain("smsOutcome = { sent: false, skipped: 'said_no_texts' };");
+  });
+});
+
 // codex #4919 round-9: the callStartedAt(call) anchoring at the extraction,
 // canAutoRoute, and callDateET call sites was removed with the
 // provider-timestamp/call-timeline work it was introduced alongside — this

@@ -9,7 +9,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const fs = require('fs');
 const CRP = require('../services/call-recording-processor');
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey } = require('../services/call-triage-flags');
+const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey, reconstructWaivedAddressValidation } = require('../services/call-triage-flags');
 
 function dbConn() {
   const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
@@ -108,8 +108,14 @@ async function main() {
       // is unchanged (codex round-11 P1); a changed street degrades to null
       // rather than riding on a stale validated_accept.
       const pj = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : (v || null); } catch { return null; } };
-      const rawAv = pj(r.ai_address_validation);
+      const rawAvUnwaived = pj(r.ai_address_validation);
+      const rawAvWaived = reconstructWaivedAddressValidation(rawAvUnwaived);
       const priorEnriched = pj(r.ai_extraction_enriched);
+      // A whole-structure unit waiver was decided for the PRIOR extraction's
+      // service and property type: keep it only when this extraction names the
+      // same; otherwise judge on the persisted, unwaived verdict.
+      const waiverInputs = (x) => [x?.service_request?.primary_service_category, x?.service_request?.specific_service_name, x?.property?.property_type].join('|');
+      const rawAv = (rawAvWaived !== rawAvUnwaived && waiverInputs(priorEnriched) !== waiverInputs(e)) ? rawAvUnwaived : rawAvWaived;
       const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
       // Recovery reconstruction (codex round-12 P2): a recovered call routed
       // on the recovery's accepting verdict, not the persisted unresolvable
@@ -131,11 +137,17 @@ async function main() {
         customer: pj(r.linked_customer),
         contactPhone,
         failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+        // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+        unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
       });
-      const route = CRP.demoteFailOpenOnV1AddressConflict(
-        canAutoRoute(e, { contactPhone, addressValidation: storedAv, ...failOpenOptions }),
+      const route = CRP.applyUnclearServiceTranscriptVeto(
+        CRP.demoteFailOpenOnV1AddressConflict(
+          canAutoRoute(e, { contactPhone, addressValidation: storedAv, ...failOpenOptions }),
+          pj(r.ai_extraction) || {},
+          knownCaller
+        ),
         pj(r.ai_extraction) || {},
-        knownCaller
+        r.transcription
       );
       // No customer PII (names/addresses) in logs — non-PII signals only.
       const hasName = !!(e.caller.first_name || e.caller.last_name);

@@ -3,6 +3,7 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
+const { REVIEW_LINK_CLICKED_REASON } = require('../services/review-click-guard');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: the review-request queue (reads return customer
@@ -90,6 +91,11 @@ router.post('/trigger', async (req, res, next) => {
       triggeredBy: triggeredBy || 'admin',
       ...serviceContext,
     });
+    // The customer already tapped their Google review link: nothing was sent,
+    // and the operator is told why rather than shown a generic suppression.
+    if (request.sendOutcome?.failed === 'review_link_clicked') {
+      return res.status(409).json({ error: REVIEW_LINK_CLICKED_REASON, code: 'review_link_clicked' });
+    }
     res.json(request);
   } catch (err) {
     // Gate refusals from ReviewService.create (at cap / cooldown / active
@@ -114,6 +120,11 @@ router.post('/tech-trigger', async (req, res, next) => {
       serviceRecordId,
       triggeredBy: 'tech',
     });
+    // A tap since the visit suppressed the ask: the same 409 as /trigger, and
+    // no reviewUrl, so the tech app cannot hand the customer another link.
+    if (request.sendOutcome?.failed === 'review_link_clicked') {
+      return res.status(409).json({ error: REVIEW_LINK_CLICKED_REASON, code: 'review_link_clicked' });
+    }
 
     // `sent` is the truth (codex #4141 r3 P2): an immediate ask held by the
     // 3-day rule, the send window or a provider retry is queued, not sent —
