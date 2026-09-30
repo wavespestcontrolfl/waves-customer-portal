@@ -12,6 +12,12 @@
  * catch-up -> template probe -> SEND through sendReminderChannels ->
  * DISPOSITION (one path for every return) -> advance. Every stage returns
  * `null` to continue or an outcome object to stop.
+ *
+ * Every pre-send guard (customer, preferences, recover-first, autopay, set,
+ * stage, templates) is split into a read-only `decide*` half, which returns
+ * null or a decision, and a write half (`applyDecision`). The live run calls
+ * both; the shadow run calls only the decide halves, so its verdicts can
+ * never drift from the live path's.
  */
 
 const db = require('../../models/db');
@@ -57,24 +63,19 @@ function channelsFor(run, prefs, customer) {
   return base.filter((c) => !(c === 'sms' && !customer.phone));
 }
 
-async function loadCustomer(run) {
+// A decision: what a guard concluded, with no write done. kind = hold | pause |
+// close | autopay_hold | settle.
+const decision = (kind, reason, extra = {}) => ({ kind, reason, ...extra });
+
+async function decideCustomer(run) {
   const customer = await run.database('customers').where({ id: run.schedule.customer_id }).first();
-  if (!customer) {
-    await Schedule.close(run.schedule, 'customer_missing', run.now, { database: run.database, claimStamp: run.claimStamp });
-    await Schedule.alertStaff({
-      title: 'Customer reminders stopped',
-      body: 'A customer reminder schedule points at a customer record that no longer exists; it was closed.',
-      dedupeKey: `customer-dunning-customer-missing:${run.schedule.id}`,
-      customerId: null,
-    });
-    return outcome('closed', { reason: 'customer_missing' });
-  }
-  if (customer.deleted_at) return pause(run, 'customer_deleted');
+  if (!customer) return decision('close', 'customer_missing', { closeReason: 'customer_missing', alertMissingCustomer: true });
+  if (customer.deleted_at) return decision('pause', 'customer_deleted');
   const { prefs, error } = await readPrefs(run);
-  if (error) return hold(run, 'prefs_unreadable');
+  if (error) return decision('hold', 'prefs_unreadable');
   run.customer = customer;
   run.channels = channelsFor(run, prefs, customer);
-  return run.channels.length ? null : pause(run, 'no_reachable_channel');
+  return run.channels.length ? null : decision('pause', 'no_reachable_channel');
 }
 
 // ── stage 3: recover first ───────────────────────────────────────────────
@@ -164,88 +165,113 @@ async function finishDelivered(run, facts) {
   return outcome(Schedule.isFinalIndex(run.schedule.step_index) ? 'completed' : 'advanced', { recovered: !facts.deliveredNow?.length });
 }
 
-async function recoverFirst(run) {
+async function decideRecovery(run) {
   let progress;
   try {
     progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels);
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${err.message}`);
-    return hold(run, 'progress_unreadable');
+    return decision('hold', 'progress_unreadable');
   }
   run.step = STEPS[run.schedule.step_index];
-  if (!run.step) {
-    logger.error(`[customer-dunning] schedule ${run.schedule.id} has no step at index ${run.schedule.step_index}; releasing`);
-    await Schedule.close(run.schedule, 'released_prereq_off', run.now, { database: run.database, claimStamp: run.claimStamp });
-    return outcome('closed', { reason: 'no_step' });
-  }
+  if (!run.step) return decision('close', 'no_step', { closeReason: 'released_prereq_off' });
   run.eventKey = eventKey(run.schedule, run.step.id);
   const event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey);
-  if (!event || event.delivered.size === 0) return event?.complete ? pause(run, 'all_channels_terminal') : null;
+  if (!event || event.delivered.size === 0) return event?.complete ? decision('pause', 'all_channels_terminal') : null;
   run.priorEvent = event; // a partial delivery from an earlier tick, kept in case the post-send read fails
   // Delivered before: settle from the ledger. No render, no set read.
   if (event.complete || await nextStageArrived(run)) {
-    return finishDelivered(run, { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] });
+    return decision('settle', 'already_delivered', { facts: { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] } });
   }
   return null;
 }
 
 // ── stage 4: autopay ─────────────────────────────────────────────────────
 
-async function checkAutopay(run) {
+async function decideAutopay(run) {
   let onAutopay;
   try {
     onAutopay = await customerOnAutopay(run.customer, { failClosed: true });
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — autopay state unreadable: ${err.message}`);
-    return hold(run, 'autopay_unreadable');
+    return decision('hold', 'autopay_unreadable');
   }
-  if (!onAutopay) return null;
-  await Schedule.markAutopayHold(run.schedule, run);
-  return outcome('autopay_hold');
+  return onAutopay ? decision('autopay_hold', 'autopay_hold') : null;
 }
 
 // ── stages 6-8: set, stage, templates ────────────────────────────────────
 
 /** A set that cannot be sent: empty closes, a hold holds (unused account credit is a hold: the office applies it). */
-async function endForSet(run, set) {
-  if (set.kind === 'hold') return hold(run, set.reason);
+function decideEndOfSet(set) {
+  if (set.kind === 'hold') return decision('hold', set.reason);
   const reason = set.reason === 'no_open_invoices' ? 'balance_cleared' : 'no_active_member';
-  await Schedule.close(run.schedule, reason, run.now, { database: run.database, claimStamp: run.claimStamp });
-  return outcome('closed', { reason });
+  return decision('close', reason, { closeReason: reason });
 }
 
 const sendable = (set) => (set.kind === 'multi' || set.kind === 'single') && set.activeCount > 0;
 
-// STAGE: catch up to the calendar, never beyond the final step. Nothing
-// customer-facing happens, so no interaction row. A HELD schedule is the
-// exception: its current stage was due and not delivered (markHeld promises to
-// retry THAT step), so clearing the hold retries it — a Day 60 reminder held
-// past Day 90 goes out as Day 60 first, and the next stage follows on its own
-// spacing — instead of jumping to the final notice by calendar age. Catch-up is
-// for a stage nobody attempted (a late promotion, a cron gap, a resume).
-async function catchUpStage(run, set) {
+// STAGE: plan the catch-up to the calendar, never beyond the final step. A HELD
+// schedule is the exception: its current stage was due and not delivered
+// (markHeld promises to retry THAT step), so clearing the hold retries it — a
+// Day 60 reminder held past Day 90 goes out as Day 60 first, and the next stage
+// follows on its own spacing — instead of jumping to the final notice by
+// calendar age. Catch-up is for a stage nobody attempted (a late promotion, a
+// cron gap, a resume). Pure: it sets run.plannedStage / step / eventKey and
+// writes nothing (applyStage writes it).
+async function planStage(run, set) {
   run.rows = null;
   const rows = Schedule.rowsInSet(await memberRows(run), set);
   run.rows = rows;
   const oldest = oldestActive(rows);
   const attemptedAndHeld = run.schedule.status === 'held';
-  const stage = oldest && !attemptedAndHeld
+  run.plannedStage = oldest && !attemptedAndHeld
     ? Schedule.stageFor(Followups.sequenceAnchor(oldest), run.now, run.schedule.step_index)
     : Number(run.schedule.step_index);
-  if (stage > Number(run.schedule.step_index)) {
-    logger.info(`[customer-dunning] stage_catch_up schedule ${run.schedule.id}: ${run.schedule.step_index} -> ${stage}`);
-    if (!await Schedule.writeStage(run.schedule, stage, run)) return outcome('stale');
-    run.schedule = { ...run.schedule, step_index: stage, link_digest: null, link_url: null };
-  }
-  run.step = STEPS[run.schedule.step_index];
+  run.step = STEPS[run.plannedStage];
   run.eventKey = eventKey(run.schedule, run.step.id);
+}
+
+/** The set-level guards: a sendable set, the stage it goes out at, an available template. */
+async function decideSet(run, set) {
+  if (!sendable(set)) return decideEndOfSet(set);
+  await planStage(run, set);
+  run.sendChannels = await Render.channelsWithTemplates(run.step, set.kind, run.channels, run.database);
+  return run.sendChannels.length ? null : decision('pause', 'no_reachable_channel');
+}
+
+// Nothing customer-facing happens, so no interaction row.
+async function applyStage(run) {
+  if (run.plannedStage > Number(run.schedule.step_index)) {
+    logger.info(`[customer-dunning] stage_catch_up schedule ${run.schedule.id}: ${run.schedule.step_index} -> ${run.plannedStage}`);
+    if (!await Schedule.writeStage(run.schedule, run.plannedStage, run)) return outcome('stale');
+    run.schedule = { ...run.schedule, step_index: run.plannedStage, link_digest: null, link_url: null };
+  }
   return null;
 }
 
-async function probeTemplates(run, set) {
-  run.sendChannels = await Render.channelsWithTemplates(run.step, set.kind, run.channels, run.database);
-  if (run.sendChannels.length) return null;
-  return pause(run, 'no_reachable_channel');
+/** The write half of every decision. */
+async function applyDecision(run, d) {
+  switch (d.kind) {
+    case 'hold': return hold(run, d.reason);
+    case 'pause': return pause(run, d.reason);
+    case 'autopay_hold':
+      await Schedule.markAutopayHold(run.schedule, run);
+      return outcome('autopay_hold');
+    case 'settle': return finishDelivered(run, d.facts);
+    default: { // close
+      if (d.reason === 'no_step') logger.error(`[customer-dunning] schedule ${run.schedule.id} has no step at index ${run.schedule.step_index}; releasing`);
+      await Schedule.close(run.schedule, d.closeReason, run.now, { database: run.database, claimStamp: run.claimStamp });
+      if (d.alertMissingCustomer) {
+        await Schedule.alertStaff({
+          title: 'Customer reminders stopped',
+          body: 'A customer reminder schedule points at a customer record that no longer exists; it was closed.',
+          dedupeKey: `customer-dunning-customer-missing:${run.schedule.id}`,
+          customerId: null,
+        });
+      }
+      return outcome('closed', { reason: d.reason });
+    }
+  }
 }
 
 // ── stage 9: send ────────────────────────────────────────────────────────
@@ -299,7 +325,7 @@ function attemptSend(run, set) {
 async function sendWithRerender(run, set) {
   const first = await attemptSend(run, set);
   if (!setChanged(first) || first.deliveredNow.length) return { result: first, set };
-  const fresh = await resolveDunnableSet(run.schedule.customer_id, { now: run.now });
+  const fresh = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
   run.rows = null; // the rows narrowed to the first set no longer describe the send
   if (!sendable(fresh)) return { result: first, set: fresh, ended: true };
   return { result: await attemptSend(run, fresh), set: fresh };
@@ -316,7 +342,11 @@ async function deliveryFacts(run, result) {
     // a partial delivery must not turn into a hold or pause for want of a re-read.
     event = run.priorEvent || null;
   }
-  const delivered = new Set([...(event?.delivered || []), ...result.deliveredNow]);
+  // `result.delivered` carries every leg the send saw as delivered, including one
+  // deduped from a reservation older than the progress window (a final notice
+  // accepted, crash, resumed 90+ days later): complete with nothing 'delivered'
+  // would read as all-terminal and pause a notice that was in fact delivered.
+  const delivered = new Set([...(event?.delivered || []), ...(result.delivered || []), ...result.deliveredNow]);
   const deliveredAt = event?.deliveredAt || (result.deliveredNow.length ? run.now : null);
   return { event, delivered, deliveredAt, deliveredNow: result.deliveredNow, complete: result.complete, results: result.results };
 }
@@ -337,12 +367,13 @@ async function dispose(run, facts) {
 }
 
 async function sendPhase(run) {
-  const set = await resolveDunnableSet(run.schedule.customer_id, { now: run.now });
-  if (!sendable(set)) return endForSet(run, set);
-  const staged = await catchUpStage(run, set) || await probeTemplates(run, set);
+  const set = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
+  const stop = await decideSet(run, set);
+  if (stop) return applyDecision(run, stop);
+  const staged = await applyStage(run);
   if (staged) return staged;
   const { result, set: finalSet, ended } = await sendWithRerender(run, set);
-  if (ended) return endForSet(run, finalSet);
+  if (ended) return applyDecision(run, decideEndOfSet(finalSet));
   return dispose(run, await deliveryFacts(run, result));
 }
 
@@ -350,7 +381,8 @@ async function sendPhase(run) {
 
 async function runClaimed(claimed, opts) {
   const run = { ...opts, schedule: claimed.schedule, claimStamp: claimed.claimStamp };
-  return await loadCustomer(run) || await recoverFirst(run) || await checkAutopay(run) || sendPhase(run);
+  const early = await decideCustomer(run) || await decideRecovery(run) || await decideAutopay(run);
+  return early ? applyDecision(run, early) : sendPhase(run);
 }
 
 /**
@@ -412,20 +444,30 @@ function allowlisted(rows) {
 }
 
 /**
- * What the live run would do with a schedule's resolved set: hold, close, or
- * send. `due` is set for a schedule that does not exist yet (a projected one).
+ * What the live run would do with a schedule: the SAME read-only guards
+ * runClaimed runs (customer, preferences, recover-first, autopay, then the set,
+ * stage and template checks), and only their decide halves — nothing is applied.
+ * `schedule` is a stored row or, for a promotion, the projected one; `due` is set
+ * for a schedule that does not exist yet.
  */
-function judgeShadowSchedule(fields, set, due = null) {
-  if (set.kind === 'hold') { line('hold', { ...fields, reason: set.reason }); return 'hold'; }
-  if (!sendable(set)) { line('close', { ...fields, reason: set.reason }); return 'close'; }
-  line('send', { ...fields, kind: set.kind, members: set.members.length, total_cents: set.totalCents, ...(due ? { due: iso(due) } : {}) });
-  return 'send';
+async function judgeShadowSchedule(schedule, set, { now, database, due = null }) {
+  const run = { schedule, now, database, operatorInitiated: false, claimStamp: null };
+  const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
+  const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAutopay(run) || await decideSet(run, set);
+  if (!stop) {
+    line('send', { ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents, ...(due ? { due: iso(due) } : {}) });
+    return 'send';
+  }
+  const verb = { hold: 'hold', autopay_hold: 'hold', pause: 'pause', close: 'close', settle: 'settle' }[stop.kind];
+  line(verb, { ...fields, reason: stop.reason });
+  return verb;
 }
 
 // The set resolve makes Stripe calls (pay-combined's live PaymentIntent check),
 // so it runs on the pool with NO transaction held (a pinned connection would
 // starve DB_POOL_MAX=2, as in promotion). It is a documented pure read; only
-// the member-row read below sits inside the READ ONLY transaction.
+// the member-row read below sits inside the READ ONLY transaction. The guards
+// that follow are plain reads on the pool as well.
 async function shadowPromote(customerId, now, database) {
   const set = await resolveDunnableSet(customerId, { database, now });
   const rows = await Schedule.inReadOnlyTransaction(database, (trx) => Schedule.activeMemberRows(customerId, { database: trx }));
@@ -441,13 +483,13 @@ async function shadowPromote(customerId, now, database) {
   // In a shadow-only rollout no schedule row is ever written, so the schedule
   // decisions would never be seen: model the schedule this promotion WOULD
   // create (in memory, never stored) and judge it the way the live run would.
-  const projected = { customer: customerId, schedule: 'projected', step: d.seed.step_id };
-  return ['promote', judgeShadowSchedule(projected, set, d.seed.next_touch_at)];
+  const projected = { id: 'projected', customer_id: customerId, episode: 1, status: 'active', step_index: d.seed.step_index, touches_sent: d.seed.touches_sent };
+  return ['promote', await judgeShadowSchedule(projected, set, { now, database, due: d.seed.next_touch_at })];
 }
 
 async function shadowSchedule(schedule, now, database) {
   const set = await resolveDunnableSet(schedule.customer_id, { database, now });
-  return judgeShadowSchedule({ customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id }, set);
+  return judgeShadowSchedule(schedule, set, { now, database });
 }
 
 /**
@@ -457,7 +499,7 @@ async function shadowSchedule(schedule, now, database) {
  * read outside it. It only logs `[customer-dunning] SHADOW would ...` lines.
  */
 async function shadowRun(now = new Date(), { database = db } = {}) {
-  const tally = { promote: 0, hold: 0, send: 0, close: 0, failed: 0 };
+  const tally = { promote: 0, hold: 0, send: 0, pause: 0, settle: 0, close: 0, failed: 0 };
   const bump = (kind) => { tally[kind] += 1; };
   for (const customerId of await Schedule.promotionCandidates({ database })) {
     try { (await shadowPromote(customerId, now, database)).forEach(bump); } catch (err) {
@@ -472,7 +514,7 @@ async function shadowRun(now = new Date(), { database = db } = {}) {
       logger.warn(`[customer-dunning] SHADOW schedule check failed for ${schedule.id}: ${err.message}`);
     }
   }
-  logger.info(`[customer-dunning] SHADOW summary: promote=${tally.promote} send=${tally.send} hold=${tally.hold} close=${tally.close} failed=${tally.failed}`);
+  logger.info(`[customer-dunning] SHADOW summary: promote=${tally.promote} send=${tally.send} hold=${tally.hold} pause=${tally.pause} settle=${tally.settle} close=${tally.close} failed=${tally.failed}`);
   return tally;
 }
 

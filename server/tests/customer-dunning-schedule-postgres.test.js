@@ -16,6 +16,18 @@ const mockResolve = jest.fn();
 jest.mock('../services/customer-dunning/balance-set', () => ({
   resolveDunnableSet: (...a) => mockResolve(...a),
 }));
+// The shadow run now runs the live pre-send guards. Their reads that go through the
+// process-wide pool (delivery progress, autopay eligibility, the email template
+// library) are stubbed here; the customer, preference and schedule reads run on `app`.
+jest.mock('../services/billing-reminder-delivery', () => ({
+  ...jest.requireActual('../services/billing-reminder-delivery'),
+  reminderProgress: jest.fn(async () => []),
+}));
+jest.mock('../services/autopay-eligibility', () => ({ customerOnAutopay: jest.fn(async () => false) }));
+jest.mock('../services/email-template-library', () => ({
+  ...jest.requireActual('../services/email-template-library'),
+  loadTemplateByKey: jest.fn(async () => ({ template: { status: 'active' }, activeVersion: { id: 'v1' } })),
+}));
 const mockNotify = jest.fn(async () => ({}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
 
@@ -51,6 +63,7 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     await admin.schema.createSchema(schema);
     app = knex({ client: 'pg', connection, searchPath: [schema], pool: { min: 0, max: 6 } });
     await app.schema.createTable('customers', (t) => { t.uuid('id').primary(); });
+    await app.schema.createTable('notification_prefs', (t) => { t.uuid('customer_id'); });
     await app.schema.createTable('invoices', (t) => {
       t.uuid('id').primary();
       t.uuid('customer_id');

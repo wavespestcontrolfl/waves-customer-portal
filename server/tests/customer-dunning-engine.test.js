@@ -121,8 +121,13 @@ jest.mock('../models/db', () => {
   const fake = jest.fn((table) => {
     fake.tables.push(table);
     let target = null;
+    let minOccurred = null; // reminderProgress' 90-day window
     const chain = {
-      where(cond) { if (cond && cond.id) target = cond.id; return chain; },
+      where(cond, op, val) {
+        if (cond && cond.id) target = cond.id;
+        if (cond === 'occurred_at' && op === '>') minOccurred = val;
+        return chain;
+      },
       whereIn() { return chain; },
       whereRaw() { return chain; },
       select() { return chain; },
@@ -136,7 +141,7 @@ jest.mock('../models/db', () => {
         return 1;
       },
       first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : undefined),
-      then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger : []),
+      then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred) : []),
     };
     return chain;
   });
@@ -239,6 +244,25 @@ function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-
   Schedule.markAutopayHold.mockResolvedValue(true);
   Schedule.writeStage.mockResolvedValue(true);
   mockResolve.mockImplementation(async () => live);
+}
+
+
+// A read handle for the shadow run: serves the same customer / prefs / template
+// rows the live guards read, the given open schedules, and records any write.
+function shadowDb(schedules = []) {
+  const writes = [];
+  const database = jest.fn((table) => {
+    const q = {};
+    q.where = () => q; q.whereIn = () => q; q.select = () => q;
+    q.first = async () => (table === 'customers' ? customer : table === 'notification_prefs' ? prefs : table === 'sms_templates' ? smsTemplateRow : undefined);
+    q.insert = (...a) => { writes.push(['insert', table, a]); return q; };
+    q.update = (...a) => { writes.push(['update', table, a]); return q; };
+    q.del = (...a) => { writes.push(['del', table, a]); return q; };
+    q.then = (resolve) => resolve(table === 'customer_dunning_schedules' ? schedules : []);
+    return q;
+  });
+  database.writes = writes;
+  return database;
 }
 
 // Rails: SMS accepted unless a test overrides it; boundary hooks run the way
@@ -655,21 +679,7 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
   describe('shadow: schedule decisions in a shadow-only rollout, allowlist, no held transaction across Stripe I/O', () => {
     const logger = require('../services/logger');
     const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
-    const emptyTableDb = (schedules = []) => {
-      const writes = [];
-      const database = jest.fn((table) => {
-        const q = {
-          where() { return q; }, whereIn() { return q; },
-          insert: (...a) => { writes.push(['insert', table, a]); return q; },
-          update: (...a) => { writes.push(['update', table, a]); return q; },
-          del: (...a) => { writes.push(['del', table, a]); return q; },
-          then: (resolve) => resolve(table === 'customer_dunning_schedules' ? schedules : []),
-        };
-        return q;
-      });
-      database.writes = writes;
-      return database;
-    };
+    const emptyTableDb = (schedules = []) => shadowDb(schedules);
 
     test('C6: shadow-only (empty table): a customer that WOULD be promoted also logs the schedule\'s would-send, and a held one logs would-hold; nothing is written', async () => {
       Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID, 'cust-held']);
@@ -720,6 +730,139 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
       expect(heldDuringResolve.every((held) => held === false)).toBe(true);
       Schedule.inReadOnlyTransaction.mockImplementation(async (database, fn) => fn(database));
     });
+  });
+});
+
+describe('shadow runs the live pre-send guards (R2-1)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const openSchedule = [{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }];
+  const shadow = async (database = shadowDb(openSchedule)) => {
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    await Runner.shadowRun(NOW, { database });
+    return database;
+  };
+  const noWrites = (database) => {
+    expect(database.writes).toEqual([]);
+    for (const writer of ['claim', 'markHeld', 'markPaused', 'markAutopayHold', 'writeStage', 'close', 'alertStaff', 'advance', 'completeFinal']) {
+      expect(Schedule[writer]).not.toHaveBeenCalled();
+    }
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  };
+
+  test('normal: would send', async () => {
+    noWrites(await shadow());
+    expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi/);
+  });
+
+  test('an autopay customer is a would-hold (autopay_hold), not a send — including a customer that would be PROMOTED', async () => {
+    mockOnAutopay.mockResolvedValue(true);
+    noWrites(await shadow());
+    expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=autopay_hold/);
+    logger.info.mockClear();
+    Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
+    memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
+    const database = shadowDb();
+    await Runner.shadowRun(NOW, { database });
+    expect(lines()).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
+    expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=projected step=\w+ reason=autopay_hold/);
+    expect(lines()).not.toMatch(/would send/);
+    noWrites(database);
+  });
+
+  test('unreadable autopay state and unreadable preferences are would-holds', async () => {
+    mockOnAutopay.mockRejectedValue(new Error('down'));
+    await shadow();
+    expect(lines()).toMatch(/would hold .* reason=autopay_unreadable/);
+    logger.info.mockClear();
+    mockOnAutopay.mockResolvedValue(false);
+    const database = shadowDb(openSchedule);
+    const serve = database.getMockImplementation();
+    database.mockImplementation((table) => { if (table === 'notification_prefs') throw new Error('prefs down'); return serve(table); });
+    await shadow(database);
+    expect(lines()).toMatch(/would hold .* reason=prefs_unreadable/);
+    expect(database.writes).toEqual([]);
+  });
+
+  test('every template switched off is a would-pause (no_reachable_channel); a deleted customer and an unreachable one too', async () => {
+    smsTemplateRow = { is_active: false };
+    mockLoadTemplate.mockResolvedValue({ template: { status: 'disabled' }, activeVersion: { id: 'v' } });
+    noWrites(await shadow());
+    expect(lines()).toMatch(/SHADOW would pause customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=no_reachable_channel/);
+    logger.info.mockClear();
+    smsTemplateRow = { is_active: true };
+    mockLoadTemplate.mockResolvedValue({ template: { status: 'active' }, activeVersion: { id: 'v1' } });
+    customer.deleted_at = new Date();
+    await shadow();
+    expect(lines()).toMatch(/would pause .* reason=customer_deleted/);
+  });
+
+  test('a step already delivered (crash before the advance) is a would-settle, not a send', async () => {
+    mockLedger.push({
+      id: 'pre-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-e',
+      metadata: { notificationEventKey: `customer-dunning:s-open:1:d60_reminder`, delivered: true, selectedChannels: ['email', 'sms'] },
+    }, {
+      id: 'pre-sms', customer_id: CUSTOMER_ID, channel: 'sms', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-s',
+      metadata: { notificationEventKey: `customer-dunning:s-open:1:d60_reminder`, delivered: true, selectedChannels: ['email', 'sms'] },
+    });
+    noWrites(await shadow());
+    expect(lines()).toMatch(/SHADOW would settle customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=already_delivered/);
+    expect(lines()).not.toMatch(/would send/);
+  });
+});
+
+describe('a delivery older than the progress window is still a delivery (R2-2)', () => {
+  test('final notice accepted, crash, staff pause, resumed 100 days later: the deduped reservation completes the notice instead of pausing it', async () => {
+    const crypto = require('crypto');
+    setup({ stepIndex: 5, sentDaysAgo: 300 });
+    prefs = { invoice_channels: ['email'] };
+    const key = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;
+    mockLedger.push({
+      id: 'old-final', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer',
+      occurred_at: new Date(Date.now() - 100 * DAY), invoice_ids: ['inv-a', 'inv-b', 'inv-c'],
+      idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${key}`).digest('hex')}:email`,
+      metadata: { notificationEventKey: key, delivered: true, selectedChannels: ['email'] },
+    });
+    const out = await run();
+    expect(out.outcome).toBe('completed');
+    expect(Schedule.completeFinal).toHaveBeenCalledTimes(1);
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled(); // deduped: never a second final notice
+    expect(mockLedger).toHaveLength(1);
+  });
+
+  test('the additive `delivered` field of sendReminderChannels lists restored legs too (per-invoice callers ignore it)', async () => {
+    const { sendReminderChannels } = require('../services/billing-reminder-delivery');
+    const key = 'customer-dunning:s:1:d60_reminder';
+    const crypto = require('crypto');
+    mockLedger.push({
+      id: 'r1', customer_id: CUSTOMER_ID, channel: 'email', source: 'x', occurred_at: new Date(Date.now() - 100 * DAY), invoice_ids: [],
+      idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${key}`).digest('hex')}:email`,
+      metadata: { notificationEventKey: key, delivered: true },
+    });
+    const out = await sendReminderChannels({
+      customerId: CUSTOMER_ID, invoiceId: null, invoiceIds: [], policyInvoiceIds: [], source: 'x', purpose: 'late_payment',
+      eventKey: key, channels: ['email'], metadata: {}, send: jest.fn(),
+    });
+    expect(out).toMatchObject({ complete: true, deliveredNow: [], delivered: ['email'] });
+  });
+});
+
+describe('the injected database handle reaches every set resolve (R2-3)', () => {
+  const runnerCalls = () => mockResolve.mock.calls.filter(([, opts]) => opts && opts.now);
+  test('the initial resolve and the re-render both use the handle processSchedule was given', async () => {
+    let n = 0;
+    const changed = makeSet(['inv-a', 'inv-b'], { totalCents: 20000, digest: 'changed' });
+    // boundary reads (no `now`) change the set once, forcing a re-render; the runner's own resolves are the ones with `now`
+    mockResolve.mockImplementation(async (_id, opts) => { if (opts?.now) return n > 0 ? changed : live; n += 1; return changed; });
+    await run();
+    const calls = runnerCalls();
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    for (const [, opts] of calls) expect(opts.database).toBe(fakeDb);
   });
 });
 
@@ -1024,7 +1167,7 @@ describe('the engine never applies account credit (owner ruling 2026-09-30)', ()
     const logger = require('../services/logger');
     Schedule.promotionCandidates.mockResolvedValue([]);
     live = creditHold();
-    const database = jest.fn((table) => { const q = { where() { return q; }, whereIn() { return q; }, then: (r) => r(table === 'customer_dunning_schedules' ? [{ id: SCHEDULE_ID, customer_id: CUSTOMER_ID, step_index: 4 }] : []) }; return q; });
+    const database = shadowDb([{ id: SCHEDULE_ID, customer_id: CUSTOMER_ID, step_index: 4 }]);
     await Runner.shadowRun(NOW, { database });
     expect(logger.info.mock.calls.map(([m]) => String(m)).join('\n')).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=sched-0000-synthetic step=\w+ reason=account_credit_available/);
     expect(mockNotify).not.toHaveBeenCalled();
@@ -1454,17 +1597,8 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
 
   test('spy on every writer: no claim/advance/close/mint/reservation/send/alert/insert/update — and the structured lines are logged', async () => {
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
-    const writes = [];
-    const database = jest.fn((table) => {
-      const q = {
-        where() { return q; }, whereIn() { return q; },
-        insert: (...a) => { writes.push(['insert', table, a]); return q; },
-        update: (...a) => { writes.push(['update', table, a]); return q; },
-        del: (...a) => { writes.push(['del', table, a]); return q; },
-        then: (resolve) => resolve(table === 'customer_dunning_schedules' ? [{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4 }] : []),
-      };
-      return q;
-    });
+    const database = shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4 }]);
+    const { writes } = database;
     live = makeSet(['inv-a', 'inv-b', 'inv-c']);
     memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
     await Runner.shadowRun(NOW, { database });
@@ -1488,7 +1622,7 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
   test('a customer whose set is held / a schedule that would close are logged as would hold / would close', async () => {
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     live = makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'member_paused' });
-    const database = jest.fn((table) => { const q = { where() { return q; }, whereIn() { return q; }, then: (r) => r(table === 'customer_dunning_schedules' ? [{ id: 's1', customer_id: CUSTOMER_ID, step_index: 4 }] : []) }; return q; });
+    const database = shadowDb([{ id: 's1', customer_id: CUSTOMER_ID, step_index: 4 }]);
     await Runner.shadowRun(NOW, { database });
     expect(shadowLines().join('\n')).toMatch(/would hold customer=cust-0000-synthetic reason=member_paused/);
     logger.info.mockClear();
@@ -1501,7 +1635,7 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
     Schedule.promotionCandidates.mockResolvedValue(['c1', 'c2']);
     mockResolve.mockRejectedValueOnce(new Error('stripe down')).mockResolvedValueOnce(makeSet(['inv-a', 'inv-b']));
     memberSeqRows = rowsFor(['inv-a', 'inv-b'], 60, 3);
-    const database = jest.fn(() => { const q = { where() { return q; }, whereIn() { return q; }, then: (r) => r([]) }; return q; });
+    const database = shadowDb();
     const tally = await Runner.shadowRun(NOW, { database });
     expect(tally.failed).toBe(1);
     expect(tally.promote).toBe(1);

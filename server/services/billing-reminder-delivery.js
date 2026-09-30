@@ -176,7 +176,7 @@ async function sendReminderChannels({
     for (const channel of pending) {
       results[channel] = { sent: false, deliveryHeld: true, retryable: true, code: 'COLLECTIONS_POLICY' };
     }
-    return { complete: false, deliveredNow, results };
+    return { complete: false, deliveredNow, results, delivered: [...delivered] };
   }
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   // Only a durable denial waives its leg; a spacing window keeps it owed.
@@ -196,7 +196,7 @@ async function sendReminderChannels({
         results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_WAIVER_REFRESH_FAILED' };
       }
     }
-    return { complete: false, deliveredNow, results };
+    return { complete: false, deliveredNow, results, delivered: [...delivered] };
   }
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
@@ -224,7 +224,7 @@ async function sendReminderChannels({
     }
   }
   const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);
-  return { complete, deliveredNow, results };
+  return { complete, deliveredNow, results, delivered: [...delivered] };
 }
 
 // A waiver only settles the episode once it is durable: a reused row keeps
