@@ -4802,7 +4802,42 @@ async function lockAndGuardFollowingSiblings(conn, {
     // The secure-prepay coverage rail is PRICE-only (owner ruling on #5253,
     // reaffirmed on #5387): a service-only 'following' edit keeps every other
     // live-invoice check but never this one (Codex r6 P1).
-    const covered = await findBillingCoveredVisits(conn, guardRows, { liveInvoice: true, securePrepay: !!priceChanged });
+    // ...but a service-only edit can still REPRICE a sibling (a service-scoped
+    // stored discount re-derives its estimated_price above). The rail stays
+    // price-only per ROW: a sibling whose derived final price differs is
+    // judged; one whose price is genuinely unchanged is exempt (still a slot
+    // competitor, never marked). Each judged row also carries the price it
+    // will end up with (_proposedPrice) so the rail can let an edit put a
+    // held visit BACK at the /secure sold price.
+    let railRows = guardRows;
+    let railOn = !!priceChanged;
+    if (proposedFields && targets.length > 0) {
+      const addonTableExists = await conn.schema.hasTable('scheduled_service_addons');
+      const derivedById = new Map();
+      for (const sibling of targets) {
+        const { estimatedPrice } = await deriveSiblingFinancials(conn, sibling, proposedFields, addonTableExists);
+        derivedById.set(String(sibling.id), estimatedPrice);
+      }
+      railRows = guardRows.map((row) => {
+        if (String(row.id) === String(editedId)) {
+          // Service-only: the edited row's own price is unchanged by
+          // definition (priceChanged is false), so it is never judged.
+          return {
+            ...row,
+            ...(proposedFields.estimated_price === undefined ? {} : { _proposedPrice: proposedFields.estimated_price }),
+            ...(!priceChanged ? { _securePrepayExempt: true } : {}),
+          };
+        }
+        const derived = derivedById.get(String(row.id));
+        if (derived === undefined) return row;
+        const unchanged = !moneyValuesDiffer(row.estimated_price, derived);
+        return { ...row, _proposedPrice: derived, ...(!priceChanged && unchanged ? { _securePrepayExempt: true } : {}) };
+      });
+      if (!priceChanged) {
+        railOn = railRows.some((row) => !row._securePrepayExempt && row._proposedPrice !== undefined);
+      }
+    }
+    const covered = await findBillingCoveredVisits(conn, railRows, { liveInvoice: true, securePrepay: railOn });
     if (covered.size > 0) {
       const [firstId, reason] = [...covered.entries()][0];
       const when = guardRows.find((visit) => visit.id === firstId);
@@ -4853,6 +4888,35 @@ async function lockAndGuardFollowingSiblings(conn, {
     }
   }
   return targets;
+}
+
+// The financials a 'following' propagation writes onto one sibling, derived
+// from the sibling's own add-ons and stored discount over the fields being
+// copied. Shared by the write loop and by the save-time secure-prepay rail,
+// which must judge a sibling by the price it will END UP with (a
+// service-scoped discount can reprice a sibling on a service-only save).
+async function deriveSiblingFinancials(conn, sibling, fields, addonTableExists) {
+  // Fail CLOSED on the read (Codex #3505 r4 P1): recomputing a priced
+  // sibling from an empty add-on list would silently strip its add-on
+  // charges, so an operational query failure must abort the scoped
+  // save — only the missing-table compat case (probed once by the caller)
+  // proceeds add-on-less.
+  let siblingAddons = [];
+  if (addonTableExists) {
+    siblingAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: sibling.id });
+  }
+  const overlaid = { ...sibling, ...fields };
+  const discountScope = await loadStoredDiscountScope(conn, overlaid, siblingAddons);
+  const financials = calculateStoredVisitFinancials(overlaid, siblingAddons, siblingAddons, discountScope);
+  // calculateStoredVisitFinancials returns NULL for a zero subtotal,
+  // and a NULL estimate lets non-callback billing fall back to the
+  // customer's monthly rate — an explicitly free series must stay an
+  // explicit $0 on every propagated row (Codex #3505 r1 P1). The
+  // caller normalizes fields.estimated_price to 0 for that case.
+  const estimatedPrice = financials.price != null
+    ? financials.price
+    : (fields.estimated_price === 0 ? 0 : financials.price);
+  return { financials, estimatedPrice };
 }
 
 async function propagatePriceServiceToFollowingSiblings(conn, {
@@ -4910,23 +4974,8 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
       // charges, so an operational query failure must abort the scoped
       // save — only the missing-table compat case (probed once above)
       // proceeds add-on-less.
-      let siblingAddons = [];
-      if (addonTableExists) {
-        siblingAddons = await conn('scheduled_service_addons').where({ scheduled_service_id: sibling.id });
-      }
-      const overlaid = { ...sibling, ...fields };
-      const discountScope = await loadStoredDiscountScope(conn, overlaid, siblingAddons);
-      const financials = calculateStoredVisitFinancials(overlaid, siblingAddons, siblingAddons, discountScope);
-      // calculateStoredVisitFinancials returns NULL for a zero subtotal,
-      // and a NULL estimate lets non-callback billing fall back to the
-      // customer's monthly rate — an explicitly free series must stay an
-      // explicit $0 on every propagated row (Codex #3505 r1 P1). The
-      // caller normalizes fields.estimated_price to 0 for that case.
-      if (cols.estimated_price) {
-        siblingUpdates.estimated_price = financials.price != null
-          ? financials.price
-          : (fields.estimated_price === 0 ? 0 : financials.price);
-      }
+      const { financials, estimatedPrice } = await deriveSiblingFinancials(conn, sibling, fields, addonTableExists);
+      if (cols.estimated_price) siblingUpdates.estimated_price = estimatedPrice;
       if (cols.discount_dollars) siblingUpdates.discount_dollars = financials.appointmentDiscountDollars;
     }
     await conn('scheduled_services').where({ id: sibling.id }).update(siblingUpdates);
@@ -13690,6 +13739,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // the service identity missing from narrower overlays.
           if (priceGuardRow) {
             priceGuardRow._proposed = saveCoverageProposed();
+            if (updates.estimated_price !== undefined) priceGuardRow._proposedPrice = updates.estimated_price;
             priceGuardRow._coverageContext = await cadenceCoverageContext(trx, priceGuardCols);
             priceGuardRow._plannedInserts = await plannedInsertCandidates(trx, priceGuardRow);
           }
@@ -18073,6 +18123,20 @@ async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
   return termsByCustomer;
 }
 
+// True when this save puts an UNSTAMPED visit back at the price the /secure
+// plan was sold at (its per_visit_amount baseline). Such an edit can never
+// leave the old-price invoice covering a different price, so the rail lets
+// it through — it is exactly the repair the stamp-time hold's office alert
+// asks for. A visit the term already stamped (prepaid money on it) is never
+// exempt, and neither is any move AWAY from the sold price.
+async function editRestoresSoldPrice(conn, term, row, proposedPrice) {
+  if (proposedPrice === undefined || proposedPrice === null || proposedPrice === '') return false;
+  if (row?.prepaid_amount != null && Number(row.prepaid_amount) > 0) return false;
+  const { securePlanSoldPerVisitCents } = require('../services/annual-prepay-renewals');
+  const soldCents = await securePlanSoldPerVisitCents(term, conn);
+  return soldCents != null && Math.round(Number(proposedPrice) * 100) === soldCents;
+}
+
 async function securePendingPrepayCoverageReasons(conn, visits) {
   const marks = new Map();
   const customerIds = [...new Set(visits.map((v) => v.customer_id).filter(Boolean).map(String))].sort();
@@ -18097,10 +18161,12 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
     // First entry per id wins, so a judged row outranks the same row as
     // context.
     const candidates = new Map();
-    const add = (row, ownerId, label) => {
-      if (!candidates.has(String(row.id))) candidates.set(String(row.id), { row, ownerId, label });
+    const add = (row, ownerId, label, proposedPrice = undefined) => {
+      if (!candidates.has(String(row.id))) candidates.set(String(row.id), { row, ownerId, label, proposedPrice });
     };
-    for (const v of customerVisits) add({ ...v, ...(v._proposed || {}) }, v.id, '');
+    // A row flagged _securePrepayExempt (a service-only save that leaves its
+    // price unchanged) still competes for slots but is never judged.
+    for (const v of customerVisits) add({ ...v, ...(v._proposed || {}) }, v._securePrepayExempt ? null : v.id, '', v._proposedPrice);
     for (const v of customerVisits) {
       for (const row of v._coverageContext || []) add({ ...row, ...(row._proposed || {}) }, null, '');
       for (const row of v._plannedInserts || []) {
@@ -18119,7 +18185,12 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
       });
       for (const row of covered) {
         const hit = candidates.get(String(row.id));
-        if (hit?.ownerId != null && !marks.has(hit.ownerId)) marks.set(hit.ownerId, `${hit.label}${reasonFor(term)}`);
+        if (hit?.ownerId == null || marks.has(hit.ownerId)) continue;
+        // The repair the office alert asks for: a visit held out of the stamp
+        // for a changed price may go BACK to the sold price. Never a planned
+        // insert, never a visit the term already stamped.
+        if (!hit.label && await editRestoresSoldPrice(conn, term, hit.row, hit.proposedPrice)) continue;
+        marks.set(hit.ownerId, `${hit.label}${reasonFor(term)}`);
       }
     }
   }
@@ -18146,7 +18217,15 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
     liveTermIds = new Set(liveTerms.map((t) => t.id));
   }
   for (const v of visits) {
-    if (v.annual_prepay_term_id && liveTermIds.has(v.annual_prepay_term_id)) mark(v.id, 'covered by an annual prepay term');
+    if (v.annual_prepay_term_id && liveTermIds.has(v.annual_prepay_term_id)) {
+      // A bare term LINK on an unstamped visit that this save puts back at
+      // the /secure sold price is the repair path, not held money (see
+      // editRestoresSoldPrice); a stamped visit stays covered.
+      const repair = securePrepay && liveInvoice && v.customer_id
+        ? await editRestoresSoldPrice(conn, { id: v.annual_prepay_term_id, customer_id: v.customer_id }, v, v._proposedPrice)
+        : false;
+      if (!repair) mark(v.id, 'covered by an annual prepay term');
+    }
     // Hand-collected prepayment (cash / phone card / Zelle), single-visit or
     // stamped across the series by POST /:id/prepaid. Cancelling one of these
     // silently is money taken for a visit that never happens (Codex #3337 P1).

@@ -7611,16 +7611,134 @@ describe('stamp-time price check (secure-prepay rail, #5387) — a repriced visi
     expect(notifyAdmin).not.toHaveBeenCalled();
   });
 
-  test('attachScheduledServices does not link a repriced visit to the term either', async () => {
+  test('attachScheduledServices does not link a repriced visit, and pins each link to the price it judged (B)', async () => {
     const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125), visit('svc-3', '2027-04-15', 100)];
-    const link = query({});
+    const link1 = query({});
+    const link3 = query({});
     setDbQueues({
-      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), link],
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), link1, link3],
       activity_log: [query({ first: SECURE_MINT_RECORD })],
     });
 
     await _private.attachScheduledServices(TERM);
 
-    expect(link.whereIn).toHaveBeenCalledWith('id', ['svc-1', 'svc-3']);
+    expect(link1.where.mock.calls[0][0]).toEqual({ id: 'svc-1' });
+    expect(link3.where.mock.calls[0][0]).toEqual({ id: 'svc-3' });
+    expect(link1.whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', [100]);
+    expect(link3.whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', [100]);
+  });
+
+  test('a term with no /secure baseline links in one bulk UPDATE with no price predicate (B: non-secure terms unchanged)', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125)];
+    const link = query({});
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), link],
+      activity_log: [query({ first: null })],
+    });
+
+    await _private.attachScheduledServices(TERM);
+
+    expect(link.whereIn).toHaveBeenCalledWith('id', ['svc-1', 'svc-2']);
+    expect(link.whereRaw).not.toHaveBeenCalled();
+  });
+
+  test('B: the stamp UPDATE is pinned to the price it judged (atomic with the decision)', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', '100.00')];
+    const updateQueries = stampQueues({ rows, updates: [1, 2] });
+
+    await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    for (const q of updateQueries) {
+      expect(q.whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', [expect.anything()]);
+    }
+    expect(updateQueries[1].whereRaw).toHaveBeenCalledWith('estimated_price IS NOT DISTINCT FROM ?::numeric', ['100.00']);
+  });
+
+  test('B: a stamp whose row was REPRICED after it was judged matches nothing, is re-judged at the new price, held and flagged — not counted as a race', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100)];
+    const racedUpdate = query({ returning: [] });
+    // A writer outside the prepay lock (e.g. a scoped wind-down) committed $125
+    // between the coverage read and the stamp.
+    const reread = query({ rows: [{ ...rows[0], status: 'pending', estimated_price: 125 }] });
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), racedUpdate, reread],
+      activity_log: [query({ first: SECURE_MINT_RECORD }), query({ first: SECURE_MINT_RECORD })],
+      notifications: [query({ first: undefined })],
+    });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(0);
+    expect(result.racedRowIds).toEqual([]);
+    expect(result.priceHeldRowIds).toEqual(['svc-1']);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert', expect.any(String), expect.stringMatching(/repriced to \$125\.00/),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'price_drift_held:svc-1' }) }),
+    );
+  });
+
+  describe('A: a held visit stays held after it completes (completion reconcile)', () => {
+    const InvoiceService = require('../services/invoice');
+    const { postCreditMovement } = require('../services/customer-credit');
+    const completed = (price) => visit('svc-done', '2026-10-20', price, { status: 'completed' });
+    const pending = (id, date) => visit(id, date, 100);
+    const openInvoice = { id: 'inv-visit', status: 'pending', payment_recorded_at: null, annual_prepay_covered_term_id: null };
+
+    beforeEach(() => {
+      InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockReset();
+      postCreditMovement.mockReset();
+    });
+
+    test('a completed visit repriced away from the sold price is NOT settled or credited by the old-price prepay; alert filed once', async () => {
+      setDbQueues({
+        scheduled_services: [query({ rows: [completed(125), pending('s2', '2027-01-20'), pending('s3', '2027-04-20'), pending('s4', '2027-07-20')] })],
+        activity_log: [query({ first: SECURE_MINT_RECORD })],
+        notifications: [query({ first: undefined })],
+        // No invoices queue: a look at the visit's invoice would throw and set failed.
+      });
+      notifyAdmin.mockClear();
+
+      const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+      expect(result).toEqual({ settled: 0, credited: 0 });
+      expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+      expect(postCreditMovement).not.toHaveBeenCalled();
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      expect(notifyAdmin).toHaveBeenCalledWith(
+        'alert', expect.any(String), expect.any(String),
+        expect.objectContaining({ metadata: expect.objectContaining({ reason: 'price_drift_held:svc-done' }) }),
+      );
+    });
+
+    test('the same completed visit at the sold price still settles as before', async () => {
+      setDbQueues({
+        scheduled_services: [query({ rows: [completed(100), pending('s2', '2027-01-20'), pending('s3', '2027-04-20'), pending('s4', '2027-07-20')] })],
+        activity_log: [query({ first: SECURE_MINT_RECORD })],
+        invoices: [query({ first: openInvoice })],
+      });
+      InvoiceService.settleInvoiceAsAnnualPrepayCovered.mockResolvedValueOnce({ settled: true });
+
+      const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+      expect(result).toEqual({ settled: 1, credited: 0 });
+    });
+
+    test('a failed sold-price lookup fails closed: nothing settled or credited', async () => {
+      const failing = query({});
+      failing.first = jest.fn(async () => { throw new Error('connection terminated'); });
+      setDbQueues({
+        scheduled_services: [query({ rows: [completed(125)] })],
+        activity_log: [failing],
+        invoices: [query({ first: openInvoice })],
+      });
+
+      const result = await AnnualPrepayRenewals.reconcilePendingWindowCompletions(TERM);
+
+      expect(result.failed).toBe(true);
+      expect(InvoiceService.settleInvoiceAsAnnualPrepayCovered).not.toHaveBeenCalled();
+      expect(postCreditMovement).not.toHaveBeenCalled();
+    });
   });
 });

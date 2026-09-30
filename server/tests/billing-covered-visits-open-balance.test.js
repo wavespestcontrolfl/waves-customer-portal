@@ -737,6 +737,110 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     const covered = await findBillingCoveredVisits(conn, [v1]);
     expect(covered.size).toBe(0);
   });
+
+  // ---- Stamp-time price hold interplay (Codex r10 on #5387) ----------------
+  // The /secure mint record the stamp-time hold judges against: the term was
+  // sold at $100 per visit. Wraps a fixture conn so the activity_log lookup
+  // (securePlanSoldPerVisitCents) answers with it (or nothing).
+  const withSoldBaseline = (base, perVisit = 100) => {
+    const conn = (table) => {
+      if (table === 'activity_log') return fakeQuery(perVisit == null ? [] : [{
+        metadata: { source: 'secure_plan_choice', per_visit_amount: perVisit, annual_prepay_term_id: 't1' },
+      }]);
+      return base(table);
+    };
+    conn.schema = base.schema; conn.raw = base.raw;
+    return conn;
+  };
+
+  test('D: an edit that puts a HELD (unstamped, drifted) visit back at the sold price is allowed', async () => {
+    const v1 = visit({ estimated_price: 125, _proposedPrice: 100 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('D: a move AWAY from the sold price stays blocked (held visit repriced again)', async () => {
+    const v1 = visit({ estimated_price: 125, _proposedPrice: 130 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('D: a visit the term already STAMPED is never exempt, even back at the sold price', async () => {
+    const v1 = visit({
+      estimated_price: 125, _proposedPrice: 100,
+      prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 't1',
+    });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(true);
+  });
+
+  test('D: a term with no /secure sold baseline never exempts (nothing to restore to)', async () => {
+    const v1 = visit({ estimated_price: 125, _proposedPrice: 100 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }), null);
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('D: a planned insert is never exempt', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01', estimated_price: 125, _proposedPrice: 100 });
+    const conn = withSoldBaseline(fixture({ visits: [v1] }));
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _plannedInserts: [visit({ id: 'planned-insert-0', scheduled_date: '2026-03-15' })],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/adding a visit this save creates/);
+  });
+
+  // C, end to end through the 'following' propagation: a service-scoped stored
+  // discount re-derives each sibling's estimated_price on a SERVICE-ONLY save,
+  // so the rail must judge by the derived final price, not by priceChanged.
+  const followingSave = async ({ discountKey }) => {
+    const sib = visit({
+      id: 'sib1', primary_line_price: 100, estimated_price: 100, pre_service_brief_type: null,
+      discount_type: 'fixed_amount', discount_amount: 10, discount_service_key_filter: discountKey,
+    });
+    const base = fixture({ visits: [sib] });
+    const conn = (table) => {
+      const q = base(table);
+      if (table === 'scheduled_services') q.update = jest.fn(async () => 1);
+      return q;
+    };
+    conn.schema = base.schema; conn.raw = base.raw;
+    const { propagatePriceServiceToFollowingSiblings } = require('../routes/admin-schedule')._test;
+    return propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited-1', editedRow: null, parentId: 'parent-1', fromDateStr: null,
+      fields: { service_id: 'svc-a', service_key_snapshot: 'key_a', service_type: 'Quarterly Pest Control Service' },
+      serviceChanged: true, priceChanged: false,
+      cols: { service_id: {}, service_key_snapshot: {}, service_type: {}, estimated_price: {}, discount_dollars: {} },
+    });
+  };
+
+  test('C: a service-only following save that REPRICES a sibling (service-scoped discount now applies) runs the rail and refuses', async () => {
+    await expect(followingSave({ discountKey: 'key_a' })).rejects.toMatchObject({
+      statusCode: 409, message: expect.stringMatching(/card-confirmation page/),
+    });
+  });
+
+  test('C: a service-only following save whose derived sibling price is UNCHANGED stays exempt (price-only ruling)', async () => {
+    await expect(followingSave({ discountKey: 'key_other' })).resolves.toEqual(['sib1']);
+  });
+
+  test('C: a row flagged _securePrepayExempt (service-only save, price unchanged) is never marked but still holds its slot', async () => {
+    // Term sold 1 visit. v1 (earliest) is exempt; v2 is judged and would only
+    // be covered if v1 did NOT keep the slot.
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15', _securePrepayExempt: true });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-06-15', _proposedPrice: 80 });
+    const conn = fixture({ visits: [v1, v2] });
+    const covered = await findBillingCoveredVisits(conn, [v1, v2], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+    expect(covered.has('v2')).toBe(false);
+    // Sanity: without the exemption v1 is marked.
+    const plain = await findBillingCoveredVisits(conn, [visit({ id: 'v1', scheduled_date: '2026-03-15' })], { liveInvoice: true });
+    expect(plain.get('v1')).toMatch(/card-confirmation page/);
+  });
+
 });
 
 // A member an old pod's mint left UNSTAMPED (scheduled_services.
