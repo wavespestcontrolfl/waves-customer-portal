@@ -1551,6 +1551,51 @@ evidence provenance is normalized to review-required: its recorded note remains
 visible beside confirmation guidance, while the former inferred “normal watering
 within 24 hours” instruction is removed. Historical neutral fallbacks retain
 their existing shape and wording.
+`GATE_LAWN_WATERING_RULE` (dark; gate off leaves this payload unchanged, key for
+key) expands the lawn payload with the visit's one watering instruction, built
+from the per-product rules frozen with the visit, the completion time and the
+customer's own irrigation entries (withheld after a move). When it resolves to
+hold, water-in or hold-then-water-in: `reportV2.banner`
+`{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
+`hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
+finished customer sentences with absolute Eastern clock times; `holdUntil`,
+`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+has dried" hold has no printed duration and `expiresAt: null` (dryness is a
+condition, so no instruction that waits for drying, including one followed by a
+water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
+`holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
+"ended" note past it; the key is absent when there is no claim).
+`reportV2.aftercare` is a record of the visit and never changes by the clock
+(owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
+`wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
+is a hold), `holdTask` (the banner's first line verbatim, or its first two lines
+for hold-then-water-in), `waterInTask` (the banner's first line verbatim, for a
+water-in that earns no plan credit; it stays the customer's task in the hero,
+the follow-up card and the assistant within the visit's plan week), `ruleSource`,
+`holdUntil` and `waterInBy`; and
+`reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
+`{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
+end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
+never reaches the payload). Provenance: `ruleSource` is `label`, `owner` or
+`default`, the weakest source among the rules that drive the instruction; state
+`none` is asserted only when every applied product resolved to a rule and at
+least one is label- or owner-sourced; any applied product with no rule makes
+the whole visit no claim (no banner, no product_instruction aftercare, the
+existing fail-closed aftercare stays), whatever the other products say. The rule itself
+(`wateringRule` / `post_application_watering`) never appears on
+`applications[].product` or anywhere else in the public payload. The complete
+instruction is frozen at completion under `structured_notes.lawnWateringFreeze`
+(first writer wins, atomically) and later reads replay it, so an edit to the customer's
+sprinkler entries after the visit never changes the minutes or times an existing
+report showed; a record with no frozen instruction regenerates it. Only the treatment-specific sentences are frozen; the one
+sentence that depends on the weekly plan ("follow this week's plan", or "that
+counts toward this week's watering" for a water-in shallower than the plan's
+run) is composed on each render from the plan present on that render.
+`reportV2.aftercare.watering` carries every treatment sentence. A render whose
+watering inputs could not be read (customer preferences or the catalog) omits
+the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
+such a render is served but never cached, and a pinned delivery defers. The gate is
+part of the lawn PDF cache signature.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -1560,7 +1605,7 @@ The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Review-required or restricted
 aftercare also keeps the deterministic report before cache/model access. Lawn
-PDF render strategy `p6-aftercare-guards-20260927` regenerates older cached PDFs
+PDF render strategy `p7-watering-instruction-20260929` regenerates older cached PDFs
 to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
@@ -2788,8 +2833,9 @@ nothing in the request names or changes the target. The query carries only an
 HMAC-signed attribution context (template key, customer id, visit or project
 id, surface — row ids only, NEVER the bearer prep token, which would land in
 the request log; it is resolved to ids at render time) — an invalid signature is ignored, never trusted. Human clicks log
-to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs still redirect but
-log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
+to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs and staff — the
+`waves_admin` marker cookie or `WAVES_ADMIN_IPS`, the same `shouldRecord`
+filter `/l` uses — still redirect but log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
 is on, but the route stays live regardless of the gate so links already sent
 keep working. Destinations are never tagged or altered.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
@@ -3851,8 +3897,12 @@ against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
-`{ error: 'service_area_unavailable' }`, recoverable), else the box test
-`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
+DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
+is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
+DeSoto ZIP); elsewhere in the box is in. Out of area 422s
 `{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
 address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day
@@ -3918,26 +3968,37 @@ contract as security-critical).
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).
 `/api/review/:token` (GET + POST; token-gated customer review flow — GET
-returns the review-request context by token, POST submits the customer's
-review. No auth beyond the review-request token. Baseline guards
+returns the review-request context by token. POST is RETIRED (owner ruling
+2026-09-29, the 1-10 rating is gone): it answers 410 Gone with no DB access
+(it used to be an unauthenticated rating write that stamped the click fields and
+fired a referral invite). No auth beyond the review-request token. Baseline guards
 (`server/routes/review-public.js`): `REVIEW_TOKEN_RE` format gate (the
 shape `services/review-request.js` mints — 32-64 url-safe chars) via
 `router.param` before any DB read, one generic 404 body for malformed,
-unknown, and expired tokens on both verbs, a router-wide 30 req/min limiter
+unknown, and expired tokens on GET, a router-wide 30 req/min limiter
 on the shared IPv6-safe `rateLimitKey`, and the shared `noStore` privacy
 headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
 stamps open state and returns customer name data, so those guards are the
 whole defense.)
-`/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-`/:token/generate-review`, `/:token/go`) (review-gate; token-scoped customer
-rating flow from a review-request link — high → the nearest GBP
-write-a-review URL, low → private feedback capture. Router-wide url-safe
+`/api/rate/:token` (+ `/:token/go`) (review-gate; token-scoped thank-you
+page from a review-request link. The 1-10 rating, its feedback form and the AI
+review writer are retired (owner ruling 2026-09-29): the page GET returns
+`reviewUrl` — ALWAYS the tracked `/api/rate/:token/go` link (whatever
+GATE_REVIEW_DIRECT_LINK says), null for a customer already
+marked as a reviewer — and the page shows one "Open Google" button; going to
+Google is always the customer's own click. `POST /:token/score`, `/:token/submit`
+and `/:token/generate-review` no longer exist (404). Finalized (legacy-rated)
+requests answer `alreadySubmitted` with no button. Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
-GET and score/submit writes carry a 30/min limiter. `/:token/go` is the
-GATE_REVIEW_DIRECT_LINK tracked redirect: the same 32–64 URL-safe token format gate, 30
+GET carries a 30/min limiter. `/:token/go` is the
+tracked redirect (ALWAYS live, not gate-dependent; GATE_REVIEW_DIRECT_LINK now only decides whether ask texts and emails link here or to the /rate thank-you page): the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
-the customer's active review cadence, and 302s to the location's GBP review
+EVERY later review-ask path for the customer in one click (`ReviewService.stopFutureAsks`: the clicked request's cadence and any active/deferred cadence, a cadence parked for visit-summary recovery, queued one-off asks, due Day-3 follow-ups; run best-effort under the per-customer `review-send:<customerId>` lock with a bounded ~2 s wait; the stamp/claim lands first and every review sender re-checks `redirected_at` at SEND time (`services/review-click-guard.js`), so the customer is never kept from Google: `/go` always 302s once the click is recorded. A send already past its guard when the click lands may still deliver that one in-flight text), fire-and-forgets the referral invite
+email on the FIRST tracked click only (`sendReferralInviteEmail`, trigger
+`google_review_click`, once per customer; owner ruling 2026-09-29; never
+delays or breaks the redirect; bot fetches, expired, finalized and
+already-reviewed requests send nothing), and 302s to the location's GBP review
 URL — every failure path degrades to the /rate page, and the ONLY redirect
 targets are config/locations.js googleReviewUrl values (never
 request-derived). ONE deliberate non-failure carve-out (owner ruling,

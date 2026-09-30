@@ -234,8 +234,11 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
   }
   const PAID_TEXTS = ['service_complete_annual_prepay', 'service_complete_prepaid', 'service_complete_paid_receipt'];
   const attemptStatus = async (f) => (await trx('service_completion_attempts').where({ service_id: f.serviceId }).first('status'))?.status;
+  // The brevity guard keeps a long alert's whole text in `detail`; the
+  // assertions read that full text through `body`.
   const addonsAlert = (f) => trx('notifications').where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]).first();
+    .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]).first()
+    .then((row) => row && { ...row, body: row.detail || row.body });
 
   const recordNotes = async (serviceRecordId) => {
     const row = await trx('service_records').where({ id: serviceRecordId }).first('structured_notes');
@@ -436,7 +439,7 @@ postgres('annual-prepay-covered visit add-ons are billed at completion', () => {
       const alerts = await trx('notifications').where({ recipient_type: 'admin' })
         .whereRaw("metadata->>'dedupeKey' = ?", [`annual_prepay_addons_unbilled:${f.serviceId}`]);
       expect(alerts).toHaveLength(1);
-      expect(alerts[0].body).toMatch(/visit-wide discount/);
+      expect(alerts[0].detail || alerts[0].body).toMatch(/visit-wide discount/);
       expect(alerts[0].read_at).toBeNull();
     });
   });

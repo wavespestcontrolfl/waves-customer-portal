@@ -55,7 +55,7 @@ beforeEach(() => {
   api.getPayments.mockResolvedValue({ payments: [] });
   api.getServices.mockResolvedValue({ services: [], total: 0 });
   api.getRequests.mockResolvedValue({ requests: [] });
-  api.getPendingSatisfaction.mockResolvedValue({ pending: [] });
+  api.getGoogleReviewCard.mockResolvedValue({ card: null });
   api.getReferrals.mockResolvedValue({ stats: null });
   api.getTodayTracker.mockResolvedValue({ tracker: null });
   api.getDocuments.mockResolvedValue({ documents: [] });

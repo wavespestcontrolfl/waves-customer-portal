@@ -1213,6 +1213,31 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // DAILY 2:25AM ET — same-stop regroup sweep. Future same-day services at
+  // one stop that qualify for a visit group but were never grouped (written
+  // before the gates, while autopay customers were excluded, or by a writer
+  // that never calls maybeGroupRow: moves, series extension) are folded into
+  // one visit through the canonical maybeGroupRow / createOrJoinVisit path.
+  // Only loose pairs more than 76h out (no reminder due or in flight), so a
+  // tech's near days never change under them.
+  // Inert unless GATE_VISIT_GROUPS is on (checked inside the sweep). Grouping
+  // writes no customer message. runExclusive: read-then-act; a deploy overlap
+  // must not run two sweeps over the same rows.
+  // =========================================================================
+  cron.schedule('25 2 * * *', async () => {
+    if (!isEnabled('visitGroups')) return;
+    try {
+      const res = await runExclusive('visit-regroup-same-stop', () =>
+        require('./visit-regroup').regroupUngroupedSameStopRows({ dryRun: false }));
+      if (res && !res.skipped && (res.groups.length || res.left.length)) {
+        logger.info(`[visit-regroup] grouped ${res.groups.length} stop(s); left ${res.left.length} row(s) alone (${res.candidates} candidates)`);
+      }
+    } catch (err) {
+      logger.error(`[visit-regroup] nightly same-stop regroup failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
   // WEEKLY MON 4:05AM ET — Manatee permit sync (public ACA CSV reports →
   // pool_permit_records + construction_permit_records). Pool report =
   // closed-permit backstop for the pool-facts lookup (the live GIS layer
@@ -4482,6 +4507,10 @@ function initScheduledJobs() {
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
                       ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
                       ...(openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: openTimesSnapshot.lookup.scheduledServiceId } : {}),
+                      // Which picker minted the offer, and what it needs to be asked again
+                      // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+                      ...(openTimesSnapshot.lookup?.source ? { source: openTimesSnapshot.lookup.source } : {}),
+                      ...(openTimesSnapshot.lookup?.serviceKey ? { serviceKey: openTimesSnapshot.lookup.serviceKey } : {}),
                       quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {

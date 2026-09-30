@@ -154,18 +154,40 @@ async function lockCustomerEmail(trx, email) {
 // Writers use compatible shared locks in this separate namespace. A final
 // provider boundary must use this nonblocking check AFTER its other locks,
 // then only read ownership sources before HTTP; it must not lock source rows.
-async function lockEmailOwnershipForSend(trx, email) {
+//
+// `waitMs` (default 0 = refuse at once, the behavior every existing caller
+// relies on): when an ownership assignment holds the fence, wait up to that
+// long for it instead of refusing. The wait blocks on the SAME keys in the SAME
+// sorted order under a lock_timeout, inside a savepoint (so a timeout cannot
+// poison the caller's transaction) and restores lock_timeout afterwards. A
+// caller waiting here must already hold the address key(s): writers take the
+// address key before the shared ownership lock, so a writer holding the fence
+// has passed the address key and cannot be waiting on the caller. Timeout ->
+// EMAIL_OWNERSHIP_CHECK_BUSY; any other failure -> EMAIL_OWNERSHIP_CHECK_UNAVAILABLE.
+async function lockEmailOwnershipForSend(trx, email, { waitMs = 0 } = {}) {
   const unavailable = () => Object.assign(new Error('Email ownership check temporarily unavailable'), { code: 'EMAIL_OWNERSHIP_CHECK_UNAVAILABLE' });
+  const busy = () => Object.assign(new Error('Email ownership assignment in progress'), { code: 'EMAIL_OWNERSHIP_CHECK_BUSY' });
   if (!trx?.isTransaction) throw unavailable();
+  const keys = customerEmailLockKeys(email).map((value) => `email-ownership:${value}`).sort();
   try {
-    for (const key of customerEmailLockKeys(email).map((value) => `email-ownership:${value}`).sort()) {
+    for (const key of keys) {
       const result = await trx.raw('SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS locked', [key]);
-      if (result.rows[0]?.locked !== true) {
-        throw Object.assign(new Error('Email ownership assignment in progress'), { code: 'EMAIL_OWNERSHIP_CHECK_BUSY' });
-      }
+      if (result.rows[0]?.locked !== true) throw busy();
     }
+    return;
   } catch (err) {
-    if (err?.code === 'EMAIL_OWNERSHIP_CHECK_BUSY') throw err;
+    if (err?.code !== 'EMAIL_OWNERSHIP_CHECK_BUSY') throw unavailable();
+    if (!(waitMs > 0)) throw err;
+  }
+  try {
+    await trx.transaction(async (sp) => {
+      const previous = (await sp.raw("SELECT current_setting('lock_timeout') AS value")).rows[0].value;
+      await sp.raw("SELECT set_config('lock_timeout', ?, true)", [`${Math.ceil(waitMs)}ms`]);
+      for (const key of keys) await sp.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+      await sp.raw("SELECT set_config('lock_timeout', ?, true)", [previous]);
+    });
+  } catch (err) {
+    if (err?.code === '55P03') throw busy();
     throw unavailable();
   }
 }

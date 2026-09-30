@@ -114,6 +114,18 @@ test('a scheduler-minted snapshot forwards scheduledServiceId to the recheck (GA
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'ss-1' }));
 });
 
+test('a /book or estimate snapshot forwards its source (+ serviceKey) so the recheck asks the same picker (GATE_SMS_OFFERS_SCHEDULER)', async () => {
+  drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
+  const snap = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, source: 'book', serviceKey: 'lawn_care' } };
+  await expect(attempt({ openTimesSnapshot: snap })).resolves.toMatchObject({ sent: true });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ source: 'book', serviceKey: 'lawn_care' }));
+  drafter.openTimesStillOffered.mockClear();
+  const est = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, estimateId: 'est-1', source: 'estimate' } };
+  await expect(attempt({ openTimesSnapshot: est })).resolves.toMatchObject({ sent: true });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ source: 'estimate', estimateId: 'est-1' }));
+  expect(drafter.openTimesStillOffered.mock.calls[0][0]).not.toHaveProperty('serviceKey');
+});
+
 test('the snapshot\'s serviceType is forwarded to the recheck when present (Codex r3 audit P1)', async () => {
   drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
   const snap = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, serviceType: 'Lawn Fertilization' } };
