@@ -70,6 +70,7 @@ function readContextDb({
     service_requests: [pendingRequest ? { id: 'request-1' } : null],
     'call_commitments as cc': [null],
     'call_commitments as cc_sms': [null],
+    'call_commitments as cc_email': [null],
     'triage_items as ti': [null],
     'operator_inbox_items as oi': [null],
     'agent_decisions as ad': [null],
@@ -126,11 +127,13 @@ test('pending-work SQL covers every customer and same-thread operational queue',
     excludeDecisionId: '00000000-0000-4000-8000-000000000004',
   })).resolves.toBe(false);
   expect(queries.map((q) => q.table)).toEqual([
-    'service_requests', 'call_commitments as cc', 'call_commitments as cc_sms',
+    'service_requests', 'call_commitments as cc', 'call_commitments as cc_sms', 'call_commitments as cc_email',
     'triage_items as ti', 'operator_inbox_items as oi', 'agent_decisions as ad',
   ]);
   const serviceRequest = queries.find((q) => q.table === 'service_requests');
   expect(serviceRequest.sql).toContain("COALESCE(status, 'new') not in");
+  const emailCommitment = queries.find((q) => q.table === 'call_commitments as cc_email');
+  expect(emailCommitment.sql).toContain('cc_email.email_customer_id');
   const callCommitment = queries.find((q) => q.table === 'call_commitments as cc');
   expect(callCommitment.sql).toContain('cl.from_phone');
   expect(callCommitment.sql).toContain('cl.to_phone');

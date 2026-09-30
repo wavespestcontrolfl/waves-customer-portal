@@ -114,6 +114,7 @@ function callExtractionV2PrimaryEnabled() {
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
+const { validateWithOnFileAssist, withOnFileStreetCandidate, bindAssistCaller } = require('./address-validation/onfile-assist');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
 // branches are mirror images and each must clear the other's keys: a pass that
@@ -140,7 +141,7 @@ const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-c
 const { enrichFromCall } = require('./call-profile-enrichment');
 const { isV2Extraction, flatView, adoptV2PrimaryFields, callerIdDisclaimedNoteText, EXTRACTION_INVALID_JSON_SUMMARY } = require('../utils/extraction-compat');
 const { loadBookableCallServices, loadCallReServiceRows, hasCallReServiceIntent, isReServiceCatalogRow, reServiceLaneForRow, resolveCallBookingCatalogService, resolveCallBookingPrice, resolveCallFollowUpPlan, callBookingInvoiceOnComplete, callFollowUpBillingShape, callBookingDateOnly } = require('./call-booking-catalog');
-const { validateAddress, buildAddressLines, SERVICE_STATE } = require('./address-validation');
+const { validateAddress, SERVICE_STATE } = require('./address-validation');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { syncVoiceMessageForCall } = require('./conversations');
 
@@ -8912,6 +8913,34 @@ const CallRecordingProcessor = {
     // Every card this pass files is created after this instant — the
     // canonical re-stamp after Step 3 below is scoped to them.
     const cardsFiledSince = new Date();
+    // GATE_CALL_ADDRESS_ONFILE_ASSIST: the on-file address may only vouch for
+    // the customer this call FINALLY resolves to. knownCaller is the
+    // phone-only pre-lookup; Step 3 (below, after both assist sites) can
+    // retain or reassign the call to someone else on a shared number. So the
+    // assist gets knownCaller only when Step 3's own inputs agree with it: no
+    // link to a different customer, and the name-aware phone resolution
+    // Step 3 runs (same function, same extraction) lands on this customer
+    // without ambiguity. Anything else (or the gate off) gets null, which
+    // makes both assist paths no-ops. Gate off costs no lookup.
+    // Judged against BOTH identities Step 3 may end up with: the V1 record and
+    // the V2 extraction's caller (V2-primary adoption, later in this pass, can
+    // replace the V1 name) — the assist runs before that adoption, so every
+    // candidate identity must resolve to the same customer.
+    const onFileAssistCaller = async (...extractionsNow) => {
+      let bound = knownCaller;
+      for (const extractedNow of extractionsNow) {
+        bound = await bindAssistCaller({
+          knownCaller: bound,
+          callCustomerId: call.customer_id,
+          hasLinkOverride: !!customerLinkOverride,
+          resolveCustomer: (multiMatchOut) => findCustomerForCallContact(
+            resolveCallContactPhone(call, extractedNow?.phone), extractedNow || {}, { multiMatchOut },
+          ),
+        });
+        if (!bound) return null;
+      }
+      return bound;
+    };
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -9019,11 +9048,14 @@ const CallRecordingProcessor = {
         // gate below without a second API call.
         if (v2Result?.status === 'valid' && v2Result.extraction) {
           try {
-            v2AddressValidation = await validateAddress({
-              addressLines: buildAddressLines(v2Result.extraction.property?.service_address),
-              // The validator preserves an explicit state over this hint.
-              // Contrary model geography also disables the fallback hint.
-              administrativeArea: v2Result.extraction.triage_flags?.includes('out_of_service_area') ? null : SERVICE_STATE,
+            // Gate off (GATE_CALL_ADDRESS_ONFILE_ASSIST): the wrapper makes the
+            // same validateAddress call this site always made. Gate on, a
+            // street-only request may borrow the on-file city + ZIP.
+            v2AddressValidation = await validateWithOnFileAssist({
+              serviceAddress: v2Result.extraction.property?.service_address,
+              knownCaller: await onFileAssistCaller(extracted, flatView(v2Result.extraction)),
+              outOfServiceFlagged: !!v2Result.extraction.triage_flags?.includes('out_of_service_area'),
+              validate: validateAddress,
             });
           } catch (avErr) {
             logger.warn(`[call-proc-v2] address validation error for ${callSid}: ${avErr.message}`);
@@ -9797,7 +9829,15 @@ const CallRecordingProcessor = {
         // Street re-hearings the contact-dictation decoder already produced
         // from BOTH transcripts — tried before recovery spends its own
         // phonetic model call.
-        extraStreetCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        // Plus (gate on, house number matching, call bound to that customer)
+        // the caller's on-file street, appended AFTER the decoder's so it never
+        // displaces one (recovery evaluates the first five) — still only
+        // adopted when Google confirms exactly one premise.
+        extraStreetCandidates: withOnFileStreetCandidate({
+          spokenStreet: extracted.address_line1,
+          knownCaller: await onFileAssistCaller(extracted, flatView(v2Result?.extraction)),
+          decoderCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
+        }),
         // "Building resolved, unit missing" is not a garbled street — the
         // recovery module refuses it outright (codex r10 P1), so the
         // ambiguous hold stands and missing_unit_number names the ask

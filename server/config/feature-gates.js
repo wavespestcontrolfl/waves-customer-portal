@@ -1011,6 +1011,11 @@ const gates = {
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
 
+  // Email asks + staff promises, same shape as the SMS lane above. Also
+  // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
+  // email-operational-actions.js; this entry is for logGateStatus only.
+  emailOperationalActions: gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS'),
+
   // SMS real answers (owner ruling 2026-09-27) — the shadow drafter answers
   // from the facts (real OPEN TIMES from AvailabilityEngine for booking/
   // rescheduling, exact amounts + send_payment_link, portal/estimate links)
@@ -3397,6 +3402,21 @@ const gates = {
   // gate goes back to the overlap-only re-check, byte for byte.
   bookCapacityCommit: gateEnvValue('GATE_BOOK_CAPACITY_COMMIT'),
 
+  // Tech-aware CONFIRM-side conflict checks for a second field technician
+  // (owner-approved 2026-09-29). The offer side (booking.js's occupancy mirror)
+  // already keeps only rows that are unassigned or on the slot's own technician
+  // when GATE_SCHEDULING_CAPACITY is on; the confirm-side probes
+  // (occupancy.js findConflictingVisits, /book's zone overlap check) were
+  // tech-blind by design for the one-technician era, so a slot offered on
+  // technician B's day was refused at confirm because technician A had an
+  // overlapping or nearby stop. On (with capacity mode), the self-serve commits
+  // that pass a technicianId scope their conflict rows to that technician plus
+  // unassigned rows. **Ships DARK: off unless exactly `true`/`1`/`on`**. This
+  // entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // multiTechConfirmLive() below. Kill switch: unset GATE_MULTI_TECH_CONFIRM —
+  // every confirm-side probe goes back to tech-blind, byte for byte.
+  multiTechConfirm: gateEnvValue('GATE_MULTI_TECH_CONFIRM'),
+
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
   // 'true'. The route reads this via isEnabled('blogReadDepth') at request
@@ -3467,6 +3487,18 @@ const gates = {
   // is for logGateStatus only; lawn-visit-assessment.js reads
   // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
   lawnAssessmentReferee: process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true',
+
+  // Call-address on-file assist (owner-approved review items 3 and 4,
+  // 2026-09-30): the caller's on-file address rescues a spoken one when the
+  // HOUSE NUMBER matches — the on-file street joins street recovery as an
+  // extra candidate (a misheard street), and the on-file city + ZIP join a
+  // street-only lookup (Google resolving "7417 Monteverdi" to New Jersey).
+  // Also reads a non-FL result on a street-only request as missing_component,
+  // not out_of_service_area. Ships DARK: off unless exactly 'true'. This entry
+  // is for logGateStatus only: services/address-validation/onfile-assist.js
+  // reads GATE_CALL_ADDRESS_ONFILE_ASSIST at call time via
+  // callAddressOnFileAssistLive().
+  callAddressOnFileAssist: process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true',
 
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
@@ -3720,6 +3752,15 @@ function bookCapacityCommitLive() {
   return gateEnvValue('GATE_BOOK_CAPACITY_COMMIT');
 }
 
+// GATE_MULTI_TECH_CONFIRM read at CALL time — the one canonical reader for the
+// tech-aware confirm-side conflict scope (scheduling/occupancy.js
+// techScopedConfirmActive, which also requires GATE_SCHEDULING_CAPACITY so the
+// confirm side scopes exactly when the offer side does). The `multiTechConfirm`
+// gates-map entry above is for logGateStatus only.
+function multiTechConfirmLive() {
+  return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -3801,6 +3842,16 @@ function visitPrepPhotosLive() {
 // call, no third-vote merge.
 function plantIdRefereeLive() {
   return process.env.GATE_PLANT_ID_REFEREE === 'true';
+}
+
+// GATE_CALL_ADDRESS_ONFILE_ASSIST read at CALL time — strict `=== 'true'`, off
+// by default. The one canonical reader for
+// server/services/address-validation/onfile-assist.js. Off, the call pipeline
+// is byte-identical: no extra street candidate, no on-file locality line, no
+// out-of-state reclassification. The gates-map entry above is for
+// logGateStatus only.
+function callAddressOnFileAssistLive() {
+  return process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true';
 }
 
 // GATE_LAWN_ASSESSMENT_REFEREE read at CALL time — ships DARK, off unless
@@ -3995,5 +4046,7 @@ module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
+module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
+module.exports.multiTechConfirmLive = multiTechConfirmLive;
 // gates 1775330914

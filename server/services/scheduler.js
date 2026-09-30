@@ -1718,6 +1718,34 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Customers blocked on the staff address-review queue (geocode-review-alert.js,
+  // kill: GEOCODE_REVIEW_ALERT_DISABLED=1): every 15 minutes. One rolling bell
+  // that rings only when a new customer joins; inert while GATE_GEOCODE_REVIEW
+  // is off. Best effort: a failed or skipped tick never throws out of here.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!gateEnvValue('GATE_GEOCODE_REVIEW')) return;
+    try {
+      const lockRes = await runExclusive('geocode-review-alert', async () => {
+        const { runGeocodeReviewAlert } = require('./geocode-review-alert');
+        const result = await runGeocodeReviewAlert();
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`geocode review alert did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`geocode review alert tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('geocode-review-alert').catch(() => {});
+        await recordJobEnd('geocode-review-alert', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[geocode-review-alert] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
@@ -1739,6 +1767,33 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Email intake and its own (simpler, non-watermarked) follow-up loop, same
+  // five-minute cadence as the SMS lane above (comms-promises-plan-20260928.md
+  // PR 1; coordinator correction #5, 2026-09-29).
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS')) return;
+    try {
+      const { runEmailOperationalActions } = require('./email-operational-actions');
+      await runEmailOperationalActions();
+    } catch {
+      logger.error('[email-operations] intake did not complete');
+    }
+    try {
+      const { refreshEmailCommitments } = require('./email-operational-actions');
+      const lockRes = await runExclusive('email-commitment-fulfillment', () => refreshEmailCommitments());
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Email fulfillment tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('email-commitment-fulfillment').catch(() => {});
+        await recordJobEnd('email-commitment-fulfillment', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch {
+      logger.error('[email-operations] commitment watcher did not complete');
     }
   }, { timezone: 'America/New_York' });
 
