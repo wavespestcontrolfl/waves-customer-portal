@@ -2728,3 +2728,20 @@ idea, the pre-referee `legFailureReason` short-circuit, the rule that the
 referee's own quality verdict joins `photoReadFor` and an unusable referee
 read merges nothing, and admin-only `internal.referee` diagnostics. Full
 detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
+
+## 2026-09-29 — Lawn visit assessment backup: GPT-6 Sol replaces Astra
+
+Owner ruling 2026-09-29. The lawn visit assessment
+(`services/lawn-visit-assessment.js`, `TEXT_POLICIES.lawnVisitAssessment`,
+`GATE_LAWN_VISIT_ASSESSMENT`) keeps Gemini 3.8 Flash first; its backup leg
+moves from GPT-6 Astra (`OPENAI_FRONTIER`) to GPT-6 Sol on its own selector,
+`OPENAI_LAWN_ASSESSMENT` (`MODEL_OPENAI_LAWN_ASSESSMENT` override). Reason:
+the same evidence as the 2026-09-28 plant ruling — on the hardest photos Sol
+did no worse than Astra and was less often confidently wrong, at about a
+third of the cost (2.7¢ vs 7.6¢ per photo). Still sequential, still no
+Claude leg. The pest identifier's `photoIdVision` keeps Astra.
+
+Caveat recorded with the ruling: the assessment scores a visit (density,
+weeds, color, fungus, thatch, stress) rather than naming a plant, so the
+ranking carries over by assumption, not measurement. A Fable referee for
+this lane is not part of this change.

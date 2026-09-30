@@ -169,6 +169,10 @@ const DEFAULTS = Object.freeze({
   // pest engine's photoIdVision ladder is unchanged): Gemini 3.8 Flash first,
   // GPT-6 Sol as the second opinion.
   OPENAI_PLANT_ID: 'gpt-6-sol',
+  // Lawn visit assessment backup leg (owner ruling 2026-09-29): GPT-6 Sol
+  // replaces Astra, matching the plant engine's second opinion — about a
+  // third of Astra's cost and no worse on the hardest photo tests.
+  OPENAI_LAWN_ASSESSMENT: 'gpt-6-sol',
   // Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28): Claude
   // Fable 5.1 at high effort, a deciding third look only when a scope is
   // still unsure after the second opinion. requires:'deep' in MODEL_CATALOG
@@ -269,6 +273,10 @@ const OPENAI_IMAGE_SCREEN  = process.env.MODEL_OPENAI_IMAGE_SCREEN || DEFAULTS.O
 // independently of the pest identifier's second look and the estimate vision
 // fallback.
 const OPENAI_PLANT_ID      = process.env.MODEL_OPENAI_PLANT_ID     || DEFAULTS.OPENAI_PLANT_ID;
+// Lawn visit assessment backup (owner ruling 2026-09-29). Its own selector,
+// off OPENAI_FRONTIER / OPENAI_PLANT_ID, so the lawn lane moves independently
+// of the pest identifier's Astra second look and the plant engine.
+const OPENAI_LAWN_ASSESSMENT = process.env.MODEL_OPENAI_LAWN_ASSESSMENT || DEFAULTS.OPENAI_LAWN_ASSESSMENT;
 // Plant photo ID referee (owner ruling 2026-09-28) — explicit opt-in via
 // GATE_PLANT_ID_REFEREE (server/config/feature-gates.js), never automatic.
 const PLANT_ID_REFEREE     = process.env.MODEL_PLANT_ID_REFEREE    || DEFAULTS.PLANT_ID_REFEREE;
@@ -498,10 +506,11 @@ const TEXT_POLICIES = Object.freeze({
     // One multimodal call per lawn visit (services/lawn-visit-assessment.js,
     // GATE_LAWN_VISIT_ASSESSMENT). Owner ruling 2026-09-08 (DECISIONS.md): the
     // Gemini vision model reads every visit photo at once; when it misses,
-    // GPT-6 Astra takes over. No Claude leg and no parallel providers — the
-    // one lane that deliberately departs from the Claude-fallback rule.
+    // OpenAI takes over — GPT-6 Sol since the 2026-09-29 ruling (was Astra).
+    // No Claude leg and no parallel providers — the one lane that
+    // deliberately departs from the Claude-fallback rule.
     primary: Object.freeze({ provider: PROVIDER.GEMINI, model: GEMINI_VISION_BEST }),
-    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FRONTIER }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_LAWN_ASSESSMENT }),
   }),
   photoIdVision: Object.freeze({
     name: 'photoIdVision',
@@ -605,6 +614,7 @@ module.exports = {
   OPENAI_ESTIMATE_VISION,
   OPENAI_IMAGE_SCREEN,
   OPENAI_PLANT_ID,
+  OPENAI_LAWN_ASSESSMENT,
   PLANT_ID_REFEREE,
   OPENAI_SMS_DRAFT,
   OPENAI_EMBEDDING,
