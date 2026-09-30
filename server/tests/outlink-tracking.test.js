@@ -413,6 +413,34 @@ describe('GET /go/:code', () => {
     expect(mockTables.outbound_link_clicks).toHaveLength(0);
   });
 
+  test('staff (waves_admin marker cookie or WAVES_ADMIN_IPS): still 302, no click logged; a customer still records', async () => {
+    const u = await registered();
+    const jwt = require('jsonwebtoken');
+    const config = require('../config');
+    const marker = jwt.sign({ kind: 'admin_marker', sub: 'staff-1' }, config.jwt.secret);
+    const saved = process.env.WAVES_ADMIN_IPS;
+    try {
+      let res = await get(u.pathname + u.search, { cookie: `waves_admin=${encodeURIComponent(marker)}` });
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe(AMAZON);
+      // staff by IP next (the marker request above was already skipped)
+      process.env.WAVES_ADMIN_IPS = '127.0.0.1,::ffff:127.0.0.1,::1';
+      res = await get(u.pathname + u.search);
+      expect(res.status).toBe(302);
+      expect(res.headers.get('location')).toBe(AMAZON);
+      await tick(); await tick();
+      expect(mockTables.outbound_link_clicks).toHaveLength(0);
+
+      delete process.env.WAVES_ADMIN_IPS;
+      res = await get(u.pathname + u.search);
+      expect(res.status).toBe(302);
+      await tick(); await tick();
+      expect(mockTables.outbound_link_clicks).toHaveLength(1);
+    } finally {
+      if (saved === undefined) delete process.env.WAVES_ADMIN_IPS; else process.env.WAVES_ADMIN_IPS = saved;
+    }
+  });
+
   test('the route serves with the gate off (links already sent keep working)', async () => {
     const u = await registered();
     delete process.env.GATE_OUTLINK_TRACKING;

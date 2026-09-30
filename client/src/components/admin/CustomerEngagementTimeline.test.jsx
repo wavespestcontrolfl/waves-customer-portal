@@ -50,6 +50,7 @@ describe("CustomerEngagementTimeline", () => {
         lastEngagedAt: "2026-09-20T15:00:00.000Z",
         lastEmailOpenAt: "2026-09-21T15:00:00.000Z",
         lastProviderClickAt: "2026-09-22T15:00:00.000Z",
+        lastSeenAt: "2026-09-23T15:00:00.000Z",
       },
       unavailableSources: [],
     })));
@@ -69,6 +70,19 @@ describe("CustomerEngagementTimeline", () => {
     expect(screen.getByTestId("engagement-last-provider-click")).toHaveTextContent(/unfiltered/i);
     expect(screen.getByTestId("engagement-last-provider-click")).toHaveTextContent(/not counted/i);
     expect(screen.queryByText(/Not tracked yet/)).not.toBeInTheDocument();
+    // presence line: shown when the server sent it, and it is not the engagement line
+    expect(screen.getByTestId("engagement-last-seen")).toHaveTextContent(/Last seen in the portal or app Sep 23/);
+    expect(screen.getByTestId("engagement-summary")).not.toHaveTextContent(/Sep 23/);
+  });
+
+  it("omits the last-seen line when the customer has never been seen", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => respond({
+      enabled: true, events: [ev("a", "sent", "Text sent")], hasMore: false,
+      summary: { lastEngagedAt: null, lastEmailOpenAt: null, lastSeenAt: null }, unavailableSources: [],
+    })));
+    render(<CustomerEngagementTimeline customerId="c1" />);
+    await screen.findByTestId("engagement-summary");
+    expect(screen.queryByTestId("engagement-last-seen")).not.toBeInTheDocument();
   });
 
   it("draws a channel-less link click with the neutral link icon, not the text icon", async () => {

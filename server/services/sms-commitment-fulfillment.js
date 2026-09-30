@@ -14,7 +14,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callContactSelects } = require('./staff-contact');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
-const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
 const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
 
 const LIMIT = 50;
@@ -336,14 +336,14 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         // below is the authoritative parse-and-match, so a coincidental
         // substring hit here that does not truly resolve is dropped there.
         }).orWhereRaw(
-          `LOWER(er.to_address) LIKE '%' || (SELECT LOWER(TRIM(email)) FROM customers WHERE id = ? AND deleted_at IS NULL AND email IS NOT NULL) || '%'`,
+          `LOWER(CONCAT_WS(',', er.to_address, er.cc_address, er.bcc_address)) LIKE '%' || (SELECT LOWER(TRIM(email)) FROM customers WHERE id = ? AND deleted_at IS NULL AND email IS NOT NULL) || '%'`,
           [customerId],
         ))
         // A wider raw window than LIMIT: rows the resolver rejects below
         // (internal forwards, mixed-recipient sends) must not crowd out an
         // older valid reply, and raw overflow is reported as truncation.
         .orderBy('er.received_at', 'desc').limit(EMAIL_REPLY_RAW_LIMIT + 1)
-        .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
+        .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
       const resolved = await Promise.all(candidates.map(async (row) => ({
         row, linkedCustomerId: await resolveEmailCustomerLink(conn, row),
       })));
@@ -353,12 +353,18 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // 16000-char body cap for the whole check).
       // A send with no words of its own (only quoted history, only a
       // signature) is no reply at all, so it never witnesses one.
-      const rows = resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId))
-        .map(({ row }) => {
-          const { body_html: _html, ...rest } = row;
-          return { ...rest, body_text: stripQuotedAndSignature(emailPlainText(row)) };
-        })
-        .filter((row) => row.body_text);
+      // A reply's subject is part of its words too ("Booked you for Monday
+      // 9am" over a body of "Thanks") — but only a subject that is new text,
+      // never the thread's subject behind "Re:" (ownSubjectsInThreads).
+      const linked = resolved.filter(({ linkedCustomerId }) => String(linkedCustomerId) === String(customerId)).map(({ row }) => row);
+      const ownSubjects = await ownSubjectsInThreads(conn, linked);
+      const rows = [];
+      for (const row of linked) {
+        const { body_html: _html, ...rest } = row;
+        const own = ownSubjects.get(row.id);
+        const text = [own && `Subject: ${own}`, stripQuotedAndSignature(emailPlainText(row))].filter(Boolean).join('\n');
+        if (text) rows.push({ ...rest, body_text: text });
+      }
       rows.truncated = candidates.length > EMAIL_REPLY_RAW_LIMIT || rows.length > LIMIT;
       return rows;
     })(),

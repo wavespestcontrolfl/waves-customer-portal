@@ -815,6 +815,10 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
           // Same service identity the draft was priced with (Codex r3 / audit P1)
           ...(claim.openTimesSnapshot.lookup?.serviceType ? { serviceType: claim.openTimesSnapshot.lookup.serviceType } : {}),
           ...(claim.openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: claim.openTimesSnapshot.lookup.scheduledServiceId } : {}),
+          // Which picker minted the offer, and what it needs to be asked again
+          // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+          ...(claim.openTimesSnapshot.lookup?.source ? { source: claim.openTimesSnapshot.lookup.source } : {}),
+          ...(claim.openTimesSnapshot.lookup?.serviceKey ? { serviceKey: claim.openTimesSnapshot.lookup.serviceKey } : {}),
           quotedWindows: stillQuoted,
         });
         if (!recheck.ok) {

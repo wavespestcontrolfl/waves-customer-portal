@@ -777,6 +777,12 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
     // and the commit's own preparedCapacity gate reading the same env.
     capacityPlacement: bookInsertionOffersLive(),
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+    // the gate is off). The commit is the same createSelfBooking, which
+    // re-reads the live grace for this date (no signed offer on this flow) —
+    // the rebuild and the commit run in the same request, so both see the
+    // same gate and grace value.
+    bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }

@@ -39,6 +39,10 @@ async function openTimesBlock({ decision, outgoingBody }) {
     estimateId: snapshot.lookup?.estimateId || null,
     ...(snapshot.lookup?.serviceType ? { serviceType: snapshot.lookup.serviceType } : {}),
     ...(snapshot.lookup?.scheduledServiceId ? { scheduledServiceId: snapshot.lookup.scheduledServiceId } : {}),
+    // Which picker minted the offer, and what it needs to be asked again
+    // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+    ...(snapshot.lookup?.source ? { source: snapshot.lookup.source } : {}),
+    ...(snapshot.lookup?.serviceKey ? { serviceKey: snapshot.lookup.serviceKey } : {}),
     quotedWindows: plan.quotedWindows,
   });
   return recheck.ok ? null : `open-times stale (${recheck.reason})`;

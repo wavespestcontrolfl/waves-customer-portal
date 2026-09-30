@@ -202,7 +202,7 @@ jest.setTimeout(30000);
       const rows = await mockConn('purchase_receipt_lines').where({ shipment_key: 'ship-1' });
       expect(rows).toEqual([expect.objectContaining({ status: 'no_delivery_email', product_id: taurus.id, raw_title: TITLE, line_no: 1 })]);
       const [bell] = await alertBells('ship-1');
-      expect(bell.body).toBe("Amazon shipped Taurus SC ×2 on September 26 but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
+      expect(bell.detail || bell.body).toBe("Amazon shipped Taurus SC ×2 on September 26 but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
       expect(await stock()).toBe(0);
     });
 
@@ -236,7 +236,7 @@ jest.setTimeout(30000);
       expect((await run(new Date('2026-09-17T16:00:00Z').getTime())).undelivered).toEqual([]); // Thursday noon ET
       expect((await run(new Date('2026-09-18T05:00:00Z').getTime())).undelivered).toHaveLength(1); // Friday 1 AM ET
       const [bell] = await alertBells('ship-6');
-      expect(bell.body).toBe("Amazon shipped Taurus SC ×1 on September 13 (due September 16) but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
+      expect(bell.detail || bell.body).toBe("Amazon shipped Taurus SC ×1 on September 13 (due September 16) but never sent a delivery confirmation, so it wasn't added. If it arrived, log it by hand.");
     });
 
     test('around the physical count: flagged by when it was due, and any Delivered email settles it', async () => {

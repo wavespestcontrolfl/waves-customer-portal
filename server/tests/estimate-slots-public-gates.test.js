@@ -55,6 +55,14 @@ jest.mock('../routes/estimate-public', () => ({
     return true;
   },
   isEstimateAcceptActive: jest.fn(() => true),
+  // The /data pricing bundle (offerableEstimateSlots derives the page's default
+  // selection from it); no priced frequencies unless a case sets one.
+  buildPricingBundle: jest.fn(async () => ({})),
+  estimateRendersMonthlyBilling: jest.fn(async () => false),
+  reconcileFrozenMembershipSnapshot: jest.fn(async () => undefined),
+  // The page's acceptance contract (/data): the slot picker renders only for
+  // standard_slot_pick, so the texting AI offers times only then.
+  resolveEstimateAcceptance: jest.fn(async () => ({ acceptance: { mode: 'standard_slot_pick' } })),
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
@@ -76,15 +84,28 @@ const TOKEN = 'test-token-abc123';
 let server;
 let base;
 let currentEstimate;
+// customers row the texting AI's phone-fallback ownership reads (by id).
+let customersById = {};
 let lastFirstArgs;
+let firstArgsHistory = [];
 
 beforeAll((done) => {
   db.mockImplementation((table) => {
+    if (table === 'customers') {
+      let id;
+      const q = {
+        where: jest.fn((w) => { id = w?.id; return q; }),
+        whereNull: jest.fn(() => q),
+        first: jest.fn(async () => customersById[id]),
+      };
+      return q;
+    }
     if (table !== 'estimates') throw new Error(`unexpected table ${table}`);
     return {
       where: jest.fn().mockReturnThis(),
       first: jest.fn((...cols) => {
         lastFirstArgs = cols;
+        firstArgsHistory.push(cols);
         return Promise.resolve(currentEstimate);
       }),
     };
@@ -104,9 +125,14 @@ afterAll((done) => {
 
 beforeEach(() => {
   getAvailableSlots.mockReset();
+  require('../routes/estimate-public').buildPricingBundle.mockReset();
+  require('../routes/estimate-public').buildPricingBundle.mockResolvedValue({});
+  require('../routes/estimate-public').resolveEstimateAcceptance.mockReset();
+  require('../routes/estimate-public').resolveEstimateAcceptance.mockResolvedValue({ acceptance: { mode: 'standard_slot_pick' } });
   findEstimateSlots.mockReset();
   slotReservation.reserveSlot.mockReset();
   lastFirstArgs = null;
+  firstArgsHistory = [];
 });
 
 const NON_VIEWABLE = [
@@ -334,5 +360,289 @@ describe('bermuda-suppression money/slot gate', () => {
     getAvailableSlots.mockResolvedValue([]);
     const slots = await fetch(`${base}/${TOKEN}/available-slots`);
     expect(slots.status).not.toBe(409);
+  });
+});
+
+// The texting AI's OPEN TIMES for an estimate (GATE_SMS_OFFERS_SCHEDULER, sms-shadow-drafter):
+// offered only when THIS page's GET would browse slots, and only for the
+// context customer's own estimate.
+describe('offerableEstimateSlots — the page picker, for the texting AI', () => {
+  const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+  const OWN = { id: 'est-1', customer_id: 'cust-1', status: 'sent', expires_at: null, archived_at: null };
+  const SLOTS = { primary: [{ date: '2027-05-20', windowStart: '09:00' }], expander: [] };
+
+  test('the customer\'s own viewable estimate: the same getAvailableSlots the page runs, default window + the page\'s service mode', async () => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockResolvedValue(SLOTS);
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBe(SLOTS);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({ serviceMode: expect.any(String) }));
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('windowDays');
+    expect(firstArgsHistory[0]).toContain('customer_id');
+  });
+
+  test('the send-time recheck (fresh): the SAME picker read uncached and uncapped; the draft read passes none of that', async () => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockResolvedValue(SLOTS);
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('bypassCache');
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('maxResults');
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('expanderMaxResults');
+    getAvailableSlots.mockClear();
+    await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBe(SLOTS);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({
+      serviceMode: expect.any(String), bypassCache: true, maxResults: expect.any(Number), expanderMaxResults: 0,
+    }));
+    expect(getAvailableSlots.mock.calls[0][1].maxResults).toBeGreaterThanOrEqual(1000);
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('windowDays');
+    // the page's gate still applies to a fresh read
+    currentEstimate = { ...OWN, status: 'draft' };
+    getAvailableSlots.mockClear();
+    await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('another customer\'s estimate, or no customer, is never offered — the picker is not even asked', async () => {
+    currentEstimate = OWN;
+    await expect(offerableEstimateSlots('est-1', 'cust-2')).resolves.toBeNull();
+    await expect(offerableEstimateSlots('est-1', null)).resolves.toBeNull();
+    currentEstimate = null;
+    await expect(offerableEstimateSlots('est-gone', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  // The resolver's phone fallback (resolveEstimateContext): an open estimate
+  // whose customer_phone is the customer's number anchors the conversation
+  // even with no (or another) customer_id — a lead's estimate often has none.
+  describe('phone-matched estimate (the resolver\'s fallback)', () => {
+    afterEach(() => { customersById = {}; });
+
+    test.each([
+      ['no customer_id', null],
+      ['another customer_id', 'cust-9'],
+    ])('%s but the estimate phone is the customer\'s own number → offered', async (_label, estimateCustomer) => {
+      currentEstimate = { ...OWN, customer_id: estimateCustomer, customer_phone: '(941) 555-0142' };
+      customersById = { 'cust-1': { phone: '+19415550142' } };
+      getAvailableSlots.mockResolvedValue(SLOTS);
+      await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toEqual(SLOTS);
+      expect(getAvailableSlots).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['a different number on file', { 'cust-1': { phone: '+19415550199' } }, '9415550142', 'cust-1'],
+      ['no number on the estimate', { 'cust-1': { phone: '+19415550142' } }, null, 'cust-1'],
+      ['the customer row gone / deleted', {}, '9415550142', 'cust-1'],
+      ['no customer at all', { 'cust-1': { phone: '+19415550142' } }, '9415550142', null],
+    ])('%s → nothing offered, the picker is not asked', async (_label, customers, estimatePhone, customerId) => {
+      currentEstimate = { ...OWN, customer_id: null, customer_phone: estimatePhone };
+      customersById = customers;
+      await expect(offerableEstimateSlots('est-1', customerId)).resolves.toBeNull();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    });
+  });
+
+  test.each([
+    ['archived', { archived_at: '2026-07-01T00:00:00Z' }],
+    ['draft', { status: 'draft' }],
+    ['accepted (terminal)', { status: 'accepted' }],
+    ['commercial auto-priced (team schedules it)', { estimate_data: JSON.stringify({ commercialEstimatedPricing: true }) }],
+  ])('a %s estimate — a refusal the page answers instead of slots — offers nothing', async (_label, patch) => {
+    currentEstimate = { ...OWN, ...patch };
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('the service says the estimate is expired / terminal → nothing; any other error propagates (caller fails closed)', async () => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'ESTIMATE_EXPIRED' }));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    getAvailableSlots.mockRejectedValueOnce(new Error('db down'));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).rejects.toThrow('db down');
+  });
+});
+
+// The picker must be asked with the SAME default selection the estimate page
+// sends on its first fetch (SlotPicker.jsx: selectedFrequency + serviceCadences),
+// or an SMS offer can be sized for a different duration / service mix.
+describe('offerableEstimateSlots — the page\'s default selection axes', () => {
+  const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+  const { buildPricingBundle, isStructuralOneTimeOnlyEstimate } = require('../routes/estimate-public');
+  const OWN = { id: 'est-1', customer_id: 'cust-1', status: 'sent', expires_at: null, archived_at: null };
+  const SLOTS = { primary: [{ date: '2027-05-20', windowStart: '09:00' }], expander: [] };
+  const freq = (key, extra = {}) => ({ key, ...extra });
+
+  beforeEach(() => { currentEstimate = OWN; getAvailableSlots.mockResolvedValue(SLOTS); });
+
+  test('recommended frequency is not frequencies[0] → the picker gets THAT frequency, on the draft AND the fresh recheck', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly', { recommended: true }), freq('bi_monthly')],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('monthly'), freq('quarterly'), freq('bi_monthly')] }],
+    });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'recurring', selectedFrequency: 'quarterly' });
+    getAvailableSlots.mockClear();
+    await offerableEstimateSlots('est-1', 'cust-1', { fresh: true });
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual(expect.objectContaining({
+      serviceMode: 'recurring', selectedFrequency: 'quarterly', bypassCache: true, expanderMaxResults: 0,
+    }));
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('serviceCadences');
+  });
+
+  test('a section default the combined list does not offer falls back to frequencies[0], exactly as the page does', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly')],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'bi_monthly', frequencies: [freq('bi_monthly')] }],
+    });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1].selectedFrequency).toBe('monthly');
+  });
+
+  test('a bundle with per-service default cadences → selectedFrequency AND serviceCadences, on both calls', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('quarterly')],
+      services: [
+        { key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('quarterly')] },
+        { key: 'lawn_care', isRecurring: true, defaultFrequencyKey: 'enhanced', frequencies: [freq('standard'), freq('enhanced')] },
+        { key: 'mosquito', isRecurring: true, frequencies: [freq('seasonal9'), freq('monthly12')] },
+      ],
+      serviceCadenceCombos: [
+        { selection: { pest_control: 'quarterly', lawn_care: 'standard', mosquito: 'seasonal9' } },
+        { selection: { pest_control: 'quarterly', lawn_care: 'enhanced', mosquito: 'seasonal9' } },
+      ],
+    });
+    // mosquito carries no defaultFrequencyKey → its first frequency, like the page
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBe(SLOTS);
+    const want = { serviceMode: 'recurring', selectedFrequency: 'quarterly', serviceCadences: { lawn_care: 'enhanced', mosquito: 'seasonal9' } };
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual(want);
+    getAvailableSlots.mockClear();
+    await offerableEstimateSlots('est-1', 'cust-1', { fresh: true });
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual(expect.objectContaining(want));
+  });
+
+  test.each([
+    ['only some combo axes have a section on the page', {
+      frequencies: [freq('quarterly')],
+      services: [
+        { key: 'pest_control', isRecurring: true, frequencies: [freq('quarterly')] },
+        { key: 'lawn_care', isRecurring: true, frequencies: [freq('standard')] },
+      ],
+      serviceCadenceCombos: [{ selection: { pest_control: 'quarterly', lawn_care: 'standard', tree_shrub: 'standard' } }],
+    }],
+    ['no combo is priced for the default selection', {
+      frequencies: [freq('quarterly')],
+      services: [
+        { key: 'pest_control', isRecurring: true, frequencies: [freq('quarterly')] },
+        { key: 'lawn_care', isRecurring: true, defaultFrequencyKey: 'enhanced', frequencies: [freq('standard'), freq('enhanced')] },
+      ],
+      serviceCadenceCombos: [{ selection: { pest_control: 'quarterly', lawn_care: 'standard' } }],
+    }],
+    ['the bundle cannot be read (not an object)', null],
+  ])('unreconstructable (%s) → estimate times withheld, the picker is never asked', async (_label, pricing) => {
+    buildPricingBundle.mockResolvedValue(pricing);
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('no combo axis rendered (bundle fell back to one section) → no serviceCadences, exactly as the page sends none', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('quarterly')],
+      services: [{ key: 'bundle', isRecurring: true, frequencies: [freq('quarterly')] }],
+      serviceCadenceCombos: [{ selection: { pest_control: 'quarterly', lawn_care: 'standard' } }],
+    });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'recurring', selectedFrequency: 'quarterly' });
+  });
+
+  test('the pricing bundle throwing withholds too (never guesses, never blocks drafting)', async () => {
+    buildPricingBundle.mockRejectedValue(new Error('pricing down'));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('a saved customerSelection is left exactly as before: no derived axes', async () => {
+    currentEstimate = { ...OWN, estimate_data: JSON.stringify({ customerSelection: { frequency: 'monthly' } }) };
+    buildPricingBundle.mockResolvedValue({ frequencies: [freq('quarterly')] });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'recurring' });
+  });
+
+  test('a one-time-only estimate sends neither axis (the page sends none in one-time mode)', async () => {
+    isStructuralOneTimeOnlyEstimate.mockReturnValueOnce(true);
+    buildPricingBundle.mockResolvedValue({ frequencies: [freq('quarterly')] });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'one_time' });
+  });
+});
+
+// The page renders the slot picker only for acceptance.mode standard_slot_pick
+// (EstimateViewPage.jsx canShowSlotPicker); every other contract has no time
+// the customer could pick, so the texting AI must offer none.
+describe('offerableEstimateSlots — the page\'s acceptance contract', () => {
+  const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+  const { buildPricingBundle, resolveEstimateAcceptance, isStructuralOneTimeOnlyEstimate } = require('../routes/estimate-public');
+  const OWN = { id: 'est-1', customer_id: 'cust-1', status: 'sent', expires_at: null, archived_at: null };
+
+  beforeEach(() => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockResolvedValue({ primary: [{ date: '2027-05-20', windowStart: '09:00' }], expander: [] });
+  });
+
+  test.each(['quote_required', 'existing_appointment', 'invoice_only', 'contact_office', 'commercial_site_confirmation'])(
+    '%s → no picker on the page → no times, draft or fresh recheck',
+    async (mode) => {
+      resolveEstimateAcceptance.mockResolvedValue({ acceptance: { mode } });
+      await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+      await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBeNull();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    },
+  );
+
+  test('a one-time estimate is held to the contract too', async () => {
+    isStructuralOneTimeOnlyEstimate.mockReturnValue(true);
+    resolveEstimateAcceptance.mockResolvedValue({ acceptance: { mode: 'existing_appointment' } });
+    try {
+      await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    } finally {
+      isStructuralOneTimeOnlyEstimate.mockReturnValue(false);
+    }
+  });
+
+  test('the contract is judged on the same pricing bundle /data builds (monthlyBilled resolved)', async () => {
+    const pricing = { frequencies: [{ key: 'quarterly' }] };
+    buildPricingBundle.mockResolvedValue(pricing);
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(buildPricingBundle.mock.calls[0][1]).toEqual({ monthlyBilled: false });
+    expect(resolveEstimateAcceptance.mock.calls[0][2]).toBe(pricing);
+    expect(getAvailableSlots).toHaveBeenCalledTimes(1);
+  });
+
+  test('a stale membership snapshot is reconciled first, as /data does: pricing, contract and selection read the reconciled row', async () => {
+    const { reconcileFrozenMembershipSnapshot } = require('../routes/estimate-public');
+    currentEstimate = { ...OWN };
+    const order = [];
+    reconcileFrozenMembershipSnapshot.mockImplementationOnce(async (row) => {
+      order.push('reconcile');
+      Object.assign(row, { estimate_data: JSON.stringify({ membershipLapsedRequote: true }) });
+    });
+    buildPricingBundle.mockImplementationOnce(async (row) => {
+      order.push('pricing');
+      expect(JSON.parse(row.estimate_data)).toEqual({ membershipLapsedRequote: true });
+      return {};
+    });
+    resolveEstimateAcceptance.mockImplementationOnce(async (row, estData) => {
+      expect(estData).toEqual({ membershipLapsedRequote: true });
+      return { acceptance: { mode: 'quote_required' } };
+    });
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(order).toEqual(['reconcile', 'pricing']);
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(OWN.estimate_data).toBeUndefined();
+  });
+
+  test('the contract failing to resolve withholds (never guesses)', async () => {
+    resolveEstimateAcceptance.mockRejectedValue(new Error('appointments down'));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
   });
 });
