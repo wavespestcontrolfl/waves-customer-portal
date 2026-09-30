@@ -43,7 +43,7 @@ const CONFLICT_RECOVERY_REASONS = new Set([
 ]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
-const { V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+const { V2_DECISION_VERSIONS, withLockedRouteDecisions } = require('../services/call-routing-gates');
 
 // A deny rejects the call's UNIT evidence only when it is a whole-call deny
 // (no wrong_fields) or names the address — a field-scoped deny (service,
@@ -152,25 +152,33 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 // Upsert the single current verdict for a call (re-review overwrites). Links to
 // the enforce-mode route_decision when one exists so calibration can attribute
 // the verdict to the flags that drove the gate.
+// The decision row is resolved AND locked (FOR UPDATE) in the same transaction as
+// the feedback write, through the shared withLockedRouteDecisions door: a
+// reprocess refresh (upsertRouteDecision) takes the same row lock, so a verdict
+// and a refresh serialize instead of the verdict attaching to a row that was
+// refreshed under the reviewer (codex #5371 r9 P1). The UI does not send what
+// it saw (this route takes no decision id), so the lock alone is the guarantee:
+// a verdict that wins the lock freezes the row it names; one that loses attaches
+// to the refreshed newest row it now reads.
 async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy }) {
-  const decision = await db('route_decisions')
-    .where({ call_log_id: callLogId, mode: 'enforce' })
-    .orderBy('created_at', 'desc')
-    .first('id');
-  await db('route_feedback')
-    .insert({
-      call_log_id: callLogId,
-      route_decision_id: decision?.id || null,
-      triage_item_id: triageItemId,
-      decision_kind: decisionKind,
-      verdict,
-      wrong_fields: JSON.stringify(verdict === 'deny' ? wrongFields : []),
-      note: note || null,
-      reviewed_by: reviewedBy || null,
-      updated_at: new Date(),
-    })
-    .onConflict('call_log_id')
-    .merge(['route_decision_id', 'triage_item_id', 'decision_kind', 'verdict', 'wrong_fields', 'note', 'reviewed_by', 'updated_at']);
+  await withLockedRouteDecisions(db, { callLogId, mode: 'enforce' }, async (trx, rows) => {
+    // Newest first, read AFTER the locks are granted (created_at is refreshed).
+    const decision = [...rows].sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
+    await trx('route_feedback')
+      .insert({
+        call_log_id: callLogId,
+        route_decision_id: decision?.id || null,
+        triage_item_id: triageItemId,
+        decision_kind: decisionKind,
+        verdict,
+        wrong_fields: JSON.stringify(verdict === 'deny' ? wrongFields : []),
+        note: note || null,
+        reviewed_by: reviewedBy || null,
+        updated_at: new Date(),
+      })
+      .onConflict('call_log_id')
+      .merge(['route_decision_id', 'triage_item_id', 'decision_kind', 'verdict', 'wrong_fields', 'note', 'reviewed_by', 'updated_at']);
+  });
 }
 
 // GET /api/admin/triage?status=open  → list items + per-status counts

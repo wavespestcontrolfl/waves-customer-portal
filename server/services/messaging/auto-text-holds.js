@@ -48,6 +48,7 @@ const db = require('../../models/db');
 const { excludeUnresolvedSendReservations } = require('./review-ask-reservation');
 const { applyOpenLeadPredicate } = require('../lead-statuses');
 const { whereNotSandboxCall } = require('../voice-agent/relay-protocol');
+const { whereCallDoNotContact } = require('../../utils/call-dnc');
 
 const RECENT_CONVERSATION_MS = 7 * 24 * 60 * 60 * 1000;
 // An estimate reached them when it carries delivery evidence (sent_at or
@@ -134,9 +135,7 @@ async function autoTextHoldReason(phone, {
   // field (a call processed with V2 off, unavailable or schema-failed). Read
   // from ANY stored extraction, valid or not, and from the call setting this
   // text off too: an opt-out is honoured wherever it was heard.
-  const doNotContact = await callsWith(dbi, digits, originCallId)
-    .where((q) => q.whereRaw("ai_extraction_enriched->'consent'->>'do_not_contact_request' = 'true'")
-      .orWhereRaw(`COALESCE(ai_extraction, '') ~ '"do_not_contact_request"\\s*:\\s*true'`))
+  const doNotContact = await whereCallDoNotContact(callsWith(dbi, digits, originCallId))
     .first('id');
   if (doNotContact) return 'asked_not_to_be_contacted';
 

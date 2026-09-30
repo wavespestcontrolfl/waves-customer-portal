@@ -984,7 +984,12 @@ describe('resendPendingConfirmation', () => {
     const conn = makeConn(matchRow(payload));
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
-    expect(sendConfirmationEmail).toHaveBeenCalledWith(expect.objectContaining({ email: payload.email, confirmation_token: 'tok-1' }));
+    // B13: the send shares the caller's transaction (vetoes + provider handoff
+    // on one connection), never a second pooled one.
+    expect(sendConfirmationEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ email: payload.email, confirmation_token: 'tok-1' }),
+      { dbh: conn },
+    );
     expect(conn.__updates('newsletter_subscribers')[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
   });
 
@@ -1072,6 +1077,20 @@ describe('resendPendingConfirmation', () => {
     expect(nsUpdates).toHaveLength(2);
     expect(nsUpdates[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
     expect(nsUpdates[1].arg.confirmation_sent_at).toBeNull();
+  });
+
+  test('B13: an AMBIGUOUS provider failure (timeout after dispatch) keeps the pre-stamp and re-pends neutral, never arming the forced resend', async () => {
+    sendConfirmationEmail.mockRejectedValueOnce(Object.assign(new Error('timeout'), { name: 'TimeoutError', deliveryAmbiguous: true }));
+    const payload = { id: 811, email: 'samtypo@example.com', confirmation_token: 'tok-1', heldNewsletterHoldIds: ['hold-1'] };
+    const conn = makeConn(matchRow(payload));
+    const ok = await resendPendingConfirmation(payload, conn);
+    expect(ok).toBe(false);
+    const nsUpdates = conn.__updates('newsletter_subscribers');
+    expect(nsUpdates).toHaveLength(1); // the pre-stamp only; NOT cleared
+    expect(nsUpdates[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
+    const holdUpdates = conn.__updates('first_touch_holds');
+    expect(holdUpdates.at(-1).arg).toMatchObject({ status: 'pending', last_error: 'doi_delivery_ambiguous' });
+    expect(holdUpdates.some((u) => u.arg.last_error === 'newsletter_doi_not_confirmed')).toBe(false);
   });
 
   test('the expiry stamp lands before the send — a post-send failure cannot leave a permanent token', async () => {

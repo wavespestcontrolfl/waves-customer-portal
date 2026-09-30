@@ -104,6 +104,7 @@ jest.mock('../models/db', () => {
           // records the fresh fence stamp AND the write (tests pin the
           // consume through it).
           if (patch.last_error === null && patch.updated_at && Object.keys(patch).length === 2) {
+            mockLockOrder.push('gate'); // the pre-send gate CAS (takes the hold row lock)
             if (mockConsumeError) throw mockConsumeError;
             if (mockConsumeZeroOnce) { mockConsumeZeroOnce = false; return 0; }
             if (mockClaimLost || mockRenewLostIds.has(whereId)) return 0;
@@ -275,7 +276,7 @@ jest.mock('../services/automation-runner', () => ({
   automationSuppressionMatches: (_t, row) => String(row?.suppression_type || '') === 'bounce' || !row?.group_key,
 }));
 
-const mockNewsletter = jest.fn(async () => ({ subscribed: true, confirmationEmailSent: true, subscriberId: 'sub-1' }));
+const mockNewsletter = jest.fn(async () => { mockLockOrder.push('send'); return { subscribed: true, confirmationEmailSent: true, subscriberId: 'sub-1' }; });
 jest.mock('../services/call-recording-processor', () => ({
   resumeNewsletterForCallCustomer: (...a) => mockNewsletter(...a),
 }));
@@ -367,7 +368,7 @@ describe('resumeHeldFirstTouch (ledger release engine)', () => {
     expect(mockEnroll).toHaveBeenCalledWith(expect.objectContaining({
       customer: expect.objectContaining({ email: 'confirmed@example.com', id: 'cust-1' }),
     }));
-    expect(mockNewsletter).toHaveBeenCalledWith(expect.objectContaining({ email: 'confirmed@example.com' }));
+    expect(mockNewsletter).toHaveBeenCalledWith(expect.objectContaining({ email: 'confirmed@example.com' }), { dbh: expect.anything() });
     // The drip settlement commits WITH the enrollment (Codex #3084 r30):
     // a deny landing after the enroll transaction always finds the release
     // durably recorded, never an active enrollment with no ledger trace.
@@ -1686,6 +1687,39 @@ describe('DOI dedupe guard and ledger sweep', () => {
       expect(mockLockOrder.slice(last + 1, i)).toContain('email_key');
       last = i;
     }
+  });
+  test('B13: every DOI send path takes the address key before it gates a hold row and runs the send on the SAME connection (one connection, address-first)', async () => {
+    // Post-commit (deferred) path.
+    mockHolds = [baseHold({ id: 'hold-1', held_drip: false })];
+    const res = await resumeHeldFirstTouch({ customerId: 'cust-1', email: 'corrected@example.com', deferNewsletter: true });
+    mockLockOrder = [];
+    mockNewsletter.mockClear();
+    await resumeHeldNewsletterPostCommit(res.newsletterResume);
+    const gate = mockLockOrder.indexOf('gate');
+    const key = mockLockOrder.indexOf('email_key');
+    expect(key).toBeGreaterThanOrEqual(0);
+    expect(gate).toBeGreaterThan(key);
+    expect(mockLockOrder.indexOf('send')).toBeGreaterThan(gate);
+    expect(mockNewsletter).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1' }), { dbh: expect.anything() });
+  });
+
+  test('B13: the direct (non-deferred) DOI path takes the address key before the gate too', async () => {
+    mockHolds = [baseHold({ created_at: new Date().toISOString() })];
+    mockTriageFirstQueue = [null, { status: 'resolved' }];
+    mockLockOrder = [];
+    mockNewsletter.mockClear();
+    await resumeHeldFirstTouch({ callLogId: 'call-1', source: 'ledger_sweep' });
+    const sendAt = mockLockOrder.indexOf('send');
+    expect(sendAt).toBeGreaterThan(-1);
+    const gateAt = mockLockOrder.lastIndexOf('gate', sendAt);
+    expect(gateAt).toBeGreaterThan(-1);
+    expect(mockLockOrder.slice(0, gateAt)).toContain('email_key');
+    // The key taken for THIS gate: after the previous hold-row lock/gate and before this gate.
+    // The hold-row lock that belongs to this gate is immediately preceded by the address key.
+    const holdRowAt = mockLockOrder.lastIndexOf('hold_row', gateAt);
+    expect(holdRowAt).toBeGreaterThan(-1);
+    expect(mockLockOrder[holdRowAt - 1]).toBe('email_key');
+    expect(mockNewsletter.mock.calls[0][1]).toEqual({ dbh: expect.anything() });
   });
   test('a hard bounce landing after the in-claim check is caught under the address key before the enroll (codex #4622 r5)', async () => {
     // in-claim read, pre-enroll re-run, then the locked boundary read finds the fresh bounce suppression
