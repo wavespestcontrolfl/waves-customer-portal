@@ -642,6 +642,99 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     });
   });
 
+  describe('refusals that close the round-4 findings', () => {
+    test('a legacy child with is_recurring NULL (cannot be stamped as a date exception) is refused', async () => {
+      const pair = await buildPair();
+      await trx('scheduled_services').where({ id: pair.kids[0].id }).update({ is_recurring: null });
+      const approved = await approvedFor(pair);
+      expect(approved.results[0].move.map((m) => m.id)).toContain(pair.kids[0].id);
+      const before = await snapshot();
+      const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'row_not_stampable' });
+      expect(await snapshot()).toBe(before);
+    });
+
+    test('the series root row is never moved', async () => {
+      const pair = await buildPair();
+      const approved = await approvedFor(pair);
+      const rootMove = { id: pair.pestParent.id, from: dateOnly(pair.pestParent.scheduled_date), to: approved.results[0].move[0].to };
+      approved.results[0].move = [rootMove];
+      const preview = require('../services/rider-series-preview');
+      const real = preview.previewRiderPair;
+      const spy = jest.spyOn(preview, 'previewRiderPair').mockImplementation(async (...a) => ({ ...(await real(...a)), move: [rootMove] }));
+      try {
+        const before = await snapshot();
+        const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+        expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'series_root_not_moved' });
+        expect(await snapshot()).toBe(before);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    test('a pest series pinned to a technician other than the host lawn stop is refused (host is not exempted)', async () => {
+      const pair = await buildPair();
+      const otherTech = randomUUID();
+      await trx('technicians').insert({
+        id: otherTech, name: 'Pinned synthetic tech', employment_status: 'active', field_dispatchable: true,
+      });
+      await trx('scheduled_services').where({ id: pair.pestParent.id }).update({
+        recurring_technician_id: otherTech, recurring_technician_override: true,
+      });
+      const approved = await approvedFor(pair);
+      const before = await snapshot();
+      const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'technician_differs_from_host' });
+      expect(await snapshot()).toBe(before);
+    });
+
+    test('a missed tech-day fence releases the keys it had already taken', async () => {
+      const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+      const pair = await buildPair({ pestTech: techId });
+      const approved = await approvedFor(pair);
+      const [first] = approved.results[0].move;
+      const holder = await database.transaction();
+      const probe = await database.transaction();
+      try {
+        // 'unassigned:<to>' sorts after the technician keys, so the earlier keys
+        // are acquired before the miss.
+        await lockTechDays(holder, [{ techId: null, date: first.to }]);
+        const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+        expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'technician_day_locked' });
+        // Another connection can take the earlier keys while the run's transaction is still open.
+        expect(await lockTechDays(probe, [{ techId, date: first.from }, { techId, date: first.to }], { wait: false })).not.toBe(false);
+      } finally {
+        await holder.rollback();
+        await probe.rollback();
+      }
+    });
+
+    test('a rollback entry whose tech-day fence misses releases its partial keys too', async () => {
+      const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+      const pair = await buildPair({ pestTech: techId });
+      const approved = await approvedFor(pair);
+      const out = rollbackPath();
+      await applyApproved(trx, approved, { apply: true, rollbackOut: out });
+      const doc = JSON.parse(fs.readFileSync(out, 'utf8'));
+      // The forward apply above still holds its own fences in this transaction, so
+      // point the entry at a day it never fenced: '<techId>:<day>' is taken, then
+      // 'unassigned:<day>' misses.
+      const day = '2099-06-15';
+      const entry = { ...doc.moves[0], before: { ...doc.moves[0].before, scheduled_date: day, technician_id: techId } };
+      const holder = await database.transaction();
+      const probe = await database.transaction();
+      try {
+        await lockTechDays(holder, [{ techId: null, date: day }]);
+        const res = await rollbackApplied(trx, { ...doc, moves: [entry] }, { apply: true });
+        expect(res.results[0]).toMatchObject({ status: 'skipped', reason: 'technician_day_locked' });
+        expect(await lockTechDays(probe, [{ techId, date: day }], { wait: false })).not.toBe(false);
+      } finally {
+        await holder.rollback();
+        await probe.rollback();
+      }
+    });
+  });
+
   test('rollback restores every moved row, and refuses a row that changed since the apply', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);

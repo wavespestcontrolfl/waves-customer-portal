@@ -362,6 +362,9 @@ async function assertRowMovable(sp, row, { expect, to, ctx }) {
     [!row, 'row_missing'],
     [row && String(row.customer_id) !== String(expect.customerId), 'row_customer_changed'],
     [row && String(row.recurring_parent_id || row.id) !== String(expect.pestParentId), 'row_not_in_pest_series'],
+    // The series root carries the template anchor (parent.scheduled_date) later
+    // writers derive add-on due dates and cadence from: never rewrite it.
+    [row && (String(row.id) === String(expect.pestParentId) || !row.recurring_parent_id), 'series_root_not_moved'],
     [row && expect.recurringParentId !== undefined
       && String(row.recurring_parent_id ?? '') !== String(expect.recurringParentId ?? ''), 'row_series_changed'],
     [row && !isPlanSeriesRow(row), 'row_not_a_plan_row'],
@@ -516,9 +519,14 @@ function composeForwardUpdates(sp, row, { to, target, cols }) {
     scheduled_date: to, window_start: target.windowStart, window_end: target.windowEnd, technician_id: target.technicianId,
   };
   const rewind = needsLifecycleRewind(row);
+  // dateExceptionStamp is empty for a row whose is_recurring is not exactly true
+  // (a legacy child): unstamped, seriesExtendAnchor would anchor on the lawn
+  // landing. Refuse rather than move it unmarked.
+  const stamp = cols.date_exception ? dateExceptionStamp(row, MOVE_SOURCE) : {};
+  if (cols.date_exception && !stamp.date_exception) throw new PairSkip('row_not_stampable', row.id);
   const updates = {
     ...changes,
-    ...(cols.date_exception ? dateExceptionStamp(row, MOVE_SOURCE) : {}),
+    ...stamp,
     ...(rewind ? LIVE_LIFECYCLE_RESET : {}),
     ...(cols.recurring_dispatch_due_date ? recurringDispatchDuePatch(row, changes) : {}),
     ...(cols.route_order ? { route_order: null } : {}),
@@ -694,6 +702,12 @@ async function planForwardMove(sp, ctx, ids, approvedPair, move) {
   const to = d10(move.to);
   const hostRow = await pickLockedHostRow(sp, ctx, to);
   const target = await resolveHostJoin(sp, ctx, hostRow, to);
+  // One stop is the point: the host lawn row is exempt from the (technician-blind)
+  // occupancy probe only when the pest visit lands on the same technician.
+  // A pinned different technician, or an unassigned side, refuses the pair.
+  if (!target.technicianId || !hostRow.technician_id || String(target.technicianId) !== String(hostRow.technician_id)) {
+    throw new PairSkip('technician_differs_from_host', move.id);
+  }
   const plan = await planMove(sp, ctx, {
     expect: {
       rowId: move.id, customerId: ids.customerId, pestParentId: ids.pestParentId, fromDate: d10(move.from),
@@ -796,8 +810,22 @@ function rollbackFenceKeys(entry) {
 async function acquireFence(trx, keys, apply) {
   if (!apply) return { keys: null };
   const { lockTechDays } = require('../server/services/scheduling/tech-day-lock');
-  const held = await lockTechDays(trx, keys, { wait: false });
-  return held ? { keys: new Set(held) } : { skip: 'technician_day_locked' };
+  // All-or-nothing: lockTechDays try-locks keys in sorted order and returns false
+  // at the first busy one, leaving the earlier keys held. Inside a savepoint that
+  // is rolled back on a miss, those partial locks are released at once instead of
+  // lingering until the whole run commits.
+  class FenceMiss extends Error {}
+  try {
+    const held = await trx.transaction(async (sp) => {
+      const got = await lockTechDays(sp, keys, { wait: false });
+      if (!got) throw new FenceMiss();
+      return got;
+    });
+    return { keys: new Set(held) };
+  } catch (err) {
+    if (err instanceof FenceMiss) return { skip: 'technician_day_locked' };
+    throw err;
+  }
 }
 
 // ---- forward run ----------------------------------------------------------------
