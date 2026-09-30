@@ -215,7 +215,8 @@ never read `parts[0]`, and budget output tokens for the thinking spend.
 
 **Lawn visit exception (owner 2026-09-08, DECISIONS.md):** the lawn visit
 assessment (`services/lawn-visit-assessment.js`, `GATE_LAWN_VISIT_ASSESSMENT`)
-is Gemini-first with **GPT-6 Astra** (`MODEL_OPENAI_FRONTIER`) as its fallback —
+is Gemini-first with **GPT-6 Sol** (`OPENAI_LAWN_ASSESSMENT`, `MODEL_OPENAI_LAWN_ASSESSMENT`;
+Astra until the 2026-09-29 ruling) as its fallback —
 no Claude vision leg, no parallel providers. It is still a two-provider
 `TEXT_POLICIES` entry (`lawnVisitAssessment`) through `dispatchWithFallback`;
 only the fallback provider differs. Do not copy this shape to another lane

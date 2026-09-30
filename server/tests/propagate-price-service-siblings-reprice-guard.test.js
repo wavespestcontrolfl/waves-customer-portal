@@ -213,3 +213,92 @@ test('ABBA-safe refusal (pre-push audit P1): a sibling whose mint lock is alread
   expect(tryAcquireScheduledInvoiceMintLock).toHaveBeenCalledTimes(2);
   expect(siblingUpdateSpy).not.toHaveBeenCalled();
 });
+
+// A /secure card confirmation mid-finish ('completing') on a sibling is not
+// durable yet — no money rail sees it — so the guard refuses with the same
+// transient VISIT_BUSY_RETRY contract as the single-visit re-price guard
+// (findCompletingCardRequestVisitId). Refused BEFORE any sibling write.
+describe("'completing' card confirmation refusal", () => {
+  const baseByTable = {
+    invoices: [], 'invoices as inv': [], 'visit_completion_packet_items as p': [],
+    estimate_card_holds: [], scheduled_service_addons: [],
+  };
+  const args = {
+    editedId: 'edited-1', editedRow: { id: 'edited-1' }, parentId: 'parent-1', fromDateStr: null,
+    fields: { estimated_price: 200 }, serviceChanged: false, priceChanged: true, cols: { estimated_price: {} },
+  };
+  // makeConn's generic table fake ignores where clauses, so the money-rail
+  // read (status 'completed', frozen fee terms) would see these fixture rows
+  // too. Route appointment_card_requests through a status-aware chain: the
+  // rail's .select() gets nothing (no completed/charge-ready row exists),
+  // the completing probe's .first() gets the rows matching its own
+  // where({ status: 'completing' }) and whereIn(scheduled_service_id, ids).
+  function withCardRequests(conn, rows) {
+    const wrapped = (table) => {
+      if (table !== 'appointment_card_requests') return conn(table);
+      let status = null;
+      let ids = null;
+      const c = {};
+      for (const m of ['whereNull', 'whereNotNull', 'whereNotIn', 'orderBy']) c[m] = jest.fn(() => c);
+      c.whereIn = jest.fn((col, v) => { if (col === 'scheduled_service_id') ids = v; return c; });
+      c.where = jest.fn((w, op, val) => { if (w && typeof w === 'object') status = w.status ?? status; else if (w === 'status') status = val ?? op; return c; });
+      c.first = jest.fn(async () => rows.find((r) => r.status === status && (!ids || ids.includes(r.scheduled_service_id))) || null);
+      c.select = jest.fn(async () => []);
+      return c;
+    };
+    Object.assign(wrapped, conn);
+    return wrapped;
+  }
+  const targets = [
+    { id: 'sib-a', scheduled_date: '2099-02-01', pre_service_brief_type: null },
+    { id: 'sib-b', scheduled_date: '2099-03-01', pre_service_brief_type: null },
+  ];
+
+  test('a sibling with a completing card request refuses the whole propagation with VISIT_BUSY_RETRY, no sibling write', async () => {
+    const conn = withCardRequests(makeConn({
+      candidateIds: ['sib-a', 'sib-b'],
+      targets,
+      hasTables: ALL_TABLES,
+      byTable: baseByTable,
+    }), [{ scheduled_service_id: 'sib-b', status: 'completing' }]);
+    await expect(propagatePriceServiceToFollowingSiblings(conn, args))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+    expect(siblingUpdateSpy).not.toHaveBeenCalled();
+  });
+
+  test('the EDITED visit\'s own completing card request refuses too', async () => {
+    const conn = withCardRequests(makeConn({
+      candidateIds: ['sib-a', 'sib-b'],
+      targets,
+      hasTables: ALL_TABLES,
+      byTable: baseByTable,
+    }), [{ scheduled_service_id: 'edited-1', status: 'completing' }]);
+    await expect(propagatePriceServiceToFollowingSiblings(conn, args))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_BUSY_RETRY' });
+    expect(siblingUpdateSpy).not.toHaveBeenCalled();
+  });
+
+  test('a pending/completed (not completing) card request does not block the propagation', async () => {
+    const conn = withCardRequests(makeConn({
+      candidateIds: ['sib-a', 'sib-b'],
+      targets,
+      hasTables: ALL_TABLES,
+      byTable: baseByTable,
+    }), [{ scheduled_service_id: 'sib-a', status: 'pending' }]);
+    const ids = await propagatePriceServiceToFollowingSiblings(conn, args);
+    expect(ids.sort()).toEqual(['sib-a', 'sib-b']);
+  });
+
+  test('a schedule-only propagation never checks for a completing request', async () => {
+    const conn = withCardRequests(makeConn({
+      candidateIds: [],
+      targets: [targets[0]],
+      hasTables: ALL_TABLES,
+      byTable: baseByTable,
+    }), [{ scheduled_service_id: 'sib-a', status: 'completing' }]);
+    await expect(propagatePriceServiceToFollowingSiblings(conn, {
+      editedId: 'edited-1', editedRow: null, parentId: 'parent-1', fromDateStr: null,
+      fields: { technician_id: 'tech-2' }, serviceChanged: false, priceChanged: false, cols: { technician_id: {} },
+    })).resolves.toBeDefined();
+  });
+});

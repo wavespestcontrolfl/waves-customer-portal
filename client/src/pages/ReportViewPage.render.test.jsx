@@ -1429,3 +1429,50 @@ describe('ReportViewPage — Ask Waves request carries the staff JWT only for st
     expect(headers).not.toHaveProperty('Authorization');
   });
 });
+
+describe('ReportViewPage — expiring signed map links', () => {
+  const withMapUrl = (url) => ({
+    ...legacyLawnReport,
+    treatmentMap: { ...(legacyLawnReport.treatmentMap || {}), satellite: { available: true, live: { url, width: 640, height: 340 } } },
+  });
+
+  it('refetches once when the map image cannot load (expired link), swapping in the fresh link', async () => {
+    const probed = [];
+    class FakeImage {
+      set src(value) {
+        probed.push(value);
+        if (value.includes('EXPIRED')) setTimeout(() => this.onerror && this.onerror(), 0);
+      }
+    }
+    vi.stubGlobal('Image', FakeImage);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.EXPIRED.sig') })
+      .mockResolvedValue({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.FRESH.sig') });
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await waitFor(() => expect(probed.some((u) => u.includes('FRESH'))).toBe(true));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+    // The fresh link loads, so nothing keeps refetching.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(2);
+  });
+
+  it('does not refetch when the map link is still good', async () => {
+    class OkImage { set src(_v) { /* loads fine */ } }
+    vi.stubGlobal('Image', OkImage);
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => withMapUrl('/api/public/map-image/v1.GOOD.sig') }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(
+      <MemoryRouter initialEntries={['/report/test-legacy-lawn']}>
+        <Routes><Route path="/report/:token" element={<ReportViewPage />} /></Routes>
+      </MemoryRouter>,
+    );
+    await screen.findAllByText(/./);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/data?mode=live'))).toHaveLength(1);
+  });
+});
