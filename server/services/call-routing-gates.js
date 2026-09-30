@@ -409,9 +409,47 @@ const ROUTE_DECISION_REFRESH_COLUMNS = [
 // processor's same-run outcome update) skips a row a human has reviewed:
 // route_feedback points at the row by id and calibration joins the row's
 // CURRENT action, reasons and outcome to the verdict (codex #5371 r6 + r7 P1).
+// The predicate alone is NOT enough (codex #5371 r9 P1): under READ COMMITTED a
+// verdict can commit between the predicate and the UPDATE landing. Every
+// mutation therefore goes through updateUnreviewedRouteDecisions, which takes
+// the row lock first, and every route_feedback writer takes the SAME row lock
+// (withLockedRouteDecisions) before it inserts, so the two are serialized on the
+// route_decisions row: whichever gets the lock first wins, and the other sees
+// its result (a refresh after a verdict finds the feedback and skips; a verdict
+// after a refresh attaches to the refreshed row it now reads).
 function excludeReviewedDecisions(query, conn) {
   return query.whereNotExists(function reviewed() {
     this.select(conn.raw('1')).from('route_feedback').whereRaw('route_feedback.route_decision_id = route_decisions.id');
+  });
+}
+
+// Lock the route_decisions rows matching `scope`, then update those of them a
+// human has not reviewed. Must run inside a transaction (`trx`) so the lock
+// spans both statements; the second statement takes a fresh READ COMMITTED
+// snapshot after the lock is granted, so a verdict committed while this waited
+// is seen by the NOT EXISTS predicate. Returns rows updated.
+async function updateUnreviewedRouteDecisions(trx, scope, patch) {
+  const locked = await trx('route_decisions').where(scope).forUpdate().select('id');
+  if (!locked.length) return 0;
+  return excludeReviewedDecisions(
+    trx('route_decisions').whereIn('id', locked.map((r) => r.id)).update(patch),
+    trx,
+  );
+}
+
+// The ONLY door for route_feedback writes: locks the call's route_decisions rows
+// FOR UPDATE inside a transaction, hands the locked rows to `fn(trx, rows)`, and
+// commits. `fn` picks the decision the verdict attaches to (from the rows it now
+// holds the lock on, so they cannot change underneath it) and writes the
+// route_feedback row on `trx`. Optional narrowing: `decisionId` (a specific row
+// the reviewer named) and `mode`.
+async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mode = null }, fn) {
+  return conn.transaction(async (trx) => {
+    const q = trx('route_decisions').where({ call_log_id: callLogId }).forUpdate();
+    if (decisionId) q.where({ id: decisionId });
+    if (mode) q.where({ mode });
+    const rows = await q.select('*');
+    return fn(trx, rows);
   });
 }
 
@@ -420,14 +458,16 @@ function excludeReviewedDecisions(query, conn) {
 // three-column constraint and the recording-keyed index during a rolling
 // deploy, Codex #3736 r9 P1 — Postgres cannot do a targetless DO UPDATE):
 //   1. INSERT ... ON CONFLICT DO NOTHING (the first pass for a key lands here);
-//   2. a keyed UPDATE of the refresh columns (a later pass lands here).
+//   2. a keyed, ROW-LOCKED UPDATE of the refresh columns (a later pass lands
+//      here) — see updateUnreviewedRouteDecisions.
 // `fence` ({ callLogId, processingToken }) makes BOTH statements conditional on
 // this pass still owning the call's processing_token: the ownership row is
 // locked FOR UPDATE and re-read in the same transaction as the writes (the
 // processor's own fence shape), so a superseded worker can neither insert a
 // first decision nor overwrite a newer pass's (codex #5371 r8 P1). A fence that
 // was ASKED FOR but is incomplete fails closed: nothing is written. Refreshes
-// also skip a decision a human already reviewed (excludeReviewedDecisions).
+// also skip a decision a human already reviewed. The unfenced path runs in a
+// transaction too: the row lock needs one.
 // Returns rows refreshed / 0 / null (null = fence not held: nothing written).
 async function upsertRouteDecision(conn, decision, fence = null) {
   const write = async (c) => {
@@ -438,16 +478,14 @@ async function upsertRouteDecision(conn, decision, fence = null) {
     // points at a decision row by id and calibration joins that row's CURRENT
     // action / reasons to the human's verdict, so mutating a reviewed row would
     // re-attach an old verdict to a decision the reviewer never saw.
-    return excludeReviewedDecisions(c('route_decisions')
-      .where({
-        call_log_id: decision.call_log_id,
-        decision_version: decision.decision_version,
-        mode: decision.mode,
-        recording_sid: decision.recording_sid,
-      })
-      .update(refresh), c);
+    return updateUnreviewedRouteDecisions(c, {
+      call_log_id: decision.call_log_id,
+      decision_version: decision.decision_version,
+      mode: decision.mode,
+      recording_sid: decision.recording_sid,
+    }, refresh);
   };
-  if (!fence) return write(conn);
+  if (!fence) return conn.transaction(write);
   if (!fence.callLogId || !fence.processingToken) return null;
   return conn.transaction(async (trx) => {
     const owned = await trx('call_log')
@@ -917,6 +955,8 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
 
 module.exports = {
   excludeReviewedDecisions,
+  updateUnreviewedRouteDecisions,
+  withLockedRouteDecisions,
   SUPERSEDE_KEPT_REASON_CODES,
   onFileAddressSnapshot,
   computeAppointmentIdempotencyKey,

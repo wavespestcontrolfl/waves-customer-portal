@@ -412,15 +412,22 @@ describe('full-transcript unsupported veto (codex r1 P1)', () => {
 });
 
 describe('an open blocking card is demoted on reprocess, fenced to the owning pass (codex r1 + r2 P1)', () => {
-  function fakeConn({ owner = true } = {}) {
+  // `present`: reason codes that have an OPEN row after the writes ('all' = the
+  // waived flag is always there; [] = the insert-if-missing left nothing).
+  function fakeConn({ owner = true, present = ['ambiguous_pest_or_service'] } = {}) {
     const calls = [];
     const builder = (table) => {
+      let selecting = false;
       const chain = {
         where(a, b) { calls.push([table, 'where', b === undefined ? a : [a, b]]); return chain; },
         whereIn(c, v) { calls.push([table, 'whereIn', c, v]); return chain; },
         forUpdate() { calls.push([table, 'forUpdate']); return chain; },
         first() { calls.push([table, 'first']); return Promise.resolve(table === 'call_log' && owner ? { id: 'call-1' } : undefined); },
         update(u) { calls.push([table, 'update', u]); return Promise.resolve(2); },
+        insert(row) { calls.push([table, 'insert', row]); return chain; },
+        onConflict(c) { calls.push([table, 'onConflict']); return chain; },
+        ignore() { calls.push([table, 'ignore']); return Promise.resolve([]); },
+        select(c) { selecting = true; calls.push([table, 'select', c]); return Promise.resolve(present.map((reason_code) => ({ reason_code }))); },
       };
       return chain;
     };
@@ -461,6 +468,66 @@ describe('an open blocking card is demoted on reprocess, fenced to the owning pa
   });
 });
 
+describe('the advisory card is PROVEN before the Assessment books (codex #5371 r9 P1)', () => {
+  const item = { call_log_id: 'call-1', reason_code: 'ambiguous_pest_or_service', severity: 'advisory' };
+  function conn({ present }) {
+    const calls = [];
+    const builder = (table) => {
+      const chain = {
+        where() { return chain; }, whereIn() { return chain; }, forUpdate() { return chain; },
+        first() { return Promise.resolve(table === 'call_log' ? { id: 'call-1' } : undefined); },
+        update() { calls.push([table, 'update']); return Promise.resolve(0); },
+        insert(row) { calls.push([table, 'insert', row]); return chain; },
+        onConflict() { return chain; },
+        ignore() { return Promise.resolve([]); },
+        select() { calls.push([table, 'verify']); return Promise.resolve(present.map((reason_code) => ({ reason_code }))); },
+      };
+      return chain;
+    };
+    builder.fn = { now: () => 'NOW' };
+    builder.raw = () => Promise.resolve({ rows: [] });
+    return { c: { transaction: async (fn) => fn(builder) }, calls };
+  }
+
+  test('first gate-enabled pass, nothing to demote: the advisory row is inserted in the SAME fenced transaction and verified', async () => {
+    const { c, calls } = conn({ present: ['ambiguous_pest_or_service'] });
+    expect(await demoteOpenTriageCards(c, 'call-1', ['ambiguous_pest_or_service'], 'tok', [item])).toBe(0);
+    expect(calls).toEqual(expect.arrayContaining([['triage_items', 'insert', item], ['triage_items', 'verify']]));
+  });
+
+  test('no open row for a waived flag afterwards (the caller\'s own insert failed and so did this one): THROWS, so the enclosing catch holds the appointment', async () => {
+    const { c } = conn({ present: [] });
+    await expect(demoteOpenTriageCards(c, 'call-1', ['ambiguous_pest_or_service'], 'tok', [item]))
+      .rejects.toThrow(/advisory card missing for: ambiguous_pest_or_service/);
+  });
+
+  test('every waived flag must be covered, not just one', async () => {
+    const { c } = conn({ present: ['ambiguous_pest_or_service'] });
+    await expect(demoteOpenTriageCards(c, 'call-1', ['ambiguous_pest_or_service', 'unit_unknown'], 'tok', []))
+      .rejects.toThrow(/unit_unknown/);
+  });
+
+  test('a lost claim still reports null before anything is proven or inserted', async () => {
+    const calls = [];
+    const builder = (table) => {
+      const chain = { where() { return chain; }, forUpdate() { return chain; }, first() { return Promise.resolve(undefined); }, insert() { calls.push(table); return chain; } };
+      return chain;
+    };
+    builder.raw = () => Promise.resolve({ rows: [] });
+    expect(await demoteOpenTriageCards({ transaction: async (fn) => fn(builder) }, 'call-1', ['ambiguous_pest_or_service'], 'stale', [item])).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  test('the processor hands the built advisory rows in, and a failure reaches the fail-closed catch (no local swallow)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const at = src.indexOf('const demoted = await demoteOpenTriageCards(');
+    const call = src.slice(at, at + 500);
+    expect(call).toMatch(/routingResult\.unclearServiceDemotedFlags, procToken,/);
+    expect(call).toMatch(/buildTriageItem\(\{\s*callLogId: call\.id, flag: f, extraction: v2Extraction, severity: 'advisory'/);
+    expect(src.slice(at - 150, at)).not.toMatch(/try \{\s*$/);
+  });
+});
+
 describe('the effective gate needs BOTH switches (codex r2 P1)', () => {
   const on = (...names) => (g) => names.includes(g);
   test('unclear-service alone (fail-open off): not active', () => {
@@ -483,7 +550,12 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     const sqls = [];
     const conn = (table) => {
       const qb = knex(table);
-      qb.then = (res, rej) => { sqls.push(qb.toSQL()); return Promise.resolve([]).then(res, rej); };
+      // The row-lock SELECT returns a row so the refresh proceeds to its UPDATE.
+      qb.then = (res, rej) => {
+        const q = qb.toSQL();
+        sqls.push(q);
+        return Promise.resolve(/for update/i.test(q.sql) && /route_decisions/.test(q.sql) ? [{ id: 'rd-1' }] : []).then(res, rej);
+      };
       return qb;
     };
     conn.raw = (...a) => knex.raw(...a);
@@ -493,21 +565,24 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
   // The route_decisions statements only (the ownership read is call_log).
   const rd = (sqls) => sqls.filter((q) => /route_decisions/.test(q.sql));
 
-  test('a TARGETLESS insert (rolling-deploy safe) then a keyed refresh of decision columns and created_at only', async () => {
+  test('a TARGETLESS insert (rolling-deploy safe), a row lock, then a refresh of decision columns and created_at only', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
     const w = rd(sqls);
-    expect(w).toHaveLength(2);
+    expect(w).toHaveLength(3);
     expect(w[0].sql).toMatch(/insert into "route_decisions"[\s\S]*on conflict do nothing/i);
     expect(w[0].sql).not.toMatch(/on conflict \(/i);
-    const upd = w[1].sql;
+    // the keyed, LOCKED read of the target row (codex #5371 r9 P1)
+    expect(w[1].sql).toMatch(/^select "id" from "route_decisions" where "call_log_id" = \? and "decision_version" = \? and "mode" = \? and "recording_sid" = \? for update/i);
+    const upd = w[2].sql;
     expect(upd).toMatch(/^update "route_decisions" set/i);
     for (const col of ROUTE_DECISION_REFRESH_COLUMNS) expect(upd).toContain(`"${col}" = ?`);
     // outcome linkage is never refreshed
     expect(upd).not.toContain('created_scheduled_service_id');
     expect(upd).not.toContain('sms_enqueued');
-    // keyed on call / version / mode / recording
-    for (const col of ['call_log_id', 'decision_version', 'mode', 'recording_sid']) expect(upd).toContain(`"${col}" = ?`);
+    // the update targets exactly the rows it locked
+    expect(upd).toMatch(/where "id" in \(\?\)/i);
+    expect(w[2].bindings).toContain('rd-1');
     expect(ROUTE_DECISION_REFRESH_COLUMNS).toContain('created_at');
   });
 
@@ -517,7 +592,7 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(sqls[0].sql).toMatch(/from "call_log" where "id" = \? and "processing_token" = \? limit \? for update/i);
     expect(sqls[0].bindings.slice(0, 2)).toEqual(['c1', 'tok']);
     expect(/route_decisions/.test(sqls[0].sql)).toBe(false);
-    expect(rd(sqls)).toHaveLength(2);
+    expect(rd(sqls)).toHaveLength(3);
   });
 
   test('a lost claim writes NOTHING (neither insert nor refresh) and reports null', async () => {
@@ -535,16 +610,19 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
   test('a refresh skips a decision that has route_feedback (codex r6 P1)', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
-    expect(rd(sqls)[1].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
+    expect(rd(sqls)[2].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
   });
 
-  test('the processor outcome update skips a reviewed decision too (codex r7 P1)', () => {
-    const knex = require('knex')({ client: 'pg' });
-    const { excludeReviewedDecisions } = require('../services/call-routing-gates');
-    const q = excludeReviewedDecisions(knex('route_decisions').where({ call_log_id: 'c1' }), knex).update({ final_action_taken: 'auto_route' });
-    expect(q.toSQL().sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
+  test('the processor outcome update skips a reviewed decision too, under the same row lock (codex r7 + r9 P1)', async () => {
+    const { conn, sqls } = recordingConn();
+    const { updateUnreviewedRouteDecisions } = require('../services/call-routing-gates');
+    await updateUnreviewedRouteDecisions(conn, { call_log_id: 'c1', mode: 'enforce' }, { final_action_taken: 'auto_route' });
+    const w = rd(sqls);
+    expect(w[0].sql).toMatch(/for update/i);
+    expect(w[1].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    expect(src).toMatch(/await excludeReviewedDecisions\(outcomeUpdate, db\)\s*\.update\(\{\s*final_action_taken/);
+    expect(src).toMatch(/db\.transaction\(\(trx\) => updateUnreviewedRouteDecisions\(trx,/);
+    expect(src).not.toMatch(/excludeReviewedDecisions/);
   });
 
   test('an incomplete fence (no processing token) fails closed: nothing is written', async () => {
@@ -557,7 +635,8 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision);
     expect(sqls.some((q) => /\bcall_log\b/.test(q.sql))).toBe(false);
-    expect(rd(sqls)).toHaveLength(2);
+    expect(rd(sqls)).toHaveLength(3);
+    expect(rd(sqls)[1].sql).toMatch(/for update/i); // the lock needs a transaction: the no-fence path opens one
   });
 
   test('both processor lanes write through it and nothing writes a route decision with a bare ignore', () => {
@@ -624,7 +703,7 @@ describe('the offline audits run the downstream transcript veto (codex r5 P1)', 
 
   test('the in-process SHADOW decision applies the same veto before it is built (codex r6 P1)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const veto = src.indexOf('routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);');
+    const veto = src.lastIndexOf('routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);');
     const build = src.indexOf('const shadowDecision = buildRouteDecision({');
     expect(veto).toBeGreaterThan(-1);
     expect(build).toBeGreaterThan(veto);
@@ -684,5 +763,88 @@ describe('a failed card demotion fails closed (codex r8 P1)', () => {
     const catchAt = src.indexOf('Routing gate error for ${callSid}: ${err.message} — failing closed (appointment only)', at);
     expect(catchAt).toBeGreaterThan(at);
     expect(src.slice(catchAt, catchAt + 200)).toMatch(/v2RoutingBlocked = true/);
+  });
+});
+
+describe('the ENFORCE decision applies the same transcript veto before it is built (codex #5371 r9 P1)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  const call = 'routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);';
+  const first = src.indexOf(call);
+  const enforceBuild = src.indexOf('const routeDecision = buildRouteDecision({');
+
+  test('the veto (the ONE shared helper) runs after the V1 address demotion and before the enforce decision is built and upserted', () => {
+    expect(first).toBeGreaterThan(-1);
+    expect(src.indexOf(call, first + 1)).toBeGreaterThan(first); // enforce + shadow both call it
+    expect(first).toBeLessThan(enforceBuild);
+    expect(src.lastIndexOf('routingResult = demoted;', first)).toBeGreaterThan(-1);
+    expect(src.indexOf('await upsertRouteDecision(db, routeDecision,')).toBeGreaterThan(first);
+    // no second copy of the resolver call for the veto
+    expect(src.match(/fullTranscriptVeto: true/g)).toHaveLength(1);
+  });
+
+  test('a vetoed call records identically to the shadow path: needs_review with the veto reason, not auto_create_appointment', () => {
+    const extracted = { matched_service: 'General Pest Control', requested_service: 'pest control', call_summary: 'Caller about pest control.' };
+    const seo = 'Agent: Hello.\nCaller: I can improve your website SEO and Google ranking for your pest control company, organic traffic guaranteed.\n';
+    const admitted = canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
+    const vetoed = applyUnclearServiceTranscriptVeto(admitted, extracted, seo);
+    const row = buildRouteDecision({
+      callLogId: 'c1', extraction: extraction(), finalTriageFlags: ['ambiguous_pest_or_service'],
+      routingResult: vetoed, action: vetoed.allowed ? 'auto_route' : 'triage_review', mode: 'enforce', recordingSid: 'RE1',
+    });
+    expect(row).toMatchObject({ validator_recommendation: 'needs_review', final_action_taken: 'triage_review' });
+    expect(JSON.parse(row.blocked_reasons)).toEqual(['unsupported_service']);
+    expect(JSON.parse(row.allowed_reasons)).toEqual([]);
+    // the advisory service card the gate owes still rides the held verdict
+    expect(vetoed.failedOpenFlags).toEqual(['ambiguous_pest_or_service']);
+  });
+
+  test('gate off: the enforce verdict is untouched (byte-identical)', () => {
+    const r = canAutoRoute(extraction(), GATE_OFF);
+    expect(applyUnclearServiceTranscriptVeto(r, {}, 'Caller: SEO ranking guaranteed.')).toBe(r);
+  });
+});
+
+describe('every route_feedback writer takes the route_decisions row lock (codex #5371 r9 P1)', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  test('the only writers are admin-triage upsertFeedback and the ai-assistant route-feedback handler, both via withLockedRouteDecisions', () => {
+    const root = path.join(__dirname, '..');
+    const writers = [];
+    const walk = (dir) => {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (['node_modules', 'tests', 'models', '__tests__'].includes(e.name)) continue;
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) walk(full);
+        else if (e.name.endsWith('.js') && /\(\s*'route_feedback'\s*\)\s*\.(insert|update|del)\b|route_feedback[^;]*\.(insert|update)\(/s.test(fs.readFileSync(full, 'utf8'))) writers.push(path.relative(root, full));
+      }
+    };
+    walk(root);
+    expect(writers.sort()).toEqual(['routes/admin-triage.js', 'routes/ai-assistant.js']);
+    for (const f of writers) {
+      const src = fs.readFileSync(path.join(root, f), 'utf8');
+      expect(src).toMatch(/withLockedRouteDecisions/);
+    }
+    const triage = fs.readFileSync(path.join(root, 'routes/admin-triage.js'), 'utf8');
+    expect(triage).toMatch(/withLockedRouteDecisions\(db, \{ callLogId, mode: 'enforce' \}, async \(trx, rows\) => \{[\s\S]*?trx\('route_feedback'\)/);
+    expect(triage).not.toMatch(/db\('route_feedback'\)\s*\.insert/);
+    const ai = fs.readFileSync(path.join(root, 'routes/ai-assistant.js'), 'utf8');
+    expect(ai).toMatch(/withLockedRouteDecisions\(db, \{[\s\S]*?writeFeedback\(trx, routeDecision\)/);
+    expect(ai).not.toMatch(/db\('route_feedback'\)\s*\.insert/);
+  });
+
+  test('withLockedRouteDecisions locks the call\'s decision rows FOR UPDATE inside the transaction, then hands them over', async () => {
+    const knex = require('knex')({ client: 'pg' });
+    const { withLockedRouteDecisions } = require('../services/call-routing-gates');
+    const sqls = [];
+    const conn = (t) => {
+      const qb = knex(t);
+      qb.then = (res, rej) => { sqls.push(qb.toSQL()); return Promise.resolve([{ id: 'rd-1' }]).then(res, rej); };
+      return qb;
+    };
+    conn.transaction = async (fn) => fn(conn);
+    const seen = await withLockedRouteDecisions(conn, { callLogId: 'c1', decisionId: 'rd-1', mode: 'enforce' }, async (trx, rows) => rows);
+    expect(seen).toEqual([{ id: 'rd-1' }]);
+    expect(sqls[0].sql).toMatch(/^select \* from "route_decisions" where "call_log_id" = \? and "id" = \? and "mode" = \? for update$/i);
   });
 });

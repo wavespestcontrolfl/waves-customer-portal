@@ -132,7 +132,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, excludeReviewedDecisions, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 
@@ -5750,7 +5750,16 @@ function forcedAssessmentBooking({ serviceResolution, services, current, extract
 // call's processing_token (a superseded worker must not demote the current
 // pass's genuinely blocking card). Returns rows updated (0 = nothing to demote)
 // or null when the claim is lost — the caller must NOT proceed to book then.
-async function demoteOpenTriageCards(conn, callLogId, flags, procToken) {
+//
+// The same fenced transaction also PROVES the advisory card exists (codex #5371
+// r9 P1): on a call's first gate-enabled pass there is no blocking card to
+// demote, and the caller's own advisory insert is best-effort (its catch only
+// logs). `advisoryItems` (built triage rows, one per flag) are inserted here if
+// missing, and every flag must then have an OPEN advisory-or-demoted row, or this
+// THROWS — which the enclosing routing catch turns into a held appointment, so a
+// Waves Assessment is never booked without the card telling staff to identify
+// the real service. Flags with no built row are still verified.
+async function demoteOpenTriageCards(conn, callLogId, flags, procToken, advisoryItems = []) {
   if (!Array.isArray(flags) || !flags.length) return 0;
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callLogId);
@@ -5760,11 +5769,29 @@ async function demoteOpenTriageCards(conn, callLogId, flags, procToken) {
       .forUpdate()
       .first('id');
     if (!owned) return null;
-    return trx('triage_items')
+    const demoted = await trx('triage_items')
       .where({ call_log_id: callLogId, severity: 'blocking' })
       .whereIn('reason_code', flags)
       .whereIn('status', ['open', 'in_progress'])
       .update({ severity: 'advisory', updated_at: trx.fn.now() });
+    for (const item of advisoryItems || []) {
+      if (!item || !flags.includes(item.reason_code)) continue;
+      await trx('triage_items')
+        .insert(item)
+        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+        .ignore();
+    }
+    const present = await trx('triage_items')
+      .where({ call_log_id: callLogId })
+      .whereIn('reason_code', flags)
+      .whereIn('status', ['open', 'in_progress'])
+      .select('reason_code');
+    const have = new Set((present || []).map((r) => r.reason_code));
+    const missing = flags.filter((f) => !have.has(f));
+    if (missing.length) {
+      throw new Error(`unclear-service advisory card missing for: ${missing.join(', ')}`);
+    }
+    return demoted;
   });
 }
 
@@ -10153,6 +10180,14 @@ const CallRecordingProcessor = {
               routingResult = demoted;
             }
           }
+          // …and the downstream full-transcript service veto the live pass
+          // applies to every call GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT admitted
+          // (the resolver skips the appointment there). Applied BEFORE the
+          // decision is built (codex #5371 r9 P1) — the SAME shared helper the
+          // shadow and offline-audit paths use — so the enforce decision records
+          // the call as held (needs_review, blocked reason), never as an allowed
+          // auto-route that is silently skipped later.
+          routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);
           if (routingResult.allowed && routingResult.failedOpenFlags?.length) {
             logger.info(`[call-proc] Fail-open booking for ${maskSid(callSid)}: proceeding despite recoverable flags ${routingResult.failedOpenFlags.join(', ')} (office to confirm)`);
           }
@@ -10446,7 +10481,12 @@ const CallRecordingProcessor = {
             // call (null = claim lost: abandon), the call is NOT booked — a
             // blocking card left standing on a booked visit is what invites a
             // duplicate booking.
-            const demoted = await demoteOpenTriageCards(db, call.id, routingResult.unclearServiceDemotedFlags, procToken);
+            const demoted = await demoteOpenTriageCards(
+              db, call.id, routingResult.unclearServiceDemotedFlags, procToken,
+              (routingResult.unclearServiceDemotedFlags || []).map((f) => buildTriageItem({
+                callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
+              })),
+            );
             if (demoted === null) return abandonToPeer('the unclear-service card demotion');
             v2ForceAssessmentService = routingResult.forceAssessmentService === true;
             v2UnclearServiceGateAdmitted = routingResult.unclearServiceGateAdmitted === true;
@@ -18901,17 +18941,18 @@ const CallRecordingProcessor = {
         }
       }
       try {
-        const outcomeUpdate = db('route_decisions')
+        // Row-locked like every write to an existing decision (codex #5371 r9 P1):
+        // a verdict landing concurrently serializes on the route_decisions row.
+        await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
           // Same-run outcome update: targets the row THIS process wrote
           // moments ago, so the CURRENT version only (a reprocess writes —
           // and updates — its own fresh v2-1.1.0 row). A row a human has
           // reviewed keeps the outcome that review judged.
-          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' });
-        await excludeReviewedDecisions(outcomeUpdate, db)
-          .update({
+          { call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' },
+          {
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
-          });
+          }));
       } catch (rdErr) {
         logger.warn(`[call-proc] route_decisions outcome update failed for ${maskSid(callSid)}: ${rdErr.message}`);
       }

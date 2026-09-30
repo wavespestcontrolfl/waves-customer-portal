@@ -7,7 +7,7 @@
 const SKIP = !process.env.DATABASE_URL;
 const knex = require('knex');
 const { randomUUID } = require('crypto');
-const { buildRouteDecision, upsertRouteDecision, V2_DECISION_VERSION } = require('../services/call-routing-gates');
+const { buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, withLockedRouteDecisions, V2_DECISION_VERSION } = require('../services/call-routing-gates');
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('upsertRouteDecision on PostgreSQL', () => {
@@ -125,5 +125,78 @@ jest.setTimeout(30000);
     await upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' });
     await upsertRouteDecision(db, { ...decision(true, 'auto_route'), recording_sid: 'RE2' }, { callLogId: callId, processingToken: 'tok-new' });
     expect(await rows()).toHaveLength(2);
+  });
+
+  // codex #5371 r9 P1: a verdict and a refresh serialize on the route_decisions
+  // row lock, whichever order they arrive in.
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const scope = () => ({ call_log_id: callId, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: 'RE1' });
+
+  test('a verdict holding the row lock BLOCKS a concurrent refresh, and the refresh then finds the feedback and leaves the reviewed row alone', async () => {
+    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let locked;
+    const lockedP = new Promise((r) => { locked = r; });
+    const feedback = withLockedRouteDecisions(db, { callLogId: callId, mode: 'enforce' }, async (trx, decisionRows) => {
+      locked();
+      await gate; // the reviewer is mid-write while the reprocess arrives
+      await trx('route_feedback').insert({ call_log_id: callId, route_decision_id: decisionRows[0].id, verdict: 'accept' });
+    });
+    await lockedP;
+    let refreshed = false;
+    const refresh = upsertRouteDecision(db, decision(true, 'auto_route'), { callLogId: callId, processingToken: 'tok-new' }).then((n) => { refreshed = true; return n; });
+    await sleep(400);
+    expect(refreshed).toBe(false); // serialized behind the verdict's row lock
+    release();
+    await Promise.all([feedback, refresh]);
+    const [row] = await rows();
+    // the row the reviewer judged is exactly as judged
+    expect(row).toMatchObject({ validator_recommendation: 'needs_review', final_action_taken: 'triage_review' });
+    const [fb] = await db('route_feedback').where({ call_log_id: callId });
+    expect(fb.route_decision_id).toBe(row.id);
+  });
+
+  test('a refresh holding the row lock BLOCKS a concurrent verdict, which then attaches to the REFRESHED row it reads', async () => {
+    await upsertRouteDecision(db, decision(false, 'triage_review'), { callLogId: callId, processingToken: 'tok-new' });
+    let release;
+    const gate = new Promise((r) => { release = r; });
+    let locked;
+    const lockedP = new Promise((r) => { locked = r; });
+    const refresh = db.transaction(async (trx) => {
+      const n = await updateUnreviewedRouteDecisions(trx, scope(), { validator_recommendation: 'auto_create_appointment', final_action_taken: 'auto_route' });
+      locked();
+      await gate;
+      return n;
+    });
+    await lockedP;
+    let seen = null;
+    const feedback = withLockedRouteDecisions(db, { callLogId: callId, mode: 'enforce' }, async (trx, decisionRows) => {
+      seen = decisionRows[0];
+      await trx('route_feedback').insert({ call_log_id: callId, route_decision_id: decisionRows[0].id, verdict: 'deny' });
+    });
+    await sleep(400);
+    expect(seen).toBeNull(); // the verdict has not even READ the decision yet
+    release();
+    expect(await refresh).toBe(1);
+    await feedback;
+    // it read the post-refresh state, so the verdict is stored against what is on the row
+    expect(seen).toMatchObject({ final_action_taken: 'auto_route', validator_recommendation: 'auto_create_appointment' });
+    const [row] = await rows();
+    expect(row.final_action_taken).toBe('auto_route');
+    const [fb] = await db('route_feedback').where({ call_log_id: callId });
+    expect(fb.route_decision_id).toBe(row.id);
+  });
+
+  test('the unfenced path also refreshes under the row lock (and still skips a reviewed row)', async () => {
+    await upsertRouteDecision(db, decision(false, 'triage_review'));
+    const [reviewed] = await rows();
+    await db('route_feedback').insert({ call_log_id: callId, route_decision_id: reviewed.id, verdict: 'accept' });
+    await upsertRouteDecision(db, decision(true, 'auto_route'));
+    expect((await rows())[0].final_action_taken).toBe('triage_review');
+  });
+
+  test('updateUnreviewedRouteDecisions updates nothing when the scope matches no row', async () => {
+    expect(await updateUnreviewedRouteDecisions(db, { call_log_id: randomUUID() }, { final_action_taken: 'x' })).toBe(0);
   });
 });
