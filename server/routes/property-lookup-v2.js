@@ -19,7 +19,7 @@ const MODELS = require('../config/models');
 const { dispatchWithFallback } = require('../services/llm/call');
 const { auditAddressHouseNumber, hasCountyEvidence, canonicalLookupAddress, lookupStoriesEvidenceFromAI, lookupPropertyFromAITrio, condoUnitFolioEnabled, addressMayNameUnit, buildPropertyDataQuality, detectUnassessedVacantParcel, detectVacantRollBareLandImagery, detectMultiSitusMasterParcel, detectStaleImageryTurfConflict, COUNTY_LOT_SQFT_MAX } = require('../services/property-lookup/ai-property-lookup');
 const { lookupFloodZoneByPoint } = require('../services/property-lookup/fema-nfhl');
-const { isInServiceAreaBox } = require('../services/service-area');
+const { isInServiceAreaBox, zipFromAddressText } = require('../services/service-area');
 const { lookupPoolPermitsByParcel } = require('../services/property-lookup/county-permits');
 const { lookupSubdivisionMedianLivingSqft, SUBDIVISION_MEDIAN_MIN_SAMPLES } = require('../services/property-lookup/county-parcel-gis');
 const { outerRing, simplifyRing } = require('../services/property-lookup/parcel-gis');
@@ -1111,7 +1111,13 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     // changes the in-area verdict.
     satellite: buildSatelliteUrlSet(lat, lng, {
       county: record?._parcel?.county || record?.county || null,
-      zip: record?.zipCode || (String(address || '').match(/\b(\d{5})(?:-\d{4})?\s*$/) || [])[1] || null,
+      // AI-only records carry zipCode '' — fall back to the formatted
+      // address, the cache row's normalized address, then the typed one.
+      zip: record?.zipCode
+        || zipFromAddressText(record?.formattedAddress)
+        || zipFromAddressText(row?.normalized_address)
+        || zipFromAddressText(address)
+        || null,
     }),
     aiAnalysis,
     enriched,

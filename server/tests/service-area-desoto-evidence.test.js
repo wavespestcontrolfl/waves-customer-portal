@@ -6,7 +6,7 @@
  */
 const fs = require('fs');
 const {
-  isDesotoLocality, isDesotoZip, isInServiceAreaBox,
+  isDesotoLocality, isDesotoZip, isInServiceAreaBox, zipFromAddressText,
 } = require('../services/service-area');
 
 describe('DeSoto locality list', () => {
@@ -29,6 +29,22 @@ describe('DeSoto locality list', () => {
   });
 });
 
+describe('zipFromAddressText (Codex r5 P2)', () => {
+  test.each([
+    ['100 Example St, Sarasota, FL 34240, USA', '34240'],
+    ['100 Example St, Sarasota FL 34240-1234', '34240'],
+    ['100 Example St, Sarasota, Florida 34240', '34240'],
+    ['100 Example St, Sarasota 34240', '34240'],
+    ['12345 Example Rd, Port Charlotte, FL 33953, United States', '33953'],
+  ])('%s -> %s', (text, zip) => {
+    expect(zipFromAddressText(text)).toBe(zip);
+  });
+
+  test.each(['12345 Example Rd, Port Charlotte, FL', '', null])('no ZIP in %s', (text) => {
+    expect(zipFromAddressText(text)).toBeNull();
+  });
+});
+
 describe('property-lookup cache hit passes area evidence', () => {
   const source = fs.readFileSync(require.resolve('../routes/property-lookup-v2'), 'utf8');
 
@@ -40,6 +56,8 @@ describe('property-lookup cache hit passes area evidence', () => {
   test('the cache-hit result passes the stored county and ZIP', () => {
     expect(source).toMatch(/satellite: buildSatelliteUrlSet\(lat, lng, \{\s*county: record\?\._parcel\?\.county/);
     expect(source).not.toMatch(/satellite: buildSatelliteUrlSet\(lat, lng\)/);
+    expect(source).toContain('zipFromAddressText(record?.formattedAddress)');
+    expect(source).toContain('zipFromAddressText(row?.normalized_address)');
   });
 
   test('a served county in the rectangle is in-area only when the evidence is passed', () => {

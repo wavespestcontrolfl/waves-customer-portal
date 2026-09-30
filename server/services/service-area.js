@@ -76,6 +76,18 @@ function isDesotoZip(zip) {
   return DESOTO_ZIPS.has(String(zip || '').trim().slice(0, 5));
 }
 
+// Pull a 5-digit ZIP out of free address text ("..., FL 34240, USA",
+// "... Sarasota FL 34240-1234", "... 34240"). The ZIP after the state wins;
+// otherwise a trailing ZIP, allowing a country suffix. A leading 5-digit
+// house number never counts. Null when none is found.
+function zipFromAddressText(text) {
+  const s = String(text || '');
+  const afterState = s.match(/\b(?:FL|Florida)\.?,?\s+(\d{5})(?:-\d{4})?\b/i);
+  if (afterState) return afterState[1];
+  const trailing = s.match(/[\s,](\d{5})(?:-\d{4})?\s*(?:,\s*(?:USA|US|United States))?\s*$/i);
+  return trailing ? trailing[1] : null;
+}
+
 function isInDesotoExclusion(lat, lng) {
   return (
     lat >= DESOTO_EXCLUSION.latMin &&
@@ -130,4 +142,5 @@ function isInServiceAreaBox(lat, lng, evidence = {}) {
 module.exports = {
   SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, DESOTO_LOCALITIES, DESOTO_ZIPS,
   isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion, isDesotoLocality, isDesotoZip,
+  zipFromAddressText,
 };
