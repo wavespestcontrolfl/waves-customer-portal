@@ -1200,11 +1200,25 @@ function heldTouchFloor(now = new Date()) {
   return anchorTo10amNY(now, 1, 0);
 }
 
+// How long the FINAL step may keep being held past its own scheduled day.
+const FINAL_STEP_HOLD_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+
 /**
  * Hold a claimed touch, undelivered and not terminal, for the next NY
  * calendar day: the retime the collections-policy and ledger-outage returns
  * in fireTouch owe. Leaving the row due instead lets runPending's stale grace
  * pass the step by at the next daily tick — a silently missed reminder.
+ *
+ * BOUNDED (owner ruling, audit P1): a hold that renews every day would pin a
+ * sequence on one step forever under a persistent denial and later send very
+ * old copy. A held step therefore retries daily only while it is still the
+ * current stage: the hold applies only when the retry day is BEFORE the next
+ * step's scheduled date (same anchor and cadence fireTouch advances along).
+ * Otherwise nothing is written and the row stays due as before, so the stale
+ * skip moves it to the next step, whose copy supersedes this one. The FINAL
+ * step has no next step, so its hold is capped at 7 days after its own
+ * scheduled date; past that the row is left as it was.
+ *
  * Guarded like the stale skip: it lands only while this worker still holds the
  * claim (fireStep's stamp) on the same active step, so an admin edit, pause or
  * a manual send-now that moved the sequence since is left alone. Best-effort:
@@ -1212,9 +1226,19 @@ function heldTouchFloor(now = new Date()) {
  * out of the touch. Returns whether the retime landed.
  */
 async function holdTouchUntilNextDay(row, claimStamp, why) {
+  const floor = heldTouchFloor();
+  const anchorAt = sequenceAnchor(row);
+  const nextStepAt = computeNextTouchAt(anchorAt, row.step_index + 1);
+  const ownStepAt = computeNextTouchAt(anchorAt, row.step_index);
+  const withinWindow = nextStepAt
+    ? floor.getTime() < nextStepAt.getTime()
+    : !!ownStepAt && floor.getTime() <= ownStepAt.getTime() + FINAL_STEP_HOLD_MAX_MS;
+  if (!withinWindow) {
+    logger.info(`[invoice-followups] sequence ${row.id} step ${row.step_index} not held (${why}) — ${nextStepAt ? "the next step's day arrives first" : 'past the final step\'s 7-day hold window'}; left to the stale skip`);
+    return false;
+  }
   const guard = { id: row.id, status: 'active', step_index: row.step_index };
   if (claimStamp) guard.touch_claimed_at = claimStamp;
-  const floor = heldTouchFloor();
   try {
     const updated = await db('invoice_followup_sequences').where(guard)
       .update({ updated_at: db.fn.now(), next_touch_at: floor });
