@@ -47,6 +47,35 @@ const DESOTO_EXCLUSION = Object.freeze({
   lngMax: -81.55,
 });
 
+// DeSoto County localities and ZIPs (owner ruling 2026-09-30: not served).
+// The one list every text-evidence check reads, so a caller naming a DeSoto
+// place without a ZIP or county still fails closed. Keys are normalized by
+// normalizeDesotoLocality (lower-case, "ft"/"ft." -> "fort", single spaces).
+const DESOTO_LOCALITIES = Object.freeze(new Set([
+  'arcadia', 'southeast arcadia', 'se arcadia', 'nocatee', 'fort ogden',
+  'lake suzy', 'brownville', 'pine level', 'hull', 'fort winder', 'owens',
+  'joshua', 'liverpool', 'sunnybreeze', 'desoto', 'de soto', 'desoto county',
+  'de soto county',
+]));
+const DESOTO_ZIPS = Object.freeze(new Set(['34265', '34266', '34267', '34268', '34269']));
+
+function normalizeDesotoLocality(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[.,]/g, ' ')
+    .replace(/\bft\b/g, 'fort')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isDesotoLocality(city) {
+  return DESOTO_LOCALITIES.has(normalizeDesotoLocality(city));
+}
+
+function isDesotoZip(zip) {
+  return DESOTO_ZIPS.has(String(zip || '').trim().slice(0, 5));
+}
+
 function isInDesotoExclusion(lat, lng) {
   return (
     lat >= DESOTO_EXCLUSION.latMin &&
@@ -98,4 +127,7 @@ function isInServiceAreaBox(lat, lng, evidence = {}) {
   return !!zipToCity(zip);
 }
 
-module.exports = { SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion };
+module.exports = {
+  SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, DESOTO_LOCALITIES, DESOTO_ZIPS,
+  isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion, isDesotoLocality, isDesotoZip,
+};

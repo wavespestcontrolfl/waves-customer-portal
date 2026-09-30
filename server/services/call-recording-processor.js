@@ -31,7 +31,7 @@ const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
-const { isInDesotoExclusion } = require('./service-area');
+const { isInDesotoExclusion, isDesotoLocality, isDesotoZip } = require('./service-area');
 const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
@@ -1291,8 +1291,6 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 //      time without repeating the address), the booking uses the on-file
 //      address, so its city/ZIP — and stored coordinates that sit in the
 //      DeSoto rectangle with no served ZIP — are judged the same way.
-const DESOTO_LOCALITY_CITIES = new Set(['arcadia', 'nocatee', 'fort ogden']);
-const DESOTO_ZIPS = new Set(['34265', '34266', '34267', '34268', '34269']);
 function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
   const av = addressValidation || null;
   const svc = v2Extraction?.property?.service_address || null;
@@ -1316,8 +1314,8 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   }
   if (av && av.inServiceArea === true) return null;
   const countyKey = normalizeCounty(statedCounty);
-  if (countyKey === 'desoto' || cities.some((c) => DESOTO_LOCALITY_CITIES.has(c))
-    || zips.some((z) => DESOTO_ZIPS.has(z)) || coordsInDesoto) {
+  if (countyKey === 'desoto' || cities.some(isDesotoLocality)
+    || zips.some(isDesotoZip) || coordsInDesoto) {
     return { reason: 'desoto_locality', county: 'DeSoto' };
   }
   const servedHillsboroughTown = cities.some((c) => SOUTH_HILLSBOROUGH_CITIES.includes(c));

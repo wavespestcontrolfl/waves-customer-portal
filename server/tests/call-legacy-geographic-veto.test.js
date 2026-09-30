@@ -28,6 +28,18 @@ describe('legacyGeographicVeto', () => {
     expect(veto).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
   });
 
+  test.each(['Lake Suzy', 'Ft. Ogden', 'FT OGDEN', 'Brownville', 'Southeast Arcadia', 'Pine Level'])(
+    'V2 disabled: a DeSoto locality stated with no ZIP or county (%s) is vetoed',
+    (city) => {
+      const veto = legacyGeographicVeto({
+        addressValidation: null,
+        v2Extraction: null,
+        extracted: { address_line1: '100 Example St', city, state: 'FL' },
+      });
+      expect(veto).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
+    },
+  );
+
   test('DeSoto ZIP alone (city missing) is vetoed', () => {
     expect(legacyGeographicVeto({ extracted: { zip: '34266-1234' } })).not.toBeNull();
   });

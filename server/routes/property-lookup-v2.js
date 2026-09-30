@@ -1106,7 +1106,13 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
     propertyRecord: record,
     rentcast: record,
     avm: null,
-    satellite: buildSatelliteUrlSet(lat, lng),
+    // A cache hit judges the rectangle overlap on the same county/ZIP evidence
+    // the fresh path passes (geo.county / geo.zip), so cache state never
+    // changes the in-area verdict.
+    satellite: buildSatelliteUrlSet(lat, lng, {
+      county: record?._parcel?.county || record?.county || null,
+      zip: record?.zipCode || (String(address || '').match(/\b(\d{5})(?:-\d{4})?\s*$/) || [])[1] || null,
+    }),
     aiAnalysis,
     enriched,
     errors: [],
@@ -1122,7 +1128,7 @@ async function buildResultFromCachedLookup(address, row, verifiedOverrides, t0, 
 
 // Client-facing satellite URL set (no vision base64s — cache hits skip the
 // vision pipeline entirely; the stored aiAnalysis already covers it).
-function buildSatelliteUrlSet(lat, lng) {
+function buildSatelliteUrlSet(lat, lng, areaEvidence = {}) {
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
   const mapsKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY;
   if (!mapsKey) return null;
@@ -1135,7 +1141,7 @@ function buildSatelliteUrlSet(lat, lng) {
     superCloseUrl: urlAtZoom(20),
     closeUrl: urlAtZoom(19),
     wideUrl: urlAtZoom(18),
-    inServiceArea: isInServiceAreaBox(lat, lng),
+    inServiceArea: isInServiceAreaBox(lat, lng, areaEvidence),
   };
 }
 
