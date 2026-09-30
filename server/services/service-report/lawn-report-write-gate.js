@@ -62,6 +62,10 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
 
     const frozen = {
       smsSummary: reportV2.smsSummary || null,
+      // The watering banner (GATE_LAWN_WATERING_RULE), frozen beside smsSummary
+      // so a later read shows what the customer was first told. Key omitted
+      // when there is no banner (gate off = frozen object unchanged).
+      ...(reportV2.banner ? { banner: reportV2.banner } : {}),
       todaysResult: fix.todaysResult || null,
       statusHeadline: reportV2.snapshot?.statusHeadline || null,
       generatedAt: new Date().toISOString(),

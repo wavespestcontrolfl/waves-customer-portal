@@ -437,6 +437,45 @@ function renderWeekPlanAfterTreatment(plan, { restriction = null } = {}) {
   };
 }
 
+// The literal token renderWeekPlanNotBefore leaves for the caller to fill
+// with the hold's end time (the plan step runs before the visit's products
+// are known; the caller owns the clock). It must never reach a customer.
+const HOLD_UNTIL_TOKEN = '{holdUntil}';
+const NOT_BEFORE_SENTENCE = `Not before ${HOLD_UNTIL_TOKEN}: if your permitted watering day comes first, use your next permitted day after it; if there isn't one this week, skip that run.`;
+
+/**
+ * The report card's plan while a product watering HOLD is in force: the same
+ * plan, with one sentence saying the run may not start before the hold ends.
+ * It only ever moves a run later inside the customer's own permitted days or
+ * drops it, so it can never create an illegal watering. A report-time overlay,
+ * like the credit path: the stored Monday snapshot and its decisionHash are
+ * never touched. Null for hold / unavailable plans (no run to shift).
+ *
+ * credit: the plan as reduced by a credited watering-in. With no runs left
+ * there is nothing to shift, so the card just orders the watering-in after
+ * the hold.
+ *
+ * The detail carries a literal {holdUntil} token — the caller replaces it
+ * with the hold's end time.
+ */
+function renderWeekPlanNotBefore(plan, { restriction = null, credit = false, runMinutes = null } = {}) {
+  if (!plan || plan.action !== 'run') return null;
+  if (credit) {
+    const reduced = renderWeekPlanAfterTreatment(plan, { restriction });
+    if (!reduced) return null;
+    if (Math.max(0, Number(plan.events || 0) - 1) === 0) {
+      return {
+        title: reduced.title,
+        detail: 'After the hold ends, water in today\'s application as the note above says — that is this week\'s run. No further turf runs this week.',
+      };
+    }
+    return { title: reduced.title, detail: `${reduced.detail} ${NOT_BEFORE_SENTENCE}` };
+  }
+  const card = renderWeekPlanReport(plan, { runMinutes, restriction });
+  if (!card) return null;
+  return { title: card.title, detail: `${card.detail} ${NOT_BEFORE_SENTENCE}` };
+}
+
 /**
  * One customer-week decision for app, email and reports. The Monday sweep
  * publishes under the existing property-preferences lock after validating
@@ -916,6 +955,8 @@ module.exports = {
   renderWeekPlanEmail,
   renderWeekPlanReport,
   renderWeekPlanAfterTreatment,
+  renderWeekPlanNotBefore,
+  HOLD_UNTIL_TOKEN,
   visitInPlanWeek,
   renewWeekPlanClaim,
   renewWeekPlanClaimWithRetry,

@@ -748,3 +748,175 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
     expect(withSnap.snapshot.rootCause).not.toEqual(noSnap.snapshot.rootCause);
   });
 });
+
+// ── GATE_LAWN_WATERING_RULE (lawn report rebuild P2) ─────────────────────────
+// Additive: nothing above changes. A rule-driven visit records
+// evidenceSource 'product_instruction' and rides the EXISTING verdict table
+// (no new verdict, no new flag); a mixed visit resolves to hold.
+describe('watering instruction drives the aftercare through the existing verdict table', () => {
+  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const { findBannedCustomerCopy: banned } = require('../services/service-report/activity-indicators');
+  const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
+
+  const COMPLETED = '2026-09-30T18:40:00Z'; // 2:40 PM ET
+  const CELSIUS = [{ product: { name: 'Celsius WG', category: 'herbicide', irrigation_required: false }, targets: ['weeds'] }];
+  const HOLD_RULE = { mode: 'hold', hold_hours: 24, source: 'label' };
+  const WATER_IN_RULE = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'default' };
+  const RUN_PLAN = {
+    title: 'This week: one full cycle per turf zone',
+    detail: 'On your permitted watering day, about ½" of water per run.',
+    action: 'run',
+    visitInPlanWeek: true,
+    prescribesRun: true,
+    afterTreatment: { title: 'This week: covered by today’s treatment watering-in', detail: 'No further turf runs this week.' },
+    afterHold: { title: 'This week: one full cycle per turf zone', detail: 'On your permitted watering day, about ½" of water per run. Not before Thu 3 PM: if your permitted watering day comes first, use your next permitted day after it; if there isn’t one this week, skip that run.' },
+  };
+  // A visit with no drought or sprinkler-coverage insight, so the only watering
+  // instruction on the report is the product one.
+  const clean = (weekPlan = RUN_PLAN) => baseAssessment({
+    droughtStress: 'none',
+    observations: 'Thick, even turf with good color.',
+    aiSummary: 'Lawn is in good shape with strong density and color.',
+    scores: { turfDensity: 88, weedSuppression: 92, colorHealth: 86, stressDamage: 90, fungusControl: 95, overallScore: 89, season: 'peak' },
+    recommendations: {},
+    waterContext: { ...baseAssessment().waterContext, weekPlan },
+  });
+  const build = (rules, { runtime = null, assessment = clean(), applications = CELSIUS } = {}) => {
+    const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED, runtime, hasWeekPlan: true });
+    return { instruction, report: buildLawnReportV2({ lawnAssessment: assessment, applications, wateringInstruction: instruction }) };
+  };
+  // The PDF prints these, in this order, through a de-duplicating pushRec
+  // (client/src/pages/ServiceReportDocument.jsx).
+  const pdfRecommendations = (v2) => {
+    const list = [];
+    const push = (t) => { const x = String(t || '').trim(); if (x && !list.includes(x)) list.push(x); };
+    push(v2.aftercare?.watering);
+    push(v2.snapshot?.customerAction);
+    push(v2.followUp?.customerAction);
+    (v2.insights || []).forEach((i) => push(i?.customerAction));
+    return list;
+  };
+
+  test('Celsius end to end: hold verdict, banner state hold, product_instruction evidence', () => {
+    const { instruction, report } = build([HOLD_RULE]);
+    expect(instruction.state).toBe('hold');
+    expect(report.aftercare).toMatchObject({
+      evidenceSource: 'product_instruction', wateringHold: true, creditableWaterIn: false, needsReview: false, neutral: false, ruleSource: 'label',
+    });
+    expect(report.aftercare.watering).toBe(`${instruction.lines[0]} ${instruction.lines[1]}`);
+    expect(report.aftercare.watering).not.toMatch(/No special watering/);
+    expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan)).toMatchObject({ verdict: 'hold', restricts: true, credited: false });
+    // The hero task IS the banner's first line, verbatim (aftercare.holdTask).
+    expect(report.aftercare.holdTask).toBe(instruction.lines[0]);
+    expect(report.snapshot.customerAction).toBe(instruction.lines[0]);
+    expect(report.snapshot.noActionNeeded).toBe(false);
+    // The water card and every insight action agree with the banner.
+    expect(report.water.explanation).toBe(instruction.lines[0]);
+    for (const insight of report.insights) {
+      if (insight.customerAction) expect(insight.customerAction).toContain(instruction.lines[0]);
+    }
+    // The hold plan callout is the not-before overlay, never the raw plan.
+    expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterHold);
+  });
+
+  test('exactly one watering line reaches the PDF recommendations list', () => {
+    for (const rules of [[HOLD_RULE], [HOLD_RULE, WATER_IN_RULE], [WATER_IN_RULE]]) {
+      const { instruction, report } = build(rules);
+      const applied = applyLawnReportReconciliation({ reportV2: report }, null);
+      const list = pdfRecommendations(applied.reportV2);
+      const sentences = list.flatMap((entry) => entry.split(/(?<=[.!?])\s+/)).filter((sentence) => /watering|water in/i.test(sentence));
+      // Entries may restate the banner's first line, never a different watering instruction.
+      expect([...new Set(sentences)]).toEqual([instruction.lines[0]]);
+      expect(list.join(' ')).not.toMatch(/No special watering|Confirm the (product )?(watering )?directions/i);
+    }
+  });
+
+  test('mixed hold + water-in resolves to hold; the water-in is banner text only', () => {
+    const { instruction, report } = build([HOLD_RULE, WATER_IN_RULE]);
+    expect(instruction.state).toBe('hold_then_water_in');
+    expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: true, creditableWaterIn: false });
+    expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan).verdict).toBe('hold');
+    expect(report.aftercare.holdTask).toBe('Skip your turf watering until Thu 3 PM, then water in.');
+    expect(report.aftercare.watering).toContain('After that, run');
+    expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterHold);
+  });
+
+  test('water-in resolves to credit, reduces the plan, and sets creditableWaterIn', () => {
+    const { report } = build([WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
+    expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: false, creditableWaterIn: true, waterInRequired: true, needsReview: false });
+    expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan)).toMatchObject({ verdict: 'credit', credited: true, restricts: false });
+    expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterTreatment);
+  });
+
+  test('without an afterHold overlay a hold keeps today\'s plan object', () => {
+    const { afterHold, ...planWithoutOverlay } = RUN_PLAN;
+    const { report } = build([HOLD_RULE], { assessment: clean(planWithoutOverlay) });
+    expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(report.water.weekPlan);
+  });
+
+  test('state none keeps the neutral aftercare (no claim, no restriction, no credit)', () => {
+    const { instruction, report } = build([{ mode: 'none', source: 'label' }]);
+    expect(instruction.state).toBe('none');
+    expect(report.aftercare.neutral).toBe(true);
+    expect(report.aftercare.ruleSource).toBe('label');
+    expect(report.aftercare.evidenceSource).toBeUndefined();
+    expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan)).toMatchObject({ verdict: 'none', restricts: false, credited: false });
+  });
+
+  test('state null (unresolved product) leaves the fail-closed aftercare exactly as it was', () => {
+    const assessment = clean();
+    const legacy = buildLawnReportV2({ lawnAssessment: assessment, applications: [{ product: { irrigation_required: true } }] });
+    const { instruction, report } = build([null], { assessment, applications: [{ product: { irrigation_required: true } }] });
+    expect(instruction.state).toBeNull();
+    expect(report.aftercare.needsReview).toBe(true);
+    expect(JSON.parse(JSON.stringify(report))).toEqual(JSON.parse(JSON.stringify(legacy)));
+  });
+
+  test('a null or absent instruction leaves the whole payload unchanged (gate off)', () => {
+    const args = { lawnAssessment: clean(), applications: CELSIUS };
+    const before = JSON.parse(JSON.stringify(buildLawnReportV2(args)));
+    expect(JSON.parse(JSON.stringify(buildLawnReportV2({ ...args, wateringInstruction: null })))).toEqual(before);
+    const off = buildWateringInstruction({ rules: [null], completedAt: COMPLETED });
+    expect(JSON.parse(JSON.stringify(buildLawnReportV2({ ...args, wateringInstruction: off })))).toEqual(before);
+    expect(before.aftercare.neutral).toBe(true);
+    expect(before.banner).toBeUndefined();
+  });
+
+  test('every customer-facing string the instruction adds passes the copy guards', () => {
+    for (const rules of [[HOLD_RULE], [WATER_IN_RULE], [HOLD_RULE, WATER_IN_RULE]]) {
+      const { report } = build(rules);
+      const texts = [report.aftercare.watering, report.aftercare.holdTask, report.snapshot.customerAction, report.water.explanation, report.smsSummary].filter(Boolean);
+      for (const text of texts) {
+        expect(banned(text)).toEqual([]);
+        expect(reentrySafetyClaimFinding(text)).toBeFalsy();
+      }
+    }
+  });
+
+  test('the banner payload is built once from the instruction and expires with it', () => {
+    const { buildWateringBanner, applyAfterHoldOverlay } = require('../services/service-report/report-data');
+    const hold = buildWateringInstruction({ rules: [HOLD_RULE], completedAt: COMPLETED, hasWeekPlan: true });
+    expect(buildWateringBanner(hold)).toEqual({
+      state: 'hold', lines: hold.lines, holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: null, expiresAt: '2026-10-01T19:00:00.000Z', ruleSource: 'label',
+    });
+    const mixed = buildWateringInstruction({ rules: [HOLD_RULE, WATER_IN_RULE], completedAt: COMPLETED });
+    expect(buildWateringBanner(mixed)).toMatchObject({ state: 'hold_then_water_in', expiresAt: '2026-10-02T19:00:00.000Z' });
+    expect(buildWateringBanner(buildWateringInstruction({ rules: [{ mode: 'none', source: 'label' }], completedAt: COMPLETED })))
+      .toMatchObject({ state: 'none', expiresAt: null });
+    expect(buildWateringBanner(buildWateringInstruction({ rules: [null], completedAt: COMPLETED }))).toBeNull();
+
+    // The {holdUntil} token is replaced for a hold and never survives otherwise.
+    const tokenPlan = { ...RUN_PLAN, afterHold: { title: RUN_PLAN.afterHold.title, detail: 'Not before {holdUntil}: skip that run.' } };
+    const filled = applyAfterHoldOverlay({ weekPlan: tokenPlan }, hold);
+    expect(filled.weekPlan.afterHold.detail).toBe('Not before Thu 3 PM: skip that run.');
+    expect(tokenPlan.afterHold.detail).toContain('{holdUntil}'); // input untouched
+    for (const instruction of [buildWateringInstruction({ rules: [WATER_IN_RULE], completedAt: COMPLETED }), null]) {
+      const dropped = applyAfterHoldOverlay({ weekPlan: tokenPlan }, instruction);
+      expect(dropped.weekPlan).not.toHaveProperty('afterHold');
+      expect(JSON.stringify(dropped)).not.toContain('{holdUntil}');
+    }
+    // A plan without an overlay is returned as is.
+    const plain = { weekPlan: { title: 'x' } };
+    expect(applyAfterHoldOverlay(plain, hold)).toBe(plain);
+  });
+});

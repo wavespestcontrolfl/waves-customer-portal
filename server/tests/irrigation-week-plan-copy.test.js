@@ -614,3 +614,73 @@ describe('weekPlanDeliveryState — the durable record decides, at customer/week
     expect(await weekPlanDeliveryState({})).toEqual({ state: null, decisionHash: null });
   });
 });
+
+// GATE_LAWN_WATERING_RULE: while a product hold is in force the report shows the
+// same plan with a "not before" sentence. A report-time overlay only.
+describe('renderWeekPlanNotBefore', () => {
+  const { renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN } = require('../services/irrigation-week-plan');
+  const SENTENCE = 'Not before {holdUntil}: if your permitted watering day comes first, use your next permitted day after it; if there isn\'t one this week, skip that run.';
+  const filled = (card, label = 'Thu 3 PM') => ({ ...card, detail: card.detail.split(HOLD_UNTIL_TOKEN).join(label) });
+
+  test('run plan: the report card plus the not-before sentence, same title', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(plan.action).toBe('run');
+    const base = renderWeekPlanReport(plan, { restriction: ONE_DAY });
+    const card = renderWeekPlanNotBefore(plan, { restriction: ONE_DAY });
+    expect(card).toEqual({ title: base.title, detail: `${base.detail} ${SENTENCE}` });
+    expect(filled(card).detail).toContain('Not before Thu 3 PM: if your permitted watering day comes first, use your next permitted day after it; if there isn\'t one this week, skip that run.');
+    expect(filled(card).detail).not.toContain('{holdUntil}');
+  });
+
+  test('runMinutes reach the base card the same way the plain report card gets them', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    const base = renderWeekPlanReport(plan, { runMinutes: 20, restriction: ONE_DAY });
+    expect(renderWeekPlanNotBefore(plan, { runMinutes: 20, restriction: ONE_DAY }).detail).toBe(`${base.detail} ${SENTENCE}`);
+  });
+
+  test('conditional-on-forecast plan keeps its rain rule', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 1.25, forecastRainInches: 1.4, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
+    expect(plan.conditionalOnForecast).toBe(true);
+    const card = renderWeekPlanNotBefore(plan, { restriction: { ...ONE_DAY, maxDaysPerWeek: 2 } });
+    expect(card.title).toBe('This week: check the rain before you water');
+    expect(card.detail).toContain('only if less than ½" has fallen');
+    expect(card.detail.endsWith(SENTENCE)).toBe(true);
+  });
+
+  test('hold and unavailable plans have no run to shift: null', () => {
+    const hold = buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    expect(hold.action).toBe('hold');
+    expect(renderWeekPlanNotBefore(hold, { restriction: ONE_DAY })).toBeNull();
+    expect(renderWeekPlanNotBefore({ action: 'unavailable' })).toBeNull();
+    expect(renderWeekPlanNotBefore(null)).toBeNull();
+  });
+
+  test('credit variant: nothing left to shift orders the watering-in after the hold; leftover runs get the sentence', () => {
+    const one = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    const covered = renderWeekPlanNotBefore(one, { restriction: ONE_DAY, credit: true });
+    expect(covered.title).toBe('This week: covered by today\'s treatment watering-in');
+    expect(covered.detail).toBe('After the hold ends, water in today\'s application as the note above says — that is this week\'s run. No further turf runs this week.');
+    expect(covered.detail).not.toContain(HOLD_UNTIL_TOKEN);
+    const two = buildWeekPlan({ targetInchesPerWeek: 1.25, season: 'peak', restriction: { maxDaysPerWeek: 2 }, ...SPRAY });
+    const more = renderWeekPlanNotBefore(two, { restriction: { ...ONE_DAY, maxDaysPerWeek: 2 }, credit: true });
+    expect(more.title).toBe('This week: 1 more run after today\'s watering-in');
+    expect(more.detail.endsWith(SENTENCE)).toBe(true);
+    expect(renderWeekPlanNotBefore(buildWeekPlan({ targetInchesPerWeek: 0.3, season: 'peak', restriction: ONE_DAY, ...SPRAY }), { credit: true })).toBeNull();
+  });
+
+  test('follows the file wording rules and never touches the stored plan or its decision hash', () => {
+    const plan = buildWeekPlan({ targetInchesPerWeek: 0.75, season: 'peak', restriction: ONE_DAY, ...SPRAY });
+    const inputs = { runMinutes: 20 };
+    const hashBefore = _private.decisionHash(plan, inputs, ONE_DAY);
+    const snapshot = JSON.stringify(plan);
+    const card = renderWeekPlanNotBefore(plan, { restriction: ONE_DAY });
+    expect(JSON.stringify(plan)).toBe(snapshot);
+    expect(_private.decisionHash(plan, inputs, ONE_DAY)).toBe(hashBefore);
+    const text = filled(card).detail;
+    expect(text).not.toMatch(/controller|turn .*off/i);
+    expect(text).not.toMatch(/each zone\b/);
+    expect(text).not.toMatch(/ordinance|county|blackout/i);
+    // Only the hold's own time is named; no other weekday appears in the sentence.
+    expect(card.detail.replace('{holdUntil}', '').match(WEEKDAY)).toBeNull();
+  });
+});

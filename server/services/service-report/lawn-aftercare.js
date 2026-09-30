@@ -71,7 +71,7 @@ function resolveLawnAftercare(aftercare, weekPlan) {
   const verdict = aftercareVerdict(aftercare);
   const customerTask = {
     review: LEGACY_NOTE_CONFIRMATION,
-    hold: HOLD_TASK,
+    hold: aftercare?.holdTask || HOLD_TASK,
     credit: recordedInstruction(aftercare),
   }[verdict] || null;
   return {
@@ -133,7 +133,9 @@ function renderedWeekPlan(aftercare, weekPlan) {
   if (!weekPlan?.title) return null;
   const reduced = hasCreditableWaterIn(aftercare, weekPlan) && weekPlan.visitInPlanWeek === true
     && weekPlan.prescribesRun === true && weekPlan.afterTreatment?.title;
-  return reduced ? weekPlan.afterTreatment : weekPlan;
+  if (reduced) return weekPlan.afterTreatment;
+  return resolveLawnAftercare(aftercare, weekPlan).verdict === 'hold' && weekPlan.afterHold?.title
+    ? weekPlan.afterHold : weekPlan;
 }
 
 function normalizeLawnAftercare(aftercare, { recordedWateringNotes = [] } = {}) {

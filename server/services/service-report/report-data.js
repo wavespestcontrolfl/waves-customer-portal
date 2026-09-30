@@ -27,6 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule } = require('./lawn-watering-rule');
+const { buildWateringInstruction } = require('./lawn-watering-instruction');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -56,7 +57,7 @@ const {
 const { etCalendarDayOf, etDateString, parseETDateTime, addETDays } = require('../../utils/datetime-et');
 const featureGates = require('../../config/feature-gates');
 const { buildReserviceReport, reserviceReportCopyGateOn } = require('./reservice-report');
-const { renderWeekPlanReport, renderWeekPlanAfterTreatment, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
+const { renderWeekPlanReport, renderWeekPlanAfterTreatment, renderWeekPlanNotBefore, HOLD_UNTIL_TOKEN, loadCurrentWeekPlan, planBindsToService, visitInPlanWeek, PinnedWeekPlanUnavailable } = require('../irrigation-week-plan');
 const { stampedDivergesSql, stampedLine2Sql } = require('../stamped-address');
 const { applyReportIdentitySnapshot, canonicalProductId } = require('./report-identity-snapshot');
 const { scheduleUnconfirmedAfterMove } = require('../irrigation-schedule-confirmation');
@@ -2541,7 +2542,10 @@ class PinnedAssessmentUnavailable extends Error {
 // the old any-zone pairing must not be reused.
 // p6: lawn water-plan credits now require explicit product-instruction
 // provenance; older PDFs may contain the former inferred 24-hour instruction.
-const LAWN_RENDER_STRATEGY = 'p6-aftercare-guards-20260927';
+// p7: GATE_LAWN_WATERING_RULE — the report can carry a product-instruction
+// aftercare, a top-of-report banner payload and a hold "not before" plan
+// overlay; PDFs rendered before the watering instruction existed must re-key.
+const LAWN_RENDER_STRATEGY = 'p7-watering-instruction-20260929';
 
 async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryEnabled = featureGates.gateEnvValue('GATE_LAWN_PROPERTY_HISTORY') } = {}) {
   const line = service?.service_line || detectServiceLine(service?.service_type);
@@ -2594,6 +2598,9 @@ async function resolveCanonicalLawnRender(service, knex = db, { propertyHistoryE
     weekPlanAvailableAt = snapshot?.availableAt && planBindsToService(snapshot, premise) ? new Date(snapshot.availableAt).toISOString() : null;
     irrigationStamp += `:plan=${weekPlanAvailableAt || 'none'}`;
   }
+  // The watering instruction is a render input once its gate is on (gate off
+  // leaves the signature byte-identical to before).
+  if (featureGates.lawnWateringRuleLive()) irrigationStamp += ':wr=1';
 
   const assessment = await loadLinkedLawnAssessment(service, knex, { failClosed: true, propertyHistoryEnabled });
   const lawnHistory = propertyHistoryEnabled
@@ -3436,7 +3443,14 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
       // must not claim a nonexistent run was covered (codex gh-r16).
       // afterTreatment: the plan reduced by a credited watering-in (the card
       // shows it INSTEAD of the unreduced plan under the credit note).
-      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }) } : null;
+      // afterHold (GATE_LAWN_WATERING_RULE): the same plan with a "not before
+      // {holdUntil}" sentence, used while a product watering hold is in
+      // force. The literal token is filled (or the key dropped) by
+      // applyAfterHoldOverlay once the visit's instruction is known.
+      const afterHold = featureGates.lawnWateringRuleLive()
+        ? renderWeekPlanNotBefore(snapshot.plan, { runMinutes: snapshot.decisionInputs?.runMinutes ?? null, restriction: snapshot.restriction || null })
+        : null;
+      waterContext.weekPlan = rendered ? { ...rendered, visitInPlanWeek: visitInPlanWeek(snapshot, assessment.service_date), prescribesRun: snapshot.plan.action !== 'hold' && (snapshot.plan.events ?? 1) >= 1, afterTreatment: renderWeekPlanAfterTreatment(snapshot.plan, { restriction: snapshot.restriction || null }), ...(afterHold ? { afterHold } : {}) } : null;
     }
   }
 
@@ -3514,6 +3528,70 @@ async function buildLawnAssessmentReportData(service, serviceLine, knex = db, { 
     } : null),
     customerSummary: snapshot?.summary || defaultCustomerSummary,
     trendSummary: defaultCustomerSummary,
+  };
+}
+
+// GATE_LAWN_WATERING_RULE: the visit's one watering instruction, built from
+// the per-product rules FROZEN with the visit (approved_report_product_facts
+// .wateringRule — never the live catalog, never the public applications[]
+// .product), the completion time and the customer's own irrigation entries.
+// Runtime facts come from the same property_preferences row
+// portalIrrigationInches reads, and are withheld after a move
+// (scheduleUnconfirmed: the entries describe the former home).
+async function buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }) {
+  const waterContext = lawnAssessment?.waterContext || {};
+  let runtime = null;
+  if (!waterContext.scheduleUnconfirmed) {
+    const prefs = await knex('property_preferences')
+      .where({ customer_id: service.customer_id })
+      .first()
+      .catch(() => null);
+    if (prefs) {
+      runtime = {
+        runMinutes: prefs.irrigation_run_minutes,
+        wateringDays: prefs.watering_days,
+        headTypes: prefs.irrigation_system_type,
+        explicitInchesPerWeek: numberOrNull(prefs.irrigation_inches_per_week),
+        systemOn: prefs.irrigation_system,
+      };
+    }
+  }
+  const weekPlan = waterContext.weekPlan;
+  return buildWateringInstruction({
+    rules: (Array.isArray(products) ? products : []).map((p) => ({
+      name: p?.product_name || null,
+      rule: p?.approved_report_product_facts?.wateringRule || null,
+    })),
+    completedAt: completionTime,
+    runtime,
+    hasWeekPlan: !!weekPlan?.title && weekPlan.visitInPlanWeek !== false,
+  });
+}
+
+// Fill the {holdUntil} token in the plan's afterHold overlay with the hold's
+// end time, or drop the overlay when this visit has no hold. The token can
+// never survive into the payload. Returns a copy; the input is untouched.
+function applyAfterHoldOverlay(waterContext, instruction) {
+  const plan = waterContext?.weekPlan;
+  if (!plan || !Object.prototype.hasOwnProperty.call(plan, 'afterHold')) return waterContext;
+  const { afterHold, ...rest } = plan;
+  const label = instruction?.holdUntilLabel;
+  const detail = typeof afterHold?.detail === 'string' && label ? afterHold.detail.split(HOLD_UNTIL_TOKEN).join(label) : null;
+  const filled = detail && !detail.includes(HOLD_UNTIL_TOKEN) ? { ...afterHold, detail } : null;
+  return { ...waterContext, weekPlan: filled ? { ...rest, afterHold: filled } : rest };
+}
+
+// The banner payload: one server-built object the client, PDF and (later)
+// the completion text all read. expiresAt is when the instruction lapses.
+function buildWateringBanner(instruction) {
+  if (!instruction || !instruction.state || !instruction.lines.length) return null;
+  return {
+    state: instruction.state,
+    lines: instruction.lines,
+    holdUntil: instruction.holdUntil,
+    waterInBy: instruction.waterInBy,
+    expiresAt: instruction.state === 'none' ? null : (instruction.waterInBy || instruction.holdUntil || null),
+    ruleSource: instruction.ruleSource,
   };
 }
 
@@ -5051,8 +5129,20 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         }
       } catch { /* snapshots table optional — trend simply doesn't render */ }
 
+      // GATE_LAWN_WATERING_RULE. Off = none of this runs and the payload is
+      // byte-identical to before.
+      let wateringInstruction = null;
+      if (featureGates.lawnWateringRuleLive()) {
+        try {
+          wateringInstruction = await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex });
+        } catch { wateringInstruction = null; }
+        // In place, so the lawnAssessment the payload returns never carries
+        // the raw {holdUntil} token either (a null instruction drops it).
+        lawnAssessment.waterContext = applyAfterHoldOverlay(lawnAssessment.waterContext, wateringInstruction);
+      }
       reportV2 = buildLawnReportV2({
         lawnAssessment,
+        wateringInstruction,
         mowingHeight,
         applications,
         actions: Array.isArray(protocol?.actions) ? protocol.actions : [],
@@ -5061,6 +5151,10 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         waterGapHistory,
         mowingTrendFallback,
       });
+      if (reportV2 && wateringInstruction) {
+        const banner = buildWateringBanner(wateringInstruction);
+        if (banner) reportV2.banner = banner;
+      }
       // AI "What we applied today" narrative — same contract as the T&S path
       // (owner 2026-07-21: across all reports).
       if (reportV2?.snapshot?.treatmentSummary) {
@@ -6715,6 +6809,9 @@ module.exports = {
   resolvePestWeekWeather,
   resolvePestWeekWeatherForBuild,
   LAWN_RENDER_STRATEGY,
+  buildReportWateringInstruction,
+  applyAfterHoldOverlay,
+  buildWateringBanner,
   PIN_NO_ASSESSMENT,
   formatApprovedLawnSnapshot,
   formatApprovedLawnRecommendation,

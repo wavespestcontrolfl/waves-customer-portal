@@ -437,7 +437,15 @@ function buildRootCause({ effectiveWaterStatus, coverageWatch, overwatering, mow
 // Aftercare watering/re-entry from the manufacturer LABEL on the applied products.
 // Surfaces a real label watering-in note when present; otherwise a safe default that
 // invents no number. Re-entry text comes from the label when available.
-function buildAftercare(applications) {
+//
+// opts.instruction (GATE_LAWN_WATERING_RULE): the visit's resolved watering
+// instruction (lawn-watering-instruction.js). A hold / water-in / hold-then-
+// water-in state is recorded as product_instruction evidence so the ordinary
+// verdict table resolves it (no new verdict, no new flag): hold sets
+// wateringHold, water_in sets creditableWaterIn, and a mixed visit is a hold.
+// State none keeps the neutral aftercare; state null (or no instruction)
+// leaves the legacy fail-closed reading exactly as it was.
+function buildAftercare(applications, opts = {}) {
   const apps = Array.isArray(applications) ? applications : [];
   const productNotes = [];
   let reentry = null;
@@ -454,6 +462,31 @@ function buildAftercare(applications) {
     const productNote = (p.irrigation_notes || facts.irrigationNotes || '').trim();
     if (productNote && !productNotes.includes(productNote)) productNotes.push(productNote);
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
+  }
+  const instruction = opts && opts.instruction;
+  if (instruction && ['hold', 'water_in', 'hold_then_water_in'].includes(instruction.state)
+    && Array.isArray(instruction.lines) && instruction.lines.length >= 2) {
+    const holds = instruction.state !== 'water_in';
+    return normalizeLawnAftercare({
+      watering: `${instruction.lines[0]} ${instruction.lines[1]}`,
+      reentry,
+      waterInRequired: instruction.state !== 'hold',
+      wateringHold: holds,
+      creditableWaterIn: instruction.state === 'water_in',
+      needsReview: false,
+      neutral: false,
+      evidenceSource: 'product_instruction',
+      ruleSource: instruction.ruleSource || null,
+      // The hero task and the PDF list carry the banner's first line verbatim.
+      ...(holds ? { holdTask: instruction.lines[0] } : {}),
+      holdUntil: instruction.holdUntil || null,
+      waterInBy: instruction.waterInBy || null,
+    });
+  }
+  if (instruction && instruction.state === 'none') {
+    return {
+      watering: NEUTRAL_AFTERCARE, reentry, waterInRequired: false, neutral: true, ruleSource: instruction.ruleSource || null,
+    };
   }
   // Retain the legacy shape until the product-note classifier lands. The
   // normalizer below prevents this requirement boolean from becoming a made-up
@@ -493,9 +526,11 @@ const ISSUE_TOPIC = {
  *   snapshot history, capped at this visit's date
  * @param {object} [input.mowingTrendFallback]  { trend, band } history when THIS visit
  *   has no gauge reading (same shape subset as mowingHeight)
+ * @param {object} [input.wateringInstruction]  buildWateringInstruction(...) result
+ *   (GATE_LAWN_WATERING_RULE); null = the legacy fail-closed aftercare
  * @returns {object|null} { snapshot, diagnosis, insights, water, mowing, trends } | null
  */
-function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null } = {}) {
+function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications = [], actions = [], customerConcern = '', waterSnapshot = null, waterGapHistory = [], mowingTrendFallback = null, wateringInstruction = null } = {}) {
   if (!lawnAssessment) return null;
   const scores = lawnAssessment.scores || {};
   const grassLabel = grassLabelFor(lawnAssessment.turfProfile?.grassType);
@@ -588,7 +623,7 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
 
   // Aftercare is computed early enough for the insight builder to reconcile
   // its damp-area advice with a label-required watering-in (codex P1 r32).
-  const aftercare = buildAftercare(applications);
+  const aftercare = buildAftercare(applications, { instruction: wateringInstruction });
   const aftercareWaterAction = wateringRestrictionAction(aftercare, water ? water.weekPlan : null);
   if (water && aftercareWaterAction) water.explanation = aftercareWaterAction;
   const insights = buildLawnInsightCards({
