@@ -173,6 +173,8 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(generateGroundedDraft).toHaveBeenCalledTimes(1);
     const call = generateGroundedDraft.mock.calls[0][0];
     expect(call.inboundMessage).toBe('Hello what happened this morning');
+    // the sender's number reaches the drafter, so it can inherit earlier thread context from that phone only
+    expect(call.inboundPhone).toBe('+19415551234');
     expect(call.intent.intent).toBe('service_scheduling_window_reply');
     // A live, sendable draft: may reach the scheduler path with no city.
     expect(call.liveOpenTimes).toBe(true);

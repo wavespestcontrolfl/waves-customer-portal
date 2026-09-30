@@ -1406,14 +1406,16 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
 const ASKED_THREAD_WINDOW_MS = 24 * 60 * 60 * 1000;
 // Only messages from the CURRENT inbound phone are inherited: a customer can have several numbers (a spouse, a
 // tenant), and their messages are not this sender's thread. A row with no phone, or no known current phone,
-// is left out (an elliptical follow-up with no thread then asks both kinds: fail closed).
-function recentInboundTexts(context, inboundMessage, inboundPhone) {
+// is left out (an elliptical follow-up with no thread then asks both kinds: fail closed). `unreadable` says the
+// thread could not be read for this sender - no known phone, or recent inbound history exists but none of it is
+// provably theirs - so a short follow-up ("is it okay now?") cannot be tied to a visit.
+function readInboundThread(context, inboundMessage, inboundPhone) {
   const cutoff = Date.now() - ASKED_THREAD_WINDOW_MS;
   const sender = phoneIdentityKey(inboundPhone);
-  const thread = !sender ? [] : (context?.smsHistory || []).slice(0, 10)
-    .filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && !(new Date(m.date) < cutoff) && phoneIdentityKey(m.fromPhone) === sender)
-    .map((m) => m.body);
-  return [String(inboundMessage ?? ''), ...thread];
+  const recent = (context?.smsHistory || []).slice(0, 10)
+    .filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && !(new Date(m.date) < cutoff));
+  const mine = sender ? recent.filter((m) => phoneIdentityKey(m.fromPhone) === sender) : [];
+  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], unreadable: !sender || (recent.length > 0 && !mine.length) };
 }
 
 function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage }) {
@@ -2351,8 +2353,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // The label sentences are English: a text in another language gets none on
   // file too (a paraphrase in that language would slip past the English guard;
   // the guard also holds that language's timing words, sms-label-facts).
-  const askedTexts = recentInboundTexts(context, inboundMessage, inboundPhone);
-  const labelFacts = labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts);
+  const thread = readInboundThread(context, inboundMessage, inboundPhone);
+  const askedTexts = thread.texts;
+  // a short follow-up whose thread could not be read for this sender cannot be tied to the latest visit: none on file
+  const labelFacts = thread.unreadable && labelFactsLib.inboundIsElliptical(askedTexts)
+    ? null : labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole

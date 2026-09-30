@@ -1245,6 +1245,27 @@ describe('r16: a year named on its own is another visit unless it is the visit y
   });
 });
 
+describe('r17: every generateGroundedDraft caller that has a sender passes inboundPhone', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+  const callBlock = (src) => {
+    const i = src.search(/generateGroundedDraft\(\{/);
+    return i < 0 ? '' : src.slice(i, src.indexOf('});', i));
+  };
+  test('the live drafter, the estimate review drafter and the backfill pass the sender phone', () => {
+    expect(callBlock(read('services/sms-shadow-drafter.js').slice(read('services/sms-shadow-drafter.js').indexOf('async function draftShadowReply')))).toMatch(/inboundPhone:\s*fromPhone/);
+    expect(callBlock(read('services/estimate-conversion-agent.js'))).toMatch(/inboundPhone/);
+    expect(read('services/estimate-conversion-agent.js')).toMatch(/generateLlmReviewDraft\(\{[^}]*inboundPhone:\s*from\b/);
+    expect(callBlock(read('services/sms-shadow-backfill.js'))).toMatch(/inboundPhone:\s*inbound\.from_phone/);
+    expect(read('services/sms-shadow-backfill.js').match(/'i\.from_phone'/g)).toHaveLength(2);
+  });
+  test('the frozen-facts replay callers have no thread to inherit (preset facts / fixture context), so they pass none on purpose', () => {
+    expect(callBlock(read('services/sms-sealed-eval.js'))).toMatch(/factsBlock:\s*item\.facts_block/);
+    expect(callBlock(read('services/sms-gratitude-qualification.js'))).toMatch(/GRATITUDE_INTENT/);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
@@ -1787,18 +1808,33 @@ describe('C: the section is for the latest visit only - a text about another vis
       // a self-contained message from this phone is judged on its own, the other number's thread never leaks in
       r = await run('What time are you coming Thursday?', [draft('Sure, Thursday works.')], other);
       expect(r.converged).toBe(true);
-      // another number's other-visit reference does not void this sender's facts; this sender's own does
+      // another number's other-visit reference never applies to this sender, but a thread that shows only OTHER numbers'
+      // messages cannot be read for this sender: a short follow-up then gets none on file (the visit fails closed too)
       const may = { direction: 'inbound', body: 'What about the May treatment?', date: ago(1) };
-      r = await run('Is it okay now?', [draft(RE)], [{ ...may, fromPhone: OTHER }]);
+      const NONE = 'LABEL FACTS (none on file for the last visit):';
+      r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: OTHER }]);
+      expect(r.factsBlock).toContain(NONE);
+      // ...whereas this sender's own earlier message is readable: benign keeps the facts, an other-visit reference voids them
+      const own = { direction: 'inbound', body: 'Can the dogs go out after you sprayed?', date: ago(1), fromPhone: PHONE };
+      r = await run('Is it okay now?', [draft(RE)], [own, { ...may, fromPhone: OTHER }]);
       expect(r.factsBlock).toContain(`- ${RE}`);
       r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: PHONE }]);
-      expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
-      // the same person in another format still matches; a row with no phone, or no known current phone, is left out
+      expect(r.factsBlock).toContain(NONE);
+      // the same person in another format still matches
       r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: '(941) 555-0100' }]);
-      expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
-      r = await run('Is it okay now?', [draft(RE)], [{ ...may, fromPhone: null }]);
+      expect(r.factsBlock).toContain(NONE);
+      // a row with no phone, or no known current phone, cannot be read for this sender: none on file for a short follow-up
+      r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: null }]);
+      expect(r.factsBlock).toContain(NONE);
+      r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: PHONE }], null);
+      expect(r.factsBlock).toContain(NONE);
+      r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [], null);
+      expect(r.factsBlock).toContain(NONE); // no known sender phone: unreadable even with no history
+      // a self-contained message is unaffected by an unreadable thread
+      r = await run('Can the dogs go out now?', [draft(RE)], [{ ...may, fromPhone: OTHER }], null);
       expect(r.factsBlock).toContain(`- ${RE}`);
-      r = await run('Is it okay now?', [draft(RE)], [{ ...may, fromPhone: PHONE }], null);
+      // a sender with no history at all (known phone) has nothing to hide: facts apply
+      r = await run('Is it okay now?', [draft(RE)], []);
       expect(r.factsBlock).toContain(`- ${RE}`);
     });
 
