@@ -343,7 +343,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   } catch (err) { logger.warn(`[holds] hold note failed for ${customerId}: ${err.message}`); }
 
   return {
-    holdId, familyKey, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length,
+    holdId, familyKey, startsOn: today, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length,
     pendingSkips: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })),
     techNotices,
   };
@@ -429,8 +429,10 @@ async function applyHoldSkips(holdResults) {
           if (row && row.status === 'skipped') return 'skipped';
           if (!row || row.status !== visit.status) return 'changed';
           const date = dateOnlyString(row.scheduled_date);
-          // Moved out of the pause in the gap: nothing to skip.
-          if (!date || date < etDateString() || date >= hold.resumeOn) return 'left_pause';
+          // Moved out of the pause in the gap: nothing to skip. The pause
+          // starts on the hold's own start date — a recovery pass a day
+          // later still skips a paused visit whose date has gone by.
+          if (!date || date < (hold.startsOn || etDateString()) || date >= hold.resumeOn) return 'left_pause';
           if (row.track_state === 'complete' || LIVE_TRACK_STATES.includes(row.track_state)) return 'live';
           const covered = await findBillingCoveredVisits(trx, [row]);
           if (covered.has(row.id)) return 'prepaid';
@@ -672,7 +674,7 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
       }
       const done = new Set((record.skipped || []).map(String));
       await applyHoldSkips([{
-        holdId: hold.id, familyKey: hold.family_key, resumeOn: dateOnlyString(hold.resume_on),
+        holdId: hold.id, familyKey: hold.family_key, resumeOn: dateOnlyString(hold.resume_on), startsOn: dateOnlyString(hold.starts_on),
         pendingSkips: record.toSkip.filter((v) => !done.has(String(v.id))),
       }]);
       out.skipsRecovered += 1;

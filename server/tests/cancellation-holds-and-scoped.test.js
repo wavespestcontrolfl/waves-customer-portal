@@ -357,8 +357,11 @@ describe('runPlanHoldLifecycle', () => {
 
   test('an accept interrupted after its hold committed: the daily run carries out the unfinished skips once, and leaves an in-flight accept alone', async () => {
     const plan = (over = {}) => JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'confirmed', from: daysOut(9) }], skipped: ['l2'], skipsFinal: false, acceptCommitted: true, ...over });
-    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), moved_visits: plan() },
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: daysOut(-1), moved_visits: plan() },
       [lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(9), { status: 'skipped' }), lawnVisit('back', daysOut(40))]);
+    // l1 was dated yesterday-in-the-pause territory too: a recovery the day
+    // after still skips it rather than calling it "moved out".
+    mockState.tables.scheduled_services.find((v) => v.id === 'l1').scheduled_date = daysOut(-1);
     const first = await runPlanHoldLifecycle({ today: TODAY });
     expect(first.skipsRecovered).toBe(1);
     expect(mockTransition).toHaveBeenCalledTimes(1);
