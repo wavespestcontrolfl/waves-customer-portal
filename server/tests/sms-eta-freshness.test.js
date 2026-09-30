@@ -1789,3 +1789,21 @@ describe('"within the hour" (approved SLA phrase) with no live context', () => {
     expect(await noSnap('The tech should arrive within the hour: portal.wavespestcontrol.com/track/tok-1')).not.toBeNull();
   });
 });
+
+// Codex round-31 P2 (PR #5334): a status clause naming an explicit future day is a
+// scheduling statement, so the send-time classifier does not hold it to today's stop.
+describe('future-day status copy is not live status at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const snapshot = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  const done = [{ id: 'svc-1', status: 'completed', track_state: 'completed', track_view_token: 'tok-1', track_token_expires_at: FUTURE }];
+  const run = (body) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(done) });
+  test.each(['Your technician is coming tomorrow.', 'We will be there next week.', 'Our team will be there on the 5th.'])('%p sends even though today\'s visit is done', async (body) => {
+    expect(await run(body)).toBeNull();
+  });
+  test.each(['Your technician is coming today.', 'Our team is on the way.', 'The team is en route now.'])('%p is live status: blocked once the visit is done', async (body) => {
+    expect(await run(body)).toBe('eta_claim_no_longer_en_route');
+  });
+});

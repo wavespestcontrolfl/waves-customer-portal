@@ -1174,7 +1174,9 @@ function bodyClaimsCompletedArrival(text) {
 // the en-route classifier etaClaimBlockReason uses) and VISIT_STATUS_RE (the
 // send-time default-deny vocabulary) are both built from this prefix.
 // Plural subjects count too (round-30 audit P1): grouped visits send "Your techs are on the way".
-const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?s?|drivers?|crews?|he|she|they)";
+// Same subject list as COMPLETED_ARRIVAL_RE's arrived form (round-31 P2: "Our team is
+// on the way"); "team ... here to help" stays non-status via the lookahead below.
+const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they)";
 const TECH_STATUS_PREFIX = `${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+`;
 const ROUTE_IDIOM = '(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way)';
 const EN_ROUTE_PREDICATES = [
@@ -1183,7 +1185,7 @@ const EN_ROUTE_PREDICATES = [
   '(?:coming|headed|heading|driving|rolling|travell?ing)\\b',
   '(?:in\\s+the\\s+(?:truck|van|vehicle)|on\\s+the\\s+road)\\b',
   '(?:just\\s+|already\\s+)?left\\s+(?:for|to\\s+head|to\\s+you)',
-  'be\\s+(?:there|here|with\\s+you|at\\s+your\\s+\\w+)',
+  'be\\s+(?:there|here|with\\s+you|at\\s+your\\s+\\w+)(?!\\s+to\\s+(?:help|assist|answer|support|serve))',
   '(?:close|nearby|almost\\s+(?:there|here))',
   '(?:arriv(?:e|ing)|arrives\\s+(?:soon|shortly|now))',
   'pull(?:ing)?\\s+up',
@@ -1219,6 +1221,32 @@ function isInterrogativeAt(str, index, length = 0) {
   const end = /[.,;:!?\n\u2014\u2013]/.exec(str.slice(index + length));
   return Boolean(end) && end[0] === '?';
 }
+// A status clause that names an explicit FUTURE day is a scheduling statement,
+// not live status for today's en-route stop (Codex round-31 P2): "Your technician
+// is coming tomorrow", "We will be there Friday", "on the 5th", "next week".
+// "today" / "tonight" / "now" / "this morning|afternoon|evening" keep it live.
+// A weekday counts as future only when it is not TODAY (America/New_York). Read
+// over the sentence the match sits in, so the day word may lead or trail. ONE
+// predicate for bodyMentionsArrival, bodyMentionsVisitStatus and therefore the
+// send-time en-route classifier that uses them.
+const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const LIVE_DAY_RE = /\b(?:today|tonight|right\s+now|(?:this|later\s+this)\s+(?:morning|afternoon|evening)|now)\b/i;
+const FUTURE_DAY_RE = /\b(?:tomorrow|the\s+day\s+after|next\s+(?:week|month|visit|(?:mon|tues|wednes|thurs|fri|satur|sun)day)|on\s+the\s+\d{1,2}(?:st|nd|rd|th)|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?|\d{1,2}\/\d{1,2}|in\s+\d+\s+(?:days?|weeks?))\b/i;
+function todayWeekdayET(now = new Date()) {
+  return new Date(now).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }).toLowerCase();
+}
+function isFutureDayStatus(str, index, now = new Date()) {
+  const spans = sentenceSpans(str);
+  const [from, to] = spans.find(([s, e]) => index >= s && index < e) || [0, str.length];
+  // ";" separates independent statements: only the segment holding the match counts.
+  const segStart = Math.max(from, str.lastIndexOf(';', index - 1) + 1);
+  const nextSemi = str.indexOf(';', index);
+  const sentence = str.slice(segStart, nextSemi === -1 || nextSemi > to ? to : nextSemi);
+  if (LIVE_DAY_RE.test(sentence)) return false;
+  if (FUTURE_DAY_RE.test(sentence)) return true;
+  const today = todayWeekdayET(now);
+  return WEEKDAY_NAMES.some((day) => day !== today && new RegExp(`\\b${day}\\b`, 'i').test(sentence));
+}
 function bodyMentionsArrival(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(EN_ROUTE_STATUS_RE.source, EN_ROUTE_STATUS_RE.flags))) {
@@ -1227,6 +1255,7 @@ function bodyMentionsArrival(text) {
     if (isNegatedInClause(str, m.index)) continue;
     if (isInterrogativeAt(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isFutureDayStatus(str, m.index)) continue;
     return true;
   }
   return false;
@@ -1267,6 +1296,7 @@ function bodyMentionsVisitStatus(text) {
     if (isNegatedInClause(str, m.index)) continue;
     if (isInterrogativeAt(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isFutureDayStatus(str, m.index)) continue;
     return true;
   }
   return false;

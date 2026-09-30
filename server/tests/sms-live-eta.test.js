@@ -1940,6 +1940,44 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-31 P2s (PR #5334).
+describe('round 31 P2s: team subjects, explicit future days', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  const DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const todayName = new Date().toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
+  const otherDay = DAYS.find((d) => d !== todayName);
+  test.each([
+    'Our team is on the way.', 'The team is en route.', 'Our teams are heading over.', 'Our team will be there shortly.',
+  ])('%p is a technician-type status claim (team is a subject)', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each(['Our team is here to help.', 'Our team will be here to help you.', 'The team is here to answer questions.'])('%p stays non-status', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('the completed-arrival classifier already shares the team subject', () => {
+    expect(bodyClaimsCompletedArrival('Our team has arrived.')).toBe(true);
+  });
+  test.each([
+    'Your technician is coming tomorrow.', 'We will be there tomorrow.', 'The tech will be there next week.', 'Your tech is coming next Monday.',
+    'Your tech will be there on the 5th.', 'Your technician is coming Oct 5.', 'The tech is on the way on 10/5.', 'Tomorrow your tech is on the way.',
+    'Your tech is coming in 3 days.', 'The tech is coming; your report will be ready tomorrow.'.replace('; your report will be ready tomorrow', ' tomorrow'),
+    `Your tech will be there ${otherDay}.`,
+  ])('%p names a future day: a scheduling statement, not live status', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Your technician is coming today.', 'Your tech is on the way now.', 'The tech is en route this morning.', 'Your tech is on the way tonight.',
+    `Your tech will be there ${todayName}.`, 'Your tech is coming tomorrow, not today.', 'The tech is on the way; your report will be ready tomorrow.',
+    'Your report is ready tomorrow; your tech is on the way.',
+  ])('%p stays live status', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+});
+
 // Codex round-30 P2s (PR #5334).
 describe('round 30 P2: route idioms need a technician-type subject', () => {
   const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
