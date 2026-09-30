@@ -1221,16 +1221,27 @@ router.post('/cancel-resolution/accept', authenticate, cancelResolutionLimiter, 
       });
     } catch (execErr) {
       logger.error(`[cancel-resolution] accepted action failed for case ${caseRow?.id}: ${execErr.message}`);
-      // A coded refusal (a hold with nothing to pause, the once-a-year
-      // limit, …) changed nothing: the case must not stand as 'accepted',
-      // or it replays for 24 h and hides the card for 12 months.
-      if (execErr.code && caseRow?.id) {
+      // A pause with nothing inside the away dates (hold_not_needed) is a
+      // pure precondition refusal: the case must not stand as 'accepted',
+      // or it replays for 24 h and hides the card for 12 months. Released
+      // only under the accept lock, from a fresh read, while no receipt and
+      // no hold stand for this case — a concurrent or retried execution of
+      // the same case that did succeed is never undone.
+      if (execErr.code === 'hold_not_needed' && caseRow?.id) {
         try {
-          const snap = typeof caseRow.snapshot === 'string' ? JSON.parse(caseRow.snapshot) : (caseRow.snapshot || {});
-          await db('cancellation_cases').where({ id: caseRow.id, resolution_outcome: 'accepted' }).update({
-            resolution_outcome: 'none',
-            snapshot: JSON.stringify({ ...snap, accept_refused: { code: execErr.code, at: new Date().toISOString() } }),
-            updated_at: new Date(),
+          await db.transaction(async (trx) => {
+            await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`cancel-accept:${req.customer.id}`]);
+            const fresh = await trx('cancellation_cases').where({ id: caseRow.id }).forUpdate().first('resolution_outcome', 'snapshot');
+            if (!fresh || fresh.resolution_outcome !== 'accepted') return;
+            const snap = typeof fresh.snapshot === 'string' ? JSON.parse(fresh.snapshot) : (fresh.snapshot || {});
+            if (snap.accept_receipt) return;
+            const standing = await trx('plan_holds').where({ cancellation_case_id: caseRow.id }).whereIn('status', ['active', 'resumed']).first('id');
+            if (standing) return;
+            await trx('cancellation_cases').where({ id: caseRow.id }).update({
+              resolution_outcome: 'none',
+              snapshot: JSON.stringify({ ...snap, accept_refused: { code: execErr.code, at: new Date().toISOString() } }),
+              updated_at: new Date(),
+            });
           });
         } catch (markErr) { logger.warn(`[cancel-resolution] refused case ${caseRow.id} not released: ${markErr.message}`); }
       }
