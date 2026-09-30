@@ -1241,7 +1241,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPhraseFamilies, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, ZERO_BALANCE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1689,28 +1689,102 @@ function buildGroundingEnv(reply, context, opts) {
   };
 }
 
-// Classify ONE (already amount-masked) clause. Kinds: negated | status | absence
-// | ack | settlement | negated_ack | owed | trusted_owed | ambiguous | none.
-function classifyPaymentClause(masked, hasAmounts, env) {
-  const families = paymentStatusPhraseFamilies(masked, hasAmounts || inboundNamesPayment(env.inboundText));
-  // Codex round-14 P1: a clause asserting SEVERAL different status families is validated
-  // against every one of them (one validator, KIND_VALIDATORS.multi), never just the first.
-  if (families.length > 1 && !families.includes('negated')) return { kind: 'multi', families };
-  const phrase = families[0] || null;
-  if (phrase === 'negated') return { kind: 'negated' };
-  if (phrase === 'not_found' || phrase === 'not_received') return { kind: 'absence', family: phrase };
-  if (phrase === 'unpaid') return { kind: 'unpaid', family: phrase };
-  if (phrase) return { kind: 'status', family: phrase };
-  const ackPol = paymentAckPolarity(masked);
-  const statusKind = paymentStatusClaimKind(masked);
-  return hasAmounts ? classifyAmountClause(masked, ackPol, statusKind, env) : classifyAmountFreeClause(ackPol, statusKind);
+// STRUCTURAL claim enumeration (Codex round-17/18 P1). A clause can assert SEVERAL things at
+// once — a status family ("is processing"), a receipt ("we received your $120 payment"), a
+// settlement ("your account is current", "$0 balance"), an owed figure, an absence. The first
+// three review rounds each patched one PAIR of these that short-circuited each other; instead
+// EVERY detector runs, every claim it finds is validated independently by its own binder
+// (KIND_VALIDATORS), the spans of validated claims are blanked, and whatever is left must
+// itself assert nothing (else the clause fails closed). Nothing returns on the first kind.
+const globalOf = (re) => new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+const spansOf = (re, text) => [...String(text || '').matchAll(globalOf(re))].map((m) => ({ start: m.index, end: m.index + m[0].length }));
+const spansOverlap = (a, b) => a.start < b.end && b.start < a.end;
+const familyClaimKind = (family) => {
+  if (family === 'not_found' || family === 'not_received') return 'absence';
+  return family === 'unpaid' ? 'unpaid' : 'status';
+};
+// The detectors, on ONE amount-masked clause. { claims: [{kind, family?}], spans, negated }
+function detectPaymentClaims(masked, hasAmounts, env) {
+  const text = String(masked || '');
+  const claims = [];
+  const spans = [];
+  // Amount-free, a settlement phrase OWNS its words ("you are paid up" also contains the ack form
+  // "are paid"); with a figure the same words are ALSO a receipt ("your $120 payment is all paid").
+  let settlementSpans = [];
+  const taken = (span) => spans.some((o) => spansOverlap(span, o) && (!hasAmounts || !settlementSpans.includes(o)));
+  const howTo = PAYMENT_HOWTO_RE.test(text);
+  // 1. SETTLEMENT phrases ("you're paid up", "no balance due") — tested before negation ("you don't owe anything").
+  const settle = howTo ? [] : spansOf(SETTLEMENT_PHRASE_RE, text).filter((sp) => !insideQuestion(text, sp.start));
+  if (settle.length) { claims.push({ kind: 'settlement' }); spans.push(...settle); settlementSpans = settle; }
+  // 2. STATUS families / absence / unpaid — every phrase, every family.
+  const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText));
+  if (negated) claims.unshift({ kind: 'negated' });
+  for (const family of [...new Set(matches.map((m) => m.family))]) {
+    claims.push({ kind: familyClaimKind(family), family });
+  }
+  for (const m of matches) spans.push({ start: m.start, end: m.end });
+  // 3. RECEIPT: completed-payment EVENTS ("your transfer cleared") and ACK phrases ("we received your payment").
+  const events = howTo || PAYMENT_NEGATION_RE.test(text) ? []
+    : spansOf(PAYMENT_EVENT_STATUS_RE, text).filter((sp) => !insideQuestion(text, sp.start) && !taken(sp));
+  spans.push(...events);
+  const acks = spansOf(PAYMENT_ACK_RE, text).filter((sp) => !taken(sp));
+  spans.push(...acks);
+  const ackPol = acks.length ? (PAYMENT_NEGATION_RE.test(text) ? 'negated' : 'positive') : null;
+  const receiptShaped = ackPol === 'positive' || events.length > 0;
+  return { claims, spans, negated, ackPol, receiptShaped, hasEvent: events.length > 0 };
 }
-function classifyAmountFreeClause(ackPol, statusKind) {
-  // Settlement first: "you are paid up" contains the literal "are paid" ack form.
-  if (statusKind === 'settlement') return { kind: 'settlement' };
-  if (ackPol === 'positive' || statusKind === 'event') return { kind: 'ack' };
-  if (ackPol === 'negated') return { kind: 'negated_ack' };
-  return { kind: 'none' };
+function enumerateMaskedClaims(masked, hasAmounts, env) {
+  const d = detectPaymentClaims(masked, hasAmounts, env);
+  const claims = [...d.claims];
+  const amountConsumed = claims.some((c) => c.kind === 'status' || c.kind === 'absence' || c.kind === 'unpaid');
+  if (d.ackPol === 'negated') {
+    claims.push({ kind: 'negated_ack' });
+  } else if (d.receiptShaped) {
+    claims.push(hasAmounts ? classifyAmountClause(masked, d.ackPol, d.hasEvent ? 'event' : null, env) : { kind: 'ack' });
+  } else if (hasAmounts && !amountConsumed) {
+    // a figure no status/receipt claim accounts for: it must be an owed figure (or is ambiguous => rejected)
+    claims.push(classifyAmountClause(masked, null, null, env));
+  }
+  // A status / absence claim takes the clause's figures as ITS payment identity — but a figure stated
+  // as OWED in the same clause ("...haven't received your $120 payment while you owe $95") is its own
+  // claim and is validated as owed too (Codex round-18 P1).
+  if (hasAmounts && amountConsumed) claims.push({ kind: 'owed_figures' });
+  return { claims, spans: d.spans, negated: d.negated };
+}
+// The figures a masked clause explicitly states as OWED: an owed word directly before the figure
+// ("you owe AMT", "balance is AMT", "due: AMT") or directly after it ("AMT due", "AMT balance").
+const OWED_BEFORE_FIGURE_RE = /\b(?:owe[sd]?|due|balance|outstanding)\b[^.\n]{0,16}?\bAMT\b/gi;
+const OWED_AFTER_FIGURE_RE = /\bAMT\b[^.\n]{0,6}?\b(?:owed|due|outstanding|balance)\b/gi;
+function owedFigureCents(masked, amounts) {
+  const text = String(masked || '');
+  const tokens = [...text.matchAll(/\bAMT\b/g)].map((m) => m.index);
+  const owedAt = new Set();
+  for (const re of [OWED_BEFORE_FIGURE_RE, OWED_AFTER_FIGURE_RE]) {
+    for (const m of text.matchAll(re)) {
+      const at = re === OWED_BEFORE_FIGURE_RE ? m.index + m[0].lastIndexOf('AMT') : m.index;
+      const i = tokens.indexOf(at);
+      if (i >= 0 && i < amounts.length) owedAt.add(amounts[i]);
+    }
+  }
+  return [...owedAt];
+}
+// The single "primary" kind (first claim) — the view the phrase-table coverage tests use.
+function classifyPaymentClause(masked, hasAmounts, env) {
+  const { claims } = enumerateMaskedClaims(masked, hasAmounts, env);
+  return claims[0] || { kind: 'none' };
+}
+// EVERY claim a raw clause asserts (zero-balance span included) — one enumerator for the draft
+// validator AND the send-time recheck's "does this need billing?" test.
+function enumeratePaymentClaims(clause, env = {}) {
+  const e = { inboundText: '', trustOwedAmounts: false, ...env };
+  const text = String(clause || '');
+  const zero = zeroBalanceClaim(text);
+  const working = zero ? withoutZeroBalanceSpan(text) : text;
+  const amounts = amountCentsIn(working);
+  const masked = working.replace(AMOUNT_MASK_RE, ' AMT ');
+  const { claims, spans, negated } = enumerateMaskedClaims(masked, amounts.length > 0, e);
+  if (zero) claims.unshift({ kind: 'settlement', zero: true });
+  return { claims, spans, negated, amounts, masked, text };
 }
 function classifyAmountClause(masked, ackPol, statusKind, env) {
   if (ackPol === 'negated') return { kind: 'negated_ack' };
@@ -1793,28 +1867,8 @@ function validateUnpaidClaim(c, env) {
   return validateAbsenceClaim(c, env) || c.amounts.some((a) => !env.owedCents.has(a));
 }
 const PRESENCE_FAMILIES = new Set(['pending', 'failed', 'refunded', 'disputed', 'reversed']);
-function validateFamilyClaim(family, c, env) {
-  if (family === 'unpaid') return validateUnpaidClaim({ ...c, family }, env);
-  if (family === 'not_found' || family === 'not_received') return validateAbsenceClaim({ ...c, family }, env);
-  return validateStatusClaim({ ...c, family }, env);
-}
-// A clause that asserts two or more different families is grounded only if EVERY family
-// binds. Presence families ("refunded", "failed", "disputed", "pending") describe ONE
-// payment's status, so they must share at least one row status — "refunded after it failed"
-// can never be a single row and is ungrounded whatever rows exist (fail closed).
-function validateMultiFamilyClaim(c, env) {
-  const presence = c.families.filter((f) => PRESENCE_FAMILIES.has(f));
-  if (presence.length > 1) {
-    const sets = presence.map((f) => new Set(PAYMENT_STATUS_VOCABULARY[f].rowStatuses));
-    const shared = [...sets[0]].filter((st) => sets.every((set) => set.has(st)));
-    if (!shared.length) return true;
-  }
-  return c.families.some((f) => validateFamilyClaim(f, c, env));
-}
-
 // Each kind's ONE validator: true = ungrounded.
 const KIND_VALIDATORS = {
-  multi: validateMultiFamilyClaim,
   negated: () => true, // a negated presence claim is not judgeable (round-9)
   ambiguous: () => true, // reads as both or neither of owed/receipt (round-5/6)
   status: validateStatusClaim,
@@ -1831,37 +1885,36 @@ const KIND_VALIDATORS = {
   settlement: (c, env) => env.hasOutstandingObligation || env.billingUnavailable,
   owed: (c, env) => c.amounts.some((a) => !env.owedCents.has(a)),
   trusted_owed: () => false,
+  // figures explicitly stated as OWED inside a clause that also makes a status / absence claim (round-18)
+  owed_figures: (c, env) => !env.trustOwedAmounts && c.amounts.some((a) => !env.owedCents.has(a)),
   none: () => false,
 };
 
 function clauseUngrounded(clause, env) {
-  const text = String(clause || '');
-  // A zero-balance claim ("Your balance is $0", "zero balance") is ONE claim among others in
-  // the clause (Codex round-17 P1): it is judged as a settlement claim, and then ONLY its span
-  // is blanked so every other claim, figure and price phrase ("after we received your $500
-  // payment", "plus a fee of fifty dollars") still goes through the normal binders below.
-  // Anything left that cannot be classified is rejected by them (ambiguous / price gate).
-  if (zeroBalanceClaim(text)) {
-    if (KIND_VALIDATORS.settlement({ kind: 'settlement', text, amounts: [] }, env)) return true;
-    return clauseUngroundedAfterZero(withoutZeroBalanceSpan(text), env);
-  }
-  return classifiedClauseUngrounded(text, env);
-}
-// The rest of a clause once its zero-balance span is gone: nothing meaningful left = grounded;
-// otherwise the ordinary pipeline (price gate, amount + polarity classification, validators).
-function clauseUngroundedAfterZero(remainder, env) {
-  const text = String(remainder || '');
-  if (!/[a-z0-9$]/i.test(text.replace(/\b(?:and|your|the|a|is|of|have|has|you|account|balance|currently|now|right)\b/gi, ''))) return false;
-  return classifiedClauseUngrounded(text, env);
-}
-function classifiedClauseUngrounded(text, env) {
-  const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
-  // Price grammar left once readable figures are masked is a price the
+  const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
+  // Price grammar left once readable figures (and any zero-balance span) are masked is a price the
   // extractor cannot verify ("fifty dollars"): fail closed (#5194 r4/r8).
   if (require('./sms-suggest-mode').hasPriceQuote(masked)) return true;
-  const amounts = amountCentsIn(text);
-  const cls = classifyPaymentClause(masked, amounts.length > 0, env);
-  return KIND_VALIDATORS[cls.kind]({ ...cls, text, amounts }, env);
+  if (!claims.length) return false;
+  // Every claim validates on its own binder; ANY ungrounded claim fails the clause.
+  const presence = [];
+  for (const claim of claims) {
+    if (claim.kind === 'negated') return true;
+    const figures = claim.kind === 'owed_figures' ? owedFigureCents(masked, amounts) : null;
+    if (KIND_VALIDATORS[claim.kind]({ ...claim, text, amounts: claim.zero ? [] : (figures || amounts) }, env)) return true;
+    if (claim.kind === 'status' && PRESENCE_FAMILIES.has(claim.family)) presence.push(claim.family);
+  }
+  // Presence families ("refunded", "failed", "disputed", "pending") describe ONE payment's status, so
+  // they must share at least one row status — "refunded after it failed" is never a single row.
+  if (presence.length > 1) {
+    const sets = presence.map((f) => new Set(PAYMENT_STATUS_VOCABULARY[f].rowStatuses));
+    if (![...sets[0]].some((st) => sets.every((set) => set.has(st)))) return true;
+  }
+  // Blank every validated span: the remainder must assert nothing more, else fail closed.
+  if (negated) return true;
+  let remainder = masked;
+  for (const sp of [...spans].sort((x, y) => y.start - x.start)) remainder = `${remainder.slice(0, sp.start)} ${remainder.slice(sp.end)}`;
+  return enumerateMaskedClaims(remainder, false, env).claims.length > 0;
 }
 
 function replyQuotesUngroundedAmount(reply, context, opts = {}) {
@@ -2467,7 +2520,9 @@ function buildFactsBlock(context, extras = {}) {
       // No suffix at all when the tender can't be reliably told apart — its
       // absence IS the signal (paired with the prompt rule below: confirm
       // only amount/date then, never guess the method).
-      return tender ? `${base} via ${tender}` : base;
+      // Gate-off (v11) facts are byte-identical to before this revision: the suffix (and the prompt
+      // rule that pairs with it) exist only under GATE_SMS_REAL_ANSWERS — the prompt identity (_pf).
+      return tender && gateEnvValue('GATE_SMS_REAL_ANSWERS') ? `${base} via ${tender}` : base;
     }).join('; ')}`);
   }
   const card = context.billing?.cardOnFile;
@@ -3594,6 +3649,7 @@ module.exports = {
   hasAffirmativePaymentAck,
   paymentAckPolarity,
   classifyPaymentClause,
+  enumeratePaymentClaims,
   paymentStatusClaimKind,
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,

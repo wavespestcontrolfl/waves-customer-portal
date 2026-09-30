@@ -318,15 +318,15 @@ async function amountFreeStatusClaimStale({
   // cannot assert a payment status — skip the drafter + billing re-read
   // entirely (gratitude/scheduling copy on the auto-send lane).
   if (!mayAssertPaymentStatus(text)) return { stale: false };
-  const hasStatusClaim = text.split(CLAUSE_SPLIT_RE)
-    .some((clause) => drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null
-      // Codex round-15 P1: an amount-free NEGATED ack ("Your payment wasn't processed") is a denial
-      // of receipt — a paid row since the draft makes it false, so it is rechecked too.
-      || (typeof drafter.paymentAckPolarity === 'function' && drafter.paymentAckPolarity(clause) === 'negated')
-      // Codex round-16 P1: a zero-balance claim ("Your balance is zero.") is a settlement claim the
-      // draft validator judges with this SAME detector — a balance that posted since the draft makes it false.
-      || zeroBalanceClaim(clause)
-      || paymentStatusPhraseClaim(clause, inboundNamesPayment(inboundMessage)) != null);
+  // ONE enumerator with the draft validator (Codex round-18 P1): a clause needs the billing recheck
+  // exactly when the drafter's own claim enumeration finds a claim in it. (A caller that mocks the
+  // drafter down to a stub falls back to the individual predicates.)
+  const hasStatusClaim = text.split(CLAUSE_SPLIT_RE).some((clause) => (
+    typeof drafter.enumeratePaymentClaims === 'function'
+      ? drafter.enumeratePaymentClaims(clause, { inboundText: String(inboundMessage || '') }).claims.length > 0
+      : (drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null
+        || paymentStatusPhraseClaim(clause, inboundNamesPayment(inboundMessage)) != null
+        || zeroBalanceClaim(clause))));
   if (!hasStatusClaim) return { stale: false };
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   try {

@@ -90,6 +90,34 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
     expect(noArg).not.toContain('OPEN TIMES');
   });
 
+  // Codex round-18 P1: the `via <tender>` suffix on Recent payments is a v12-only rendering (its prompt
+  // rule is gated), so gate-off facts with a payment row of KNOWN tender must equal main's rendering
+  // (pinned here: "<amount> <status> <date>", no suffix).
+  test('Recent payments has NO "via <tender>" suffix gate-off, even for rows with a known tender (v11 facts unchanged)', () => {
+    const context = {
+      summary: 'Test customer',
+      billing: {
+        outstandingBalance: 0,
+        recentPayments: [
+          { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' },
+          { amount: 45, status: 'processing', payment_date: '2026-09-10', description: 'Invoice INV-9 — zelle' },
+        ],
+      },
+    };
+    clearGates();
+    const off = buildFactsBlock(context);
+    expect(off.split('\n').filter((l) => l.startsWith('- Recent payments:'))).toEqual([
+      '- Recent payments: $120.00 paid Saturday, Sep 12; $45.00 processing Thursday, Sep 10',
+    ]);
+    expect(off).not.toMatch(/ via (?:card|Zelle|bank)/);
+    process.env[GATE] = 'false';
+    expect(buildFactsBlock(context)).toBe(off);
+    // gate on: the suffix (and its paired prompt rule) appear
+    process.env[GATE] = 'true';
+    expect(buildFactsBlock(context, { now: new Date('2026-09-29T15:00:00Z') }))
+      .toContain('- Recent payments: $120.00 paid Saturday, Sep 12 via card; $45.00 processing Thursday, Sep 10 via Zelle');
+  });
+
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
     expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers_cf_pf');

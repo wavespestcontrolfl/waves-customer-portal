@@ -122,3 +122,25 @@ describe('a zero-balance clause with another claim is fully rechecked at send ti
     await expect(run('Your balance is $0 plus a fee of $50.', [])).resolves.toEqual(STALE);
   });
 });
+
+// Codex round-18 P1: the send-time recheck runs the SAME claim enumerator — every claim in a clause is rechecked.
+describe('multi-claim clauses are rechecked claim-by-claim at send time', () => {
+  const { amountFreeStatusClaimStale, outgoingAmountsStale } = require('../services/sms-amount-recheck');
+  const STALE = { stale: true, reason: 'amount_no_longer_authorized' };
+  const proc = { ...paid, amount: 120, status: 'processing' };
+  test('"Your account is current while your payment is processing." (processing payment + $95 owed) is stale', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([proc], { outstandingBalance: 95 }));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your account is current while your payment is processing.', strict: true, dbh })).resolves.toEqual(STALE);
+  });
+  test('"We received your $120 payment from Sep 12 while it is processing." with no paid row is stale', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $120 payment from Sep 12 while it is processing.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual(STALE);
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ ...paid, amount: 120 }]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $120 payment from Sep 12 while it is processing.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual(STALE); // paid, but "processing" has no row
+  });
+  test('the enumerator is what decides a clause needs billing: a multi-claim clause always does', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    expect(drafter.enumeratePaymentClaims('Your account is current while your payment is processing.', {}).claims.map((c) => c.kind).sort()).toEqual(['settlement', 'status']);
+    expect(drafter.enumeratePaymentClaims('Thanks so much, see you Tuesday!', {}).claims).toEqual([]);
+  });
+});

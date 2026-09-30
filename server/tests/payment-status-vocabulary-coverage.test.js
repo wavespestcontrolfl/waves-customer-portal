@@ -330,3 +330,80 @@ describe('round-17: zero-balance claims do not shield the rest of the clause', (
     expect(rq('Your balance is fifty dollars.', ctx())).toBe(true);
   });
 });
+
+// Codex round-18 P1 (STRUCTURAL): a clause is grounded only if EVERY claim in it is. The same
+// short-circuit bug (first recognized claim wins) hit three different pairs in a row, so this
+// table crosses EVERY pair of claim kinds: the joined clause must be ungrounded whenever either
+// half is ungrounded on its own, in every context below — no pair may launder the other.
+describe('round-18: every pair of claim kinds is validated independently (no short-circuit)', () => {
+  const rq = (r, c) => replyQuotesUngroundedAmount(r, c, { byMeaning: true });
+  const row = (status, over = {}) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card', ...over });
+  const CLAIMS = {
+    ack: 'we received your $120 payment from Sep 12',
+    pending: 'your $120 payment from Sep 12 is still processing',
+    failed: 'your $120 payment from Sep 12 failed',
+    refunded: 'your $120 payment from Sep 12 was refunded',
+    disputed: 'your $120 payment from Sep 12 was disputed',
+    not_received: "we haven't received your $120 payment from Sep 12",
+    not_found: "we don't see a $120 payment from Sep 12",
+    unpaid: 'your $95 invoice is unpaid',
+    settlement: 'your account is current',
+    settlement_phrase: "you're paid up",
+    zero: 'your balance is $0',
+    owed: 'you owe $95',
+    negated_ack: 'no payment received',
+  };
+  const ctx = (rows = [], extra = {}) => ({ billing: { outstandingBalance: 0, recentPayments: rows, ...extra } });
+  const CONTEXTS = {
+    empty: ctx(),
+    paid: ctx([row('paid')]),
+    processing: ctx([row('processing')]),
+    failed: ctx([row('failed')]),
+    refunded: ctx([row('refunded')]),
+    disputed: ctx([row('disputed')]),
+    owed95: ctx([], { outstandingBalance: 95, openInvoice: { amountDue: 95 } }),
+    paidAndOwed: ctx([row('paid')], { outstandingBalance: 95 }),
+    everything: ctx([row('paid'), row('processing'), row('failed'), row('refunded'), row('disputed')], { outstandingBalance: 95, hasProcessingPayment: true }),
+  };
+  const alone = (name, c) => rq(`${CLAIMS[name][0].toUpperCase()}${CLAIMS[name].slice(1)}.`, c);
+  const joined = (a, b) => `${CLAIMS[a][0].toUpperCase()}${CLAIMS[a].slice(1)} while ${CLAIMS[b]}.`;
+  const names = Object.keys(CLAIMS);
+
+  test('the table really covers every claim kind (each is recognized on its own)', () => {
+    for (const n of names) expect({ n, claims: drafterEnumerate(CLAIMS[n]).length > 0 }).toEqual({ n, claims: true });
+  });
+
+  test('joined ungrounded whenever EITHER half is ungrounded alone, in every context', () => {
+    const failures = [];
+    for (const a of names) {
+      for (const b of names) {
+        if (a === b) continue;
+        for (const [cname, c] of Object.entries(CONTEXTS)) {
+          const expectUngrounded = alone(a, c) || alone(b, c);
+          if (expectUngrounded && !rq(joined(a, b), c)) failures.push(`${a} + ${b} in ${cname}: "${joined(a, b)}"`);
+        }
+      }
+    }
+    expect(failures).toEqual([]);
+  });
+
+  test('consistent pairs are still grounded (the enumerator is not simply rejecting every multi-claim clause)', () => {
+    expect(rq('Your account is current while your balance is $0.', ctx())).toBe(false);
+    expect(rq("You're paid up while your balance is zero.", ctx())).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12 while your balance is $0.', ctx([row('paid')]))).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12 while your balance is $0.', ctx([row('paid')], { outstandingBalance: 40 }))).toBe(true);
+    expect(rq("We haven't received your $120 payment from Sep 12 while you owe $95.", ctx([], { outstandingBalance: 95 }))).toBe(false);
+  });
+
+  test('the three shapes the auditor found, plus their mirror images', () => {
+    const inFlight = ctx([row('processing')], { outstandingBalance: 95 });
+    expect(rq('Your account is current while your payment is processing.', inFlight)).toBe(true);
+    expect(rq('Your payment is processing while your account is current.', inFlight)).toBe(true);
+    expect(rq('We received your $120 payment from Sep 12 while it is processing.', ctx())).toBe(true);
+    expect(rq('Your balance is $0 after we received your $500 payment from Sep 12.', ctx())).toBe(true);
+    expect(rq('Your payment was refunded after it failed.', ctx([row('refunded')]))).toBe(true);
+  });
+});
+function drafterEnumerate(text) {
+  return require('../services/sms-shadow-drafter').enumeratePaymentClaims(text, {}).claims;
+}
