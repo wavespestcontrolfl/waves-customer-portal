@@ -230,3 +230,70 @@ describe('failure with a payments row', () => {
     expect(payload.payment_method_label).toBe('');
   });
 });
+
+// Round 8: ANY card label (payment snapshot, saved method, failed intent) is
+// shown only when payment, invoice and intent all agree with the emailed customer.
+describe('round 8: the card label needs payment / invoice / intent ownership to agree', () => {
+  const owned = (over = {}) => ({
+    id: 'pay-1', customer_id: 'cust-1', payment_method_id: null, amount: '129.00',
+    payment_date: '2026-09-28', next_retry_at: null, stripe_payment_intent_id: 'pi_test', ...over,
+  });
+  const intent = (customer) => ({ ...failedIntent(), ...(customer === undefined ? {} : { customer }) });
+  const build = ({ invoice = INVOICE, payment, customer = CUSTOMER } = {}) => lifecycle({
+    customers: [chain({ first: customer })],
+    invoices: [chain({ first: invoice })],
+    payments: [chain({ first: payment })],
+    payment_methods: [chain({ first: undefined })],
+  });
+
+  test('a payment row of ANOTHER customer never falls through to the intent\'s card', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ payment: owned({ customer_id: 'someone-else' }) }));
+    const payload = await sendFailed({ paymentIntent: failedIntent(), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('an invoice of ANOTHER customer never shows the intent\'s card', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ invoice: { ...INVOICE, customer_id: 'someone-else' }, payment: undefined }));
+    const payload = await sendFailed({ paymentIntent: failedIntent(), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('a payment snapshot on another customer\'s row is blanked too', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ payment: owned({ customer_id: 'someone-else', card_brand: 'Visa', card_last_four: '1111' }) }));
+    const payload = await sendFailed({ failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('an intent whose Stripe customer is not this customer\'s Stripe customer is blank', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
+    const payload = await sendFailed({ paymentIntent: intent('cus_other'), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('');
+  });
+
+  test('an intent whose Stripe customer matches shows the card (string or expanded object)', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
+    expect((await sendFailed({ paymentIntent: intent('cus_mine'), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
+    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
+    expect((await sendFailed({ paymentIntent: intent({ id: 'cus_mine' }), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
+  });
+
+  test('a Stripe customer unknown on either side is not a disagreement', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: null } }));
+    expect((await sendFailed({ paymentIntent: intent('cus_other'), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
+    mockQueues(build({ payment: undefined, customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' } }));
+    expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
+  });
+
+  test('gate off: the payload is untouched by the ownership check', async () => {
+    mockDetailsLive = false;
+    mockQueues(build({ payment: owned({ customer_id: 'someone-else', card_brand: 'Visa', card_last_four: '1111' }) }));
+    const payload = await sendFailed({ paymentIntent: failedIntent(), failedAt: FAILED_AT });
+    expect(payload.payment_method_label).toBe('Visa ending in 1111');
+  });
+});

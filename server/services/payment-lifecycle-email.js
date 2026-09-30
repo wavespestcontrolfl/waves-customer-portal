@@ -596,6 +596,35 @@ function failedIntentCardLabel(paymentIntent) {
   }).label;
 }
 
+// The Stripe customer a PaymentIntent belongs to (id string or expanded object).
+function intentStripeCustomerId(paymentIntent) {
+  const c = paymentIntent?.customer;
+  return clean(typeof c === 'string' ? c : c?.id);
+}
+
+// True only when every owner we can see for this failure is the customer the
+// email goes to: the payments row, the invoice, and (when both sides are known)
+// the intent's Stripe customer vs. the customer's stripe_customer_id. Unknown
+// on one side of the Stripe check is not a disagreement; a lookup failure
+// there is treated as one, so a blip blanks the row instead of guessing.
+async function paymentCardOwnershipAgrees({ emailedCustomerId, payment, invoice, paymentIntent }) {
+  if (!emailedCustomerId) return false;
+  const emailed = String(emailedCustomerId);
+  if (payment?.customer_id && String(payment.customer_id) !== emailed) return false;
+  if (invoice?.customer_id && String(invoice.customer_id) !== emailed) return false;
+  const intentCustomer = intentStripeCustomerId(paymentIntent);
+  if (intentCustomer) {
+    try {
+      const row = await db('customers').where({ id: emailedCustomerId }).first('stripe_customer_id');
+      const known = clean(row?.stripe_customer_id);
+      if (known && known !== intentCustomer) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
 // The retry the dunning ladder ACTUALLY armed for this failure — a stored
 // payments.next_retry_at (billing-cron's RETRY_DELAYS_DAYS ladder writes it),
 // never a computed guess. A pay-page failure the ladder does not retry has no
@@ -671,13 +700,20 @@ async function sendPaymentFailed({
     // Card label, attempt date and the ladder's own retry date, each only where
     // the data exists: the payments row first, then the saved method it points
     // at, then the failed intent itself.
-    if (!payload.payment_method_label) {
+    // ANY card label (the payments row's own snapshot, the saved method, or
+    // the failed intent's card) is shown only when payment, invoice and intent
+    // all agree with the customer this email goes to; otherwise the row stays
+    // blank rather than name another customer's card.
+    const emailedCustomerId = customerId || invoice?.customer_id || payment?.customer_id || null;
+    const cardOwnershipAgrees = await paymentCardOwnershipAgrees({
+      emailedCustomerId, payment, invoice, paymentIntent,
+    });
+    if (!cardOwnershipAgrees) {
+      payload.payment_method_label = '';
+    } else if (!payload.payment_method_label) {
       // A lookup blip must never throw out of the webhook: blank row instead.
-      // The method is read with the payment's own customer id (and must be the
-      // customer this email goes to): another customer's saved card is never
-      // named, the row just stays blank.
       const owner = payment?.customer_id || null;
-      const saved = owner && payment?.payment_method_id && (!customerId || String(owner) === String(customerId))
+      const saved = owner && payment?.payment_method_id
         ? await loadPaymentMethod(payment.payment_method_id, owner).catch(() => null)
         : null;
       const savedParts = saved ? methodParts(saved) : null;

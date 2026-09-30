@@ -285,4 +285,36 @@ describe('round 5: combined-packet labels are verified against customer, invoice
     mockTables({ 'visit_completion_packet_items as i': [m('55 Rental Court', { 's.customer_id': 'someone-else' })] });
     expect(await Details.invoicePropertyAddress(inv, HOME)).toBe('');
   });
+  // Round 8: visit-completion-invoice adopts a packet onto an invoice that keeps
+  // the owner visit's scheduled_service_id and gains service_record_id. The
+  // direct link must not speak for the whole packet.
+  describe('an adopted packet invoice (keeps the owner visit link)', () => {
+    const adopted = { ...inv, scheduled_service_id: 'ss-1', service_record_id: 'sr-1' };
+    const m = (line1, over) => member({ ...stamped('c', line1), ...over });
+    const tables = (members) => ({
+      'visit_completion_packet_items as i': members,
+      scheduled_services: [stamped('c', '55 Rental Court')],
+      service_records: [{ id: 'sr-1', customer_id: 'c', service_type: 'Lawn Care', service_date: '2026-09-02', scheduled_service_id: 'ss-1' }],
+    });
+
+    test('members on different addresses omit the row even though the owner visit resolves', async () => {
+      mockTables(tables([m('55 Rental Court'), m('9 Other Street')]));
+      expect(await Details.invoicePropertyAddress(adopted, HOME)).toBe('');
+    });
+
+    test('members all on one address name it', async () => {
+      mockTables(tables([m('9 Other Street'), m('9 Other Street')]));
+      expect(await Details.invoicePropertyAddress(adopted, HOME)).toBe('9 Other Street, Sarasota, FL 34236');
+    });
+
+    test('a packet with no verified members omits the row (never the owner visit, never primary)', async () => {
+      mockTables(tables([]));
+      expect(await Details.invoicePropertyAddress(adopted, HOME)).toBe('');
+    });
+
+    test('the service label comes from the packet members, not the owner visit alone', async () => {
+      mockTables(tables([member(), member({ service_type: 'Pest Control' })]));
+      expect((await Details.invoiceServiceDetails(adopted)).label).toBe('Lawn Care, Pest Control');
+    });
+  });
 });

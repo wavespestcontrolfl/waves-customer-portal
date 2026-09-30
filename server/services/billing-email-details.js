@@ -253,6 +253,18 @@ async function invoicePropertyAddress(invoice, customer) {
   try {
     const customerId = invoice?.customer_id;
     if (!customerId) return '';
+    if (invoice.visit_completion_packet_id) {
+      // A combined-visit invoice: every verified member must name the SAME
+      // street address; a member that cannot be resolved omits the row. This
+      // is decided BEFORE the direct visit link: an adopted packet invoice
+      // keeps the owner visit's scheduled_service_id, and that one visit's
+      // address must not speak for the whole packet.
+      const members = await ownedPacketVisits(invoice, VISIT_COLS.map((c) => `s.${c}`));
+      if (!members.length) return '';
+      const addresses = await Promise.all(members.map((m) => visitPropertyAddress(m, customerId)));
+      const first = addresses[0];
+      return first && addresses.every((a) => a === first) ? first : '';
+    }
     const { visit, linked, unresolved, conflict } = await ownedVisitContext(invoice);
     if (conflict) return '';
     if (linked) {
@@ -260,15 +272,6 @@ async function invoicePropertyAddress(invoice, customer) {
       // name the property. Foreign or unresolvable → omit, never primary.
       if (unresolved || !visit) return '';
       return await visitPropertyAddress(visit, customerId);
-    }
-    if (invoice.visit_completion_packet_id) {
-      // A combined-visit invoice: every verified member must name the SAME
-      // street address; a member that cannot be resolved omits the row.
-      const members = await ownedPacketVisits(invoice, VISIT_COLS.map((c) => `s.${c}`));
-      if (!members.length) return '';
-      const addresses = await Promise.all(members.map((m) => visitPropertyAddress(m, customerId)));
-      const first = addresses[0];
-      return first && addresses.every((a) => a === first) ? first : '';
     }
     // NO link at all: the address frozen on the invoice, else the customer's.
     // The passed customer is used only when it IS the invoice's customer.
