@@ -32,9 +32,11 @@ const roach3 = { service: 'german_roach', label: 'German Roach Cleanout Service 
 
 describe('interior spray copy (owner R1 2026-09-29)', () => {
   test('one-time pest copy says an interior spray is included and never disclaims baseboard spraying', () => {
-    const pest = JSON.stringify(ONE_TIME_SERVICE_COPY.pest || ONE_TIME_SERVICE_COPY);
+    expect(ONE_TIME_SERVICE_COPY.one_time_pest).toBeDefined();
+    const pest = JSON.stringify(ONE_TIME_SERVICE_COPY.one_time_pest);
     expect(pest).toContain('an interior spray plus baits, gels, and crack-and-crevice work');
-    expect(pest).not.toMatch(/not baseboard spraying/i);
+    // No one-time service in the pack may disclaim the interior spray.
+    expect(JSON.stringify(ONE_TIME_SERVICE_COPY)).not.toMatch(/not baseboard spraying/i);
   });
 });
 
