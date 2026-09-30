@@ -702,6 +702,17 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     expect(covered.has('v1')).toBe(false);
   });
 
+  test('a sibling the conversion turns into a free re-service callback is judged post-save and does not block (Codex r7 P1 on #5387)', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const stored = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(stored.get('v1')).toMatch(/card-confirmation page/);
+    const converted = await findBillingCoveredVisits(conn, [{
+      ...v1, _proposed: { is_callback: true, service_type: 'Pest Control Re-Service' },
+    }], { liveInvoice: true });
+    expect(converted.has('v1')).toBe(false);
+  });
+
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {
     const v1 = visit();
     const conn = fixture({ visits: [v1], securePrepayLockAcquired: false });

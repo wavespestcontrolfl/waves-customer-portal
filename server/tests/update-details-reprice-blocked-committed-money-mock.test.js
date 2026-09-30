@@ -297,7 +297,7 @@ test('the free re-service conversion runs the same any-live-invoice check, guard
   expect(src).toMatch(/findBillingCoveredVisits\(trx, \[priceGuardRow \|\| \{ id: req\.params\.id \}\], \{ liveInvoice: true \}\)/);
   // Series-wide conversion: every sibling the conversion block zeroes is
   // locked, mint-try-locked and guarded BEFORE the first write (Codex r3 P1).
-  const sibGuardAt = src.indexOf('const sibCovered = await findBillingCoveredVisits(trx, convSiblings, { liveInvoice: true });');
+  const sibGuardAt = src.indexOf('const sibCovered = await findBillingCoveredVisits(trx, convSiblings.map((row) => (');
   expect(sibGuardAt).toBeGreaterThan(-1);
   expect(sibGuardAt).toBeLessThan(src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);'));
   expect(src).not.toMatch(/liveIndirectInvoice/);

@@ -13240,9 +13240,19 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // will stand. Judged by the secure-prepay rail ONLY (synthetic ids never
     // reach an id-keyed invoice read); a hit refuses the save against the
     // edited visit (Codex r6 P1 on #5387).
-    const plannedInsertCandidates = (row) => (plannedRecurrenceDates.insertDates || []).map((date, index) => ({
-      ...row,
-      ...saveCoverageProposed(),
+    // Children resolve the CURRENT catalog identity at insert
+    // (resolveSeriesChildIdentity, as both real insert paths do), never the
+    // parent's possibly pre-rename label (Codex r7 P1 on #5387).
+    const plannedInsertCandidates = async (conn, row) => {
+      const dates = plannedRecurrenceDates.insertDates || [];
+      if (dates.length === 0) return [];
+      const postSaveParent = { ...row, ...saveCoverageProposed() };
+      const identity = await resolveSeriesChildIdentity(conn, postSaveParent);
+      return dates.map((date, index) => ({
+      ...postSaveParent,
+      service_type: identity.service_type,
+      service_id: identity.service_id,
+      ...(identity.service_key ? { service_key_snapshot: identity.service_key } : {}),
       id: `planned-insert-${index}`,
       scheduled_date: date,
       status: 'pending',
@@ -13255,7 +13265,8 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
       _proposed: undefined,
       _coverageContext: undefined,
       _plannedInserts: undefined,
-    }));
+      }));
+    };
     const saveSeriesOverlayById = () => {
       const byId = new Map();
       const put = (id, patch) => byId.set(String(id), { ...(byId.get(String(id)) || {}), ...patch });
@@ -13680,7 +13691,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (priceGuardRow) {
             priceGuardRow._proposed = saveCoverageProposed();
             priceGuardRow._coverageContext = await cadenceCoverageContext(trx, priceGuardCols);
-            priceGuardRow._plannedInserts = plannedInsertCandidates(priceGuardRow);
+            priceGuardRow._plannedInserts = await plannedInsertCandidates(trx, priceGuardRow);
           }
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
@@ -13756,7 +13767,18 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 );
               }
             }
-            const sibCovered = await findBillingCoveredVisits(trx, convSiblings, { liveInvoice: true });
+            // Judged as the conversion leaves them (Codex r7 P1 on #5387): the
+            // seriesUpdates below turn these siblings into free re-service
+            // callbacks, which canonical prepay coverage excludes — the
+            // secure-prepay rail must see that post-save identity, exactly as
+            // the edited row does. The invoice rails are unaffected.
+            const conversionOverlay = {};
+            for (const col of ['is_callback', 'service_id', 'service_type']) {
+              if (updates[col] !== undefined) conversionOverlay[col] = updates[col];
+            }
+            const sibCovered = await findBillingCoveredVisits(trx, convSiblings.map((row) => (
+              Object.keys(conversionOverlay).length === 0 ? row
+                : { ...row, _proposed: { ...(row._proposed || {}), ...conversionOverlay } })), { liveInvoice: true });
             if (sibCovered.size > 0) {
               const [firstId, reason] = [...sibCovered.entries()][0];
               const when = convSiblings.find((visit) => visit.id === firstId);
