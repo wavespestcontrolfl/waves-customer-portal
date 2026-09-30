@@ -262,6 +262,28 @@ async function executeExpandedTool(toolName, input, contextCustomerId, context =
       // an autonomous assistant turn keeps the sender's default-on hold check.
       const sendResult = await InvoiceService.sendViaSMS(invoiceId, { operatorInitiated: true, holdExempt: actorTechnicianId ? 'operator' : null, actorTechnicianId });
       if (sendResult?.code === 'COLLECTION_HOLD_DEFER') {
+        // The held invoice must still go out once the hold is released: hand it to the
+        // scheduled-invoice sender (draft -> scheduled). The sender holds it while the
+        // dispute stands and sends it on the first tick after the release. A queue
+        // failure is surfaced (never reported as a clean hold) so the invoice is not lost.
+        try {
+          await require('../collections/collection-hold').queueHeldInvoiceForSender(invoiceId);
+        } catch (queueErr) {
+          require('../logger').error(`[ai-assistant] send_payment_link: invoice ${invoiceId} was held by a dispute hold but could not be queued for sending after release: ${queueErr.message}`);
+          try {
+            await require('../dispatch-alerts').createAlert({
+              type: 'collection_hold_invoice_queue_failed',
+              severity: 'warn',
+              payload: {
+                invoiceId: String(invoiceId),
+                customerId: String(customerId),
+                error: String(queueErr.message || queueErr).slice(0, 300),
+                action: 'A dispute hold withheld the assistant\'s payment link but the invoice could not be queued to send once the hold ends. Send it from the invoice page after the hold is released.',
+              },
+            });
+          } catch { /* the error log above is the last resort */ }
+          return { error: 'send_failed' };
+        }
         return { sent: false, held: true, message: 'Billing follow-up is on hold for this account, so no payment link was sent. Do not promise one; a team member will follow up.' };
       }
       // sent reflects ACTUAL delivery only — never `|| sendResult?.ok`

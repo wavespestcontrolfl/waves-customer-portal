@@ -20,7 +20,12 @@ jest.mock('../services/invoice', () => ({
   sendViaSMS: jest.fn(async () => ({ sent: true, payUrl: 'https://pay.example/x' })),
 }));
 
+jest.mock('../services/collections/collection-hold', () => ({ queueHeldInvoiceForSender: jest.fn(async () => ({ queued: true })) }));
+jest.mock('../services/dispatch-alerts', () => ({ createAlert: jest.fn(async () => ({})) }));
+
 const InvoiceService = require('../services/invoice');
+const CollectionHold = require('../services/collections/collection-hold');
+const DispatchAlerts = require('../services/dispatch-alerts');
 const { executeToolCall } = require('../services/ai-assistant/tools-expanded');
 
 describe('send_payment_link operator context', () => {
@@ -111,5 +116,15 @@ describe('send_payment_link — sent must reflect actual delivery, never sendRes
     const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1');
     expect(out).toMatchObject({ sent: false, held: true });
     expect(out.message).toMatch(/no payment link was sent/i);
+    // the held invoice is handed to the scheduled sender so it goes out after the release
+    expect(CollectionHold.queueHeldInvoiceForSender).toHaveBeenCalledWith('inv-1');
+  });
+
+  test('a held send whose queue write fails is surfaced (alert + error), never reported as a clean hold', async () => {
+    InvoiceService.sendViaSMS.mockResolvedValueOnce({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER', retryable: true });
+    CollectionHold.queueHeldInvoiceForSender.mockRejectedValueOnce(new Error('queue down'));
+    const out = await executeToolCall('send_payment_link', { invoice_id: 'inv-1' }, 'cust-1');
+    expect(out).toEqual({ error: 'send_failed' });
+    expect(DispatchAlerts.createAlert).toHaveBeenCalledWith(expect.objectContaining({ type: 'collection_hold_invoice_queue_failed' }));
   });
 });
