@@ -418,7 +418,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
   test('a link-only reply with no snapshot at all fails closed', async () => {
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: null, factsGeneratedAt: null,
-      outgoingBody: 'Here you go: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Here you go: portal.wavespestcontrol.com/track/abc123',
     });
     expect(reason).toBe('eta_claim_no_snapshot');
   });
@@ -427,7 +427,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['other-token'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
     });
     expect(reason).toBe('eta_claim_untracked_link');
@@ -437,7 +437,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(), // an hour old — irrelevant to a link-only share
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
     });
     expect(reason).toBeNull();
@@ -447,7 +447,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'on_site', track_state: 'on_property', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
     });
     expect(reason).toBeNull();
@@ -457,7 +457,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
     });
     expect(reason).toBe('eta_claim_no_longer_en_route');
@@ -467,7 +467,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'The tech is 12 minutes away: wavespestcontrol.com/track/stale-token',
+      outgoingBody: 'The tech is 12 minutes away: portal.wavespestcontrol.com/track/stale-token',
       now: NOW,
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
     });
@@ -478,7 +478,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'The tech is 12 minutes away: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'The tech is 12 minutes away: portal.wavespestcontrol.com/track/abc123',
       now: NOW,
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
     });
@@ -721,7 +721,7 @@ describe('round 6 (Codex P2): a token\'s OWNING row must itself be live — a gr
         entries: [{ minutes: 9, scheduledServiceIds: ['svc-cancelled', 'svc-live'], trackTokens: ['cancelled-token', 'live-token'] }],
       },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/cancelled-token',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/cancelled-token',
       now: NOW,
       dbh: fakeDb([
         { id: 'svc-cancelled', status: 'cancelled', track_state: null, track_view_token: 'cancelled-token', track_token_expires_at: FUTURE },
@@ -739,7 +739,7 @@ describe('round 6 (Codex P2): a token\'s OWNING row must itself be live — a gr
         entries: [{ minutes: 9, scheduledServiceIds: ['svc-cancelled', 'svc-live'], trackTokens: ['cancelled-token', 'live-token'] }],
       },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/live-token',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/live-token',
       now: NOW,
       dbh: fakeDb([
         { id: 'svc-cancelled', status: 'cancelled', track_state: null, track_view_token: 'cancelled-token', track_token_expires_at: FUTURE },
@@ -762,7 +762,7 @@ describe('round 5 (Codex P2): a /track/ link\'s own token expiry is re-checked, 
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: PAST }]),
     });
     expect(reason).toBe('eta_claim_link_expired');
@@ -772,7 +772,7 @@ describe('round 5 (Codex P2): a /track/ link\'s own token expiry is re-checked, 
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: null }]),
     });
     expect(reason).toBe('eta_claim_link_expired');
@@ -782,7 +782,7 @@ describe('round 5 (Codex P2): a /track/ link\'s own token expiry is re-checked, 
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'Track your tech here: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'on_site', track_state: 'on_property', track_view_token: 'abc123', track_token_expires_at: PAST }]),
     });
     expect(reason).toBe('eta_claim_link_expired');
@@ -792,7 +792,7 @@ describe('round 5 (Codex P2): a /track/ link\'s own token expiry is re-checked, 
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: FRESH,
-      outgoingBody: 'The tech is 12 minutes away: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'The tech is 12 minutes away: portal.wavespestcontrol.com/track/abc123',
       now: NOW,
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: PAST }]),
     });
@@ -803,7 +803,7 @@ describe('round 5 (Codex P2): a /track/ link\'s own token expiry is re-checked, 
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
       factsGeneratedAt: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
-      outgoingBody: 'He is on the way and should be there in a few: wavespestcontrol.com/track/abc123',
+      outgoingBody: 'He is on the way and should be there in a few: portal.wavespestcontrol.com/track/abc123',
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: PAST }]),
     });
     expect(reason).toBe('eta_claim_link_expired');
@@ -855,7 +855,7 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
   test('status + link with TWO live visits binds to the entry the link token names, not ambiguous', async () => {
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: twoEntrySnapshot, factsGeneratedAt: FRESH, now: NOW,
-      outgoingBody: 'Your pest tech is on the way: wavespestcontrol.com/track/pest-token',
+      outgoingBody: 'Your pest tech is on the way: portal.wavespestcontrol.com/track/pest-token',
       dbh: fakeDb(liveRows),
     });
     expect(reason).toBeNull();
@@ -864,7 +864,7 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
   test('status + link with two live visits still fails closed when the named visit is no longer en_route', async () => {
     const reason = await etaClaimBlockReason({
       liveEtaSnapshot: twoEntrySnapshot, factsGeneratedAt: FRESH, now: NOW,
-      outgoingBody: 'Your pest tech is on the way: wavespestcontrol.com/track/pest-token',
+      outgoingBody: 'Your pest tech is on the way: portal.wavespestcontrol.com/track/pest-token',
       dbh: fakeDb([{ ...liveRows[0], status: 'completed', track_state: 'complete' }, liveRows[1]]),
     });
     expect(reason).toBe('eta_claim_no_longer_en_route');
@@ -878,7 +878,7 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
     expect(noLink).toBe('eta_claim_ambiguous');
     const stray = await etaClaimBlockReason({
       liveEtaSnapshot: twoEntrySnapshot, factsGeneratedAt: FRESH, now: NOW,
-      outgoingBody: 'Your tech is on the way: wavespestcontrol.com/track/stray-token', dbh: fakeDb(liveRows),
+      outgoingBody: 'Your tech is on the way: portal.wavespestcontrol.com/track/stray-token', dbh: fakeDb(liveRows),
     });
     expect(stray).toBe('eta_claim_ambiguous');
   });
@@ -1046,5 +1046,94 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
       dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
     });
     expect(reason).toBe('eta_claim_unbound');
+  });
+
+  // Codex round-13 P2 (PR #5334) — seconds/days, the canonical link host, and
+  // completed arrivals.
+  describe('round 13 P2s', () => {
+    const snap = { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'] }] };
+    const enRoute = [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE }];
+    const onSite = [{ id: 'svc-1', status: 'on_site', track_state: 'on_property', track_view_token: 'tok-1', track_token_expires_at: FUTURE }];
+    const check = (outgoingBody, rows = enRoute, liveEtaSnapshot = snap) => etaClaimBlockReason({
+      liveEtaSnapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW, dbh: fakeDb(rows),
+    });
+
+    test.each([
+      'The tech is 90 seconds away.',
+      'The tech is a few seconds away.',
+      'The tech is 2 days away.',
+    ])('%p is a timed claim that cannot bind (never status-only)', async (body) => {
+      expect(await check(body)).toBe('eta_claim_unbound');
+    });
+
+    test('"60 seconds away" binds to an entry of exactly 1 minute', async () => {
+      expect(await check('The tech is 60 seconds away.', enRoute, { entries: [{ minutes: 1, scheduledServiceIds: ['svc-1'] }] })).toBeNull();
+    });
+
+    describe('tracking links must be the canonical origin + exact token path', () => {
+      test.each([
+        'Track: evil.example/track/tok-1',
+        'Track: https://evil.example/track/tok-1',
+        'Track: portal.wavespestcontrol.com.evil.example/track/tok-1',
+        'Track: evil.example/portal.wavespestcontrol.com/track/tok-1',
+        'Track: portal.wavespestcontrol.com/track/tok-1/extra',
+        'Track: portal.wavespestcontrol.com/track/tok-1?ref=x',
+        'Track: portal.wavespestcontrol.com/track/tok-1#frag',
+        'Track: /track/tok-1',
+      ])('%p is refused', async (body) => {
+        expect(await check(body)).toBe('eta_claim_link_untrusted');
+      });
+
+      test('a foreign link is refused even with no snapshot at all', async () => {
+        expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'Track: evil.example/track/tok-1', now: NOW })).toBe('eta_claim_link_untrusted');
+      });
+
+      test.each([
+        'Track: portal.wavespestcontrol.com/track/tok-1',
+        'Track: https://portal.wavespestcontrol.com/track/tok-1.',
+        'Track: PORTAL.WAVESPESTCONTROL.COM/Track/tok-1',
+        '(portal.wavespestcontrol.com/track/tok-1)',
+      ])('%p is trusted (host compared case-insensitively, punctuation tolerated)', async (body) => {
+        expect(await check(body)).toBeNull();
+      });
+
+      test('the configured portal origin is what is trusted (PUBLIC_PORTAL_URL)', async () => {
+        const prior = process.env.PUBLIC_PORTAL_URL;
+        process.env.PUBLIC_PORTAL_URL = 'https://portal.example.test';
+        try {
+          expect(await check('Track: portal.example.test/track/tok-1')).toBeNull();
+          expect(await check('Track: portal.wavespestcontrol.com/track/tok-1')).toBe('eta_claim_link_untrusted');
+        } finally {
+          if (prior === undefined) delete process.env.PUBLIC_PORTAL_URL; else process.env.PUBLIC_PORTAL_URL = prior;
+        }
+      });
+    });
+
+    describe('a completed arrival requires the on-site tracker state', () => {
+      test.each([
+        'The technician has arrived.',
+        'The tech is here.',
+        'The tech pulled up.',
+      ])('%p is blocked while the visit is still en_route', async (body) => {
+        expect(await check(body, enRoute)).toBe('eta_claim_no_longer_en_route');
+      });
+      test('...and passes once the visit is on_property', async () => {
+        expect(await check('The technician has arrived.', onSite)).toBeNull();
+      });
+      test.each([
+        'The tech will arrive in a bit.',
+        'The tech is on the way.',
+      ])('%p stays en-route status: passes en_route, blocked once on site', async (body) => {
+        // "on the way" is en-route-only copy; "will arrive" mentions arrival without minutes
+        expect(await check(`${body} About 2 minutes.`, enRoute)).toBeNull();
+      });
+      test('a completed arrival beside a minutes claim contradicts itself — refused', async () => {
+        expect(await check('The tech has arrived, about 2 minutes ago.', enRoute)).not.toBeNull();
+        expect(await check('The tech has arrived and is 2 minutes away.', onSite)).toBe('eta_claim_unbound');
+      });
+      test('with no snapshot and no link, an arrival sentence is untouched', async () => {
+        expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'The technician has arrived.', now: NOW })).toBeNull();
+      });
+    });
   });
 });

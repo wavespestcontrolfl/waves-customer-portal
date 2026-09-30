@@ -789,6 +789,62 @@ function perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey) {
   });
 }
 
+// The upcoming-services row set: the same query getContextForCustomer always
+// ran (next three by date), plus — when the caller resolves LIVE ETA — any
+// currently-live visit (customer-facing track_state en_route/on_property) the
+// limit would have dropped (Codex round-13 P2, PR #5334): a 4-service day
+// (pest + lawn + mosquito + tree stop) could push the en-route row past
+// limit(3), so "where's the tech" reported no live location while the public
+// tracker was active. A customer with no live row, or whose live row is
+// already in the first three, gets EXACTLY the old rows in the old order.
+const LIVE_TRACK_STATES = ['en_route', 'on_property'];
+function upcomingServicesBase(customer) {
+  return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
+}
+const UPCOMING_SERVICE_COLUMNS = [
+  'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name',
+  // LIVE ETA inputs (GATE_SMS_REAL_ANSWERS) — technician_id + the
+  // tech's Bouncie IMEI to resolve a fresh GPS position, the visit's
+  // own track_view_token for the SAME "Track live" link the en-route
+  // SMS sends, and the stamped-vs-primary destination coords
+  // track-transitions.js's resolveEnRouteEtaMinutes already reads the
+  // same way for the initial en-route text.
+  // track_state (Codex round-1 finding, PR #5334): the admin-side
+  // status flip and the customer-facing tracker flip are two separate
+  // writes (server/routes/tech-track.js commits status='en_route'
+  // BEFORE calling track-transitions.markEnRoute, and does not roll
+  // the status back if that second write fails) — a LIVE ETA fact
+  // must require the SAME customer-facing tracker state the public
+  // tracking page requires for a live vehicle, never raw status alone,
+  // or it can advertise "Track live" for a stop the tracking page
+  // itself still renders as scheduled. See customerTrackState below.
+  'ss.id', 'ss.technician_id', 'ss.track_view_token', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei',
+  'ss.lat as service_lat', 'ss.lng as service_lng',
+  'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city',
+];
+const dateOrderKey = (row) => (row.scheduled_date instanceof Date ? row.scheduled_date.getTime() : Date.parse(row.scheduled_date) || 0);
+// Live rows the limited list is missing go IN; non-live rows come off the end
+// to stay at `cap`; the original date order is restored (stable).
+function mergeLiveUpcoming(limited, liveRows, cap = 3) {
+  const have = new Set(limited.map((r) => r.id));
+  const missing = liveRows.filter((r) => !have.has(r.id));
+  if (!missing.length) return limited;
+  const liveIds = new Set(liveRows.map((r) => r.id));
+  const merged = [...missing, ...limited];
+  while (merged.length > cap) {
+    const drop = merged.map((r) => liveIds.has(r.id)).lastIndexOf(false);
+    if (drop === -1) break;
+    merged.splice(drop, 1);
+  }
+  return merged.sort((a, b) => dateOrderKey(a) - dateOrderKey(b));
+}
+async function loadUpcomingServices(customer, includeLiveEta) {
+  const limited = await upcomingServicesBase(customer).orderBy('ss.scheduled_date').limit(3).select(...UPCOMING_SERVICE_COLUMNS);
+  if (!includeLiveEta) return limited;
+  const liveRows = await upcomingServicesBase(customer).whereIn('ss.track_state', LIVE_TRACK_STATES).orderBy('ss.scheduled_date').limit(10).select(...UPCOMING_SERVICE_COLUMNS);
+  return mergeLiveUpcoming(limited, liveRows);
+}
+
 // Test-only: clears the cross-request memo so unrelated test cases sharing a
 // (technician, destination) key never see a previous test's cached lookup.
 // Never called from production code.
@@ -845,27 +901,7 @@ class ContextAggregator {
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
       db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select(
-        'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name',
-        // LIVE ETA inputs (GATE_SMS_REAL_ANSWERS) — technician_id + the
-        // tech's Bouncie IMEI to resolve a fresh GPS position, the visit's
-        // own track_view_token for the SAME "Track live" link the en-route
-        // SMS sends, and the stamped-vs-primary destination coords
-        // track-transitions.js's resolveEnRouteEtaMinutes already reads the
-        // same way for the initial en-route text.
-        // track_state (Codex round-1 finding, PR #5334): the admin-side
-        // status flip and the customer-facing tracker flip are two separate
-        // writes (server/routes/tech-track.js commits status='en_route'
-        // BEFORE calling track-transitions.markEnRoute, and does not roll
-        // the status back if that second write fails) — a LIVE ETA fact
-        // must require the SAME customer-facing tracker state the public
-        // tracking page requires for a live vehicle, never raw status alone,
-        // or it can advertise "Track live" for a stop the tracking page
-        // itself still renders as scheduled. See customerTrackState below.
-        'ss.id', 'ss.technician_id', 'ss.track_view_token', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei',
-        'ss.lat as service_lat', 'ss.lng as service_lng',
-        'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city'
-      ),
+      loadUpcomingServices(customer, includeLiveEta),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
       // five future autopay rows empty the history.
@@ -1506,4 +1542,6 @@ module.exports.liveEtaDedupeKey = liveEtaDedupeKey;
 module.exports.liveEtaEligible = liveEtaEligible;
 module.exports._resetLiveEtaMemoForTests = _resetLiveEtaMemoForTests;
 module.exports.perVisitLiveEtas = perVisitLiveEtas;
+module.exports.mergeLiveUpcoming = mergeLiveUpcoming;
+module.exports.loadUpcomingServices = loadUpcomingServices;
 module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

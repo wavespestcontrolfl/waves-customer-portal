@@ -80,6 +80,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { publicPortalUrl } = require('../utils/portal-url');
 
 // 15 minutes: long enough that an ordinary reviewer accept/edit cycle (a
 // human reading a composer card and clicking Send) never gets blocked by
@@ -94,22 +95,49 @@ const logger = require('./logger');
 // instead of this draft-time window.
 const ETA_FRESHNESS_WINDOW_MS = 15 * 60 * 1000;
 
-// A /track/:token link anywhere in the outgoing body (Codex round-4 P2) —
-// matched on the bare path, never a full URL parse, since the send path
-// (and comms-lint) can strip the https:// scheme before or after this runs;
-// "/track/" itself never appears in ordinary customer copy. Case-INSENSITIVE
-// (Codex round-10 P2): the customer-facing React route is not case-sensitive,
-// so "portal.example/Track/<token>" is a working link and must be validated
-// like "/track/<token>"; the host is never matched at all (path only), and
-// the captured token keeps its own case (tokens are case-sensitive).
-const TRACK_LINK_TOKEN_RE = /\/track\/([A-Za-z0-9_-]+)/gi;
+// Every /track/:token link in the outgoing body, scanned as a URL (Codex
+// round-4 P2; host + exact path — round-13 P2, PR #5334). The send path (and
+// comms-lint) can strip the https:// scheme before or after this runs, so a
+// scheme is optional, but a link is only TRUSTED when
+//   - its host is the canonical portal origin's host (utils/portal-url's
+//     publicPortalUrl — the SAME base the tracking-link builder uses),
+//     compared case-insensitively — a valid snapshot token on another host
+//     would hand the real token-scoped tracking page to that host;
+//   - the path is EXACTLY /track/<token> (case-insensitive, Codex round-10:
+//     the React route isn't case-sensitive) with nothing but sentence
+//     punctuation after it — no extra path segments, query, or fragment;
+//   - it HAS a host (a bare "/track/<token>" names no origin at all).
+// The captured token keeps its own case (tokens are case-sensitive). Any
+// untrusted /track/ link is a `violation`, refused outright.
+const TRACK_URL_RE = /(?:(?<![\w./@:-])((?:https?:\/\/)?(?:[a-z0-9-]+\.)+[a-z0-9-]+(?::\d+)?))?\/track\/([A-Za-z0-9_-]*)([^\s]*)/gi;
+const TRAILING_PUNCTUATION_RE = /^[.,;:!?)\]"'>]*$/;
+
+function canonicalPortalHost() {
+  try {
+    return new URL(publicPortalUrl()).host.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function trackLinkIsTrusted(host, token, rest, canonicalHost) {
+  if (!host || !token || !TRAILING_PUNCTUATION_RE.test(rest)) return false;
+  return host.replace(/^https?:\/\//i, '').toLowerCase() === canonicalHost;
+}
+
+function scanTrackLinks(text) {
+  const tokens = new Set();
+  let violation = false;
+  const canonicalHost = canonicalPortalHost();
+  for (const m of String(text || '').matchAll(new RegExp(TRACK_URL_RE.source, TRACK_URL_RE.flags))) {
+    if (trackLinkIsTrusted(m[1], m[2], m[3], canonicalHost)) tokens.add(m[2]);
+    else violation = true;
+  }
+  return { tokens: [...tokens], violation };
+}
 
 function extractTrackTokens(text) {
-  const tokens = new Set();
-  const re = new RegExp(TRACK_LINK_TOKEN_RE.source, TRACK_LINK_TOKEN_RE.flags);
-  let m;
-  while ((m = re.exec(String(text || '')))) tokens.add(m[1]);
-  return [...tokens];
+  return scanTrackLinks(text).tokens;
 }
 
 function parseDraftedAt(factsGeneratedAt) {
@@ -155,31 +183,46 @@ function sendTimeTrackTokenLive(expiresAt) {
 //                      closed as unbound; ages out like a stated number
 //   unparsedStatusClaim pure status copy ("on the way") — rechecked against
 //                      the CURRENT tracker state only, no freshness window
-function classifyEtaBody({ outgoingBody, snapshotHasEntries }) {
+// Timed claims that carry no parseable exact figure, or one the parser could
+// not convert (round 5/6/9/11/13): fail closed as unbound.
+function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
+  const unreadTimed = drafter.bodyHasTimedArrivalPhrase(outgoingBody) || drafter.bodyHasUnclassifiedArrivalDigit(outgoingBody);
+  // Codex round-9 P2: an hour/day/week word normalization could NOT turn
+  // into minutes is a timed claim even beside a real minutes figure, once a
+  // live ETA context exists to hold the body to.
+  const unreadHours = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true });
+  // Codex round-11 P2: a number word that could not be converted to digits
+  // ("a thousand minutes") is a timed claim on every path.
+  const unreadNumbers = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unconvertedNumbersOnly: true });
+  return (!claims.length && unreadTimed) || unreadHours || unreadNumbers;
+}
+
+function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries }) {
   const drafter = require('./sms-shadow-drafter');
-  const trackTokens = extractTrackTokens(outgoingBody);
+  const trackTokens = extractTrackTokens(fullBody);
+  // The link itself is not prose: a token like "a-12-b" must never read as a
+  // "12" minutes figure, so claim analysis runs on the body without its
+  // /track/ URLs.
+  const outgoingBody = String(fullBody || '').replace(new RegExp(TRACK_URL_RE.source, TRACK_URL_RE.flags), ' ');
   const hasTrackLink = trackTokens.length > 0;
   const liveContext = snapshotHasEntries || hasTrackLink;
   const claims = liveContext
     ? [...drafter.findEtaMinutesClaims(outgoingBody), ...drafter.findGroundedMinutesFigures(outgoingBody)]
     : drafter.findEtaMinutesClaims(outgoingBody);
-  const unreadTimed = drafter.bodyHasTimedArrivalPhrase(outgoingBody) || drafter.bodyHasUnclassifiedArrivalDigit(outgoingBody);
-  // Codex round-9 P2: an hour word normalization could NOT turn into minutes
-  // is a timed claim even beside a real minutes figure, once a live ETA
-  // context exists to hold the body to.
-  const unreadHours = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true });
-  // Codex round-11 P2: a number word that could not be converted to digits
-  // ("a thousand minutes") is a timed claim on every path.
-  const unreadNumbers = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unconvertedNumbersOnly: true });
-  const timedArrivalClaim = (!claims.length && unreadTimed) || unreadHours || unreadNumbers;
+  const timedArrivalClaim = unreadTimedClaim(drafter, outgoingBody, { claims, liveContext });
+  // Codex round-13 P2: "has arrived" / "is here" / "pulled up" states the
+  // tech IS on site — a different fact from "on the way" status copy, so it
+  // requires the on-site tracker state at send. Only meaningful (and only
+  // checked) where a live snapshot/link says which visit it is about.
+  const arrivedClaim = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true });
   // Backstop (audit P1, round 4): a body that talks about the tech arriving
   // is checked whenever the draft carried a LIVE ETA, or whenever it
   // mentions minutes at all.
   const mentionsMinutes = snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || ''));
-  const unparsedStatusClaim = !claims.length && !timedArrivalClaim && drafter.bodyMentionsArrival(outgoingBody) && mentionsMinutes;
+  const unparsedStatusClaim = !claims.length && !timedArrivalClaim && !arrivedClaim && drafter.bodyMentionsArrival(outgoingBody) && mentionsMinutes;
   return {
-    claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim,
-    hasClaim: claims.length > 0 || timedArrivalClaim || unparsedStatusClaim,
+    claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim,
+    hasClaim: claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim,
   };
 }
 
@@ -233,7 +276,10 @@ function bindTimedOrMinutesClaim(claim, entries, { factsGeneratedAt, now }) {
 
 // Phase 2. Returns { entries } (the bound entries) or { reason }.
 function bindEtaClaim(claim, entries, freshness) {
-  if (claim.unparsedStatusClaim) return bindStatusClaim(claim, entries);
+  // A completed-arrival claim ("has arrived") beside a minutes/timed claim
+  // contradicts itself (en route vs on site) — fail closed.
+  if (claim.arrivedClaim && (claim.claims.length || claim.timedArrivalClaim)) return { reason: 'eta_claim_unbound' };
+  if (claim.unparsedStatusClaim || claim.arrivedClaim) return bindStatusClaim(claim, entries);
   // Two distinct live ETAs (Codex r3): a minutes/timed claim can't be tied
   // to the right visit deterministically, so even the right number fails
   // closed.
@@ -251,6 +297,9 @@ function bindEtaClaim(claim, entries, freshness) {
  * instead of round-tripping through JSON.
  */
 async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, now = new Date(), dbh = db }) {
+  // Codex round-13 P2: any /track/ link that is not the canonical origin's exact
+  // token path is refused outright, claim or not.
+  if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';
   const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0 });
   if (!claim.hasClaim && !claim.hasTrackLink) return null;
   const entries = usableSnapshotEntries(liveEtaSnapshot);
@@ -272,7 +321,7 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // link belong to the SAME bound visit(s) — never let a mismatched or stale
   // link ride along on an otherwise-valid claim.
   if (claim.hasTrackLink && !entriesForTokens(bound.entries, claim.trackTokens).length) return 'eta_claim_untracked_link';
-  return checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
+  return checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, requireOnSite: claim.arrivedClaim, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
 }
 
 // Shared "is the bound entry's visit still customer-facing live" recheck —
@@ -286,12 +335,14 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
 // checked too, never inferred from the visit's status/track_state alone, so
 // an expired (or unexpectedly missing) token blocks the send even while its
 // row still reads en_route/on_property.
-async function checkEntriesStillLive({ boundEntries, allowOnSite, dbh, trackTokensToVerify = [] }) {
+async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
     const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at');
-    const liveStates = allowOnSite ? new Set(['en_route', 'on_property']) : new Set(['en_route']);
+    // requireOnSite (Codex round-13 P2): a completed-arrival claim ("has
+    // arrived") holds only once the tracker says the tech is on the property.
+    const liveStates = new Set(requireOnSite ? ['on_property'] : (allowOnSite ? ['en_route', 'on_property'] : ['en_route']));
     const liveById = new Map(rows.map((row) => [row.id, liveStates.has(customerTrackState(row))]));
     // Codex round-7 P2: a minutes/status claim about a grouped entry
     // implicitly covers EVERY sibling in it ("your techs are 9 minutes

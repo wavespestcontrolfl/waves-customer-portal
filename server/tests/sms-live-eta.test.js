@@ -33,7 +33,7 @@ const { resolveFreshTechPosition } = require('../services/tracking-vehicle-locat
 const { calculateBoundedTrackingEta, STALE_TECH_STATUS_MS } = require('../services/customer-tracking-eta');
 const {
   resolveLiveEtaFact, liveEtaDestination, liveEtaDedupeKey, liveEtaEligible,
-  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests, perVisitLiveEtas,
+  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests, perVisitLiveEtas, mergeLiveUpcoming,
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
@@ -456,6 +456,66 @@ describe('perVisitLiveEtas — grouped-stop siblings share minutes, never a trac
 
   test('a visit with no key / no resolved result stays null', () => {
     expect(perVisitLiveEtas([baseRow(), baseRow()], [null, 'k'], new Map())).toEqual([null, null]);
+  });
+});
+
+// Codex round-13 P2 (PR #5334): limit(3) could drop the en-route row on a
+// 4-service day, so "where's the tech" found no live tech.
+describe('upcoming services keep a live visit the limit(3) would drop (round 13 P2)', () => {
+  const row = (id, date, track_state = 'scheduled') => ({ id, scheduled_date: date, track_state });
+  test('a customer with no live row (or a live row already in the first three) gets EXACTLY the old rows in the old order', () => {
+    const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-10-01')];
+    expect(mergeLiveUpcoming(limited, [])).toBe(limited);
+    expect(mergeLiveUpcoming(limited, [row('b', '2026-09-30', 'en_route')])).toBe(limited);
+  });
+
+  test('the live row the limit dropped is merged in, a non-live row comes off the end, date order is kept', () => {
+    const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-09-30')];
+    const merged = mergeLiveUpcoming(limited, [row('d', '2026-09-30', 'en_route')]);
+    expect(merged.map((r) => r.id).sort()).toEqual(['a', 'b', 'd']);
+    expect(merged).toHaveLength(3);
+  });
+
+  test('live rows are never the ones dropped to stay at the cap', () => {
+    const limited = [row('a', '2026-09-30', 'en_route'), row('b', '2026-09-30'), row('c', '2026-10-02')];
+    const merged = mergeLiveUpcoming(limited, [row('a', '2026-09-30', 'en_route'), row('d', '2026-10-01', 'on_property')]);
+    expect(merged.map((r) => r.id)).toEqual(['a', 'b', 'd']);
+  });
+
+  describe('loadUpcomingServices — the live query runs only when LIVE ETA is requested', () => {
+    function loadWithDb(limitedRows, liveRows) {
+      const calls = { live: 0, base: 0 };
+      let agg;
+      jest.isolateModules(() => {
+        jest.doMock('../models/db', () => jest.fn(() => {
+          let isLive = false;
+          const chain = {};
+          for (const m of ['leftJoin', 'where', 'orderBy', 'limit']) chain[m] = () => chain;
+          chain.whereIn = (col) => { if (col === 'ss.track_state') isLive = true; return chain; };
+          chain.select = async () => { if (isLive) { calls.live += 1; return liveRows; } calls.base += 1; return limitedRows; };
+          return chain;
+        }));
+        agg = require('../services/context-aggregator');
+      });
+      return { agg, calls };
+    }
+    afterEach(() => { jest.dontMock('../models/db'); });
+
+    test('includeLiveEta false: only the original limited query runs (byte-identical rows)', async () => {
+      const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-09-30')];
+      const { agg, calls } = loadWithDb(limited, [row('d', '2026-09-30', 'en_route')]);
+      await expect(agg.loadUpcomingServices({ id: 'c1' }, false)).resolves.toBe(limited);
+      expect(calls).toEqual({ live: 0, base: 1 });
+    });
+
+    test('includeLiveEta true: the live row missing from the limited list is merged in', async () => {
+      const limited = [row('a', '2026-09-30'), row('b', '2026-09-30'), row('c', '2026-09-30')];
+      const { agg, calls } = loadWithDb(limited, [row('d', '2026-09-30', 'en_route')]);
+      const out = await agg.loadUpcomingServices({ id: 'c1' }, true);
+      expect(out.map((r) => r.id)).toContain('d');
+      expect(out).toHaveLength(3);
+      expect(calls).toEqual({ live: 1, base: 1 });
+    });
   });
 });
 
@@ -1218,6 +1278,56 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
       expect(bodyHasTimedArrivalPhrase(body, { unnormalizedHoursOnly: true })).toBe(false);
       expect(bodyHasTimedArrivalPhrase(body, { unconvertedNumbersOnly: true })).toBe(false);
       expect(bodyHasTimedArrivalPhrase('Your arrival window is half an hour.')).toBe(false);
+    });
+  });
+
+  // Codex round-13 P2 (PR #5334): seconds/days/weeks arrival durations and
+  // completed-arrival claims.
+  describe('seconds, days and completed arrivals (round 13 P2)', () => {
+    const facts = (n) => `LIVE STATUS: tech marked en route to this visit, LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      ['The tech is 90 seconds away.', [1.5]],
+      ['The tech is 30 secs out.', [0.5]],
+      ['The tech is 60 seconds away.', [1]],
+    ])('%p reads as %p minutes', (reply, minutes) => {
+      expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual(minutes);
+    });
+    test.each([
+      'The tech is 90 seconds away.',
+      'The tech is a few seconds away.',
+      'The tech is 2 days away.',
+      'The tech will arrive in 3 weeks.',
+    ])('%p is rejected against a live 2-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+    test('"60 seconds away" binds to a live 1-minute ETA exactly', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The tech is 60 seconds away.', factsBlock: facts(1) }).ok).toBe(true);
+    });
+    test('a bare "day" (no count) is never a duration claim', () => {
+      expect(validateLiveEtaMinutes({ reply: 'Have a great day — the tech is on the way!', factsBlock: facts(2) }).ok).toBe(true);
+    });
+
+    test.each([
+      'The technician has arrived.',
+      'The tech just arrived at your home.',
+      'The tech is here.',
+      "He's outside.",
+      'The tech pulled up.',
+    ])('%p is rejected while the facts say the tech is still EN ROUTE', (reply) => {
+      const result = validateLiveEtaMinutes({ reply, factsBlock: facts(2) });
+      expect(result.ok).toBe(false);
+      expect(result.violations[0]).toMatch(/ARRIVED/);
+    });
+    test('the same arrival claims pass once the facts say the tech is on site', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The technician has arrived.', factsBlock: 'LIVE STATUS: tech marked on site at this visit' }).ok).toBe(true);
+    });
+    test.each([
+      'The tech will arrive in 2 minutes.',
+      'The tech is arriving in 2 minutes.',
+      "The tech hasn't arrived yet.",
+      'We are here to help — the tech is on the way!',
+    ])('%p stays en-route status (not a completed arrival)', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(true);
     });
   });
 

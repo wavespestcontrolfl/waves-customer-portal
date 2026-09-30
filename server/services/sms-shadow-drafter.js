@@ -789,6 +789,11 @@ function normalizeTimeQuantities(text) {
   // "2 hours", "2h", "1.5 hrs".
   out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h\b)/gi,
     (m, n) => `${hoursToMinutes(n)} minutes`);
+  // "90 seconds" -> "1.5 minutes" (Codex round-13 P2): a seconds ETA is a
+  // real, timed arrival claim; as a (usually non-integer) minutes figure it
+  // can only bind to a live fact that equals it exactly.
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)[\s-]*(?:seconds?|secs?)\b/gi,
+    (m, n) => `${Number((parseFloat(n) / 60).toFixed(4))} minutes`);
   return out;
 }
 // Fail-closed leftover check for normalizeTimeQuantities: any hour word still
@@ -814,13 +819,25 @@ function unreadDurationInArrivalSentence(str, wordRe) {
   }
   return false;
 }
+// Hour words the normalizer could not convert, plus any counted day/week/month
+// duration (Codex round-13 P2: "in 2 days" is a timed arrival claim like
+// any other; a bare "day" — "have a great day" — is not).
+const UNREAD_LONG_DURATION_RE = /\b(?:hours?|hrs?)\b|\b(?:\d+(?:\.\d+)?|an?|a\s+(?:couple|few)(?:\s+of)?|several)[\s-]+(?:days?|weeks?|months?)\b/gi;
 function bodyHasUnnormalizedHourWord(text) {
-  return unreadDurationInArrivalSentence(normalizeTimeQuantities(normalizeNumberWords(text)), /\b(?:hours?|hrs?)\b/gi);
+  return unreadDurationInArrivalSentence(normalizeTimeQuantities(normalizeNumberWords(text)), UNREAD_LONG_DURATION_RE);
 }
 // Codex round-11 P2 (PR #5334): a number word the converter could not turn
 // into digits next to a time unit is rejected outright, live ETA or not.
 function bodyHasUnconvertedNumberWord(text) {
   return unreadDurationInArrivalSentence(normalizeNumberWords(text), UNCONVERTED_NUMBER_WORD_RE);
+}
+// A COMPLETED arrival (Codex round-13 P2, PR #5334): "has arrived", "just
+// arrived", "arrived at your home", "the tech is here / outside / at your
+// door", "pulled up" state the tech IS on site — a different fact from "on
+// the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|at\s+(?:your|the)\s+(?:house|home|place|property|door))|pulled\s+up)\b/i;
+function bodyClaimsCompletedArrival(text) {
+  return COMPLETED_ARRIVAL_RE.test(String(text || ''));
 }
 // Does the body talk about the tech arriving at all? The send-time freshness
 // check uses this as a backstop for ETA wording the claim parser can't read.
@@ -843,13 +860,14 @@ function bodyMentionsArrival(text) {
 // so "the treatment needs about half an hour to dry" (no arrival word at
 // all besides "out" from an unrelated "letting pets out") never
 // false-positives.
-const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?min(?:ute)?s?|any\s+minute\s+now|shortly|soon)\b/i;
+const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?(?:min(?:ute)?s?|sec(?:ond)?s?)|any\s+minute\s+now|shortly|soon)\b/i;
 // `unnormalizedHoursOnly` (Codex round-9 P2, PR #5334): instead of the vague
 // phrase list, report only whether an hour-based duration normalizeTimeQuantities
 // could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
 // Routed through this one already-shared entry point so every send seam's
 // existing import of the drafter keeps working unchanged.
-function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false } = {}) {
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false } = {}) {
+  if (completedArrivalOnly) return bodyClaimsCompletedArrival(text);
   if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text);
   if (unconvertedNumbersOnly) return bodyHasUnconvertedNumberWord(text);
   const str = normalizeNumberWords(text);
@@ -1151,6 +1169,12 @@ function buildLiveEtaSnapshot(context) {
 // not appear at all when the facts carry no LIVE ETA line.
 function validateLiveEtaMinutes({ reply, factsBlock }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  // Codex round-13 P2: a completed-arrival claim ("has arrived") with an
+  // en-route tech and no on-site fact is false — the facts must say the tech
+  // is on site before a reply may say so.
+  if (bodyClaimsCompletedArrival(reply) && /LIVE (?:STATUS: tech marked en route|ETA:)/.test(String(factsBlock || '')) && !/tech marked on site/.test(String(factsBlock || ''))) {
+    return { ok: false, violations: ['the reply says the tech has ARRIVED but the facts show the tech is still EN ROUTE — say the tech is on the way (with the exact LIVE ETA if stated), never that they have arrived'] };
+  }
   // Every LIVE ETA line, not only the first (audit P1): a customer with two
   // distinct live stops has two figures, and a reply about either is grounded.
   const factsMinutes = new Set([...String(factsBlock || '').matchAll(/LIVE ETA: about (\d+) minutes/g)].map((x) => parseInt(x[1], 10)));
@@ -3368,6 +3392,7 @@ module.exports = {
   normalizeTimeQuantities,
   bodyHasUnnormalizedHourWord,
   bodyHasUnconvertedNumberWord,
+  bodyClaimsCompletedArrival,
   replyClaimsEtaMinutes,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,
