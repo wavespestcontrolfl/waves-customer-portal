@@ -30,7 +30,7 @@ const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
-const { resolveLocation } = require('../config/locations');
+const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
@@ -111,7 +111,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms, isInServiceAreaCounty } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -1267,6 +1267,44 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
     // superseded worker's marker never lands.
     if (!bridgeNeedsConfirmation.includes('auto_booking_skipped_after_approval')) bridgeNeedsConfirmation.push('auto_booking_skipped_after_approval');
   }
+}
+
+// Geographic hard veto for the LEGACY (non-enforce) booking path. The V2
+// enforce gate already vetoes out_of_service_area, but with
+// CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
+// CALL_EXTRACTION_V2_DRIVES_ROUTING off, the legacy inbound condition would
+// auto-book an out-of-area address (DeSoto/Arcadia, owner ruling
+// 2026-09-30). This survives every routing mode. Evidence, strongest first:
+//   1. the Address Validation verdict — status out_of_service_area,
+//      inServiceArea === false, or a resolved county outside the served set.
+//      A positive verdict (inServiceArea === true) is final: model/extracted
+//      county text never overrides it.
+//   2. otherwise the extracted county (V2 property.service_address.county,
+//      then the legacy record's county, when present).
+//   3. otherwise a deterministic DeSoto locality (Arcadia and its ZIPs), so
+//      V2-disabled calls, which carry no AV and no county, still fail closed.
+// Served south-Hillsborough towns (config/locations.js) stay bookable: their
+// county is Hillsborough, which is not in SERVICE_AREA_COUNTIES.
+const DESOTO_LOCALITY_CITIES = new Set(['arcadia', 'nocatee', 'fort ogden']);
+const DESOTO_ZIPS = new Set(['34265', '34266', '34267', '34268', '34269']);
+function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null } = {}) {
+  const av = addressValidation || null;
+  const svc = v2Extraction?.property?.service_address || null;
+  const city = String(extracted?.city || svc?.city || av?.normalized?.city || '').toLowerCase().trim();
+  const zip = String(extracted?.zip || svc?.postal_code || av?.normalized?.postal_code || '').trim().slice(0, 5);
+  if (city && SOUTH_HILLSBOROUGH_CITIES.includes(city)) return null;
+  if (av && av.inServiceArea === true) return null;
+  if (av && (av.status === 'out_of_service_area' || av.inServiceArea === false)) {
+    return { reason: 'address_validation_out_of_service_area', county: av.county || null };
+  }
+  const county = av?.county || svc?.county || extracted?.county || null;
+  if (county && !isInServiceAreaCounty(county)) {
+    return { reason: 'county_out_of_service_area', county: String(county) };
+  }
+  if (DESOTO_LOCALITY_CITIES.has(city) || DESOTO_ZIPS.has(zip)) {
+    return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  return null;
 }
 
 function isLiveLeadConversation({ call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription }) {
@@ -15433,6 +15471,7 @@ const CallRecordingProcessor = {
         `${appointmentResult.skippedReason} (direction=${call.direction || 'unknown'}, service=${appointmentResult.service || 'none'})`
       );
     }
+    let legacyGeoVeto = null;
     if (v2RoutingBlocked) {
       appointmentResult = {
         service: extracted.matched_service || extracted.requested_service || null,
@@ -15442,6 +15481,29 @@ const CallRecordingProcessor = {
         skippedReason: 'v2_routing_blocked',
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
+    } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall
+      && (legacyGeoVeto = legacyGeographicVeto({ addressValidation: effectiveAddressValidation, v2Extraction: v2Result?.extraction, extracted }))) {
+      // Geographic hard veto (owner ruling 2026-09-30, DeSoto is not served):
+      // survives V2-off and V2-shadow routing, where nothing else stops a
+      // confirmed booking on an out-of-area address. The customer + lead are
+      // kept; only the visit is withheld, and the call is left for human review.
+      appointmentResult = {
+        service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
+        dateTime: extracted.preferred_date_time,
+        scheduleCreated: false,
+        smsSent: false,
+        skippedReason: 'out_of_service_area',
+      };
+      logger.warn(`[call-proc] Skipping appointment auto-create for ${maskSid(callSid)}: out of service area (${legacyGeoVeto.reason}, county=${legacyGeoVeto.county || 'unknown'})`);
+      if (!bridgeNeedsConfirmation.includes('out_of_service_area')) bridgeNeedsConfirmation.push('out_of_service_area');
+      if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
+        await fileSkippedBookingCard({
+          call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
+          skippedReason: 'out_of_service_area',
+          preferredDateTime: extracted.preferred_date_time,
+          serviceType: appointmentResult.service, bridgeNeedsConfirmation, callSid,
+        });
+      }
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
       // Declared OUTSIDE the try so the catch can see whether a schedule row
       // was already inserted when a later confirmation/SMS step threw — the
@@ -20788,6 +20850,7 @@ function legacyDisputeServiceIntent(extracted) {
 }
 
 CallRecordingProcessor._test = {
+  legacyGeographicVeto,
   isOutboundCall,
   outboundImpliedConsentEligible,
   hasRealTwoWayConversation,

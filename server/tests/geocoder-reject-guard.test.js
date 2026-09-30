@@ -14,6 +14,15 @@ const rooftop = (lat, lng, extra = {}) => ({
 });
 
 describe('isInServiceAreaBox', () => {
+  test('DeSoto County (Arcadia) is excluded; neighbouring served towns stay in', () => {
+    expect(isInServiceAreaBox(27.2159, -81.8584)).toBe(false); // Arcadia
+    expect(isInServiceAreaBox('27.2159', '-81.8584')).toBe(false);
+    expect(isInServiceAreaBox(27.35, -82.15)).toBe(true); // Myakka City
+    expect(isInServiceAreaBox(27.04, -82.2)).toBe(true); // North Port
+    expect(isInServiceAreaBox(26.93, -82.05)).toBe(true); // Punta Gorda
+    expect(isInServiceAreaBox(27.57, -82.43)).toBe(true); // Parrish
+  });
+
   test('Bradenton is in, Fort Worth / Ontario / a half-set pair are out', () => {
     expect(isInServiceAreaBox(27.4989, -82.5748)).toBe(true);
     expect(isInServiceAreaBox('27.4989', '-82.5748')).toBe(true);

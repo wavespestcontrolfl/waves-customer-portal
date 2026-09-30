@@ -2666,6 +2666,26 @@ describe('POST /:token commit', () => {
         process.env.GOOGLE_API_KEY = 'test-google-key';
       }
     });
+
+    // DeSoto County (Arcadia) sits inside the coarse service-area box but is
+    // not served (owner ruling 2026-09-30); with no key the box is the only
+    // check, so it must carve DeSoto out.
+    test('no Google key configured + Arcadia (DeSoto County) STORED coordinates: out_of_area, no booking', async () => {
+      delete process.env.GOOGLE_API_KEY;
+      delete process.env.GOOGLE_MAPS_API_KEY;
+      try {
+        firstResults.leads = { ...LINKED_LEAD, customer_id: 'cust-1' };
+        firstResults.customers = { id: 'cust-1', phone: '9415550101', address_line1: '1 Example Rd', city: 'Arcadia', state: 'FL', zip: '34266', latitude: 27.2159, longitude: -81.8584 };
+        listResults.scheduled_services = [];
+        const token = mintLeadConsultationToken(LEAD_ID);
+        const res = await callPost(token, okBody());
+        expect(res.statusCode).toBe(422);
+        expect(res.body).toMatchObject({ error: 'out_of_area' });
+        expect(mockCreateSelfBooking).not.toHaveBeenCalled();
+      } finally {
+        process.env.GOOGLE_API_KEY = 'test-google-key';
+      }
+    });
   });
 
   // Round 10, Codex pre-push P1, 2026-09-24 (inspection-public.js:585): an
@@ -3216,7 +3236,7 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
 
   test('key configured, county resolves and is NOT served → out_of_area shape', async () => {
     mockCounty.mockResolvedValueOnce('Hardee');
-    expect(await checkServiceArea({ lat: 27.4, lng: -81.8 })).toEqual({ ok: false, county: 'Hardee' });
+    expect(await checkServiceArea({ lat: 27.5, lng: -81.8 })).toEqual({ ok: false, county: 'Hardee' });
   });
 
   test('key configured, county lookup throws → treated the same as a null county (unavailable, not a silent pass)', async () => {

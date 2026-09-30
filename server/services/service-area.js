@@ -27,7 +27,34 @@ const SERVICE_AREA_BOUNDS = Object.freeze({
 });
 
 /**
- * True when a coordinate falls inside the service-area box. Null/undefined/
+ * DeSoto County (Arcadia) is NOT served (owner ruling 2026-09-30), but it sits
+ * inside the generous box above. This rectangle carves it out: DeSoto's
+ * northern edge is ~27.40 (Manatee line), its southern edge ~27.03 (Charlotte
+ * line), its western edge ~-82.06 (Sarasota/Manatee line) and its eastern edge
+ * ~-81.55. Served neighbours stay outside it: North Port (27.04, -82.20),
+ * Myakka City (27.35, -82.15) and Punta Gorda (26.93, -82.05). It is a
+ * rectangle, so it can clip a sliver of a neighbouring county at a corner; the
+ * county-name check (SERVICE_AREA_COUNTIES) stays the authoritative test.
+ */
+const DESOTO_EXCLUSION = Object.freeze({
+  latMin: 27.03,
+  latMax: 27.4,
+  lngMin: -82.06,
+  lngMax: -81.55,
+});
+
+function isInDesotoExclusion(lat, lng) {
+  return (
+    lat >= DESOTO_EXCLUSION.latMin &&
+    lat <= DESOTO_EXCLUSION.latMax &&
+    lng >= DESOTO_EXCLUSION.lngMin &&
+    lng <= DESOTO_EXCLUSION.lngMax
+  );
+}
+
+/**
+ * True when a coordinate falls inside the service-area box (and outside the
+ * DeSoto exclusion). Null/undefined/
  * unparseable coordinates are NOT in the box — callers treat a missing
  * coordinate the same as an implausible one (both mean "do not route on
  * this"), so a half-set pair can never read as valid.
@@ -36,6 +63,7 @@ function isInServiceAreaBox(lat, lng) {
   const a = Number(lat);
   const b = Number(lng);
   if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  if (isInDesotoExclusion(a, b)) return false;
   return (
     a >= SERVICE_AREA_BOUNDS.latMin &&
     a <= SERVICE_AREA_BOUNDS.latMax &&
@@ -44,4 +72,4 @@ function isInServiceAreaBox(lat, lng) {
   );
 }
 
-module.exports = { SERVICE_AREA_BOUNDS, isInServiceAreaBox };
+module.exports = { SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, isInServiceAreaBox };
