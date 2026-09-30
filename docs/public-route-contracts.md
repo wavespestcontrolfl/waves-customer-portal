@@ -970,7 +970,8 @@ and still accepted at commit — `arrival-route.js`'s `verifyArrivalCapacity`
 — only while its certified delay stays within that same grace, tighter than
 but never wider than the existing 120-minute arrival promise every capacity
 booking already carries.
-**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — narrowed from an earlier
+**ESTIMATE PICKER ONLY** (Codex r1 P1, #5314; `/book` later joined under its own
+gate and opt-in — see "Online-booking arrival grace" below — narrowed from an earlier
 draft that also covered `/book` and public reschedule): those two surfaces'
 commit paths (`createSelfBooking`, the rebooker's single-visit move) each
 run a STRICT pre-verify travel probe ahead of their capacity check, so a
@@ -1040,6 +1041,86 @@ booking tools never opt in and are unaffected. Default 0 is byte-identical
 to before this lane. A slotId minted before this v3 bump fails verification
 once (the same accepted trade the v1→v2 canonical-string bump already made)
 — the client's existing "pick another time" 409 recovery re-signs fresh.
+**Online-booking arrival grace (`GATE_BOOK_ARRIVAL_GRACE`, owner-approved
+2026-09-29; ships dark).** `/book`'s offers and commit join the same grace,
+and the "ESTIMATE PICKER ONLY" carve-out above is lifted for exactly the
+surfaces whose commit is `createSelfBooking`: `/api/booking/availability`,
+`/find-slots`, the `/capture-intent` revalidation, public re-service and
+inspection booking — each passes `bookArrivalGrace: true` to
+`buildBookingAvailability`, which takes effect only with mid-route insertion
+(`capacityPlacement`, i.e. `bookInsertionOffersLive()`: `GATE_BOOK_CAPACITY_
+COMMIT` + `GATE_SCHEDULING_CAPACITY`), the new gate, and a positive
+`SELF_SERVE_ARRIVAL_GRACE_MINUTES` for the slot's date (0 on a same-day pick).
+The **phone agent** (its commit stays end-of-day only), **public reschedule**
+(its rebooker commit still runs the strict pre-verify travel probe), office
+Find-a-Time, the Intelligence Bar and auto-dispatch never opt in and are
+byte-identical. Gate off (or grace 0) is today's strict drive+15-minute
+travel-gap offer and commit, byte for byte, on every surface.
+
+*Why.* Fable's read-only production runs found find-time seeing 8 bookable
+Parrish days at cap 30 while `/book` showed 3: every dropped slot failed
+`/book`'s own both-neighbour travel-gap mirror, because
+`find-time.js`'s `packCapacityEnds` tested each group's earliest pick against
+the previous stop ONLY and its latest pick against the next stop ONLY, so a
+pick that cleared its own neighbour but crowded the other survived find-time
+and was then dropped by the mirror — often emptying 4-7-stop days. The commit
+side had the mirror image: `findConflictingVisits`' strict travel probe ran
+before `verifyArrivalCapacity` and refused any buffer shortfall, so a
+grace-kept offer would have 409'd.
+
+*The one rule* (`services/scheduling/book-arrival-grace.js`, read by find-time's
+`packCapacityEnds`, `/book`'s offer mirror in `buildBookingAvailability`, and
+`createSelfBooking`'s commit probe — so offer and commit cannot drift):
+1. A real window overlap is never waived (the commit's own SQL overlap probe
+   and the raw-window check in `travel-gap.js` keep refusing it).
+2. Only the travel BUFFER against the PREVIOUS stop may be waived, and only
+   when that stop is committed and assigned to THIS technician and the
+   whole-route arrival simulation's own delay for this slot is within grace
+   (`arrival_delay_minutes` at offer, `verifyArrivalCapacity`'s fit at commit).
+   The NEXT stop's side is never waived — the next customer's promised start is
+   not this customer's to spend — nor an unassigned or other-technician stop, a
+   live hold (every hold on the route must clear the strict gap), or an
+   interview.
+3. `packCapacityEnds` (`/book` mode) checks every candidate against EVERY
+   route neighbour under rule 1-2 BEFORE a group picks its earliest/latest
+   endpoint, so a later candidate that clears both sides is never lost to an
+   earlier one that crowds the far side. Without the gate the default
+   one-neighbour-per-side pick is unchanged (the estimate picker's grace
+   still opts in through `arrivalGrace: true` and keeps its own rule).
+4. Independently of any gap, a graced build never offers a slot whose
+   simulated arrival delay is past the grace, because the commit's
+   `verifyArrivalCapacity(…, { arrivalGraceMinutes })` would refuse it:
+   `createSelfBooking` now passes the OFFER's grace (the guard test
+   `verify-arrival-capacity-grace-callers-guard.test.js` counts it).
+
+*Commit.* `createSelfBooking` tolerates a strict-probe clash only when the
+offer was graced, a prepared capacity proof exists, and EVERY clash is a
+previous-side `travel_gap` row (a row that starts before the candidate;
+`findConflictingVisits` itself is unchanged and stays tech-blind) on the same
+assigned committed technician;
+everything else stays `SLOT_TAKEN`. The grace it enforces is the exact value
+that justified the offer: a signed `/book` offer carries it as an HMAC-bound
+field (`slot_sig` = `<exp>.<grace>.<sig>`, only when grace > 0; a zero-grace
+offer keeps the exact `<exp>.<sig>` shape), never a live re-read; an internal
+callback booking (re-service, inspection — no signed field, offer proof is a
+same-request rebuild) reads the live grace for its date.
+
+*Zero grace is the gate off.* Grace mode applies only where the applicable
+grace is positive: a build whose range has no positive-grace date (env unset/0)
+is plain insertion mode, and per slot a zero-grace date (a same-day pick)
+keeps the old one-neighbour packing, the strict mirror, the
+`BOOK_INSERTION_OFFER_POLICY` tag and the `<exp>.<sig>` field.
+
+*Flip safety.* Every `/book` offer for a positive-grace date carries
+`BOOK_ARRIVAL_GRACE_OFFER_POLICY` (`utils/slot-offer-token.js`) instead of
+`BOOK_INSERTION_OFFER_POLICY`, and `/confirm` verifies with
+`bookOfferPolicyLive(date)`, so a gate flip in either direction between mint and
+confirm fails the signature into the standard "pick your time again" 409
+(same mechanism as `GATE_BOOK_CAPACITY_COMMIT`, #5231). Tests:
+`book-arrival-grace-parity.test.js` (real whole-route simulation +
+find-time + commit probe, both directions, gate on and off),
+`booking-availability-arrival-grace.test.js` (offer mirror + signing),
+`booking-confirm-signed-offer.test.js` (commit matrix), `slot-offer-token.test.js`.
 Catalog-sized estimate offers resolve the primary appointment allowance from
 `services.scheduling_duration_policy`; independent recurring companions do not
 enlarge that appointment, while one-time paid add-ons contribute shared work.

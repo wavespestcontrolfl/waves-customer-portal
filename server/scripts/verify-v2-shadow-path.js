@@ -131,11 +131,17 @@ async function main() {
         customer: pj(r.linked_customer),
         contactPhone,
         failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+        // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+        unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
       });
-      const route = CRP.demoteFailOpenOnV1AddressConflict(
-        canAutoRoute(e, { contactPhone, addressValidation: storedAv, ...failOpenOptions }),
+      const route = CRP.applyUnclearServiceTranscriptVeto(
+        CRP.demoteFailOpenOnV1AddressConflict(
+          canAutoRoute(e, { contactPhone, addressValidation: storedAv, ...failOpenOptions }),
+          pj(r.ai_extraction) || {},
+          knownCaller
+        ),
         pj(r.ai_extraction) || {},
-        knownCaller
+        r.transcription
       );
       // No customer PII (names/addresses) in logs — non-PII signals only.
       const hasName = !!(e.caller.first_name || e.caller.last_name);
