@@ -164,7 +164,11 @@ async function releaseStalePreSubmitSavedCardClaim(attempt, database = db) {
 // lease that proves a bound PI is a dead session rather than a live page.
 const paySessionTouchedAt = () => String(Math.floor(Date.now() / 1000));
 
-async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db) {
+// readOnly: reach the same verdict without writing (a READ ONLY transaction or
+// a pure resolver such as customer-dunning's). A stale pre-submit claim counts
+// as released and a stale submitted claim as ambiguous, exactly what the
+// writing path would conclude; nothing is updated.
+async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = db, { readOnly = false } = {}) {
   let chargeAttempt = await database('stripe_invoice_charge_attempts')
     .where({ invoice_id: invoiceId })
     .whereIn('status', ['claimed', 'ambiguous'])
@@ -172,7 +176,10 @@ async function assertNoInvoiceChargeReconciliationPending(invoiceId, database = 
     .first('id', 'status', 'stripe_payment_intent_id', 'idempotency_key', 'submitted_at', 'created_at');
   if (chargeAttempt) {
     let ambiguous = chargeAttempt.status === 'ambiguous';
-    if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
+    if (!ambiguous && readOnly && savedCardClaimIsStale(chargeAttempt)) {
+      if (!savedCardClaimWasSubmitted(chargeAttempt)) chargeAttempt = null;
+      else chargeAttempt.status = 'ambiguous';
+    } else if (!ambiguous && savedCardClaimIsStale(chargeAttempt)) {
       if (!savedCardClaimWasSubmitted(chargeAttempt)) {
         const released = await releaseStalePreSubmitSavedCardClaim(chargeAttempt, database).catch((releaseErr) => {
           logger.error(`[stripe] could not release stale pre-submit saved-card claim ${chargeAttempt.id}: ${releaseErr.message}`);

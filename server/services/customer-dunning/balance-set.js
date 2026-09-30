@@ -150,6 +150,9 @@ async function readSiblings(anchorRow, database) {
     // PaymentIntent stays included, or a page reload would shed it.
     reusePaymentIntentId: anchorRow.stripe_payment_intent_id || null,
     onDegrade: (r) => { reason = r; },
+    // Pure read: the sibling reconciliation fence must not release or
+    // promote stale saved-card claims from here (pre-push P1).
+    readOnly: true,
   });
   return { siblings: siblings || [], reason: siblings ? null : (reason || 'incomplete') };
 }

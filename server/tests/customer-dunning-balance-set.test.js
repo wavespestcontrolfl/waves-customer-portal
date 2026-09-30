@@ -319,7 +319,7 @@ describe('every read goes through the database handle it was given', () => {
     for (const call of mockOpenBalance.mock.calls) expect(call[1].database).toBe(database);
     for (const call of mockResolveForInvoice.mock.calls) expect(call[0].database).toBe(database);
     for (const call of mockStopped.mock.calls) expect(call[1].database).toBe(database);
-    for (const call of mockReconcile.mock.calls) expect(call[1]).toBe(database);
+    for (const call of mockReconcile.mock.calls) { expect(call[1]).toBe(database); expect(call[2]).toEqual({ readOnly: true }); }
     // (the pool handle is a mock that throws if touched; the run above passed)
   });
 });

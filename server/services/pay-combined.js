@@ -163,7 +163,7 @@ function makeDegrade(onDegrade) {
  * an unexpected selection failure reports 'incomplete'. `database` is
  * threaded into the payer resolve as well as every read below it.
  */
-async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null, onDegrade } = {}) {
+async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePaymentIntentId = null, throwOnPayerAnchor = false, releaseAbandonedPaymentIntents = false, onAbandonedReleased = null, onDegrade, readOnly = false } = {}) {
   const degrade = makeDegrade(onDegrade);
   let errorReason = 'incomplete';
   try {
@@ -295,7 +295,7 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       const cleared = [];
       for (const inv of eligible) {
         try {
-          await StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database);
+          await StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly });
           cleared.push(inv);
         } catch (fenceErr) {
           logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${fenceErr.message}`);
