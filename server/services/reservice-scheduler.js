@@ -332,7 +332,14 @@ const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
   'i',
 );
 const RESERVICE_LAWN_WORDS_RE = /\b(lawn|turf|grass|weeds?|fert|fertilizer|fertilization|mow(?:ing)?|sod|yard)\b/i;
-const RESERVICE_PEST_WORDS_RE = /\b(pests?|bugs?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|fleas?|ticks?|wasps?|bees?|silverfish|scorpions?|exterminator)\b/i;
+// Codex round-15 P2 (PR #5336): the ONE pest-noun list. The lane vocabulary below and
+// sms-shadow-drafter.js's PEST_REPORT_TEXT_RE (the open-times / pest-report prescreen) are both
+// built from it, so a pest the prescreen accepts ("earwigs are back") can never be missing from
+// the lane classifier. Termites / rodents / mosquitoes are deliberately NOT here — they are the
+// excluded specialties (EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE above), which the prescreen adds
+// on its own since it only asks "is this a pest report", not "which lane".
+const RESERVICE_PEST_NOUNS_SOURCE = 'pests?|bugs?|palmetto\\s*bugs?|ants?|roach(?:es)?|cockroach(?:es)?|spider\\w*|fleas?|ticks?|wasps?|bees?|hornets?|silverfish|scorpions?|earwigs?|centipedes?|millipedes?';
+const RESERVICE_PEST_WORDS_RE = new RegExp(`\\b(${RESERVICE_PEST_NOUNS_SOURCE}|exterminator)\\b`, 'i');
 // Codex round-6 P1: the ONE lane vocabulary, shared by reportedReserviceLane
 // below (a customer's INBOUND report) and sms-shadow-drafter.js's
 // namedReserviceLanesInText (an outgoing reply's own wording) — the same
@@ -493,6 +500,7 @@ module.exports = {
   reserviceLaneAvailability,
   loadReserviceLaneAvailability,
   RESERVICE_LANE_WORD_PATTERNS,
+  RESERVICE_PEST_NOUNS_SOURCE,
   reportedReserviceLane,
   reportedReserviceExcludedSpecialty,
   openReserviceCallbacks,

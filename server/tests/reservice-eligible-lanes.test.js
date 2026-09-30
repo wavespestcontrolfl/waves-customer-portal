@@ -234,6 +234,20 @@ describe('RESERVICE_LANE_WORD_PATTERNS — the one shared lane vocabulary (Codex
     expect(named).toEqual(['lawn']);
   });
 
+  // Codex round-15 P2 (PR #5336): the drafter's pest-report prescreen and the lane vocabulary share one noun list.
+  test.each(['earwigs are back', 'centipedes still in the house', 'millipedes everywhere', 'a palmetto bug came back'])('%s → pest lane', (text) => {
+    expect(reportedReserviceLane(text)).toBe('pest');
+  });
+
+  test('every noun the pest-report prescreen accepts (bar the excluded specialties) resolves to the pest lane', () => {
+    const { PEST_REPORT_TEXT_RE } = require('../services/sms-shadow-drafter');
+    for (const noun of ['ants', 'roaches', 'spiders', 'fleas', 'ticks', 'wasps', 'bees', 'silverfish', 'scorpions', 'earwigs', 'centipedes', 'millipedes', 'bugs', 'pests']) {
+      const text = `${noun} are back`;
+      expect(PEST_REPORT_TEXT_RE.test(text)).toBe(true);
+      expect(reportedReserviceLane(text)).toBe('pest');
+    }
+  });
+
   test('pest is checked before lawn, matching this module\'s own [\'pest\', \'lawn\'] ordering convention', () => {
     expect(RESERVICE_LANE_WORD_PATTERNS.map(([lane]) => lane)).toEqual(['pest', 'lawn']);
   });

@@ -605,7 +605,7 @@ const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)\\bfree\\b(?!\\s+(?:to|
   + "|without\\s+(?:any\\s+)?(?:charge|cost|fee)|nothing\\s+extra|cost\\s+(?:you\\s+)?nothing"
   + "|waiv(?:e|ed|ing)\\s+(?:the\\s+|any\\s+)?(?:charge|cost|fee)s?"
   + "|(?<!\\b(?:count|rely|depend|counting|relying|depending|wait|waiting)\\s)on us(?!\\s+to\\b)|on the house"
-  + "|(?:won['’]?t|will\\s+not|don['’]?t|do\\s+not)\\s+(?:charge|bill)(?:\\s+you)?|(?:won['’]?t|will\\s+not)\\s+(?:cost|be\\s+(?:charged|billed))"
+  + "|(?:won['’]?t|will\\s+not|don['’]?t|do\\s+not)\\s+(?:charge|bill)(?:\\s+you)?|(?:won['’]?t|will\\s+not)\\s+(?:cost|be\\s+(?:charged|billed))|(?:won['’]?t|will\\s+not)\\s+be\\s+(?:any\\s+|an?\\s+)?(?:extra\\s+|additional\\s+)?(?:charge|cost|fee)s?"
   + ")";
 // Deterministic backstop: a reply that offers a free visit while the facts
 // do not say eligible is a violation, fed into the same revise/verify loop
@@ -667,7 +667,7 @@ const RESERVICE_DENIAL_RE = new RegExp(
   + "|(?:don['’]?t|do\\s+not|doesn['’]?t|does\\s+not)\\s+(?:do|give|extend|perform|make)\\b"
   + "|(?:isn['’]?t|is\\s+not|aren['’]?t)\\s+(?:something|an\\s+option|possible|allowed)\\b"
   + "|(?:isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+)?(?:covered|included|eligible)"
-  + "|(?:can['’]?t|cannot|can\\s+not|won['’]?t\\s+be\\s+able\\s+to|will\\s+not\\s+be\\s+able\\s+to|unable\\s+to|not\\s+able\\s+to)\\s+(?:to\\s+)?(?:offer|send|schedule|provide|book|give|do|arrange)"
+  + "|(?:can['’]?t|cannot|can\\s+not|won['’]?t\\s+be\\s+able\\s+to|will\\s+not\\s+be\\s+able\\s+to|unable\\s+to|not\\s+able\\s+to)\\s+(?:to\\s+)?(?:offer|send|schedule|provide|book|give|do|arrange|come|return|go|stop|make\\s+it|get)"
   + '|no\\s+longer\\s+(?:eligible|qualif(?:y|ies|ied)|covered|included)'
   // Availability denials ("no free re-service available", "no longer available", "isn't offered").
   + "|no\\s+longer\\s+(?:available|offered|(?:an?\\s+|any\\s+)?(?:free|complimentary|no[- ]charge))"
@@ -781,6 +781,26 @@ function rawReserviceOfferMatch(text) {
 // free lawn re-service is covered") leaves the promise. Codex round-7 (PR #5336) used the clause split
 // for lane scoping; this is the same split, shared, so detection and lane
 // derivation can never disagree about which text is the promise.
+// Codex round-15 P2 (PR #5336): an offer split across two ADJACENT sentences — "We'll send someone
+// back out. There won't be any charge." / "No charge. We'll come back out." — has no single-sentence
+// span. A sentence with a RETURN-visit phrase (send someone back out, come back, another visit,
+// re-treat, …; never a bare "visit") paired with the neighbouring sentence's price word is one
+// offer; its lane text is the return sentence (the price sentence carries no lane). Guards: an
+// estimate/quote price ("No charge for the estimate. See you at the visit.") never counts (the
+// price-word pattern already binds it to its noun), a bare visit is no return marker, and a
+// denial in either sentence ("We can't come back out. No charge.") is no offer.
+const RESERVICE_RETURN_PHRASE_RE = /\b(?:(?:send|sending|have|get|getting|bring|bringing)\s+(?:a\s+|another\s+|the\s+)?(?:tech(?:nician)?|someone|somebody|crew|team|us)\s+(?:back|out|again|over)|come\s+back(?!\s+(?:to\s+you|with|later\s+with))|go\s+back|back\s+out|out\s+again|stop\s+by\s+again|(?:another|second|return|repeat)\s+(?:visit|trip|treatment|service|application|spray)|follow-?up\s+(?:visit|treatment)|re-?treat|re-?spray|re-?service|revisit|redo)\b/i;
+const RESERVICE_PRICE_WORD_RE = new RegExp(FREE_OFFER_WORD_SOURCE, 'i');
+function adjacentSentenceOffers(sentences) {
+  const offers = [];
+  for (let i = 0; i + 1 < sentences.length; i += 1) {
+    for (const [ret, price] of [[sentences[i], sentences[i + 1]], [sentences[i + 1], sentences[i]]]) {
+      if (RESERVICE_RETURN_PHRASE_RE.test(ret) && RESERVICE_PRICE_WORD_RE.test(price)
+        && !RESERVICE_DENIAL_RE.test(ret) && !RESERVICE_DENIAL_RE.test(price)) offers.push(ret);
+    }
+  }
+  return offers;
+}
 function affirmativeReservicePromiseClauses(text) {
   const t = String(text || '');
   const clauseSplitter = /[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]|\b(?:but|however|though|although|instead|whereas)\b|(?<!\bnot\s)\byet\b/i;
@@ -803,6 +823,7 @@ function affirmativeReservicePromiseClauses(text) {
     const clauses = sentence.split(clauseSplitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
     out.push(...[...clauses, sentence].flatMap(affirmativeReserviceOfferTexts));
   }
+  out.push(...adjacentSentenceOffers(sentences));
   if (!anySentenceHit) {
     out.push(...affirmativeReserviceOfferTexts(t));
   }
@@ -854,7 +875,7 @@ function reservicePromiseClauses(text) {
 // excluded-specialty check). Pest words are reservice-scheduler's own
 // (RESERVICE_LANE_WORD_PATTERNS, species included); the lawn words are its
 // lawn SERVICE words minus the location words.
-const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|revisit|callback|follow-?up|treatment|visit|service|application|trip|inspections?|assessments?|check-?up|come\\s+back(?:\\s+out)?|go\\s+back(?:\\s+out)?|come\\s+out';
+const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|revisit|callback|follow-?up|treatment|visit|service|application|trip|inspections?|assessments?|check-?up|come\\s+back(?:\\s+out)?|go\\s+back(?:\\s+out)?|come\\s+out|back\\s+out|out\\s+again';
 // Codex round-10 P2: purpose clauses attach a lane to the offer too — "a free visit to treat your lawn".
 const RESERVICE_PURPOSE_VERB = 'treat|re-?treat|handle|take\\s+care\\s+of|spray|service|address|deal\\s+with|control|fix|inspect|check(?:\\s+on)?|look\\s+(?:at|over)|assess|get\\s+rid\\s+of|kill';
 const RESERVICE_LAWN_SERVICE_WORDS = 'lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod';
@@ -2430,7 +2451,14 @@ const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|
 // pest noun with NO activity verb ("thanks, no bugs since!") does not fire —
 // there is nothing to act on, and it is usually a closing/gratitude message,
 // not a report.
-const PEST_REPORT_TEXT_RE = /(?=.*\b(?:ants?|roach(?:es)?|cockroach(?:es)?|spider\w*|bugs?|pests?|termites?|mosquito\w*|rodents?|mice|mouse|rats?|fleas?|ticks?|wasps?|bees?|silverfish|scorpions?|earwigs?|centipedes?|millipedes?|palmetto\s*bugs?)\b)(?=.*\b(?:see|saw|seeing|found|finding|find|show(?:ed|ing)?\s*up|return\w*|back|again|still|more|everywhere|infest\w*)\b)/i;
+// Codex round-15 P2 (PR #5336): the pest nouns come from reservice-scheduler's ONE shared list
+// (RESERVICE_PEST_NOUNS_SOURCE) plus the excluded specialties, so this prescreen and the lane
+// classifier can't drift.
+const PEST_REPORT_TEXT_RE = new RegExp(
+  `(?=.*\\b(?:${require('./reservice-scheduler').RESERVICE_PEST_NOUNS_SOURCE || 'pests?|bugs?|ants?'}|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)\\b)`
+  + '(?=.*\\b(?:see|saw|seeing|found|finding|find|show(?:ed|ing)?\\s*up|return\\w*|back|again|still|more|everywhere|infest\\w*)\\b)',
+  'i',
+);
 
 // Pronoun-only / bare return phrasing (Codex round-3 P2): the structural
 // pest-noun + activity-verb rule above deliberately dropped "they're back"

@@ -1802,9 +1802,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // doesn't itself stub out.
     // Codex round-7 (PR #5336): reserviceExcludedSpecialtyInPromise reads the
     // real reportedReserviceExcludedSpecialty the same way.
-    const { RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty, reportedReserviceLane } = jest.requireActual('../services/reservice-scheduler');
+    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane } = jest.requireActual('../services/reservice-scheduler');
     jest.doMock('../services/reservice-scheduler', () => ({
-      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty, reportedReserviceLane,
+      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane,
     }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
@@ -2663,6 +2663,18 @@ describe('free re-service is an entitlement resolved through the existing mechan
       });
     });
 
+    // Codex round-15 P2 #1: an offer split across ADJACENT sentences is one offer.
+    test('an offer split across adjacent sentences is validated at draft time (not waved through for an ineligible customer)', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      for (const reply of ["We'll send someone back out. There won't be any charge.", "No charge. We'll come back out."]) {
+        expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(false);
+        expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine(['pest'])}\nBILLING:`, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(true);
+      }
+      // The guard: an estimate price beside a bare visit is not an offer.
+      expect(validateReserviceOffer({ reply: 'No charge for the estimate. See you at the visit.', factsBlock: `X\n${reserviceFactLine([])}\nBILLING:` }).ok).toBe(true);
+    });
+
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,
     // conjunctions, purpose clauses, new nouns, plurals, waive/comp wording), denials
     // and idioms. [sentence, isPromise, promisedLanes].
@@ -2757,6 +2769,15 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["Your scheduled service is free with your plan.", false, []],
   ["Feel free to call about your service.", false, []],
   ["We offer a free service estimate.", false, []],
+  ["We'll send someone back out. There won't be any charge.", true, []],
+  ["No charge. We'll come back out.", true, []],
+  ["We'll send someone back out for the lawn. It's on us.", true, ['lawn']],
+  ["It's free! We'll send a tech back out for the ants.", true, ['pest']],
+  ["No charge for the estimate. See you at the visit.", false, []],
+  ["No charge for the estimate. We'll come back to you with a quote.", false, []],
+  ["We can't come back out this week. There won't be any charge for rescheduling.", false, []],
+  ["Your visit is Tuesday. It's free to reschedule.", false, []],
+  ["We'll send someone back out. See you Tuesday.", false, []],
   ["We can't offer a free lawn re-service.", false, []],
   ["You're not eligible for a free re-service right now.", false, []],
   ["Unfortunately that isn't covered - the re-service is not free.", false, []],
