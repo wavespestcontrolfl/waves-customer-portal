@@ -263,11 +263,22 @@ const ZERO_BALANCE_RE = new RegExp(
   'i',
 );
 // ONE detector for a zero-balance claim, shared by the draft validator AND the send-time
-// recheck (a question — "is your balance zero?" — asserts nothing).
-function zeroBalanceClaim(text) {
+// recheck (a question — "is your balance zero?" — asserts nothing). zeroBalanceSpan returns the
+// matched span so a caller can validate the claim as ONE claim among others (Codex round-17 P1).
+function zeroBalanceSpan(text) {
   const raw = String(text || '');
   const m = ZERO_BALANCE_RE.exec(raw);
-  return !!m && !insideQuestion(raw, m.index);
+  return m && !insideQuestion(raw, m.index) ? { index: m.index, length: m[0].length } : null;
+}
+function zeroBalanceClaim(text) {
+  return !!zeroBalanceSpan(text);
+}
+// The text with ONLY the zero-balance span blanked out — everything else in the clause (a receipt
+// claim, another figure, price grammar) still goes through the normal binders.
+function withoutZeroBalanceSpan(text) {
+  const raw = String(text || '');
+  const span = zeroBalanceSpan(raw);
+  return span ? `${raw.slice(0, span.index)} ${raw.slice(span.index + span.length)}` : raw;
 }
 
 // The prompt sentence derived from the table above.
@@ -311,6 +322,8 @@ module.exports = {
   SETTLEMENT_PHRASE_RE,
   ZERO_BALANCE_RE,
   zeroBalanceClaim,
+  zeroBalanceSpan,
+  withoutZeroBalanceSpan,
   PAYMENT_SUBJECT,
   PAYMENT_EVENT_SUBJECT,
   insideQuestion,

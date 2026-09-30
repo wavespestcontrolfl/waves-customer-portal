@@ -1241,7 +1241,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPhraseFamilies, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, ZERO_BALANCE_RE, zeroBalanceClaim, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPhraseFamilies, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, ZERO_BALANCE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1683,10 +1683,9 @@ function buildGroundingEnv(reply, context, opts) {
     inboundText: String(opts.inboundMessage || ''),
     trustOwedAmounts: !!opts.trustOwedAmounts,
     replyAmounts: amountCentsIn(text),
-    // A zero-balance claim ("Your balance is zero.") reads as price grammar but states no price — it is a
-    // settlement claim judged against billing below, so it must not trip the fail-closed price gate.
-    priceGrammarFires: text.split(CLAUSE_SPLIT_RE).some((clause) => !zeroBalanceClaim(clause) && require('./sms-suggest-mode').hasPriceQuote(clause))
-      || (!zeroBalanceClaim(text) && require('./sms-suggest-mode').hasPriceQuote(text)),
+    // A zero-balance claim ("Your balance is zero.") reads as price grammar but states no price — the gate is
+    // evaluated with ONLY that span blanked (anything else in the clause still trips it; Codex round-17 P1).
+    priceGrammarFires: require('./sms-suggest-mode').hasPriceQuote(withoutZeroBalanceSpan(text)),
   };
 }
 
@@ -1837,15 +1836,31 @@ const KIND_VALIDATORS = {
 
 function clauseUngrounded(clause, env) {
   const text = String(clause || '');
+  // A zero-balance claim ("Your balance is $0", "zero balance") is ONE claim among others in
+  // the clause (Codex round-17 P1): it is judged as a settlement claim, and then ONLY its span
+  // is blanked so every other claim, figure and price phrase ("after we received your $500
+  // payment", "plus a fee of fifty dollars") still goes through the normal binders below.
+  // Anything left that cannot be classified is rejected by them (ambiguous / price gate).
+  if (zeroBalanceClaim(text)) {
+    if (KIND_VALIDATORS.settlement({ kind: 'settlement', text, amounts: [] }, env)) return true;
+    return clauseUngroundedAfterZero(withoutZeroBalanceSpan(text), env);
+  }
+  return classifiedClauseUngrounded(text, env);
+}
+// The rest of a clause once its zero-balance span is gone: nothing meaningful left = grounded;
+// otherwise the ordinary pipeline (price gate, amount + polarity classification, validators).
+function clauseUngroundedAfterZero(remainder, env) {
+  const text = String(remainder || '');
+  if (!/[a-z0-9$]/i.test(text.replace(/\b(?:and|your|the|a|is|of|have|has|you|account|balance|currently|now|right)\b/gi, ''))) return false;
+  return classifiedClauseUngrounded(text, env);
+}
+function classifiedClauseUngrounded(text, env) {
   const masked = text.replace(AMOUNT_MASK_RE, ' AMT ');
   // Price grammar left once readable figures are masked is a price the
   // extractor cannot verify ("fifty dollars"): fail closed (#5194 r4/r8).
-  if (!zeroBalanceClaim(text) && require('./sms-suggest-mode').hasPriceQuote(masked)) return true;
+  if (require('./sms-suggest-mode').hasPriceQuote(masked)) return true;
   const amounts = amountCentsIn(text);
-  // "$0 balance" / "balance is $0": a settlement claim (raw text — masking loses the value).
-  const cls = zeroBalanceClaim(text)
-    ? { kind: 'settlement' }
-    : classifyPaymentClause(masked, amounts.length > 0, env);
+  const cls = classifyPaymentClause(masked, amounts.length > 0, env);
   return KIND_VALIDATORS[cls.kind]({ ...cls, text, amounts }, env);
 }
 

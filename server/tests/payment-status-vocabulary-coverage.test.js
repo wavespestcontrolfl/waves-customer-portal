@@ -296,3 +296,37 @@ describe('round-15: a reply identity that conflicts with the inbound is unground
     expect(rq('We received your $120 card payment from Sep 10.', ctx([card]))).toBe(false);
   });
 });
+
+// Codex round-17 P1: a zero-balance claim is ONE claim among others in a clause — only its span
+// is blanked; every other claim, figure and price phrase still goes through the normal binders.
+describe('round-17: zero-balance claims do not shield the rest of the clause', () => {
+  const ctx = (rows = [], extra = {}) => ({ billing: { outstandingBalance: 0, recentPayments: rows, ...extra } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const paid500 = { amount: 500, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+
+  test('the auditor sentences are ungrounded with no payments', () => {
+    expect(rq('Your balance is $0 after we received your $500 payment from Sep 12.', ctx())).toBe(true);
+    expect(rq('Your balance is $0 plus a fee of fifty dollars.', ctx())).toBe(true);
+    expect(rq('Your balance is $0 plus a fee of $50.', ctx())).toBe(true);
+  });
+
+  test('"$0 after we received your $500 payment" is grounded only with a matching paid row', () => {
+    const r = 'Your balance is $0 after we received your $500 payment from Sep 12.';
+    expect(rq(r, ctx([paid500]))).toBe(false);
+    expect(rq(r, ctx([{ ...paid500, status: 'refunded' }]))).toBe(true);
+    expect(rq(r, ctx([{ ...paid500, amount: 400 }]))).toBe(true);
+    expect(rq(r, ctx([{ ...paid500, payment_date: '2026-09-10' }]))).toBe(true);
+    // ...and the zero claim itself still has to be true
+    expect(rq(r, ctx([paid500], { outstandingBalance: 40 }))).toBe(true);
+    expect(rq(r, ctx([paid500], { openInvoice: { amountDue: 40 } }))).toBe(true);
+  });
+
+  test('plain zero-balance claims are unchanged: clean at zero, ungrounded when anything is owed or in flight', () => {
+    for (const r of ['Your balance is zero.', 'Your balance is $0.', 'You have a zero balance.', 'You have a $0.00 balance.', 'Your $0 balance is unchanged.']) {
+      expect({ r, atZero: rq(r, ctx()) }).toEqual({ r, atZero: false });
+      expect({ r, owed: rq(r, ctx([], { outstandingBalance: 40 })) }).toEqual({ r, owed: true });
+      expect({ r, inFlight: rq(r, ctx([], { hasProcessingPayment: true })) }).toEqual({ r, inFlight: true });
+    }
+    expect(rq('Your balance is fifty dollars.', ctx())).toBe(true);
+  });
+});

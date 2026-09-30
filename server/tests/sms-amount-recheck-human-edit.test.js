@@ -102,3 +102,23 @@ describe('a queued zero-balance reply is rechecked when a balance posts after th
     await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $0.99.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
 });
+
+// Codex round-17 P1: the send-time check validates the rest of a zero-balance clause too.
+describe('a zero-balance clause with another claim is fully rechecked at send time', () => {
+  const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+  const run = (body, rows, extra) => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(rows, extra));
+    return outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh });
+  };
+  const STALE = { stale: true, reason: 'amount_no_longer_authorized' };
+  test('receipt half: needs the matching paid row NOW (refunded since the draft => stale)', async () => {
+    const r = 'Your balance is $0 after we received your $500 payment from Sep 12.';
+    await expect(run(r, [paid])).resolves.toEqual({ stale: false });
+    await expect(run(r, [])).resolves.toEqual(STALE);
+    await expect(run(r, [{ ...paid, status: 'refunded' }])).resolves.toEqual(STALE);
+  });
+  test('an extra fee/price half is never shielded by the zero claim', async () => {
+    await expect(run('Your balance is $0 plus a fee of fifty dollars.', [])).resolves.toEqual(STALE);
+    await expect(run('Your balance is $0 plus a fee of $50.', [])).resolves.toEqual(STALE);
+  });
+});
