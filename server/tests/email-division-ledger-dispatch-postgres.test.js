@@ -167,7 +167,7 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
     automationKey: automation.automation_key,
     recipient: { type: 'customer', id: customer.id, email: extra.email || customer.email },
     payload: { customer_id: customer.id, customer_email: extra.email || customer.email, first_name: 'Jordan' },
-    executeImmediately: true,
+    executeImmediately: extra.immediately !== false,
   });
 
   const events = async (runId) => db('email_template_automation_run_events').where({ run_id: runId }).orderBy('created_at', 'asc');
@@ -346,6 +346,26 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       const rows = await db('marketing_email_ledger').whereIn('customer_id', [customer.id, other.id]);
       expect(rows.find((r) => r.customer_id === customer.id).marketing_class).toBe('marketing');
       expect(rows.find((r) => r.customer_id === other.id).marketing_class).toBe('relationship');
+    });
+
+    test('the class follows the run\'s PINNED template: swapping the automation to a service template while a marketing run is queued does not make it relationship mail', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      await db('notification_prefs').where({ customer_id: customer.id }).update({ marketing_offers: false });
+      const marketingKey = await makeTemplate('lc.', 'marketing_nurture');
+      const automation = await makeAutomation(marketingKey, 'marketing_nurture');
+      const queued = (await fire(automation, customer, { immediately: false })).results[0].run;
+      expect(queued.status).toBe('queued');
+      expect(queued.template_key).toBe(marketingKey);
+
+      // The admin API permits this while runs are queued.
+      const serviceKey = await makeTemplate('lc.', 'service_operational');
+      await db('email_template_automations').where({ id: automation.id }).update({ template_key: serviceKey, suppression_group_key: 'service_operational' });
+
+      const run = await Executor.executeRun(queued.id);
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('STREAM_FLAG_OFF'); // still judged as marketing mail
+      expect(sendTemplate).not.toHaveBeenCalled();
     });
 
     test('shadow judges the same class: an opted-out customer is would_block for a marketing-stream lc.* template', async () => {

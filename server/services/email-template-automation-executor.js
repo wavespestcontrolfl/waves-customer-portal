@@ -1120,13 +1120,18 @@ async function processTrigger(args) {
 async function loadAutomationForRun(run) {
   return db('email_template_automations as a')
     .leftJoin('email_templates as t', 't.template_key', 'a.template_key')
+    .leftJoin('email_templates as rt', function pinnedTemplate() { this.on('rt.template_key', '=', db.raw('?', [run.template_key])); })
     .leftJoin('email_template_versions as v', 'v.id', 't.active_version_id')
     .select(
       'a.*',
       't.active_version_id as active_version_id',
-      't.send_stream as template_send_stream',
-      't.suppression_group_key as template_suppression_group_key',
-      't.mode as template_mode',
+      // The run's PINNED template (run.template_key is what dispatch sends),
+      // not the automation's current one: the admin API lets an automation's
+      // template change while runs are still queued, and the class a send is
+      // judged under must follow the content actually being sent.
+      'rt.send_stream as template_send_stream',
+      'rt.suppression_group_key as template_suppression_group_key',
+      'rt.mode as template_mode',
       'v.id as template_version_id',
       'v.version_number as active_version_number',
     )
