@@ -98,7 +98,9 @@ async function newestCompletedVisitAnchor(customerId, database = db) {
       .orderBy('service_date', 'desc').orderByRaw('ended_at DESC NULLS LAST')
       .first('service_date', 'ended_at'),
     database('scheduled_services').where({ customer_id: customerId, status: 'completed' })
-      .orderBy('scheduled_date', 'desc').orderByRaw('completed_at DESC NULLS LAST')
+      // Same-day ties by the SAME instant scheduledInstant() reads (actual end,
+      // then check-out, then completed_at), so the later visit always wins.
+      .orderBy('scheduled_date', 'desc').orderByRaw('COALESCE(actual_end_time, check_out_time, completed_at) DESC NULLS LAST')
       .first('scheduled_date', 'actual_end_time', 'check_out_time', 'completed_at'),
   ]);
   const dates = [recordInstant(record), scheduledInstant(visit)].filter(Boolean);

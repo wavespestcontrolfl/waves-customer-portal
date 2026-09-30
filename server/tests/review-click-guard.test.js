@@ -65,3 +65,27 @@ describe('review-click-guard visit anchor', () => {
     expect(await guard.touchSuppressedByClick('cust-1', { serviceRecordId: 'sr-1' }, db)).toBe(true);
   });
 });
+
+describe('newestCompletedVisitAnchor ordering matches the anchor instant', () => {
+  // The ORDER BY runs in Postgres (the unit fakes cannot evaluate it), so pin the
+  // contract: same-day scheduled visits are ordered by the SAME instant
+  // scheduledInstant() reads (actual end, then check-out, then completed_at).
+  test('scheduled visits order same-day ties by COALESCE(actual_end_time, check_out_time, completed_at)', async () => {
+    const raws = {};
+    const fake = (table) => {
+      const q = {
+        where: () => q,
+        orderBy: () => q,
+        orderByRaw: (sql) => { raws[table] = sql; return q; },
+        first: async () => (table === 'scheduled_services'
+          ? { scheduled_date: '2026-09-25', actual_end_time: null, check_out_time: '2026-09-25T20:00:00Z', completed_at: '2026-09-25T13:00:00Z' }
+          : null),
+      };
+      return q;
+    };
+    const anchor = await guard.newestCompletedVisitAnchor('cust-1', fake);
+    expect(raws.scheduled_services).toMatch(/COALESCE\(\s*actual_end_time\s*,\s*check_out_time\s*,\s*completed_at\s*\)\s+DESC\s+NULLS\s+LAST/i);
+    // ...and the anchor reads check_out_time before completed_at, like the ORDER BY.
+    expect(anchor.toISOString()).toBe('2026-09-25T20:00:00.000Z');
+  });
+});
