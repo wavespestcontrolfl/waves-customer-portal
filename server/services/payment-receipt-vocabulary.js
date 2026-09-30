@@ -271,6 +271,18 @@ function insideQuestion(text, index) {
 // enumerator (sms-shadow-drafter.js enumeratePaymentClaims) validates each one independently.
 // { negated, matches: [{ family, start, end }] }. `negated` = a positive-family phrase under a
 // negator (or a negated stem) — fail closed, the binder cannot judge it.
+// Is the RECOGNIZED status phrase at `index` inside a hypothetical / interrogative sub-clause — a question, a sub-clause
+// that opens with a conditional, or one with "if / whether / in case…" BEFORE the phrase? (Sub-clause scoped, so a
+// "please try another card" elsewhere does not matter, and an assertion like "Please note your payment failed" is kept.)
+function recognizedMatchIsHypothetical(text, index) {
+  const range = subclauseRanges(text).find((r) => index >= r.start && index <= r.end);
+  if (!range) return false;
+  const sub = range.text;
+  return MODAL_NON_ASSERTIVE_RE.test(sub) || HYPOTHETICAL_BEFORE_RE.test(sub.slice(0, Math.max(0, index - range.start)));
+}
+// Affirmative (not a question / conditional): used to gate what a clause may DISCLOSE.
+const isModalNonAssertive = (text) => MODAL_NON_ASSERTIVE_RE.test(String(text || ''));
+
 function paymentStatusPhraseMatches(clause, namesPayment = false) {
   const text = String(clause || '');
   if (!namesPayment && !PAYMENT_NOUN_RE.test(text) && !invoiceSubjectClause(text)) return { negated: false, matches: [] };
@@ -280,6 +292,7 @@ function paymentStatusPhraseMatches(clause, namesPayment = false) {
     const global = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
     for (const m of text.matchAll(global)) {
       if (insideQuestion(text, m.index)) continue;
+      if (recognizedMatchIsHypothetical(text, m.index)) continue; // "If your payment failed, …" asserts nothing
       if (POSITIVE_FAMILIES.has(family) && NEGATOR_BEFORE_RE.test(text.slice(0, m.index))) { negated = true; continue; }
       matches.push({ family, start: m.index, end: m.index + m[0].length });
     }
@@ -289,7 +302,7 @@ function paymentStatusPhraseMatches(clause, namesPayment = false) {
   // "didn't fail", "wasn't declined", "not refunded" forms whose positive stem
   // is not itself a table phrase: still a negated status claim.
   const stem = NEGATED_STEM_RE.exec(text);
-  if (stem && !insideQuestion(text, stem.index)) return { negated: true, matches };
+  if (stem && !insideQuestion(text, stem.index) && !recognizedMatchIsHypothetical(text, stem.index)) return { negated: true, matches };
   return { negated: false, matches };
 }
 // [] = no status claim; ['negated'] = any negated positive-family claim in the clause;
@@ -382,16 +395,28 @@ const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
 // prescreen flags but for which the enumerator finds NO claim is treated as an UNRECOGNIZED payment assertion
 // (fail closed) — unless it is clearly NON-assertive: a question, a conditional, an offer/instruction ("you
 // can pay…", "please…"), or a plain reference to the payment options / pay link / payment method.
-const NON_ASSERTIVE_PAYMENT_RE = new RegExp([
+// ONE set of non-assertive patterns, three groups: MODAL (a question, a conditional opening the sub-clause), OFFER (an
+// offer / request / future action) and REFERENCE (how to pay, payment options / method / link). The unrecognized-assertion
+// fallback exempts on ANY group; RECOGNIZED status phrases are exempt only when hypothetical (see recognizedMatchIsHypothetical) —
+// "If your payment failed, please try another card" does not assert a failure (Codex round-32 P2).
+const MODAL_NON_ASSERTIVE = [
   '\\?', // a question
   '^\\s*(?:if|once|when|whenever|unless|in\\s+case|should\\s+you|as\\s+soon\\s+as|after\\s+you|before\\s+you)\\b', // conditional (opens the sub-clause)
+];
+const OFFER_NON_ASSERTIVE = [
   '\\b(?:you\\s+(?:can|could|may|might|will\\s+be\\s+able\\s+to)|feel\\s+free|please|(?:can|could|would|will)\\s+you|let\\s+me|reply\\s+with|just\\s+(?:reply|text)|go\\s+ahead)\\b', // offer / request
   "\\b(?:we|i)(?:'ll|\\s+will|'d|\\s+can|\\s+could)\\s+(?:send|text|email|share|resend|forward|get|help|check|look|find|make|set|go|take|give|walk|confirm|follow|let|reach|call|update|see)\\b", // future action
+];
+const REFERENCE_NON_ASSERTIVE = [
   '\\b(?:we\\s+(?:accept|take|offer|support)|to\\s+pay|ways?\\s+to\\s+pay|how\\s+to\\s+pay|pay(?:ing)?\\s+(?:link|online|by|with|via|through|using))\\b', // how-to-pay
   '\\b(?:pay|payment)\\s+(?:link|method|methods|options?|page|portal|plan|info(?:rmation)?|details|instructions?|reminder|schedule|date|due)\\b',
   '\\bpersonal\\s+pay\\b',
   '\\bautopay\\b',
-].join('|'), 'i');
+];
+const NON_ASSERTIVE_PAYMENT_RE = new RegExp([...MODAL_NON_ASSERTIVE, ...OFFER_NON_ASSERTIVE, ...REFERENCE_NON_ASSERTIVE].join('|'), 'i');
+const MODAL_NON_ASSERTIVE_RE = new RegExp(MODAL_NON_ASSERTIVE.join('|'), 'i');
+// words that make what FOLLOWS them hypothetical inside a sub-clause ("…whether your payment failed", "I'll check if it posted")
+const HYPOTHETICAL_BEFORE_RE = /\b(?:if|whether|in\s+case|unless|suppose|assuming)\b/i;
 const isNonAssertivePaymentClause = (text) => NON_ASSERTIVE_PAYMENT_RE.test(String(text || ''));
 // The words that make a clause a payment-STATUS assertion when NO claim was recognized: a payment noun,
 // paid / unpaid, a settlement phrase or a zero balance. (Narrower than mayAssertPaymentStatus on purpose:
@@ -477,6 +502,8 @@ function invoiceSubjectAt(text, index) {
 const hasPronounSubjectClause = (text) => String(text || '').split(SUBCLAUSE_SPLIT_RE).some((sub, i) => i % 2 === 0 && PRONOUN_SUBJECT_CLAUSE_RE.test(sub));
 
 module.exports = {
+  isModalNonAssertive,
+  recognizedMatchIsHypothetical,
   hasPronounSubjectClause,
   subclauseRanges,
   invoiceSubjectAt,

@@ -194,6 +194,18 @@ function hasNegativeZelleAvailabilityClaim(body) {
   return String(body || '').split(CLAUSE_SPLIT_RE)
     .some((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause));
 }
+// Codex round-32 P2: a reply can hold BOTH a Zelle offer and a Zelle denial ("Zelle isn't available for invoice A. You can
+// Zelle invoice B."). Every seam validates each independently, each against ITS OWN clause text (so each clause's invoice
+// reference targets its own check): { offerText, denialText } — '' when none.
+function zelleClauseTexts(body) {
+  const text = String(body || '');
+  const clauses = text.split(CLAUSE_SPLIT_RE);
+  const offers = clauses.filter((clause) => classifyZelleClause(clause) === 'offer');
+  const denials = clauses.filter((clause) => ZELLE_WORD_RE.test(clause) && !zelleBodyContacts(clause).length && ZELLE_NEGATION_RE.test(clause));
+  // the cross-clause case (Zelle affirmed in one clause, the transfer instruction in another) has no single offer clause
+  const offerText = offers.length ? offers.join(' ') : (hasAffirmativeZelleMention(text) ? text : '');
+  return { offerText, denialText: denials.join(' ') };
+}
 function hasAffirmativeZelleMention(body) {
   const clauses = String(body || '').split(CLAUSE_SPLIT_RE);
   if (clauses.some((clause) => classifyZelleClause(clause) === 'offer')) return true;
@@ -475,7 +487,8 @@ async function outgoingAmountsStale({
   // classifyZelleClause/hasAffirmativeZelleMention route it to the amount
   // binder below instead). A body with no affirmative Zelle offer at all has
   // nothing to recheck.
-  if (hasAffirmativeZelleMention(text)) {
+  const { offerText, denialText } = zelleClauseTexts(text);
+  if (offerText) {
     // Independent-review P1 (round 4, finding 3): a caller with no drafted
     // Zelle fact to re-check against (a human-authored scheduled edit with no
     // agent-decision snapshot, or any other caller that never resolved one)
@@ -490,7 +503,8 @@ async function outgoingAmountsStale({
     // names with the same resolver and check THAT invoice afresh; if it can't be resolved (not open, ambiguous) the
     // offer is unverifiable and blocks.
     const { resolveZelleTargetInvoice, explicitInvoiceReference } = require('./zelle-target-invoice');
-    const editedNamesInvoice = explicitInvoiceReference(text);
+    // the OFFER clauses' own text decides the target (a denial clause in the same reply targets its own check below)
+    const editedNamesInvoice = explicitInvoiceReference(offerText);
     if (customerId && (!effectiveZelleInvoiceId || editedNamesInvoice)) {
       try {
         const customerRow = await dbh('customers').where({ id: customerId }).first();
@@ -498,9 +512,9 @@ async function outgoingAmountsStale({
         if (!effectiveZelleInvoiceId) {
           // Codex round-30 P1: the OUTGOING body's explicit invoice reference wins (unresolvable => unresolved => blocked);
           // the customer's message decides only when the body names none. Several open: else abstain.
-          effectiveZelleInvoiceId = resolveZelleTargetInvoice(ctx?.billing, editedNamesInvoice ? text : inboundMessage).invoiceId;
+          effectiveZelleInvoiceId = resolveZelleTargetInvoice(ctx?.billing, editedNamesInvoice ? offerText : inboundMessage).invoiceId;
         } else {
-          const edited = resolveZelleTargetInvoice(ctx?.billing, text).invoiceId;
+          const edited = resolveZelleTargetInvoice(ctx?.billing, offerText).invoiceId;
           if (edited !== effectiveZelleInvoiceId) effectiveZelleInvoiceId = edited; // re-targeted (null => unresolved => blocked below)
         }
       } catch (err) {
@@ -510,8 +524,10 @@ async function outgoingAmountsStale({
     }
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: effectiveZelleInvoiceId, dbh });
     if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
-  } else if (hasNegativeZelleAvailabilityClaim(text)) {
-    const denial = await zelleDenialStale({ customerId, dbh, inboundMessage, body: text });
+  }
+  // INDEPENDENT of the offer branch (round 32): a reply with both an offer and a denial validates both
+  if (denialText) {
+    const denial = await zelleDenialStale({ customerId, dbh, inboundMessage, body: denialText });
     if (denial.stale) return denial;
   }
   const strict = strictForVersion(promptVersion);
@@ -579,6 +595,6 @@ async function outgoingAmountsStale({
 
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, zelleDenialStale, classifyZelleClause, bodyMakesPaymentClaim,
+  hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, zelleClauseTexts, zelleDenialStale, classifyZelleClause, bodyMakesPaymentClaim,
   amountFreeStatusClaimStale, bodyNeedsPaymentRecheck,
 };

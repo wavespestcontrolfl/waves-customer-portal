@@ -1299,3 +1299,54 @@ describe('round-30: "It settled." after a payment question is an unrecognized pa
     expect(paymentClauseNeedsValidation('It settled.', { paymentContext: true })).toBe(true); // an earlier clause made a payment claim
   });
 });
+
+// Codex round-32 P2 (1): recognized status phrases in a hypothetical / interrogative sub-clause assert nothing.
+describe('round-32: recognized status phrases honor conditional / question scope (per sub-clause)', () => {
+  const V8 = require('../services/payment-receipt-vocabulary');
+  const { enumeratePaymentClaims } = require('../services/sms-shadow-drafter');
+  const rq = (r, rows = []) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } }, { byMeaning: true });
+  const paidRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+
+  test('hypothetical / interrogative mentions are not claims (and not negated claims)', () => {
+    for (const s of [
+      'If your payment failed, please try another card.', "If your payment wasn't processed, let us know.", 'Let me know whether your payment failed.',
+      'I will check if your payment posted.', 'In case your card is declined, call us.', 'Did your payment fail?', 'Once your payment clears we will reschedule.',
+      'If your refund was issued you will see it in 3 days.',
+    ]) {
+      expect({ s, claims: enumeratePaymentClaims(s, {}).claims.map((c) => c.kind), neg: V8.paymentStatusPhraseMatches(s, false).negated }).toEqual({ s, claims: [], neg: false });
+      expect({ s, r: rq(s, [paidRow]) }).toEqual({ s, r: false }); // grounded whatever the payment rows say
+    }
+  });
+  test('the assertion half of a mixed sentence is still judged (sub-clause scoped)', () => {
+    expect(rq('Your payment failed, please try another card.', [paidRow])).toBe(true); // asserts failure, but it is paid
+    expect(rq('Your payment failed, please try another card.', [{ ...paidRow, status: 'failed' }])).toBe(false);
+    expect(rq('Please note your payment failed.', [paidRow])).toBe(true); // "please" is not a conditional
+    expect(rq('Your payment is paid, and if it failed let us know.', [paidRow])).toBe(true); // the paid-ack clause has no amount => ungrounded; the if-clause is exempt
+    expect(rq('Your payment method was declined.', [{ ...paidRow, status: 'failed' }])).toBe(false);
+    expect(rq('Your payment method was declined.', [paidRow])).toBe(true);
+  });
+  test('the unrecognized fallback and the recognized rule agree on the conditional opener', () => {
+    expect(V8.unrecognizedPaymentAssertion('If your payment settled, please call us.')).toBe(false);
+    expect(V8.unrecognizedPaymentAssertion('Your payment settled, please call us.')).toBe(true);
+  });
+});
+
+// Codex round-32 P2 (2): only an AFFIRMATIVE partial-refund mention discloses.
+describe('round-32: interrogative / conditional partial-refund mentions disclose nothing', () => {
+  const rq = (r, rows) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows } }, { byMeaning: true });
+  const A = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', refund_status: 'partial', refund_amount: 30 };
+  test('an affirmative disclosure still relaxes the guard for ITS row', () => {
+    expect(rq('We received your $120 payment from Sep 12. Part of your $120 payment from Sep 12 was refunded.', [A])).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12, but it was partially refunded.', [A])).toBe(false);
+  });
+  test('a question or a conditional does not: the plain-paid guard stays in force (and the mention itself asserts nothing)', () => {
+    for (const d of [
+      'Was part of your $120 payment from Sep 12 refunded?', 'Was it partially refunded?', 'If part of your $120 payment from Sep 12 was refunded, let us know.',
+      'Let me know whether part of your $120 payment from Sep 12 was refunded.',
+    ]) {
+      expect({ d, r: rq(`We received your $120 payment from Sep 12. ${d}`, [A]) }).toEqual({ d, r: true });
+    }
+    // anaphoric question right after the receipt must not be read as a disclosure either
+    expect(rq('We received your $120 payment from Sep 12, but was it partially refunded?', [A])).toBe(true);
+  });
+});

@@ -293,3 +293,27 @@ describe('a stale Zelle denial is held by auto-send', () => {
     await expect(attempt({ reply: "Zelle isn't available right now." })).resolves.toMatchObject({ sent: true });
   });
 });
+
+// Codex round-32 P2: auto-send rechecks the denial even when the reply also holds an offer.
+describe('an offer AND a stale denial in one reply (round 32)', () => {
+  test('offer passes, denial stale => not sent, claim released, siblings reopened', async () => {
+    amountRecheck.hasAffirmativeZelleMention.mockReturnValue(true);
+    amountRecheck.outgoingZelleStale.mockReturnValue({ stale: false });
+    amountRecheck.zelleInvoiceStillEligible.mockResolvedValue({ eligible: true });
+    amountRecheck.hasNegativeZelleAvailabilityClaim.mockReturnValue(true);
+    amountRecheck.zelleDenialStale.mockResolvedValue({ stale: true, reason: 'zelle_now_available' });
+    await expect(attempt({ reply: "Zelle isn't available for invoice A. You can Zelle invoice B.", zelleInvoiceId: 'inv-1' })).resolves.toMatchObject({ sent: false, reason: 'zelle_now_available' });
+    expect(amountRecheck.zelleInvoiceStillEligible).toHaveBeenCalled(); // the offer branch ran
+    expect(amountRecheck.zelleDenialStale).toHaveBeenCalled(); // and so did the denial branch
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+  });
+  test('offer passes and the denial still holds => sends', async () => {
+    amountRecheck.hasAffirmativeZelleMention.mockReturnValue(true);
+    amountRecheck.outgoingZelleStale.mockReturnValue({ stale: false });
+    amountRecheck.zelleInvoiceStillEligible.mockResolvedValue({ eligible: true });
+    amountRecheck.hasNegativeZelleAvailabilityClaim.mockReturnValue(true);
+    amountRecheck.zelleDenialStale.mockResolvedValue({ stale: false });
+    await expect(attempt({ reply: "Zelle isn't available for invoice A. You can Zelle invoice B.", zelleInvoiceId: 'inv-1' })).resolves.toMatchObject({ sent: true });
+  });
+});

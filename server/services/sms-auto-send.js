@@ -895,11 +895,13 @@ async function dispatchClaimedSend({
     // Codex round-18 P2: a DENIAL ("Zelle isn't available right now") is a live claim too — if Zelle became
     // available since the draft, the denial is stale. (Guarded: partial test doubles omit the helper.)
     const zelleDenialRecheck = require('./sms-amount-recheck');
-    if (!hasAffirmativeZelleMention(reply) && typeof zelleDenialRecheck.hasNegativeZelleAvailabilityClaim === 'function'
+    // Independent of the offer branch above (Codex round-32 P2): a reply holding BOTH an offer and a denial rechecks both.
+    if (typeof zelleDenialRecheck.hasNegativeZelleAvailabilityClaim === 'function'
         && zelleDenialRecheck.hasNegativeZelleAvailabilityClaim(reply)) {
       let denial;
       try {
-        denial = await zelleDenialRecheck.zelleDenialStale({ customerId, inboundMessage });
+        const denialBody = typeof zelleDenialRecheck.zelleClauseTexts === 'function' ? zelleDenialRecheck.zelleClauseTexts(reply).denialText : reply;
+        denial = await zelleDenialRecheck.zelleDenialStale({ customerId, inboundMessage, body: denialBody });
       } catch (err) {
         logger.warn(`[sms-auto-send] Zelle denial recheck threw (decision ${claim.decisionId}): ${err.message}`);
         denial = { stale: true, reason: 'zelle_recheck_failed' };

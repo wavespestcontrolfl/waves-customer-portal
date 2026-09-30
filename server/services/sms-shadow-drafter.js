@@ -1332,7 +1332,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, unrecognizedPaymentAssertion, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, unrecognizedPaymentAssertion, isModalNonAssertive, recognizedMatchIsHypothetical, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1929,6 +1929,8 @@ function partialRefundDisclosures(text, context, inboundText) {
     const partialWording = partialRefundWording(clause);
     const refundSubject = /\brefunds?\b/i.test(clause);
     if (!/refund/i.test(clause) || !(partialWording || refundSubject)) continue;
+    // only an AFFIRMATIVE disclosure relaxes the plain-paid guard — "Was it partially refunded?" / "If part of it was refunded…" discloses nothing (Codex round-32 P2)
+    if (isModalNonAssertive(clause)) continue;
     const amounts = amountCentsIn(clause);
     if (isAnaphoricPaymentClause(clause, amounts)) { if (partialWording && i > 0) anaphoricAfter.add(i - 1); continue; }
     const binding = paymentClaimBinding(clause, inboundText);
@@ -2011,7 +2013,7 @@ function detectPaymentClaims(masked, hasAmounts, env) {
   const taken = (span) => spans.some((o) => spansOverlap(span, o) && (!hasAmounts || !settlementSpans.includes(o)));
   const howTo = PAYMENT_HOWTO_RE.test(text);
   // 1. SETTLEMENT phrases ("you're paid up", "no balance due") — tested before negation ("you don't owe anything").
-  const settle = howTo ? [] : spansOf(SETTLEMENT_PHRASE_RE, text).filter((sp) => !insideQuestion(text, sp.start));
+  const settle = howTo ? [] : spansOf(SETTLEMENT_PHRASE_RE, text).filter((sp) => !insideQuestion(text, sp.start) && !recognizedMatchIsHypothetical(text, sp.start));
   if (settle.length) { claims.push({ kind: 'settlement' }); spans.push(...settle); settlementSpans = settle; }
   // 2. STATUS families / absence / unpaid — every phrase, every family.
   const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText) || !!env.paymentContext);
@@ -2022,9 +2024,9 @@ function detectPaymentClaims(masked, hasAmounts, env) {
   for (const m of matches) spans.push({ start: m.start, end: m.end });
   // 3. RECEIPT: completed-payment EVENTS ("your transfer cleared") and ACK phrases ("we received your payment").
   const events = howTo || PAYMENT_NEGATION_RE.test(text) ? []
-    : spansOf(PAYMENT_EVENT_STATUS_RE, text).filter((sp) => !insideQuestion(text, sp.start) && !taken(sp));
+    : spansOf(PAYMENT_EVENT_STATUS_RE, text).filter((sp) => !insideQuestion(text, sp.start) && !recognizedMatchIsHypothetical(text, sp.start) && !taken(sp));
   spans.push(...events);
-  const acks = spansOf(PAYMENT_ACK_RE, text).filter((sp) => !taken(sp));
+  const acks = spansOf(PAYMENT_ACK_RE, text).filter((sp) => !recognizedMatchIsHypothetical(text, sp.start) && !taken(sp));
   spans.push(...acks);
   const ackPol = acks.length ? (PAYMENT_NEGATION_RE.test(text) ? 'negated' : 'positive') : null;
   const receiptShaped = ackPol === 'positive' || events.length > 0;

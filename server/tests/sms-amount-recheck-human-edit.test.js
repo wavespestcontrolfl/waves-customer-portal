@@ -428,3 +428,45 @@ describe('the recheck gates pass a pronoun-subject clause on to the per-clause d
     expect(bodyNeedsPaymentRecheck('Sounds good, see you Tuesday!')).toBe(false);
   });
 });
+
+// Codex round-32 P2 (3): a reply with BOTH a Zelle offer and a denial validates each, independently.
+describe('a Zelle offer AND a denial in one reply are both rechecked', () => {
+  const { outgoingAmountsStale, zelleClauseTexts } = require('../services/sms-amount-recheck');
+  const pay = require('../routes/pay-v2');
+  const open = [
+    { id: 'inv-A', invoiceNumber: 'WPC-2026-0001', status: 'sent', amountDue: 95 },
+    { id: 'inv-B', invoiceNumber: 'WPC-2026-0002', status: 'sent', amountDue: 210 },
+  ];
+  let visibility;
+  const checkedIds = [];
+  const idDb = (table) => ({ where: (w) => ({ first: async () => { if (table === 'invoices') checkedIds.push(w.id); return table === 'invoices' ? { id: w.id, customer_id: 'c1', status: 'sent' } : { id: 'c1' }; } }) });
+  beforeEach(() => {
+    checkedIds.length = 0;
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [], openInvoice: open[0], openInvoices: open } });
+  });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; if (visibility) visibility.mockRestore(); });
+  const BODY = "Zelle isn't available for invoice WPC-2026-0001. You can Zelle invoice WPC-2026-0002 to pay@example.com.";
+  const run = () => outgoingAmountsStale({ customerId: 'c1', body: BODY, promptVersion: 'house_voice_v11', zelleInvoiceId: null, inboundMessage: null, trustOwedAmounts: true, dbh: idDb });
+
+  test('clause texts are separated: each clause targets its own invoice', () => {
+    const t = zelleClauseTexts(BODY);
+    expect(t.denialText).toContain('WPC-2026-0001');
+    expect(t.denialText).not.toContain('WPC-2026-0002');
+    expect(t.offerText).toContain('WPC-2026-0002');
+    expect(t.offerText).not.toContain('WPC-2026-0001');
+  });
+  test('offer to B is eligible and A is ineligible => the DENIAL about A stands, the reply is fine', async () => {
+    visibility = jest.spyOn(pay, 'payPageZelleVisibility').mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-B', reason: 'not_eligible' }));
+    await expect(run()).resolves.toEqual({ stale: false });
+    expect(checkedIds.sort()).toEqual(['inv-A', 'inv-B']);
+  });
+  test('the denial about A is now STALE (A became eligible) — caught even though the offer branch passed', async () => {
+    visibility = jest.spyOn(pay, 'payPageZelleVisibility').mockImplementation(async () => ({ visible: true, reason: null }));
+    await expect(run()).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
+  });
+  test('the OFFER is stale (B ineligible) => blocked before the denial is even needed', async () => {
+    visibility = jest.spyOn(pay, 'payPageZelleVisibility').mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-A' ? false : false, reason: 'not_eligible' }));
+    await expect(run()).resolves.toMatchObject({ stale: true, reason: 'zelle_invoice_ineligible' });
+  });
+});
