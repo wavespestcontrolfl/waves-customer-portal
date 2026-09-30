@@ -160,9 +160,9 @@ describe('the recheck gate matches the scheduler (round 23)', () => {
       expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', body, promptVersion: 'house_voice_v11', trustOwedAmounts: true }));
     },
   );
-  test('a still-true denial goes out; a denial on a decision with no customer cannot be verified and is not silently blocked as an offer', async () => {
+  test('a still-true denial goes out; a denial on a decision with no customer cannot be verified and FAILS CLOSED (round 28)', async () => {
     await expect(agentDecisionSendBlockReason({ decision: v11(), outgoingBody: "Zelle isn't available right now." })).resolves.toBeNull();
-    await expect(agentDecisionSendBlockReason({ decision: v11({ customer_id: null }), outgoingBody: "Zelle isn't available right now." })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: v11({ customer_id: null }), outgoingBody: "Zelle isn't available right now." })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
   });
   test.each(['You owe $5.', 'Your payment was received.', 'You can Zelle us.'])('a pre-v12 body that names a figure / payment status / Zelle offer is rechecked like the scheduler does: %s', async (body) => {
     await agentDecisionSendBlockReason({ decision: v11(), outgoingBody: body });
@@ -235,5 +235,21 @@ describe('inbound message threading (round 6)', () => {
   test('neither present → inboundMessage is null', async () => {
     await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' });
     expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: null }));
+  });
+});
+
+// Codex round-28 P2: a customerless decision fails CLOSED for every body the recheck gate selects.
+describe('customerless decisions (round 28)', () => {
+  const noCustomer = (over = {}) => decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', customer_id: null, ...over });
+  test.each([
+    'Your payment was received.', "Zelle isn't available right now.", 'You can use Zelle.', 'You owe $95.', 'Your balance is zero.', 'Your payment settled.',
+  ])('blocked: %s', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    expect(outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+  test('a body the gate does not select is not blocked (and v12 customerless benign copy is fine)', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: 'See you Tuesday, thanks!' })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer({ prompt_version: 'house_voice_v12_real_answers_cf_pf' }), outgoingBody: 'See you Tuesday, thanks!' })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer({ prompt_version: 'house_voice_v12_real_answers_cf_pf' }), outgoingBody: "Zelle isn't available right now." })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
   });
 });

@@ -12,10 +12,13 @@
 // customer_id — same rule as the aggregator), so `complete` is exact:
 // complete = ownRows <= cap.
 const db = require('../models/db');
+const { loadPayerLinkage } = require('./payer-linkage');
 const logger = require('./logger');
 const { containsAbsencePhrase } = require('./payment-receipt-vocabulary');
 
 const PAYMENT_HISTORY_CAP = 200;
+// most rows surfaceReferencedPayments adds to the model-facing window
+const SURFACED_PAYMENTS_MAX = 5;
 
 // payments.metadata->>'invoice_id' as a uuid, or NULL when it is not one. invoices.id is a
 // uuid PRIMARY KEY (20260401000082_invoices), so comparing the uuid directly lets the planner
@@ -30,7 +33,12 @@ function uuidFromMetadata(alias) {
 async function loadPaymentHistory(customerId, dbh = db) {
   if (!customerId) return null;
   try {
-    const rows = await dbh('payments')
+    // ONE shared payer-linkage predicate (services/payer-linkage.js — the one billing-v2 uses for the customer's
+    // own history): metadata invoice_id + aliases, PaymentIntent, charge, "Invoice <n> —" description, and the
+    // payer_billed: withdrawal stamp. Unknown ownership (lookup failed) => unknown history (null) — Codex round-28 P1.
+    const linkage = await loadPayerLinkage(customerId, dbh);
+    if (linkage.failed) return null;
+    const fetched = await dbh('payments')
       .where({ 'payments.customer_id': customerId })
       // Payer-owned money (payments.payer_id — the AP party that paid) never belongs to the
       // homeowner's history, even with no metadata.invoice_id (Codex round-12 P0).
@@ -49,7 +57,11 @@ async function loadPaymentHistory(customerId, dbh = db) {
       .orderBy('payments.created_at', 'desc') // deterministic tie-break for same-day attempts (Codex round-27 P1)
       .orderBy('payments.id', 'desc')
       .limit(PAYMENT_HISTORY_CAP + 1);
-    return { rows: rows.slice(0, PAYMENT_HISTORY_CAP), complete: rows.length <= PAYMENT_HISTORY_CAP };
+    // `complete` reflects the RAW read (payer-linked rows dropped below must not make a truncated read look whole)
+    return {
+      rows: fetched.filter((p) => !linkage.isPayerLinked(p)).slice(0, PAYMENT_HISTORY_CAP),
+      complete: fetched.length <= PAYMENT_HISTORY_CAP,
+    };
   } catch (err) {
     logger.warn(`[payment-history] read failed for customer ${customerId}: ${err.message}`);
     return null;
@@ -139,7 +151,10 @@ async function surfaceReferencedPayments(context, inboundMessage, dbh = db) {
     const rows = billing.paymentHistory?.rows;
     if (!Array.isArray(rows)) return context;
     const shown = new Set((billing.recentPayments || []).map((p) => p && p.id).filter(Boolean));
-    const extra = rows.filter((p) => p && !(p.id && shown.has(p.id)) && drafter.paymentRowMatchesIdentity(p, identity));
+    // The FULL history stays on billing.paymentHistory (validation binds against it); only a handful of the
+    // best matches — most recent first (history rows are date-desc) — join the MODEL-FACING recent payments, so a
+    // broad identity (e.g. just a tender) can never push ~200 rows into the prompt (Codex round-28 P2).
+    const extra = rows.filter((p) => p && !(p.id && shown.has(p.id)) && drafter.paymentRowMatchesIdentity(p, identity)).slice(0, SURFACED_PAYMENTS_MAX);
     if (extra.length) billing.recentPayments = [...(billing.recentPayments || []), ...extra];
   } catch (err) {
     logger.warn(`[payment-history] could not surface referenced payments: ${err.message}`);

@@ -83,6 +83,8 @@ jest.mock('../services/twilio-failure-alerts', () => ({
 // these route tests only need the hooks to succeed quietly.
 jest.mock('../services/sms-suggest-mode', () => ({
   SUGGEST_WORKFLOW: 'sms_house_voice_suggest',
+  // bodyNeedsPaymentRecheck (the send seam's gate) asks this; an absent export reads as "unknowable => recheck" (fail closed)
+  hasPriceQuote: jest.fn(() => false),
   HUMAN_REPLY_TYPES: ['manual', 'ai_approved', 'ai_revised'],
   revertDraftsToShadow: jest.fn(async () => 0),
   markSuggestionScheduled: jest.fn(async () => 1),

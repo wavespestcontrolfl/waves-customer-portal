@@ -13,13 +13,15 @@ jest.mock('../models/db', () => {
   const windowRows = [1, 2, 3, 4, 5].map((n) => ({
     id: `p${n}`, amount: 40 + n, status: 'paid', payment_date: `2026-09-2${n}`, payer_id: null, metadata: null,
   }));
-  const rowsFor = (table) => ((db.__rows && db.__rows[table]) || (table === 'payments' ? windowRows : []));
+  const rowsFor = (table, q) => (q && q._linkage ? ((db.__rows && db.__rows.payerInvoices) || []) : ((db.__rows && db.__rows[table]) || (table === 'payments' ? windowRows : [])));
   const mk = (table) => {
     const q = {};
-    for (const m of ['where', 'whereNull', 'whereNot', 'whereNotNull', 'whereIn', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'select', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereNull', 'whereNot', 'whereNotNull', 'whereIn', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
+    // the shared payer-linkage lookup (services/payer-linkage.js) is the only invoices query that selects stripe_charge_id
+    q.select = jest.fn((...cols) => { if (cols.includes('stripe_charge_id')) q._linkage = true; return q; });
     q.first = jest.fn(async () => (table === 'customers' ? { id: 'c1' } : undefined));
-    q.catch = jest.fn(() => Promise.resolve(rowsFor(table)));
-    q.then = (res, rej) => Promise.resolve(rowsFor(table)).then(res, rej);
+    q.catch = jest.fn(() => Promise.resolve(rowsFor(table, q)));
+    q.then = (res, rej) => Promise.resolve(rowsFor(table, q)).then(res, rej);
     return q;
   };
   const queries = [];
@@ -143,4 +145,63 @@ test('the Recent payments query orders by payment_date, then created_at, then id
   expect(q.orderBy.mock.calls.map(([col, dir]) => [col, dir])).toEqual([
     ['payments.payment_date', 'desc'], ['payments.created_at', 'desc'], ['payments.id', 'desc'],
   ]);
+});
+
+// Codex round-28 P1: the context's payments read uses the SAME payer-linkage predicate as billing-v2 / the history.
+describe('recent payments exclude payer-linked rows through every linkage', () => {
+  const db = require('../models/db');
+  afterEach(() => { delete db.__rows; });
+  const payerInv = { id: '11111111-1111-4111-8111-111111111111', stripe_payment_intent_id: 'pi_ap', stripe_charge_id: 'ch_ap', invoice_number: 'WPC-2026-0500' };
+  const pay = (id, over = {}) => ({ id, amount: 50, status: 'paid', payment_date: '2026-09-1' + id.slice(-1), payer_id: null, metadata: null, description: null, ...over });
+  const mixed = [
+    pay('p1', { metadata: { dispute_invoice_id: payerInv.id } }), pay('p2', { stripe_payment_intent_id: 'pi_ap' }), pay('p3', { stripe_charge_id: 'ch_ap' }),
+    pay('p4', { description: 'Invoice WPC-2026-0500 — zelle' }), pay('p5', { metadata: JSON.stringify({ waves_invoice_id: payerInv.id }) }), pay('p6', { metadata: { invoice_id: payerInv.id } }),
+    pay('p7'), pay('p8'), pay('p9'),
+  ];
+  test('the display window shows only the homeowner\'s own rows (payer rows are over-fetched past and dropped)', async () => {
+    db.__rows = { payments: mixed, invoices: [], payerInvoices: [payerInv] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const billing = await build();
+    expect(billing.recentPayments.map((p) => p.id)).toEqual(['p7', 'p8', 'p9']);
+    expect(billing.recentPaymentsTruncated).toBe(false); // only three own rows exist
+  });
+  test('more than three own rows => truncated', async () => {
+    db.__rows = { payments: [...mixed, pay('p10')], invoices: [], payerInvoices: [payerInv] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const billing = await build();
+    expect(billing.recentPayments).toHaveLength(3);
+    expect(billing.recentPaymentsTruncated).toBe(true);
+  });
+  test('the payments query over-fetches (limit 40) so dropped payer rows cannot starve the window', async () => {
+    db.__rows = { payments: mixed, invoices: [], payerInvoices: [payerInv] };
+    db.__queries.length = 0;
+    hasInFlightMoney.mockResolvedValue(false);
+    await build();
+    const q = db.__queries.find(([t]) => t === 'payments')[1];
+    expect(q.limit).toHaveBeenCalledWith(40);
+  });
+});
+
+// Codex round-28 P2: the Zelle target list is complete well past the old cap of 10, and flagged when it is cut.
+describe('openInvoices is not silently capped at 10', () => {
+  const db = require('../models/db');
+  afterEach(() => { delete db.__rows; });
+  const many = (n) => Array.from({ length: n }, (_, i) => ({
+    id: `i${i + 1}`, invoice_number: `WPC-2026-${String(i + 1).padStart(4, '0')}`, status: 'sent', total: 100 + i, credit_applied: 0, payer_id: null,
+    scheduled_send_error: null, due_date: null, created_at: `2026-09-${String(28 - (i % 27)).padStart(2, '0')}T00:00:00Z`,
+  }));
+  test('12 open invoices are all listed (the 11th and 12th included), not flagged truncated', async () => {
+    db.__rows = { invoices: many(12), payments: [], payerInvoices: [] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const billing = await build();
+    expect(billing.openInvoices).toHaveLength(12);
+    expect(billing.openInvoicesTruncated).toBe(false);
+  });
+  test('beyond the (much higher) cap the list is cut AND flagged', async () => {
+    db.__rows = { invoices: many(130), payments: [], payerInvoices: [] };
+    hasInFlightMoney.mockResolvedValue(false);
+    const billing = await build();
+    expect(billing.openInvoices).toHaveLength(100);
+    expect(billing.openInvoicesTruncated).toBe(true);
+  });
 });

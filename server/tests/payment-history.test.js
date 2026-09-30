@@ -7,15 +7,21 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../models/db', () => jest.fn());
 const { loadPaymentHistory, ensureAbsenceHistory, PAYMENT_HISTORY_CAP } = require('../services/payment-history');
 
-function fakeDb(rows, { fail = false } = {}) {
+function fakeDb(rows, { fail = false, payerInvoices = [], linkageFails = false } = {}) {
   const calls = [];
   const q = {};
   ['where', 'whereNot', 'whereNull', 'whereRaw', 'orderBy', 'limit'].forEach((m) => {
     q[m] = jest.fn((...args) => { calls.push([m, args]); return q; });
   });
   q.then = (res, rej) => (fail ? Promise.reject(new Error('db down')) : Promise.resolve(rows)).then(res, rej);
-  const dbh = jest.fn(() => q);
+  // the shared payer-linkage lookup (services/payer-linkage.js): the customer's payer-owned invoices
+  const inv = {};
+  ['where', 'select', 'whereNotNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
+  inv.catch = (handler) => (linkageFails ? Promise.resolve(handler(new Error('linkage down'))) : Promise.resolve(payerInvoices));
+  const dbh = jest.fn((table) => (table === 'invoices' ? inv : q));
   dbh.calls = calls;
+  // number of PAYMENTS reads (the linkage lookup is a second, invoices, query)
+  dbh.paymentReads = () => dbh.mock.calls.filter(([t]) => t === 'payments').length;
   return dbh;
 }
 
@@ -67,11 +73,11 @@ describe('ensureAbsenceHistory (lazy)', () => {
     const dbh = fakeDb([{ id: 1 }]);
     const notAbsence = ctx({ recentPayments: [], recentPaymentsTruncated: true });
     await ensureAbsenceHistory(notAbsence, 'See you Tuesday, thanks!', dbh);
-    expect(dbh).not.toHaveBeenCalled();
+    expect(dbh.paymentReads()).toBe(0);
     expect(notAbsence.billing.paymentHistory).toBeUndefined();
     const notTruncated = ctx({ recentPayments: [], recentPaymentsTruncated: false });
     await ensureAbsenceHistory(notTruncated, "Your payment isn't showing yet.", dbh);
-    expect(dbh).not.toHaveBeenCalled();
+    expect(dbh.paymentReads()).toBe(0);
   });
 
   // Codex round-27 P1: ANY status / receipt claim binds against incomplete rows when the window is truncated.
@@ -85,14 +91,14 @@ describe('ensureAbsenceHistory (lazy)', () => {
     const dbh = fakeDb([]);
     const notTruncated = ctx({ recentPayments: [], recentPaymentsTruncated: false });
     await ensureAbsenceHistory(notTruncated, 'We received your $120 payment from Sep 12.', dbh);
-    expect(dbh).not.toHaveBeenCalled();
+    expect(dbh.paymentReads()).toBe(0);
   });
 
   test('an amount-free NEGATED ack ("No payment received.") also loads the authoritative history (Codex round-15 P1)', async () => {
     const dbh = fakeDb([{ id: 1, status: 'paid' }]);
     const denial = ctx({ recentPayments: [], recentPaymentsTruncated: true });
     await ensureAbsenceHistory(denial, 'No payment received.', dbh);
-    expect(dbh).toHaveBeenCalledTimes(1);
+    expect(dbh.paymentReads()).toBe(1);
     expect(denial.billing.paymentHistory.rows).toHaveLength(1);
   });
 
@@ -102,7 +108,7 @@ describe('ensureAbsenceHistory (lazy)', () => {
     await ensureAbsenceHistory(c, "Your payment isn't showing on our end yet.", dbh);
     expect(c.billing.paymentHistory).toEqual({ rows: [{ id: 1, amount: 120 }], complete: true });
     await ensureAbsenceHistory(c, "We haven't received it.", dbh);
-    expect(dbh).toHaveBeenCalledTimes(1);
+    expect(dbh.paymentReads()).toBe(1);
   });
 
   test('a failed load attaches null (validator then rejects)', async () => {
@@ -184,7 +190,7 @@ describe('surfaceReferencedPayments', () => {
     await surfaceReferencedPayments(notTruncated, 'Did you get my $120 payment from June 12?', dbh);
     await surfaceReferencedPayments(ctx(), 'What time are you coming Tuesday?', dbh);
     await surfaceReferencedPayments(ctx(), 'Did you get my payment?', dbh); // no amount / date / tender
-    expect(dbh).not.toHaveBeenCalled();
+    expect(dbh.paymentReads()).toBe(0);
   });
   test('a failed history read leaves the context untouched (never throws)', async () => {
     const context = ctx();
@@ -205,7 +211,7 @@ describe('draft/send flow with 4+ same-day attempts', () => {
     const reply = 'Your $120 card payment from Sep 12 failed.';
     expect(replyQuotesUngroundedAmount(reply, context, { byMeaning: true })).toBe(false); // window only: looks fine
     await ensureAbsenceHistory(context, reply, dbh);
-    expect(dbh).toHaveBeenCalledTimes(1);
+    expect(dbh.paymentReads()).toBe(1);
     expect(replyQuotesUngroundedAmount(reply, context, { byMeaning: true })).toBe(true);
   });
   test('a failed history read (null) leaves the truncated window unusable for binding', async () => {
@@ -213,5 +219,24 @@ describe('draft/send flow with 4+ same-day attempts', () => {
     await ensureAbsenceHistory(context, 'Your $120 card payment from Sep 12 failed.', fakeDb([], { fail: true }));
     expect(context.billing.paymentHistory).toBeNull();
     expect(replyQuotesUngroundedAmount('Your $120 card payment from Sep 12 failed.', context, { byMeaning: true })).toBe(true);
+  });
+});
+
+// Codex round-28 P2: surfaceReferencedPayments keeps the FULL history for validation but shows the model only a few rows.
+describe('surfaceReferencedPayments prompt size', () => {
+  const { surfaceReferencedPayments } = require('../services/payment-history');
+  const many = Array.from({ length: 60 }, (_, i) => ({ id: `z${i}`, amount: 40 + i, status: 'paid', payment_date: `2026-05-${String(28 - (i % 27)).padStart(2, '0')}`, payment_method_type: 'card' }));
+  const newest = [1, 2, 3].map((n) => ({ id: `p${n}`, amount: 900 + n, status: 'paid', payment_date: `2026-09-0${n}`, payment_method_type: 'card' }));
+  test('a broad identity (just a tender) adds at most 5 rows to the model-facing window; the full history stays attached', async () => {
+    const context = { customer: { id: 'c1' }, billing: { recentPayments: [...newest], recentPaymentsTruncated: true } };
+    await surfaceReferencedPayments(context, 'Did my card payment go through?', fakeDb([...newest, ...many]));
+    expect(context.billing.recentPayments).toHaveLength(3 + 5);
+    expect(context.billing.recentPayments.slice(3).map((p) => p.id)).toEqual(['z0', 'z1', 'z2', 'z3', 'z4']); // most recent first (history is date-desc)
+    expect(context.billing.paymentHistory.rows).toHaveLength(63); // validation still sees everything
+  });
+  test('a precise identity still surfaces its row', async () => {
+    const context = { customer: { id: 'c1' }, billing: { recentPayments: [...newest], recentPaymentsTruncated: true } };
+    await surfaceReferencedPayments(context, 'Did my $77 payment go through?', fakeDb([...newest, ...many]));
+    expect(context.billing.recentPayments.slice(3).map((p) => p.amount)).toEqual([77]);
   });
 });

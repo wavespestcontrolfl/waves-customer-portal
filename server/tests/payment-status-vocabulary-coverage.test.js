@@ -1142,3 +1142,57 @@ describe('round-27: with a truncated window, claims bind against the loaded HIST
     expect(rq('We received your $77 card payment from Jun 12.', ctxWith({}))).toBe(true); // window only: not there
   });
 });
+
+// Codex round-28 P1 (2)+(3): card / tender subjects and "charge" inbound.
+describe('round-28: card and tender subjects are payment subjects; "charge" inbound is a payment question', () => {
+  const V5 = require('../services/payment-receipt-vocabulary');
+  const rq = (r, rows = [], inboundMessage) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } }, { byMeaning: true, inboundMessage });
+  const row = (status, over = {}) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card', ...over });
+
+  test('the classifier reads "Your card was declined / Your Apple Pay failed" as a FAILED claim', () => {
+    for (const s of ['Your card was declined.', 'Your card failed.', 'Your Apple Pay payment failed.', 'Your Apple Pay failed.', 'Your Google Pay was declined.', 'Your Zelle failed.', 'Your bank account payment failed.']) {
+      expect({ s, families: [...new Set(V5.paymentStatusPhraseMatches(s, false).matches.map((m) => m.family))] }).toEqual({ s, families: ['failed'] });
+    }
+  });
+  test('and binds it to a FAILED row (grounded), never a paid one', () => {
+    expect(rq('Your card was declined.', [row('failed')])).toBe(false);
+    expect(rq('Your card was declined.', [row('paid')])).toBe(true);
+    expect(rq('Your card was declined.', [])).toBe(true);
+    expect(rq('Your Apple Pay payment failed.', [row('failed')])).toBe(false);
+    expect(rq('Your Apple Pay payment failed.', [row('paid')])).toBe(true);
+    expect(rq('Your Apple Pay failed.', [row('paid')])).toBe(true);
+  });
+  test('the unrecognized fallback covers card / tender subjects; saved-method facts are not assertions', () => {
+    for (const s of ['Your card got sorted out.', 'Your Apple Pay went fine.', 'Your card was all fixed.']) expect({ s, r: V5.unrecognizedPaymentAssertion(s), flagged: V5.mayAssertPaymentStatus(s) }).toEqual({ s, r: true, flagged: true });
+    for (const s of ['Your card on file is a Visa ending 4242.', 'Your card expires next month.', 'Your default card was updated.', 'You can pay by card or Zelle.']) expect({ s, r: V5.unrecognizedPaymentAssertion(s) }).toEqual({ s, r: false });
+    expect(rq('Your card got sorted out.', [row('paid')])).toBe(true);
+  });
+  test('the customer-message test includes charge / charged / card / tender words (built from the same list)', () => {
+    for (const q of ['Did my charge go through?', 'Was I charged twice?', 'Did my card get declined?', 'Did my Apple Pay work?', 'Did my Zelle arrive?']) expect({ q, r: V5.inboundNamesPayment(q) }).toEqual({ q, r: true });
+    expect(V5.inboundNamesPayment('What time is my visit Tuesday?')).toBe(false);
+  });
+  test('"Did my charge go through?" + "It failed." is now VALIDATED (was: a bare pronoun clause validated nothing)', () => {
+    const ASK = 'Did my charge go through?';
+    expect(rq('It failed.', [row('failed')], ASK)).toBe(true); // an anaphor with no antecedent is ungrounded
+    expect(rq('Your charge failed.', [row('failed')], ASK)).toBe(false);
+    expect(rq('Your charge failed.', [row('paid')], ASK)).toBe(true);
+    expect(rq('It failed.', [row('paid')], ASK)).toBe(true);
+    expect(require('../services/sms-shadow-drafter').enumeratePaymentClaims('It failed.', { inboundText: ASK }).claims.map((c) => c.kind)).toEqual(['status']);
+  });
+});
+
+// Codex round-28 P1 (4): the anaphoric partial-refund disclosure backs ONLY the claim it follows.
+describe('round-28: an anaphoric partial disclosure is bound to its antecedent row only', () => {
+  const rq = (r, rows) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows } }, { byMeaning: true });
+  const A = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', refund_status: 'partial', refund_amount: 30 };
+  const B = { amount: 200, status: 'paid', payment_date: '2026-09-05', payment_method_type: 'card', refund_status: 'partial', refund_amount: 50 };
+  test('the two-partial-rows case', () => {
+    const ra = 'We received your $120 payment from Sep 12, but it was partially refunded.';
+    const rb = 'We received your $200 payment from Sep 5.';
+    expect(rq(ra, [A, B])).toBe(false);
+    expect(rq(`${ra} ${rb}`, [A, B])).toBe(true); // B has no disclosure of its own
+    expect(rq(`${rb} ${ra}`, [A, B])).toBe(true);
+    expect(rq(`${rb.replace('.', '')}, but it was partially refunded. ${ra}`, [A, B])).toBe(false); // each has its own disclosure
+    expect(rq('We received your $200 payment from Sep 5, and we received your $120 payment from Sep 12, but it was partially refunded.', [A, B])).toBe(true);
+  });
+});

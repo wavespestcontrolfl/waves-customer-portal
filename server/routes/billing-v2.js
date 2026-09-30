@@ -10,6 +10,9 @@ const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod, isPaused, getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
+const {
+  loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf,
+} = require('../services/payer-linkage');
 const { isEnabled } = require('../config/feature-gates');
 
 router.use(authenticate);
@@ -39,52 +42,11 @@ router.get('/', async (req, res, next) => {
     // exclusion can't be a SQL filter without casting arbitrary payment metadata
     // to jsonb table-wide). Payer payments are a small minority, so a padded
     // buffer fills the page in realistic cases.
-    let payerLookupFailed = false;
-    const payerInvRows = await db('invoices')
-      .where({ customer_id: req.customerId })
-      // payer_id OR the withdrawal stamp (Codex #4311 r36 P1): a withdrawn
-      // combined-visit invoice keeps payer_id NULL, so an id-only test let
-      // its failed attempts and receipts read as the homeowner's own.
-      .where(function payerOwned() {
-        this.whereNotNull('payer_id').orWhere('scheduled_send_error', 'like', 'payer_billed:%');
-      })
-      .select('id', 'stripe_payment_intent_id', 'stripe_charge_id', 'invoice_number')
-      .catch(() => { payerLookupFailed = true; return []; });
-    const payerInvoiceIds = new Set(payerInvRows.map((r) => String(r.id)));
-    // Payer ownership must be recognized through EVERY linkage the receipt
-    // resolution below understands — an id-only filter let alias / PaymentIntent
-    // / invoice-number-linked payer rows through, and their hosted Stripe
-    // receipt exposes the AP payer's identity to the homeowner (pre-push P0).
-    const payerIntentIds = new Set(payerInvRows.map((r) => r.stripe_payment_intent_id).filter(Boolean));
-    const payerChargeIds = new Set(payerInvRows.map((r) => r.stripe_charge_id).filter(Boolean));
-    const payerInvoiceNumbers = new Set(payerInvRows.map((r) => r.invoice_number).filter(Boolean));
-    const invoiceIdOf = (p) => {
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return m && m.invoice_id != null ? String(m.invoice_id) : null;
-      } catch {
-        return null;
-      }
-    };
-    const aliasInvoiceIdOf = (p) => {
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        const alias = m?.dispute_invoice_id || m?.waves_invoice_id;
-        return alias != null ? String(alias) : null;
-      } catch { return null; }
-    };
-    const descriptionInvoiceNumberOf = (p) => {
-      const m = /^Invoice\s+([A-Za-z0-9-]+)\s+—/.exec(String(p.description || ''));
-      return m ? m[1] : null;
-    };
-    const isPayerLinked = (p) => {
-      const invId = invoiceIdOf(p) || aliasInvoiceIdOf(p);
-      if (invId && payerInvoiceIds.has(invId)) return true;
-      if (p.stripe_payment_intent_id && payerIntentIds.has(p.stripe_payment_intent_id)) return true;
-      if (p.stripe_charge_id && payerChargeIds.has(p.stripe_charge_id)) return true;
-      const num = descriptionInvoiceNumberOf(p);
-      return !!(num && payerInvoiceNumbers.has(num));
-    };
+    // ONE shared payer-linkage predicate (services/payer-linkage.js — extracted verbatim from this route so the SMS
+    // facts use the exact same rule). Payer ownership is recognized through EVERY linkage the receipt resolution
+    // below understands: metadata invoice_id / aliases, PaymentIntent, charge, invoice-number description, and the
+    // payer_billed: withdrawal stamp (pre-push P0).
+    const { failed: payerLookupFailed, payerInvoiceIds, isPayerLinked } = await loadPayerLinkage(req.customerId);
     let total;
     if (payerInvoiceIds.size === 0) {
       const countRow = await db('payments')

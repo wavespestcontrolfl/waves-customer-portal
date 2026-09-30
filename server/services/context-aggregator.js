@@ -1,6 +1,11 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
+const { loadPayerLinkage } = require('./payer-linkage');
+// the payments display read over-fetches so payer-linked rows can be dropped without starving the window
+const PAYMENT_OVERFETCH = 40;
+// how many open own invoices the SMS context lists (the target list for Zelle / invoice status); flagged when cut
+const OPEN_INVOICES_CAP = 100;
 const {
   INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, isCollectibleOwnInvoice, hasCollectibleAmountDue,
   OWN_COLLECTIBLE_INVOICE_STATUSES,
@@ -546,7 +551,7 @@ class ContextAggregator {
     // never throws — null on failure) starts NOW so it overlaps the fetches below instead of
     // adding a serial round trip; it is awaited where hasProcessingPayment is derived.
     const inFlightMoneyPromise = require('./payment-history').hasInFlightMoney(customer.id);
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, payerLinkage] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
       // #4331 P2): an in-flight, unconfirmed placeholder must not read as a
       // message Waves definitely sent, nor displace a real row out of this
@@ -564,7 +569,7 @@ class ContextAggregator {
       // a NULL-status row is found-but-unknown evidence (Codex round-15 P1).
       // DETERMINISTIC order (Codex round-27 P1): payment_date is date-only, so same-day attempts tie — created_at
       // then id break the tie, so the same rows are shown (and hidden) on every read, draft and send.
-      db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }).orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').limit(5),
+      db('payments').where({ 'payments.customer_id': customer.id }).whereNull('payments.payer_id').where(function keepNullStatus() { this.whereNull('payments.status').orWhereNot('payments.status', 'upcoming'); }).orderBy('payments.payment_date', 'desc').orderBy('payments.created_at', 'desc').orderBy('payments.id', 'desc').limit(PAYMENT_OVERFETCH),
       db('customer_interactions').where({ customer_id: customer.id }).orderBy('created_at', 'desc').limit(10),
       db('customer_interactions').where({ customer_id: customer.id, interaction_type: 'complaint' }).where('created_at', '>', new Date(Date.now() - 90 * 86400000)),
       db('reschedule_log').where({ customer_id: customer.id }).where('created_at', '>', new Date(Date.now() - 30 * 86400000)).count('* as count').first(),
@@ -635,6 +640,8 @@ class ContextAggregator {
         // hits the same table; an error sentinel here forces the UNKNOWN
         // autopay rendering below.
         .catch(() => 'unavailable'),
+      // ONE shared payer-linkage predicate (services/payer-linkage.js, extracted from billing-v2) — Codex round-28 P1.
+      loadPayerLinkage(customer.id),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -642,7 +649,8 @@ class ContextAggregator {
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
     // balance and the recent-payments facts.
-    const billingUnavailable = allInvoices === null;
+    // payer ownership of the payment rows is UNKNOWN when the linkage lookup failed => the money picture is unknowable
+    const billingUnavailable = allInvoices === null || payerLinkage.failed === true;
     const invoiceRows = allInvoices || [];
     const VISIBLE_INVOICE_STATUSES = new Set(OWN_COLLECTIBLE_INVOICE_STATUSES);
     const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
@@ -653,10 +661,11 @@ class ContextAggregator {
         return m && m.invoice_id != null ? String(m.invoice_id) : null;
       } catch { return null; }
     };
-    const ownPayments = payments.filter((p) => {
-      const invId = paymentInvoiceId(p);
-      return !(invId && payerInvoiceIds.has(invId));
-    });
+    // The payments read over-fetches (payer-linked rows are dropped in JS through EVERY linkage billing-v2 knows: metadata
+    // invoice_id + aliases, PaymentIntent, charge, the "Invoice <n> —" description and the payer_billed: withdrawal
+    // stamp — Codex round-28 P1); the FIRST 5 own rows are the display read, exactly as before.
+    const ownPaymentsAll = payments.filter((p) => !(payerLinkage.isPayerLinked(p) || (paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p)))));
+    const ownPayments = ownPaymentsAll.slice(0, 5);
     const inFlightMoney = await inFlightMoneyPromise;
     // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
     // collectible OWN invoices (net of credit) plus failed standalone
@@ -688,7 +697,8 @@ class ContextAggregator {
     const openInvoice = ownInvoices.find(hasCollectibleAmountDue) || null;
     // EVERY own invoice with a positive due (newest first, capped) — `openInvoice` above is only the newest.
     // Lets a caller tell WHICH open invoice a customer's message is about (Codex round-19 P1).
-    const openInvoices = ownInvoices.filter(hasCollectibleAmountDue).slice(0, 10).map((inv) => ({
+    const collectibleOpen = ownInvoices.filter(hasCollectibleAmountDue);
+    const openInvoices = collectibleOpen.slice(0, OPEN_INVOICES_CAP).map((inv) => ({
       id: inv.id, invoiceNumber: inv.invoice_number || null, status: inv.status, amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
     }));
     // The status of the customer's recent own invoices (drafts excluded — never shown to the customer), for
@@ -822,7 +832,7 @@ class ContextAggregator {
         // the window may hide more history (the 5-row read was full, or own rows
         // exceed 3) — an absence claim then needs the authoritative history,
         // loaded lazily by payment-history.js ONLY when a reply makes one.
-        recentPaymentsTruncated: payments.length >= 5
+        recentPaymentsTruncated: ownPaymentsAll.length >= 5 || payments.length >= PAYMENT_OVERFETCH
           || ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').length > 3,
         // Codex round-11 P1: a payment or invoice still PROCESSING is unsettled
         // (the balance above excludes a processing invoice, so "you're paid up"
@@ -852,6 +862,9 @@ class ContextAggregator {
           dueDate: openInvoice.due_date || null,
         } : null,
         openInvoices,
+        // the list is complete unless the customer has more than OPEN_INVOICES_CAP open invoices — then a caller must
+        // not conclude "that invoice isn't open" from its absence (Codex round-28 P2)
+        openInvoicesTruncated: collectibleOpen.length > OPEN_INVOICES_CAP,
         invoiceStatuses,
         payerBilledInvoice: hasPayerBilledOpen,
         // v10: payment method on file — brand/bank + last4 only, never a

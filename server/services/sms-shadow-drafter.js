@@ -1869,7 +1869,8 @@ function paymentClaimBinding(clauseText, inboundText) {
   if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
   if (claimedTender === TENDER_AMBIGUOUS) return null;
   const claimedDate = replyDate || inboundDate || null;
-  const inboundNamedPayment = !!inboundText && /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?)\b/i.test(inboundText);
+  // the SAME customer-message test as the classifier (charge / card / tender subjects included — Codex round-28 P1)
+  const inboundNamedPayment = !!inboundText && inboundNamesPayment(inboundText);
   // the customer's message is about a payment but names NO amount / date / tender (Codex round-27 P1)
   const inboundGeneric = !!inboundText && inboundNamedPayment && !amountCentsIn(inboundText).length
     && !inboundDate && !tenderLabelsIn(inboundText).size;
@@ -1918,14 +1919,18 @@ const amountCentsIn = (t) => (String(t || '').match(AMOUNT_MASK_RE) || []).map((
 // (checked by validateAnaphoricClaim) carries it.
 function partialRefundDisclosures(text, context, inboundText) {
   const rowsOut = new Set();
-  let anaphoric = false;
+  // indexes of the clauses IMMEDIATELY BEFORE an anaphoric partial-refund disclosure: that disclosure's antecedent
+  // is the payment claim made there, so only that clause may back a partially refunded row with it
+  const anaphoricAfter = new Set();
   const rows = paymentRowsForBinding(context).filter((p) => isPartiallyRefunded(p));
-  for (const clause of String(text || '').split(CLAUSE_SPLIT_RE)) {
+  const clauses = String(text || '').split(CLAUSE_SPLIT_RE);
+  for (let i = 0; i < clauses.length; i += 1) {
+    const clause = clauses[i];
     const partialWording = partialRefundWording(clause);
     const refundSubject = /\brefunds?\b/i.test(clause);
     if (!/refund/i.test(clause) || !(partialWording || refundSubject)) continue;
     const amounts = amountCentsIn(clause);
-    if (isAnaphoricPaymentClause(clause, amounts)) { if (partialWording) anaphoric = true; continue; }
+    if (isAnaphoricPaymentClause(clause, amounts)) { if (partialWording && i > 0) anaphoricAfter.add(i - 1); continue; }
     const binding = paymentClaimBinding(clause, inboundText);
     if (!binding) continue;
     for (const a of (amounts.length ? amounts : [null])) {
@@ -1934,14 +1939,14 @@ function partialRefundDisclosures(text, context, inboundText) {
       }
     }
   }
-  return { rows: rowsOut, anaphoric };
+  return { rows: rowsOut, anaphoricAfter };
 }
 function buildGroundingEnv(reply, context, opts) {
   const text = String(reply || '');
   // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const { owed, paid } = billingAmountCents(context, { settledOnly: realAnswers });
-  return {
+  const env = {
     text,
     context,
     realAnswers,
@@ -1965,16 +1970,20 @@ function buildGroundingEnv(reply, context, opts) {
     paymentContext: false,
     // Codex round-27 P1: a partial-refund DISCLOSURE is tracked by the payment ROW it binds to, not reply-wide.
     // A receipt claim may back a partially refunded row only if a disclosure in this reply is bound to THAT row
-    // (or an anaphoric "…but it was partially refunded" follows — validated against the antecedent row itself).
+    // (or an anaphoric "…but it was partially refunded" immediately follows THAT claim — validated against the antecedent row itself).
     ...(() => {
       const d = partialRefundDisclosures(text, context, String(opts.inboundMessage || ''));
-      return { disclosedPartialRows: d.rows, partialPaidAllowedFor: (row) => d.rows.has(row) || d.anaphoric };
+      return { disclosedPartialRows: d.rows, anaphoricPartialAfter: d.anaphoricAfter, clauseIndex: -1 };
     })(),
     replyAmounts: amountCentsIn(text),
     // A zero-balance claim ("Your balance is zero.") reads as price grammar but states no price — the gate is
     // evaluated with ONLY that span blanked (anything else in the clause still trips it; Codex round-17 P1).
     priceGrammarFires: require('./sms-suggest-mode').hasPriceQuote(withoutZeroBalanceSpan(text)),
   };
+  // may this receipt back a PARTIALLY refunded row? Only if a disclosure is bound to that row, or an anaphoric
+  // disclosure immediately follows the clause being judged (env.clauseIndex is advanced by the clause loop).
+  env.partialPaidAllowedFor = (row) => env.disclosedPartialRows.has(row) || env.anaphoricPartialAfter.has(env.clauseIndex);
+  return env;
 }
 
 // STRUCTURAL claim enumeration (Codex round-17/18 P1). A clause can assert SEVERAL things at
@@ -2336,8 +2345,10 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // Gate OFF: the original pooled allowlist — any authoritative figure passes.
   if (!env.realAnswers) return env.replyAmounts.some((a) => !env.owedCents.has(a) && !env.paidCents.has(a));
   // In order, one shared env: earlier clauses set the payment identity later (anaphoric) clauses inherit.
-  for (const clause of env.text.split(CLAUSE_SPLIT_RE)) {
-    if (clauseUngrounded(clause, env)) return true;
+  const clauseList = env.text.split(CLAUSE_SPLIT_RE);
+  for (let i = 0; i < clauseList.length; i += 1) {
+    env.clauseIndex = i; // which clause is being judged (an anaphoric disclosure backs ONLY the clause just before it)
+    if (clauseUngrounded(clauseList[i], env)) return true;
   }
   return false;
 }

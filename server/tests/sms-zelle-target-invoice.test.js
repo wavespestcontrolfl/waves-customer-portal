@@ -279,3 +279,15 @@ describe('conflict vs ambiguity wording (Codex round-27 P2)', () => {
     expect(f4).toContain('does NOT match an open invoice'); // an explicit conflict even with several open
   });
 });
+
+// Codex round-28 P2: a cut open-invoice list proves nothing about a NAMED invoice.
+describe('truncated open-invoice list (round 28)', () => {
+  const open = [{ id: 'a', invoiceNumber: 'WPC-2026-0001', amountDue: 50 }, { id: 'b', invoiceNumber: 'WPC-2026-0002', amountDue: 60 }];
+  test('a named invoice absent from a TRUNCATED list is unresolved (not a "conflict")', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open, openInvoicesTruncated: true }, 'Can I Zelle invoice WPC-2026-0500?')).toEqual({ invoiceId: null, reason: 'open_list_truncated' });
+    expect(resolveZelleTargetInvoice({ openInvoices: open, openInvoicesTruncated: false }, 'Can I Zelle invoice WPC-2026-0500?').reason).toBe('named_invoice_not_open');
+  });
+  test('a named invoice that IS in the list still resolves when truncated', () => {
+    expect(resolveZelleTargetInvoice({ openInvoices: open, openInvoicesTruncated: true }, 'Zelle invoice WPC-2026-0002').invoiceId).toBe('b');
+  });
+});

@@ -56,6 +56,9 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
     const last = num.split('-').pop();
     return named.tail.some((t) => stripZeros(t) === stripZeros(last));
   }) : [];
+  // the open list was CUT (more open invoices than the context lists): absence from it proves nothing — do not declare
+  // a conflict, treat the target as unresolved (Codex round-28 P2)
+  if (namesNumber && byNumber.length === 0 && billing?.openInvoicesTruncated) return { invoiceId: null, reason: 'open_list_truncated' };
   if (namesNumber && byNumber.length === 0) return { invoiceId: null, reason: 'named_invoice_not_open' };
   if (byNumber.length > 1) return { invoiceId: null, reason: 'ambiguous_invoice_number' };
   if (byNumber.length === 1) {
