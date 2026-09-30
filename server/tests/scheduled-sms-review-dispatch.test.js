@@ -337,7 +337,7 @@ test('the completion suffix is built from the same sentence the strip matches', 
   expect(src).not.toContain(COMPLETION_REVIEW_INVITE);
 });
 
-test('a tapped customer whose review line cannot be stripped still gets the completion once: the ask is suppressed, never held or re-dispatched', async () => {
+test('a tapped customer whose review line was edited still gets the completion once, with no review link (Codex #5367 r8 P2): the ask is suppressed, never held or re-dispatched', async () => {
   const logger = require('../services/logger');
   logger.warn.mockClear();
   const edited = 'Your service is complete: https://portal.test/report/abc\n\nLoved it? Leave us a quick review: https://portal.test/rate/review1';
@@ -350,14 +350,14 @@ test('a tapped customer whose review line cannot be stripped still gets the comp
   const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' }));
   expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete')).toMatchObject({ sent: true });
   expect(send).toHaveBeenCalledTimes(1);
-  expect(row).toMatchObject({ status: 'sent', message_body: edited });
+  expect(row).toMatchObject({ status: 'sent', message_body: 'Your service is complete: https://portal.test/report/abc' });
   expect(row.metadata.bundled_review_request_id).toBeUndefined();
   expect(row.metadata.review_hold_reason).toBeUndefined();
   expect(reviewUpdates).toEqual([{ status: 'suppressed', scheduled_for: null }]);
   expect(reviewRequest).toMatchObject({ status: 'suppressed', scheduled_for: null });
   expect(history.lastDeliveredAskAt).not.toHaveBeenCalled();
   expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
-  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('completion sent as-is, bundled ask suppressed'));
+  expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('review paragraphs and links removed, bundled ask suppressed'));
 });
 
 test('an unreadable click lookup fails closed: the review line is stripped and re-armed, never sent blind', async () => {
@@ -634,4 +634,17 @@ test('retiring an earlier billing event keeps the original queue time and mints 
   expect(final.metadata.bindings).toEqual([null, visibleAt, true, visibleAt, false, false, null, true, true, visibleAt]);
   expect(final.metadata.sql).toContain("'app_event_already_visible_at', ?::timestamptz");
   expect(row.status).toBe('sent');
+});
+
+test('a tapped customer whose edited review ask shares the completion paragraph loses only the review link', async () => {
+  const edited = 'Your service is complete: https://portal.test/report/abc Loved it? Review us: https://portal.test/rate/review1';
+  row.message_body = edited;
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askIdSuppressedByClick.mockResolvedValueOnce(true);
+  const send = jest.fn(async () => ({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' }));
+  expect(await dispatchScheduledSms(row, row.metadata, send, 'service_complete')).toMatchObject({ sent: true });
+  expect(row.message_body).toBe('Your service is complete: https://portal.test/report/abc Loved it? Review us:');
+  expect(row.message_body).not.toMatch(/\/rate\//);
 });

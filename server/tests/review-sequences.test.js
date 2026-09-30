@@ -7014,6 +7014,21 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
     expect(mock.__state.rows.review_requests.find((r) => r.id === 'rr-fu')).toMatchObject({ followup_sent: true });
   });
 
+  test('a manual retry on a delivered same-service row reports the tap instead of handing its URL back (Codex #5367 r8 P2)', async () => {
+    const delivered = () => ({ id: 'rr-tech', customer_id: 'clk-1', status: 'sent', channel: 'sms', template_key: 'day0_ask', sms_sent_at: VISIT, service_record_id: 'rec-clk', token: 'ttech', triggered_by: 'tech', created_at: VISIT });
+    let mock = makeMock({ customers: [customer], service_records: [record], review_requests: [delivered(), click({ id: 'rr-other' })] });
+    db.mockImplementation(mock);
+    const clicked = await ReviewService.create({ customerId: 'clk-1', serviceRecordId: 'rec-clk', triggeredBy: 'tech' });
+    expect(clicked.sendOutcome).toEqual({ sent: false, failed: 'review_link_clicked', nextAllowedAt: null });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+
+    mock = makeMock({ customers: [customer], service_records: [record], review_requests: [delivered()] });
+    db.mockImplementation(mock);
+    const untouched = await ReviewService.create({ customerId: 'clk-1', serviceRecordId: 'rec-clk', triggeredBy: 'tech' });
+    expect(untouched.id).toBe('rr-tech');
+    expect(untouched.sendOutcome).toBeUndefined();
+  });
+
   test('the composer inline email leg is suppressed too', async () => {
     const row = { id: 'rr-inline', customer_id: 'clk-1', status: 'sent', channel: 'sms', sms_sent_at: new Date(Date.now() - 3600000), triggered_by: 'admin', token: 'tin', email_leg_owed_at: new Date(), created_at: new Date(Date.now() - 7200000) };
     const mock = makeMock({ customers: [customer], review_requests: [row, click({ redirected_at: new Date(Date.now() - 600000) })] });

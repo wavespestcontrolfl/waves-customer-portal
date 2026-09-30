@@ -81,7 +81,11 @@ router.get('/review-card', async (req, res, next) => {
         'scheduled_services.completed_at as linked_completed_at',
         'technicians.name as technician_name'
       )
+      // The same order as the sort below, before the limit, so same-day
+      // siblings cannot crowd the latest visit out of the five.
       .orderBy('service_records.service_date', 'desc')
+      .orderByRaw('COALESCE(service_records.ended_at, scheduled_services.actual_end_time, scheduled_services.check_out_time, scheduled_services.completed_at) DESC NULLS LAST')
+      .orderBy('service_records.id', 'asc')
       .limit(5);
     recordQuery = applyPropertyPredicate(recordQuery, scope, 'scheduled_services');
     let scheduledQuery = db('scheduled_services')
@@ -100,6 +104,8 @@ router.get('/review-card', async (req, res, next) => {
         'technicians.name as technician_name'
       )
       .orderBy('scheduled_services.scheduled_date', 'desc')
+      .orderByRaw('COALESCE(scheduled_services.actual_end_time, scheduled_services.check_out_time, scheduled_services.completed_at) DESC NULLS LAST')
+      .orderBy('scheduled_services.id', 'asc')
       .limit(5);
     scheduledQuery = applyPropertyPredicate(scheduledQuery, scope, 'scheduled_services');
     const [records, scheduled] = await Promise.all([recordQuery, scheduledQuery]);

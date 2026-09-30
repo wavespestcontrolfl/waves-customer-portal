@@ -1032,6 +1032,23 @@ const ReviewService = {
       const pendingResend = existing && manualTrigger
         && String(existing.status || "").toLowerCase() === "pending" && !existing.sms_sent_at;
       if (existing && !pendingResend) {
+        // A manual retry hands the row's review URL back to the caller: after a
+        // tracked tap since the visit it must not (Codex #5367 r8 P2). Both
+        // trigger routes answer this outcome with a 409 and no URL; an
+        // unreadable click state is a 503, never a URL.
+        if (manualTrigger && OUTREACH.isAskTemplate(existing.template_key)) {
+          let clicked;
+          try {
+            clicked = await ClickGuard.askSuppressedByClick(existing);
+          } catch {
+            throw Object.assign(new Error("Could not confirm whether this customer already tapped their review link. Try again shortly."),
+              { statusCode: 503, code: "REVIEW_CLICK_STATE_UNAVAILABLE" });
+          }
+          if (clicked) {
+            existing.sendOutcome = { sent: false, failed: "review_link_clicked", nextAllowedAt: null };
+            return existing;
+          }
+        }
         // Nothing is sent on this path; say what the row's state is so a
         // caller's `sent` is SMS delivery evidence, not the absence of a
         // held outcome (codex #4156 r3 P2). A delivered row carries no

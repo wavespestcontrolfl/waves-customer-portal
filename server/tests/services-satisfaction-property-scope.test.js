@@ -31,7 +31,7 @@ const OFF = { customerId: 'cust-1', enabled: false, multi: false, scoped: false,
 
 function chain(rows) {
   const c = { calls: [] };
-  for (const m of ['where', 'whereRaw', 'whereIn', 'whereNull', 'whereNot', 'orWhere', 'orWhereNull', 'leftJoin', 'join', 'select', 'orderBy', 'limit', 'offset', 'on', 'andOn', 'count']) {
+  for (const m of ['where', 'whereRaw', 'whereIn', 'whereNull', 'whereNot', 'orWhere', 'orWhereNull', 'leftJoin', 'join', 'select', 'orderBy', 'orderByRaw', 'limit', 'offset', 'on', 'andOn', 'count']) {
     c[m] = jest.fn((...args) => {
       if (typeof args[0] === 'function') { const inner = chain([]); args[0].call(inner, inner); c.calls.push([m + '(fn)', inner.calls]); }
       else c.calls.push([m, ...args]);

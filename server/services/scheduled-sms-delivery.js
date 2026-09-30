@@ -29,6 +29,15 @@ const COMPLETION_REVIEW_SUFFIX_RE = new RegExp(
   'i',
 );
 const stripCompletionReviewLine = (body) => String(body || '').replace(COMPLETION_REVIEW_SUFFIX_RE, '').trim();
+// For a customer who already tapped: when the exact sentence no longer
+// matches (edited wording), drop every later paragraph that reads as a review
+// ask, then any review-page link left, so no working review link goes out.
+// The first paragraph (the completion itself) is always kept.
+const withoutReviewInvite = (body) => {
+  const [first = '', ...rest] = String(body || '').split(/\n{2,}/);
+  return [first, ...rest.filter((p) => !looksLikeReviewAsk(p))].join('\n\n')
+    .replace(/[ \t]*(?:https?:\/\/)?[a-z0-9.-]+(?::\d+)?\/(?:api\/)?rate\/[A-Za-z0-9][^\s]*/gi, '').trim();
+};
 
 async function acceptedScheduledSms(id, err) {
   if (err?.providerOutcome?.deliveryOutcome === 'accepted') return err.providerOutcome;
@@ -222,12 +231,12 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   // Completion delivery must not wait behind its optional review invitation.
   // Remove only the exact suffix we generated, preserving every receipt,
   // invoice and report link. Persist body and linkage together before send.
-  // A clicked customer's completion goes out even when that line cannot be
-  // stripped cleanly (sent as-is and logged); only the invitation is dropped.
+  // A clicked customer's completion goes out even when that line does not
+  // match the known wording: its review paragraphs and links are removed.
   const stripped = bundledReviewRequestId && stripCompletionReviewLine(msg.message_body);
   const strippedClean = Boolean(stripped) && stripped !== msg.message_body && !looksLikeReviewAsk(stripped);
   if (strippedClean || clicked) {
-    const body = strippedClean ? stripped : msg.message_body;
+    const body = strippedClean ? stripped : withoutReviewInvite(msg.message_body);
     const explicitRetryAt = result.nextAllowedAt ? new Date(result.nextAllowedAt) : null;
     const reviewRetryAt = explicitRetryAt && !Number.isNaN(explicitRetryAt.getTime())
       ? explicitRetryAt
@@ -276,7 +285,7 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
       });
       if (!changed) throw new Error('Scheduled completion claim lost before removing review invitation');
     });
-    if (!strippedClean) logger.warn(`[scheduled-sms] review line not strippable for a customer who already tapped a review link; completion sent as-is, bundled ask suppressed (smsLogId=${msg.id})`);
+    if (!strippedClean) logger.warn(`[scheduled-sms] review line did not match the known wording for a customer who already tapped a review link; review paragraphs and links removed, bundled ask suppressed (smsLogId=${msg.id})`);
     msg.message_body = body;
     delete meta.bundled_review_request_id;
     delete meta.review_ask_reservation;

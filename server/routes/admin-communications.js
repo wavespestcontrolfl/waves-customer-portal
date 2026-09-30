@@ -2902,7 +2902,15 @@ async function emailReviewAskNow(primaryId) {
     return { status: 409, body: { error: "Could not check this customer's pending review email — try again", outcome: 'error', reason: 'owed_lookup_failed' } };
   }
   if (awaiting?.id) {
-    const copy = await ReviewService.sendInlineEmailCopy(awaiting.id);
+    // Under the same review-send lock as the ordinary Both delivery, so a tap
+    // on the delivered text cannot land between the click check inside
+    // sendInlineEmailCopy and the email provider call.
+    const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id),
+      { recordHealth: false, waitForSlot: false });
+    if (wasLockSkipped(copy)) {
+      return { status: 409, body: { error: 'A review request to this customer is already being sent. Try again in a moment.', outcome: 'blocked', code: 'REVIEW_SEND_BUSY' } };
+    }
     if (copy?.sent) {
       const firstName = await emailContactFirstName(primaryId);
       return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: awaiting.id, firstName, retriedInline: true } };

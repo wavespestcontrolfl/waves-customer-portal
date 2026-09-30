@@ -118,7 +118,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // rendered while the ask was live, tapped after the customer finalized
     // through another link.
     const requestFinalized = Boolean(request.rated_at)
-      || ['submitted', 'reviewed', 'rated'].includes(request.status);
+      || ['submitted', 'reviewed', 'rated'].includes(String(request.status || '').toLowerCase());
     if (requestFinalized) return res.redirect(302, ratePageFallback);
     if (request.expires_at && new Date(request.expires_at) < new Date()) {
       // Expired-but-real UNANSWERED link (review audit 2026-08-07): a
@@ -277,14 +277,18 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // every pre-redirect step has succeeded — a failed attempt falls back to
     // the rate page and must not become "latest click" evidence (pre-push P1;
     // redirected_at is the immutable first-click claim above and never
-    // moves). Best-effort: a stamp failure must not cost the redirect.
+    // moves). On a REPEAT click this stamp is the only durable evidence the
+    // send-time guard reads for a newer visit (Codex #5367 r8 P2), so its
+    // failure falls back to /rate?retry=1 like the claim's; a first click
+    // already holds redirected_at and still goes to Google.
     try {
       await db('review_requests').where({ id: request.id }).update({
         last_redirected_at: new Date(),
         last_google_location: loc.id,
       });
     } catch (err) {
-      logger.warn(`[review-gate] last-click stamp failed: ${err.message}`);
+      logger.warn(`[review-gate] last-click stamp failed (firstClick=${Boolean(firstClick)}): ${err.message}`);
+      if (!firstClick) return res.redirect(302, retryFallback);
     }
 
     return res.redirect(302, loc.googleReviewUrl);

@@ -31,6 +31,7 @@ jest.mock('../models/db', () => {
     q.update = jest.fn(async (patch) => {
       if (table !== 'review_requests') return 1;
       if (state.failUpdate) throw new Error('pg blip');
+      if (state.failStamp && 'last_redirected_at' in patch) throw new Error('stamp blip');
       // Atomic first-click claim: WHERE redirected_at IS NULL.
       if (q._nullCols.includes('redirected_at') && state.request.redirected_at) return 0;
       Object.assign(state.request, patch);
@@ -65,6 +66,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
   db.state.failUpdate = false;
+  db.state.failStamp = false;
     db.state.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', has_left_google_review: false };
   db.state.request = {
     id: 'rr-1', token: TOKEN, customer_id: 'cust-1', location_id: loc.id, status: 'sent',
@@ -166,6 +168,17 @@ describe.each([true, false])('GATE_REVIEW_DIRECT_LINK=%s (review sequences ON) â
     db.state.request.status = 'submitted';
     res = await go();
     expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
+  });
+
+  test('a failed latest-click stamp: a repeat click falls back to /rate?retry=1, a first click still reaches Google (Codex #5367 r8 P2)', async () => {
+    db.state.failStamp = true;
+    db.state.request.redirected_at = new Date(Date.now() - 86400000);
+    let res = await go();
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}?retry=1`);
+    db.state.request.redirected_at = null;
+    res = await go();
+    expect(res.headers.get('location')).toBe(loc.googleReviewUrl);
+    expect(db.state.request.redirected_at).toBeTruthy();
   });
 
   test('a link-scanner / bot fetch records nothing and sends no invite', async () => {

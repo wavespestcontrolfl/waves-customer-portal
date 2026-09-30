@@ -10,7 +10,7 @@ jest.mock('../models/db', () => {
   const state = { visits: [], scheduled: [], clicked: null };
   const fn = jest.fn((table) => {
     const q = {};
-    for (const m of ['where', 'whereNotNull', 'whereNull', 'leftJoin', 'select', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
+    for (const m of ['where', 'whereNotNull', 'whereNull', 'leftJoin', 'select', 'orderBy', 'orderByRaw', 'limit']) q[m] = jest.fn(() => q);
     q.first = jest.fn(async () => {
       if (table === 'review_requests') return state.clicked;
       // visitAnchor (review-click-guard) reads the visit's service_date.
@@ -150,6 +150,11 @@ describe('GET /review-card — tracked links only, never a send', () => {
     const second = (await card()).card;
     expect(first).toMatchObject({ serviceRecordId: 'rec-a', scheduledServiceId: 'ss-1' });
     expect(second).toEqual(first);
+    // The same order is applied in SQL before the five-row limit (Codex #5367 r8 P2).
+    const recordQ = db.mock.results.find((r, i) => db.mock.calls[i][0] === 'service_records' && r.value.limit.mock.calls.length)?.value;
+    expect(recordQ.orderByRaw).toHaveBeenCalledWith(expect.stringMatching(/^COALESCE\(service_records\.ended_at, .*\) DESC NULLS LAST$/));
+    expect(recordQ.orderBy).toHaveBeenCalledWith('service_records.id', 'asc');
+    expect(recordQ.orderByRaw.mock.invocationCallOrder[0]).toBeLessThan(recordQ.limit.mock.invocationCallOrder[0]);
   });
 
   test('a same-day record with no ended_at sorts by its linked visit\'s completion instant', async () => {
