@@ -13,6 +13,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 
 const migration = require('../models/migrations/20260930170000_prep_lawn_guide_revision');
+// Follow-up (#5441 r1 P2): one-time-neutral wording over 170000.
+const followup = require('../models/migrations/20260930180000_prep_lawn_one_time_neutral');
 const { normalizeBlocks } = require('../services/email-template-library');
 
 const { TEMPLATES, MIGRATION_MARKER } = migration;
@@ -112,7 +114,29 @@ describe('one-time-safe copy', () => {
   });
 });
 
-describe('publish mechanics', () => {
+describe('20260930180000 one-time-neutral wording', () => {
+  test('supersedes 170000 and changes exactly the three visit-wording blocks', () => {
+    expect(followup.SUPERSEDES).toBe(MIGRATION_MARKER);
+    const before = TEMPLATES[0].blocks;
+    const after = followup.TEMPLATES[0].blocks;
+    expect(after).toHaveLength(before.length);
+    const changed = after.filter((b, i) => JSON.stringify(b) !== JSON.stringify(before[i]));
+    expect(changed.map((b) => b.type)).toEqual(['heading', 'paragraph', 'callout']);
+  });
+
+  test('no first-visit / each-visit wording; headings are service-neutral', () => {
+    const text = JSON.stringify(followup.TEMPLATES);
+    expect(text).not.toMatch(/first visit|each visit|every visit|next visit/i);
+    const headings = followup.TEMPLATES[0].blocks.filter((b) => b.type === 'heading').map((b) => b.content);
+    expect(headings).toEqual(['What we need from you', 'Before we arrive', 'Pets & kids', 'What to expect after']);
+  });
+});
+
+describe.each([
+  ['170000', migration],
+  ['180000', followup],
+])('publish mechanics (%s)', (_name, migration) => {
+  const { TEMPLATES, MIGRATION_MARKER } = migration;
   function makeKnex({ insertError = null, casMoves = 1 } = {}) {
     const state = {
       template: { id: 't-1', template_key: 'prep.lawn', active_version_id: 'v-1' },
