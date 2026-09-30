@@ -68,7 +68,7 @@ describe('Resend webhook subscriber writes after a subscriber merge', () => {
     const [, sql, bind] = u.ops.find((o) => o[0] === 'whereRaw');
     expect(sql).toMatch(/IN \('gmail\.com', 'googlemail\.com'\)/);
     expect(sql).toMatch(/TRIM\(email\)/);
-    expect(bind).toEqual(['johndoe']);
+    expect(bind[0]).toBe('johndoe');
     expect(u.ops.find((o) => o[0] === 'update')[1]).toHaveProperty('last_bounced_at');
   });
 
@@ -77,7 +77,7 @@ describe('Resend webhook subscriber writes after a subscriber merge', () => {
     await post('email.bounced');
     const [u] = subscriberUpdates();
     expect(u).toBeTruthy();
-    expect(u.ops.find((o) => o[0] === 'whereRaw')[2]).toEqual(['johndoe']);
+    expect(u.ops.find((o) => o[0] === 'whereRaw')[2][0]).toBe('johndoe');
   });
 
   test('a cleared subscriber id on a non-Gmail (or malformed) address writes no subscriber row', async () => {

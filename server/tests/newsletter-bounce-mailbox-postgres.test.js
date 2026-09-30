@@ -62,7 +62,7 @@ pg('subscriberRowsForBounce on Postgres', () => {
     expect(await bounce(1, 'jonhdoe@gmail.com')).toBe(0);
   });
 
-  test.each(['.johndoe@gmail.com', 'johndoe.@gmail.com', 'john..doe@gmail.com'])(
+  test.each(['.johndoe@gmail.com', 'johndoe.@gmail.com', 'john..doe@gmail.com', 'johndoe.+promo@gmail.com', 'john_doe@gmail.com'])(
     'a malformed Gmail spelling (%s) keeps the exact fence and never bounce-counts the valid mailbox',
     async (mailed) => {
       await seed(['johndoe@gmail.com']);
@@ -103,5 +103,13 @@ pg('subscriberRowsForBounce on Postgres', () => {
     await seed(['same@example.test']);
     expect(await bounce(null, 'same@example.test')).toBe(0);
     expect(await bounce(null, null)).toBe(0);
+  });
+
+  test('a dot right before the +tag is malformed on the stored side too (codex #5413 r4)', async () => {
+    await seed(['johndoe@gmail.com', 'johndoe.+promo@gmail.com', 'john.doe+promo@gmail.com', 'JohnDoe+Tag.With.Dots@GMAIL.com']);
+    expect(await bounce(1, 'johndoe@gmail.com')).toBe(3);
+    expect(await counts()).toEqual({
+      'johndoe@gmail.com': 1, 'johndoe.+promo@gmail.com': 0, 'john.doe+promo@gmail.com': 1, 'JohnDoe+Tag.With.Dots@GMAIL.com': 1,
+    });
   });
 });

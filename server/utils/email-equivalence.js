@@ -121,12 +121,13 @@ function subscriberRowsForBounce(query, subscriberId, mailedEmail) {
   const mailbox = bounceMailbox(mailed);
   if (mailbox) {
     const column = 'TRIM(email)';
+    const [wellFormedSql, wellFormedBindings] = wellFormedAddressSql(column);
     return query.whereRaw(
       // The same well-formedness rule on the stored side: a malformed stored
       // spelling is not an alias of the valid mailbox either.
       `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?
-        AND ${wellFormedAddressSql(column)})`,
-      [mailbox.split('@')[0]],
+        AND ${wellFormedSql})`,
+      [mailbox.split('@')[0], ...wellFormedBindings],
     );
   }
   // No subscriber id (the delivery lost it in a merge) and no Gmail mailbox
@@ -136,23 +137,24 @@ function subscriberRowsForBounce(query, subscriberId, mailedEmail) {
   return mailed ? byId.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : byId;
 }
 
-// ONE rule for "a well-formed address the Gmail widening may apply to",
-// JS and SQL kept together: exactly one '@', and a local part with no
-// leading, trailing or consecutive dots. Anything else — ".john@",
-// "jo..hn@", "john@gmail.com@invalid.test" — is not an alias of a valid
-// mailbox and keeps the exact-address fence (codex #5413 r1-r3).
+// ONE rule for "a well-formed Gmail address the mailbox widening may apply
+// to", JS and SQL built from the same pattern: an ALLOW-list, not a list of
+// bad shapes. The mailbox name (before any +tag) is letters and digits with
+// single interior dots, which is all Gmail accepts; then an optional +tag;
+// then exactly one '@' and a Google domain. Anything else — ".john@",
+// "jo..hn@", "john.+promo@", "john@gmail.com@invalid.test" — is not an alias
+// of a valid mailbox and keeps the exact-address fence (codex #5413 r1-r4).
+const GMAIL_WELL_FORMED = '^[a-z0-9]+(\\.[a-z0-9]+)*(\\+[^@[:space:]]*)?@(gmail|googlemail)\\.com$';
+const GMAIL_WELL_FORMED_RE = new RegExp(GMAIL_WELL_FORMED.replace('[:space:]', '\\s'));
+
 function wellFormedAddress(email) {
-  const value = String(email || '');
-  return value.split('@').length === 2 && validDotPlacement(value);
+  return GMAIL_WELL_FORMED_RE.test(String(email || ''));
 }
 
+// Bound, never inlined: the pattern holds '?', which knex reads as a
+// placeholder. Returns [sql, bindings].
 function wellFormedAddressSql(column) {
-  const local = `SPLIT_PART(LOWER(${column}), '@', 1)`;
-  return `(LENGTH(${column}) - LENGTH(REPLACE(${column}, '@', '')) = 1
-        AND ${local} <> ''
-        AND ${local} NOT LIKE '.%'
-        AND ${local} NOT LIKE '%.'
-        AND POSITION('..' IN ${local}) = 0)`;
+  return [`(LOWER(${column}) ~ ?)`, [GMAIL_WELL_FORMED]];
 }
 
 /**

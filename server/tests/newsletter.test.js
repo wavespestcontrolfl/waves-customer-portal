@@ -1498,7 +1498,7 @@ describe('sendgrid newsletter suppression ledger writes', () => {
     }, client);
     const q = calls.newsletter_subscribers[0];
     expect(q.where).not.toHaveBeenCalled();
-    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("IN ('gmail.com', 'googlemail.com')"), ['johndoe']);
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("IN ('gmail.com', 'googlemail.com')"), ['johndoe', expect.stringMatching(/gmail|googlemail/)]);
     expect(q.update).toHaveBeenCalledWith(expect.objectContaining({ last_bounced_at: expect.any(Date) }));
   });
 
