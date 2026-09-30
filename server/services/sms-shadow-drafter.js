@@ -698,22 +698,56 @@ function reservicePromiseClauses(text) {
   const clauses = affirmativeReservicePromiseClauses(text);
   return clauses.length ? clauses : [String(text || '')];
 }
-// The lane(s) an SMS body EXPLICITLY names IN ITS RE-SERVICE PROMISE — shared
-// by validateReserviceOffer (the drafted reply) and reservicePromiseStillEligible
-// (the actual outgoing body, which a human may have edited after drafting) so
-// the two never run different named-lane logic on text that is supposed to
-// mean the same thing. Codex round-6 P1: reuses reservice-scheduler's OWN
-// lane-word vocabulary (RESERVICE_LANE_WORD_PATTERNS) — the SAME words
-// reportedReserviceLane classifies a customer's inbound report with —
-// instead of a separate, narrower ad hoc list here (the old list matched
-// only bare "pest" and "lawn|turf|grass", so a reply naming "weed-treatment"
-// or a pest species word named no lane at all). Codex round-7 (PR #5336):
-// scoped to the promise clause(s) (reservicePromiseClauses) — a lane word in
-// the acknowledgement ("ants ... in your yard") is not part of the offer.
+// The lane(s) an SMS body PROMISES — shared by validateReserviceOffer (the
+// drafted reply) and reservicePromiseStillEligible (the actual outgoing body,
+// which a human may have edited after drafting) so the two never run different
+// lane logic on text that is supposed to mean the same thing.
+//
+// Codex round-9 (PR #5336), structural and final: a lane counts as PROMISED
+// only when a SERVICE word directly modifies the offer noun — "<lane>
+// re-service/treatment/visit/service" ("free pest re-service", "lawn
+// treatment visit", "weed-treatment re-service") or "re-service/treatment
+// [link] for (your) <lane>" ("free re-service for your lawn"). Location words
+// (yard, grass, garden, landscape, home, house) never produce a lane anywhere
+// here, and neither does any lane word merely present in the promise clause:
+// "We'll send your free pest re-service link for the ants in your yard" is a
+// PEST promise, not pest+lawn. Every earlier round patched the vocabulary
+// ("yard", "weed-treatment", tree/shrub locations) because lanes were read
+// from every lane word in the text; reading only the word attached to the
+// offer noun retires that whole class. No lane-as-modifier → no named lane →
+// the callers fall back to the draft-time snapshot / reported lane (after the
+// excluded-specialty check). Pest words are reservice-scheduler's own
+// (RESERVICE_LANE_WORD_PATTERNS, species included); the lawn words are its
+// lawn SERVICE words minus the location words.
+const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|revisit|callback|follow-?up|treatment|visit|service|application|trip';
+const RESERVICE_LAWN_SERVICE_WORDS = 'lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod';
+let reservicePromiseLaneRes = null;
+function promiseLaneRegexes() {
+  if (reservicePromiseLaneRes) return reservicePromiseLaneRes;
+  const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
+  const pestRx = RESERVICE_LANE_WORD_PATTERNS.find(([lane]) => lane === 'pest')[1];
+  const words = {
+    pest: pestRx.source.replace(/^\\b/, '').replace(/\\b$/, ''),
+    lawn: `(?:${RESERVICE_LAWN_SERVICE_WORDS})`,
+  };
+  // A coordinated modifier ("pest and lawn re-service") names both lanes.
+  const any = `(?:${words.pest}|${words.lawn})`;
+  const conj = '\\s*(?:and|&|\\/)\\s*';
+  reservicePromiseLaneRes = ['pest', 'lawn'].map((lane) => {
+    const w = `(?:${any}${conj})?${words[lane]}(?:${conj}${any})?`;
+    return [lane, new RegExp(
+      // "<lane> [control|care] <offer noun>" — "pest re-service", "weed-treatment re-service"
+      `\\b${w}[\\s-]+(?:(?:control|care)[\\s-]+)?(?:${RESERVICE_OFFER_NOUN_FOR_LANE})\\b`
+      // "<offer noun> [link] for (your) <lane>" — "re-service for your lawn"
+      + `|\\b(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:\\s+link)?\\s+for\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`,
+      'i',
+    )];
+  });
+  return reservicePromiseLaneRes;
+}
 function namedReserviceLanesInText(text) {
   const promise = reservicePromiseClauses(text).join(' ');
-  const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
-  return RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(promise)).map(([lane]) => lane);
+  return promiseLaneRegexes().filter(([, rx]) => rx.test(promise)).map(([lane]) => lane);
 }
 // Codex round-7 (PR #5336): a promise clause that names an excluded
 // specialty ("we'll send your free termite re-service link" — a reviewer's
@@ -845,7 +879,34 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
 // check, blocks; the live lookup (liveReserviceLanes) is itself fail-closed
 // on any DB/timeout error. Returns null when the body may go out, else a
 // short reason.
-async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes }) {
+// Codex round-9 (PR #5336): a decision created BEFORE this feature deployed has
+// no reservice_lanes_snapshot, and the strict check above rejected every one of
+// its promises (a suggestion stays reviewable up to 48h, so pending cards
+// straddle the deploy). A decision predates the feature when its prompt version
+// is older than REAL_ANSWERS_PROMPT_VERSION's introducing identity
+// ("house_voice_v12_real_answers2") — bare v12, v11, or no version at all;
+// decisions on the new identity ALWAYS carry the snapshot when they promise, so
+// a new-version decision missing one stays fail-closed.
+function reserviceSnapshotVersionEmitted(promptVersion) {
+  const m = /^house_voice_v(\d+)_real_answers(\d*)/.exec(String(promptVersion || ''));
+  if (!m) return false;
+  const major = Number(m[1]);
+  return major > 12 || (major === 12 && Number(m[2] || 0) >= 2);
+}
+async function loadDraftFactsBlock(draftId) {
+  if (!draftId) return null;
+  try {
+    const row = await db('message_drafts').where({ id: draftId }).first('facts_block');
+    return row?.facts_block || null;
+  } catch (err) {
+    logger.warn(`[sms-shadow] draft facts lookup failed for re-service grandfathering (${err.message}); using live eligibility`);
+    return null;
+  }
+}
+// decisionMeta = { promptVersion, draftId, factsBlock? } is passed by the send
+// paths that hold a decision row (agent-decision-send-checks, scheduler.js);
+// omitting it keeps the strict, snapshot-only behavior.
+async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta = null }) {
   const body = String(outgoingBody || '');
   if (!isReserviceOfferPromise(body)) return null;
   // Codex round-7 (PR #5336): checked BEFORE the snapshot fallback below — an
@@ -856,6 +917,20 @@ async function reservicePromiseStillEligible({ outgoingBody, customerId, promise
   }
   const snapshotLanes = Array.isArray(promisedLanes) ? promisedLanes.filter((l) => l === 'pest' || l === 'lawn') : [];
   const namedLanes = namedReserviceLanesInText(body);
+  if (!snapshotLanes.length && decisionMeta && !reserviceSnapshotVersionEmitted(decisionMeta.promptVersion)) {
+    // Grandfathered pre-deploy decision: named lanes must all be live-eligible;
+    // with no lane named, at least one live-eligible lane (limited to the lanes
+    // the persisted draft facts said were eligible, when they are recoverable).
+    if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
+    const live = await liveReserviceLanes(customerId);
+    if (namedLanes.length) {
+      const ineligible = namedLanes.filter((lane) => !live.includes(lane));
+      return ineligible.length ? `no longer eligible for a free ${ineligible.join(' and ')} re-service` : null;
+    }
+    const factsBlock = decisionMeta.factsBlock !== undefined ? decisionMeta.factsBlock : await loadDraftFactsBlock(decisionMeta.draftId);
+    const factsLanes = factsBlock ? eligibleReserviceLanes(factsBlock) : [];
+    return live.some((lane) => !factsLanes.length || factsLanes.includes(lane)) ? null : 'no longer eligible for a free re-service';
+  }
   const lanes = namedLanes.length ? namedLanes : snapshotLanes;
   if (!lanes.length) return 'no promised re-service lane on record to revalidate';
   if (!customerId) return 'no customer on record to revalidate re-service eligibility against';

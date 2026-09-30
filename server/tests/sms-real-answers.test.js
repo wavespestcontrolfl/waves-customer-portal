@@ -2344,6 +2344,80 @@ describe('free re-service is an entitlement resolved through the existing mechan
       await expect(loadWith({ lanes: ['lawn'] }).drafter.reservicePromiseStillEligible({ outgoingBody: reply, customerId: 'cust-1', promisedLanes: null })).resolves.toMatch(/no longer eligible for a free pest re-service/);
     });
 
+    // Codex round-9 (PR #5336) P2 #2: a lane is PROMISED only when a service word
+    // directly modifies the offer noun; location words never produce a lane.
+    test.each([
+      ["We'll send your free pest re-service link for the ants in your yard.", ['pest']],
+      ['We can come back for a free lawn re-service.', ['lawn']],
+      ['We can send your free re-service for your lawn.', ['lawn']],
+      ['Good news — free weed-treatment re-service link is on its way.', ['lawn']],
+      ['Your free pest and lawn re-service is covered.', ['pest', 'lawn']],
+    ])('%s → promised lanes %j', (reply, expected) => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const both = `X\n${reserviceFactLine(['pest', 'lawn'])}\nBILLING:`;
+      const out = validateReserviceOffer({ reply, factsBlock: both, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] });
+      expect(out.ok).toBe(true);
+      expect(out.promisedLanes).toEqual(expected);
+    });
+
+    test('a location word alone ("the ants in your yard") names no lane → snapshot fallback at send time', async () => {
+      const outgoingBody = 'We will send a free re-service, the ants in your yard sound rough.';
+      // Draft time: no lane modifier and no resolvable reported lane → asked to name the line.
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      expect(validateReserviceOffer({ reply: outgoingBody, factsBlock: `X\n${reserviceFactLine(['pest'])}\nBILLING:`, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(false);
+      // Send time: falls back to the snapshot (pest live → passes; lawn not consulted).
+      await expect(loadWith({ lanes: ['pest'] }).drafter.reservicePromiseStillEligible({ outgoingBody, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toBeNull();
+      await expect(loadWith({ lanes: ['lawn'] }).drafter.reservicePromiseStillEligible({ outgoingBody, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+    });
+
+    test("the pest promise that mentions the yard sends for a pest-only customer (the round-9 quoted case)", async () => {
+      await expect(loadWith({ lanes: ['pest'] }).drafter.reservicePromiseStillEligible({
+        outgoingBody: "We'll send your free pest re-service link for the ants in your yard.", customerId: 'cust-1', promisedLanes: ['pest'],
+      })).resolves.toBeNull();
+    });
+
+    // Codex round-9 (PR #5336) P2 #3: pending cards created BEFORE the deploy carry
+    // no reservice_lanes_snapshot. Grandfather them on live eligibility; a
+    // NEW-version decision missing its snapshot stays fail-closed.
+    describe('pre-deploy decisions (no snapshot) are grandfathered on live eligibility', () => {
+      const body = "Good news — we'll send your free re-service link now.";
+      const predeploy = { id: 'd1', customer_id: 'cust-1', suggested_message: body, input_snapshot: JSON.stringify({ draft_id: null }), prompt_version: 'house_voice_v12_real_answers' };
+      const newVersion = { ...predeploy, prompt_version: 'house_voice_v12_real_answers2' };
+
+      test('pre-deploy + live-eligible → sends; pre-deploy + ineligible → blocked (both send entry points)', async () => {
+        const { drafter } = loadWith({ lanes: ['pest'] });
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null } })).resolves.toBeNull();
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(agentDecisionSendBlockReason({ decision: predeploy, outgoingBody: body })).resolves.toBeNull();
+        const ineligible = loadWith({ lanes: [] });
+        await expect(ineligible.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v11', draftId: null } })).resolves.toMatch(/no longer eligible/);
+        const { agentDecisionSendBlockReason: blockAgain } = require('../services/agent-decision-send-checks');
+        await expect(blockAgain({ decision: predeploy, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable/);
+      });
+
+      test('a named lane must itself be live-eligible for a pre-deploy decision', async () => {
+        const { drafter } = loadWith({ lanes: ['pest'] });
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: 'We can send your free lawn re-service link now.', customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: null, draftId: null } })).resolves.toMatch(/no longer eligible for a free lawn re-service/);
+      });
+
+      test('recovered draft facts limit which live lane counts when no lane is named', async () => {
+        const factsPest = `X\n${require('../services/sms-shadow-drafter').reserviceFactLine(['pest'])}\nBILLING:`;
+        const { drafter } = loadWith({ lanes: ['lawn'] }); // only lawn live; the draft facts said pest
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', factsBlock: factsPest } })).resolves.toMatch(/no longer eligible/);
+        const ok = loadWith({ lanes: ['pest'] });
+        await expect(ok.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', factsBlock: factsPest } })).resolves.toBeNull();
+      });
+
+      test('a NEW-version decision missing its snapshot stays fail-closed, even for an eligible customer', async () => {
+        const { drafter } = loadWith({ lanes: ['pest'] });
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null } })).resolves.toMatch(/no promised re-service lane on record/);
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(agentDecisionSendBlockReason({ decision: newVersion, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable \(no promised re-service lane/);
+        // ...and a category-suffixed new version is still "new".
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2+bc', draftId: null } })).resolves.toMatch(/no promised re-service lane on record/);
+      });
+    });
+
     test.each(DENIALS.slice(0, 2))('%s → passes draft validation for an ineligible customer (nothing to validate)', (reply) => {
       const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
       const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;

@@ -200,6 +200,22 @@ describe('tree & shrub: SERVICE-ISSUE phrasing vs an incidental location (Codex 
   // Regression: the existing "the shrubs look sick"/"the trees look sick"
   // fixtures above must keep resolving as a genuine specialty, not an
   // incidental location, since this narrowing must not swing the other way.
+  // Codex round-9 (PR #5336): the service word may sit on EITHER side of the
+  // tree/shrub noun.
+  test.each([
+    "the treatment for my shrubs didn't work—can I get a lawn re-service?",
+    'spray on the trees never took',
+    'care of my shrubs was skipped',
+    'the shrub spray did nothing',
+  ])('tree/shrub service wording on either side is the excluded specialty: %s', (text) => {
+    expect(reportedReserviceExcludedSpecialty(text)).toBe(true);
+    expect(reportedReserviceLane(text)).toBeNull();
+  });
+
+  test('an incidental tree/shrub location with a service word nowhere near still resolves pest', () => {
+    expect(reportedReserviceExcludedSpecialty('the ants are back in the shrubs, treatment did not hold')).toBe(false);
+  });
+
   test('a bare tree/shrub health complaint (no pest noun) still resolves as a specialty', () => {
     expect(reportedReserviceExcludedSpecialty('the shrubs look sick')).toBe(true);
     expect(reportedReserviceExcludedSpecialty('the trees look sick')).toBe(true);

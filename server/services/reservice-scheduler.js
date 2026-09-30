@@ -268,8 +268,12 @@ async function loadEligibleReserviceLanes(customerId, dbh = db) {
 // to the pest lane below.
 const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = /\b(termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?)\b/i;
 const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
-  // A dedicated tree & shrub service/treatment/care/program call.
-  '\\b(?:tree|shrub)s?\\b(?:\\s*(?:and|\\/|&)\\s*(?:tree|shrub)s?\\b)?\\s*(?:service|treatment|care|program)\\b'
+  // A dedicated tree & shrub service/treatment/care/program/spray call, the
+  // service word on EITHER side of the noun (Codex round-9, PR #5336: "the
+  // treatment for my shrubs didn't work" is the same complaint as "shrub
+  // treatment", and used to slip through as lawn).
+  '\\b(?:tree|shrub)s?\\b(?:\\s*(?:and|\\/|&)\\s*(?:tree|shrub)s?\\b)?\\s*(?:service|treatment|care|program|spray(?:ing)?)\\b'
+  + '|\\b(?:service|treatment|care|program|spray(?:ing)?)\\s+(?:for|on|of|to)\\s+(?:(?:my|our|the|your)\\s+)?(?:(?:tree|shrub)s?\\b)'
   // The trees/shrubs themselves reported sick, dying, or diseased.
   + '|\\b(?:my\\s+|our\\s+|the\\s+)?(?:trees?|shrubs?)\\s+(?:are|is|looks?)\\s+(?:sick|dying|diseased)\\b'
   // Disease/fungus/scale on the trees or shrubs, in either order.

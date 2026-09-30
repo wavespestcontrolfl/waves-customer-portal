@@ -85,6 +85,10 @@ async function reserviceBlock({ decision, outgoingBody }) {
     outgoingBody,
     customerId: decision.customer_id,
     promisedLanes: snapshot?.reservice_lanes_snapshot || null,
+    // Codex round-9 (PR #5336): lets a PRE-DEPLOY decision (no snapshot, older
+    // prompt version) be grandfathered onto live eligibility instead of being
+    // rejected outright; new-version decisions missing a snapshot stay closed.
+    decisionMeta: { promptVersion: decision.prompt_version, draftId: snapshot?.draft_id || null },
   });
   return reason ? `re-service promise unsendable (${reason})` : null;
 }

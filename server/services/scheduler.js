@@ -4357,7 +4357,7 @@ function initScheduledJobs() {
                 const { reservicePromiseStillEligible } = require('./sms-shadow-drafter');
                 const reserviceDecision = await db('agent_decisions')
                   .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot', 'customer_id');
+                  .first('input_snapshot', 'customer_id', 'prompt_version');
                 let reserviceSnapshot = reserviceDecision?.input_snapshot;
                 if (typeof reserviceSnapshot === 'string') {
                   try { reserviceSnapshot = JSON.parse(reserviceSnapshot); } catch { reserviceSnapshot = null; }
@@ -4366,6 +4366,8 @@ function initScheduledJobs() {
                   outgoingBody: msg.message_body,
                   customerId: reserviceDecision?.customer_id || msg.customer_id || null,
                   promisedLanes: reserviceSnapshot?.reservice_lanes_snapshot || null,
+                  // Codex round-9 (PR #5336): same pre-deploy grandfathering as the immediate send path.
+                  decisionMeta: { promptVersion: reserviceDecision?.prompt_version, draftId: reserviceSnapshot?.draft_id || null },
                 });
                 if (reason) {
                   reserviceStale = true;

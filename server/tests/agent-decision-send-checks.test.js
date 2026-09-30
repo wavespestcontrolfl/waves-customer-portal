@@ -117,6 +117,7 @@ describe('re-service promise revalidation (Codex round-3 P2)', () => {
       outgoingBody: "Good news — we'll send your free re-service link now.",
       customerId: 'c1',
       promisedLanes: ['pest'],
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null },
     });
   });
 
@@ -144,6 +145,7 @@ describe('re-service promise revalidation (Codex round-3 P2)', () => {
       outgoingBody: 'You owe $5.',
       customerId: 'c1',
       promisedLanes: null,
+      decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null },
     });
   });
 });
