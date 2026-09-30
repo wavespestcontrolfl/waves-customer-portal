@@ -190,7 +190,7 @@ describe('agent-gap-reports', () => {
     const flush = () => new Promise((resolve) => setImmediate(resolve));
     const signal = (over = {}) => ({ source: 'texting-ai', kind: 'missing_capability', summary: 'reschedule a recurring series', domain: 'scheduling', ...over });
 
-    test('a first sighting rings once, after the commit, with the two short lines', async () => {
+    test('a first sighting rings once, inside the row transaction, with the two short lines', async () => {
       const { writeGapRows } = load();
       returningRows = [{ id: '7', occurrences: 1, status: 'new', domain: 'scheduling', xmax: '0' }];
       const saved = await writeGapRows([signal({ domain: 'scheduling' })]);

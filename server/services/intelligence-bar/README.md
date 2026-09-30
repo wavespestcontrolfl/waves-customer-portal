@@ -111,13 +111,20 @@ rows with the real `total_matching` and `has_more`, read through
 
 `server/services/agent-gap-reports.js` rings the admin bell the moment a gap is
 recorded (owner 2026-09-29: "when a gap happens"; the old Monday digest is
-gone). `upsertGapRow()` reports `rang` for the first sighting of a gap and
-for a `fixed` gap coming back; a repeat of an already-open gap (new, building,
-by_design, dismissed) is quiet. It reads the existing row's status `FOR UPDATE`
-inside the write's transaction and uses Postgres' `xmax = 0` on the returned
-row to tell an insert from a merge. The bell fires after the commit,
-fire-and-forget, so a bell failure never touches the reply that surfaced the
-gap. It is a two-line `agents` bell (`bell: true`, link `/admin/agents`), title
+gone). A ring event is the first sighting of a gap, a `fixed` gap coming back,
+or an open (new / building) gap whose `belled_at` is NULL (recorded before the
+bell existed, or an earlier bell that was not written); any other repeat is
+quiet, and by_design / dismissed never ring. `upsertGapRow()` reads the
+existing row's status and `belled_at` `FOR UPDATE` inside the write's
+transaction and uses Postgres' `xmax = 0` on the returned row to tell an
+insert from a merge; a reopen clears `belled_at`. The bell is transactional:
+`ringGapBell()` writes the notification row and stamps `belled_at` in a
+savepoint of that same transaction, and `upsertGapRow()` awaits it, so the
+bell commits with the sighting or not at all. The recording path therefore
+waits on one extra notification insert (a local DB write, no external call).
+A bell that is not written rolls back only the savepoint: the sighting still
+commits, `belled_at` stays NULL, `rang` is false, and the gap's next sighting
+rings; the error is logged, never thrown. It is a two-line `agents` bell (`bell: true`, link `/admin/agents`), title
 `Gap #N: <source> (<area>)` or `Gap #N is back: ...`, no free-text summary. Body
 for `intelligence-bar` / `tech-bar` gaps: `A Claude window on the Mac starts
 building it within 10 min.`; for `texting-ai` / `phone-agent` gaps: `Say "build
