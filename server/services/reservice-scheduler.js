@@ -236,6 +236,46 @@ async function loadReserviceEligibility(customerId, dbh = db) {
   }
 }
 
+/**
+ * Codex round-11 P2 (PR #5336): the ONE lane-availability computation the
+ * public /reservice page and the SMS promise validators share — plan coverage
+ * (reserviceLanesForCustomer) MINUS lanes that already hold an open callback
+ * (openReserviceCallbacks), i.e. exactly what the page renders as bookable vs
+ * alreadyBooked. Coverage alone let a promise pass after another channel booked
+ * the lane, while the page answered already_booked. Returns
+ * { eligible, open, bookable }: eligible = covered lanes, open = the per-lane
+ * open-callback map, bookable = eligible lanes with no open callback. An
+ * inactive customer has no eligible lanes. Throws on a lookup error (callers
+ * choose how to fail; the by-id loader below fails closed).
+ */
+async function reserviceLaneAvailability(customer, dbh = db) {
+  const eligible = !customer || customer.active === false ? [] : await reserviceLanesForCustomer(customer, dbh);
+  const open = eligible.length ? await openReserviceCallbacks(customer.id, dbh) : {};
+  return { eligible, open, bookable: eligible.filter((lane) => !open[lane]) };
+}
+
+/**
+ * By-id form for the SMS drafter's draft-time facts and send-time recheck: the
+ * same customer-row predicate as loadReserviceEligibility (live, non-deleted,
+ * tokened row) followed by reserviceLaneAvailability. Never throws — any lookup
+ * failure resolves to no eligible lane (fail-closed).
+ */
+async function loadReserviceLaneAvailability(customerId, dbh = db) {
+  const none = { eligible: [], open: {}, bookable: [] };
+  if (!customerId) return none;
+  try {
+    const customer = await dbh('customers')
+      .where({ id: customerId })
+      .whereNull('deleted_at')
+      .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
+    if (!customer || customer.active === false || !customer.reservice_token) return none;
+    return await reserviceLaneAvailability(customer, dbh);
+  } catch (err) {
+    logger.warn(`[reservice-scheduler] lane availability loader failed for customer ${customerId}: ${err.message}`);
+    return none;
+  }
+}
+
 async function loadEligibleReserviceLanes(customerId, dbh = db) {
   const eligibility = await loadReserviceEligibility(customerId, dbh);
   return eligibility ? eligibility.lanes : [];
@@ -440,6 +480,8 @@ module.exports = {
   reserviceLanesForCustomer,
   loadReserviceEligibility,
   loadEligibleReserviceLanes,
+  reserviceLaneAvailability,
+  loadReserviceLaneAvailability,
   RESERVICE_LANE_WORD_PATTERNS,
   reportedReserviceLane,
   reportedReserviceExcludedSpecialty,

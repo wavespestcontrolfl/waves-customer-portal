@@ -1785,18 +1785,26 @@ describe('free re-service is an entitlement resolved through the existing mechan
   // through — so the active/deleted/token/lane checks are exercised once,
   // at that loader (server/tests/reservice-eligible-lanes.test.js), not
   // re-tested here against a fake customer row.
-  function loadWith({ lanes = ['pest'], selfServe = true, throws = false } = {}) {
+  function loadWith({ lanes = ['pest'], selfServe = true, throws = false, booked = [] } = {}) {
     jest.resetModules();
-    const loadEligibleReserviceLanes = jest.fn(async () => { if (throws) throw new Error('boom'); return lanes; });
+    // Codex round-11 P2 (PR #5336): the drafter reads reservice-scheduler's SHARED
+    // lane availability (coverage minus open callbacks); `lanes` is the covered
+    // set and `booked` the lanes holding an open callback. Named
+    // loadEligibleReserviceLanes below so the existing call assertions keep reading.
+    const loadEligibleReserviceLanes = jest.fn(async () => {
+      if (throws) throw new Error('boom');
+      const open = Object.fromEntries(booked.map((l) => [l, { date: '2026-10-05' }]));
+      return { eligible: lanes, open, bookable: lanes.filter((l) => !booked.includes(l)) };
+    });
     // namedReserviceLanesInText (Codex round-6 P1) reads the real module's
     // RESERVICE_LANE_WORD_PATTERNS — pass the actual export through so this
     // mock stays byte-identical to the real module on everything this suite
     // doesn't itself stub out.
     // Codex round-7 (PR #5336): reserviceExcludedSpecialtyInPromise reads the
     // real reportedReserviceExcludedSpecialty the same way.
-    const { RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty } = jest.requireActual('../services/reservice-scheduler');
+    const { RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty, reportedReserviceLane } = jest.requireActual('../services/reservice-scheduler');
     jest.doMock('../services/reservice-scheduler', () => ({
-      reserviceSelfServeEnabled: () => selfServe, loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty,
+      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty, reportedReserviceLane,
     }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
@@ -2437,6 +2445,51 @@ describe('free re-service is an entitlement resolved through the existing mechan
       const { drafter } = loadWith({ lanes: ['pest'] });
       await expect(drafter.reservicePromiseStillEligible({ outgoingBody, customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta([]) })).resolves.toMatch(/no send_reservice_link action on record/);
       await expect(drafter.reservicePromiseStillEligible({ outgoingBody, customerId: 'cust-1', promisedLanes: ['pest'], decisionMeta: meta([{ type: 'escalate', note: 'send_reservice_link' }]) })).resolves.toBeNull();
+    });
+
+    // Codex round-11 P2 (PR #5336): the promised lane is revalidated against the SAME
+    // availability the public page uses — coverage minus open callbacks.
+    describe('an already-booked lane is not promisable (shared lane availability)', () => {
+      const pestPromise = "We'll send your free pest re-service link now";
+      const lawnPromise = "We'll send your free lawn re-service link now";
+
+      test('lane booked between draft and send → blocked with an "already booked" reason', async () => {
+        const { drafter } = loadWith({ lanes: ['pest', 'lawn'], booked: ['pest'] });
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: pestPromise, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/already booked/);
+      });
+
+      test('the OTHER lane is still open → passes', async () => {
+        const { drafter } = loadWith({ lanes: ['pest', 'lawn'], booked: ['pest'] });
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: lawnPromise, customerId: 'cust-1', promisedLanes: ['lawn'] })).resolves.toBeNull();
+      });
+
+      test('a lane no longer covered still reads "no longer eligible"; a covered-but-booked lane reads "already booked"', async () => {
+        const { drafter } = loadWith({ lanes: ['lawn'], booked: [] });
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: pestPromise, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+      });
+
+      test('both send entry points block it (new-version card with snapshot + action, and a grandfathered card)', async () => {
+        const action = [{ type: 'escalate', note: 'send_reservice_link' }];
+        loadWith({ lanes: ['pest'], booked: ['pest'] });
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(agentDecisionSendBlockReason({
+          decision: { id: 'd1', customer_id: 'cust-1', suggested_message: pestPromise, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: ['pest'], intended_actions: action }), prompt_version: 'house_voice_v12_real_answers2' },
+          outgoingBody: pestPromise,
+        })).resolves.toMatch(/re-service promise unsendable \(a free pest re-service is already booked/);
+        await expect(agentDecisionSendBlockReason({
+          decision: { id: 'd2', customer_id: 'cust-1', suggested_message: pestPromise, input_snapshot: JSON.stringify({ intended_actions: action }), prompt_version: 'house_voice_v12_real_answers' },
+          outgoingBody: pestPromise,
+        })).resolves.toMatch(/already booked/);
+      });
+
+      test('draft time: the FREE RE-SERVICE fact lists only bookable lanes, so an already-booked lane is not offered', async () => {
+        const { drafter } = loadWith({ lanes: ['pest', 'lawn'], booked: ['pest'] });
+        process.env.GATE_SMS_REAL_ANSWERS = 'true';
+        await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual(['lawn']);
+        const facts = `X\n${drafter.reserviceFactLine(['lawn'])}\nBILLING:`;
+        expect(drafter.validateReserviceOffer({ reply: pestPromise, factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(false);
+        expect(drafter.validateReserviceOffer({ reply: lawnPromise, factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(true);
+      });
     });
 
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,

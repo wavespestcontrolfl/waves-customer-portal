@@ -419,23 +419,42 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
 // error, or a timeout all resolve to [] (not eligible) — loadEligibleReserviceLanes
 // itself never throws, but the timeout race below still guards against it
 // hanging.
-async function liveReserviceLanes(customerId) {
-  if (!customerId) return [];
+// Codex round-11 P2 (PR #5336): the state comes from reservice-scheduler's
+// SHARED lane-availability computation (coverage MINUS lanes with an open
+// callback — what the public /reservice page renders as bookable), so a lane
+// another channel booked after review no longer passes, at draft time (the
+// FREE RE-SERVICE fact lists only bookable lanes) or at send time. Returns
+// { eligible, open, bookable }; fail-closed to all-empty.
+async function liveReserviceLaneState(customerId) {
+  const none = { eligible: [], open: {}, bookable: [] };
+  if (!customerId) return none;
   let timer = null;
   try {
-    const { reserviceSelfServeEnabled, loadEligibleReserviceLanes } = require('./reservice-scheduler');
-    if (!reserviceSelfServeEnabled()) return [];
+    const { reserviceSelfServeEnabled, loadReserviceLaneAvailability } = require('./reservice-scheduler');
+    if (!reserviceSelfServeEnabled()) return none;
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('reservice eligibility timeout')), OPEN_TIMES_TIMEOUT_MS);
     });
-    const lanes = await Promise.race([loadEligibleReserviceLanes(customerId), timeout]);
-    return Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+    const state = await Promise.race([loadReserviceLaneAvailability(customerId), timeout]);
+    const only = (lanes) => (Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : []);
+    return { eligible: only(state?.eligible), open: state?.open || {}, bookable: only(state?.bookable) };
   } catch (err) {
     logger.warn(`[sms-shadow] re-service eligibility lookup failed (${err.message}); treating as not eligible`);
-    return [];
+    return none;
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+async function liveReserviceLanes(customerId) {
+  return (await liveReserviceLaneState(customerId)).bookable;
+}
+// Why the given lanes cannot be promised now: not covered any more vs covered
+// but already booked (an open re-service visit in the lane).
+function reserviceLanesBlockedReason(lanes, state) {
+  const notCovered = lanes.filter((lane) => !state.eligible.includes(lane));
+  if (notCovered.length) return `no longer eligible for a free ${notCovered.join(' and ')} re-service`;
+  const booked = lanes.filter((lane) => !state.bookable.includes(lane));
+  return booked.length ? `a free ${booked.join(' and ')} re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page` : null;
 }
 
 // Free re-service eligibility for the facts block (Codex r6 P1; decoupled
@@ -979,21 +998,19 @@ async function reservicePromiseStillEligible({ outgoingBody, customerId, promise
     // with no lane named, at least one live-eligible lane (limited to the lanes
     // the persisted draft facts said were eligible, when they are recoverable).
     if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
-    const live = await liveReserviceLanes(customerId);
-    if (namedLanes.length) {
-      const ineligible = namedLanes.filter((lane) => !live.includes(lane));
-      return ineligible.length ? `no longer eligible for a free ${ineligible.join(' and ')} re-service` : null;
-    }
+    const state = await liveReserviceLaneState(customerId);
+    const live = state.bookable;
+    if (namedLanes.length) return reserviceLanesBlockedReason(namedLanes, state);
     const factsBlock = decisionMeta.factsBlock !== undefined ? decisionMeta.factsBlock : draftRow?.facts_block;
     const factsLanes = factsBlock ? eligibleReserviceLanes(factsBlock) : [];
-    return live.some((lane) => !factsLanes.length || factsLanes.includes(lane)) ? null : 'no longer eligible for a free re-service';
+    if (live.some((lane) => !factsLanes.length || factsLanes.includes(lane))) return null;
+    const booked = (factsLanes.length ? factsLanes : state.eligible).some((lane) => state.eligible.includes(lane) && !state.bookable.includes(lane));
+    return booked ? 'a free re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page' : 'no longer eligible for a free re-service';
   }
   const lanes = namedLanes.length ? namedLanes : snapshotLanes;
   if (!lanes.length) return 'no promised re-service lane on record to revalidate';
   if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
-  const live = await liveReserviceLanes(customerId);
-  const ineligible = lanes.filter((lane) => !live.includes(lane));
-  return ineligible.length ? `no longer eligible for a free ${ineligible.join(' and ')} re-service` : null;
+  return reserviceLanesBlockedReason(lanes, await liveReserviceLaneState(customerId));
 }
 
 // Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
@@ -3203,6 +3220,7 @@ module.exports = {
   serviceIdentityFor,
   fetchReserviceLanes,
   liveReserviceLanes,
+  liveReserviceLaneState,
   reserviceFactLine,
   validateReserviceOffer,
   isReserviceOfferPromise,
