@@ -4894,6 +4894,10 @@ async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, schedule
 // connection (a savepoint here) instead of opening a second one that would
 // block on the address lock the caller holds (B13).
 async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstName, lastName }, { dbh = null } = {}) {
+  // The caller's transaction when it has one, else the pool: the WHOLE path
+  // (lookup, subscribe, verify, send, stamp bookkeeping) runs on one connection,
+  // so a caller holding a connection + locks never waits on a second pooled one.
+  const conn = dbh && dbh.isTransaction ? dbh : db;
   const emailLc = String(email || '').trim().toLowerCase();
   if (!customerId || !emailLc) return null;
 
@@ -4902,10 +4906,10 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     return { skipped: true, reason: 'invalid_email' };
   }
 
-  const existing = await db('newsletter_subscribers').where({ email: emailLc }).first();
+  const existing = await conn('newsletter_subscribers').where({ email: emailLc }).first();
   if (existing?.status === 'unsubscribed') {
     if (!existing.customer_id) {
-      await db('newsletter_subscribers')
+      await conn('newsletter_subscribers')
         .where({ id: existing.id })
         .update({ customer_id: customerId, updated_at: new Date() });
     } else if (existing.customer_id !== customerId) {
@@ -4922,9 +4926,11 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     source: 'call_recording',
     strict: true,
     requireConfirmation: true,
+    dbh: conn === db ? null : conn,
   });
 
   let confirmationEmailSent = null;
+  let deliveryAmbiguous = false;
   if (result.action === 'confirmation_sent' || result.action === 'confirmation_resent') {
     // The subscriber row is re-verified and LOCKED through the provider
     // call (Codex #3084 r51 — the same pending/token lock-through-send
@@ -4941,7 +4947,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     // durable.
     let sendRefused = false;
     try {
-      await (dbh && dbh.isTransaction ? dbh : db).transaction(async (trx) => {
+      await conn.transaction(async (trx) => {
         // Address key BEFORE the row lock (suppression / ownership writers
         // take the key first, then rows); sendConfirmationEmail re-enters it
         // and runs its vetoes on THIS connection (B13).
@@ -4975,6 +4981,16 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
         logger.warn(`[call-proc] newsletter send transaction commit errored after the send for customer ${customerId}: ${e.code || e.name || 'db_error'} — pre-stamp stands`);
         e = null;
       }
+      if (e && e.deliveryAmbiguous) {
+        // A provider timeout / 5xx / network failure AFTER dispatch: the DOI
+        // may have been accepted. Keep the pre-stamp (the dedupe evidence) and
+        // report neutral "maybe sent" state — never clear it and never arm the
+        // forced resend (sendgrid-mail's isDefiniteRejection convention).
+        logger.warn(`[call-proc] Newsletter confirmation delivery is ambiguous for customer ${customerId}: ${e.code || e.name || 'provider_error'} — pre-stamp stands`);
+        confirmationEmailSent = false;
+        deliveryAmbiguous = true;
+        e = null;
+      }
       if (e) {
         logger.warn(`[call-proc] Newsletter confirmation email failed for customer ${customerId}`);
         confirmationEmailSent = false;
@@ -4989,7 +5005,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
         // the rotation's own callback owns its stamp.
         if (result.subscriber?.id) {
           try {
-            await db('newsletter_subscribers')
+            await conn('newsletter_subscribers')
               .where({
                 id: result.subscriber.id,
                 confirmation_token: result.subscriber.confirmation_token,
@@ -5015,6 +5031,9 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     // newer token whose DOI may already be delivered.
     confirmationToken: result.subscriber?.confirmation_token || null,
     confirmationEmailSent,
+    // Set only for an ambiguous provider failure: the resume lane re-pends with
+    // the neutral marker (dedupe evidence kept), not the forced-resend one.
+    ...(deliveryAmbiguous ? { deliveryAmbiguous: true, retryReason: 'doi_delivery_ambiguous' } : {}),
   };
 }
 

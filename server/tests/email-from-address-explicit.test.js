@@ -24,7 +24,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 jest.mock('../models/db', () => {
   const query = () => {
     const q = {};
-    ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'select'].forEach((m) => { q[m] = () => q; });
+    ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'whereNotNull', 'select'].forEach((m) => { q[m] = () => q; });
     q.first = async () => null;
     q.then = (res, rej) => Promise.resolve([]).then(res, rej);
     return q;

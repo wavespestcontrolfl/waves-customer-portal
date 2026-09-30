@@ -160,6 +160,41 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     });
   });
 
+  test('do-not-contact on a customer linked through a LEAD email or an ESTIMATE customer_email blocks (real schema)', async () => {
+    await inRolledBackTx(async (trx) => {
+      const email = addr();
+      const id = await customer(trx);
+      await trx('leads').insert({ first_name: 'Test', email: ` ${email.toUpperCase()}`, customer_id: id });
+      await dncCall(trx, id);
+      await expect(assertConfirmationAllowed(sub(email), trx)).rejects.toMatchObject({ reason: 'do_not_contact' });
+    });
+    await inRolledBackTx(async (trx) => {
+      const email = addr();
+      const id = await customer(trx);
+      await trx('estimates').insert({ customer_id: id, customer_email: email });
+      await dncCall(trx, id);
+      await expect(assertConfirmationAllowed(sub(email), trx)).rejects.toMatchObject({ reason: 'do_not_contact' });
+    });
+    // Gmail spelling through a lead
+    await inRolledBackTx(async (trx) => {
+      const box = uniq().replace(/-/g, '');
+      const id = await customer(trx);
+      await trx('leads').insert({ first_name: 'Test', email: `${box.slice(0, 3)}.${box.slice(3)}@gmail.com`, customer_id: id });
+      await dncCall(trx, id);
+      await expect(assertConfirmationAllowed(sub(`${box}+x@gmail.com`), trx)).rejects.toMatchObject({ reason: 'do_not_contact' });
+    });
+  });
+
+  test('a lead or estimate with NO customer link, or a linked one without a request, does not block', async () => {
+    await inRolledBackTx(async (trx) => {
+      const email = addr();
+      await trx('leads').insert({ first_name: 'Test', email });
+      const id = await customer(trx);
+      await trx('estimates').insert({ customer_id: id, customer_email: email });
+      await expect(assertConfirmationAllowed(sub(email), trx)).resolves.toBeUndefined();
+    });
+  });
+
   test('owners without a do-not-contact request, or a request on someone else, allow', async () => {
     await inRolledBackTx(async (trx) => {
       const email = addr();

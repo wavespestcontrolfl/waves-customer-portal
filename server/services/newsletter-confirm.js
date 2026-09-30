@@ -45,6 +45,23 @@ function customerEmailFields() {
     .filter((column) => column !== 'billing_email');
 }
 
+// A provider failure AFTER the request was dispatched is delivery-AMBIGUOUS:
+// the provider may have accepted the message before the answer was lost.
+// sendgrid-mail's convention (isDefiniteRejection): only a conclusive 4xx
+// rejection is definite; a timeout-style 408, any other 4xx, every 5xx and
+// every network/timeout failure is ambiguous for a POST. Errors that never
+// reached the request (not configured, annual-offer guard, boundary refusal)
+// are definite and are not tagged.
+function isDeliveryAmbiguous(err) {
+  if (!err || err.code === 'SENDGRID_NOT_CONFIGURED' || err.annualOfferWithheld || err.annualOfferGuardFailed
+      || err.providerBoundaryBlocked) return false;
+  if (err.name === 'TimeoutError' || err.name === 'AbortError') return true;
+  if (Number.isFinite(Number(err.status))) {
+    return typeof sendgrid.isDefiniteRejection === 'function' ? !sendgrid.isDefiniteRejection(err) : true;
+  }
+  return err.name === 'TypeError'; // fetch network failure
+}
+
 class ConfirmationVetoedError extends Error {
   constructor(reason) {
     super(`confirmation email vetoed: ${reason}`);
@@ -161,6 +178,14 @@ async function assertConfirmationAllowed(subscriber, dbh = db, { ownershipWaitMs
       for (const row of profiles || []) customerIds.add(row.id);
       const prefs = await sp('notification_prefs').where(sameMailbox(['billing_email'])).select('customer_id');
       for (const row of prefs || []) if (row.customer_id) customerIds.add(row.customer_id);
+      // Linked leads and estimates are ownership sources too (the same set
+      // correctedAddressOwnedByOther and the billing_email ownership guard
+      // consult): a customer_id on a lead's email / an estimate's
+      // customer_email owns the mailbox for do-not-contact purposes.
+      const leads = await sp('leads').whereNotNull('customer_id').where(sameMailbox(['email'])).select('customer_id');
+      for (const row of leads || []) if (row.customer_id) customerIds.add(row.customer_id);
+      const estimates = await sp('estimates').whereNotNull('customer_id').where(sameMailbox(['customer_email'])).select('customer_id');
+      for (const row of estimates || []) if (row.customer_id) customerIds.add(row.customer_id);
 
       if (customerIds.size) {
         const { customerCallDoNotContact } = require('./lead-first-touch-resume');
@@ -247,21 +272,29 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
     // Confirmation emails are transactional — they must arrive even for
     // recipients who've previously unsubscribed from newsletter broadcasts.
     // Pass asmGroupId: 0 to bypass the SendGrid suppression group entirely.
-    return sendgrid.sendOne({
-      to: subscriber.email,
-      // Newsletter confirmation is the legitimate use of the `newsletter@`
-      // identity — name it explicitly so the intent is durable rather than
-      // depending on sendgrid-mail's default (other callers should declare
-      // their own identity; defaults are not policy).
-      fromEmail: 'newsletter@wavespestcontrol.com',
-      fromName: 'Waves Newsletter',
-      subject: 'Confirm your Waves Newsletter signup',
-      html,
-      text,
-      categories: ['newsletter_confirm'],
-      asmGroupId: 0,
-      timeoutMs: CONFIRMATION_SEND_TIMEOUT_MS,
-    });
+    try {
+      return await sendgrid.sendOne({
+        to: subscriber.email,
+        // Newsletter confirmation is the legitimate use of the `newsletter@`
+        // identity — name it explicitly so the intent is durable rather than
+        // depending on sendgrid-mail's default (other callers should declare
+        // their own identity; defaults are not policy).
+        fromEmail: 'newsletter@wavespestcontrol.com',
+        fromName: 'Waves Newsletter',
+        subject: 'Confirm your Waves Newsletter signup',
+        html,
+        text,
+        categories: ['newsletter_confirm'],
+        asmGroupId: 0,
+        timeoutMs: CONFIRMATION_SEND_TIMEOUT_MS,
+        // sendOne's annual-offer guard and link rewrite read the DB; hand them
+        // THIS connection or they take a second pooled one while we hold ours.
+        database: trx,
+      });
+    } catch (sendErr) {
+      if (isDeliveryAmbiguous(sendErr)) sendErr.deliveryAmbiguous = true;
+      throw sendErr;
+    }
   };
   const result = dbh && dbh.isTransaction ? await handoff(dbh) : await (dbh || db).transaction(handoff);
   // ID-only logging per AGENTS.md (no PII in logs).
@@ -270,5 +303,5 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
 }
 
 module.exports = {
-  CONFIRMATION_SEND_TIMEOUT_MS, sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError,
+  CONFIRMATION_SEND_TIMEOUT_MS, isDeliveryAmbiguous, sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError,
 };

@@ -1494,6 +1494,15 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // subscriber id and a sanitized code (this path exists BECAUSE the email
     // is being corrected; it must not leak into logs).
     logger.warn(`[email-fanout] DOI confirmation re-send failed for subscriber ${pendingConfirmation.id}: ${e.code || e.statusCode || 'send_failed'}`);
+    if (e.deliveryAmbiguous) {
+      // A provider timeout / 5xx / network failure AFTER dispatch: the DOI may
+      // have been accepted. Keep the pre-stamp (the dedupe evidence) and re-pend
+      // under the neutral marker — never clear the stamp, never arm the forced
+      // resend (the retry's dedupe guard then settles on the stamp).
+      logger.warn(`[email-fanout] DOI delivery is ambiguous for subscriber ${pendingConfirmation.id} — pre-stamp stands, holds re-pended neutral`);
+      await repenHolds('doi_delivery_ambiguous');
+      return false;
+    }
     // The pre-stamp must not bury an undelivered DOI: clear it, conditional
     // on the row still being OUR verified payload (a rotation landing
     // mid-send already replaced or cleared it, and B's callback owns

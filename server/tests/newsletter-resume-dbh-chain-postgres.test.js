@@ -14,6 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../sockets', () => ({ getIo: jest.fn(() => null) }));
 const mockSendOne = jest.fn(async () => ({ messageId: 'sg-chain' }));
 jest.mock('../services/sendgrid-mail', () => ({
+  isDefiniteRejection: (err) => new Set([400, 401, 403, 404, 405, 413, 415, 422, 429]).has(Number(err?.status)),
   isConfigured: () => true,
   sendOne: (...a) => mockSendOne(...a),
 }));
@@ -81,5 +82,66 @@ jest.mock('../services/sendgrid-mail', () => ({
     release();
     await holder;
     await blocked.catch(() => {}); // completes once the key is free
+  });
+
+  test('POOL STARVATION: the whole resume (lookup, subscribe, verify, send, bookkeeping) acquires NO second pooled connection', async () => {
+    const address = email();
+    mockSendOne.mockClear();
+    const spy = jest.spyOn(db.client, 'acquireConnection');
+    try {
+      await race(db.transaction(async (trx) => {
+        await locks.lockCustomerEmail(trx, address);
+        spy.mockClear(); // the transaction's own connection is already held
+        const outcome = await CRP.resumeNewsletterForCallCustomer(
+          { customerId: '00000000-0000-0000-0000-000000000003', email: address, firstName: 'Pat', lastName: 'Sample' },
+          { dbh: trx },
+        );
+        expect(outcome).toMatchObject({ confirmationEmailSent: true, action: 'confirmation_sent' });
+        expect(spy).not.toHaveBeenCalled();
+      }));
+      // Second pass: an existing pending row takes the "resent" branch, also on one connection.
+      await race(db.transaction(async (trx) => {
+        await locks.lockCustomerEmail(trx, address);
+        spy.mockClear();
+        const outcome = await CRP.resumeNewsletterForCallCustomer(
+          { customerId: '00000000-0000-0000-0000-000000000003', email: address, firstName: 'Pat', lastName: 'Sample' },
+          { dbh: trx },
+        );
+        expect(outcome).toMatchObject({ action: 'confirmation_resent' });
+        expect(spy).not.toHaveBeenCalled();
+      }));
+    } finally { spy.mockRestore(); }
+  });
+
+  test('control: without dbh the same resume DOES acquire pooled connections (the spy detects it)', async () => {
+    const address = email();
+    const spy = jest.spyOn(db.client, 'acquireConnection');
+    try {
+      await CRP.resumeNewsletterForCallCustomer({ customerId: '00000000-0000-0000-0000-000000000004', email: address, firstName: 'Pat', lastName: 'Sample' });
+      expect(spy).toHaveBeenCalled();
+    } finally { spy.mockRestore(); }
+  });
+
+  test('AMBIGUOUS timeout: the call pipeline keeps the pre-stamp, reports neutral state, and does not arm a forced resend', async () => {
+    const address = email();
+    mockSendOne.mockRejectedValueOnce(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }));
+    const outcome = await CRP.resumeNewsletterForCallCustomer(
+      { customerId: '00000000-0000-0000-0000-000000000005', email: address, firstName: 'Pat', lastName: 'Sample' },
+    );
+    expect(outcome).toMatchObject({ confirmationEmailSent: false, deliveryAmbiguous: true, retryReason: 'doi_delivery_ambiguous' });
+    const row = await db('newsletter_subscribers').where({ email: address }).first();
+    expect(row.confirmation_sent_at).not.toBeNull();
+  });
+
+  test('a DEFINITE failure (422) still clears the pre-stamp so the retry re-sends', async () => {
+    const address = email();
+    mockSendOne.mockRejectedValueOnce(Object.assign(new Error('bad request'), { status: 422 }));
+    const outcome = await CRP.resumeNewsletterForCallCustomer(
+      { customerId: '00000000-0000-0000-0000-000000000006', email: address, firstName: 'Pat', lastName: 'Sample' },
+    );
+    expect(outcome.confirmationEmailSent).toBe(false);
+    expect(outcome.deliveryAmbiguous).toBeUndefined();
+    const row = await db('newsletter_subscribers').where({ email: address }).first();
+    expect(row.confirmation_sent_at).toBeNull();
   });
 });

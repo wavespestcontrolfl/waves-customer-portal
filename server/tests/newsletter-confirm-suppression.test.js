@@ -10,6 +10,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 const mockOrder = [];
 jest.mock('../services/sendgrid-mail', () => ({
+  isDefiniteRejection: (err) => new Set([400, 401, 403, 404, 405, 413, 415, 422, 429]).has(Number(err?.status)),
   isConfigured: () => true,
   sendOne: jest.fn(async () => { mockOrder.push('send'); return { messageId: 'sg-1' }; }),
 }));
@@ -42,7 +43,7 @@ function fakeQuery(table) {
     if (v instanceof Error) throw v;
     return v;
   };
-  ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'whereNull', 'select'].forEach((m) => {
+  ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'whereNull', 'whereNotNull', 'select'].forEach((m) => {
     q[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q, q); return q; });
   });
   q.first = jest.fn(async () => { mockOrder.push(`read:${table}`); const v = settle(); return Array.isArray(v) ? v[0] || null : v || null; });
@@ -81,7 +82,7 @@ beforeEach(() => {
   mockOrder.length = 0;
   ownershipBusy = false;
   ownershipWaitTimesOut = false;
-  tables = { email_suppressions: [], customers: [], notification_prefs: [], call_log: [] };
+  tables = { email_suppressions: [], customers: [], notification_prefs: [], leads: [], estimates: [], call_log: [] };
   rootTrx = makeTrx();
   db.mockImplementation((t) => fakeQuery(t));
   db.transaction = jest.fn(async (fn) => fn(rootTrx));
@@ -175,6 +176,8 @@ describe('locking, ordering and connection reuse (B13 review)', () => {
   test('a caller-supplied transaction is reused: no second connection is opened', async () => {
     const callerTrx = makeTrx();
     await sendConfirmationEmail(SUB, { dbh: callerTrx });
+    // sendOne's own DB reads (annual-offer guard, link rewrite) ride the same connection.
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ database: callerTrx }));
     expect(db.transaction).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
     expect(callerTrx.raw).toHaveBeenCalled();
@@ -301,6 +304,39 @@ describe('provider timeout bound while the connection and address lock are held'
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  });
+});
+
+describe('delivery-ambiguous provider failures', () => {
+  const { isDeliveryAmbiguous } = require('../services/newsletter-confirm');
+
+  test.each([
+    ['timeout after dispatch', Object.assign(new Error('t'), { name: 'TimeoutError' }), true],
+    ['abort', Object.assign(new Error('a'), { name: 'AbortError' }), true],
+    ['5xx', Object.assign(new Error('x'), { status: 503 }), true],
+    ['timeout-style 408', Object.assign(new Error('x'), { status: 408 }), true],
+    ['network failure', new TypeError('fetch failed'), true],
+    ['definite 422 rejection', Object.assign(new Error('x'), { status: 422 }), false],
+    ['definite 400 rejection', Object.assign(new Error('x'), { status: 400 }), false],
+    ['not configured (no request made)', Object.assign(new Error('x'), { code: 'SENDGRID_NOT_CONFIGURED' }), false],
+    ['annual-offer guard (no request made)', Object.assign(new Error('x'), { annualOfferWithheld: true }), false],
+    ['annual-offer guard lookup failure (no request made)', Object.assign(new Error('x'), { annualOfferGuardFailed: true }), false],
+  ])('%s', (_name, err, expected) => {
+    expect(isDeliveryAmbiguous(err)).toBe(expected);
+  });
+
+  test('sendConfirmationEmail tags an ambiguous send failure and leaves a definite one untagged', async () => {
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('t'), { name: 'TimeoutError' }));
+    await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ deliveryAmbiguous: true });
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('bad'), { status: 422 }));
+    const definite = await sendConfirmationEmail(SUB).catch((e) => e);
+    expect(definite.deliveryAmbiguous).toBeUndefined();
+  });
+
+  test('a veto is never tagged ambiguous (nothing was dispatched)', async () => {
+    tables.email_suppressions = [{ id: 's1', suppression_type: 'do_not_email' }];
+    const err = await sendConfirmationEmail(SUB).catch((e) => e);
+    expect(err.deliveryAmbiguous).toBeUndefined();
   });
 });
 
