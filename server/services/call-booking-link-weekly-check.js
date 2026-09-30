@@ -23,6 +23,7 @@ const { isInternalEmailRecipient } = require('../utils/internal-email-recipients
 const { etWeekStart } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 const { GATE, METADATA_KEY } = require('./call-booking-link-text');
+const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 
 const JOB_NAME = 'call-booking-link-text';
 const OPS_KEY = 'call-booking-link-weekly';
@@ -84,6 +85,7 @@ function windowStart(now) {
 
 async function loadWeek(now = new Date()) {
   const rows = await db('call_log')
+    .modify((q) => whereNotSandboxCall(q)) // the sweep never texts a sandbox call either
     .where('created_at', '>=', new Date(windowStart(now).getTime() - LOOKBACK_EXTRA_MS))
     .whereRaw('metadata->? IS NOT NULL', [METADATA_KEY])
     .select(
