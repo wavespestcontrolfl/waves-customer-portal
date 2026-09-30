@@ -12,7 +12,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // reimplemented here — so the minutes the AI states match what the
 // customer would see on their own tracking link.
 const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
-const { calculateBoundedTrackingEta, finiteNumber } = require('./customer-tracking-eta');
+const { calculateBoundedTrackingEta, finiteNumber, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
 const { stampedAddressDiverges } = require('./stamped-address');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -701,6 +701,10 @@ async function resolveLiveEtaMinutesUncached(row, dest) {
     return {
       minutes: eta.minutes,
       asOf: `${formatETTime(new Date(position.lastReportedAt))} ET`,
+      // The GPS fix's own timestamp (ms), carried ONLY so the memo can cap
+      // its expiry at the fix's freshness deadline (Codex round-9 P2, PR
+      // #5334) — never rendered into any prompt.
+      fixAtMs: new Date(position.lastReportedAt).getTime(),
     };
   } catch (err) {
     logger.warn(`[context] live ETA lookup failed for scheduled_service ${row?.id}: ${err.message}`);
@@ -721,8 +725,24 @@ async function resolveLiveEtaFact(row, customer) {
   if (cached && cached.expiresAt > now) {
     minutesPromise = cached.promise;
   } else {
-    minutesPromise = resolveLiveEtaMinutesUncached(row, dest);
-    liveEtaMemo.set(memoKey, { expiresAt: now + LIVE_ETA_MEMO_TTL_MS, promise: minutesPromise });
+    const entry = { expiresAt: now + LIVE_ETA_MEMO_TTL_MS, promise: null };
+    // Codex round-9 P2 (PR #5334): the 60 s TTL above counts from INSERTION,
+    // but resolveFreshTechPosition already accepted a fix up to
+    // STALE_TECH_STATUS_MS old (the SAME constant the public tracking page's
+    // freshness check uses) — a fix 4 min 50 s old at lookup time would
+    // otherwise be reused for 60 s more, well past the moment the tracker
+    // itself rejects it as stale. Cap expiry at min(insert + TTL, fix time +
+    // STALE_TECH_STATUS_MS) once the lookup resolves (a null result keeps
+    // the plain insert-time TTL). Tightened BEFORE the promise resolves to
+    // any caller, so a follow-up caller can never observe the looser expiry.
+    minutesPromise = resolveLiveEtaMinutesUncached(row, dest).then((fact) => {
+      if (fact && Number.isFinite(fact.fixAtMs)) {
+        entry.expiresAt = Math.min(entry.expiresAt, fact.fixAtMs + STALE_TECH_STATUS_MS);
+      }
+      return fact;
+    });
+    entry.promise = minutesPromise;
+    liveEtaMemo.set(memoKey, entry);
     // Pruned AFTER inserting (never before): an eviction pass that ran first
     // would trim to the cap and then this insert would push it one back
     // over — pruning last is what actually keeps the map at or under the
@@ -738,8 +758,29 @@ async function resolveLiveEtaFact(row, customer) {
   return {
     minutes: minutesFact.minutes,
     asOf: minutesFact.asOf,
-    trackUrl: `${publicPortalUrl()}/track/${row.track_view_token}`,
+    trackUrl: liveEtaTrackUrl(row),
   };
+}
+
+// One visit's own customer tracking link — null when that row has no
+// track_view_token (never falls back to another visit's token).
+function liveEtaTrackUrl(row) {
+  return row?.track_view_token ? `${publicPortalUrl()}/track/${row.track_view_token}` : null;
+}
+
+// Per-visit LIVE ETA facts for a customer's upcoming services (Codex round-9
+// P2, PR #5334): the resolved minutes + timestamp are shared across a grouped
+// stop's siblings (one physical stop, one figure), but each sibling's
+// trackUrl is built from ITS OWN track_view_token — never copied from the
+// representative row whose lookup produced the shared result. A sibling with
+// no token gets trackUrl null (buildFactsBlock then renders no LIVE ETA /
+// TRACKING LINK line for it).
+function perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey) {
+  return liveEtaKeys.map((key, i) => {
+    const shared = key != null ? liveEtaResultByKey.get(key) || null : null;
+    if (!shared) return null;
+    return { minutes: shared.minutes, asOf: shared.asOf, trackUrl: liveEtaTrackUrl(upcomingServices[i]) };
+  });
 }
 
 // Test-only: clears the cross-request memo so unrelated test cases sharing a
@@ -1028,10 +1069,11 @@ class ContextAggregator {
     // comment above).
     // Grouped-stop siblings (visit-groups.js fan-out) share one physical
     // stop and advance to en_route together — resolved once per unique
-    // (technician, destination) key and the SAME result object is reused by
-    // every sibling that shares it (liveEtaDedupeKey/liveEtaDestination
-    // above), so the facts block can never carry two different minute
-    // counts for what is really one stop.
+    // (technician, destination) key and the SAME minutes + timestamp are
+    // reused by every sibling that shares it (liveEtaDedupeKey/
+    // liveEtaDestination above), so the facts block can never carry two
+    // different minute counts for what is really one stop; each sibling's
+    // tracking link is its OWN (perVisitLiveEtas, Codex round-9 P2).
     // includeLiveEta default false: every key resolves to null, so the
     // Promise.all below has nothing to await and resolveLiveEtaFact is
     // never called — no GPS or Distance Matrix request at all.
@@ -1048,7 +1090,14 @@ class ContextAggregator {
       return resolveLiveEtaFact(representative, customer);
     }));
     const liveEtaResultByKey = new Map(uniqueLiveEtaKeys.map((key, i) => [key, uniqueLiveEtaResults[i]]));
-    const liveEtas = liveEtaKeys.map((key) => (key != null ? liveEtaResultByKey.get(key) || null : null));
+    // Codex round-9 P2 (PR #5334): a grouped stop shares ONE resolved
+    // minutes figure + timestamp across its siblings, but each sibling gets
+    // its OWN trackUrl built from its own track_view_token — copying the
+    // representative's whole result would hand a Pest visit's tracking link
+    // to the Lawn line (and a sibling with no token would silently inherit
+    // a link that is not its own). A sibling with no token gets trackUrl
+    // null, which buildFactsBlock renders as no LIVE ETA/TRACKING LINK line.
+    const liveEtas = perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey);
     // LIVE ETA send-time freshness (independent review + Codex round-1
     // finding, PR #5334; grouped by distinct ETA — pre-push audit P1, round
     // 2): one entry per unique (technician, destination) key that actually
@@ -1448,4 +1497,5 @@ module.exports.liveEtaDestination = liveEtaDestination;
 module.exports.liveEtaDedupeKey = liveEtaDedupeKey;
 module.exports.liveEtaEligible = liveEtaEligible;
 module.exports._resetLiveEtaMemoForTests = _resetLiveEtaMemoForTests;
+module.exports.perVisitLiveEtas = perVisitLiveEtas;
 module.exports._liveEtaMemoSizeForTests = _liveEtaMemoSizeForTests;

@@ -30,14 +30,14 @@ jest.mock('../services/customer-tracking-eta', () => {
 });
 
 const { resolveFreshTechPosition } = require('../services/tracking-vehicle-location');
-const { calculateBoundedTrackingEta } = require('../services/customer-tracking-eta');
+const { calculateBoundedTrackingEta, STALE_TECH_STATUS_MS } = require('../services/customer-tracking-eta');
 const {
   resolveLiveEtaFact, liveEtaDestination, liveEtaDedupeKey, liveEtaEligible,
-  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests,
+  _resetLiveEtaMemoForTests, _liveEtaMemoSizeForTests, perVisitLiveEtas,
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
-  replyClaimsEtaMinutes, buildLiveEtaSnapshot,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities,
 } = require('../services/sms-shadow-drafter');
 const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 
@@ -69,7 +69,10 @@ function baseCustomer(overrides = {}) {
   };
 }
 
-const FRESH_POSITION = { lat: 27.39, lng: -82.49, lastReportedAt: '2026-09-29T14:30:00Z', source: 'tech_status' };
+// Codex round-9 P2 (PR #5334): the memo now caps its expiry at the fix's own
+// freshness deadline (fix time + STALE_TECH_STATUS_MS), so a "fresh" fixture
+// must genuinely be fresh relative to the real clock.
+const FRESH_POSITION = { lat: 27.39, lng: -82.49, lastReportedAt: new Date().toISOString(), source: 'tech_status' };
 const ETA_RESULT = { minutes: 14, distanceMiles: 3.2, source: 'google', techUpdatedAt: '2026-09-29T14:30:00Z' };
 
 afterEach(() => {
@@ -340,6 +343,53 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     }
   });
 
+  // Codex round-9 P2 (PR #5334): the TTL counts from insertion, but a fix
+  // resolveFreshTechPosition accepted at 4 min 50 s old must not be reused
+  // for a further 60 s — the public tracker rejects it as stale at 5 min.
+  test('a nearly-stale GPS fix is NOT reused past its own freshness deadline, even inside the 60s insert TTL', async () => {
+    process.env[GATE] = 'true';
+    const t0 = Date.now();
+    resolveFreshTechPosition.mockResolvedValue({ ...FRESH_POSITION, lastReportedAt: new Date(t0 - (STALE_TECH_STATUS_MS - 10 * 1000)).toISOString() });
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    let now = t0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      await resolveLiveEtaFact(row, baseCustomer());
+      now = t0 + 5 * 1000; // fix is 4:55 old, still fresh — reused
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+      now = t0 + 15 * 1000; // fix would now be 5:05 old: stale to the tracker, though the 60s TTL has 45s left
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
+  test('a brand-new GPS fix still gets the full 60s insert TTL (the cap never LENGTHENS it)', async () => {
+    process.env[GATE] = 'true';
+    const t0 = Date.now();
+    resolveFreshTechPosition.mockResolvedValue({ ...FRESH_POSITION, lastReportedAt: new Date(t0).toISOString() });
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+
+    let now = t0;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      await resolveLiveEtaFact(row, baseCustomer());
+      now = t0 + 59 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+      now = t0 + 61 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
   test('the memo is bounded — many distinct keys never grow it past the cap', async () => {
     process.env[GATE] = 'true';
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
@@ -349,6 +399,52 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
       await resolveLiveEtaFact(baseRow({ id: `svc-${i}`, technician_id: `tech-${i}`, service_lat: 27 + i / 1000 }), baseCustomer());
     }
     expect(_liveEtaMemoSizeForTests()).toBeLessThanOrEqual(200);
+  });
+});
+
+describe('perVisitLiveEtas — grouped-stop siblings share minutes, never a tracking link (Codex round-9 P2, PR #5334)', () => {
+  test('two siblings at one stop get the SAME minutes/asOf but each its OWN trackUrl', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const pest = baseRow({ id: 'svc-pest', service_type: 'Pest Control', track_view_token: 'token-pest' });
+    const lawn = baseRow({ id: 'svc-lawn', service_type: 'Lawn Care', track_view_token: 'token-lawn' });
+    const customer = baseCustomer();
+    const key = liveEtaDedupeKey(pest, customer);
+    expect(liveEtaDedupeKey(lawn, customer)).toBe(key);
+
+    // The representative's OWN result carries the pest link — exactly what
+    // the aggregator stores per key and used to copy to every sibling.
+    const representative = await resolveLiveEtaFact(pest, customer);
+    expect(representative.trackUrl).toContain('/track/token-pest');
+
+    const etas = perVisitLiveEtas([pest, lawn], [key, key], new Map([[key, representative]]));
+    expect(etas[0].trackUrl).toContain('/track/token-pest');
+    expect(etas[1].trackUrl).toContain('/track/token-lawn');
+    expect(etas[1].trackUrl).not.toContain('token-pest');
+    expect(etas[0].minutes).toBe(etas[1].minutes);
+    expect(etas[0].asOf).toBe(etas[1].asOf);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+  });
+
+  test('a sibling with no track_view_token gets NO link — never the representative\'s', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const pest = baseRow({ id: 'svc-pest', track_view_token: 'token-pest' });
+    const lawn = baseRow({ id: 'svc-lawn', track_view_token: null });
+    const customer = baseCustomer();
+    const key = liveEtaDedupeKey(pest, customer);
+    const representative = await resolveLiveEtaFact(pest, customer);
+
+    const etas = perVisitLiveEtas([pest, lawn], [key, key], new Map([[key, representative]]));
+    expect(etas[0].trackUrl).toContain('/track/token-pest');
+    expect(etas[1].trackUrl).toBeNull();
+    expect(etas[1].minutes).toBe(representative.minutes);
+  });
+
+  test('a visit with no key / no resolved result stays null', () => {
+    expect(perVisitLiveEtas([baseRow(), baseRow()], [null, 'k'], new Map())).toEqual([null, null]);
   });
 });
 
@@ -914,13 +1010,87 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     expect(result.ok).toBe(false);
   });
 
-  // "about 2 hours out" is a claim in its OWN right (no unit word — bound as
-  // the raw captured figure "2", same as every other pass in this module)
-  // and gets the EXACT-match treatment: it passes when the (contrived) LIVE
-  // ETA figure is itself 2, and is rejected above when it is 9.
-  test('"About 2 hours out." is bound to the LIVE ETA figure', () => {
+  // Codex round-9 P2 (PR #5334): "about 2 hours out" used to be recorded as
+  // the raw captured "2", so a LIVE ETA of "2 minutes" accepted an ETA off by
+  // nearly two hours. Hour figures are now normalized to minutes BEFORE the
+  // comparison: 2 hours is 120 minutes.
+  test('"About 2 hours out." is REJECTED when the LIVE ETA is 2 minutes (round 9: hours are not minutes)', () => {
     const result = validateLiveEtaMinutes({ reply: 'About 2 hours out.', factsBlock: 'LIVE ETA: about 2 minutes (GPS, as of 2:45 PM ET)' });
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]).toMatch(/120/);
+  });
+
+  test('"About 2 hours out." passes only against a LIVE ETA of exactly 120 minutes', () => {
+    const result = validateLiveEtaMinutes({ reply: 'About 2 hours out.', factsBlock: 'LIVE ETA: about 120 minutes (GPS, as of 2:45 PM ET)' });
     expect(result).toEqual({ ok: true, violations: [] });
+  });
+
+  describe('normalizeTimeQuantities — every hour quantity is read WITH its unit (Codex round-9 P2)', () => {
+    test.each([
+      ['about 2 hours out', 'about 120 minutes out'],
+      ['about 2 hrs out', 'about 120 minutes out'],
+      ['2h out', '120 minutes out'],
+      ['1 hr 20 min away', '80 minutes away'],
+      ['1h20m away', '80 minutes away'],
+      ['1 hour and 20 minutes away', '80 minutes away'],
+      ['an hour and 20 minutes away', '80 minutes away'],
+      ['1.5 hours away', '90 minutes away'],
+      ['2 and a half hours away', '150 minutes away'],
+      ['2 hours and a half away', '150 minutes away'],
+      ['an hour and a half away', '90 minutes away'],
+      ['1 to 2 hours away', '60-120 minutes away'],
+    ])('%p reads as %p', (input, expected) => {
+      expect(normalizeTimeQuantities(input)).toBe(expected);
+    });
+
+    test('a vague hour phrase is left alone for the fail-closed check, never guessed', () => {
+      expect(normalizeTimeQuantities('half an hour away')).toBe('half an hour away');
+      expect(normalizeTimeQuantities('an hour out')).toBe('an hour out');
+      expect(normalizeTimeQuantities('a couple hours out')).toBe('a couple hours out');
+    });
+  });
+
+  describe('validateLiveEtaMinutes — hour-based ETAs compare as minutes (Codex round-9 P2)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      ['He is 1 hr 20 min out.', 80],
+      ['He is 1 hour and 20 minutes away.', 80],
+      ['He is 1.5 hours away.', 90],
+      ['He is two and a half hours out.', 150],
+      ['He is an hour and a half away.', 90],
+    ])('%p matches a LIVE ETA of exactly %p minutes', (reply, minutes) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(minutes) }).ok).toBe(true);
+    });
+
+    test.each([
+      'He is 1 hr 20 min out.',
+      'He is 1 hour and 20 minutes away.',
+      'He is 1.5 hours away.',
+      'He is two and a half hours out.',
+      'He is an hour and a half away.',
+      'He is 2 hours out.',
+    ])('%p is rejected against a LIVE ETA of 2 minutes', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+
+    test.each([
+      'He is about half an hour away.',
+      'He is an hour out.',
+      'He is a couple hours out.',
+      'He is an hour or so away.',
+      'He is an hour out, about 12 minutes.',
+    ])('%p — an hour phrase the parser cannot turn into minutes fails closed even beside a matching minutes figure', (reply) => {
+      const result = validateLiveEtaMinutes({ reply, factsBlock: facts(12) });
+      expect(result.ok).toBe(false);
+    });
+
+    test('an hour-based dry-time duration in an unrelated clause is still never an ETA claim', () => {
+      const result = validateLiveEtaMinutes({
+        reply: 'The tech is 12 minutes away. Please keep pets off the lawn — allow 2 hours before letting them out.',
+        factsBlock: facts(12),
+      });
+      expect(result).toEqual({ ok: true, violations: [] });
+    });
   });
 
   // The "no-snapshot trigger path" fix: findEtaMinutesClaims itself now

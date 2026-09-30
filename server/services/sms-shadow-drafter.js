@@ -494,7 +494,10 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // phrasings too.
 const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
 const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
-const ETA_MINUTES_TOKEN_RE = /\b(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
+// Up to 5 digits (Codex round-9 P2, PR #5334): normalizeTimeQuantities below
+// rewrites hour figures into minutes ("17 hours" -> "1020 minutes"), so the
+// unit token must be able to read a normalized figure wider than 3 digits.
+const ETA_MINUTES_TOKEN_RE = /\b(\d{1,5})\s*(?:min(?:ute)?s?)\b/gi;
 const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
 const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it|lasts?)\b[^.?!\n]{0,20}$/i;
 // A bare "in <number>" with no minutes unit at all ("be at your place in
@@ -572,8 +575,9 @@ function looksLikeTimeAddressOrPhone(str, index, length) {
 // address, a date, a count of something that isn't time, an ordinal, or a
 // percentage. Each of these is checked in isolation, narrowly, against the
 // text immediately around the match; a bare integer that matches NONE of
-// them is the claim itself (default-deny). "N hour(s)" is handled by its own
-// dedicated token pass below (ETA_HOURS_TOKEN_RE), not here.
+// them is the claim itself (default-deny). "N hour(s)" never reaches this
+// classifier — normalizeTimeQuantities (below) has already rewritten every
+// hour figure into a minutes figure by the time any pass runs.
 const MONEY_SIGN_BEFORE_RE = /\$\s*$/;
 const MONEY_WORD_AFTER_RE = /^\s*(?:dollars?|bucks?)\b/i;
 const ORDINAL_SUFFIX_AFTER_RE = /^(?:st|nd|rd|th)\b/i;
@@ -581,12 +585,6 @@ const PERCENT_SIGN_AFTER_RE = /^\s*%/;
 const MONTH_NAME_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
 const DATE_SLASH_AFTER_RE = /^\s*\/\s*\d{1,4}\b/;
 const DATE_SLASH_BEFORE_RE = /\d{1,4}\s*\/\s*$/;
-// "N hour(s)" (round 8): a timed claim exactly like "N minutes" — checked
-// through the SAME maybeGroundedClaim strong-trigger/duration-exclusion
-// logic in findGroundedMinutesFigures below, so "allow 2 hours before
-// letting pets out" stays excluded exactly like "allow 30 minutes ..." does,
-// while "about 2 hours out" claims.
-const ETA_HOURS_TOKEN_RE = /\b(\d{1,3})\s*(?:hours?|hrs?)\b/gi;
 const WORD_AFTER_RE = /^\s*[A-Za-z]+\b/;
 function classifyBareEtaNumber(str, index, length) {
   const before = str.slice(Math.max(0, index - 15), index);
@@ -602,12 +600,6 @@ function classifyBareEtaNumber(str, index, length) {
   // Date: a month name nearby, or an N/N slash date.
   if (MONTH_NAME_RE.test(before) || MONTH_NAME_RE.test(after)) return 'excluded';
   if (DATE_SLASH_AFTER_RE.test(after) || DATE_SLASH_BEFORE_RE.test(before)) return 'excluded';
-  // "N hour(s)" is handled by its own dedicated pass in
-  // findGroundedMinutesFigures (the SAME strong-trigger/duration-exclusion
-  // logic "N minutes" gets — "allow 2 hours before letting pets out" must
-  // stay excluded exactly like "allow 30 minutes ..." does), so a hitherto
-  // unclaimed "hour(s)" figure reaching this point was already judged and
-  // excluded there; fall through to the generic trailing-word rule below.
   // A count with a non-time noun directly after it ("3 bugs", "2 visits",
   // "4 traps", "12 months", "30 days") — any other word sitting right after
   // the number reads as its unit/noun, so it is never a bare arrival figure.
@@ -641,6 +633,88 @@ function normalizeNumberWords(text) {
     return String(NUMBER_WORD_TENS[tens.toLowerCase()] + (unit ? NUMBER_WORD_UNITS[unit.toLowerCase()] : 0));
   });
 }
+// Structural time-quantity normalization (Codex round-9 P2, PR #5334): every
+// earlier round of this PR found ANOTHER way a customer-visible ETA could
+// slip past the exact-minutes comparison, and round 9 found the newest —
+// "About 2 hours out" was recorded as { minutes: 2 } (the raw captured
+// number, no unit conversion), so a live fact of "2 minutes" accepted an ETA
+// off by nearly two hours at both draft time and send time. The fix is ONE
+// function that reads every hour-unit quantity WITH its unit and rewrites it
+// as an equivalent "<total> minutes" figure BEFORE any claim pass runs, so
+// the existing minutes passes (units, ranges, trigger/duration-exclusion
+// judgment) compare real minutes: "2 hours" -> "120 minutes", "1 hr 20 min"
+// / "1h20m" / "1 hour and 20 minutes" -> "80 minutes", "2 and a half hours"
+// / "an hour and a half" -> "150"/"90 minutes", "1.5 hours" -> "90 minutes",
+// "1 to 2 hours" -> "60-120 minutes". Anything hour-ish it can NOT turn into
+// a number ("an hour", "half an hour", "a couple hours", "hour or so") is
+// left as-is on purpose and is rejected outright by bodyHasUnnormalizedHour-
+// Word below — fail closed, never guess. Used only by
+// findGroundedMinutesFigures (the two call sites with a LIVE ETA to compare
+// against): findEtaMinutesClaims keeps its own hour-blind behavior so an
+// ordinary "2 hour arrival window" in a reply with no live tech is never
+// newly treated as an ETA claim.
+const HOURS_TO_MINUTES = 60;
+function hoursToMinutes(h) {
+  return Math.round(parseFloat(h) * HOURS_TO_MINUTES);
+}
+// Hours WITH a minutes part ("1 hr 20 min", "1h20m", "1 hour and 20 minutes",
+// "an hour and 20 minutes") -> one "<total> minutes" figure. Split out because
+// findEtaMinutesClaims (the trigger-based path, which stays hour-blind for a
+// plain "2 hours" — see above) must still read a mixed quantity as ONE figure
+// rather than mistaking its trailing "20 min" for the whole ETA.
+function normalizeHourMinuteCompounds(text) {
+  let out = String(text || '');
+  // An article hour is read ONLY when a minutes figure follows it; a bare
+  // "an hour" / "half an hour" / "quarter of an hour" is vague and stays for
+  // bodyHasUnnormalizedHourWord to reject.
+  out = out.replace(/(?<!half\s)(?<!quarter\s)(?<!of\s)\ban?\s+(?:hour|hr)\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi,
+    (m, mins) => `${HOURS_TO_MINUTES + parseInt(mins, 10)} minutes`);
+  out = out.replace(/\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h(?=\d|\b))\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?|m)\b/gi,
+    (m, n, mins) => `${hoursToMinutes(n) + parseInt(mins, 10)} minutes`);
+  return out;
+}
+function normalizeTimeQuantities(text) {
+  let out = String(text || '');
+  // "1 to 2 hours" / "1-2 hours" / "1 or 2 hours" — both bounds scale.
+  out = out.replace(/\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi,
+    (m, a, b) => `${hoursToMinutes(a)}-${hoursToMinutes(b)} minutes`);
+  // "2 and a half hours" / "2 hours and a half" / "an hour and a half".
+  out = out.replace(/\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b/gi,
+    (m, n) => `${hoursToMinutes(n) + 30} minutes`);
+  out = out.replace(/\b(?:(\d+(?:\.\d+)?)|an?)\s+(?:hours?|hrs?)\s+and\s+a\s+half\b/gi,
+    (m, n) => `${hoursToMinutes(n || 1) + 30} minutes`);
+  out = normalizeHourMinuteCompounds(out);
+  // "2 hours", "2h", "1.5 hrs".
+  out = out.replace(/\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h\b)/gi,
+    (m, n) => `${hoursToMinutes(n)} minutes`);
+  return out;
+}
+// Fail-closed leftover check for normalizeTimeQuantities: any hour word still
+// standing after the numeric rewrite is a duration the parser could not turn
+// into minutes ("an hour", "half an hour", "quarter hour", "a couple
+// hours", "an hour or so"). Judged with the SAME sentence rule a vague
+// arrival phrase gets (an arrival trigger in the sentence; a strong trigger
+// wins; a weak "out" consults the dry-time/wait-before duration exclusions)
+// so "the treatment needs about half an hour to dry" never false-positives.
+// Only meaningful — and only called — where there is a LIVE ETA to compare a
+// claim against; see validateLiveEtaMinutes and etaClaimBlockReason.
+function bodyHasUnnormalizedHourWord(text) {
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const spans = sentenceSpans(str);
+  const re = /\b(?:hours?|hrs?)\b/gi;
+  let m;
+  while ((m = re.exec(str))) {
+    const span = spans.find(([s, e]) => m.index >= s && m.index < e) || spans[spans.length - 1];
+    const sentence = str.slice(span[0], span[1]);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
+    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
+    const before = str.slice(Math.max(0, m.index - 30), m.index);
+    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
+    return true;
+  }
+  return false;
+}
 // Does the body talk about the tech arriving at all? The send-time freshness
 // check uses this as a backstop for ETA wording the claim parser can't read.
 function bodyMentionsArrival(text) {
@@ -663,7 +737,13 @@ function bodyMentionsArrival(text) {
 // all besides "out" from an unrelated "letting pets out") never
 // false-positives.
 const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?min(?:ute)?s?|any\s+minute\s+now|shortly|soon)\b/i;
-function bodyHasTimedArrivalPhrase(text) {
+// `unnormalizedHoursOnly` (Codex round-9 P2, PR #5334): instead of the vague
+// phrase list, report only whether an hour-based duration normalizeTimeQuantities
+// could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
+// Routed through this one already-shared entry point so every send seam's
+// existing import of the drafter keeps working unchanged.
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false } = {}) {
+  if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text);
   const str = normalizeNumberWords(text);
   const spans = sentenceSpans(str);
   const sentenceFor = (index) => {
@@ -695,11 +775,11 @@ function bodyHasTimedArrivalPhrase(text) {
 // alike — they share one clause ("takes 10-12 minutes to dry" excludes both,
 // "10-12 minutes out" includes both) — and the span is marked `consumed` so
 // the single-number pass never double-claims the bound already covered.
-const RANGE_MINUTES_RE = /\b(\d{1,3})\s*(?:[-–—]|to|or)\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
-const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,3})\s+and\s+(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi;
+const RANGE_MINUTES_RE = /\b(\d{1,5})\s*(?:[-–—]|to|or)\s*(\d{1,5})\s*(?:min(?:ute)?s?)\b/gi;
+const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,5})\s+and\s+(\d{1,5})\s*(?:min(?:ute)?s?)\b/gi;
 function findEtaMinutesClaims(text) {
   const claims = [];
-  const str = normalizeNumberWords(text);
+  const str = normalizeHourMinuteCompounds(normalizeNumberWords(text));
   const spans = sentenceSpans(str);
   const sentenceFor = (index) => {
     const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
@@ -840,7 +920,7 @@ function findEtaMinutesClaims(text) {
 // a date, a count of something that isn't time, an ordinal, or a percentage.
 function findGroundedMinutesFigures(text) {
   const claims = [];
-  const str = normalizeNumberWords(text);
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
   const spans = sentenceSpans(str);
   const sentenceFor = (index) => {
     const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
@@ -875,17 +955,6 @@ function findGroundedMinutesFigures(text) {
   while ((m = re.exec(str))) {
     if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
     maybeGroundedClaim(parseInt(m[1], 10), m.index, m[0].length, sentenceFor(m.index));
-  }
-
-  // "N hour(s)" pass (round 8): the SAME strong-trigger/duration-exclusion
-  // judgment as the minutes pass above — "about 2 hours out" claims, "allow
-  // 2 hours before letting pets out"/"takes about 2 hours to dry" stay
-  // excluded exactly like their minutes equivalents.
-  const hoursRe = new RegExp(ETA_HOURS_TOKEN_RE.source, ETA_HOURS_TOKEN_RE.flags);
-  let hm;
-  while ((hm = hoursRe.exec(str))) {
-    if (consumed.some(([s, e]) => hm.index >= s && hm.index < e)) continue;
-    maybeGroundedClaim(parseInt(hm[1], 10), hm.index, hm[0].length, sentenceFor(hm.index));
   }
 
   // Bare-integer default-deny (Codex round-8 P2, PR #5334): "the tech should
@@ -943,7 +1012,7 @@ function findGroundedMinutesFigures(text) {
 // count with a non-time noun, an ordinal, a percentage) never trips this
 // backstop; a digit classifyBareEtaNumber can't otherwise explain still does.
 function bodyHasUnclassifiedArrivalDigit(text) {
-  const str = normalizeNumberWords(text);
+  const str = normalizeHourMinuteCompounds(normalizeNumberWords(text));
   const spans = sentenceSpans(str);
   const claims = findEtaMinutesClaims(text);
   const digitRe = /\d{1,3}/g;
@@ -1024,6 +1093,14 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   const claims = factsMinutes.size
     ? [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)]
     : findEtaMinutesClaims(reply);
+  // Codex round-9 P2 (PR #5334): an hour-based duration the normalizer could
+  // not turn into minutes ("an hour", "half an hour", "a couple hours") next
+  // to a real minutes figure ("about an hour out, 2 minutes") would otherwise
+  // ride the numeric claim through — reject it outright once there is a LIVE
+  // ETA to hold the reply to.
+  if (factsMinutes.size && bodyHasUnnormalizedHourWord(reply)) {
+    return { ok: false, violations: ['the reply gives an hour-based arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number of minutes, or drop the timeframe and say the tech is on the way'] };
+  }
   if (!claims.length) {
     // Codex round-5 P2: a vague/approximate duration ("half an hour away",
     // "an hour out", "a few minutes", "a couple minutes", "quarter hour",
@@ -3208,6 +3285,8 @@ module.exports = {
   bodyHasTimedArrivalPhrase,
   bodyHasUnclassifiedArrivalDigit,
   findGroundedMinutesFigures,
+  normalizeTimeQuantities,
+  bodyHasUnnormalizedHourWord,
   replyClaimsEtaMinutes,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,

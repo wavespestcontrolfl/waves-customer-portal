@@ -636,16 +636,38 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     expect(reason).toBeNull();
   });
 
-  // "about 2 hours out" is its own claim (raw captured "2", no conversion) —
-  // bound against a snapshot that also reads 2 so the mechanism is exercised
-  // the same way the round-7 tests exercise "20 minutes.".
-  test('"About 2 hours out." is bound and blocked once the visit is done', async () => {
+  // Codex round-9 P2 (PR #5334): "about 2 hours out" is 120 MINUTES, not a
+  // raw "2" — it binds to a snapshot entry reading 120, and a snapshot that
+  // reads 2 (a contrived 2-minute live fact) no longer matches it.
+  test('"About 2 hours out." is bound (as 120 minutes) and blocked once the visit is done', async () => {
     const reason = await etaClaimBlockReason({
-      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      liveEtaSnapshot: { entries: [{ minutes: 120, scheduledServiceIds: ['svc-1'] }] },
       factsGeneratedAt: FRESH, outgoingBody: 'About 2 hours out.', now: NOW,
       dbh: dbWith([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
     });
     expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('"About 2 hours out." does NOT bind to a live ETA of 2 minutes — off by nearly two hours (round 9)', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody: 'About 2 hours out.', now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
+
+  test.each([
+    'He is 1 hr 20 min out.',
+    'He is about an hour out, 2 minutes.',
+    'He is a couple hours away.',
+  ])('%p never passes against a live ETA of 2 minutes', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: dbWith([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).not.toBeNull();
   });
 
   // The "no-snapshot trigger path" fix: findEtaMinutesClaims itself now

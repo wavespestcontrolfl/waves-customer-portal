@@ -175,8 +175,17 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // a vague timed phrase — fails closed as unbound rather than falling
   // through to the lenient status-only path below, which would recheck only
   // the CURRENT tracker state and never bind the unread figure to anything.
-  const timedArrivalClaim = !claims.length
-    && (bodyHasTimedArrivalPhrase(outgoingBody) || bodyHasUnclassifiedArrivalDigit(outgoingBody));
+  // Codex round-9 P2 (PR #5334): hour-based durations are normalized to
+  // minutes inside findGroundedMinutesFigures (so "About 2 hours out" reads
+  // as 120, never as a raw "2" that a live "2 minutes" fact would accept). An
+  // hour word that normalization could NOT turn into minutes ("an hour",
+  // "half an hour", "a couple hours") is treated as a vague timed claim even
+  // when a real minutes figure sits beside it, once there is a live ETA
+  // context to hold the body to — fail closed as unbound below.
+  const liveContext = snapshotHasEntries || hasTrackLink;
+  const timedArrivalClaim = (!claims.length
+    && (bodyHasTimedArrivalPhrase(outgoingBody) || bodyHasUnclassifiedArrivalDigit(outgoingBody)))
+    || (liveContext && bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true }));
   // Backstop (audit P1, round 4): the claim parser can't read every way a
   // person or model writes an ETA. A body that talks about the tech arriving
   // is checked whenever the draft carried a LIVE ETA, or whenever it mentions
