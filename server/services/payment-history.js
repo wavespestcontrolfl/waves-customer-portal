@@ -17,6 +17,15 @@ const { containsAbsencePhrase } = require('./payment-receipt-vocabulary');
 
 const PAYMENT_HISTORY_CAP = 200;
 
+// payments.metadata->>'invoice_id' as a uuid, or NULL when it is not one. invoices.id is a
+// uuid PRIMARY KEY (20260401000082_invoices), so comparing the uuid directly lets the planner
+// use the key instead of casting the indexed column to text; the CASE guarantees the cast is
+// only evaluated for a well-formed value (a malformed metadata string can never throw).
+function uuidFromMetadata(alias) {
+  const v = `${alias}.metadata->>'invoice_id'`;
+  return `(CASE WHEN ${v} ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (${v})::uuid END)`;
+}
+
 // { rows, complete } or null when the read failed (unknown => callers fail closed).
 async function loadPaymentHistory(customerId, dbh = db) {
   if (!customerId) return null;
@@ -30,7 +39,7 @@ async function loadPaymentHistory(customerId, dbh = db) {
       // payments.metadata is JSONB (initial_schema `t.jsonb('metadata')`, never altered), so
       // ->> is total (NULL metadata / missing key => NULL => the row is kept).
       .whereRaw(
-        "NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id::text = payments.metadata->>'invoice_id' AND i.customer_id = ? AND i.payer_id IS NOT NULL)",
+        `NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id = ${uuidFromMetadata('payments')} AND i.customer_id = ? AND i.payer_id IS NOT NULL)`,
         [customerId],
       )
       .orderBy('payments.payment_date', 'desc')
@@ -66,7 +75,7 @@ const IN_FLIGHT_SQL = `SELECT (
     SELECT 1 FROM payments p
     WHERE p.customer_id = ? AND p.payer_id IS NULL
       AND lower(p.status) IN ('pending', 'processing', 'requires_action')
-      AND NOT EXISTS (SELECT 1 FROM invoices pi WHERE pi.id::text = p.metadata->>'invoice_id' AND pi.customer_id = ? AND pi.payer_id IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM invoices pi WHERE pi.id = ${uuidFromMetadata('p')} AND pi.customer_id = ? AND pi.payer_id IS NOT NULL)
   )
   OR EXISTS (
     SELECT 1 FROM invoices i

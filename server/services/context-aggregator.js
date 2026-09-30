@@ -527,7 +527,10 @@ class ContextAggregator {
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
   async getContextForCustomer(customer) {
-    // Parallel data fetch
+    // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
+    // never throws — null on failure) starts NOW so it overlaps the fetches below instead of
+    // adding a serial round trip; it is awaited where hasProcessingPayment is derived.
+    const inFlightMoneyPromise = require('./payment-history').hasInFlightMoney(customer.id);
     const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
       // #4331 P2): an in-flight, unconfirmed placeholder must not read as a
@@ -636,7 +639,7 @@ class ContextAggregator {
       const invId = paymentInvoiceId(p);
       return !(invId && payerInvoiceIds.has(invId));
     });
-    const inFlightMoney = await require('./payment-history').hasInFlightMoney(customer.id);
+    const inFlightMoney = await inFlightMoneyPromise;
     // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
     // collectible OWN invoices (net of credit) plus failed standalone
     // attempts — a customer with a sent-but-unpaid invoice and no failed

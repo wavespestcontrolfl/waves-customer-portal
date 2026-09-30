@@ -41,7 +41,10 @@ async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false }
   const StripeService = require('./stripe');
   let pi;
   try {
-    pi = await StripeService.retrievePaymentIntent(piId);
+    // inspectOnly serves read-only surfaces (the public pay page): bound the Stripe
+    // read (no SDK retries) so a slow Stripe cannot stall it; a timeout throws and
+    // lands in the fail-closed branch below.
+    pi = await StripeService.retrievePaymentIntent(piId, inspectOnly ? { timeout: 5000, maxNetworkRetries: 0 } : undefined);
   } catch (e) {
     logger.warn(`[prepaid-pi-guard] PI verify failed for ${piId}: ${e.message}`);
     return { ok: false, reason: 'payment_session_unverifiable', piId, detail: e.message };

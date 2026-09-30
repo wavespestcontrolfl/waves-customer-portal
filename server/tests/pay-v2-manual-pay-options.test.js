@@ -272,11 +272,14 @@ describe('GET /pay/:token manualPayOptions', () => {
     expect(StripeService.cancelPaymentIntent).not.toHaveBeenCalled();
   });
 
-  test('env set ⇒ a non-fence error from the reconciliation check still propagates', async () => {
+  // Pre-push audit P1 (supersedes "still propagates"): the public page fails CLOSED, not 500.
+  test('env set ⇒ a non-fence error from the reconciliation check withholds Zelle and the page still serves', async () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     const StripeService = require('../services/stripe');
     StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValueOnce(new Error('db down'));
-    await expect(getPayPage(invoiceData({ status: 'overdue' }))).rejects.toThrow('db down');
+    const { body, status } = await getPayPage(invoiceData({ status: 'overdue' }));
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
   });
 
   test('env set ⇒ key absent on a combined-balance session (codex r2 P1)', async () => {
@@ -524,6 +527,52 @@ describe('payPageZelleVisibility + GET: an erroring credit lookup fails closed',
     const { body, status } = await getPayPage(invoiceData(), { dbImpl });
     expect(status).toBe(200);
     expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+  });
+});
+
+// Pre-push audit P1: a THROWING eligibility probe fails closed (Zelle withheld) and never 500s the public page.
+describe('a throwing Zelle eligibility probe never fails the public pay page', () => {
+  const StripeService = require('../services/stripe');
+  const { warn } = require('../services/logger');
+  const { payPageZelleVisibility } = payRouter;
+  afterEach(() => {
+    delete process.env.ZELLE_RECIPIENT;
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockReset();
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockResolvedValue(undefined);
+  });
+
+  test('reconciliation check throws a non-suppression error => 200, manualPayOptions absent, only the invoice id logged', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValue(Object.assign(new Error('secret db detail'), { code: 'ECONNRESET' }));
+    warn.mockClear();
+    const { body, status } = await getPayPage(invoiceData({ status: 'overdue' }));
+    expect(status).toBe(200);
+    expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+    const logged = warn.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toMatch(/inv-1/);
+    expect(logged).not.toMatch(/secret db detail/);
+  });
+
+  test('payPageZelleVisibility resolves { visible: false, reason: eligibility_unverifiable } instead of throwing', async () => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    StripeService.assertNoInvoiceChargeReconciliationPending.mockRejectedValue(new Error('db down'));
+    db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false }))
+      .resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+  });
+
+  test('a HUNG probe is bounded: resolves not-visible instead of stalling the page', async () => {
+    jest.useFakeTimers();
+    try {
+      process.env.ZELLE_RECIPIENT = 'pay@example.com';
+      StripeService.assertNoInvoiceChargeReconciliationPending.mockImplementation(() => new Promise(() => {}));
+      db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+      const p = payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }), creditWillCoverAnchor: false });
+      await jest.advanceTimersByTimeAsync(9000);
+      await expect(p).resolves.toEqual({ visible: false, reason: 'eligibility_unverifiable' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

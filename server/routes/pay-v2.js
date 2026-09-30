@@ -393,6 +393,16 @@ async function zellePayerOwnership(inv, dbh) {
   }
 }
 
+const ZELLE_ELIGIBILITY_TIMEOUT_MS = 8000;
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error('timed out'), { code: 'ZELLE_ELIGIBILITY_TIMEOUT' })), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // STRUCTURAL (independent-review P1, round 5, findings 3 & 4, PR #5331): the
 // ONE place that answers "does the pay page offer a Zelle transfer for this
 // invoice RIGHT NOW" — folding isZelleTransferEligible's full predicate
@@ -434,7 +444,21 @@ async function payPageZelleVisibility({
   if (coverage == null) {
     try { coverage = await invoiceCreditWouldFullyCover(inv); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
   }
-  const eligible = await isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive });
+  // Pre-push audit P1: isZelleTransferEligible RETHROWS a non-suppression error from
+  // the charge-reconciliation check (and any probe below it can throw or hang on
+  // Stripe). On the public pay page that must never 500 the page — fail CLOSED:
+  // withhold Zelle, log the invoice id only. Bounded so a slow Stripe read cannot
+  // stall the page either (the PI inspect also carries its own request timeout).
+  let eligible;
+  try {
+    eligible = await withTimeout(
+      isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive }),
+      ZELLE_ELIGIBILITY_TIMEOUT_MS,
+    );
+  } catch (err) {
+    logger.warn(`[pay-v2] Zelle eligibility check failed for invoice ${inv.id}: ${err.code || err.name || 'error'}; withholding Zelle`);
+    return { visible: false, reason: 'eligibility_unverifiable' };
+  }
   if (!eligible) return { visible: false, reason: 'not_eligible' };
   // Finding 4: any positive projected account credit (invoiceProjectedCreditApplied
   // — partial coverage only; a credit that would fully cover already denied
