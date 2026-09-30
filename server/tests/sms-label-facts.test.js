@@ -1301,6 +1301,50 @@ describe('r19: a friendly prefix or suffix never lets an answer through - it is 
   });
 });
 
+describe('r20: qualified weekdays, a language allowlist, and answer-shaped questions', () => {
+  const other = (text) => labelFactsLib.inboundRefersToOtherVisit(text, '2026-09-29', '2026-09-30');
+  const asked = labelFactsLib.askedLabelKinds('Can my dogs go outside?');
+  const claim = (reply, kinds = []) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', kinds);
+
+  test('1. a qualified weekday is another visit; a bare or past weekday keeps the 6-day rule', () => {
+    for (const text of ["next Friday's treatment", 'this Friday', 'this coming Friday', 'Friday after next', 'the following Friday', 'every Tuesday you spray', 'the upcoming Tuesday visit', 'each Wednesday']) {
+      expect([text, other(text)]).toEqual([text, true]);
+    }
+    for (const text of ['Tuesday', 'on Tuesday you sprayed', 'last Tuesday', 'you came Tuesday, dogs ok?']) expect([text, other(text)]).toEqual([text, false]);
+  });
+
+  test('2. a reply sentence of 4+ words must be verifiably en / es / pt / fr; German, Italian, Dutch and Haitian Creole timing is held', () => {
+    for (const reply of [
+      'Bitte halten Sie Haustiere vier Stunden fern.', 'Die Hunde k\u00f6nnen nach vier Stunden wieder nach drau\u00dfen.', 'Tenga gli animali fuori per quattro ore.', 'Tenete i cani dentro per quattro ore.',
+      'Kenbe chen yo andedan pou kat \u00e8 tan.', 'Houd de honden vier uur binnen alstublieft.', 'Zwei Stunden warten und dann ist es gut.',
+    ]) expect([reply, labelFactsLib.hasUnverifiableLanguage(reply), claim(reply)]).toEqual([reply, true, true]);
+    for (const reply of [
+      'See you then.', 'Hola, gracias por escribir. Un compa\u00f1ero le confirmar\u00e1 su cita.', 'Sounds good, see you Tuesday.', 'Tuesday morning works great.', 'We will see you Thursday between 8 and 10 AM.',
+      'Your technician will confirm the timing at the visit.', 'Thanks for reaching out, we appreciate it.', 'The office is open until 5 PM today.', 'Bonjour, un coll\u00e8gue vous confirmera votre rendez-vous.', 'Never name product brands.', 'OK',
+    ]) expect([reply, claim(reply)]).toEqual([reply, false]);
+  });
+  test('2. an inbound that is not verifiably English gets none on file', () => {
+    const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
+    const forInbound = (text) => labelFactsLib.labelFactsForInbound(facts, [text], '2026-09-30');
+    for (const text of ['Wann d\u00fcrfen die Hunde wieder nach drau\u00dfen gehen', 'Quando possono i cani uscire dopo il trattamento', 'Kan de hond nu naar buiten na de behandeling', 'Kilè chen yo ka soti apre tretman an']) {
+      expect([text, forInbound(text)]).toEqual([text, null]);
+    }
+    for (const text of ['Can the dogs go out now?', 'Is it okay now?', 'Tuesday morning works', 'when can the kids play on the lawn']) expect(forInbound(text)).toBe(facts);
+  });
+
+  test('3. answer-shaped and rhetorical questions are judged like statements; genuine clarification questions are exempt', () => {
+    for (const reply of ['Sure, why not?', 'Go ahead?', "Wouldn't that be fine?", "Why wouldn't they?", "Isn't it safe by now?", 'Yes?', 'Absolutely, right?', 'Hi, feel free?', 'Can they go out?', 'You can go out, okay?']) {
+      expect([reply, claim(reply, asked)]).toEqual([reply, true]);
+    }
+    for (const reply of [
+      'Do you have pets that stay outside?', 'Which area is the dog in?', 'Can you send a photo of the gate?', 'Is that the front or back yard?', 'What time works for you?', 'Is 2 PM ok?',
+      'Could you let me know which gate to use?', 'Hi Jane, do you have any pets that stay outside?', 'Would you like us to come Tuesday?',
+    ]) expect([reply, claim(reply, asked)]).toEqual([reply, false]);
+    // a clarification question that carries a duration, a clearance word or a label claim is not exempt
+    for (const reply of ['Do you want the dogs kept off for 4 hours?', 'Are the dogs okay outside now?', 'Do you know it is safe by now?', 'What if they can go out at 3?']) expect([reply, claim(reply, asked)]).toEqual([reply, true]);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
