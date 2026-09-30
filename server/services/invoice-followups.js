@@ -2833,6 +2833,16 @@ module.exports = {
   firstEligibleFireAt,
   STALE_TOUCH_GRACE_MS,
   ladderThrough90Live,
+  // Cadence helpers, exported for services/customer-dunning/ (dunning
+  // consolidation) so the customer schedule computes step dates with the
+  // exact code the per-invoice ladder uses. No logic lives behind these.
+  computeNextTouchAt,
+  anchorTo10amNY,
+  sequenceAnchor,
+  heldTouchFloor,
+  adoptionLanding,
+  isStaleTouch,
+  FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID,
   markAtRiskForLongOverdue,
   latePaymentCheckerRetiredLive,
   adoptOrphanInvoicesLive,

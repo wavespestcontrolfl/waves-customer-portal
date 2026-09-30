@@ -17,7 +17,8 @@
  * already bot / staff filtered where it was recorded:
  *
  *   short_code_clicks     human/bot-filtered at /l/
- *   customer_page_views   filtered by its recorder
+ *   customer_page_views   filtered by its recorder (incl. a push:open row: a
+ *                         server-verified open of that customer's own notification)
  *   inbound sms replies   non-recruiting
  *
  * Everything else is shown in the feed and NEVER engaged: SendGrid opens AND
@@ -60,6 +61,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { leadEmailLinksLive } = require('../config/feature-gates');
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -86,7 +88,7 @@ function preview(text, max = PREVIEW_MAX) {
   return flat.length > max ? `${flat.slice(0, max - 1).trimEnd()}…` : flat;
 }
 
-function mk(source, rowId, ref, { at, channel, kind, title, detail = null }) {
+function mk(source, rowId, ref, { at, channel, kind, title, detail = null, engaged = isEngagedKind(kind) }) {
   const when = iso(at);
   if (!when) return null;
   return {
@@ -96,7 +98,7 @@ function mk(source, rowId, ref, { at, channel, kind, title, detail = null }) {
     kind,
     title,
     detail: detail || null,
-    engaged: isEngagedKind(kind),
+    engaged,
     source,
     ref: ref || null,
   };
@@ -112,6 +114,10 @@ const PAGE_LABELS = {
   track: 'Opened the live tracking page',
   inspection: 'Opened the inspection page',
 };
+
+const PUSH_OPEN_PAGE = 'push:open';
+const NOTIFICATION_SUBJECT_RE = /^notification:([0-9a-f-]{36})$/i;
+const PUSH_PLATFORMS = new Set(['web', 'ios', 'android']);
 
 function pageViewTitle(page) {
   const p = String(page || '');
@@ -322,6 +328,20 @@ const SOURCES = [
         w.orWhere((k) => k.whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')")
           .where((o) => o.where('em.recipient_id', String(ctx.customerId))
             .orWhereIn('em.recipient_id', dbh('leads').where('customer_id', ctx.customerId).select(dbh.raw('id::text')))));
+        // GATE_LEAD_EMAIL_LINKS: mail sent to this customer's lead, or about
+        // one of their estimates, before they were a customer
+        // (email_messages.lead_id / estimate_id, recorded at send time; see
+        // email-lead-links.js). Ownership is by id, so it survives a changed
+        // address. Only lead-typed / untyped rows ride the link (a
+        // customer-typed row is owned by its recipient_id), and a row whose
+        // recipient_id names some OTHER customer never does.
+        if (ctx.leadEmailLinks) {
+          w.orWhere((k) => k.whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')")
+            .where((o) => o.whereIn('em.lead_id', dbh('leads').where('customer_id', ctx.customerId).select('id'))
+              .orWhereIn('em.estimate_id', dbh('estimates').where('customer_id', ctx.customerId).select('id')))
+            .where((o) => o.whereRaw("COALESCE(em.recipient_id, '') IN ('', ?)", [String(ctx.customerId)])
+              .orWhereIn('em.recipient_id', dbh('leads').where('customer_id', ctx.customerId).select(dbh.raw('id::text')))));
+        }
         // Address match only for mail nobody claimed: recipient_type NULL/''/
         // 'lead' AND no recipient_id at all. A lead-typed row that names some
         // other lead/customer id (another prospect sharing this inbox) never
@@ -396,16 +416,34 @@ const SOURCES = [
     // customer_page_views is recorded by a bot/staff-filtering recorder: engaged.
     name: 'page views',
     from: (dbh, ctx) => dbh('customer_page_views as pv').where('pv.customer_id', ctx.customerId),
-    select: ['pv.id', 'pv.page', 'pv.viewed_at'],
+    select: ['pv.id', 'pv.page', 'pv.viewed_at', 'pv.subject_type', 'pv.subject_id'],
     ts: ['pv.viewed_at'],
     engaged: { expr: 'pv.viewed_at' },
-    toEvents: (r) => compact([mk('pageview', r.id, { type: 'customer_page_view', id: r.id }, {
-      at: r.viewed_at,
-      channel: String(r.page || '').startsWith('portal:') ? 'portal' : 'page',
-      kind: 'viewed',
-      title: pageViewTitle(r.page),
-      detail: String(r.page || '').startsWith('portal:') ? String(r.page).slice('portal:'.length) : null,
-    })]),
+    toEvents: (r) => {
+      const page = String(r.page || '');
+      if (page === PUSH_OPEN_PAGE) {
+        // A push:open row exists only when the server proved the bell notification
+        // belongs to this customer (services/customer-activity.js recordPushOpen),
+        // so it is a verified first-party open: engaged. kind 'opened' is not in
+        // ENGAGED_KINDS (an email open is unreliable), hence the explicit flag.
+        const note = NOTIFICATION_SUBJECT_RE.exec(String(r.subject_id || ''));
+        return compact([mk('pageview', r.id, note ? { type: 'notification', id: note[1].toLowerCase() } : { type: 'customer_page_view', id: r.id }, {
+          at: r.viewed_at,
+          channel: 'push',
+          kind: 'opened',
+          title: 'Opened app from a notification',
+          detail: PUSH_PLATFORMS.has(r.subject_type) ? r.subject_type : null,
+          engaged: true,
+        })]);
+      }
+      return compact([mk('pageview', r.id, { type: 'customer_page_view', id: r.id }, {
+        at: r.viewed_at,
+        channel: page.startsWith('portal:') ? 'portal' : 'page',
+        kind: 'viewed',
+        title: pageViewTitle(page),
+        detail: page.startsWith('portal:') ? page.slice('portal:'.length) : null,
+      })]);
+    },
   },
   // The token-page stamps below are written unfiltered by their public routes
   // (any load, a scanner or a staff preview included): listed, never engaged.
@@ -637,7 +675,11 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
   const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email');
   if (!customer) return null;
   const emails = [...new Set([String(customer.email || '').trim().toLowerCase()].filter(Boolean))];
-  const ctx = { dbh, customerId: customer.id, emails, limit: cap, beforeIso: beforeIso || FAR_FUTURE };
+  const ctx = {
+    dbh, customerId: customer.id, emails, limit: cap, beforeIso: beforeIso || FAR_FUTURE,
+    // Read at call time so a flip needs no redeploy.
+    leadEmailLinks: leadEmailLinksLive(),
+  };
 
   const unavailableSources = [];
   const settled = await Promise.all(SOURCES.map(async (src) => {

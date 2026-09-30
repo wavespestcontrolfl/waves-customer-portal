@@ -108,6 +108,21 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
       .toMatchObject({ channel: 'portal', kind: 'viewed', engaged: true, detail: 'billing' });
     expect(source('page views').toEvents({ id: 'p', page: 'appointment', viewed_at: t })[0])
       .toMatchObject({ channel: 'page', kind: 'viewed', engaged: true, title: 'Opened the appointment page' });
+    // a push:open row is a verified first-party open: engaged, with the notification id in ref
+    const nid = '0b6f3c1e-1f6a-4a52-9a7e-2f0f4f0f9a11';
+    expect(source('page views').toEvents({ id: 'q', page: 'push:open', subject_type: 'ios', subject_id: `notification:${nid}`, viewed_at: t })[0])
+      .toMatchObject({
+        channel: 'push', kind: 'opened', engaged: true, title: 'Opened app from a notification', detail: 'ios',
+        ref: { type: 'notification', id: nid },
+      });
+    // ...while an EMAIL open (same kind) is still never engaged
+    expect(isEngagedKind('opened')).toBe(false);
+  });
+
+  test('a push:open row without a parseable notification subject falls back to the view row ref', () => {
+    const ev = source('page views').toEvents({ id: 'q', page: 'push:open', subject_type: 'weird', subject_id: null, viewed_at: new Date('2026-09-01T12:00:00Z') })[0];
+    expect(ev).toMatchObject({ title: 'Opened app from a notification', detail: null, engaged: true, ref: { type: 'customer_page_view', id: 'q' } });
+    expect(ev.title).not.toMatch(/push:open/);
   });
 
   test('every non-engaged source still shows its events, and none of them is engaged', () => {

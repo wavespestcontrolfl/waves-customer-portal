@@ -282,6 +282,58 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     expect(rows[0]).toMatchObject({ status: 'unrecoverable', attempts: 1, last_error: message });
   });
 
+  // Per-automation isolation (pre-live fix): processTrigger visits every
+  // automation before rethrowing, tagging the error with each failure. The
+  // marker is shared, so a fixable automation-configuration 400 must leave it
+  // pending (bounded retries) instead of terminalizing it for every automation.
+  test('an automation-configuration 400 from processTrigger keeps the shared marker pending, naming the failing automation', async () => {
+    const err = Object.assign(new Error('automation a.broken does not define an idempotency key template'), {
+      status: 400,
+      automationFailures: [{ automation_key: 'a.broken', status: 400, code: null, message: 'x' }],
+    });
+    AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+
+    expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
+    expect(rows[0].last_error).toContain('a.broken');
+  });
+
+  test('a mixed failure set (one config 400, one recipient error) still stays pending: the config one is fixable', async () => {
+    const err = Object.assign(new Error('recipient email is required for automation execution'), {
+      status: 400,
+      code: 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED',
+      automationFailures: [
+        { automation_key: 'a.recipient', status: 400, code: 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED', message: 'x' },
+        { automation_key: 'b.broken', status: 400, code: null, message: 'y' },
+      ],
+    });
+    AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+
+    expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
+  });
+
+  test('a failure set made entirely of the permanent recipient error still settles unrecoverable at once', async () => {
+    const err = Object.assign(new Error('recipient email is required for automation execution'), {
+      status: 400,
+      code: 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED',
+      automationFailures: [
+        { automation_key: 'a', status: 400, code: 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED', message: 'x' },
+        { automation_key: 'b', status: 400, code: 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED', message: 'x' },
+      ],
+    });
+    AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+
+    expect(rows[0].status).toBe('unrecoverable');
+  });
+
   test('a non-400 failure (no status, e.g. a DB hiccup) stays pending for another attempt', async () => {
     const err = new Error('Connection terminated unexpectedly');
     err.code = 'ECONNRESET';
