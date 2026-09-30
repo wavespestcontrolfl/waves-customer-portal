@@ -158,7 +158,6 @@ function composeWriterRulesPrompt([header, ...parts]) {
 
 // User-message labels the route uses while the rules apply.
 const TECHNICIAN_NOTE_HEADER = "[TECHNICIAN NOTE — the technician's own words, often dictated; it may mix work done, what was seen, what the customer said, and advice for later: sort each sentence]";
-const MAX_TECHNICIAN_NOTE_CHARS = 3000;
 const CUSTOMER_WORDS_HEADER = 'WHAT THE CUSTOMER TOLD US (their own texts and emails, and AI summaries of calls; context only, never a finding)';
 
 function withheldProductsLine(count) {
@@ -197,8 +196,12 @@ function activeIngredientPattern(name) {
 
 // Catalog active_ingredient text ("Fipronil 9.1%, Pyriproxyfen",
 // "Bacillus thuringiensis israelensis (Bti)") → names, aliases included.
+// Devices carry a descriptive placeholder there ("Mechanical snap trap"),
+// which is not a chemical and must never make its own words forbidden.
+const NON_CHEMICAL_ACTIVE_RE = /\b(?:mechanical|traps?|glue|devices?|stations?|monitors?|equipment|none|n\/?a|not\s+applicable|no\s+active|unknown|test\s+product)\b/i;
 function activeIngredientNames(values) {
   return (Array.isArray(values) ? values : [])
+    .filter((value) => !NON_CHEMICAL_ACTIVE_RE.test(String(value || '')))
     .flatMap((value) => String(value || '').split(/[,;/+&()]|\band\b/i))
     .map((part) => part.replace(/[\d.]+\s*%?/g, ' ').replace(/\s+/g, ' ').trim())
     .filter((part) => part.length >= 3);
@@ -274,16 +277,33 @@ const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|f
 // Judged per sentence: the place can come before or after ("You mentioned
 // ants near the dishwasher; none were seen there today").
 const ABSENCE_RE = /\b(?:no\s+(?:(?:visible|active|live|signs?\s+of)\s+)?(?:pest\s+)?(?:activity|pests|insects|bugs|termites|rodents|mosquitoes|ants|roaches)|none|nothing)\b/gi;
+// "on this visit", "in today's inspection", "at today's service" name the
+// visit, not a place.
+const VISIT_PHRASE_RE = /\b(?:on|in|at|during|for|of)\s+(?:this|today'?s|today’s|the|our|your|each|every)\s+(?:visit|inspection|service|appointment|trip|check|stop|treatment)s?\b/gi;
 const PLACE_RE = /\b(?:at|in|on|of|near|along|around|under|inside|outside|by|within|behind|across|there|here)\b/i;
 function unscopedAbsence(copy) {
   return copy.split(/(?<=[.!?])\s+/).some((sentence) => {
     const rest = sentence.replace(ABSENCE_RE, ' ');
-    return rest !== sentence && !PLACE_RE.test(rest);
+    return rest !== sentence && !PLACE_RE.test(rest.replace(VISIT_PHRASE_RE, ' '));
   });
 }
+// Aftercare told to the customer (rule 7): an instruction, at the start of
+// a sentence or line or after "please", "you should", "be sure to"…, to
+// leave the work alone or not clean or water it ("Do not disturb the bait
+// placements", "Please avoid cleaning the treated areas", "Water the
+// treated area this evening", "Leave the stations undisturbed"). The same
+// words in work copy ("we moved a station to keep the bait dry", "standing
+// water in the yard") give no instruction and pass.
+const CARE_VERB = String.raw`(?:disturb|mov(?:e|ing)|touch|clean|wash|mop(?:ping)?|vacuum|water|irrigat(?:e|ing)|mow(?:ing)?|sweep|wip(?:e|ing)|scrub(?:bing)?|spray|remov(?:e|ing))(?:ing)?`;
+const INSTRUCTION_START = String.raw`(?:^|[.!?;:]\s+|\b(?:please|you\s+(?:should|can|may|must|need\s+to|will\s+want\s+to)|you['’]ll\s+want\s+to|we\s+(?:recommend|suggest|ask)(?:\s+that\s+you)?|be\s+sure\s+to|make\s+sure\s+to|remember\s+to|try\s+to)\s+)["'“‘(]*(?:please\s+)?`;
+const AFTERCARE_RE = new RegExp(`${INSTRUCTION_START}(?:`
+  + String.raw`(?:do\s+not|don['’]t|not|never|avoid(?:ing)?|refrain\s+from|try\s+not\s+to)\s+(?:\w+\s+)?${CARE_VERB}\b`
+  + String.raw`|(?:leav(?:e|ing)|keep(?:ing)?)\s+(?:the\s+|your\s+|all\s+|any\s+)?(?:bait\w*|stations?|traps?|placements?|devices?|treated\s+\w+)\b[^.!?]{0,30}?\b(?:undisturbed|untouched|alone|in\s+place|clear|dry)\b`
+  + String.raw`|(?:water|irrigat(?:e|ing)|wash|mop(?:ping)?|clean|vacuum)(?:ing)?\s+(?:the\s+|your\s+|any\s+)?(?:treated|lawn|yard|grass|turf|beds?|plants?|floors?|baseboards?|areas?)\b`
+  + ')', 'im');
 // Phrases the owner rules name that no older screen covers (rules 4, 9,
 // 13, 14).
-const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmaps?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
+const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmap(?:s|ped|ping)?\b|\btrac(?:e|ed|ing)\s+(?:route|outline|path|area|perimeter|line)s?\b|\btreated\s+outlines?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
 const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
@@ -300,6 +320,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [CHEMICAL_RE, 'chemical'],
   [OWNER_PHRASE_RE, 'owner_phrase'],
   [unscopedAbsence, 'unscoped_absence'],
+  [AFTERCARE_RE, 'aftercare'],
   [REENTRY_RE, 'reentry'],
   [TIMEFRAME_RE, 'timeframe'],
   [PRICE_RE, 'price'],
@@ -329,7 +350,6 @@ module.exports = {
   PROMPT_REWRITES,
   composeWriterRulesPrompt,
   TECHNICIAN_NOTE_HEADER,
-  MAX_TECHNICIAN_NOTE_CHARS,
   CUSTOMER_WORDS_HEADER,
   withheldProductsLine,
   COMMON_ACTIVE_INGREDIENTS,

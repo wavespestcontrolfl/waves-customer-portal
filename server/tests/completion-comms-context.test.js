@@ -230,7 +230,7 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.promptHint).toContain('rodent');
   });
 
-  test('customer words: quoted history stripped, bare codes masked in texts, snippets, replies and subjects', async () => {
+  test('customer words: quoted history stripped, short replies left out, bare codes masked in snippets and subjects', async () => {
     const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
     const ctx = await buildCustomerWordsContext({
       customerId: 'c1',
@@ -242,10 +242,12 @@ describe('buildCompletionCommsContext', () => {
         service_completion_profiles: [],
         call_log: [],
         // Bare credentials texted back to a Waves question (which is left
-        // out as a Waves text), so nothing anchors them.
+        // out as a Waves text), so nothing anchors them; a lowercase one
+        // looks like any other word.
         sms_log: [
           { created_at: mk(5), direction: 'inbound', message_body: '4821' },
           { created_at: mk(6), direction: 'inbound', message_body: 'BLUE' },
+          { created_at: mk(6.5), direction: 'inbound', message_body: 'open sesame' },
         ],
         emails: [
           // A reply whose quoted history holds Waves' own words.
@@ -266,12 +268,14 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toMatch(/\b123\b/);
     expect(ctx.text).not.toContain('4821');
     expect(ctx.text).not.toContain('BLUE');
-    expect(ctx.text).toMatch(/Customer text .*: \[redacted\]/);
+    expect(ctx.text).not.toContain('sesame');
+    expect(ctx.text).not.toMatch(/^Customer text/m);
+    expect(ctx.text).toMatch(/^Customer email .* "Re: Gate": \[no body preview\]$/m);
     expect(ctx.text).not.toContain('7719');
     expect(ctx.text).toContain('Thanks for coming out.');
   });
 
-  test('customer words: bare codes in bodies and call summaries are masked; call notes are never read', async () => {
+  test('customer words: access sentences dropped, bare codes masked; call notes are never read', async () => {
     const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
     const ctx = await buildCustomerWordsContext({
       customerId: 'c1',
@@ -282,8 +286,10 @@ describe('buildCompletionCommsContext', () => {
         ],
         service_completion_profiles: [],
         call_log: [
-          // A summary that drops the credential noun.
-          { created_at: mk(1), direction: 'inbound', call_summary: 'Customer provided BLUE for entry to the back yard' },
+          // A summary that drops the credential noun, in lowercase.
+          { created_at: mk(1), direction: 'inbound', call_summary: 'Customer provided blue for entry to the back yard' },
+          // Only the access sentence goes.
+          { created_at: mk(1.5), direction: 'inbound', call_summary: 'Customer said ants are back by the sink. The gate code is sunflower.' },
           // Operational text in notes is never customer speech.
           { created_at: mk(2), direction: 'inbound', notes: 'Twilio create failed: 21211' },
         ],
@@ -304,8 +310,8 @@ describe('buildCompletionCommsContext', () => {
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],
       }),
     });
-    expect(ctx.text).toContain('Customer provided [redacted] for entry to the back yard');
-    expect(ctx.text).not.toContain('BLUE');
+    expect(ctx.text).not.toMatch(/blue|for entry|sunflower/i);
+    expect(ctx.text).toMatch(/^Call .*: Customer said ants are back by the sink\.$/m);
     expect(ctx.text).not.toContain('3355');
     expect(ctx.text).not.toContain('Twilio create failed');
     expect(ctx.text).not.toContain('A12B');
@@ -329,6 +335,26 @@ describe('buildCompletionCommsContext', () => {
       }),
     });
     expect(ctx.text).toBe('Customer text 2026-09-28: Ants are back by the sink.');
+  });
+
+  test('customer words: calls with no summary never use up the six kept', async () => {
+    const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
+    const ctx = await buildCustomerWordsContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      knex: stubKnex({
+        scheduled_services: [
+          { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Service', created_at: mk(20) },
+        ],
+        service_completion_profiles: [], sms_log: [], emails: [],
+        // Six missed or unprocessed calls, newest first, then one summarized.
+        call_log: [
+          ...[1, 2, 3, 4, 5, 6].map((d) => ({ created_at: mk(d), direction: 'inbound' })),
+          { created_at: mk(7), direction: 'inbound', call_summary: 'Customer reported ants along the patio slider' },
+        ],
+      }),
+    });
+    expect(ctx.text).toMatch(/^Call .*: Customer reported ants along the patio slider$/);
   });
 
   test('no customerId returns an empty context', async () => {
@@ -358,8 +384,9 @@ describe('buildCompletionCommsContext', () => {
         { created_at: mk(2), direction: 'outbound', message_body: 'Confirming your exclusion visit window' },
         { created_at: mk(3), direction: 'inbound', message_body: 'Scratching is worse after midnight' },
         // The code comes before its anchor, and the anchor sits past the
-        // 260-character cut: redaction has to run on the whole message.
-        { created_at: mk(9), direction: 'inbound', message_body: `4821 ${'and the side yard is muddy '.repeat(12)}is the gate code` },
+        // 260-character cut: the whole access sentence has to go before the
+        // cut, and the rest of the message stays.
+        { created_at: mk(9), direction: 'inbound', message_body: `4821 ${'and the side yard is muddy '.repeat(12)}is the gate code. The dog stays inside.` },
       ],
       emails: [
         { received_at: mk(5), subject: 'Attic photos', snippet: 'Photos of the soffit gap attached', from_address: 'pat@example.com', label_ids: ['INBOX'] },
@@ -391,10 +418,12 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toContain('5173');
     expect(ctx.text).not.toContain('6620');
 
-    expect(ctx.text).toMatch(/Customer text .*: \[redacted\] and the side yard is muddy/);
+    expect(ctx.text).not.toContain('side yard is muddy');
+    expect(ctx.text).not.toContain('back door sticks');
+    expect(ctx.text).toMatch(/^Customer text .*: The dog stays inside\.$/m);
     expect(whereArgs['emails:raw'].map(([sql]) => sql).join(' ')).toMatch(/SENT.*wavespestcontrol\.com/s);
     const lines = ctx.text.split('\n')
-      .filter((line) => !/side yard is muddy|back door sticks|Side gate/.test(line));
+      .filter((line) => !/dog stays inside|"Access"|Side gate/.test(line));
     expect(lines).toEqual([
       expect.stringMatching(/^Call .* \(the customer called; AI summary of the whole conversation, not verified\): Heard noises again in the attic$/),
       expect.stringMatching(/^Customer text .*: Scratching is worse after midnight$/),

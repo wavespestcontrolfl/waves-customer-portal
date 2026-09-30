@@ -297,18 +297,32 @@ async function buildCompletionCommsContext({
 // non-space characters, surrounding punctuation aside) is credential-shaped
 // when it carries a digit, unless it is a one- or two-digit count or an
 // ordinal ("4821", "A12B", "AB-12", "A#12", "$120", "9:30"), or when its
-// letters are all capitals ("BLUE", "AB-CD"; "A/C" passes). The context that anchors a bare code ("4821", "BLUE") is
-// often gone here (the Waves question is left out, a quote is stripped, a
-// summary drops the noun), and these lines become "You mentioned…" copy.
+// letters are all capitals ("BLUE", "AB-CD"; "A/C" passes). The context
+// that anchors a bare code ("4821", "BLUE") is often gone here (the Waves
+// question is left out, a quote is stripped, a summary drops the noun), and
+// these lines become "You mentioned…" copy.
 function credentialShaped(token) {
   if (/\d/.test(token)) return !/^\d{1,2}$/.test(token) && !/^\d+(?:st|nd|rd|th)$/i.test(token);
   return /^[A-Z][A-Z#*-]{2,}$/.test(token);
 }
+// Access details never reach the writer: a sentence about getting in (a
+// code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
+// lowercase code ("blue", "open sesame") looks like any other word.
+const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in)\b/i;
 function scrub(text) {
-  return redactAccessCodes(String(text || '')).replace(/\S+/g, (word) => {
-    const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
-    return credentialShaped(token) ? `${lead}[redacted]${trail}` : word;
-  });
+  return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
+    .filter((sentence) => !ACCESS_SENTENCE_RE.test(sentence))
+    .join(' ')
+    .replace(/\S+/g, (word) => {
+      const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
+      return credentialShaped(token) ? `${lead}[redacted]${trail}` : word;
+    });
+}
+// A customer's reply (a text, an email body) of one to three words answers
+// a Waves question left out here, and may be the code it asked for
+// ("blue", "open sesame"): it is left out.
+function scrubReply(text) {
+  return String(text || '').trim().split(/\s+/).length <= 3 ? '' : scrub(text);
 }
 // The communication's calendar day in Eastern time (an 8 PM text is still
 // that day in Florida).
@@ -328,7 +342,7 @@ function wavesSentEmail(email) {
 // quoted Waves promise is never read as theirs), scrubbed before the preview
 // is cut.
 function customerEmailText(email) {
-  return compactText(scrub(stripQuotedAndSignature(String(email.body_text || '').trim() || String(email.snippet || ''))), 260);
+  return compactText(scrubReply(stripQuotedAndSignature(String(email.body_text || '').trim() || String(email.snippet || ''))), 260);
 }
 
 const CALLER = { inbound: 'the customer called', outbound: 'Waves called the customer' };
@@ -376,7 +390,7 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
     keep: (row) => row.direction === 'inbound' && row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body),
     max: 8,
     line: (row) => {
-      const summary = compactText(scrub(row.message_body), 260);
+      const summary = compactText(scrubReply(row.message_body), 260);
       return summary && `Customer text ${etDay(row.created_at)}: ${summary}`;
     },
     ts: (row) => row.created_at,
@@ -419,10 +433,13 @@ async function buildCustomerWordsContext({
   const { floor, reason, serviceLine } = await resolveContextWindow({
     customerId, scheduledServiceId, originDate, knex,
   });
+  // Rows that format to nothing (a call with no summary) are dropped before
+  // each channel's cap, so they never push an older real line out.
   const perChannel = await Promise.all(CUSTOMER_WORDS_CHANNELS.map((channel) => channel.read(knex, customerId, floor)
-    .then((rows) => rows.filter(channel.keep).slice(0, channel.max)
+    .then((rows) => rows.filter(channel.keep)
       .map((row) => ({ ts: contextTs(channel.ts(row)), line: channel.line(row) }))
-      .filter((entry) => entry.line))
+      .filter((entry) => entry.line)
+      .slice(0, channel.max))
     .catch((err) => {
       logger.warn(`[comms-context] customer ${channel.name} context unavailable: ${err.message}`);
       return [];

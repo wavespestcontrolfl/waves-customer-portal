@@ -115,6 +115,16 @@ test('gate on: pest gets the owner rules, the technician note block and no produ
   expect(mockBuildContext.mock.calls[0][0].writerRules).toBe(true);
 });
 
+test('gate on: a long technician note reaches the writer whole', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const res = mkRes();
+  const note = `${'Checked the slider track and the lanai foundation. '.repeat(80)}Customer asked us to look at the garage door seal next time.`;
+  await handler(mkReq({ serviceNotes: note }), res);
+  expect(res.statusCode).toBe(200);
+  expect(note.length).toBeGreaterThan(3000);
+  expect(mockProvider.mock.calls[0][0].text).toContain('look at the garage door seal next time.');
+});
+
 test('gate off: pest keeps the exact legacy user message', async () => {
   const res = mkRes();
   await handler(mkReq({ serviceNotes: 'Treated the thresholds.' }), res);

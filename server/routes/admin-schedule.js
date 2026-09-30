@@ -73,7 +73,7 @@ const ActivityIndicators = require('../services/service-report/activity-indicato
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
-  TECHNICIAN_NOTE_HEADER, MAX_TECHNICIAN_NOTE_CHARS, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -24706,7 +24706,7 @@ Service Date: ${serviceDate || 'Not specified'}
 Arrival Time: ${arrivalTime || 'Not specified'}
 
 ${writerRulesOn
-    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes.slice(0, MAX_TECHNICIAN_NOTE_CHARS) || 'Not specified'}\n\n[COMPLETED WORK]`
+    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes || 'Not specified'}\n\n[COMPLETED WORK]`
     : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
 Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
 Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}

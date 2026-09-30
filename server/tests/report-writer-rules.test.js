@@ -194,6 +194,17 @@ describe('writerRulesRejection', () => {
     ['None were observed during the visit.', 'unscoped_absence'],
     ['The technician saw none today.', 'unscoped_absence'],
     ['Nothing was found.', 'unscoped_absence'],
+    ['No pest activity was observed on this visit.', 'unscoped_absence'],
+    ["None were observed in today's inspection.", 'unscoped_absence'],
+    ["Nothing was found at today's service.", 'unscoped_absence'],
+    ['Please do not disturb the bait placements.', 'aftercare'],
+    ['Avoid cleaning the treated areas.', 'aftercare'],
+    ['Water the treated area this evening.', 'aftercare'],
+    ['Leave the bait stations undisturbed.', 'aftercare'],
+    ['We recommend not mopping along the baseboards.', 'aftercare'],
+    ['We mapped the treated perimeter.', 'owner_phrase'],
+    ['The technician followed the traced route.', 'owner_phrase'],
+    ['We completed the treated outline.', 'owner_phrase'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -225,6 +236,19 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('You mentioned ants near the dishwasher; none were seen there today.')).toBeNull();
     expect(writerRulesRejection('None of the 10 stations had feeding.')).toBeNull();
     expect(writerRulesRejection('The activity rating was light.')).toBeNull();
+  });
+
+  test('work copy that shares the aftercare words gives no instruction', () => {
+    expect(writerRulesRejection('We moved one station under the eave to keep the bait dry.')).toBeNull();
+    expect(writerRulesRejection('We found standing water in the yard near the downspout.')).toBeNull();
+    expect(writerRulesRejection('We chose gel bait to avoid spraying near the koi pond.')).toBeNull();
+    expect(writerRulesRejection('Water was pooling by the A/C pad.')).toBeNull();
+    expect(writerRulesRejection('No ants were seen in the kitchen during this visit.')).toBeNull();
+  });
+
+  test('a device placeholder in the catalog active field is not a chemical', () => {
+    expect(writerRulesRejection('We reset the mechanical snap traps.', { activeIngredients: ['Mechanical snap trap'] })).toBeNull();
+    expect(writerRulesRejection('We refilled the bromadiolone blocks.', { activeIngredients: ['Mechanical snap trap', 'Bromadiolone 0.005%'] })).toBe('active_ingredient');
   });
 
   test('a dry cabinet or a note about rain is not re-entry wording', () => {
