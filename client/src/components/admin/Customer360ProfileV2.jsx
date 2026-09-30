@@ -82,7 +82,7 @@ import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
-import { formatETDateOnly } from "../../lib/timezone";
+import { formatETDate, formatETDateOnly } from "../../lib/timezone";
 import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
@@ -8280,6 +8280,125 @@ function CustomerBillingPause({
   );
 }
 
+// B10: a collections DISPUTE hold ("stops_charges") halts every off-session
+// charge (monthly dues, completion, sweeps) and the customer was told billing
+// follow-up is on hold. GET /collection-holds lists the active holds (admin
+// only, so the read is skipped for anyone else) and POST /collection-holds/
+// release lifts it (audited server-side; body `{ released: <rows released> }`).
+// Errors arrive as `{ error }`, which adminFetch surfaces as err.message.
+function CustomerCollectionHold({ customerId, isAdmin }) {
+  const [holds, setHolds] = useState([]);
+  const [releasing, setReleasing] = useState(false);
+  const [releaseErr, setReleaseErr] = useState("");
+  const [releaseNote, setReleaseNote] = useState("");
+  const seqRef = useRef(0);
+  const customerRef = useRef(customerId);
+  customerRef.current = customerId;
+
+  useEffect(() => {
+    seqRef.current += 1;
+    const seq = seqRef.current;
+    setHolds([]);
+    setReleasing(false);
+    setReleaseErr("");
+    setReleaseNote("");
+    if (!isAdmin || !customerId) return undefined;
+    let cancelled = false;
+    adminFetch(`/admin/customers/${customerId}/collection-holds`)
+      .then((body) => {
+        if (cancelled || seqRef.current !== seq) return;
+        setHolds(Array.isArray(body?.holds) ? body.holds : []);
+      })
+      .catch(() => {
+        // A failed read shows nothing rather than a false "no hold"; the
+        // profile itself is unaffected.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [customerId, isAdmin]);
+
+  const dispute = holds.find((h) => h.stops_charges);
+
+  const release = async () => {
+    if (
+      !window.confirm(
+        "Release this billing hold?\n\nAutomatic charges (monthly dues and the other automatic card charges) will resume on their next attempt, and any invoice that was held back will be sent. Only release once the dispute is resolved.",
+      )
+    )
+      return;
+    const forCustomerId = customerId;
+    const seq = seqRef.current;
+    const stillViewing = () =>
+      seqRef.current === seq &&
+      String(customerRef.current) === String(forCustomerId);
+    setReleasing(true);
+    setReleaseErr("");
+    setReleaseNote("");
+    try {
+      const result = await adminFetch(
+        `/admin/customers/${forCustomerId}/collection-holds/release`,
+        { method: "POST" },
+      );
+      if (!stillViewing()) return;
+      setHolds([]);
+      setReleaseNote(
+        Number(result?.released) > 0
+          ? "Billing hold released. Automatic charges resume on their next attempt, and any held-back invoice is sent."
+          : "This hold was already released.",
+      );
+    } catch (err) {
+      if (!stillViewing()) return;
+      setReleaseErr(
+        err.status === 403
+          ? "Only an admin can release a billing hold."
+          : err.message || "Could not release the billing hold",
+      );
+    } finally {
+      if (stillViewing()) setReleasing(false);
+    }
+  };
+
+  return (
+    <>
+      {dispute && (
+        <div role="alert" className="mb-3 rounded border border-hairline p-2.5">
+          <div className="text-ui-label font-medium text-alert-fg">
+            Billing on hold — customer disputed a bill on a collections call
+          </div>
+          <div className="text-ui-label text-ink-secondary mt-0.5">
+            {dispute.reason ? `Reason: ${dispute.reason}. ` : ""}
+            {dispute.created_at
+              ? `Placed ${formatETDate(dispute.created_at, { month: "short", day: "numeric", year: "numeric" })}. `
+              : ""}
+            Automatic card charges are stopped until the hold is released.
+          </div>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="mt-2"
+            onClick={release}
+            disabled={releasing}
+          >
+            {releasing ? "Releasing…" : "Release hold"}
+          </Button>
+          {releaseErr && (
+            <div className="text-ui-label text-alert-fg mt-1">{releaseErr}</div>
+          )}
+        </div>
+      )}
+      {releaseNote && (
+        <div
+          role="status"
+          className="mb-3 rounded border border-hairline p-2.5 text-ui-label text-ink-secondary"
+        >
+          {releaseNote}
+        </div>
+      )}
+    </>
+  );
+}
+
 function CustomerBillingSummary({
   embedded,
   c,
@@ -8302,6 +8421,7 @@ function CustomerBillingSummary({
       <SectionTitle>
         {embedded ? "Billing status & prepay" : "Billing Summary"}
       </SectionTitle>{" "}
+      <CustomerCollectionHold customerId={c.id} isAdmin={isAdmin} />
       <CustomerBillingPause
         c={c}
         isAdmin={isAdmin}
