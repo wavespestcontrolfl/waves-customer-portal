@@ -1213,7 +1213,7 @@ async function auditSendRefusal(err, context = {}) {
 // parallel re-implementation that kept missing one live guard per round):
 // resolve the template + version, the reviewed-content hash, sendable
 // status, and an active version.
-async function resolveTemplateForSend({ templateKey, versionId, expectedContentHash = null, test = false } = {}) {
+async function resolveTemplateForSend({ templateKey, versionId, expectedContentHash = null, test = false, database = db } = {}) {
   let template;
   let version;
   if (versionId) {
@@ -1226,7 +1226,7 @@ async function resolveTemplateForSend({ templateKey, versionId, expectedContentH
     template = row.template;
     version = row;
   } else {
-    const loaded = await loadTemplateByKey(templateKey);
+    const loaded = await loadTemplateByKey(templateKey, database);
     if (!loaded?.template) {
       throw sendRefusal(Object.assign(new Error('template not found'), { code: 'EMAIL_TEMPLATE_UNAVAILABLE' }), {
         eventType: 'missing_template', versionId: undefined,
@@ -2017,6 +2017,7 @@ module.exports = {
   productionPlaceholderPayloadValues,
   productionPlaceholderRenderedValues,
   activeSuppressionFor,
+  resolveTemplateForSend,
   activeSuppressionsFor,
   isMarketingSend,
   GLOBAL_SUPPRESSION_TYPES,
