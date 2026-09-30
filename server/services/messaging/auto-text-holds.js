@@ -144,7 +144,15 @@ async function autoTextHoldReason(phone, {
   // this text off included. Only a VALID V2 extraction counts: whether the
   // caller truly declined texts is model judgment, trusted only from a
   // schema-validated row (the booking-link lane's own posture).
-  const saidNoTexts = await callsWith(dbi, digits, originCallId)
+  // Also a call where the caller SPOKE this number ("call me at Y, don't
+  // text me") from another line: a later missed call or voicemail from Y
+  // must still see that decline (the booking-link lane's
+  // smsDeclinedOnEarlierCall matches caller.phone_e164 for the same reason).
+  const saidNoTexts = await dbi('call_log')
+    .modify((q) => whereNotSandboxCall(q))
+    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
+      .orWhereRaw(...matches("(ai_extraction_enriched->'caller'->>'phone_e164')", digits))
+      .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
     .where('v2_extraction_status', 'valid')
     .whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
     .first('id');

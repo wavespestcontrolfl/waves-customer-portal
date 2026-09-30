@@ -142,6 +142,14 @@ jest.setTimeout(30000);
       expect(await hold({ originCallId: id })).toBe('said_no_texts');
     });
 
+    test('a call from another line where they gave this number and said no to texts', async () => {
+      await priorCall({
+        from_phone: '+19415559999', v2_extraction_status: 'valid',
+        ai_extraction_enriched: JSON.stringify({ caller: { phone_e164: PHONE }, consent: { sms_declined: true } }),
+      });
+      expect(await hold()).toBe('said_no_texts');
+    });
+
     test('never: no decline, a call from before the field existed, or a schema-failed extraction', async () => {
       await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: false } }) });
       await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_consent_given: false } }) });
