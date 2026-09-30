@@ -1307,6 +1307,9 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
   if (holdIds.length) {
     try {
       await conn.transaction(async (trx) => {
+        // Address key first (writers take it before rows); the send below
+        // re-enters it and runs its vetoes on this same connection (B13).
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sentEmailLc);
         for (const holdId of holdIds) {
           // Target-bound (r35): a correction retargeting a releasing row
           // preserves its fence, so only the held_email CAS can refuse
@@ -1350,7 +1353,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
         // stamps the rollback restored.
         Object.assign(holdClaims, gatedStamps);
         try {
-          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation, { dbh: trx });
           sentOk = true;
         } catch (e) {
           sendErr = e;
@@ -1414,6 +1417,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
     // read lock, and the pre-stamp is already durable.
     try {
       await conn.transaction(async (trx) => {
+        await require('../utils/customer-comms-lock').lockCustomerEmail(trx, sentEmailLc);
         const liveSubscriber = await trx('newsletter_subscribers')
           .where({
             id: pendingConfirmation.id,
@@ -1429,7 +1433,7 @@ async function resendPendingConfirmation(pendingConfirmation, conn = db) {
           throw lost;
         }
         try {
-          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation);
+          await require('./newsletter-confirm').sendConfirmationEmail(pendingConfirmation, { dbh: trx });
           sentOk = true;
         } catch (e) {
           sendErr = e;

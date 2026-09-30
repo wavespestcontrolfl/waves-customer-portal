@@ -8,9 +8,10 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
+const mockOrder = [];
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: () => true,
-  sendOne: jest.fn(async () => ({ messageId: 'sg-1' })),
+  sendOne: jest.fn(async () => { mockOrder.push('send'); return { messageId: 'sg-1' }; }),
 }));
 jest.mock('../models/db', () => jest.fn());
 const mockDnc = jest.fn();
@@ -32,6 +33,7 @@ const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 
 // Per-table canned results. A value that is an Error is thrown by the query.
 let tables;
+let ownershipBusy;
 function fakeQuery(table) {
   const q = {};
   const settle = () => {
@@ -39,18 +41,41 @@ function fakeQuery(table) {
     if (v instanceof Error) throw v;
     return v;
   };
-  ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'whereNull', 'select'].forEach((m) => { q[m] = jest.fn(() => q); });
-  q.first = jest.fn(async () => { const v = settle(); return Array.isArray(v) ? v[0] || null : v || null; });
-  q.then = (res, rej) => Promise.resolve().then(() => settle() || []).then(res, rej);
+  ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'whereNull', 'select'].forEach((m) => {
+    q[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q, q); return q; });
+  });
+  q.first = jest.fn(async () => { mockOrder.push(`read:${table}`); const v = settle(); return Array.isArray(v) ? v[0] || null : v || null; });
+  q.then = (res, rej) => Promise.resolve().then(() => { mockOrder.push(`read:${table}`); return settle() || []; }).then(res, rej);
   return q;
 }
+// A transaction-shaped handle: records advisory-lock and read order.
+function makeTrx() {
+  const trx = jest.fn((t) => fakeQuery(t));
+  trx.isTransaction = true;
+  trx.raw = jest.fn(async (sql, bindings) => {
+    const key = bindings && bindings[0];
+    if (/pg_try_advisory_xact_lock/.test(sql)) {
+      mockOrder.push(`try:${key}`);
+      return { rows: [{ locked: !ownershipBusy }] };
+    }
+    mockOrder.push(`lock:${key}`);
+    return { rows: [] };
+  });
+  trx.transaction = jest.fn(async (fn) => fn(trx));
+  return trx;
+}
+let rootTrx;
 
 const SUB = { id: 'sub-1', email: 'Neighbor@Example.com', first_name: 'Pat', confirmation_token: 'tok-1', customer_id: null };
 
 beforeEach(() => {
   jest.clearAllMocks();
-  tables = { email_suppressions: [], customers: [], call_log: [] };
+  mockOrder.length = 0;
+  ownershipBusy = false;
+  tables = { email_suppressions: [], customers: [], notification_prefs: [], call_log: [] };
+  rootTrx = makeTrx();
   db.mockImplementation((t) => fakeQuery(t));
+  db.transaction = jest.fn(async (fn) => fn(rootTrx));
   mockDnc.mockResolvedValue(false);
 });
 
@@ -115,6 +140,98 @@ describe('sendConfirmationEmail vetoes (chokepoint)', () => {
   });
 });
 
+describe('locking, ordering and connection reuse (B13 review)', () => {
+  test('address key -> ownership fence -> reads -> send, all on ONE transaction', async () => {
+    await sendConfirmationEmail(SUB);
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+    const emailLc = 'neighbor@example.com';
+    expect(mockOrder.slice(0, 2)).toEqual([`lock:customer-email:${emailLc}`, `try:email-ownership:customer-email:${emailLc}`]);
+    const firstRead = mockOrder.findIndex((e) => e.startsWith('read:'));
+    const send = mockOrder.indexOf('send');
+    expect(firstRead).toBeGreaterThan(1);
+    expect(send).toBeGreaterThan(firstRead);
+    expect(mockOrder.slice(send + 1)).toEqual([]);
+  });
+
+  test('a Google address also takes its mailbox key, in the global sorted order, before the fence', async () => {
+    await sendConfirmationEmail({ ...SUB, email: 'Pat.Smith+news@gmail.com' });
+    expect(mockOrder.slice(0, 4)).toEqual([
+      'lock:customer-email:pat.smith+news@gmail.com',
+      'lock:customer-mailbox:patsmith@gmail.com',
+      'try:email-ownership:customer-email:pat.smith+news@gmail.com',
+      'try:email-ownership:customer-mailbox:patsmith@gmail.com',
+    ]);
+  });
+
+  test('a caller-supplied transaction is reused: no second connection is opened', async () => {
+    const callerTrx = makeTrx();
+    await sendConfirmationEmail(SUB, { dbh: callerTrx });
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(db).not.toHaveBeenCalled();
+    expect(callerTrx.raw).toHaveBeenCalled();
+    expect(callerTrx).toHaveBeenCalledWith('email_suppressions');
+    expect(mockOrder).toContain('send');
+  });
+
+  test('a non-transaction handle is wrapped in a transaction rather than fencing nothing', async () => {
+    const plain = jest.fn((t) => fakeQuery(t));
+    plain.transaction = jest.fn(async (fn) => fn(rootTrx));
+    await sendConfirmationEmail(SUB, { dbh: plain });
+    expect(plain.transaction).toHaveBeenCalledTimes(1);
+    expect(mockOrder).toContain('send');
+  });
+
+  test('a busy ownership fence refuses the send and reads nothing', async () => {
+    ownershipBusy = true;
+    await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ code: 'confirmation_vetoed', reason: 'ownership_busy' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    expect(mockOrder.some((e) => e.startsWith('read:'))).toBe(false);
+  });
+
+  test('a failing lock statement fails closed', async () => {
+    rootTrx.raw.mockRejectedValueOnce(new Error('lock timeout'));
+    await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ reason: 'veto_unverifiable' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('reads run inside a savepoint on the caller transaction', async () => {
+    await sendConfirmationEmail(SUB);
+    expect(rootTrx.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  test('ownership is read from customers (real columns only) and notification_prefs.billing_email', async () => {
+    const cols = [];
+    const fq = rootTrx.getMockImplementation();
+    rootTrx.mockImplementation((t) => {
+      const q = fq(t);
+      const raw = q.whereRaw;
+      q.whereRaw = jest.fn((sql, ...r) => { cols.push(`${t}:${sql}`); return raw(sql, ...r); });
+      q.orWhereRaw = jest.fn((sql, ...r) => { cols.push(`${t}:${sql}`); return q; });
+      return q;
+    });
+    await sendConfirmationEmail(SUB);
+    const customers = cols.filter((c) => c.startsWith('customers:')).join('\n');
+    expect(customers).not.toMatch(/billing_email/);
+    for (const c of ['email', 'service_contact_email', 'service_contact2_email', 'service_contact3_email']) {
+      expect(customers).toMatch(new RegExp(`BTRIM\\(${c}\\)`));
+    }
+    expect(cols.filter((c) => c.startsWith('notification_prefs:')).join('\n')).toMatch(/BTRIM\(billing_email\)/);
+  });
+
+  test('a do-not-contact request on a billing_email owner blocks the send', async () => {
+    tables.notification_prefs = [{ customer_id: 'cust-billing' }];
+    mockDnc.mockImplementation(async (id) => id === 'cust-billing');
+    await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ reason: 'do_not_contact' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('notification_prefs lookup error = no send (fail closed)', async () => {
+    tables.notification_prefs = new Error('boom');
+    await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ reason: 'veto_unverifiable' });
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+});
+
 describe('POST /api/public/newsletter/subscribe with a vetoed address', () => {
   async function post(email) {
     const router = require('../routes/public-newsletter');
@@ -153,5 +270,26 @@ describe('POST /api/public/newsletter/subscribe with a vetoed address', () => {
     const r = await post('neighbor@example.com');
     expect(r).toEqual({ status: 200, body: { success: true, pending: true } });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('transactional callers hand their own connection to the send (source pins)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const read = (f) => fs.readFileSync(path.join(__dirname, '..', 'services', f), 'utf8');
+
+  test('call pipeline: address key before the subscriber row lock, send on the same trx', () => {
+    const src = read('call-recording-processor.js');
+    expect(src).toContain('sendConfirmationEmail(result.subscriber, { dbh: trx })');
+    const keyAt = src.indexOf(".lockCustomerEmail(trx, String(result.subscriber.email || emailLc)");
+    const rowAt = src.indexOf('.forUpdate()', keyAt);
+    expect(keyAt).toBeGreaterThan(0);
+    expect(rowAt).toBeGreaterThan(keyAt);
+  });
+
+  test('email fanout: both DOI transactions lock the address first and send on trx', () => {
+    const src = read('customer-email-fanout.js');
+    expect((src.match(/sendConfirmationEmail\(pendingConfirmation, \{ dbh: trx \}\)/g) || []).length).toBe(2);
+    expect((src.match(/lockCustomerEmail\(trx, sentEmailLc\)/g) || []).length).toBe(2);
   });
 });

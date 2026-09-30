@@ -21,13 +21,22 @@ jest.mock('../services/sendgrid-mail', () => ({
 // (B13) before the provider call; this suite pins the from-identity, so the
 // db answers "no suppression, no profile" (vetoes have their own suite:
 // newsletter-confirm-suppression).
-jest.mock('../models/db', () => jest.fn(() => {
-  const q = {};
-  ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'select'].forEach((m) => { q[m] = () => q; });
-  q.first = async () => null;
-  q.then = (res, rej) => Promise.resolve([]).then(res, rej);
-  return q;
-}));
+jest.mock('../models/db', () => {
+  const query = () => {
+    const q = {};
+    ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'select'].forEach((m) => { q[m] = () => q; });
+    q.first = async () => null;
+    q.then = (res, rej) => Promise.resolve([]).then(res, rej);
+    return q;
+  };
+  const trx = () => query();
+  trx.isTransaction = true;
+  trx.raw = async () => ({ rows: [{ locked: true }] });
+  trx.transaction = async (fn) => fn(trx);
+  const db = () => query();
+  db.transaction = async (fn) => fn(trx);
+  return db;
+});
 
 const sendgrid = require('../services/sendgrid-mail');
 

@@ -4938,6 +4938,11 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
     let sendRefused = false;
     try {
       await db.transaction(async (trx) => {
+        // Address key BEFORE the row lock (suppression / ownership writers
+        // take the key first, then rows); sendConfirmationEmail re-enters it
+        // and runs its vetoes on THIS connection (B13).
+        await require('../utils/customer-comms-lock')
+          .lockCustomerEmail(trx, String(result.subscriber.email || emailLc).trim().toLowerCase());
         const liveSubscriber = await trx('newsletter_subscribers')
           .where({
             id: result.subscriber.id,
@@ -4951,7 +4956,7 @@ async function subscribeNewCallCustomerToNewsletter({ customerId, email, firstNa
           sendRefused = true;
           return;
         }
-        await sendConfirmationEmail(result.subscriber);
+        await sendConfirmationEmail(result.subscriber, { dbh: trx });
         confirmationEmailSent = true;
       });
       if (sendRefused) {

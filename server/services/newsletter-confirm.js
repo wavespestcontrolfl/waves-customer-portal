@@ -37,6 +37,14 @@ function confirmationUrl(token) {
 // newsletter-sender.js). A DOI must never reach one of these.
 const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
 
+// The customers columns that can hold a sendable address. CUSTOMER_EMAIL_COLUMNS
+// also lists billing_email, which lives on notification_prefs (migration
+// 20260927000150), NOT on customers — querying it there is a 42703 that would
+// veto every confirmation. Same split as email-bounce-recovery's
+// CUSTOMER_EMAIL_FIELDS + its separate notification_prefs read.
+const CUSTOMER_EMAIL_FIELDS = require('../utils/customer-comms-lock').CUSTOMER_EMAIL_COLUMNS
+  .filter((column) => column !== 'billing_email');
+
 class ConfirmationVetoedError extends Error {
   constructor(reason) {
     super(`confirmation email vetoed: ${reason}`);
@@ -47,12 +55,25 @@ class ConfirmationVetoedError extends Error {
 }
 
 /**
- * The one outbound veto for a newsletter confirmation email. The send below
+ * The one outbound veto for a newsletter confirmation email. The send
  * deliberately bypasses SendGrid's suppression group (asmGroupId: 0 — a
  * prior newsletter unsubscribe must not stop a fresh, deliberate re-signup
  * confirmation), so the app-level vetoes have to run here, before the
  * provider call, for EVERY caller (public form, quote wizard, admin import,
  * call pipeline, email fanout).
+ *
+ * MUST run on a transaction that stays open through the provider handoff
+ * (sendConfirmationEmail arranges this): the two locks below are
+ * transaction-scoped and fence nothing once it ends. Same final-send-boundary
+ * recipe as billing-channel-email-authority / email-bounce-recovery:
+ *   1. lockCustomerEmail — the per-address lock every suppression writer
+ *      (SendGrid webhook, admin do_not_email) takes, so a bounce / complaint /
+ *      do-not-email is either committed before this read or lands after the
+ *      send. Blocking; taken first (caller-held row locks are always taken
+ *      AFTER the address key by the writers, never before).
+ *   2. lockEmailOwnershipForSend — non-blocking, AFTER the blocking locks,
+ *      fencing assignment of this address to a customer between the profile
+ *      read and the send. Busy = a writer is mid-assignment: refuse (retryable).
  *
  *  - email_suppressions: an active bounce / spam_complaint / do_not_email row
  *    (any stream) or an ungrouped row, on this mailbox under ANY Gmail
@@ -60,7 +81,9 @@ class ConfirmationVetoedError extends Error {
  *    applies. A group-scoped newsletter unsubscribe does NOT veto: the
  *    subscriber is asking back in.
  *  - do-not-contact: a call_log consent.do_not_contact_request on the linked
- *    customer OR on any customer profile carrying this mailbox in any of its email columns.
+ *    customer OR on any customer that owns this mailbox: the four customers
+ *    email columns and notification_prefs.billing_email (which is NOT a
+ *    customers column).
  *
  * Fail closed: a lookup that throws means the address could not be cleared,
  * so nothing is sent. Vetoes are not surfaced to anonymous callers — every
@@ -69,42 +92,54 @@ class ConfirmationVetoedError extends Error {
 async function assertConfirmationAllowed(subscriber, dbh = db) {
   const emailLc = String(subscriber.email || '').trim().toLowerCase();
   try {
-    const { suppressionCoversEmail } = require('../utils/email-equivalence');
-    const suppression = await dbh('email_suppressions')
-      .where(suppressionCoversEmail(emailLc))
-      .where({ status: 'active' })
-      .where(function globalOrUngrouped() {
-        this.whereRaw('LOWER(suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES)
-          .orWhereNull('group_key')
-          .orWhere('group_key', '');
-      })
-      .first('id');
-    if (suppression) throw new ConfirmationVetoedError('address_suppressed');
-
-    const { GOOGLE_MAILBOX_SQL, googleMailboxIdentity, CUSTOMER_EMAIL_COLUMNS } = require('../utils/customer-comms-lock');
-    const customerIds = new Set();
-    if (subscriber.customer_id) customerIds.add(subscriber.customer_id);
-    const mailbox = googleMailboxIdentity(emailLc);
-    const profiles = await dbh('customers')
-      .where(function sameMailbox() {
-        for (const col of CUSTOMER_EMAIL_COLUMNS) {
-          this.orWhereRaw(`LOWER(${col}) = ?`, [emailLc]);
-          if (mailbox) {
-            this.orWhereRaw(
-              `(${GOOGLE_MAILBOX_SQL.isGoogle(col)} AND ${GOOGLE_MAILBOX_SQL.mailbox(col)} = ?)`,
-              [mailbox.split('@')[0]],
-            );
-          }
-        }
-      })
-      .select('id');
-    for (const row of profiles || []) customerIds.add(row.id);
-    if (customerIds.size) {
-      const { customerCallDoNotContact } = require('./lead-first-touch-resume');
-      for (const id of customerIds) {
-        if (await customerCallDoNotContact(id, dbh)) throw new ConfirmationVetoedError('do_not_contact');
-      }
+    const locks = require('../utils/customer-comms-lock');
+    if (!dbh || !dbh.isTransaction) throw Object.assign(new Error('transaction required'), { code: 'NO_TRANSACTION' });
+    await locks.lockCustomerEmail(dbh, emailLc);
+    try {
+      await locks.lockEmailOwnershipForSend(dbh, emailLc);
+    } catch (lockErr) {
+      if (lockErr && lockErr.code === 'EMAIL_OWNERSHIP_CHECK_BUSY') throw new ConfirmationVetoedError('ownership_busy');
+      throw lockErr;
     }
+    // Reads run in a savepoint so a failing statement cannot poison a
+    // caller's transaction; the locks above (taken outside it) survive.
+    await dbh.transaction(async (sp) => {
+      const { suppressionCoversEmail } = require('../utils/email-equivalence');
+      const suppression = await sp('email_suppressions')
+        .where(suppressionCoversEmail(emailLc))
+        .where({ status: 'active' })
+        .where(function globalOrUngrouped() {
+          this.whereRaw('LOWER(suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES)
+            .orWhereNull('group_key')
+            .orWhere('group_key', '');
+        })
+        .first('id');
+      if (suppression) throw new ConfirmationVetoedError('address_suppressed');
+
+      const customerIds = new Set();
+      if (subscriber.customer_id) customerIds.add(subscriber.customer_id);
+      const mailbox = locks.googleMailboxIdentity(emailLc);
+      const mailboxName = mailbox ? mailbox.split('@')[0] : null;
+      const CANON = (col) => locks.GOOGLE_MAILBOX_SQL.mailbox(`BTRIM(${col})`);
+      const GOOGLE = (col) => locks.GOOGLE_MAILBOX_SQL.isGoogle(`BTRIM(${col})`);
+      const sameMailbox = (columns) => function match() {
+        for (const col of columns) {
+          this.orWhereRaw(`LOWER(BTRIM(${col})) = ?`, [emailLc]);
+          if (mailboxName) this.orWhereRaw(`(${GOOGLE(col)} AND ${CANON(col)} = ?)`, [mailboxName]);
+        }
+      };
+      const profiles = await sp('customers').where(sameMailbox(CUSTOMER_EMAIL_FIELDS)).select('id');
+      for (const row of profiles || []) customerIds.add(row.id);
+      const prefs = await sp('notification_prefs').where(sameMailbox(['billing_email'])).select('customer_id');
+      for (const row of prefs || []) if (row.customer_id) customerIds.add(row.customer_id);
+
+      if (customerIds.size) {
+        const { customerCallDoNotContact } = require('./lead-first-touch-resume');
+        for (const id of customerIds) {
+          if (await customerCallDoNotContact(id, sp)) throw new ConfirmationVetoedError('do_not_contact');
+        }
+      }
+    });
   } catch (err) {
     if (err instanceof ConfirmationVetoedError) throw err;
     // ID-only, no address, per AGENTS.md.
@@ -120,20 +155,27 @@ async function assertConfirmationAllowed(subscriber, dbh = db) {
  * retries.
  *
  * Returns { messageId } on success; throws on SendGrid error so the
- * caller can decide whether to surface a 500 or swallow. Throws a
+ * caller can decide whether to surface a 500 or swallow.
+ *
+ * Callers that already hold a transaction (row locks on the subscriber, the
+ * fanout's hold gates) pass it as `{ dbh }` so the vetoes and the send share
+ * that connection — a second pooled connection would deadlock a small pool
+ * against the caller's own held connection. The caller should also take
+ * lockCustomerEmail on the address BEFORE its own row locks (writers take the
+ * address key first, then rows). Without `dbh` a transaction is opened here
+ * and held through the provider call — the same discipline the billing and
+ * bounce-recovery final-send boundaries use. Throws a
  * ConfirmationVetoedError (code 'confirmation_vetoed') — never sending — when
  * the address is suppressed / do-not-contact / unverifiable (see
  * assertConfirmationAllowed); callers treat it like any failed send.
  */
-async function sendConfirmationEmail(subscriber) {
+async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
   if (!subscriber || !subscriber.email || !subscriber.confirmation_token) {
     throw new Error('subscriber missing email or confirmation_token');
   }
   if (!sendgrid.isConfigured()) {
     throw new Error('SendGrid not configured (SENDGRID_API_KEY missing)');
   }
-  await assertConfirmationAllowed(subscriber);
-
   const url = confirmationUrl(subscriber.confirmation_token);
   const firstName = (subscriber.first_name || '').trim();
   // Plain-text greeting is safe inline; HTML greeting must escape so a
@@ -163,23 +205,27 @@ async function sendConfirmationEmail(subscriber) {
     '— The Waves crew',
   ].join('\n');
 
-  // Confirmation emails are transactional — they must arrive even for
-  // recipients who've previously unsubscribed from newsletter broadcasts.
-  // Pass asmGroupId: 0 to bypass the SendGrid suppression group entirely.
-  const result = await sendgrid.sendOne({
-    to: subscriber.email,
-    // Newsletter confirmation is the legitimate use of the `newsletter@`
-    // identity — name it explicitly so the intent is durable rather than
-    // depending on sendgrid-mail's default (other callers should declare
-    // their own identity; defaults are not policy).
-    fromEmail: 'newsletter@wavespestcontrol.com',
-    fromName: 'Waves Newsletter',
-    subject: 'Confirm your Waves Newsletter signup',
-    html,
-    text,
-    categories: ['newsletter_confirm'],
-    asmGroupId: 0,
-  });
+  const handoff = async (trx) => {
+    await assertConfirmationAllowed(subscriber, trx);
+    // Confirmation emails are transactional — they must arrive even for
+    // recipients who've previously unsubscribed from newsletter broadcasts.
+    // Pass asmGroupId: 0 to bypass the SendGrid suppression group entirely.
+    return sendgrid.sendOne({
+      to: subscriber.email,
+      // Newsletter confirmation is the legitimate use of the `newsletter@`
+      // identity — name it explicitly so the intent is durable rather than
+      // depending on sendgrid-mail's default (other callers should declare
+      // their own identity; defaults are not policy).
+      fromEmail: 'newsletter@wavespestcontrol.com',
+      fromName: 'Waves Newsletter',
+      subject: 'Confirm your Waves Newsletter signup',
+      html,
+      text,
+      categories: ['newsletter_confirm'],
+      asmGroupId: 0,
+    });
+  };
+  const result = dbh && dbh.isTransaction ? await handoff(dbh) : await (dbh || db).transaction(handoff);
   // ID-only logging per AGENTS.md (no PII in logs).
   logger.info(`[newsletter-confirm] Confirmation email queued for subscriber id=${subscriber.id} (msgId=${result.messageId || 'n/a'})`);
   return result;

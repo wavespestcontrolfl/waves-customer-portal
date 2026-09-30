@@ -984,7 +984,12 @@ describe('resendPendingConfirmation', () => {
     const conn = makeConn(matchRow(payload));
     const ok = await resendPendingConfirmation(payload, conn);
     expect(ok).toBe(true);
-    expect(sendConfirmationEmail).toHaveBeenCalledWith(expect.objectContaining({ email: payload.email, confirmation_token: 'tok-1' }));
+    // B13: the send shares the caller's transaction (vetoes + provider handoff
+    // on one connection), never a second pooled one.
+    expect(sendConfirmationEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ email: payload.email, confirmation_token: 'tok-1' }),
+      { dbh: conn },
+    );
     expect(conn.__updates('newsletter_subscribers')[0].arg.confirmation_sent_at).toBeInstanceOf(Date);
   });
 
