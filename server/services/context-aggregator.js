@@ -13,7 +13,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // customer would see on their own tracking link.
 const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
 const { calculateBoundedTrackingEta, finiteNumber, techMappingCutoff, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
-const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay } = require('./live-eta-destination');
+const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay, mappingGeneration } = require('./live-eta-destination');
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -591,10 +591,11 @@ function liveEtaDedupeKey(row, customer) {
 // The ONE identity tuple an ETA is about: technician + tracker device
 // (fingerprint) + resolved destination (Codex round-23 P2). It keys grouped-stop
 // dedupe AND the cross-request memo, and mirrors what the send-time snapshot
-// records (technicianId / deviceImei / destinations), so a device repointed
-// inside the memo window can never reuse the old vehicle's minutes.
+// records (technicianId / deviceImei / mappingChangedAt / destinations), so a device
+// repointed inside the memo window — even A->B->A, which only the mapping GENERATION
+// (bouncie_imei_changed_at) tells apart — can never reuse the old vehicle's minutes.
 function liveEtaIdentityKey(row, dest) {
-  return `${row.technician_id}:${dest.lat}:${dest.lng}:${deviceFingerprint(row.tech_bouncie_imei) || ''}`;
+  return `${row.technician_id}:${dest.lat}:${dest.lng}:${deviceFingerprint(row.tech_bouncie_imei) || ''}:${mappingGeneration(row.tech_mapping_changed_at) || ''}`;
 }
 
 // LIVE ETA (GATE_SMS_REAL_ANSWERS, owner ruling 2026-09-29): a TODAY
@@ -916,6 +917,8 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
   const technicianId = members.find((s) => s.technician_id != null)?.technician_id;
   const deviceImei = deviceFingerprint(members.find((s) => s.tech_bouncie_imei)?.tech_bouncie_imei);
   // Technician first name(s) as shown in UPCOMING SERVICES (tech.name) — names only.
+  // The tracker-mapping generation, when the technician row carried it (round-41 P2).
+  const mappingMember = members.find((s) => s && 'tech_mapping_changed_at' in s);
   const technicianNames = [...new Set(members.map((s) => String(s.technician_name || '').trim().split(/\s+/)[0]).filter(Boolean))];
   return {
     minutes: result ? result.minutes : null,
@@ -931,6 +934,7 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
     // Round-22 P2: the tracker device (Bouncie IMEI) the ETA was read from.
     // Send time refuses when an admin re-pointed the technician at another vehicle.
     ...(deviceImei ? { deviceImei } : {}),
+    ...(mappingMember ? { mappingChangedAt: mappingGeneration(mappingMember.tech_mapping_changed_at) } : {}),
     ...(technicianNames.length ? { technicianNames } : {}),
     // Round-20 P2: WHERE the ETA/status was about — each member's property id +
     // the coordinates/address stamp the destination came from. Send time

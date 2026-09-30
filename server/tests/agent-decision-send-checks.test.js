@@ -23,7 +23,7 @@ const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
 const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
-const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, composeProviderPreSendChecks } = require('../services/agent-decision-send-checks');
+const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
 const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
@@ -227,5 +227,23 @@ describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provide
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
     expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, composeProviderPreSendChecks }');
     expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
+  });
+});
+
+// Codex round-41 P2: the in-memory-snapshot variant (auto-send executor).
+describe('etaSnapshotProviderPreSendCheck', () => {
+  test('hands the held snapshot + facts time to the shared check, body read lazily', async () => {
+    let body = 'Thanks!';
+    const snap = { entries: [{ minutes: 9, scheduledServiceIds: ['s1'] }] };
+    const check = etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', getBody: () => body });
+    body = 'The tech is 9 minutes away.';
+    await expect(check()).resolves.toEqual({ ok: true });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', outgoingBody: 'The tech is 9 minutes away.' });
+  });
+  test('stale -> terminal refusal; a throwing recheck -> retryable', async () => {
+    etaClaimBlockReason.mockResolvedValue('eta_claim_stale_facts');
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY' });
+    etaClaimBlockReason.mockRejectedValue(new Error('db down'));
+    await expect(etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: null, factsGeneratedAt: null, getBody: () => 'x' })()).resolves.toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
   });
 });

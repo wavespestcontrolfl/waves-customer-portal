@@ -82,4 +82,16 @@ function sanitizeTechNames(names) {
   return out.slice(0, 5);
 }
 
-module.exports = { sanitizeTechNames, resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay };
+// The tracker-mapping GENERATION (technicians.bouncie_imei_changed_at) as a stable
+// comparable value (Codex round-41 P2): ISO-8601 or null (never remapped). Part of
+// the ETA memo key and of the persisted per-entry identity, so EVERY remap — even
+// A->B->A, where the device value returns to its previous fingerprint — invalidates
+// ETA facts computed before it. A present-but-unparseable value is kept as a
+// distinct opaque string so it still never equals a different generation.
+function mappingGeneration(value) {
+  if (value == null || value === '') return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : `unparseable:${String(value)}`;
+}
+
+module.exports = { mappingGeneration, sanitizeTechNames, resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay };

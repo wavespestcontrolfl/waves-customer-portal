@@ -744,6 +744,18 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
     identityTrustLevel: 'phone_matches_customer',
     entryPoint: 'sms_auto_send_executor',
     ...laneFields,
+    // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the executor's own
+    // check ran before its recheck/handoff awaits and sendCustomerMessage's recipient and
+    // policy work; the same shared check (from the claim's in-memory snapshot — no extra
+    // read) runs again immediately before the provider request, composed AFTER the
+    // gratitude lane's own predicate.
+    providerPreSendCheck: (() => {
+      const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+      return composeProviderPreSendChecks(
+        laneFields.providerPreSendCheck,
+        etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, getBody: () => reply }),
+      );
+    })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an
     // accepted send whose ordinary sms_log insert fails is promoted with the
     // provider's real context. Borrowing never creates a second reservation;

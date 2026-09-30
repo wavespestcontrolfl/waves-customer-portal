@@ -128,6 +128,31 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
   };
 }
 
+// Snapshot-carrying variant for a caller that already holds the decision's live-ETA
+// snapshot in memory (the auto-send executor's claim): same check, same verdicts, no
+// extra row read.
+function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, getBody }) {
+  return async () => {
+    const { etaClaimBlockReason } = require('./sms-eta-freshness');
+    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
+    let reason;
+    try {
+      reason = await etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, outgoingBody });
+    } catch (err) {
+      require('./logger').warn(`[agent-decision-send-checks] LIVE ETA boundary recheck failed: ${err.message}; blocking send`);
+      reason = 'eta_recheck_failed';
+    }
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'eta_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY' : 'LIVE_ETA_STALE_AT_BOUNDARY',
+      reason: `live ETA unsendable (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+}
+
 // Run several provider-boundary predicates in order; the first refusal wins.
 // undefined entries are skipped; returns undefined when there is nothing to run.
 function composeProviderPreSendChecks(...checks) {
@@ -154,4 +179,4 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await etaBlock({ decision, outgoingBody }));
 }
 
-module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, composeProviderPreSendChecks };
+module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks };

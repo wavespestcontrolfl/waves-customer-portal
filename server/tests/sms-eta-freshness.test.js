@@ -2031,3 +2031,81 @@ describe('smart punctuation and "is there" at send time', () => {
     expect(await run('The technician is there to help.', done)).toBeNull();
   });
 });
+
+// Codex round-41 P2 (PR #5334): the mapping GENERATION is compared at send time, so A->B->A blocks.
+describe('tracker-mapping generation at send time (A->B->A)', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) drafter[name].mockReset().mockImplementation(real[name]);
+  });
+  const { deviceFingerprint } = require('../services/live-eta-destination');
+  const FP = deviceFingerprint('356938035643809');
+  const entry = (extra) => ({ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', technicianId: 'tech-1', deviceImei: FP, ...extra });
+  const dbWithTech = (tech) => (table) => (table === 'technicians'
+    ? { where: () => ({ first: async () => tech }) }
+    : { whereIn: () => ({ select: async () => dated([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, technician_id: 'tech-1' }]) }) });
+  const run = (e, tech) => etaClaimBlockReason({ liveEtaSnapshot: { entries: [e] }, factsGeneratedAt: FRESH, outgoingBody: 'The tech is on the way.', now: NOW, dbh: dbWithTech(tech) });
+  const d = (iso) => new Date(iso);
+
+  test('same device, same generation (null/null and equal instants) passes', async () => {
+    expect(await run(entry({ mappingChangedAt: null }), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: null })).toBeNull();
+    expect(await run(entry({ mappingChangedAt: '2026-09-30T16:00:00.000Z' }), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: d('2026-09-30T16:00:00.000Z') })).toBeNull();
+  });
+  test('A->B->A: the device fingerprint matches again but the generation advanced -> blocked', async () => {
+    expect(await run(entry({ mappingChangedAt: null }), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: d('2026-09-30T16:05:00.000Z') })).toBe('eta_claim_device_changed');
+    expect(await run(entry({ mappingChangedAt: '2026-09-30T16:00:00.000Z' }), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: d('2026-09-30T16:05:00.000Z') })).toBe('eta_claim_device_changed');
+  });
+  test('a generation recorded but later cleared to NULL also blocks; an entry that recorded no generation keeps the device-only check', async () => {
+    expect(await run(entry({ mappingChangedAt: '2026-09-30T16:00:00.000Z' }), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: null })).toBe('eta_claim_device_changed');
+    expect(await run(entry({}), { bouncie_imei: '356938035643809', bouncie_imei_changed_at: d('2026-09-30T16:05:00.000Z') })).toBeNull();
+  });
+  test('an entry with only a generation (no device fingerprint) is still checked; a missing technician row blocks', async () => {
+    expect(await run(entry({ deviceImei: undefined, mappingChangedAt: null }), { bouncie_imei: null, bouncie_imei_changed_at: d('2026-09-30T16:05:00.000Z') })).toBe('eta_claim_device_changed');
+    expect(await run(entry({ mappingChangedAt: null }), null)).toBe('eta_claim_device_changed');
+  });
+});
+
+// Codex round-41 P2 (PR #5334): recognizable CURRENT status wording with no snapshot to bind
+// it is an ungrounded assertion — gate-on only; the approved SLA wording keeps its exemption.
+describe('status wording with no snapshot (GATE_SMS_REAL_ANSWERS on)', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  let prior;
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); prior = process.env.GATE_SMS_REAL_ANSWERS; process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; });
+  const noSnap = (body, gate = true) => {
+    if (!gate) delete process.env.GATE_SMS_REAL_ANSWERS;
+    return etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, now: NOW, dbh: fakeDb([]) });
+  };
+
+  test.each([
+    'The technician is on the way.', 'The technician has arrived.', 'Our team is en route.', "We're on our way.", "We've arrived.", 'Your tech is running late.',
+    'The technician is there.', 'He just got there.', 'Your technician is nearby.', 'They’re on the way.',
+  ])('%p: fails closed as eta_claim_no_snapshot', async (body) => {
+    expect(await noSnap(body)).toBe('eta_claim_no_snapshot');
+  });
+  test('gate OFF: unchanged (legacy / human flows send)', async () => {
+    expect(await noSnap('The technician is on the way.', false)).toBeNull();
+    expect(await noSnap('The technician has arrived.', false)).toBeNull();
+  });
+  test.each([
+    'Thanks, 5 stars!', 'We are here to help.', "The technician hasn't arrived yet.", 'Has your technician arrived yet?', "I'll text you once he's on the way.",
+    'Your technician is coming tomorrow.', 'Your receipt is on the way.', 'We will be there Tuesday.', 'The technician was on the way earlier.',
+  ])('%p is not current status wording: untouched', async (body) => {
+    expect(await noSnap(body)).toBeNull();
+  });
+  test('the approved SLA wording keeps its exemption', async () => {
+    expect(await noSnap('Your technician is nearby and should arrive within the hour.')).toBeNull();
+    expect(await noSnap('Sorry about that — someone will follow up within the hour.')).toBeNull();
+  });
+  test('a snapshot-backed status claim is still bound by the snapshot (unchanged)', async () => {
+    const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+    const rows = [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE }];
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: 'The technician is on the way.', now: NOW, dbh: fakeDb(rows) })).toBeNull();
+  });
+  test('a bare minutes claim with no snapshot was already blocked on any gate (unchanged)', async () => {
+    expect(await noSnap('The tech is 9 minutes away.', false)).toBe('eta_claim_no_snapshot');
+  });
+});

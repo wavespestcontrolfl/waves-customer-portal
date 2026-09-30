@@ -1811,6 +1811,9 @@ function buildLiveEtaSnapshot(context) {
       // sms-eta-freshness refuses at send when a reassignment changed it.
       ...(g.technicianId != null ? { technicianId: g.technicianId } : {}),
       ...(g.deviceImei ? { deviceImei: g.deviceImei } : {}),
+      // The tracker-mapping generation (bouncie_imei_changed_at) the ETA was computed under
+      // (round-41 P2): send time blocks when a remap advanced it, even A->B->A.
+      ...('mappingChangedAt' in g ? { mappingChangedAt: g.mappingChangedAt } : {}),
       // Round-33: the technician first name(s) the draft may have used as a status
       // subject ("Sam is on the way"); names only. Send time reads them from here.
       ...(sanitizeTechNames(g.technicianNames).length ? { technicianNames: sanitizeTechNames(g.technicianNames) } : {}),

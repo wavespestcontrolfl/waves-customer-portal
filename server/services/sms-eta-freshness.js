@@ -239,6 +239,12 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
 // A plural technician/team/"we" subject: plural nouns (techs, technicians, drivers,
 // crews), a team, or first-person plural ("we're", "we'll", "we are/will").
 const PLURAL_STATUS_SUBJECT_RE = /\b(?:tech(?:nician)?s|drivers|crews|teams?|we(?:'re|'ll|\s+(?:are|will|should)))\b/i;
+// Same permissive spelling rule as config/feature-gates gateEnvValue, read at call
+// time; local (like sms-followup-sla's) so this module stays dependency-free.
+function realAnswersGateOn() {
+  return ['1', 'true', 'on'].includes(String(process.env.GATE_SMS_REAL_ANSWERS || '').toLowerCase());
+}
+
 function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [] }) {
   const drafter = require('./sms-shadow-drafter');
   const trackTokens = extractTrackTokens(fullBody);
@@ -268,12 +274,26 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames
   // bodyMentionsVisitStatus), whether or not a narrower classifier read it.
   const visitStatusMention = liveContext && drafter.bodyMentionsVisitStatus(outgoingBody, { techNames });
   const classified = claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim;
+  // Codex round-41 P2: with NO snapshot and no link to bind to, recognizable CURRENT
+  // visit-status wording ("The technician is on the way", "has arrived", "Our team is
+  // en route", first-person forms) is an ungrounded assertion — the real-answers
+  // prompt authorizes status only from LIVE STATUS facts, so a decision without a
+  // live snapshot (gate-off draft, no eligible visit, a reviewer adding the wording)
+  // has nothing backing it. Scoped to GATE_SMS_REAL_ANSWERS so legacy / human flows
+  // with the gate off are unchanged, and the approved follow-up SLA wording ("within
+  // the hour") keeps its exemption.
+  const ungroundedStatus = !liveContext && realAnswersGateOn()
+    && !require('./sms-followup-sla').replyPromisesFollowup(outgoingBody)
+    && Boolean(drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true })
+      || drafter.bodyMentionsArrival(outgoingBody)
+      || drafter.bodyMentionsVisitStatus(outgoingBody));
   // Round-16 structural backstop: nothing above read a claim, yet a number sits
   // beside a time unit / arrival word — hold it to the status-claim checks.
   const unclassifiedClaim = liveContext && !classified && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unclassifiedSignalOnly: true });
   return {
     claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim, unclassifiedClaim, visitStatusMention,
     pluralSubject: PLURAL_STATUS_SUBJECT_RE.test(outgoingBody),
+    ungroundedStatus,
     hasClaim: classified || unclassifiedClaim,
   };
 }
@@ -380,7 +400,8 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // with no status vocabulary at all ("Thanks, 5 stars!") is unaffected, as are
   // accurate corrections ("hasn't arrived") and scheduling windows.
   if (!claim.hasClaim && !claim.hasTrackLink) {
-    if (!entries.length || !claim.visitStatusMention) return null;
+    if (!entries.length) return claim.ungroundedStatus ? 'eta_claim_no_snapshot' : null;
+    if (!claim.visitStatusMention) return null;
     return checkEntriesStillLive({ boundEntries: entries, allowOnSite: false, recordedState: true, dbh });
   }
   if (!entries.length) return 'eta_claim_no_snapshot';
@@ -511,13 +532,19 @@ async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson, check
     // Round-18: only entries that recorded a technicianId are checked.
     if (boundEntries.some((entry) => entry.technicianId != null
       && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)))) return 'eta_claim_tech_changed';
-    // Round-22: an entry that recorded the ETA's tracker device must still map
-    // its technician to that same device (admin-geofence can re-point it).
+    // Round-22/41: an entry that recorded the ETA's tracker device (and/or the mapping
+    // GENERATION, technicians.bouncie_imei_changed_at) must still find its technician
+    // mapped to that same device under that same generation (admin-geofence can
+    // re-point it). The generation catches A->B->A, where the device fingerprint
+    // returns to its previous value although the earlier ETA facts predate the remap.
     for (const entry of boundEntries) {
-      if (!entry.deviceImei) continue;
-      const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei');
-      const { deviceFingerprint } = require('./live-eta-destination');
-      if (!tech || deviceFingerprint(tech.bouncie_imei) !== entry.deviceImei) return 'eta_claim_device_changed';
+      const hasGeneration = 'mappingChangedAt' in entry;
+      if (!entry.deviceImei && !hasGeneration) continue;
+      const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at');
+      const { deviceFingerprint, mappingGeneration } = require('./live-eta-destination');
+      if (!tech) return 'eta_claim_device_changed';
+      if (entry.deviceImei && deviceFingerprint(tech.bouncie_imei) !== entry.deviceImei) return 'eta_claim_device_changed';
+      if (hasGeneration && mappingGeneration(tech.bouncie_imei_changed_at) !== mappingGeneration(entry.mappingChangedAt)) return 'eta_claim_device_changed';
     }
   }
   if (await destinationChanged(boundEntries, rows, dbh)) return 'eta_claim_destination_changed';

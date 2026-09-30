@@ -1083,6 +1083,14 @@ router.post('/sms', async (req, res, next) => {
       identityTrustLevel: trustedCustomerId ? 'phone_matches_customer' : 'phone_provided_unverified',
       entryPoint: 'admin_communications_manual_sms',
       ...(cardClaim ? { operatorInitiated: true } : {}),
+      // LIVE ETA at the TRUE provider boundary (Codex round-41 P2): the decision's ETA
+      // check ran in verifyAgentDraftDecision, before this route's many link / claim /
+      // consent / policy awaits. Decision-linked sends only (a hand-typed composer text
+      // has no snapshot to recheck); the predicate reads the decision's persisted snapshot.
+      ...(verifiedAgentDecision?.id ? {
+        providerPreSendCheck: require('../services/agent-decision-send-checks')
+          .etaProviderPreSendCheck({ decisionId: verifiedAgentDecision.id, getBody: () => cleanBody }),
+      } : {}),
       // codex #5018 pre-push P2: a consultation link can ride this composer
       // send (a pasted URL, or one the operator typed in) without the
       // phone-locked handoff call-booking-link-text.js's own worker holds —

@@ -33,6 +33,9 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   // sms-eta-freshness.test.js for that check's own coverage.
   findEtaMinutesClaims: jest.fn(() => []),
   bodyMentionsArrival: jest.fn(() => false),
+  // Round-41: with GATE_SMS_REAL_ANSWERS on, the send-time check classifies status wording
+  // even without a snapshot, so it now reads this too — "never claims" here as well.
+  bodyMentionsVisitStatus: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
   bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
   // Structural default-deny (Codex round-7 P2): sms-eta-freshness.js unions
@@ -191,5 +194,32 @@ describe('auto-send refuses an unowned follow-up promise', () => {
 
   test('no SLA phrase → unaffected', async () => {
     await expect(attempt({ reply: 'Sounds good, thanks!' })).resolves.toMatchObject({ sent: true });
+  });
+});
+
+// Codex round-41 P2 (PR #5334): the auto-send executor's ETA check also runs at the TRUE
+// provider boundary, from the claim's in-memory snapshot.
+describe('auto-send supplies the live-ETA provider-boundary check', () => {
+  const sentArgs = () => sendCustomerMessage.mock.calls[0][0];
+
+  test('the provider request carries a providerPreSendCheck that passes for a reply with nothing to recheck', async () => {
+    await expect(attempt({ reply: 'Sounds good, thanks!' })).resolves.toMatchObject({ sent: true });
+    const { providerPreSendCheck } = sentArgs();
+    expect(typeof providerPreSendCheck).toBe('function');
+    await expect(providerPreSendCheck({ channel: 'sms' })).resolves.toEqual({ ok: true });
+  });
+
+  test('...and refuses (terminal) when the ETA claim is no longer backed by the snapshot at the boundary', async () => {
+    await attempt({ reply: 'Sounds good, thanks!' });
+    const { providerPreSendCheck } = sentArgs();
+    // The claim is now an ETA with no snapshot behind it: the shared check fails closed.
+    drafter.findEtaMinutesClaims.mockReturnValue([{ minutes: 9, index: 0 }]);
+    try {
+      await expect(providerPreSendCheck({ channel: 'sms' })).resolves.toMatchObject({
+        ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_no_snapshot)',
+      });
+    } finally {
+      drafter.findEtaMinutesClaims.mockReturnValue([]);
+    }
   });
 });

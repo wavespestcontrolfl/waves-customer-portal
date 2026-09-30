@@ -1943,6 +1943,40 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-41 P2 (PR #5334): the tracker-remap GENERATION is part of the memo key and of the
+// persisted identity, so A->B->A invalidates earlier ETA facts although the device returns to A.
+describe('round 41 P2: mapping generation (bouncie_imei_changed_at) in the memo key and entry identity', () => {
+  test('A->B->A inside the memo window: the same device but a newer generation gets a FRESH lookup', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValueOnce({ ...ETA_RESULT, minutes: 7 }).mockResolvedValueOnce({ ...ETA_RESULT, minutes: 19 });
+    const first = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: null }), baseCustomer());
+    const same = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: null }), baseCustomer());
+    const afterRoundTrip = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: '2026-09-30T16:00:00.000Z' }), baseCustomer());
+    expect(same.minutes).toBe(first.minutes);
+    expect(afterRoundTrip.minutes).toBe(19);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+  });
+  test('the dedupe/memo identity differs by generation, and two rows at the same generation still match', () => {
+    const customer = baseCustomer();
+    const a = liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1', tech_mapping_changed_at: null }), customer);
+    const b = liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1', tech_mapping_changed_at: '2026-09-30T16:00:00.000Z' }), customer);
+    expect(a).not.toBe(b);
+    expect(liveEtaDedupeKey(baseRow({ id: 'svc-2', tech_bouncie_imei: 'A1', tech_mapping_changed_at: new Date('2026-09-30T16:00:00.000Z') }), customer)).toBe(b);
+  });
+  test('the group records the generation (ISO or null) only when the technician row carried it, and the snapshot persists it', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const base = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const build = (row) => buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() })[0];
+    const withGen = build({ ...base, tech_mapping_changed_at: new Date('2026-09-30T16:00:00.000Z') });
+    expect(withGen.mappingChangedAt).toBe('2026-09-30T16:00:00.000Z');
+    expect(build({ ...base, tech_mapping_changed_at: null }).mappingChangedAt).toBeNull();
+    expect('mappingChangedAt' in build(base)).toBe(false);
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [withGen] }).entries[0].mappingChangedAt).toBe('2026-09-30T16:00:00.000Z');
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [build({ ...base, tech_mapping_changed_at: null })] }).entries[0].mappingChangedAt).toBeNull();
+  });
+});
+
 // Codex round-40 P2 (PR #5334): a retrospective exclusion needs an elapsed relation ON the figure.
 describe('round 40 P2: retrospective durations need an elapsed relation on the figure', () => {
   test.each([
