@@ -1345,6 +1345,17 @@ function reserviceExcludedSpecialtyInPromise(text) {
 // pest, or a pronoun-only return ("they're back") from a customer with a pest relationship when the
 // facts list the pest lane. Returns 'pest' or null. Function declarations, so the regexes defined
 // further down are read only at call time.
+// The lane of an ACTIVE report, pest or lawn, when the facts list it as eligible (a pronoun-only return is pest).
+function reportedReportLane({ inboundMessage, context, lanes }) {
+  const { reportedReserviceLane } = require('./reservice-scheduler');
+  const text = String(inboundMessage || '');
+  if (PEST_REPORT_TEXT_RE.test(text)) {
+    const lane = reportedReserviceLane(text);
+    if ((lane === 'pest' || lane === 'lawn') && lanes.includes(lane)) return lane;
+  }
+  if (pronounOnlyReportLane(text, context) && lanes.includes('pest')) return 'pest';
+  return null;
+}
 function reportedPestLane({ inboundMessage, context, lanes }) {
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const text = String(inboundMessage || '');
@@ -1400,7 +1411,9 @@ function reserviceOfferOwed({ inboundMessage, lanes, context }) {
   // Codex round-24 P2: only an AFFIRMED hand-off clause suppresses the offer — "I don't need a refund" or
   // "I don't want to cancel" mentions the term to negate it (the scheduler's clause-level negation rule).
   if (require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe)) return false;
-  return reportedPestLane({ inboundMessage, context, lanes }) === 'pest';
+  // Codex round-36 P2: the owed lane is the RESOLVED reported lane — pest OR lawn (turf insects: "Chinch bugs are back") — when it is
+  // eligible, so the customer gets the link instead of neither the link nor times (OPEN TIMES are skipped for a deciding lane).
+  return Boolean(reportedReportLane({ inboundMessage, context, lanes }));
 }
 // Recognizable customer-facing offer / send-link wording (free, no cost, re-service, a link, come back / stop by).
 function reserviceReplyHasOfferWording(text) {

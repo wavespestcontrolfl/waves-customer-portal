@@ -3882,6 +3882,41 @@ describe('free re-service is an entitlement resolved through the existing mechan
       for (const m of ['the ants are back, can I get an appointment for Friday?', 'ants are back and I need an appointment', 'ants are back, I want to schedule an appointment', 'ants are back, please move my appointment']) expect(only(m)).toBe(false);
     });
 
+    // Codex round-36 P2: the owed lane is the RESOLVED reported lane — pest OR lawn (turf insects) — when eligible.
+    test('"Chinch bugs are back" from an eligible LAWN customer is owed the lawn re-service (both lanes covered by the same rule)', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const facts = (lanes) => `X\n${reserviceFactLine(lanes)}\nBILLING:`;
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      // lawn eligible: a generic acknowledgement is rejected; the lawn offer + link action converges with the LAWN lane
+      const owed = validateReserviceOffer({ reply: 'Sorry to hear that.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage: 'Chinch bugs are back' });
+      expect(owed.ok).toBe(false);
+      expect(owed.violations[0]).toMatch(/offer the covered free re-service/);
+      expect(validateReserviceOffer({ reply: "I'm sending your free lawn re-service link now.", factsBlock: facts(['lawn']), intendedActions: sendLink, inboundMessage: 'Chinch bugs are back' }))
+        .toMatchObject({ ok: true, promisedLanes: ['lawn'] });
+      // ...and the slot guard treats the lawn lane like pest (no times / book_appointment)
+      expect(validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage: 'the mole crickets are back', offeredTimes: slot }).ok).toBe(false);
+      // pest-only customer + a lawn report: nothing owed (the lawn lane is not eligible)
+      expect(validateReserviceOffer({ reply: 'Sorry to hear that.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'Chinch bugs are back' }).ok).toBe(true);
+      // the pest lane is unchanged
+      expect(validateReserviceOffer({ reply: 'Sorry to hear that.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'the ants are back' }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply: 'Sorry to hear that.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage: 'the ants are back' }).ok).toBe(true);
+      // a bare lawn complaint (no active report) is NOT owed an offer
+      expect(validateReserviceOffer({ reply: 'Sorry to hear that.', factsBlock: facts(['lawn']), intendedActions: [], inboundMessage: 'my lawn looks bad' }).ok).toBe(true);
+    });
+
+    test('an eligible lawn customer\'s turf-insect report skips normal-slot work (the owed lawn offer replaces OPEN TIMES)', () => {
+      const { reserviceLaneDecidesReply } = require('../services/sms-shadow-drafter');
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      try {
+        const st = { lanes: ['lawn'], booked: {}, linkDownLanes: [] };
+        expect(reserviceLaneDecidesReply({ reserviceState: st, inboundMessage: 'Chinch bugs are back', context: null })).toBe(true);
+        expect(reserviceLaneDecidesReply({ reserviceState: { lanes: ['pest'], booked: {}, linkDownLanes: [] }, inboundMessage: 'Chinch bugs are back', context: null })).toBe(false);
+      } finally {
+        delete process.env.GATE_SMS_REAL_ANSWERS;
+      }
+    });
+
     // Codex round-32 P1 (PR #5336): with the public surface off, a COVERED customer is not "eligibility unavailable".
     describe('covered customer, booking link unavailable (GATE_RESERVICE_SELF_SERVE off / killed)', () => {
       const covered = (extra = {}) => {

@@ -461,6 +461,13 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['ants came back last year and are still here', true, 'pest', false],
     ['the ants came back last week', true, 'pest', false],
     ['the ants are back again this week', true, 'pest', false],
+    // round-36 P2: a leading historical adjunct is carried into the clause that follows it
+    ['Back in 2024, the ants came back. What did you use?', false, 'pest', false],
+    ['Last year, the ants came back', false, 'pest', false],
+    ['Years ago, we had ants', false, 'pest', false],
+    ['Previously, the ants were bad', false, 'pest', false],
+    ['This year, the ants came back', true, 'pest', false],
+    ['Previously the ants were bad, now they are back', true, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],

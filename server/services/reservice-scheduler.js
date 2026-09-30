@@ -292,7 +292,18 @@ async function reserviceLaneAvailability(customer, dbh = db, { strict = false } 
   // Codex round-32 P2: open callbacks are loaded INDEPENDENTLY of current eligibility — a callback booked while the plan
   // covered the lane is still an appointment on the schedule after coverage changes. Eligibility is intersected only for
   // "newly bookable".
-  const open = customer?.id ? await openReserviceCallbacks(customer.id, dbh) : {};
+  // Codex round-36 P2: on the NON-strict path (the public /reservice page) a failed callback read fails CLOSED to the friendly
+  // not-eligible state — the page used to render it when the eligibility dependency was down, and the unconditional read must not
+  // turn that into a 500. The strict path (SMS facts / send-time rechecks) still rethrows.
+  let open = {};
+  if (customer?.id) {
+    try {
+      open = await openReserviceCallbacks(customer.id, dbh);
+    } catch (err) {
+      if (strict) throw err;
+      logger.warn(`[reservice-scheduler] open-callback read failed for customer ${customer.id}: ${err.message}; treating as none (non-strict)`);
+    }
+  }
   // Codex round-33 P2: "no supported lane" is not "no plan" — a termite / mosquito / tree-and-shrub recurring customer has no
   // self-serve lane but IS a plan customer. hasRecurringPlan is the affirmative "NO recurring plan of ANY kind" evidence
   // (false) or its opposite (true); null when it could not be read (non-strict path).
@@ -578,6 +589,14 @@ function reservicePestReportFacts(text) {
       const noun = prevSeg && RESERVICE_PEST_NOUN_UNBOUND_RE.exec(prevSeg.clause);
       if (noun) seg.eff = `${noun[0]} ${seg.clause.trim()}`;
     }
+  });
+  // A leading HISTORICAL time adjunct ("Back in 2024, the ants came back") is carried into the clause that follows it — the comma split
+  // would otherwise drop it and read the sighting as current (Codex round-36 P2).
+  segs.forEach((seg, i) => {
+    if (seg.blank || RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause) || !RESERVICE_PAST_MARKER_RE.test(seg.clause)
+      || seg.clause.trim().split(/\s+/).length > 6) return;
+    const next = segs.slice(i + 1).find((x) => !x.blank);
+    if (next) next.eff = `${seg.clause.trim()}, ${next.eff}`;
   });
   segs.forEach((seg) => {
     seg.dropped = seg.blank || reserviceClauseDropped(seg.eff);
