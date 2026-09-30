@@ -95,6 +95,9 @@ function parsePayload(payload) {
   try { return JSON.parse(payload); } catch { return null; }
 }
 
+// A card's visit link must stay inside the admin app (navigation only — not an API call).
+const ADMIN_LINK_PATTERN = /^\/admin\//;
+
 export function ConfirmEvidence({ payload }) {
   const p = parsePayload(payload);
   if (!p) return null;
@@ -290,7 +293,7 @@ export function ConfirmEvidence({ payload }) {
       {p.confirmation_question && (
         <div className="text-14 text-zinc-900 mt-1">Ask: “{p.confirmation_question}”</div>
       )}
-      {p.street_level_address && typeof p.visit_link === "string" && p.visit_link.startsWith("/admin/") && (
+      {p.street_level_address && typeof p.visit_link === "string" && ADMIN_LINK_PATTERN.test(p.visit_link) && (
         <a href={p.visit_link} className="inline-block mt-1 text-13 font-medium text-zinc-900 underline">Open visit</a>
       )}
     </div>

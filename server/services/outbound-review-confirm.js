@@ -19,6 +19,7 @@
  */
 
 const logger = require('./logger');
+const { findStreetLevelHoldCard } = require('./street-level-hold');
 const db = require('../models/db');
 const { parseETDateTime } = require('../utils/datetime-et');
 
@@ -391,7 +392,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       // Shared per-call lock contract (utils/triage-locks.js) with the other
       // triage writers — serialize before the card update so an overlapping
       // sweep/verdict can't deadlock or interleave the aggregate.
-      const { lockTriageCall } = require('../utils/triage-locks');
+      const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
       await db.transaction(async (trx) => {
         await lockTriageCall(trx, svc.source_call_log_id);
         await fileOwedFollowUpForStreetLevelHold(trx, svc);
@@ -400,6 +401,9 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
           .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
           .whereIn('status', ['open', 'in_progress'])
           .update({ status: 'resolved', updated_at: trx.fn.now() });
+        // The call's review state closes with its last open card (same aggregate
+        // every card writer keeps, under the same per-call lock).
+        await syncCallReviewStatus(trx, svc.source_call_log_id);
       });
     }
   } catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed for ${svc.id}: ${e.message}`); }
@@ -687,14 +691,11 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
  * is resolved.
  */
 async function fileOwedFollowUpForStreetLevelHold(trx, svc) {
-  const card = await trx('triage_items')
-    .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
-    .whereIn('status', ['open', 'in_progress'])
-    .orderBy('created_at', 'desc')
-    .first('payload');
-  const payload = typeof card?.payload === 'string' ? JSON.parse(card.payload) : (card?.payload || null);
-  if (!payload?.street_level_address || !payload.follow_up_plan
-    || String(payload.scheduled_service_id || '') !== String(svc.id)) return false;
+  // The visit's latest street-level card, open or already superseded by a
+  // recording replacement: the promised follow-up must not depend on it staying open.
+  const card = await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id });
+  const payload = card?.payload || null;
+  if (!payload?.follow_up_plan) return false;
   const owned = await trx('scheduled_services')
     .where((q) => q.where({ parent_service_id: svc.id }).orWhere({ followup_source_service_id: svc.id }))
     .first('id');
@@ -733,13 +734,7 @@ async function fileOwedFollowUpForStreetLevelHold(trx, svc) {
 async function stampBookedDispositionForStreetLevelHold(trx, svc) {
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('callDispositionV1')) return false;
-  const card = await trx('triage_items')
-    .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
-    .whereIn('status', ['open', 'in_progress'])
-    .orderBy('created_at', 'desc')
-    .first('payload');
-  const payload = typeof card?.payload === 'string' ? JSON.parse(card.payload) : (card?.payload || null);
-  if (!payload?.street_level_address || String(payload.scheduled_service_id || '') !== String(svc.id)) return false;
+  if (!(await findStreetLevelHoldCard(trx, { callLogId: svc.source_call_log_id, visitId: svc.id }))) return false;
   const stamped = await trx('call_log')
     .where({ id: svc.source_call_log_id, disposition: 'lead_response_flow_triggered' })
     .update({ disposition: 'booked', updated_at: new Date() });

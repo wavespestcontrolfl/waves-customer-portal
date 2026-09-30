@@ -28,7 +28,7 @@ const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers')
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
-const { lockTriageCall } = require('../utils/triage-locks');
+const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { safeErrorToken } = require('../utils/sentry-scrub');
@@ -1750,15 +1750,42 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
 async function isStreetLevelHoldRow(conn, row) {
   try {
     if (!row?.id || !row.source_call_log_id || !isPendingOutboundReviewBooking(row)) return false;
-    const card = await conn('triage_items')
-      .where({ call_log_id: row.source_call_log_id, reason_code: 'outbound_booking_review' })
-      .whereRaw("payload->>'street_level_address' = 'true'")
-      .whereRaw("payload->>'scheduled_service_id' = ?", [String(row.id)])
-      .first('id');
+    const card = await findStreetLevelHoldCard(conn, { callLogId: row.source_call_log_id, visitId: row.id });
     return !!card;
   } catch (err) {
     logger.warn(`[call-proc] street-level hold lookup failed for ${row?.id}: ${err.message}`);
     return true;
+  }
+}
+// Re-opens a street-level hold's review card when a recording replacement
+// superseded it: copies the latest card for the visit (payload, summary, severity)
+// as a fresh open card. No-op when an open card stands. Best-effort: the visit,
+// the bell and the durable signal (the resolved card) all survive a miss.
+async function refileStreetLevelReviewCard(visit, callLogId, conn = db) {
+  try {
+    const card = await findStreetLevelHoldCard(conn, { callLogId: visit.source_call_log_id, visitId: visit.id });
+    if (!card || ['open', 'in_progress'].includes(card.status)) return false;
+    const { buildTriageItem } = require('./call-routing-gates');
+    const fresh = buildTriageItem({
+      callLogId: visit.source_call_log_id || callLogId,
+      flag: 'outbound_booking_review',
+      extraction: { meta: { call_summary: card.summary || null } },
+      severity: 'advisory',
+      extraPayload: card.payload,
+    });
+    const inserted = await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, fresh.call_log_id);
+      const rows = await trx('triage_items')
+        .insert(fresh)
+        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore()
+        .returning('id');
+      if (rows.length) await syncCallReviewStatus(trx, fresh.call_log_id);
+      return rows.length > 0;
+    });
+    return inserted;
+  } catch (err) {
+    logger.warn(`[call-proc] street-level review card re-file failed for visit ${visit?.id}: ${err.code || err.name || 'error'}`);
+    return false;
   }
 }
 function dateOnlyISO(v) {
@@ -2076,6 +2103,7 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION, isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
+const { findStreetLevelHoldCard } = require('./street-level-hold');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -7982,6 +8010,15 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
       await recordVerdict(call.id, spamVerdictResult);
     }
     if (isEnabled('callDispositionV1')) {
+      // A street-level hold is booked only once the office confirms. The pending
+      // state was decided earlier in the pass, so re-read the visit HERE, in the
+      // final writer: staff may already have confirmed it (their compare-and-swap
+      // found no pending disposition to flip yet).
+      let appointmentPendingReview = appointmentResult?.pendingOfficeReview === true;
+      if (appointmentPendingReview) {
+        const visit = await db('scheduled_services').where({ id: appointmentResult.scheduledServiceId }).first('customer_confirmed');
+        if (visit?.customer_confirmed === true) appointmentPendingReview = false;
+      }
       const { disposition, reason } = decideDisposition({
         extraction: v2ForDisposition,
         legacy: extracted,
@@ -7989,12 +8026,23 @@ async function applyZeroTriageLayers({ call, callSid, contactPhone, extracted, v
         outcome: {
           appointmentCreated: !!appointmentResult?.scheduledServiceId,
           // A street-level address hold is booked only once the office confirms.
-          appointmentPendingReview: appointmentResult?.pendingOfficeReview === true,
+          appointmentPendingReview,
           customerId: customerId || null,
           isKnownCustomer: !!call.customer_id || !!customerId,
         },
       });
       await writeCallDisposition({ callId: call.id, disposition, reason, callSid });
+      // ...and once more after the write: a confirm that landed between the read
+      // and the write found nothing to flip, so flip it now (compare-and-swap on
+      // the pending value we just wrote).
+      if (appointmentPendingReview) {
+        const after = await db('scheduled_services').where({ id: appointmentResult.scheduledServiceId }).first('customer_confirmed');
+        if (after?.customer_confirmed === true) {
+          await writeCallDisposition({
+            callId: call.id, priorDisposition: disposition, disposition: 'booked', reason: 'appointment_confirmed_by_office', callSid,
+          });
+        }
+      }
     }
     if (customerId) {
       await enrichFromCall({ customerId, extraction: v2ForDisposition, legacy: extracted, callCreatedAt: call.created_at });
@@ -17852,6 +17900,10 @@ const CallRecordingProcessor = {
               // voice agent) keeps its exact prior behavior.
               if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {
                 pendingOfficeReview = true;
+                // A recording replacement / adoption supersedes (resolves) the review
+                // card while the visit stays pending; the reprocess reuses the visit,
+                // so put the office's card back (same payload, follow_up_plan included).
+                await refileStreetLevelReviewCard(svc, call.id);
                 if (v2StreetLevelHold) {
                   try {
                     const alert = buildStreetLevelHoldAlert({
@@ -21570,6 +21622,7 @@ CallRecordingProcessor._test = {
   streetLevelVisitLink,
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
+  refileStreetLevelReviewCard,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,

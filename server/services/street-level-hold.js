@@ -44,4 +44,26 @@ async function isStreetLevelHoldVisit(scheduledServiceId, conn = db) {
   }
 }
 
-module.exports = { heldVisitSubquery, isStreetLevelHoldVisit };
+function parsePayload(v) {
+  if (v && typeof v === 'object') return v;
+  try { const o = JSON.parse(v); return o && typeof o === 'object' ? o : null; } catch { return null; }
+}
+
+// The LATEST street-level review card for this visit, whatever its status: a
+// recording replacement / adoption supersedes (resolves) the card while the
+// visit stays pending, so every reader of the hold (the reuse checks, the
+// confirm hook's follow-up and disposition legs) keys off the visit's card, not
+// its open state. Returns { id, status, payload, summary } or null.
+async function findStreetLevelHoldCard(conn, { callLogId, visitId }) {
+  if (!callLogId || !visitId) return null;
+  const card = await conn('triage_items')
+    .where({ call_log_id: callLogId, reason_code: 'outbound_booking_review' })
+    .whereRaw("COALESCE(payload->>'street_level_address', '') = 'true'")
+    .whereRaw("payload->>'scheduled_service_id' = ?", [String(visitId)])
+    .orderBy('created_at', 'desc')
+    .first('id', 'status', 'payload', 'summary');
+  if (!card) return null;
+  return { ...card, payload: parsePayload(card.payload) || {} };
+}
+
+module.exports = { heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard };

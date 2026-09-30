@@ -19,6 +19,7 @@ const {
   streetLevelVisitLink,
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
+  refileStreetLevelReviewCard,
 } = CallRecordingProcessor._test;
 
 const GATE = 'GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL';
@@ -600,7 +601,7 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
 
   test('isStreetLevelHoldRow: only a pending office-review row with the flagged card; fails closed on error', async () => {
     const row = { id: 'v1', source_call_log_id: 'c1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false };
-    const conn = (found) => () => ({ where() { return this; }, whereRaw() { return this; }, first: async () => (found ? { id: 't1' } : undefined) });
+    const conn = (found) => () => ({ where() { return this; }, whereRaw() { return this; }, orderBy() { return this; }, first: async () => (found ? { id: 't1', status: 'open', payload: {} } : undefined) });
     expect(await isStreetLevelHoldRow(conn(true), row)).toBe(true);
     expect(await isStreetLevelHoldRow(conn(false), row)).toBe(false);         // a plain voice-agent row
     expect(await isStreetLevelHoldRow(conn(true), { ...row, status: 'confirmed' })).toBe(false);
@@ -683,5 +684,41 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(s).toMatch(/street_level_address_review: 'web-form address: Google matched only the street/);
     // Gate off: buildStreetLevelHold is null (no knownCaller.onFileStreetLevel), so nothing is pushed.
     expect(buildStreetLevelHold({ knownCaller: { addressLine1: '1 X St' }, routingResult: { usesOnFileAddress: true } })).toBeNull();
+  });
+
+  test('r11 recording replacement: the superseded card is re-filed open on the reprocess (same payload, follow_up_plan included); an open card stands', async () => {
+    const visit = { id: 'v-1', source_call_log_id: 'call-1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false };
+    const plan = { scheduled_date: '2026-10-19', window_start: '09:00' };
+    const make = (card) => {
+      const inserts = [];
+      const q = (table) => {
+        const b = {
+          where() { return b; }, whereRaw() { return b; }, orderBy() { return b; }, whereIn() { return b; }, count() { return b; },
+          first: async () => (table === 'triage_items' && b._count ? { n: 1 } : card),
+          insert(row) { inserts.push(row); return b; },
+          onConflict() { return b; }, ignore() { return b; },
+          returning: async () => [{ id: 'new-card' }],
+          update: async () => 1,
+        };
+        return b;
+      };
+      q.raw = async () => ({ rows: [{}] });
+      q.transaction = async (fn) => fn(q);
+      return { conn: q, inserts };
+    };
+    const superseded = { id: 't-old', status: 'resolved', summary: 'Web-form address x', payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'v-1', lead_id: 'lead-1', follow_up_plan: plan } };
+    const a = make(superseded);
+    expect(await refileStreetLevelReviewCard(visit, 'call-1', a.conn)).toBe(true);
+    expect(a.inserts).toHaveLength(1);
+    expect(a.inserts[0].reason_code).toBe('outbound_booking_review');
+    expect(JSON.stringify(a.inserts[0].payload)).toContain('follow_up_plan');
+    expect(JSON.stringify(a.inserts[0].payload)).toContain('lead-1');
+    // An open card stands; no card at all files nothing.
+    const b = make({ ...superseded, status: 'open' });
+    expect(await refileStreetLevelReviewCard(visit, 'call-1', b.conn)).toBe(false);
+    expect(b.inserts).toHaveLength(0);
+    expect(await refileStreetLevelReviewCard(visit, 'call-1', make(undefined).conn)).toBe(false);
+    // Wired on the reuse path, right where the hold is recognized.
+    expect(src()).toContain('await refileStreetLevelReviewCard(svc, call.id);');
   });
 });

@@ -86,44 +86,50 @@ describe('the routes keep the hold out of generic verdicts and single-card actio
 describe('office confirm files the deferred follow-up as the owed follow-up card', () => {
   const svc = { id: 'visit-1', source_call_log_id: 'call-1' };
   const plan = { scheduled_date: '2026-10-19', window_start: '09:00' };
-  const make = ({ payload, child = null, handled = null }) => {
+  // A fake trx: the visit's latest street-level card (any status), child visits, handled owed cards.
+  const make = ({ card, child = null, handled = null }) => {
     const inserts = [];
     const trx = (table) => {
       const q = {
-        _t: table,
-        where() { return q; }, whereIn() { return q; }, orderBy() { return q; },
+        _reason: null,
+        where(arg) { if (arg && arg.reason_code) q._reason = arg.reason_code; return q; },
+        whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; },
         first: async () => {
-          if (table === 'triage_items' && q._reason === 'outbound_booking_review') return { payload };
+          if (table === 'triage_items' && q._reason === 'outbound_booking_review') return card;
           if (table === 'scheduled_services') return child;
           return handled;
         },
         insert(row) { inserts.push({ table, row }); return q; },
         onConflict() { return q; }, merge: async () => [],
       };
-      const w = q.where;
-      q.where = (arg, ...rest) => { if (arg && arg.reason_code) q._reason = arg.reason_code; return w(arg, ...rest); };
       return q;
     };
     trx.raw = (s) => s;
     return { trx, inserts };
   };
-  const heldPayload = (extra = {}) => ({ origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1', follow_up_plan: plan, ...extra });
+  const heldCard = (status, extra = {}) => ({ id: 't1', status, summary: 'x', payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1', follow_up_plan: plan, ...extra } });
 
   test('a confirmed street-level hold with a promised follow-up files attached_booking_followup_unbooked carrying the plan', async () => {
-    const { trx, inserts } = make({ payload: heldPayload() });
+    const { trx, inserts } = make({ card: heldCard('open') });
     expect(await fileOwedFollowUpForStreetLevelHold(trx, svc)).toBe(true);
     expect(inserts).toHaveLength(1);
     expect(inserts[0].row.reason_code).toBe('attached_booking_followup_unbooked');
     expect(JSON.stringify(inserts[0].row.payload)).toContain('2026-10-19');
     expect(JSON.stringify(inserts[0].row.payload)).toContain('street_level_address_confirmed_follow_up_unbooked');
   });
-  test('idempotent and scoped: nothing without a plan, for another visit, a plain voice card, an existing child, or a handled card', async () => {
+  test('recording replacement path: the card was superseded (resolved) but the plan still files on confirm', async () => {
+    for (const status of ['resolved', 'dismissed']) {
+      const { trx, inserts } = make({ card: heldCard(status) });
+      expect(await fileOwedFollowUpForStreetLevelHold(trx, svc)).toBe(true);
+      expect(inserts).toHaveLength(1);
+    }
+  });
+  test('idempotent and scoped: nothing without a plan, no street-level card, an existing child, or a handled card', async () => {
     for (const opts of [
-      { payload: heldPayload({ follow_up_plan: undefined }) },
-      { payload: heldPayload({ scheduled_service_id: 'other' }) },
-      { payload: heldPayload({ street_level_address: undefined }) },
-      { payload: heldPayload(), child: { id: 'child-1' } },
-      { payload: heldPayload(), handled: { id: 'done' } },
+      { card: heldCard('open', { follow_up_plan: undefined }) },
+      { card: undefined },
+      { card: heldCard('open'), child: { id: 'child-1' } },
+      { card: heldCard('open'), handled: { id: 'done' } },
     ]) {
       const { trx, inserts } = make(opts);
       expect(await fileOwedFollowUpForStreetLevelHold(trx, svc)).toBe(false);
@@ -135,5 +141,37 @@ describe('office confirm files the deferred follow-up as the owed follow-up card
     const file = s.indexOf('await fileOwedFollowUpForStreetLevelHold(trx, svc);');
     expect(file).toBeGreaterThan(0);
     expect(file).toBeLessThan(s.indexOf("status: 'resolved', updated_at: trx.fn.now()", file));
+  });
+  test('the confirm closes the call-level review state under the same lock, via the shared aggregate', () => {
+    const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
+    const resolve = s.indexOf("status: 'resolved', updated_at: trx.fn.now()");
+    const sync = s.indexOf('await syncCallReviewStatus(trx, svc.source_call_log_id);', resolve);
+    expect(sync).toBeGreaterThan(resolve);
+    expect(sync).toBeLessThan(s.indexOf('} catch (e) { coreLegsOk = false; logger.error(`[${routeTag}] outbound-review triage resolve failed', sync));
+    expect(s.indexOf('await lockTriageCall(trx, svc.source_call_log_id);')).toBeLessThan(resolve);
+  });
+});
+
+describe('syncCallReviewStatus (shared aggregate)', () => {
+  const { syncCallReviewStatus } = require('../utils/triage-locks');
+  const make = (n) => {
+    const updates = [];
+    const trx = (table) => {
+      const q = {
+        where() { return q; }, whereIn() { return q; }, count() { return q; },
+        first: async () => ({ n }),
+        update: async (u) => { updates.push({ table, u }); return 1; },
+      };
+      return q;
+    };
+    return { trx, updates };
+  };
+  test('closes the call when no card is left open, keeps it open otherwise', async () => {
+    const closed = make(0);
+    expect(await syncCallReviewStatus(closed.trx, 'call-1')).toBe('resolved');
+    expect(closed.updates[0].u).toMatchObject({ review_status: 'resolved' });
+    const open = make('2');
+    expect(await syncCallReviewStatus(open.trx, 'call-1')).toBe('open');
+    expect(open.updates[0].u).toMatchObject({ review_status: 'open' });
   });
 });

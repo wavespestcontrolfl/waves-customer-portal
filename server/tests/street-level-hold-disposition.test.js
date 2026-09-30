@@ -27,18 +27,33 @@ describe('decideDisposition', () => {
 describe('the processor passes the pending-review state', () => {
   const src = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
   test('applyZeroTriageLayers hands appointmentPendingReview to the decision, set only on the street-level pending branch', () => {
-    expect(src).toContain("appointmentPendingReview: appointmentResult?.pendingOfficeReview === true,");
+    expect(src).toContain('          appointmentPendingReview,\n');
     const at = src.indexOf("smsBlockedReason: 'outbound_booking_review', pendingOfficeReview: true");
     expect(at).toBeGreaterThan(src.lastIndexOf('if (scheduledServiceId && pendingOfficeReview) {') - 1);
+  });
+  test('fast office confirm: the final writer re-reads the visit (confirmed -> booked) before AND after it writes the pending value', () => {
+    const start = src.indexOf('let appointmentPendingReview = appointmentResult?.pendingOfficeReview === true;');
+    expect(start).toBeGreaterThan(0);
+    const block = src.slice(start, start + 2600);
+    // Before: a visit already confirmed is decided as booked, not pending.
+    expect(block).toMatch(/if \(visit\?\.customer_confirmed === true\) appointmentPendingReview = false;/);
+    expect(block.indexOf('customer_confirmed === true) appointmentPendingReview = false')).toBeLessThan(block.indexOf('decideDisposition({'));
+    // After: a confirm that landed between the read and the write is flipped by compare-and-swap.
+    const write = block.indexOf('await writeCallDisposition({ callId: call.id, disposition, reason, callSid });');
+    expect(write).toBeGreaterThan(0);
+    const after = block.indexOf("if (after?.customer_confirmed === true) {", write);
+    expect(after).toBeGreaterThan(write);
+    expect(block.slice(after, after + 300)).toContain("priorDisposition: disposition, disposition: 'booked'");
   });
 });
 
 describe('office confirm stamps booked', () => {
+  const heldCard = (status, extra = {}) => ({ id: 't1', status, payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1', ...extra } });
   const make = ({ card, stamped = 1 }) => {
     const updates = [];
     const trx = (table) => {
       const q = {
-        where(arg) { q._where = arg; return q; }, whereIn() { return q; }, orderBy() { return q; },
+        where(arg) { q._where = arg; return q; }, whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; },
         first: async () => card,
         update: async (u) => { updates.push({ table, where: q._where, u }); return stamped; },
       };
@@ -49,21 +64,24 @@ describe('office confirm stamps booked', () => {
   const svc = { id: 'visit-1', source_call_log_id: 'call-1' };
 
   test('a confirmed street-level hold flips lead_response_flow_triggered to booked (compare-and-swap on that value)', async () => {
-    const { trx, updates } = make({ card: heldCard() });
+    const { trx, updates } = make({ card: heldCard('open') });
     expect(await stampBookedDispositionForStreetLevelHold(trx, svc)).toBe(true);
     expect(updates).toHaveLength(1);
     expect(updates[0].where).toEqual({ id: 'call-1', disposition: 'lead_response_flow_triggered' });
     expect(updates[0].u).toMatchObject({ disposition: 'booked' });
   });
-  test('scoped: nothing for a plain voice-agent card, another visit, or a card that is gone', async () => {
-    for (const card of [heldCard({ street_level_address: undefined }), heldCard({ scheduled_service_id: 'other' }), undefined]) {
-      const { trx, updates } = make({ card });
-      expect(await stampBookedDispositionForStreetLevelHold(trx, svc)).toBe(false);
-      expect(updates).toHaveLength(0);
-    }
+  test('recording replacement: a superseded (resolved) card still identifies the hold', async () => {
+    const { trx, updates } = make({ card: heldCard('resolved') });
+    expect(await stampBookedDispositionForStreetLevelHold(trx, svc)).toBe(true);
+    expect(updates).toHaveLength(1);
+  });
+  test('scoped: nothing when the visit has no street-level card', async () => {
+    const { trx, updates } = make({ card: undefined });
+    expect(await stampBookedDispositionForStreetLevelHold(trx, svc)).toBe(false);
+    expect(updates).toHaveLength(0);
   });
   test('a call whose disposition is something else (a human tag, a reprocess) is left alone', async () => {
-    const { trx } = make({ card: heldCard(), stamped: 0 });
+    const { trx } = make({ card: heldCard('open'), stamped: 0 });
     expect(await stampBookedDispositionForStreetLevelHold(trx, svc)).toBe(false);
   });
   test('runs inside the card-resolve transaction, before the review card is resolved; gate off is a no-op', () => {
