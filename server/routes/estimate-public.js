@@ -26915,13 +26915,17 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
       // consent, DNC, identity ...): answered with one generic 409 that names
       // no reason, and never retried.
       const withheldByOffer = cmResult?.code === 'ANNUAL_OFFER_WITHHELD';
+      // A lookup/infra failure inside the chain (CONSENT_LOOKUP_FAILED carries
+      // no retryable flag) is transient, never a verdict on the number: it
+      // keeps the retryable 502, not the permanent 409.
+      const transientRefusal = /_(LOOKUP_)?FAILED$|_UNAVAILABLE$/.test(String(cmResult?.code || ''));
       const smsSendResult = {
         success: cmResult?.sent === true,
         deduped: cmResult?.deduped === true ? true : undefined,
         code: cmResult?.code,
         withheld: withheldByOffer || undefined,
         policyBlocked: cmResult?.sent !== true && cmResult?.blocked === true
-          && !withheldByOffer && cmResult?.retryable !== true,
+          && !withheldByOffer && !transientRefusal && cmResult?.retryable !== true,
       };
       // Codex round 3 on #4608 (P0): the durable stamp for the annual-offer
       // withhold, resolved as a coded refusal rather than a throw.

@@ -80,7 +80,7 @@ function makeDb() {
   const db = jest.fn((table) => {
     fixtures.tablesTouched.add(table);
     if (table === 'estimates') return chain(() => ({ ...fixtures.estimate }));
-    if (table === 'notification_prefs') return chain(() => fixtures.prefs);
+    if (table === 'notification_prefs') return chain(() => (typeof fixtures.prefs === 'function' ? fixtures.prefs() : fixtures.prefs));
     if (table === 'customers') return chain(() => fixtures.customer);
     if (table === 'messaging_suppression') return chain(() => fixtures.suppression);
     if (table === 'sms_send_claims') {
@@ -265,6 +265,19 @@ describe('B01: service-details SMS honors the suppression store and sms_enabled'
       jest.useRealTimers();
       gates.isEnabled.mockImplementation((key) => actualIsEnabled(key));
     }
+  });
+
+  test('a consent lookup failure is transient: retryable 502, never the permanent 409', async () => {
+    const TwilioService = require('../services/twilio');
+    fixtures.prefs = () => { throw new Error('connection terminated'); };
+    const res = await post();
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ ok: false, error: 'Text could not be sent right now.' });
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    const { persistAudit } = require('../services/messaging/audit');
+    expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
+      blockedBy: expect.objectContaining({ code: 'CONSENT_LOOKUP_FAILED' }),
+    }));
   });
 
   test('a provider failure after the policy chain passes stays the retryable 502, not the 409', async () => {
