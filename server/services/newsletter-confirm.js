@@ -42,8 +42,13 @@ const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
 // 20260927000150), NOT on customers — querying it there is a 42703 that would
 // veto every confirmation. Same split as email-bounce-recovery's
 // CUSTOMER_EMAIL_FIELDS + its separate notification_prefs read.
-const CUSTOMER_EMAIL_FIELDS = require('../utils/customer-comms-lock').CUSTOMER_EMAIL_COLUMNS
-  .filter((column) => column !== 'billing_email');
+// Resolved at call time, not module load: callers that mock
+// customer-comms-lock without the constant must still be able to load this
+// module (voice-relay-booking's real-surface check).
+function customerEmailFields() {
+  return require('../utils/customer-comms-lock').CUSTOMER_EMAIL_COLUMNS
+    .filter((column) => column !== 'billing_email');
+}
 
 class ConfirmationVetoedError extends Error {
   constructor(reason) {
@@ -172,7 +177,7 @@ async function assertConfirmationAllowed(subscriber, dbh = db, { ownershipWaitMs
           if (mailboxName) this.orWhereRaw(`(${GOOGLE(col)} AND ${CANON(col)} = ?)`, [mailboxName]);
         }
       };
-      const profiles = await sp('customers').where(sameMailbox(CUSTOMER_EMAIL_FIELDS)).select('id');
+      const profiles = await sp('customers').where(sameMailbox(customerEmailFields())).select('id');
       for (const row of profiles || []) customerIds.add(row.id);
       const prefs = await sp('notification_prefs').where(sameMailbox(['billing_email'])).select('customer_id');
       for (const row of prefs || []) if (row.customer_id) customerIds.add(row.customer_id);
