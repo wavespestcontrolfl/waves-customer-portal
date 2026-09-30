@@ -224,6 +224,55 @@ function isCommercialAutoEstimate(estimate = {}) {
   return recurringRows.some(isCommercialSvc);
 }
 
+// The estimate columns the page's slot gate reads (slotBrowseRefusal).
+const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest'];
+
+// Everything GET /:token/available-slots can answer with INSTEAD of slots —
+// the estimate is refused, terminal, or not self-schedulable (commercial,
+// invoice-only renewal, trenching review). null = the page browses slots.
+// Also the texting AI's gate (offerableEstimateSlots): it offers an estimate
+// time only when this page would.
+async function slotBrowseRefusal(estimate) {
+  let refusal = null;
+  const sink = { status(status) { return { json(body) { refusal = { status, body }; return refusal; } }; } };
+  if (await rejectCallSideBlockedEstimate(sink, estimate) || rejectIneligibleEstimate(sink, estimate)) return refusal;
+  if (isCommercialAutoEstimate(estimate)) {
+    return {
+      status: 200,
+      body: {
+        primary: [], expander: [], availableSlots: [], summary: null,
+        commercialManualScheduling: true,
+        message: 'A Waves team member will reach out to schedule your commercial service.',
+      },
+    };
+  }
+  // A guarantee-only renewal accepts through the payment-only invoice path —
+  // there is NO visit to book, so the slot picker never renders. Return the
+  // empty no-booking shape (mirroring the accept-time gate) so a crafted or
+  // stale client can't browse slots for an estimate whose accept takes none.
+  if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+    return {
+      status: 200,
+      body: {
+        primary: [], expander: [], availableSlots: [], summary: null,
+        invoiceOnlyAcceptance: true,
+        message: 'No appointment is needed — this renewal is accepted with an invoice.',
+      },
+    };
+  }
+  if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
+    return {
+      status: 200,
+      body: {
+        primary: [], expander: [], availableSlots: [], summary: null,
+        reviewBeforeBooking: true,
+        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
+      },
+    };
+  }
+  return null;
+}
+
 router.get('/:token/available-slots', async (req, res) => {
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
@@ -233,39 +282,12 @@ router.get('/:token/available-slots', async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first(...SLOT_ESTIMATE_COLUMNS);
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
-    if (callBlocked) return callBlocked;
-    const ineligible = rejectIneligibleEstimate(res, estimate);
-    if (ineligible) return ineligible;
-    if (isCommercialAutoEstimate(estimate)) {
-      return res.json({
-        primary: [], expander: [], availableSlots: [], summary: null,
-        commercialManualScheduling: true,
-        message: 'A Waves team member will reach out to schedule your commercial service.',
-      });
-    }
-    // A guarantee-only renewal accepts through the payment-only invoice path —
-    // there is NO visit to book, so the slot picker never renders. Return the
-    // empty no-booking shape (mirroring the accept-time gate) so a crafted or
-    // stale client can't browse slots for an estimate whose accept takes none.
-    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
-      return res.json({
-        primary: [], expander: [], availableSlots: [], summary: null,
-        invoiceOnlyAcceptance: true,
-        message: 'No appointment is needed — this renewal is accepted with an invoice.',
-      });
-    }
-    if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
-      return res.json({
-        primary: [], expander: [], availableSlots: [], summary: null,
-        reviewBeforeBooking: true,
-        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
-      });
-    }
+    const refusal = await slotBrowseRefusal(estimate);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
@@ -1006,4 +1028,22 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
   }
 });
 
+// The slots the estimate page would show for one estimate, for the texting
+// AI's OPEN TIMES (sms-shadow-drafter): the SAME gate (slotBrowseRefusal) and
+// the same getAvailableSlots the page's GET runs (default window, the page's
+// default service mode), so an offered time is one /reserve would take. null
+// when the estimate is not this customer's, or the page would show none.
+async function offerableEstimateSlots(estimateId, customerId) {
+  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id');
+  if (!estimate || !customerId || String(estimate.customer_id) !== String(customerId)) return null;
+  if (await slotBrowseRefusal(estimate)) return null;
+  try {
+    return await getAvailableSlots(estimate.id, { serviceMode: resolveSlotServiceMode(estimate, '') });
+  } catch (err) {
+    if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) return null;
+    throw err;
+  }
+}
+
 module.exports = router;
+module.exports._internals = { offerableEstimateSlots };

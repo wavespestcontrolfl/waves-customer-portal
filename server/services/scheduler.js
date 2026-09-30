@@ -4359,6 +4359,10 @@ function initScheduledJobs() {
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
                       ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
                       ...(openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: openTimesSnapshot.lookup.scheduledServiceId } : {}),
+                      // Which picker minted the offer, and what it needs to be asked again
+                      // (GATE_SMS_OFFERS_SCHEDULER): absent on a legacy snapshot.
+                      ...(openTimesSnapshot.lookup?.source ? { source: openTimesSnapshot.lookup.source } : {}),
+                      ...(openTimesSnapshot.lookup?.serviceKey ? { serviceKey: openTimesSnapshot.lookup.serviceKey } : {}),
                       quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {

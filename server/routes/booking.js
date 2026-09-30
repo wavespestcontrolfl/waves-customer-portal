@@ -2000,6 +2000,55 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   };
 }
 
+// The /book funnel's default offer window — anchored to ET calendar days so it
+// doesn't shift by a day between 8 PM ET and midnight UTC — and the 90-day
+// horizon a caller-supplied range is clamped to.
+function bookingOfferWindow(config, today) {
+  return {
+    minDate: etDateString(addETDays(today, config.advance_days_min ?? 1)),
+    maxDate: etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS)),
+    defaultTo: etDateString(addETDays(today, config.advance_days_max ?? 14)),
+  };
+}
+
+// The /book funnel's offer builder — GET /availability, POST /find-slots and
+// the texting AI's OPEN TIMES (availabilityForExistingCustomer) all offer
+// through it, so an offer and its later createSelfBooking commit come from
+// one finder. Self-serve surface: the notice window is enforced (owner ruling
+// 2026-09-23). /confirm's commit for this funnel is createSelfBooking, which
+// (while bookInsertionOffersLive() is live) re-verifies with traffic and
+// persists the certified route order — see the comment on capacityPlacement
+// inside buildBookingAvailability. The minted offer carries a signed policy
+// tag either way, so a gate flip between this mint and /confirm can't be
+// redeemed under the wrong policy.
+function buildFunnelAvailability(args) {
+  return buildBookingAvailability({ ...args, selfServeNotice: true, capacityPlacement: bookInsertionOffersLive() });
+}
+
+// What the /book funnel would offer an EXISTING customer for one funnel
+// service (GET /availability with no date range: the customer's own booking
+// pin, the service's catalog duration, the default window) — null when there
+// is nothing to commit against: /book off, no funnel service (createSelfBooking
+// refuses an empty serviceKey), the customer gone, or no resolvable pin (no
+// coordinates and no geocodable address, or a staff review holding it).
+async function availabilityForExistingCustomer({ customerId, serviceKey }) {
+  const funnelKey = normalizeBookingServiceKey(serviceKey);
+  if (!customerId || !funnelKey) return null;
+  const { isEnabled } = require('../config/feature-gates');
+  if (!isEnabled('selfBooking')) return null;
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at')
+    .first('id', 'account_id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  const location = customer ? await customerBookingLocation(customer) : null;
+  if (!location) return null;
+  const config = await loadBookingConfig();
+  const today = new Date();
+  const { minDate, defaultTo } = bookingOfferWindow(config, today);
+  return buildFunnelAvailability({
+    lat: location.lat, lng: location.lng, duration: resolveBookingDuration(null, config, funnelKey),
+    rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
+  });
+}
+
 // GET /api/booking/availability
 //   query: lat, lng, address, city, state, zip, unit, estimate_id,
 //          service_type, duration_minutes, date_from, date_to
@@ -2037,14 +2086,10 @@ router.get('/availability', async (req, res, next) => {
       return res.status(400).json({ error: 'address, lat/lng, or city required' });
     }
 
-    // Default date window from config — anchored to ET calendar days so the
-    // window doesn't shift by a day between 8 PM ET and midnight UTC. A
-    // caller-supplied range is honored but clamped to the 90-day horizon so a
+    // A caller-supplied range is honored but clamped to the 90-day horizon so a
     // "Find more dates" / specific-date request can reach further out.
     const today = new Date();
-    const minDate = etDateString(addETDays(today, config.advance_days_min ?? 1));
-    const maxDate = etDateString(addETDays(today, MAX_BOOKING_HORIZON_DAYS));
-    const defaultTo = etDateString(addETDays(today, config.advance_days_max ?? 14));
+    const { minDate, maxDate, defaultTo } = bookingOfferWindow(config, today);
     const clamp = (d, fallback) => {
       if (!d) return fallback;
       if (d < minDate) return minDate;
@@ -2062,22 +2107,12 @@ router.get('/availability', async (req, res, next) => {
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration, rangeFrom, rangeTo, config, today,
       // "expand=open" widens otherwise-empty days into full hourly windows — used
       // when the customer browses a specific date / "Find more dates".
       expandOpenDays: req.query.expand === 'open',
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
-      // /confirm's own commit for this funnel is createSelfBooking, which
-      // (while bookInsertionOffersLive() is live) re-verifies with traffic
-      // and persists the certified route order — see the comment on
-      // capacityPlacement inside buildBookingAvailability. The minted offer
-      // carries a signed policy tag either way (below), so a gate flip
-      // between this mint and /confirm can't be redeemed under the wrong
-      // policy.
-      capacityPlacement: bookInsertionOffersLive(),
     });
 
     // Coords the caller didn't already hold (estimate_id → customer record,
@@ -2176,17 +2211,12 @@ router.post('/find-slots', findSlotsLimiter, findSlotsHourlyLimiter, async (req,
     const serviceKey = normalizeBookingServiceKey(service_type);
     const duration = resolveBookingDuration(duration_minutes, config, serviceKey);
 
-    const availability = await buildBookingAvailability({
+    const availability = await buildFunnelAvailability({
       lat: resolvedLat, lng: resolvedLng, duration,
       rangeFrom: when.dateFrom, rangeTo: when.dateTo, config, today,
       timeOfDay: when.timeOfDay,
       expandOpenDays: true,
       serviceKey,
-      // Self-serve surface — enforce the notice window (owner ruling 2026-09-23).
-      selfServeNotice: true,
-      // Same /confirm commit (createSelfBooking) as /availability — see the
-      // comment there and on capacityPlacement inside buildBookingAvailability.
-      capacityPlacement: bookInsertionOffersLive(),
     });
 
     const slotCount = (availability.days || []).reduce((n, d) => n + (Array.isArray(d.slots) ? d.slots.length : 0), 0);
@@ -6577,23 +6607,19 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
       const serviceKey = normalizeBookingServiceKey(b.service_id)
         || normalizeBookingServiceKey(b.service_type)
         || normalizeBookingServiceKey(b.quoted_service_label);
-      const avail = await buildBookingAvailability({
+      // The /book funnel's own builder (buildFunnelAvailability): a slot the
+      // notice window would now refuse must not be treated as still offered,
+      // and this re-checks a slot /availability or /find-slots already
+      // offered, so it must use the SAME capacityPlacement value those used
+      // (offer/commit parity). This route never redeems a slot_sig itself
+      // (capture-intent only stages a recovery row), so the mismatch protection
+      // here is offer/commit parity, not the signed policy tag.
+      const avail = await buildFunnelAvailability({
         lat, lng,
         duration: cfg.slot_duration_minutes || 60,
         rangeFrom: row.slot_date, rangeTo: row.slot_date,
         config: cfg, today: new Date(), expandOpenDays: true,
         serviceKey,
-        // Self-serve surface — a slot the notice window would now refuse
-        // must not be treated as still offered (offer/commit parity).
-        selfServeNotice: true,
-        // This re-checks a slot /availability or /find-slots already
-        // offered, so it must use the SAME capacityPlacement value those
-        // used, or a genuinely still-offered inserted slot would revalidate
-        // as unavailable (offer/commit parity). This route never redeems a
-        // slot_sig itself (capture-intent only stages a recovery row), so
-        // the mismatch protection here is offer/commit parity, not the
-        // signed policy tag below.
-        capacityPlacement: bookInsertionOffersLive(),
       });
       const day = (avail.days || []).find((d) => String(d.date).slice(0, 10) === row.slot_date);
       const offered = !!day && Array.isArray(day.slots)
@@ -6811,6 +6837,7 @@ module.exports._internals = {
   resolveOfferCoords,
   customerBookingLocation,
   buildBookingAvailability,
+  availabilityForExistingCustomer,
   bookingExpectedMinutes,
   loadBookingConfig,
   createSelfBooking,

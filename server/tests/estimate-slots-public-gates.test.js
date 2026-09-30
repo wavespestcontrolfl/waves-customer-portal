@@ -336,3 +336,49 @@ describe('bermuda-suppression money/slot gate', () => {
     expect(slots.status).not.toBe(409);
   });
 });
+
+// The texting AI's OPEN TIMES for an estimate (GATE_SMS_OFFERS_SCHEDULER, sms-shadow-drafter):
+// offered only when THIS page's GET would browse slots, and only for the
+// context customer's own estimate.
+describe('offerableEstimateSlots — the page picker, for the texting AI', () => {
+  const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+  const OWN = { id: 'est-1', customer_id: 'cust-1', status: 'sent', expires_at: null, archived_at: null };
+  const SLOTS = { primary: [{ date: '2027-05-20', windowStart: '09:00' }], expander: [] };
+
+  test('the customer\'s own viewable estimate: the same getAvailableSlots the page runs, default window + the page\'s service mode', async () => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockResolvedValue(SLOTS);
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBe(SLOTS);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({ serviceMode: expect.any(String) }));
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('windowDays');
+    expect(lastFirstArgs).toContain('customer_id');
+  });
+
+  test('another customer\'s estimate, or no customer, is never offered — the picker is not even asked', async () => {
+    currentEstimate = OWN;
+    await expect(offerableEstimateSlots('est-1', 'cust-2')).resolves.toBeNull();
+    await expect(offerableEstimateSlots('est-1', null)).resolves.toBeNull();
+    currentEstimate = null;
+    await expect(offerableEstimateSlots('est-gone', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['archived', { archived_at: '2026-07-01T00:00:00Z' }],
+    ['draft', { status: 'draft' }],
+    ['accepted (terminal)', { status: 'accepted' }],
+    ['commercial auto-priced (team schedules it)', { estimate_data: JSON.stringify({ commercialEstimatedPricing: true }) }],
+  ])('a %s estimate — a refusal the page answers instead of slots — offers nothing', async (_label, patch) => {
+    currentEstimate = { ...OWN, ...patch };
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('the service says the estimate is expired / terminal → nothing; any other error propagates (caller fails closed)', async () => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'ESTIMATE_EXPIRED' }));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    getAvailableSlots.mockRejectedValueOnce(new Error('db down'));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).rejects.toThrow('db down');
+  });
+});

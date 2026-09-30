@@ -256,3 +256,31 @@ test('a malformed estimate_id is never queried', async () => {
     .resolves.toEqual({ lat: 27.3, lng: -82.5, disclosable: true });
   expect(db.mock.calls.map(([table]) => table)).not.toContain('estimates');
 });
+
+// The texting AI's OPEN TIMES for a new visit (GATE_SMS_OFFERS_SCHEDULER):
+// what /book would offer this customer for one funnel service, or nothing
+// when /book has nothing to commit against.
+describe('availabilityForExistingCustomer — refusals before any picker runs', () => {
+  const { availabilityForExistingCustomer } = require('../routes/booking')._internals;
+
+  test('no customer id or a service the funnel does not book (empty / rodent bait / unknown) → null with no lookup at all', async () => {
+    await expect(availabilityForExistingCustomer({ customerId: null, serviceKey: 'pest_control' })).resolves.toBeNull();
+    for (const serviceKey of ['', null, 'rodent_bait', 'termite_bait', 'nonsense']) {
+      await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey })).resolves.toBeNull();
+    }
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('/book off (the selfBooking gate) → null before the customer is even loaded', async () => {
+    jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation((gate) => gate !== 'selfBooking');
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+  });
+
+  test('customer gone, or no resolvable pin (no coordinates, address does not geocode, staff review holds it) → null', async () => {
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    firstResults.customers = customerRow();
+    jest.spyOn(geocoder, 'geocodeAddress').mockResolvedValue(null);
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'lawn_care' })).resolves.toBeNull();
+  });
+});
