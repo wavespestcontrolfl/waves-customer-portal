@@ -910,7 +910,7 @@ describe('r10: an elliptical answer to a re-entry or rain question needs the aut
 
   test('asked kind: re-entry, rain, both, or none', () => {
     expect(asked(RE_Q)).toEqual(['reentry']);
-    expect(asked('Is it ok to water?')).toEqual(['reentry']);
+    expect(asked('Is it ok to water?').sort()).toEqual(['rain', 'reentry']); // (r31: watering in a timing context asks both kinds)
     expect(asked('Is it safe for the kids to play on the lawn?')).toEqual(['reentry']);
     expect(asked(RAIN_Q)).toEqual(['rain']);
     expect(asked('Will the sprinklers wash it off?')).toEqual(expect.arrayContaining(['rain']));
@@ -1185,12 +1185,15 @@ describe('r15: a verbatim COMPANY FACTS sentence answers a watering question; it
   const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
   const [, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
   const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, asked(inbound));
-  const Q = 'What days should I water my lawn?';
+  const Q = 'What days should I water my lawn?'; // general watering advice: asks no label kind (r31)
+  const Q2 = 'Can I water the lawn now?'; // watering in a timing context: asks both kinds
   const WATERING = "Follow the county's watering days, water early in the morning, and water deeply and less often.";
   const { COMPANY_FACTS } = require('../services/sms-company-facts');
   test('the question is a label-kind question and the approved company answer passes', () => {
-    expect(asked(Q)).toEqual(expect.arrayContaining(['reentry']));
+    expect(asked(Q)).toEqual([]);
+    expect(asked(Q2).sort()).toEqual(['rain', 'reentry']);
     expect(guard(WATERING, Q)).toBe(false);
+    expect(guard(WATERING, Q2)).toBe(false); // the approved watering answer answers the timing question too
     expect(guard(WATERING.replace("'", '\u2019').toUpperCase(), Q)).toBe(false); // typography / case do not matter
     expect(guard(`Hi Jane, ${WATERING} Thanks!`, Q)).toBe(false);
     expect(guard(`${WATERING} ${reentry}`, Q)).toBe(false);
@@ -1200,7 +1203,7 @@ describe('r15: a verbatim COMPANY FACTS sentence answers a watering question; it
       for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
         // a "Label: text" line is copied as its text (the label is an instruction to the drafter, not customer wording)
         const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence)?.[1] || sentence;
-        expect([text, guard(text, Q)]).toEqual([text, false]);
+        expect([text, guard(text, Q2)]).toEqual([text, false]);
       }
     }
   });
@@ -1209,11 +1212,11 @@ describe('r15: a verbatim COMPANY FACTS sentence answers a watering question; it
       'Yes, water whenever.', `Sure! ${WATERING}`, `Yes! ${WATERING}`, `${WATERING} Go for it.`, `${WATERING} Yes, they can.`, `Go for it. ${WATERING}`,
       'Water whenever you like.', "Follow the county's watering days and water any time.", `${WATERING.replace('early in the morning', 'at noon')}`, WATERING.replace(/\.$/, ', or so.'),
       `Old info: ${WATERING}`, `${WATERING} Just kidding.`,
-    ]) expect([reply, guard(reply, Q)]).toEqual([reply, true]);
+    ]) expect([reply, guard(reply, Q2)]).toEqual([reply, true]);
   });
   test('send time: the same list (the section is static, so nothing needs snapshotting)', async () => {
     const boom = () => { throw new Error('must not read'); };
-    const send = (body) => labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked: asked(Q) }, body, conn: boom });
+    const send = (body) => labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked: asked(Q2) }, body, conn: boom });
     await expect(send(WATERING)).resolves.toBeNull();
     await expect(send('Yes, water whenever.')).resolves.toBe('label_facts_unauthorized_claim');
     await expect(send(`Sure! ${WATERING}`)).resolves.toBe('label_facts_unauthorized_claim');
@@ -1855,7 +1858,7 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
     'and a half': rep('one and a half '), 'keep off': rep('keep off '), 'keep the dogs': rep('keep the dogs '), 'wait for': rep('wait for '), 'give it a': rep('give it a '), 'let the dog': rep('let the dog '),
     'dry and': rep('dry and '), 'trigger words': rep('rain pets dogs kids lawn stay off until dry '), 'for 2 hours or': rep('for 2 hours or '), dashes: rep('- '), dots: rep('. '), commas: rep(', '), 'question marks': rep('? '),
     'let the cat': rep('let the cat '), 'go back in': rep('go back in '), 'come back inside': rep('come back inside '), 'sleep in the': rep('sleep in the '), 'use the kitchen': rep('use the kitchen '),
-    'inside house home': rep('inside house home '), 'we my kids': rep('we my kids '), 'you can come': rep('you can come '),
+    'inside house home': rep('inside house home '), 'water the': rep('water the '), 'turn the water back on': rep('turn the water back on '), 'run the sprinklers': rep('run the sprinklers '), 'water in': rep('water in the '), 'hand-off deadline': rep('Your technician will confirm the timing within the hour. '), 'we my kids': rep('we my kids '), 'you can come': rep('you can come '),
     'zero width': rep('\u200b '), apostrophes: rep("don't "), 'may in': rep('may in '), 'next fri': rep('next fri '), years: rep('in 2025 '), 'am pm': rep('9 am '), clocks: rep('9:00 '), 'by 5': rep('by 5 '), colons: rep('a: '),
   };
   const SECTION = 'LABEL FACTS (Jun 5):\n- For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas for 4 hours.\n';
@@ -1992,6 +1995,39 @@ describe('r30: indoor re-entry is a structural re-entry question', () => {
       expect([inbound, guard("I'll have the office confirm within the hour.", inbound)]).toEqual([inbound, false]);
     }
     expect(guard('Yes, we do spray inside the house.', 'do you spray inside the house')).toBe(false);
+  });
+});
+
+describe('r31: watering in a timing context asks both kinds; general watering advice asks none', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [rain, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, asked(inbound));
+  const WATERING = "Follow the county's watering days, water early in the morning, and water deeply and less often.";
+  test('watering / irrigating / sprinklers / the hose in a timing, permission, treatment or weather context asks both kinds', () => {
+    for (const text of [
+      'Can I water the lawn now?', 'Is it ok to water?', 'when can I run the sprinklers', 'can I turn the irrigation back on', 'can we water today', 'how long should I water', 'do I need to water after you fertilize',
+      'when should I water the new sod', 'can the kids play while the sprinklers run', 'can I water if it rains', 'is it safe to use the hose yet', 'should I wait to water',
+    ]) expect([text, asked(text).slice().sort()]).toEqual([text, ['rain', 'reentry']]);
+  });
+  test('general watering advice with no timing / treatment / weather context asks no label kind, so the company-fact copy answers it', () => {
+    for (const text of ['What days should I water my lawn?', 'how often should I water', 'should I water in the morning or evening', 'how do I set my sprinklers?', 'what time of day is best to water my grass']) {
+      expect([text, asked(text)]).toEqual([text, []]);
+    }
+    expect(guard(WATERING, 'What days should I water my lawn?')).toBe(false);
+    expect(guard(WATERING, 'how often should I water')).toBe(false);
+    expect(guard('Yes, water whenever.', 'What days should I water my lawn?')).toBe(false); // (not a label question: nothing to check here)
+  });
+  test('the kind-specific copy rule applies: a re-entry-only or rainfast-only copy to "Can I water now?" is held unless both copies or a hand-off', () => {
+    const Q = 'Can I water the lawn now?';
+    expect(guard(reentry, Q)).toBe(true);
+    expect(guard(rain, Q)).toBe(true);
+    expect(guard(`${rain} ${reentry}`, Q)).toBe(false);
+    expect(guard(`${reentry} Your technician will confirm the timing within the hour.`, Q)).toBe(false);
+    expect(guard(WATERING, Q)).toBe(false); // the approved company answer is not a label copy and needs no partner
+    expect(guard('Yes, go ahead and water.', Q)).toBe(true);
+    expect(guard(`${WATERING} Yes, go ahead.`, Q)).toBe(true);
   });
 });
 

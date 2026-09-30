@@ -979,10 +979,27 @@ function isEllipticalInbound(text) {
 // No question shape is required for a topic: "tell me when my dogs can go outside" asks re-entry as much as a
 // "?" does, so any label-topic vocabulary counts (over-holding a mere mention of the dogs is accepted: fail closed).
 // Only explicit pre-visit access wording is exempt. A follow-up with no topic word needs a question shape to count.
+// Watering ("can I water the lawn now?", "is it ok to water?", "when can I run the sprinklers", "can I turn the irrigation back on")
+// in a timing / permission / treatment / weather context asks BOTH kinds (the rain-fast time and the keep-off time both bear on it);
+// general watering advice with none of that ("what days should I water my lawn?", "how often should I water") asks no label kind,
+// so the approved COMPANY FACTS watering answer is what answers it.
+const WATERING_RE = /\b(?:water(?:ing)?(?=\s+(?:the|my|our|it|them|in|down|early|daily|twice|every|once|more|less|again|now|today|tonight|tomorrow|yet|lawn|grass|yard|plants?|garden|sod)\b|\s*[?!.]|\s*$)|to\s+water\b|sprinklers?|irrigat\w+|hose|turn(?:ing)?\s+(?:the\s+)?(?:water|sprinklers?|irrigation)\s+(?:back\s+)?on|run(?:ning)?\s+the\s+(?:sprinklers?|irrigation|water))\b/;
+const WATERING_CONTEXT_RE = /\b(?:now|yet|ok|okay|safe|fine|when|can\s+(?:i|we)|may\s+(?:i|we)|allowed|how\s+long|after|before|until|till|today|tonight|tomorrow|already|still|treatment|treated|spray|sprayed|spraying|application|applied|fertilizer|fertilized|granules?|product|wait|hold\s+off|again|back\s+on)\b/;
+const WATERING_WEATHER_RE = /\b(?:rain\w*|showers?|storms?|stormy|forecast\w*|drizzl\w*|downpour\w*|weather|humid\w*|wet|soaked)\b|\bwash(?:es|ed)?\s+(?:it\s+)?(?:off|away)\b/;
+const OTHER_REENTRY_TOPIC_RE = new RegExp(BEING_RE.source + '|\\b(?:walk|walking|play|playing|mow|mowing|swim|swimming|sit|sitting|enter|inside|indoors)\\b');
+function wateringKinds(text) {
+  if (!WATERING_RE.test(text)) return null;
+  const context = WATERING_CONTEXT_RE.test(text) || WATERING_WEATHER_RE.test(text);
+  if (context) return ['reentry', 'rain'];
+  return OTHER_REENTRY_TOPIC_RE.test(text) ? null : [];
+}
+
 function askedKindsOf(inboundText) {
   const text = canonText(inboundText).toLowerCase();
   if (!text) return { kinds: [], elliptical: false };
   if (ASKED_ACCESS_RE.test(text) && !POST_TREATMENT_SIGNAL_RE.test(text)) return { kinds: [], elliptical: false };
+  const watering = wateringKinds(text); // ([] for general watering advice, both kinds in a timing context, null when not about watering)
+  if (watering) return { kinds: watering, elliptical: false };
   return { kinds: [(ASKED_REENTRY_RE.test(text) || asksReentryStructurally(text)) && 'reentry', (ASKED_RAIN_RE.test(text) || asksWeather(text)) && 'rain'].filter(Boolean), elliptical: ASKED_QUESTION_RE.test(text) && isEllipticalInbound(text) };
 }
 
@@ -1181,8 +1198,9 @@ function stripHandoffDeadlines(text) {
     const lower = piece.trim().toLowerCase();
     const phrase = SLA_PHRASES.find((p) => lower.endsWith(p.toLowerCase()));
     if (!phrase) return piece;
-    const base = canonText(piece).toLowerCase().replace(new RegExp(`[\\s,;-]*(?:and\\s+)?${escapeRegex(phrase.toLowerCase())}$`), '').trim();
-    return isHandoffBase(base) ? ` ${base}` : piece;
+    // (the base keeps its own case: a lowercased sentence would stop the copy before it from being a complete copy)
+    const base = canonText(piece).replace(new RegExp(`[\\s,;-]*(?:and\\s+)?${escapeRegex(phrase)}$`, 'i'), '').trim();
+    return isHandoffBase(base.toLowerCase()) ? ` ${base}` : piece;
   }).join('');
 }
 const isHandoffBase = (base) => isDeferral(peelFriendlyEnds(base)) || /^(?:.*\s)?sanctioned_idiom\b[^.]*\bconfirms?\s+(?:the\s+|your\s+)?timing$/.test(base);
