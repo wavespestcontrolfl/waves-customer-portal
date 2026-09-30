@@ -357,8 +357,10 @@ async function runClaimed(claimed, opts) {
  * Process ONE schedule end to end. `force` (operator send-now) skips the
  * "due" test only; every other guard, the claim included, still applies.
  */
-async function processSchedule(scheduleId, now = new Date(), { database = db, operatorInitiated = false, force = false } = {}) {
-  const claimed = await Schedule.claim(scheduleId, now, { database, force });
+async function processSchedule(scheduleId, now = new Date(), { database = db, operatorInitiated = false, force = false, claimAt = null } = {}) {
+  // `claimAt` is when the claim is actually taken (a batch passes its start
+  // time plus elapsed wall time); `now` stays the batch clock for cadence.
+  const claimed = await Schedule.claim(scheduleId, claimAt || now, { database, force });
   if (!claimed) return outcome('skipped', { reason: 'not_claimable' });
   try {
     return await runClaimed(claimed, { now, database, operatorInitiated });
@@ -376,9 +378,16 @@ async function dueScheduleIds(now, database) {
 /** Every due schedule, one at a time; one failure never stops the rest. */
 async function runCustomerSchedules(now = new Date(), { database = db } = {}) {
   const tally = { processed: 0, failed: 0, outcomes: {} };
-  for (const id of await dueScheduleIds(now, database)) {
+  const ids = await dueScheduleIds(now, database);
+  // A sequential batch can outlive CLAIM_TTL_MS: each claim is stamped at the
+  // time it is TAKEN (batch clock + elapsed wall time), never the batch start,
+  // or later claims would be born expired to admin controls and
+  // InvoiceService's edit fence.
+  const wallStart = Date.now();
+  for (const id of ids) {
     try {
-      const out = await processSchedule(id, now, { database });
+      const claimAt = new Date(now.getTime() + (Date.now() - wallStart));
+      const out = await processSchedule(id, now, { database, claimAt });
       tally.processed += 1;
       tally.outcomes[out.outcome] = (tally.outcomes[out.outcome] || 0) + 1;
     } catch (err) {

@@ -1374,6 +1374,25 @@ describe('runCustomerSchedules: one failure never stops the rest', () => {
   });
 });
 
+describe('runCustomerSchedules: each claim is stamped when it is TAKEN, not at batch start', () => {
+  test('a batch that outlives the claim TTL hands later schedules a claim time advanced by the elapsed wall time; cadence keeps the batch clock', async () => {
+    const db = jest.fn(() => ({
+      whereIn() { return this; }, where() { return this; }, orderBy() { return this; },
+      select: async () => [{ id: 's1', customer_id: 'c1' }, { id: 's2', customer_id: 'c2' }],
+    }));
+    let wall = 1_000_000;
+    const spy = jest.spyOn(Date, 'now').mockImplementation(() => wall);
+    try {
+      // the first schedule's send takes 15 minutes of wall time
+      Schedule.claim.mockImplementationOnce(async () => { wall += 15 * 60 * 1000; return null; }).mockResolvedValueOnce(null);
+      await Runner.runCustomerSchedules(NOW, { database: db });
+    } finally { spy.mockRestore(); }
+    const [first, second] = Schedule.claim.mock.calls.map((c) => c[1].getTime());
+    expect(first).toBe(NOW.getTime());
+    expect(second).toBe(NOW.getTime() + 15 * 60 * 1000);
+  });
+});
+
 describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
   const logger = require('../services/logger');
   const shadowLines = () => logger.info.mock.calls.map(([m]) => m).filter((m) => String(m).includes('SHADOW would'));
