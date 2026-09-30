@@ -18019,30 +18019,22 @@ const SECURE_PREPAY_COVERAGE_COLUMNS = ['customer_id', 'scheduled_date', 'window
   'service_id', 'service_key_snapshot', 'status', 'is_recurring', 'recurring_pattern', 'recurring_parent_id',
   'property_id', 'is_callback', 'prepaid_method', 'source_estimate_id', 'annual_prepay_term_id'];
 
-async function securePendingPrepayCoverageReasons(conn, visits) {
-  const marks = new Map();
-  if (!visits.length) return marks;
-  const customerIdFor = (v) => v.customer_id || null;
-  const customerIds = [...new Set(visits.map(customerIdFor).filter(Boolean).map(String))].sort();
-  if (customerIds.length === 0) return marks;
-  if (!(await conn.schema.hasTable('annual_prepay_terms'))) return marks;
-
-  const busy = () => Object.assign(
-    new Error('An annual prepay selection for this customer is being confirmed right now — try the price change again in a moment.'),
-    { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
-  );
-
+// Locks each customer's annual-prepay namespace (try-lock — see the header
+// comment above) and returns every held term, grouped by customer id.
+async function lockAndLoadHeldPrepayTerms(conn, customerIds) {
   const { ANNUAL_PREPAY_LOCK_NS } = require('./admin-customers')._private;
   for (const customerId of customerIds) {
     const lockResult = await conn.raw(
       'SELECT pg_try_advisory_xact_lock(?, hashtext(?)) AS locked',
       [ANNUAL_PREPAY_LOCK_NS, String(customerId)],
     );
-    if (!advisoryTryLockAcquired(lockResult)) throw busy();
+    if (!advisoryTryLockAcquired(lockResult)) {
+      throw Object.assign(
+        new Error('An annual prepay selection for this customer is being confirmed right now — try the price change again in a moment.'),
+        { statusCode: 409, isOperational: true, code: 'VISIT_BUSY_RETRY' },
+      );
+    }
   }
-
-  const NO_MONEY_HELD = ['void', 'refunded', 'canceled', 'cancelled'];
-  const disputeSuspendedColumn = await conn.schema.hasColumn('annual_prepay_terms', 'dispute_suspended_at');
   // Every term that holds money at the price it was minted with, whose
   // canonical coverage decides which visits it stamps:
   //  - an UNPAID pick (payment_pending with a live prepay invoice), minus
@@ -18055,10 +18047,10 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
   //    Codex r4 P1), never a status list of this route's own.
   // A term's canonical set is exactly what its next refreshTermSnapshot
   // stamps (completed visits stay in the sold count), so a visit in it is
-  // committed money whether or not it is stamped yet: mid-activation, a
-  // refresh that threw after the flip, or a repaid dispute whose OLD links
-  // survive while the current set moved on. has_linked_visit decides only
-  // whether the first-activation window slide is projected.
+  // committed money whether or not it is stamped yet. has_linked_visit
+  // decides only whether the first-activation window slide is projected.
+  const NO_MONEY_HELD = ['void', 'refunded', 'canceled', 'cancelled'];
+  const disputeSuspendedColumn = await conn.schema.hasColumn('annual_prepay_terms', 'dispute_suspended_at');
   const hasLinkedVisit = conn.raw(
     'EXISTS (SELECT 1 FROM scheduled_services ss_link WHERE ss_link.annual_prepay_term_id = t.id) AS has_linked_visit',
   );
@@ -18073,69 +18065,61 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
     unpaidPicksQuery.select('t.*', hasLinkedVisit),
     coveredTermsAsOf(conn).whereIn('t.customer_id', customerIds).select('t.*', hasLinkedVisit),
   ]);
-  const pendingTerms = [...new Map([...unpaidPicks, ...liveTerms].map((term) => [String(term.id), term])).values()];
-  if (pendingTerms.length === 0) return marks;
-
   const termsByCustomer = new Map();
-  for (const term of pendingTerms) {
+  for (const term of new Map([...unpaidPicks, ...liveTerms].map((t) => [String(t.id), t])).values()) {
     const key = String(term.customer_id);
-    if (!termsByCustomer.has(key)) termsByCustomer.set(key, []);
-    termsByCustomer.get(key).push(term);
+    termsByCustomer.set(key, [...(termsByCustomer.get(key) || []), term]);
   }
+  return termsByCustomer;
+}
+
+async function securePendingPrepayCoverageReasons(conn, visits) {
+  const marks = new Map();
+  const customerIds = [...new Set(visits.map((v) => v.customer_id).filter(Boolean).map(String))].sort();
+  if (customerIds.length === 0 || !(await conn.schema.hasTable('annual_prepay_terms'))) return marks;
+  const termsByCustomer = await lockAndLoadHeldPrepayTerms(conn, customerIds);
 
   const { coverageRowsForTerm } = require('../services/annual-prepay-renewals');
   const today = etDateString();
   const reasonFor = (term) => (term.status === 'payment_pending'
     ? 'on an annual prepay invoice from the card-confirmation page that is still open at the old price'
     : 'covered by an annual prepay paid at the old price');
-  // ONE coverage pass per customer and term with EVERY visit this save
-  // touches overlaid together (Codex r2 P1 on #5387): judged one at a time,
-  // each check saw the other rows' stale DB state — an edited visit moving
-  // OUT of the window kept its stale in-window row consuming the sold slot
-  // while a sibling propagated INTO the covered service went unmarked.
-  // Each row carries its post-save state (_proposed: date incl. the cadence
-  // rewrite, start time, service, property); coverageRowsForTerm's
-  // extraCandidateRows swaps them in by id and re-applies the window,
-  // scope and slot order.
   for (const [customerId, terms] of termsByCustomer) {
-    const customerVisits = visits.filter((v) => String(customerIdFor(v)) === customerId);
-    if (customerVisits.length === 0) continue;
-    const judgedIds = new Set(customerVisits.map((v) => String(v.id)));
-    const contextRows = [];
+    const customerVisits = visits.filter((v) => String(v.customer_id) === customerId);
+    // ONE coverage pass per customer and term with every candidate this
+    // save touches, each in its post-save shape (Codex r2 P1 on #5387):
+    //  - the visits being repriced (judged; marked against themselves);
+    //  - cadence / address context rows (compete for slots; never marked);
+    //  - rows this save will INSERT (judged; marked against the visit whose
+    //    save creates them). Their key starts with '!' so it sorts BEFORE
+    //    every real uuid: the insert's real id is unknown, so a date/time
+    //    tie at the sold-slot boundary counts it as covered (Codex r8 P1).
+    // First entry per id wins, so a judged row outranks the same row as
+    // context.
+    const candidates = new Map();
+    const add = (row, ownerId, label) => {
+      if (!candidates.has(String(row.id))) candidates.set(String(row.id), { row, ownerId, label });
+    };
+    for (const v of customerVisits) add({ ...v, ...(v._proposed || {}) }, v.id, '');
     for (const v of customerVisits) {
-      for (const row of v._coverageContext || []) {
-        if (judgedIds.has(String(row.id)) || contextRows.some((c) => String(c.id) === String(row.id))) continue;
-        contextRows.push(row);
-      }
-    }
-    const insertOwner = new Map();
-    const insertRows = [];
-    for (const v of customerVisits) {
+      for (const row of v._coverageContext || []) add({ ...row, ...(row._proposed || {}) }, null, '');
       for (const row of v._plannedInserts || []) {
-        const key = `${v.id}:${row.id}`;
-        insertOwner.set(key, v.id);
-        insertRows.push({ ...row, id: key });
+        add({ ...row, id: `!planned:${v.id}:${row.id}` }, v.id, 'adding a visit this save creates, which would be ');
       }
     }
-    const candidateRows = [...customerVisits, ...contextRows].map((v) => ({ ...v, ...(v._proposed || {}) }))
-      .concat(insertRows);
+    const extraCandidateRows = [...candidates.values()].map((c) => c.row);
     for (const term of terms) {
       const covered = await coverageRowsForTerm(term, conn, {
-        extraCandidateRows: candidateRows,
+        extraCandidateRows,
         // A never-activated term is judged on the window a payment TODAY
         // would give it (the first-activation slide; Fable review P2 on
         // #5387). A later payment slides further — a known limit, stated on
         // the PR. An activated term keeps its stored window.
         projectFirstActivationOn: term.has_linked_visit ? null : today,
       });
-      const coveredIds = new Set(covered.map((row) => String(row.id)));
-      for (const v of customerVisits) {
-        if (!marks.has(v.id) && coveredIds.has(String(v.id))) marks.set(v.id, reasonFor(term));
-      }
-      for (const [key, ownerId] of insertOwner) {
-        if (!marks.has(ownerId) && coveredIds.has(key)) {
-          marks.set(ownerId, `adding a visit this save creates, which would be ${reasonFor(term)}`);
-        }
+      for (const row of covered) {
+        const hit = candidates.get(String(row.id));
+        if (hit?.ownerId != null && !marks.has(hit.ownerId)) marks.set(hit.ownerId, `${hit.label}${reasonFor(term)}`);
       }
     }
   }

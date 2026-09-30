@@ -693,6 +693,17 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     expect(covered.get('v1')).toMatch(/adding a visit this save creates/);
   });
 
+  test('a planned insert TIED with an existing visit at the sold-slot boundary counts as covered (its real id is unknown; Codex r8 P1 on #5387)', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01' });
+    const other = visit({ id: '00000000-0000-4000-8000-000000000001', scheduled_date: '2026-06-01', window_start: '09:00:00' });
+    const conn = fixture({ visits: [other, v1] });
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1,
+      _plannedInserts: [{ ...v1, id: 'planned-insert-0', scheduled_date: '2026-06-01', window_start: '09:00:00' }],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/adding a visit this save creates/);
+  });
+
   test('a planned insert outside the window does not refuse', async () => {
     const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01' });
     const conn = fixture({ visits: [v1] });
