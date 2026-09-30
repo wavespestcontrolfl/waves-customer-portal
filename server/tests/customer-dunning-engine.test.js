@@ -1303,6 +1303,80 @@ describe('shadow models an ambiguous reservation before logging a send (R5-2)', 
   });
 });
 
+describe('progress is selected by the CURRENT touch key after the stage is planned again (R6)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const day30 = `customer-dunning:s-open:1:d30_final`;
+  // a schedule still at Day 30 whose oldest invoice is 65 days old: the stage catches up to Day 60
+  const catchUp = () => {
+    memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 65, 3);
+    live = makeSet(['inv-a', 'inv-b', 'inv-c']);
+  };
+
+  test('SHADOW: an ambiguous DAY 30 reservation does not hold the Day 60 the schedule catches up to (policy exclusions and claimability read the Day 60 event)', async () => {
+    prefs = { invoice_channels: ['email'] };
+    catchUp();
+    mockLedger.push({
+      id: 'd30-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(30),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-d30',
+      metadata: { notificationEventKey: day30, selectedChannels: ['email'] }, // no delivery evidence, not send_failed: ambiguous
+    });
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 3, episode: 1, status: 'active' }]);
+    await Runner.shadowRun(NOW, { database });
+    expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder/);
+    expect(lines()).not.toMatch(/REMINDER_OUTCOME_UNCONFIRMED/);
+    // the policy read excludes THIS touch's rows (none yet), not the old step's
+    expect(mockPolicy.mock.calls.every(([a]) => !a.excludeLedgerIds.includes('d30-email'))).toBe(true);
+    expect(database.writes).toEqual([]);
+  });
+
+  test('SHADOW: the ambiguous reservation of the CURRENT (planned) step still holds', async () => {
+    prefs = { invoice_channels: ['email'] };
+    catchUp();
+    mockLedger.push({
+      id: 'd60-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-d60',
+      metadata: { notificationEventKey: 'customer-dunning:s-open:1:d60_reminder', selectedChannels: ['email'] },
+    });
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    await Runner.shadowRun(NOW, { database: shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 3, episode: 1, status: 'active' }]) });
+    expect(lines()).toMatch(/would hold .* step=d30_final reason=REMINDER_OUTCOME_UNCONFIRMED unclaimable=email/);
+  });
+
+  test('LIVE re-plan Day 30 -> 60: when the post-send progress read fails, the fallback is the Day 60 touch\'s event, never the Day 30 one delivered earlier', async () => {
+    setup({ stepIndex: 3, sentDaysAgo: 30 });
+    prefs = { invoice_channels: ['email', 'sms'] };
+    memberSeqRows = [...rowsFor(['inv-a'], 65, 3), ...rowsFor(['inv-b'], 30, 3), ...rowsFor(['inv-c'], 29, 3)];
+    // Day 30's email was delivered earlier (a partial touch naming b and c); the text is still owed
+    mockLedger.push({
+      id: 'd30-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+      invoice_ids: ['inv-b', 'inv-c'], idempotency_key: 'k-d30',
+      metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d30_final`, delivered: true, selectedChannels: ['email', 'sms'] },
+    });
+    // the runner first sees {b, c}; the boundary sees the full set (the older invoice became eligible) => re-plan to Day 60
+    const initial = makeSet(['inv-b', 'inv-c']);
+    let n = 0;
+    mockResolve.mockImplementation(async (_id, opts) => {
+      if (!opts?.now) return makeSet(['inv-a', 'inv-b', 'inv-c']);
+      n += 1;
+      return n === 1 ? initial : makeSet(['inv-a', 'inv-b', 'inv-c']);
+    });
+    // after the Day 60 email is accepted, the next ledger read (the post-send progress read) fails
+    const impl = fakeDb.getMockImplementation();
+    fakeDb.mockImplementation((table) => {
+      if (table === 'collections_contact_ledger' && mockEmailMessages.length > 0) throw new Error('ledger down');
+      return impl(table);
+    });
+    const out = await run();
+    expect(out.outcome).toBe('advanced');
+    expect(Schedule.writeStage).toHaveBeenCalledWith(expect.anything(), 4, expect.anything());
+    // both Day 60 legs were delivered NOW; the Day 30 email's earlier time must not stand in for this touch
+    expect(new Date(Schedule.advance.mock.calls[0][1].deliveredAt).getTime()).toBe(NOW.getTime());
+    expect(interactions).toHaveLength(1);
+  });
+});
+
 describe('a delivery older than the progress window is still a delivery, and completes what it NAMED (R2-2 / A2)', () => {
   const crypto = require('crypto');
   const finalKey = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;

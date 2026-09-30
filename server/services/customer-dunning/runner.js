@@ -209,6 +209,10 @@ async function finishDelivered(run, facts) {
   return outcome(Schedule.isFinalIndex(run.schedule.step_index) ? 'completed' : 'advanced', { recovered: !facts.deliveredNow?.length });
 }
 
+// The delivery-progress event of the touch this run is CURRENTLY about (run.eventKey). Key-driven on
+// purpose: nothing may hold on to an event object across a change of stage.
+const currentEvent = (run) => (run.progress || []).find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
+
 async function decideRecovery(run) {
   let progress;
   try {
@@ -221,10 +225,11 @@ async function decideRecovery(run) {
   run.step = STEPS[run.schedule.step_index];
   if (!run.step) return decision('close', 'no_step', { closeReason: 'released_prereq_off' });
   run.eventKey = eventKey(run.schedule, run.step.id);
-  const event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey);
-  run.progressEvent = event || null; // the shadow policy check needs this step's rows
+  // Keep the WHOLE collection: run.eventKey moves when the stage is planned again (catch-up,
+  // re-plan), and everything that reads "this touch's events" selects by the CURRENT key.
+  run.progress = progress;
+  const event = currentEvent(run);
   if (!event || event.delivered.size === 0) return event?.complete ? decision('pause', 'all_channels_terminal') : null;
-  run.priorEvent = event; // a partial delivery from an earlier tick, kept in case the post-send read fails
   // Delivered before: settle from the ledger. No render, no set read.
   if (event.complete || await nextStageArrived(run, event)) {
     return decision('settle', 'already_delivered', { facts: { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] } });
@@ -399,7 +404,8 @@ async function deliveryFacts(run, result) {
     logger.warn(`[customer-dunning] post-send progress unreadable for schedule ${run.schedule.id}: ${err.message}`);
     // What this tick's recover-first read already saw as delivered still is:
     // a partial delivery must not turn into a hold or pause for want of a re-read.
-    event = run.priorEvent || null;
+    const prior = currentEvent(run); // this touch's event from the recover-first read, never another step's
+    event = prior && prior.delivered.size > 0 ? prior : null;
   }
   // `result.delivered` carries every leg the send saw as delivered, including one
   // deduped from a reservation older than the progress window (a final notice
@@ -522,7 +528,7 @@ function allowlisted(rows) {
  * already delivered, the step settles on the waiver, as it does live).
  */
 async function decideShadowPolicy(run, set) {
-  const event = run.progressEvent;
+  const event = currentEvent(run);
   const delivered = event?.delivered || new Set();
   const pending = pendingReminderChannels(run.sendChannels, delivered, event?.resolved || new Set());
   run.policyDenied = [];
