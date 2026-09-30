@@ -644,6 +644,8 @@ async function sendDepositReceiptEmail({ estimate, customer, prefs, amountDollar
       recipientId: estimate.customer_id || null,
       triggerEventId: `deposit_receipt:${paymentIntentId}`,
       idempotencyKey: `deposit_receipt:${paymentIntentId}`,
+      // Provenance only (email_messages.estimate_id); the annual-offer guard is unchanged.
+      linkEstimateId: estimate.id,
       categories: ['deposit_receipt'],
       // Codex round 3 on #4608 (P1 PRRT_kwDOR3YQi86j8Ydp, over-blocking):
       // the deposit is owed regardless of the annual offer's own state — a

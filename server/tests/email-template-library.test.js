@@ -326,6 +326,84 @@ describe('email template library rendering', () => {
     }));
   });
 
+  describe('lead / estimate linkage on the queued row', () => {
+    const EST = '11111111-1111-4111-8111-111111111111';
+    const LEAD = '22222222-2222-4222-8222-222222222222';
+    const CUSTOMER_ID = '33333333-3333-4333-8333-333333333333';
+
+    // The estimate-owner lookup: `.limit(2).pluck('id')`.
+    const ownerChain = (ids) => { const q = chain(); q.limit = jest.fn(() => q); q.pluck = jest.fn(async () => ids); return q; };
+
+    test('two live leads on the estimate records no lead (ambiguous) but keeps the estimate', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: null, estimateId: EST },
+        [ownerChain([LEAD, '55555555-5555-4555-8555-555555555555'])],
+      );
+      expect(row).toEqual(expect.objectContaining({ estimate_id: EST, lead_id: null }));
+    });
+
+    async function sendLeadMail(args, leadsQueue) {
+      const queuedMessage = { id: 'msg-1', status: 'queued', subject_snapshot: 'Your estimate expires June 12' };
+      const queueInsert = chain({ returning: [queuedMessage] });
+      setDbQueues({
+        email_templates: [chain({ first: serviceTemplate({ active_version_id: 'ver-1' }) })],
+        email_template_versions: [chain({ first: version() })],
+        email_suppressions: [chain({ result: [] })],
+        email_messages: [queueInsert, chain({ returning: [{ ...queuedMessage, status: 'sent' }] })],
+        leads: leadsQueue,
+      });
+      sendgrid.sendOne.mockResolvedValue({ messageId: 'sg-1' });
+      await EmailTemplates.sendTemplate({
+        templateKey: 'estimate.expiring_notice',
+        to: 'sam@example.com',
+        payload: { first_name: 'Sam', expires_at: 'June 12', estimate_url: 'https://portal.wavespestcontrol.com/estimate/sample' },
+        ...args,
+      });
+      return queueInsert.insert.mock.calls[0][0];
+    }
+
+    test('a lead-typed send with no recipient_id records the estimate and the lead that owns it', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: null, estimateId: EST },
+        [ownerChain([LEAD])],
+      );
+      expect(row).toEqual(expect.objectContaining({ recipient_type: 'lead', recipient_id: null, estimate_id: EST, lead_id: LEAD }));
+    });
+
+    test('a lead-typed send whose recipient_id is a real lead records that lead', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: LEAD },
+        [chain({ first: { id: LEAD } })],
+      );
+      expect(row).toEqual(expect.objectContaining({ recipient_id: LEAD, lead_id: LEAD, estimate_id: null }));
+    });
+
+    test('a lead-typed row that names a CUSTOMER id is not a lead id (falls back to the estimate owner)', async () => {
+      const row = await sendLeadMail(
+        { recipientType: 'lead', recipientId: CUSTOMER_ID, estimateId: EST },
+        [chain({ first: undefined }), ownerChain([LEAD])],
+      );
+      expect(row).toEqual(expect.objectContaining({ recipient_id: CUSTOMER_ID, lead_id: LEAD, estimate_id: EST }));
+    });
+
+    test('a customer-typed send records the estimate without any lead lookup', async () => {
+      // setDbQueues throws on a table with no queue, so a stray leads query would fail this test.
+      const row = await sendLeadMail(
+        { recipientType: 'customer', recipientId: CUSTOMER_ID, linkEstimateId: EST },
+        [],
+      ).catch((e) => { throw e; });
+      expect(row).toEqual(expect.objectContaining({ recipient_type: 'customer', lead_id: null, estimate_id: EST }));
+    });
+
+    test('a failed lead lookup never blocks the send; the estimate link is still recorded', async () => {
+      const boom = chain();
+      boom.first = jest.fn(async () => { throw Object.assign(new Error('db down'), { code: '57P01' }); });
+      const row = await sendLeadMail({ recipientType: 'lead', estimateId: EST }, [boom]);
+      expect(row).toEqual(expect.objectContaining({ lead_id: null, estimate_id: EST }));
+      expect(sendgrid.sendOne).toHaveBeenCalled();
+    });
+  });
+
   test('deduplicates SendGrid categories before queueing and sending', async () => {
     const queuedMessage = {
       id: 'msg-1',

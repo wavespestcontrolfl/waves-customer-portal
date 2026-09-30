@@ -3292,7 +3292,8 @@ describe('service report v1', () => {
       },
     });
 
-    expect(email.text).toContain('Findings: 0 findings');
+    expect(email.text).not.toMatch(/^Findings:/m);
+    expect(email.html).not.toContain('>Findings<');
     expect(email.text).toContain('No action-required findings were documented during this visit.');
     expect(email.text).not.toContain('Top findings: No activity observed this visit');
     expect(email.html).not.toContain('Top findings');

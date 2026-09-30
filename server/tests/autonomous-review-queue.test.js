@@ -470,6 +470,34 @@ describe('decision transactions re-select the current run (Codex #3024 r19)', ()
     expect(db.transaction).not.toHaveBeenCalled();
   });
 
+  test('an interrupted new-blog approval can be dismissed (and only dismissed) after a person checks GitHub', async () => {
+    const hold = {
+      id: 'opp-1', status: 'pending_review', skip_reason: 'named_competitor_publish_interrupted',
+      action_type: 'new_supporting_blog', signal_metadata: '{}',
+    };
+    const run = { id: 'run-1', action_type: 'new_supporting_blog' };
+    expect(reviewActions({ opportunity: hold, run })).toMatchObject({ can_requeue: false, can_dismiss: true, can_approve_named_competitor: false });
+    // An ordinary engine-managed blog row still offers nothing.
+    expect(reviewActions({ opportunity: { ...hold, skip_reason: 'topic_ownership_failed' }, run }).can_dismiss).toBe(false);
+
+    const rowsFor = (opp) => {
+      const first = jest.fn().mockResolvedValueOnce(opp).mockResolvedValueOnce(run);
+      const chain = { where: jest.fn(function () { return this; }), orderBy: jest.fn(function () { return this; }), first };
+      db.mockImplementation(() => chain);
+    };
+    db.transaction = jest.fn().mockRejectedValue(new Error('reached transaction'));
+
+    rowsFor(hold);
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' })).rejects.toThrow('reached transaction');
+    rowsFor(hold);
+    await expect(decideReviewItem('opp-1', { decision: 'requeue', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    rowsFor({ ...hold, skip_reason: 'topic_ownership_failed' });
+    await expect(decideReviewItem('opp-1', { decision: 'dismiss', reviewer: 'owner' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/managed by the engine/) });
+    expect(db.transaction).toHaveBeenCalledTimes(1);
+  });
+
   test('a superseded reconciliation hold rejects requeue but lets dismiss through to its locked transaction', async () => {
     const hold = {
       id: 'opp-1',
