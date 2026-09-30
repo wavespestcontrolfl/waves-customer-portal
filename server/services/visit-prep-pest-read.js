@@ -17,7 +17,11 @@
  * isPestOnlyServiceType — never a WDO inspection or assessment; members from
  * visit-prep.js techStopMemberIds) is read; anything else is
  * 'unsupported' — no engine call, no cap spent. Lawn and tree & shrub stops
- * go to visit-prep-plant-read.js instead.
+ * go to visit-prep-plant-read.js instead. A combined Lawn & Pest stop (one
+ * combined service_type, or separate pest and lawn / tree & shrub members)
+ * gets BOTH reads under one claim from visit-prep-combo-read.js when both
+ * gates are live (owner ruling 2026-09-30); this engine reads such a stop
+ * alone only while the plant gate is dark (visit-prep-read-key.js).
  *
  * Dispatched by visit-prep-read-dispatch.js — the ONE place that picks an
  * engine for a submission. createVisitPrepSubmission calls it
@@ -46,21 +50,31 @@ const {
   UNCLAIMED_STATUSES,
 } = require('./visit-prep-read-claim');
 const { isPestStop, liveStopServiceTypes } = require('./visit-prep-pest-applicability');
+const { currentReadKey } = require('./visit-prep-read-key');
 
 
 // The read follows the VISIT's service line only. The appointment page and
 // app no longer ask for a topic (owner 2026-09-28), so a topic on the row is
 // not an input here, and a resubmit that edits it changes nothing
 // (Codex #5305 r1 P2).
+// This engine reads a stop only when the router's key for it, with the gates
+// as they are NOW, is 'pest' alone: a combined lawn + pest stop with both
+// gates live is the combo read's (visit-prep-combo-read.js), a stop that
+// lost its pest part is the plant read's or nobody's. Null when not this
+// engine's stop.
+async function pestApplicable(svc, conn) {
+  return (await currentReadKey(svc, conn)) === 'pest' ? 'pest' : null;
+}
+
 async function resolveApplicability(svc, conn) {
-  return (await isPestStop(svc, conn)) ? 'pest' : 'unsupported';
+  return (await pestApplicable(svc, conn)) || 'unsupported';
 }
 
 // Returns 'claimed', 'unsupported' (no longer a pest stop) or 'refused'
 // (cap reached, or not a today submission).
 async function claimReadSlot(conn, submissionId, svc, { now = new Date(), expectStatus } = {}) {
   const out = await claimSharedReadSlot(conn, submissionId, svc, {
-    applicable: (stop, trx) => isPestStop(stop, trx),
+    applicable: pestApplicable,
     pendingPatch: { read_ref: null, read_result: null },
     now,
     ...(expectStatus ? { expectStatus } : {}),
@@ -206,7 +220,7 @@ async function settle(args, result) {
   const { submissionId, svc, conn } = args;
   try {
     const settled = await settleClaimedRead(conn, submissionId, svc, {
-      applicable: (stop, trx) => isPestStop(stop, trx),
+      applicable: pestApplicable,
       matches: Boolean,
       store: async (trx) => {
         if (!result.ok) {
@@ -232,6 +246,8 @@ async function settle(args, result) {
 
 module.exports = {
   triggerVisitPrepPestRead,
+  // Shared with the combined read, which stores the pest part the same way.
+  storeIdentification,
   dailyCap,
   _internal: { isPestStop, resolveApplicability, liveStopServiceTypes, etDayStart },
 };

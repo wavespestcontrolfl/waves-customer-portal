@@ -258,8 +258,27 @@ function formatVisitPrepPlantReadLine(read) {
   return parts.join(' ');
 }
 
+// A combined Lawn & Pest visit (owner ruling 2026-09-30) carries BOTH notes on
+// one read: `read.kind === 'combo'`, `read.pest` (a pest read's fixed fields)
+// and `read.plant` (a plant read's), either of which is null when that part
+// produced nothing. Each renders as its own line under the same rules as the
+// single reads above, labelled with what it is a read of.
+const VISIT_PREP_PLANT_SUBJECT_LABELS = { lawn: 'lawn', tree_shrub: 'tree & shrub' };
+
 function VisitPrepReadLine({ read }) {
   if (!read) return null;
+  if (read.status === 'done' && read.kind === 'combo') {
+    const pestLine = formatVisitPrepReadLine(read.pest ? { ...read.pest, status: 'done' } : null);
+    const plantLine = formatVisitPrepPlantReadLine(read.plant ? { ...read.plant, status: 'done' } : null);
+    const plantLabel = VISIT_PREP_PLANT_SUBJECT_LABELS[read.plant?.subjectType] || 'lawn';
+    if (!pestLine && !plantLine) return null;
+    return (
+      <>
+        {pestLine && <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read — pest (AI suggestion, not confirmed): {pestLine}</p>}
+        {plantLine && <p style={{ ...factRowStyle, color: DARK.teal }}>Photo read — {plantLabel} (AI suggestion, not confirmed): {plantLine}</p>}
+      </>
+    );
+  }
   if (read.status === 'done') {
     const line = read.kind === 'plant' ? formatVisitPrepPlantReadLine(read) : formatVisitPrepReadLine(read);
     if (!line) return null;
