@@ -473,15 +473,21 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
   let detailPayload = {};
   if (detailsLive) {
-    const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
-    detailPayload = {
-      service_label: service.label,
-      service_date: service.date,
-      property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
-      // An operator's one-off recipient or a payer's AP inbox must never see
-      // the homeowner's card: only the customer's own delivery names it.
-      payment_method: await BillingEmailDetails.payMethodOnFileLabel(invoice, { allowed: !effectiveOverride }),
-    };
+    // Details are additive: any lookup failure sends the email without them.
+    try {
+      const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+      detailPayload = {
+        service_label: service.label,
+        service_date: service.date,
+        property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+        // An operator's one-off recipient or a payer's AP inbox must never see
+        // the homeowner's card: only the customer's own delivery names it.
+        payment_method: await BillingEmailDetails.payMethodOnFileLabel(invoice, { allowed: !effectiveOverride }),
+      };
+    } catch (err) {
+      detailPayload = {};
+      logger.warn(`[invoice-email] detail lookup failed for ${invoice.invoice_number}: ${err.message}`);
+    }
   }
 
   if (sendgrid.isConfigured()) {
@@ -783,13 +789,18 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
   let detailPayload = {};
   if (detailsLive) {
-    const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
-    detailPayload = {
-      service_label: service.label,
-      service_date: service.date,
-      property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
-      payment_method: BillingEmailDetails.receiptTenderLabel({ payment, invoice }),
-    };
+    try {
+      const service = await BillingEmailDetails.invoiceServiceDetails(invoice);
+      detailPayload = {
+        service_label: service.label,
+        service_date: service.date,
+        property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
+        payment_method: BillingEmailDetails.receiptTenderLabel({ payment, invoice }),
+      };
+    } catch (err) {
+      detailPayload = {};
+      logger.warn(`[invoice-email] receipt detail lookup failed for ${invoice.invoice_number}: ${err.message}`);
+    }
   }
 
   const first = recipient.name || customer.first_name || 'there';

@@ -277,3 +277,24 @@ describe('invoice.receipt', () => {
     expect(result).toMatchObject({ ok: true, deduped: true });
   });
 });
+
+describe('detail lookups are additive', () => {
+  test('gate on: a throwing lookup still sends invoice.sent and the receipt, without the extra variables', async () => {
+    process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
+    const Details = require('../services/billing-email-details');
+    const spy = jest.spyOn(Details, 'invoiceServiceDetails').mockRejectedValue(new Error('db blip'));
+    mockTables(baseTables(invoiceRow()));
+    const sentResult = await sendInvoiceEmail('inv-1', { claimToken: 'claim-1' });
+    expect(sentResult.ok).toBe(true);
+    let payload = EmailTemplates.sendTemplate.mock.calls.at(-1)[0].payload;
+    expect(payload).not.toHaveProperty('property_full_address');
+    expect(payload.service_label).toBe('Quarterly Pest Control');
+
+    mockTables({ ...baseTables(invoiceRow({ status: 'paid', paid_at: new Date('2026-09-29T14:00:00Z'), receipt_sent_at: null })), payments: null });
+    const receiptResult = await sendReceiptEmail('inv-1');
+    expect(receiptResult.ok).toBe(true);
+    payload = EmailTemplates.sendTemplate.mock.calls.at(-1)[0].payload;
+    expect(payload).not.toHaveProperty('property_full_address');
+    spy.mockRestore();
+  });
+});
