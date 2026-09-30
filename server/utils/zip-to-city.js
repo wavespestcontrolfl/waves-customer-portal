@@ -144,6 +144,13 @@ const ZIP_CITY_ALIASES = {
   '33980': ['charlotte harbor'],
   '33981': ['gulf cove', 'el jobean'],
   '33983': ['deep creek'],
+  // Typed-city communities that share a ZIP with the USPS primary (mapped in
+  // config/locations.js CITY_TO_LOCATION as of 2026-09-30).
+  '33947': ['rotonda west'],
+  '34219': ['duette'],
+  '34232': ['lake sarasota'],
+  '34275': ['north venice'],
+  '34293': ['north venice'],
 };
 
 // True when `city` is an acceptable name for `zip`: the USPS primary from

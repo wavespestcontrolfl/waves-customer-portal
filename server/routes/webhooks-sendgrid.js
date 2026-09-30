@@ -436,7 +436,12 @@ async function handleEvent(ev) {
 async function processWebhookEvent(ev, messageId, email, handler) {
   const eventId = ev.sg_event_id ? String(ev.sg_event_id) : null;
   if (!eventId) {
-    await handler(db);
+    // Still one transaction (no dedupe ledger row without an event id): the
+    // handlers take the address key before their row writes and record the
+    // suppression on the same connection, so an autocommitted opt-out can never
+    // land ahead of the locked suppression write and let a concurrent
+    // confirmation send in the gap.
+    await db.transaction((trx) => handler(trx));
     return true;
   }
 
@@ -878,6 +883,23 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   const updates = computeNewsletterEventUpdates(ev, delivery);
   if (!updates) return;
 
+  // LOCK ORDER: address key BEFORE any newsletter_subscribers row. The DOI
+  // resend (customer-email-fanout resendPendingConfirmation) and the call
+  // pipeline's confirmation send hold the address key and then lock the
+  // subscriber row FOR UPDATE; this handler used to update the subscriber row
+  // first and only then reach recordEmailSuppressionForEvent (which takes the
+  // same key) — an AB-BA that PostgreSQL resolves by aborting this transaction,
+  // and /events answers 200 for a caught failure, so the provider never retries
+  // and the suppression / opt-out is lost. Take the key first, on the same
+  // transaction connection (recordEmailSuppressionForEvent's own lock on that
+  // key then re-enters harmlessly; advisory xact locks are reentrant per
+  // session). Same address it will record for: the event's, else the delivery's.
+  const newsletterGroupKey = newsletterSuppressionGroupKeyForEvent(ev);
+  if (client.isTransaction && shouldRecordNewsletterSuppression(ev, newsletterGroupKey)) {
+    const suppressionAddress = String(ev?.email || delivery.email || '').trim().toLowerCase();
+    if (suppressionAddress) await require('../utils/customer-comms-lock').lockCustomerEmail(client, suppressionAddress);
+  }
+
   if (updates.delivery) {
     await client('newsletter_send_deliveries').where({ id: delivery.id }).update(updates.delivery);
   }
@@ -929,7 +951,6 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   // future app sends. Runs even when there's no matching subscriber row; the
   // address/provider signal is still valid. SendGrid's newsletter ASM group is
   // local `marketing_newsletter`, while bounces/spam complaints stay GLOBAL.
-  const newsletterGroupKey = newsletterSuppressionGroupKeyForEvent(ev);
   if (shouldRecordNewsletterSuppression(ev, newsletterGroupKey)) {
     await recordEmailSuppressionForEvent(
       ev,

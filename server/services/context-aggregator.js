@@ -114,6 +114,18 @@ function redactAccessCodes(text) {
 // route exports only its router). Modern rows trust the stored overall_score;
 // legacy rows recompute under the four-category weighting so this fact can
 // never disagree with the portal/report score.
+// The scheduled_services id of an upcoming visit, carried on the context
+// entry for the texting AI's scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER,
+// sms-shadow-drafter). NON-ENUMERABLE on purpose: this context is serialized
+// whole into LLM-visible payloads elsewhere (lead-response get_customer_context
+// tool result, the managed assistant snapshot, email reply facts), and an
+// internal row id must never ride there. A direct property read still works;
+// JSON.stringify, spread and Object.keys do not see it.
+function withScheduledServiceId(entry, id) {
+  if (id != null) Object.defineProperty(entry, 'scheduledServiceId', { value: id, enumerable: false });
+  return entry;
+}
+
 function lawnStressDamage(row = {}) {
   if (row.stress_damage != null) return row.stress_damage;
   return Math.min(row.fungus_control ?? 100, row.thatch_level ?? 100);
@@ -539,7 +551,7 @@ class ContextAggregator {
       // completed visits only (Codex r8): an 'incomplete' closeout must not
       // answer "what did you do last time" as though the work happened.
       db('service_records').where({ customer_id: customer.id, status: 'completed' }).orderBy('service_date', 'desc').limit(5),
-      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
+      db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES).orderBy('ss.scheduled_date').limit(3).select('ss.id', 'ss.service_type', 'ss.scheduled_date', 'ss.window_display', 'ss.window_start', 'ss.window_end', 'ss.time_window', 'ss.status', 'tech.name as technician_name'),
       db('property_preferences').where({ customer_id: customer.id }).first(),
       // 'upcoming' filtered IN SQL (Codex r8) — post-limit JS filtering let
       // five future autopay rows empty the history.
@@ -767,7 +779,7 @@ class ContextAggregator {
         notes: customerSafeVisitNotes(s.technician_notes),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
       })),
-      upcomingServices: upcomingServices.map(s => ({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() })),
+      upcomingServices: upcomingServices.map(s => withScheduledServiceId({ type: s.service_type, date: s.scheduled_date, window: this.deriveWindow(s), status: s.status, tech: s.technician_name || null, isToday: this.calendarDay(s.scheduled_date) === etDateString() }, s.id)),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
         unavailable: billingUnavailable,

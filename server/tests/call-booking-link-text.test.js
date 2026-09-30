@@ -2625,7 +2625,7 @@ describe('dispatchClaimedCall', () => {
 
     const outcome = await _private.recordRetryableDecision(db, call, entry, 'lead-1', now, result, skip);
 
-    expect(skip).toHaveBeenCalledWith('PROVIDER_FAILURE');
+    expect(skip).toHaveBeenCalledWith('PROVIDER_FAILURE', { failed: true }); // a delivery that never happened (codex #5358 r1 P1)
     expect(del).toHaveBeenCalledTimes(2);
     expect(deletedTables).toEqual([HANDOFF_MARKER_TABLE, CONSULTATION_ATTEMPT_TABLE]);
     expect(outcome).toEqual({ sent: false, skipped: 'PROVIDER_FAILURE' });
@@ -3127,5 +3127,56 @@ describe('recoverStaleClaims', () => {
       return chain;
     });
     await expect(recoverStaleClaims(conn, NOW)).resolves.toBe(0);
+  });
+});
+
+// codex #5358 r3 P1: only a known refusal is a healthy skip. A blocked
+// result from the pipeline itself, or a provider rejection, is a failure
+// the weekly check must surface.
+describe('isExpectedRefusal', () => {
+  const { isExpectedRefusal } = _private;
+  test('opt-outs, suppression and missing consent are expected refusals', () => {
+    for (const code of ['SMS_OPTED_OUT', 'SUPPRESSED_MANUAL_DNC', 'NO_CONSENT_RECORD', 'NON_MOBILE_SMS_RECIPIENT']) {
+      expect(isExpectedRefusal({ sent: false, blocked: true, code })).toBe(true);
+    }
+  });
+  test('pipeline and provider failures are not', () => {
+    for (const code of ['CONTRACT_VIOLATION', 'UNKNOWN_POLICY', 'CONSENT_LOOKUP_FAILED', 'SOME_NEW_CODE']) {
+      expect(isExpectedRefusal({ sent: false, blocked: true, code })).toBe(false);
+    }
+    expect(isExpectedRefusal({ sent: false, code: 'SMS_OPTED_OUT' })).toBe(false);
+  });
+  // codex #5358 r5 P2: Twilio's recipient-side rejections are about the
+  // number, not the lane.
+  test('Twilio recipient rejections are expected; other provider codes are not', () => {
+    for (const code of ['21610', '21614', 21211]) {
+      expect(isExpectedRefusal({ sent: false, retryable: false, providerErrorCode: code })).toBe(true);
+    }
+    expect(isExpectedRefusal({ sent: false, retryable: false, providerErrorCode: '20003' })).toBe(false);
+  });
+});
+
+// codex #5358 r6 P2: every rewrite of the entry keeps staged_at, so the week
+// a call was checked in never moves after staging.
+describe('recordDecision keeps staged_at', () => {
+  const { recordDecision } = _private;
+  function capture() {
+    const written = [];
+    const conn = jest.fn(() => ({
+      where: () => ({ update: async (patch) => { written.push(JSON.parse(patch.metadata.bindings[0])); } }),
+      insert: () => ({ catch: async () => {} }),
+    }));
+    conn.raw = (sql, bindings) => ({ sql, bindings });
+    return { conn, written };
+  }
+  const call = { id: 'c-1', metadata: { call_booking_link_text: { status: 'claimed', staged_at: '2026-10-05T12:20:00.000Z' } } };
+  test('a send and a pending retry carry staged_at forward', async () => {
+    const { conn, written } = capture();
+    await recordDecision(conn, call, { status: 'sent', lead_id: 'l-1', sent_at: '2026-10-05T14:00:00.000Z' }, { logActivity: false });
+    await recordDecision(conn, call, { status: 'pending', lead_id: 'l-1', send_at: '2026-10-05T15:00:00.000Z' }, { logActivity: false });
+    expect(written[0].call_booking_link_text.staged_at).toBe('2026-10-05T12:20:00.000Z');
+    expect(written[0].call_booking_link_text.decided_at).toEqual(expect.any(String));
+    expect(written[1].call_booking_link_text.staged_at).toBe('2026-10-05T12:20:00.000Z');
+    expect(written[1].call_booking_link_text.decided_at).toBeUndefined();
   });
 });

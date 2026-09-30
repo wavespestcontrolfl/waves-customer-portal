@@ -61,7 +61,7 @@ function makeConn({
   const conn = (table) => {
     if (table === 'scheduled_services') {
       const c = {};
-      for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNot', 'orderBy']) c[m] = jest.fn(() => c);
+      for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNot', 'orderBy', 'select']) c[m] = jest.fn(() => c);
       c.modify = jest.fn((cb) => { cb(c); return c; });
       c.forUpdate = jest.fn((...a) => { rowForUpdateSpy(...a); return c; });
       c.noWait = jest.fn(() => c);
@@ -75,7 +75,7 @@ function makeConn({
     const rows = byTable[table] || [];
     const c = {};
     let lastEqWhere = null;
-    for (const m of ['whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'join', 'orderBy', 'select']) c[m] = jest.fn(() => c);
+    for (const m of ['whereIn', 'whereNotIn', 'whereNull', 'whereNotNull', 'whereRaw', 'join', 'orderBy', 'select']) c[m] = jest.fn(() => c);
     c.where = jest.fn((w) => { if (w && typeof w === 'object') lastEqWhere = w; return c; });
     c.first = jest.fn(async () => {
       if (!lastEqWhere) return rows[0] || null;
