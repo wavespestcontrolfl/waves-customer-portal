@@ -156,6 +156,11 @@ describe('writerRulesRejection', () => {
     ['We will return next Tuesday.', 'date'],
     ['Your next visit is scheduled for October 7.', 'date'],
     ['We arrive between 8 and 10 AM.', 'time'],
+    ['The garage was infested.', 'owner_phrase'],
+    ['No problems were found today.', 'owner_phrase'],
+    ['There is nothing to worry about.', 'owner_phrase'],
+    ['The treatment map shows where we sprayed.', 'owner_phrase'],
+    ['Your termite bond stays active.', 'owner_phrase'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });

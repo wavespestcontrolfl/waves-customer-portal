@@ -226,6 +226,9 @@ const MONTH_DAY_RE = /\b(?:[Jj]an(?:uary)?|[Ff]eb(?:ruary)?|[Mm]ar(?:ch)?|[Aa]pr
 // Forward words only: "you texted us on Monday" is a past fact.
 const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
 const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])/i;
+// Phrases the owner rules name that no older screen covers (rules 4, 9,
+// 13, 14).
+const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmaps?\b|\bbond(?:ed|s)?\b/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
 const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
@@ -241,6 +244,7 @@ function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   if (COMPANY_NAME_RE.test(copy)) return 'company_name';
   if (SAFE_WORD_RE.test(copy)) return 'safe_word';
   if (CHEMICAL_RE.test(copy)) return 'chemical';
+  if (OWNER_PHRASE_RE.test(copy)) return 'owner_phrase';
   if (REENTRY_RE.test(copy)) return 'reentry';
   if (TIMEFRAME_RE.test(copy)) return 'timeframe';
   if (PRICE_RE.test(copy)) return 'price';

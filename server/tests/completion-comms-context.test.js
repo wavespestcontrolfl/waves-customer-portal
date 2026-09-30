@@ -262,6 +262,10 @@ describe('buildCompletionCommsContext', () => {
       emails: [
         { received_at: mk(5), subject: 'Attic photos', snippet: 'Photos of the soffit gap attached', from_address: 'pat@example.com', label_ids: ['INBOX'] },
         { received_at: mk(6), subject: 'Your visit', snippet: 'See you Tuesday', from_address: 'Waves Pest Control <contact@wavespestcontrol.com>', label_ids: ['SENT'] },
+        // Gmail's snippet stops before the anchor; the full body has it.
+        { received_at: mk(10), subject: 'Access', snippet: `5173 ${'the back door sticks '.repeat(8)}`, body_text: `5173 ${'the back door sticks '.repeat(14)}is the gate code`, from_address: 'pat@example.com', label_ids: ['INBOX'] },
+        // A snippet with no body has lost the context entirely.
+        { received_at: mk(11), subject: 'Side gate', snippet: 'The number is 6620 if you need it', from_address: 'pat@example.com', label_ids: ['INBOX'] },
       ],
     }, whereArgs);
     const whereArgs = {};
@@ -279,9 +283,12 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toContain('We will be there Thursday');
     expect(ctx.promptHint).toContain('never what Waves said or promised');
     expect(ctx.text).not.toContain('4821');
+    expect(ctx.text).not.toContain('5173');
+    expect(ctx.text).not.toContain('6620');
     expect(ctx.text).toMatch(/Customer text .*: \[redacted\] and the side yard is muddy/);
     expect(whereArgs['emails:raw'].map(([sql]) => sql).join(' ')).toMatch(/SENT.*wavespestcontrol\.com/s);
-    const lines = ctx.text.split('\n').filter((line) => !line.includes('side yard is muddy'));
+    const lines = ctx.text.split('\n')
+      .filter((line) => !/side yard is muddy|back door sticks|Side gate/.test(line));
     expect(lines).toEqual([
       expect.stringMatching(/^Call .* \(the customer called; AI summary of the whole conversation, not verified\): Heard noises again in the attic$/),
       expect.stringMatching(/^Customer text .*: Scratching is worse after midnight$/),

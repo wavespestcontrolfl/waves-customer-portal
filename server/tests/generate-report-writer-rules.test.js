@@ -8,6 +8,7 @@
 let mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
 let mockServiceType = 'Quarterly Pest Control Service';
 let mockCatalogRows = [];
+let mockCatalogFails = false;
 const mockProvider = jest.fn();
 const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
 const mockComms = jest.fn(async () => ({ text: '', promptHint: '' }));
@@ -25,7 +26,9 @@ jest.mock('../models/db', () => {
     for (const name of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
     chain.first = async () => (table === 'scheduled_services'
       ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1' } : null);
-    chain.then = (resolve) => Promise.resolve(table === 'products_catalog' ? mockCatalogRows : []).then(resolve);
+    chain.then = (resolve, reject) => (table === 'products_catalog' && mockCatalogFails
+      ? Promise.reject(new Error('catalog read failed'))
+      : Promise.resolve(table === 'products_catalog' ? mockCatalogRows : [])).then(resolve, reject);
     return chain;
   });
   db.raw = jest.fn(); db.fn = { now: () => new Date() }; return db;
@@ -61,6 +64,7 @@ beforeEach(() => {
   mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
   mockServiceType = 'Quarterly Pest Control Service';
   mockCatalogRows = [];
+  mockCatalogFails = false;
   delete process.env.GATE_REPORT_WRITER_RULES;
 });
 afterEach(() => { delete process.env.GATE_REPORT_WRITER_RULES; });
@@ -161,6 +165,16 @@ test('gate on: the last-resort copy leaves out recorded items the rules forbid',
   expect(report).not.toContain('7 days');
   expect(report).not.toContain('Trim the shrubs');
   expect(report).not.toMatch(/linear ft/);
+});
+
+test('gate on: a failed catalog read fails retryable instead of screening weaker', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogFails = true;
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Perimeter band (catalog outage case).' }), res);
+  expect(res.statusCode).toBe(503);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ retryable: true }));
+  expect(mockProvider).not.toHaveBeenCalled();
 });
 
 test('gate on: a name-only product still has its catalog actives screened', async () => {

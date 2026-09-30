@@ -24791,7 +24791,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
             })
             .select('active_ingredient');
           visitActiveIngredients.push(...(Array.isArray(rows) ? rows : []).map((row) => row?.active_ingredient).filter(Boolean));
-        } catch { /* the screen's common list still applies */ }
+        } catch (err) {
+          // The screen cannot run complete without this visit's actives —
+          // fail retryable like the trade-name guard, never screen weaker.
+          logger.warn(`[generate-report] active-ingredient screen build failed — failing retryable: ${err.message}`);
+          return res.status(503).json({
+            error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+            retryable: true,
+          });
+        }
       }
     }
     const writerRulesScreen = (text) => (writerRulesOn

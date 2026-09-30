@@ -311,7 +311,15 @@ async function buildCompletionCommsContext({
   }
   for (const email of emails) {
     if (customerWordsOnly && wavesSentEmail(email)) continue;
-    const summary = compactText(source(email.snippet || email.body_text), 260);
+    // customerWordsOnly: the full body is redacted first and the preview
+    // cut from it, so a code whose anchor sits past Gmail's pre-cut snippet
+    // is still masked. A snippet with no body has lost that context: any
+    // run of four or more digits in it is masked outright.
+    const summary = customerWordsOnly
+      ? compactText(String(email.body_text || '').trim()
+        ? source(email.body_text)
+        : source(email.snippet).replace(/\d{4,}/g, '[redacted]'), 260)
+      : compactText(email.snippet || email.body_text, 260);
     const subject = compactText(source(email.subject), 120);
     if (summary || subject) {
       entries.push({
