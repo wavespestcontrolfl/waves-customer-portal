@@ -3680,17 +3680,18 @@ on the shared IPv6-safe `rateLimitKey`, and the shared `noStore` privacy
 headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
 stamps open state and returns customer name data, so those guards are the
 whole defense.)
-`/api/rate/:token` (+ `/:token/score`, `/:token/submit`,
-`/:token/go`) (review-gate; token-scoped customer
-rating flow from a review-request link — every score is offered the same
-nearest-GBP write-a-review URL (`googleReviewUrl` on the page GET and on every
-`/submit` response; never an auto-redirect, going to Google is the customer's
-own click; owner ruling 2026-09-29), and a low score also gets the private
-feedback form plus the unchanged office alert. There is no AI review writer
-(`/:token/generate-review` was removed 2026-09-29). Router-wide url-safe
+`/api/rate/:token` (+ `/:token/go`) (review-gate; token-scoped thank-you
+page from a review-request link. The 1-10 rating, its feedback form and the AI
+review writer are retired (owner ruling 2026-09-29): the page GET returns
+`reviewUrl` — the tracked `/api/rate/:token/go` link while GATE_REVIEW_DIRECT_LINK
+is on, else the nearest GBP write-a-review URL, and null for a customer already
+marked as a reviewer — and the page shows one "Open Google" button; going to
+Google is always the customer's own click. `POST /:token/score`, `/:token/submit`
+and `/:token/generate-review` no longer exist (404). Finalized (legacy-rated)
+requests answer `alreadySubmitted` with no button. Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
-GET and score/submit writes carry a 30/min limiter. `/:token/go` is the
+GET carries a 30/min limiter. `/:token/go` is the
 GATE_REVIEW_DIRECT_LINK tracked redirect: the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
 the customer's active review cadence, and 302s to the location's GBP review

@@ -67,7 +67,7 @@ beforeEach(() => {
   api.getServiceStats.mockResolvedValue({});
   api.getBalance.mockResolvedValue({ currentBalance: 0 });
   api.getServices.mockResolvedValue({ services: [] });
-  api.getPendingSatisfaction.mockResolvedValue({ pending: null });
+  api.getGoogleReviewCard.mockResolvedValue({ card: null });
   api.getReferrals.mockResolvedValue({ stats: null });
   api.getBlogPosts.mockResolvedValue({ posts: [] });
   api.getNewsletterPosts.mockResolvedValue({ posts: [] });

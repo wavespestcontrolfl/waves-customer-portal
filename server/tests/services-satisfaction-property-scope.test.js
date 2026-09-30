@@ -1,7 +1,7 @@
 /**
  * Saved-property scope (GATE_APP_PROPERTY_SCOPE) on the two Home reads that
  * are NOT visit lists: the "Last Visit" card (GET /services?propertyScoped=1)
- * and the satisfaction prompt (GET /satisfaction/pending). Both join the
+ * and the Google review card (GET /satisfaction/review-card). Both join the
  * record's visit and apply the shared property predicate; every property
  * retired matches nothing (GitHub codex #4207 r5 P1).
  */
@@ -9,7 +9,7 @@ jest.mock('../models/db', () => { const fn = jest.fn(); fn.raw = jest.fn((s) => 
 jest.mock('../services/photos', () => ({ getPhotosForService: jest.fn(async () => []), photoUrl: jest.fn(() => null) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
-jest.mock('../services/review-request', () => ({ sendGatedAsk: jest.fn(), livePortalReviewUrlFor: jest.fn() }));
+jest.mock('../services/review-request', () => ({ livePortalReviewUrlFor: jest.fn(), checkUnscheduledAskGates: jest.fn() }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
   return { ...actual, resolveSessionScope: jest.fn(async () => global.__SCOPE__) };
@@ -106,10 +106,10 @@ describe('GET /services?propertyScoped=1 — the selected house\'s last visit', 
   });
 });
 
-describe('GET /satisfaction/pending — the prompt follows the selected house', () => {
-  test('secondary selection: joins the visit and applies the predicate; closed asks nothing', async () => {
+describe('GET /satisfaction/review-card — the card follows the selected house', () => {
+  test('secondary selection: joins the visit and applies the predicate; closed offers nothing', async () => {
     global.__SCOPE__ = SECONDARY;
-    let res = await fetch(`${base}/satisfaction/pending`);
+    let res = await fetch(`${base}/satisfaction/review-card`);
     expect(res.status).toBe(200);
     // The resolved scope is echoed (GitHub codex r11 P2) so Home drops a
     // prompt served under another house than it shows.
@@ -119,62 +119,16 @@ describe('GET /satisfaction/pending — the prompt follows the selected house', 
     expect(propertyPredicates(pending)).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
 
     jest.clearAllMocks(); global.__SCOPE__ = CLOSED;
-    res = await fetch(`${base}/satisfaction/pending`);
-    expect(await res.json()).toEqual({ pending: [], propertyScope: expect.objectContaining({ closed: true }) });
-    expect(db).not.toHaveBeenCalled();
-  });
-  // POST applies the same predicate to the record lookup (GitHub codex r12
-  // P2): a stale prompt or a replayed record id cannot rate another house's
-  // visit from this session; every property retired rates nothing.
-  test('POST /: the record lookup joins the visit and applies the predicate; a record outside the house is 404; closed is 404 before any read', async () => {
-    global.__SCOPE__ = SECONDARY;
-    // No record inside the house: first() yields nothing (the shared chain
-    // helper answers `{ count: 0 }` for count reads).
-    db.mockImplementation((table) => {
-      if (table === 'service_records') { const c = chain([]); c.first = jest.fn(async () => undefined); return c; }
-      throw new Error(`unexpected table ${table}`);
-    });
-    let res = await fetch(`${base}/satisfaction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceRecordId: 'rec-1', rating: 9 }) });
-    expect(res.status).toBe(404);
-    const [lookup] = recordChains();
-    expect(lookup.some((c) => c[0] === 'leftJoin' && c[1] === 'scheduled_services')).toBe(true);
-    expect(propertyPredicates(lookup)).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
-
-    jest.clearAllMocks(); global.__SCOPE__ = CLOSED;
-    res = await fetch(`${base}/satisfaction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceRecordId: 'rec-1', rating: 9 }) });
-    expect(res.status).toBe(404);
+    res = await fetch(`${base}/satisfaction/review-card`);
+    expect(await res.json()).toEqual({ card: null, propertyScope: expect.objectContaining({ closed: true }) });
     expect(db).not.toHaveBeenCalled();
   });
   test('gate off / single home: today\'s query, no predicate', async () => {
     for (const scope of [OFF, SINGLE]) {
       jest.clearAllMocks(); global.__SCOPE__ = scope;
-      const res = await fetch(`${base}/satisfaction/pending`);
+      const res = await fetch(`${base}/satisfaction/review-card`);
       expect(res.status).toBe(200);
       expect(recordChains().flatMap(propertyPredicates)).toEqual([]);
     }
-  });
-});
-
-
-describe('POST /satisfaction — review hold fallbacks', () => {
-  test.each(['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY', 'SMS_DELIVERY_UNCERTAIN'])('%s preserves the rating without returning a review CTA', async (code) => {
-    global.__SCOPE__ = OFF;
-    const review = require('../services/review-request');
-    review.sendGatedAsk.mockResolvedValue({ outcome: 'blocked', code });
-    review.livePortalReviewUrlFor.mockResolvedValue(null);
-    const insert = jest.fn(async () => []);
-    db.mockImplementation((table) => {
-      if (table === 'service_records') return chain([{ id: 'rec-1', service_type: 'Pest Control' }]);
-      if (table === 'satisfaction_responses') {
-        const c = chain([]); c.first = jest.fn(async () => null); c.insert = insert; return c;
-      }
-      throw new Error(`unexpected table ${table}`);
-    });
-    const res = await fetch(`${base}/satisfaction`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ serviceRecordId: 'rec-1', rating: 9 }) });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toMatchObject({ success: true, action: 'review', reviewLink: null });
-    expect(insert).toHaveBeenCalledWith(expect.objectContaining({ rating: 9 }));
-    expect(review.sendGatedAsk).toHaveBeenCalled();
-    expect(review.livePortalReviewUrlFor).not.toHaveBeenCalled();
   });
 });
