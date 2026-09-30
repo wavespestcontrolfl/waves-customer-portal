@@ -168,7 +168,11 @@ async function decideReviewItem(opportunityId, { decision, note, reviewer, expec
     .orderBy('claimed_at', 'desc')
     .first();
 
-  if ((run?.action_type || opportunity.action_type) === 'new_supporting_blog') {
+  // Autonomous blogs are engine-managed, except a may-have-published hold (an
+  // interrupted approval publish): a person who has checked GitHub must be
+  // able to dismiss it, and nothing else.
+  const blogHoldDismiss = normalizedDecision === 'dismiss' && unreconciledRefreshHold(opportunity);
+  if ((run?.action_type || opportunity.action_type) === 'new_supporting_blog' && !blogHoldDismiss) {
     const err = new Error('Autonomous blogs are managed by the engine; no review decision is required');
     err.statusCode = 409;
     err.isOperational = true;
@@ -452,9 +456,11 @@ function reviewActions({ opportunity, run }) {
   const inReview = opportunity?.status === 'pending_review' && (run?.action_type || opportunity?.action_type) !== 'new_supporting_blog';
   const unreconciled = unreconciledRefreshHold(opportunity);
   const pendingReview = !superseded && !unreconciled && inReview;
+  // A may-have-published hold is dismissable on every lane, blogs included.
+  const holdDismissable = opportunity?.status === 'pending_review' && unreconciled;
   return {
     can_requeue: pendingReview,
-    can_dismiss: pendingReview || (inReview && (unreconciled || supersededReconciliationHold(opportunity))),
+    can_dismiss: pendingReview || holdDismissable || (inReview && supersededReconciliationHold(opportunity)),
     can_approve_trust_build: pendingReview && isTrustBuildRun(run),
     can_approve_named_competitor: pendingReview && isNamedCompetitorReviewRun(run),
   };

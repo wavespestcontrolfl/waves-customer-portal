@@ -35,6 +35,9 @@ const RECONCILIATION_HOLD_REASONS = [
   'astro_pr_queue_transition_failed', 'published_queue_complete_failed',
   'named_competitor_publish_interrupted', UNRECONCILED_REFRESH_REASON,
 ];
+// sweepExhaustedAttempts never retires these: owner review kinds plus every
+// reconciliation hold, so a new hold reason cannot be missed by the sweep.
+const SWEEP_PROTECTED_REASONS = ['named_competitor_review', 'affiliate_review', ...RECONCILIATION_HOLD_REASONS];
 
 // Keep read-only catch-up probes and atomic claims on the same eligibility.
 // A failed status write may leave a published run's row pending. Fence every
@@ -692,15 +695,14 @@ class OpportunityQueue {
       .whereRaw(`(status = 'pending' AND attempt_count >= ?) OR (
         ${effectiveActionSql} = 'new_supporting_blog' AND status = 'pending_review'
         -- A failed audit insert can leave no run evidence despite an external publish.
-        -- Reconciliation holds must survive until that external state is resolved.
-        AND COALESCE(skip_reason, '') NOT IN ('named_competitor_review', 'affiliate_review',
-          'astro_pr_audit_failed', 'published_audit_failed',
-          'astro_pr_queue_transition_failed', 'published_queue_complete_failed')
+        -- Reconciliation holds (every may-have-published reason, incl. an
+        -- interrupted approval) must survive until a person resolves them.
+        AND COALESCE(skip_reason, '') NOT IN (${SWEEP_PROTECTED_REASONS.map(() => '?').join(', ')})
         AND COALESCE(skip_reason, '') !~ '^trust_build_[0-9]+_of_[0-9]+$'
         AND NOT EXISTS (SELECT 1 FROM autonomous_runs r
           WHERE r.opportunity_id = opportunity_queue.id
             AND (r.astro_pr_url IS NOT NULL OR r.published_url IS NOT NULL))
-      )`, [maxClaimAttempts()])
+      )`, [maxClaimAttempts(), ...SWEEP_PROTECTED_REASONS])
       .update({
         status: db.raw(`CASE WHEN ${effectiveActionSql} = 'new_supporting_blog' THEN 'skipped' ELSE 'pending_review' END`),
         skip_reason: db.raw("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END"),
