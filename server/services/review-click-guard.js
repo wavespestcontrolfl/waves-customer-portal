@@ -30,8 +30,8 @@
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
 
-// A date-only visit column is that ET calendar day, so the anchor is ET
-// midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
+// A date-only visit column is that ET calendar day, so the fallback anchor is
+// ET midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
 // 4–5 hours early, and a 9 p.m. ET click the evening before the visit would
 // then suppress that visit's ask.
 function etMidnight(value) {
@@ -39,16 +39,34 @@ function etMidnight(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(ymd || '') ? parseETDateTime(`${ymd}T00:00`) : null;
 }
 
-// The visit date a review ask belongs to, or null.
+// The moment a visit completed, when the completion flow recorded one, else ET
+// midnight of its date. Two completed visits on the same day then anchor at
+// their own completion instants: a click between them is not a response to the
+// second. Fields are the ones the completion flow writes:
+//   service_records.ended_at (service report v1)
+//   scheduled_services.actual_end_time / check_out_time / completed_at (the same
+//   order lifecycle-email-sweeps and the field-team program read)
+function instantOrMidnight(instant, date) {
+  if (instant) {
+    const d = new Date(instant);
+    if (!Number.isNaN(d.getTime())) return d;
+  }
+  return etMidnight(date);
+}
+const recordInstant = (row) => instantOrMidnight(row?.ended_at, row?.service_date);
+const scheduledInstant = (row) => instantOrMidnight(row?.actual_end_time || row?.check_out_time || row?.completed_at, row?.scheduled_date);
+
+// The visit a review ask belongs to, as a completion instant (or ET midnight), or null.
 async function visitAnchor({ serviceRecordId = null, scheduledServiceId = null } = {}, database = db) {
   if (serviceRecordId) {
-    const row = await database('service_records').where({ id: serviceRecordId }).first('service_date');
-    const anchor = etMidnight(row?.service_date);
+    const row = await database('service_records').where({ id: serviceRecordId }).first('service_date', 'ended_at');
+    const anchor = recordInstant(row);
     if (anchor) return anchor;
   }
   if (scheduledServiceId) {
-    const row = await database('scheduled_services').where({ id: scheduledServiceId }).first('scheduled_date');
-    const anchor = etMidnight(row?.scheduled_date);
+    const row = await database('scheduled_services').where({ id: scheduledServiceId })
+      .first('scheduled_date', 'actual_end_time', 'check_out_time', 'completed_at');
+    const anchor = scheduledInstant(row);
     if (anchor) return anchor;
   }
   return null;
@@ -77,11 +95,13 @@ async function newestCompletedVisitAnchor(customerId, database = db) {
   // status 'completed' ordered by service_date desc.
   const [record, visit] = await Promise.all([
     database('service_records').where({ customer_id: customerId, status: 'completed' })
-      .orderBy('service_date', 'desc').first('service_date'),
+      .orderBy('service_date', 'desc').orderByRaw('ended_at DESC NULLS LAST')
+      .first('service_date', 'ended_at'),
     database('scheduled_services').where({ customer_id: customerId, status: 'completed' })
-      .orderBy('scheduled_date', 'desc').first('scheduled_date'),
+      .orderBy('scheduled_date', 'desc').orderByRaw('completed_at DESC NULLS LAST')
+      .first('scheduled_date', 'actual_end_time', 'check_out_time', 'completed_at'),
   ]);
-  const dates = [etMidnight(record?.service_date), etMidnight(visit?.scheduled_date)].filter(Boolean);
+  const dates = [recordInstant(record), scheduledInstant(visit)].filter(Boolean);
   return dates.length ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null;
 }
 

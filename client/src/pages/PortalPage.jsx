@@ -2673,6 +2673,8 @@ function SavedVisitDetails({ visits }) {
 // this remembers the untracked bare-link tap and dismissals per completed visit
 // in the browser only — no new table.
 const REVIEW_CARD_DONE_KEY = 'waves.googleReviewCardDone';
+// A record-less completed visit is keyed by its scheduled visit id.
+const reviewCardKey = (c) => c.serviceRecordId || c.scheduledServiceId;
 function reviewCardDone(serviceRecordId) {
   try { return JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').includes(serviceRecordId); } catch { return false; }
 }
@@ -2849,7 +2851,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
       const { entry, saved, named, refresh } = pendingScopeRef.current;
       if (scopeEchoMismatch(d.propertyScope, entry, saved, named)) {
         if (typeof refresh === 'function') Promise.resolve(refresh()).catch(() => {});
-      } else if (d.card && !reviewCardDone(d.card.serviceRecordId)) setReviewCard(d.card);
+      } else if (d.card && !reviewCardDone(reviewCardKey(d.card))) setReviewCard(d.card);
       setReviewCardStatus('ready');
     }).catch(err => {
       // No error UI: the review card only exists when the server offers one,
@@ -3264,7 +3266,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
               </div>
             </div>
             <ShellCloseButton
-              onClick={() => { rememberReviewCardDone(reviewCard.serviceRecordId); setReviewCardDismissed(true); }}
+              onClick={() => { rememberReviewCardDone(reviewCardKey(reviewCard)); setReviewCardDismissed(true); }}
               label="Dismiss feedback prompt"
             />
           </div>
@@ -3278,7 +3280,7 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
               target="_blank"
               rel="noopener noreferrer"
               // Hide the card in the same handler; the link itself still opens Google.
-              onClick={() => { rememberReviewCardDone(reviewCard.serviceRecordId); setReviewCardDismissed(true); }}
+              onClick={() => { rememberReviewCardDone(reviewCardKey(reviewCard)); setReviewCardDismissed(true); }}
               style={{
                 ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
                 boxShadow: 'none', borderRadius: 8,

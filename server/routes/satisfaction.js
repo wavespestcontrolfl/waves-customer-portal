@@ -70,12 +70,31 @@ router.get('/review-card', async (req, res, next) => {
       .orderBy('service_records.service_date', 'desc')
       .limit(1); // one card at a time
     visitQuery = applyPropertyPredicate(visitQuery, scope, 'scheduled_services');
-    const [visit] = await visitQuery;
+    let [visit] = await visitQuery;
+    // A completed appointment can exist with no service record: fall back to
+    // the newest completed scheduled visit in the same window and property
+    // scope (same status / date predicates as the click guard's anchor).
+    if (!visit) {
+      let scheduledQuery = db('scheduled_services')
+        .where({ 'scheduled_services.customer_id': req.customerId, 'scheduled_services.status': 'completed' })
+        .where('scheduled_services.scheduled_date', '>=', sevenDaysAgo.toISOString().split('T')[0])
+        .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
+        .select(
+          'scheduled_services.id as scheduled_service_id',
+          'scheduled_services.service_type',
+          'technicians.name as technician_name'
+        )
+        .orderBy('scheduled_services.scheduled_date', 'desc')
+        .limit(1);
+      scheduledQuery = applyPropertyPredicate(scheduledQuery, scope, 'scheduled_services');
+      [visit] = await scheduledQuery;
+    }
     if (!visit) return res.json({ card: null, propertyScope });
 
     // Already clicked through a tracked review link since this visit: the same
-    // ET-midnight anchor and first-or-latest click check the send-time guard uses.
-    const anchor = await visitAnchor({ serviceRecordId: visit.id });
+    // completion-instant anchor and first-or-latest click check the send-time
+    // guard uses.
+    const anchor = await visitAnchor({ serviceRecordId: visit.id || null, scheduledServiceId: visit.scheduled_service_id || null });
     if (await reviewLinkClickedSince(req.customerId, anchor)) return res.json({ card: null, propertyScope });
 
     // Same last-resort stored id the ask path uses (ReviewService
@@ -90,7 +109,8 @@ router.get('/review-card', async (req, res, next) => {
 
     res.json({
       card: {
-        serviceRecordId: visit.id,
+        serviceRecordId: visit.id || null,
+        scheduledServiceId: visit.scheduled_service_id || null,
         serviceType: visit.service_type,
         technicianName: visit.technician_name || null,
         reviewLink,

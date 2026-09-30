@@ -322,6 +322,19 @@ describe('Google review card (the 1-10 rating is retired)', () => {
     expect(JSON.parse(localStorage.getItem('waves.googleReviewCardDone'))).toEqual(['svc-9']);
   });
 
+  it('a record-less visit card (no serviceRecordId) is dismissed and remembered under its scheduled visit id', async () => {
+    const recordless = { ...card, serviceRecordId: null, scheduledServiceId: 'ss-9' };
+    api.getGoogleReviewCard.mockResolvedValue({ card: recordless });
+    const first = render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss feedback prompt/i }));
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves.googleReviewCardDone'))).toEqual(['ss-9']);
+    first.unmount();
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    await waitFor(() => expect(api.getGoogleReviewCard).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
+  });
+
   it('dismissing the card hides it and remembers it', async () => {
     api.getGoogleReviewCard.mockResolvedValue({ card });
     render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);

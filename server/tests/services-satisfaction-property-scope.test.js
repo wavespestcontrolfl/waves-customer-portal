@@ -56,7 +56,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
   db.mockImplementation((table) => {
-    if (table === 'service_records') return chain([]);
+    if (table === 'service_records' || table === 'scheduled_services') return chain([]);
     throw new Error(`unexpected table ${table}`);
   });
 });
@@ -122,6 +122,16 @@ describe('GET /satisfaction/review-card — the card follows the selected house'
     res = await fetch(`${base}/satisfaction/review-card`);
     expect(await res.json()).toEqual({ card: null, propertyScope: expect.objectContaining({ closed: true }) });
     expect(db).not.toHaveBeenCalled();
+  });
+  test('the record-less fallback (completed scheduled visit) carries the SAME property predicate and 7-day window', async () => {
+    global.__SCOPE__ = SECONDARY;
+    const res = await fetch(`${base}/satisfaction/review-card`);
+    expect(res.status).toBe(200);
+    const scheduled = db.mock.calls.map((c, i) => [c[0], db.mock.results[i].value]).filter(([t]) => t === 'scheduled_services').map(([, c]) => c.calls);
+    expect(scheduled).toHaveLength(1);
+    expect(propertyPredicates(scheduled[0])).toEqual([['where(fn)', [['where', 'scheduled_services.property_id', 'prop-b']]]]);
+    expect(JSON.stringify(scheduled[0])).toContain('scheduled_services.status');
+    expect(JSON.stringify(scheduled[0])).toContain('scheduled_services.scheduled_date');
   });
   test('gate off / single home: today\'s query, no predicate', async () => {
     for (const scope of [OFF, SINGLE]) {

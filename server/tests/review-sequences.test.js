@@ -7102,6 +7102,53 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  describe('a visit anchors at its recorded COMPLETION instant, ET midnight only when none is recorded', () => {
+    const day = VISIT.toISOString().slice(0, 10);
+    const at = (hhmmZ) => new Date(`${day}T${hhmmZ}:00Z`); // EDT: 14:00Z = 10:00 ET
+    const visits = () => [
+      { id: 'rec-a', customer_id: 'clk-1', status: 'completed', service_date: day, ended_at: at('14:00') }, // 10:00 ET
+      { id: 'rec-b', customer_id: 'clk-1', status: 'completed', service_date: day, ended_at: at('20:00') }, // 4:00 PM ET
+    ];
+    const clickAt = (when) => click({ sms_sent_at: null, redirected_at: when });
+    const sent = async (records, clickRow, recordId) => {
+      const mock = makeMock({ customers: [customer], service_records: records, review_requests: [clickRow, queuedAsk({ id: `rr-${recordId}`, service_record_id: recordId, created_at: new Date() })] });
+      db.mockImplementation(mock);
+      mockSendCustomerMessage.mockClear();
+      return (await ReviewService.processScheduled()).sent;
+    };
+
+    test('two same-day visits: a click BETWEEN them (1 PM) suppresses the first visit\'s ask but not the second\'s; a click after the second (5 PM) suppresses both', async () => {
+      expect(await sent(visits(), clickAt(at('17:00')), 'rec-a')).toBe(0);
+      expect(await sent(visits(), clickAt(at('17:00')), 'rec-b')).toBe(1);
+      expect(await sent(visits(), clickAt(at('21:00')), 'rec-b')).toBe(0);
+    });
+
+    test('the operator path agrees: newest visit is the later completion, so a click between the two visits does not suppress a one-off', async () => {
+      // (the in-memory harness ignores orderByRaw, so list the later completion first, as the real ORDER BY would)
+      const mock = makeMock({ customers: [customer], service_records: visits().reverse(), review_requests: [clickAt(at('17:00'))] });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({ customer, channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'admin', manageRetryVia: 'cron' });
+      expect(out).toMatchObject({ ok: true, sent: true });
+    });
+
+    test('a visit with NO timestamp still anchors at ET midnight of its date (a click hours after midnight suppresses)', async () => {
+      const noStamp = [{ id: 'rec-a', customer_id: 'clk-1', status: 'completed', service_date: day }];
+      expect(await sent(noStamp, clickAt(at('06:00')), 'rec-a')).toBe(0); // 2 AM ET of the visit day, after midnight
+      expect(await sent(noStamp, clickAt(new Date(at('04:00').getTime() - 1)), 'rec-a')).toBe(1); // 11:59 PM ET the evening before
+    });
+
+    test('a scheduled visit anchors at its check-out / completion stamp', async () => {
+      const mock = makeMock({
+        customers: [customer],
+        scheduled_services: [{ id: 'ss-2', customer_id: 'clk-1', status: 'completed', scheduled_date: day, check_out_time: at('20:00') }],
+        review_requests: [clickAt(at('17:00'))],
+      });
+      db.mockImplementation(mock);
+      const out = await ReviewService.sendOutreachTouch({ customer, channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'admin', manageRetryVia: 'cron' });
+      expect(out).toMatchObject({ ok: true, sent: true }); // the click predates the visit's 4 PM completion
+    });
+  });
+
   test('a completed visit with NO service record (scheduled_services only) anchors an operator one-off: a click after it suppresses, a click from before it does not', async () => {
     const visit = { id: 'ss-1', customer_id: 'clk-1', status: 'completed', scheduled_date: VISIT.toISOString().slice(0, 10) };
     let mock = makeMock({ customers: [customer], scheduled_services: [visit], review_requests: [click({ sms_sent_at: null })] });

@@ -7,7 +7,7 @@
  * rating POST and the pending-prompt GET no longer exist.
  */
 jest.mock('../models/db', () => {
-  const state = { visits: [], clicked: null };
+  const state = { visits: [], scheduled: [], clicked: null };
   const fn = jest.fn((table) => {
     const q = {};
     for (const m of ['where', 'whereNotNull', 'leftJoin', 'select', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
@@ -15,9 +15,10 @@ jest.mock('../models/db', () => {
       if (table === 'review_requests') return state.clicked;
       // visitAnchor (review-click-guard) reads the visit's service_date.
       if (table === 'service_records') return state.visits[0] ? { service_date: state.visits[0].service_date } : undefined;
+      if (table === 'scheduled_services') return state.scheduled[0] ? { scheduled_date: state.scheduled[0].scheduled_date } : undefined;
       return undefined;
     });
-    q.then = (ok, err) => Promise.resolve(table === 'service_records' ? state.visits : []).then(ok, err);
+    q.then = (ok, err) => Promise.resolve(table === 'service_records' ? state.visits : table === 'scheduled_services' ? state.scheduled : []).then(ok, err);
     return q;
   });
   fn.state = state;
@@ -65,6 +66,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   global.__LEFT__ = false;
   db.state.visits = [VISIT];
+  db.state.scheduled = [];
   db.state.clicked = null;
   ReviewService.reviewSmsAllowedNow.mockResolvedValue({ allowed: true });
   ReviewService._liveReviewToken.mockResolvedValue('t'.repeat(40));
@@ -79,7 +81,7 @@ const expectNothingSent = () => {
 describe('GET /review-card — tracked links only, never a send', () => {
   test('a live tracked token: the card carries its /go link', async () => {
     expect(await card()).toEqual({
-      card: { serviceRecordId: 'rec-1', serviceType: 'Pest Control', technicianName: 'Alex', reviewLink: TOKEN_URL, officeName: office.name },
+      card: { serviceRecordId: 'rec-1', scheduledServiceId: null, serviceType: 'Pest Control', technicianName: 'Alex', reviewLink: TOKEN_URL, officeName: office.name },
       propertyScope: expect.anything(),
     });
     expectNothingSent();
@@ -110,6 +112,18 @@ describe('GET /review-card — tracked links only, never a send', () => {
     expect(db).not.toHaveBeenCalled();
     expect(ReviewService._liveReviewToken).not.toHaveBeenCalled();
     expectNothingSent();
+  });
+
+  test('a completed visit with NO service record (scheduled_services only): the card is shown, keyed on the scheduled visit id', async () => {
+    db.state.visits = [];
+    db.state.scheduled = [{ scheduled_service_id: 'ss-9', service_type: 'Lawn Care', technician_name: null, scheduled_date: '2026-09-28' }];
+    expect(await card()).toEqual({
+      card: { serviceRecordId: null, scheduledServiceId: 'ss-9', serviceType: 'Lawn Care', technicianName: null, reviewLink: TOKEN_URL, officeName: office.name },
+      propertyScope: expect.anything(),
+    });
+    // ...and a tracked click since that visit ends it (same anchor as the guard).
+    db.state.clicked = { id: 'rr-9' };
+    expect((await card()).card).toBeNull();
   });
 
   test('no completed visit in the window: no card', async () => {
