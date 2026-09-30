@@ -4124,6 +4124,38 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(namedReserviceLanesInText(text)).toEqual(lanes);
     });
 
+    // Codex round-38 P2: an inactive customer's live booked callback still renders as ALREADY BOOKED and the slot guard honors it.
+    test('inactive customer + open pest callback → "already booked" fact, offered times rejected', async () => {
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      jest.resetModules();
+      const actual = jest.requireActual('../services/reservice-scheduler');
+      // the REAL by-id loader over a fake db: an inactive customer row, one open pest callback
+      const callback = { id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Pest Control Re-Service', reschedule_token: 't1', service_key: 'pest_re_service' };
+      const mk = (table) => {
+        const chain = {};
+        for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'orWhere', 'orWhereIn', 'modify', 'select', 'limit', 'forUpdate']) chain[m] = () => chain;
+        chain.orderBy = () => { chain.mode = 'callbacks'; return chain; };
+        chain.first = async () => (table === 'customers' ? { id: 'cust-1', active: false, reservice_token: 'tok' } : null);
+        chain.then = (resolve) => Promise.resolve(chain.mode === 'callbacks' ? [callback] : []).then(resolve);
+        return chain;
+      };
+      jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: (id) => actual.loadReserviceLaneAvailability(id, mk) }));
+      const drafter = require('../services/sms-shadow-drafter');
+      const state = await drafter.fetchReserviceFactState({ customerId: 'cust-1' });
+      jest.dontMock('../services/reservice-scheduler');
+      jest.resetModules();
+      expect(Object.keys(state.booked)).toEqual(['pest']);
+      expect(state.lanes).toEqual([]);
+      const { reserviceFactLine, validateReserviceOffer } = require('../services/sms-shadow-drafter');
+      const line = reserviceFactLine(state.lanes, state.booked, state.planState, state.linkDownLanes);
+      expect(line).toMatch(/pest already booked/);
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      const out = validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: `X\n${line}\nBILLING:`, intendedActions: [], inboundMessage: 'the ants are back', offeredTimes: slot });
+      expect(out.ok).toBe(false);
+      expect(out.violations[0]).toMatch(/ALREADY BOOKED/);
+      delete process.env.GATE_SMS_REAL_ANSWERS;
+    });
+
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {
       const { RESERVICE_OFFER_SPAN_RES } = require('../services/sms-shadow-drafter');
       expect(RESERVICE_OFFER_SPAN_RES).toHaveLength(2);

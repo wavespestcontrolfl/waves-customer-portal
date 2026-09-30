@@ -222,6 +222,13 @@ async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = fa
  * loadReserviceLaneAvailability both start here, so the predicate cannot drift
  * (Codex round-12, PR #5336). Throws on a lookup error; callers fail closed.
  */
+// The customer row with NO active / token filter (still not deleted) — the by-id SMS path needs the identity to read open callbacks.
+async function loadReserviceCustomerIdentity(customerId, dbh = db) {
+  return (await dbh('customers')
+    .where({ id: customerId })
+    .whereNull('deleted_at')
+    .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token')) || null;
+}
 async function loadReserviceCustomerRow(customerId, dbh = db) {
   const customer = await dbh('customers')
     .where({ id: customerId })
@@ -333,9 +340,16 @@ async function loadReserviceLaneAvailability(customerId, dbh = db) {
   const none = { eligible: [], open: {}, bookable: [], verified: false };
   if (!customerId) return none;
   try {
-    const customer = await loadReserviceCustomerRow(customerId, dbh);
-    if (!customer) return none;
-    return { ...(await reserviceLaneAvailability(customer, dbh, { strict: true })), verified: true };
+    // Codex round-38 P2: load the customer IDENTITY and the open callbacks BEFORE filtering on active / token. A cancellation can mark
+    // the customer inactive before its callback is cancelled; that live booked callback must still render as "already booked" (the
+    // SMS facts and the slot guard read it), or the pest flow offers paid times over it. An inactive or tokenless row still has NO
+    // newly bookable lane and is not a confirmed prospect (verified:false).
+    const identity = await loadReserviceCustomerIdentity(customerId, dbh);
+    if (!identity) return none;
+    if (identity.active === false || !identity.reservice_token) {
+      return { eligible: [], open: await openReserviceCallbacks(identity.id, dbh), bookable: [], verified: false };
+    }
+    return { ...(await reserviceLaneAvailability(identity, dbh, { strict: true })), verified: true };
   } catch (err) {
     logger.warn(`[reservice-scheduler] lane availability loader failed for customer ${customerId}: ${err.message}`);
     return none;

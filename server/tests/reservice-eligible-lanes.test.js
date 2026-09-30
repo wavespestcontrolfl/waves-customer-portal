@@ -735,3 +735,43 @@ describe('covered-pests load-time derivation never throws (and drift is reported
     expect(mod.TURF_INSECT_NOUN_SOURCES).toHaveLength(1);
   });
 });
+
+
+// Codex round-38 P2: the by-id SMS path reads open callbacks BEFORE filtering on active / token.
+describe('loadReserviceLaneAvailability — a live callback survives an inactive / tokenless customer row', () => {
+  const { loadReserviceLaneAvailability } = require('../services/reservice-scheduler');
+  const callback = { id: 'r1', scheduled_date: '2099-01-05', window_start: '09:00', window_end: '11:00', service_type: 'Pest Control Re-Service', reschedule_token: 't1', service_key: 'pest_re_service' };
+  const fakeDb = ({ customer, callbacks = [callback] }) => {
+    const mk = (table) => {
+      const chain = {};
+      for (const m of ['leftJoin', 'where', 'whereIn', 'whereNotIn', 'whereNull', 'orWhere', 'orWhereIn', 'modify', 'select', 'limit', 'forUpdate']) chain[m] = () => chain;
+      chain.orderBy = () => { chain.mode = 'callbacks'; return chain; };
+      chain.first = async () => (table === 'customers' ? customer : null);
+      chain.then = (resolve) => Promise.resolve(chain.mode === 'callbacks' ? callbacks : []).then(resolve);
+      return chain;
+    };
+    return (table) => mk(table);
+  };
+
+  test('inactive customer + open pest callback → the lane is BOOKED (open populated), nothing newly bookable, not a confirmed prospect', async () => {
+    const out = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: { id: 'cust-1', active: false, reservice_token: 'tok' } }));
+    expect(Object.keys(out.open)).toEqual(['pest']);
+    expect(out.eligible).toEqual([]);
+    expect(out.bookable).toEqual([]);
+    expect(out.verified).toBe(false);
+  });
+
+  test('tokenless customer + open callback → same; a deleted / missing row stays unavailable', async () => {
+    const tokenless = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: { id: 'cust-1', active: true, reservice_token: null } }));
+    expect(Object.keys(tokenless.open)).toEqual(['pest']);
+    expect(tokenless.bookable).toEqual([]);
+    expect(tokenless.verified).toBe(false);
+    const missing = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: null }));
+    expect(missing).toEqual({ eligible: [], open: {}, bookable: [], verified: false });
+  });
+
+  test('inactive customer with NO open callback: empty open, unverified (unchanged behavior)', async () => {
+    const out = await loadReserviceLaneAvailability('cust-1', fakeDb({ customer: { id: 'cust-1', active: false, reservice_token: 'tok' }, callbacks: [] }));
+    expect(out).toEqual({ eligible: [], open: {}, bookable: [], verified: false });
+  });
+});
