@@ -1,0 +1,94 @@
+// The one way new admin notifications are written. Contract: docs/admin-notifications.md.
+// composeAdminAlert is pure (no I/O); raiseAdminAlert routes the composed alert by severity.
+// Errors name the field and the rule, never the text: headline and why carry customer names.
+// notification-service is required at call time so composing never loads the database.
+const logger = require('./logger');
+const { truncateAtWord } = require('./ops-digest');
+const { stripEmoji } = require('../utils/strip-emoji');
+
+const AREAS = ['Comms', 'Schedule', 'Billing', 'Estimates', 'Leads', 'Customers', 'Inventory', 'Content', 'System'];
+const SEVERITIES = ['needs-you', 'broken', 'fyi'];
+const WHO = ['person', 'claude', 'either'];
+const SUBJECT_TYPES = ['customer', 'visit', 'invoice', 'estimate', 'lead', 'call', 'check'];
+const MAX_HEADLINE_CHARS = 60;
+const MAX_WHY_CHARS = 110;
+const RULE_CODE = 'ADMIN_ALERT_RULE';
+
+// Doc section 3: what never appears in a headline or a why. [slug, test(text)].
+const FORBIDDEN = [
+  ['iso_date', (t) => /\d{4}-\d{2}-\d{2}/.test(t)],
+  ['hash', (t) => /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i.test(t) || /\b[0-9a-f]{12,}\b/i.test(t)],
+  ['env_name', (t) => /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/.test(t)],
+  ['snake_case', (t) => /\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/.test(t)],
+  ['file_path', (t) => /~\/|\/[\w.-]+(?:\/[\w.-]+)*\.[A-Za-z]\w{0,4}\b|\b[\w-]+(?:\/[\w.-]+)+\.[A-Za-z]\w{0,4}\b/.test(t)],
+  ['bracket_tag', (t) => /\[[^\]]*\]/.test(t)],
+  ['zero_new', (t) => /\b0 new\b/i.test(t)],
+  ['action_prefix', (t) => /^(?:\w+ — )?(?:ACT|FIX|OK|FYI):/i.test(t)],
+  ['exclamation', (t) => t.includes('!')],
+  ['emoji', (t) => { const tidy = t.replace(/[ \t]{2,}/g, ' ').trim(); return stripEmoji(tidy) !== tidy; }],
+];
+
+function ruleError(violations, message = `Admin alert breaks docs/admin-notifications.md: ${violations.join(', ')}`) {
+  return Object.assign(new Error(message), { code: RULE_CODE, violations });
+}
+
+function composeAdminAlert(spec = {}) {
+  const { area, action, why, severity, link, subject, doneWhen, who } = spec;
+  const v = [];
+  if (!AREAS.includes(area)) v.push('area_invalid');
+  if (!SEVERITIES.includes(severity)) v.push('severity_invalid');
+  if (!WHO.includes(who)) v.push('who_invalid');
+  if (!SUBJECT_TYPES.includes(subject?.type)) v.push('subject_type_invalid');
+  const id = subject?.id;
+  if (!((typeof id === 'string' && id.trim()) || (typeof id === 'number' && Number.isFinite(id)))) v.push('subject_id_invalid');
+  if (!(typeof doneWhen === 'string' && /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(doneWhen))) v.push('done_when_invalid');
+  if (typeof action !== 'string' || !action.trim()) v.push('action_missing');
+
+  const headline = `${area} — ${typeof action === 'string' ? action.trim() : ''}`;
+  if (headline.length > MAX_HEADLINE_CHARS) v.push('headline_too_long');
+  const whyText = typeof why === 'string' ? why.trim() : '';
+  if (!whyText && severity !== 'fyi') v.push('why_missing');
+  if (whyText.length > MAX_WHY_CHARS) v.push('why_too_long');
+  for (const [field, text] of [['headline', headline], ['why', whyText]]) {
+    for (const [slug, hit] of FORBIDDEN) if (hit(text)) v.push(`${field}_forbidden_token:${slug}`);
+  }
+
+  if (link != null && !(typeof link === 'string' && link.startsWith('/admin/'))) v.push('link_not_admin');
+  if (severity === 'needs-you') {
+    if (!link) v.push('link_required');
+    else if (/^\/admin\/agents\b.*\btab=activity/.test(link)) v.push('link_is_activity_feed');
+  }
+  if (v.length) throw ruleError(v);
+  return { headline, why: whyText, link: link || null, metadata: { area, severity, subject: { type: subject.type, id }, doneWhen, who } };
+}
+
+// needs-you rings through notifyAdmin under the emitter's own category; broken belongs to
+// deliverOpsDigest (the Activity feed reads ops_digest rows only); fyi writes nothing.
+// A violation in a live emitter never crashes its work and never drops a needs-you alert:
+// it rings with the headline cut to fit and the violations stamped. Tests rethrow.
+async function raiseAdminAlert(category, spec = {}, opts = {}) {
+  let composed;
+  try {
+    composed = composeAdminAlert(spec);
+  } catch (err) {
+    const { severity } = spec;
+    if (err.code !== RULE_CODE || process.env.NODE_ENV === 'test' || (severity !== 'needs-you' && severity !== 'fyi')) throw err;
+    logger.warn(`[admin-alert] ${category} broke the notification rule: ${err.violations.join(', ')}`);
+    if (severity === 'fyi') return { id: null, suppressed: true, reason: 'fyi' };
+    return require('./notification-service').notifyAdmin(category, truncateAtWord([spec.area, spec.action].filter(Boolean).join(' — '), MAX_HEADLINE_CHARS), spec.why, {
+      ...opts, ...(spec.link ? { link: spec.link } : {}), metadata: { ...opts.metadata, ruleViolations: err.violations },
+    });
+  }
+  if (spec.severity === 'broken') {
+    throw ruleError(['broken_uses_ops_digest'], "A broken alert is not raised here: call deliverOpsDigest (server/services/ops-digest.js) with the composed headline and why as headline and summary and audience 'engineering'. The Activity feed reads ops_digest rows only.");
+  }
+  if (spec.severity === 'fyi') return { id: null, suppressed: true, reason: 'fyi' };
+  return require('./notification-service').notifyAdmin(category, composed.headline, composed.why, {
+    ...opts, link: composed.link, metadata: { ...(opts.metadata || {}), ...composed.metadata },
+  });
+}
+
+module.exports = {
+  AREAS, SEVERITIES, WHO, SUBJECT_TYPES, MAX_HEADLINE_CHARS, MAX_WHY_CHARS,
+  composeAdminAlert, raiseAdminAlert, cutAtWord: truncateAtWord,
+};
