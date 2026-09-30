@@ -1597,12 +1597,13 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY BOOKING-LINK TEXT CHECK — Monday 8:19am ET (owner 2026-09-29: a
+  // WEEKLY BOOKING-LINK TEXT CHECK — Monday 8:13am ET (owner 2026-09-29: a
   // concise admin notification every 7 days while GATE_CALL_BOOKING_LINK_TEXT
-  // is on — sent count, top skips, or what needs a look). Minute 19 is
-  // unused by every other schedule in this file.
+  // is on — sent count, top skips, or what needs a look). Minute 13 is free
+  // in every schedule here, step patterns included; :19/:49 belong to the
+  // DB/LLM-heavy previsit sweep (codex #5358 r2 P1).
   // =========================================================================
-  cron.schedule('19 8 * * 1', async () => {
+  cron.schedule('13 8 * * 1', async () => {
     const tickStartedAt = Date.now();
     try {
       const lockRes = await runExclusive('call-booking-link-weekly', async () => {

@@ -17,7 +17,7 @@ const {
   _private: { composeWeeklyCheck, dedupeKeyFor, reasonLabel, SUMMARY_MAX },
 } = require('../services/call-booking-link-weekly-check');
 
-const NOW = new Date('2026-10-05T12:19:00.000Z'); // Monday 8:19 AM ET
+const NOW = new Date('2026-10-05T12:13:00.000Z'); // Monday 8:13 AM ET
 const FRESH_JOB = { last_success_at: new Date(NOW.getTime() - 3 * 60 * 1000), consecutive_failures: 0 };
 
 function skipped(reason, n) {
@@ -160,7 +160,7 @@ describe('dedupeKeyFor', () => {
   test('one key per ET week', () => {
     const monday = dedupeKeyFor(NOW);
     expect(dedupeKeyFor(new Date('2026-10-07T15:00:00.000Z'))).toBe(monday);
-    expect(dedupeKeyFor(new Date('2026-10-12T12:19:00.000Z'))).not.toBe(monday);
+    expect(dedupeKeyFor(new Date('2026-10-12T12:13:00.000Z'))).not.toBe(monday);
   });
 });
 

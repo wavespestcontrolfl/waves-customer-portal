@@ -13,7 +13,7 @@
 //            "3 stuck · 1 error · last run 3h ago"
 // The fuller breakdown rides in `detail` (and the email fallback).
 //
-// Cron: Monday 8:19am ET in scheduler.js, inside runExclusive.
+// Cron: Monday 8:13am ET in scheduler.js, inside runExclusive.
 
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
