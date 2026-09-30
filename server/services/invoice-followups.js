@@ -1201,6 +1201,35 @@ function heldTouchFloor(now = new Date()) {
 }
 
 /**
+ * Hold a claimed touch, undelivered and not terminal, for the next NY
+ * calendar day: the retime the collections-policy and ledger-outage returns
+ * in fireTouch owe. Leaving the row due instead lets runPending's stale grace
+ * pass the step by at the next daily tick — a silently missed reminder.
+ * Guarded like the stale skip: it lands only while this worker still holds the
+ * claim (fireStep's stamp) on the same active step, so an admin edit, pause or
+ * a manual send-now that moved the sequence since is left alone. Best-effort:
+ * a failed write leaves the prior behaviour (row still due) and never throws
+ * out of the touch. Returns whether the retime landed.
+ */
+async function holdTouchUntilNextDay(row, claimStamp, why) {
+  const guard = { id: row.id, status: 'active', step_index: row.step_index };
+  if (claimStamp) guard.touch_claimed_at = claimStamp;
+  const floor = heldTouchFloor();
+  try {
+    const updated = await db('invoice_followup_sequences').where(guard)
+      .update({ updated_at: db.fn.now(), next_touch_at: floor });
+    if (Number(updated) > 0) {
+      logger.info(`[invoice-followups] sequence ${row.id} step ${row.step_index} held (${why}) — retimed to ${floor.toISOString()}`);
+      return true;
+    }
+    logger.info(`[invoice-followups] hold retime no-op for sequence ${row.id} (${why}) — sequence changed since the claim`);
+  } catch (err) {
+    logger.warn(`[invoice-followups] hold retime failed for sequence ${row.id} (${why}): ${err.message}`);
+  }
+  return false;
+}
+
+/**
  * Advance a sequence past touches whose eligible send day already passed,
  * without sending them. Walks the same anchored timeline fireTouch advances
  * along until it finds a step still sendable; no sendable step left = completed.
@@ -1353,7 +1382,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   row.invoice_status = claimedInvoice.status;
   row.token = claimedInvoice.token;
   try {
-    await fireTouch(row, { operatorInitiated });
+    await fireTouch(row, { operatorInitiated, claimStamp });
   } finally {
     await db('invoice_followup_sequences')
       .where({ id: row.id, touch_claimed_at: claimStamp })
@@ -1366,7 +1395,7 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   }
 }
 
-async function fireTouch(row, { operatorInitiated = false } = {}) {
+async function fireTouch(row, { operatorInitiated = false, claimStamp = null } = {}) {
   const step = followupSteps()[row.step_index];
   if (!step) {
     await db('invoice_followup_sequences').where({ id: row.id }).update({
@@ -1456,8 +1485,8 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   // 2026-08-14: the email leg must not ride the SMS verdict). Gate off ⇒
   // both true without consulting, byte-identical (pinned by test). A policy
   // denial is a TRANSIENT state (frequency window, releasable hold) — a
-  // both-denied touch returns with the sequence still active and due, so
-  // the next tick re-decides; it is never paused terminally for policy.
+  // both-denied touch returns with the sequence still active and retimed to
+  // the next day (holdTouchUntilNextDay), so a later tick re-decides; it is never paused terminally for policy.
   const selectedChannels = explicitChannels;
   const nonEmailChannels = selectedChannels === null ? ['sms']
     : ['push', 'sms'].filter((channel) => selectedChannels.includes(channel));
@@ -1468,6 +1497,7 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
     try { ownLedgerIds = await currentStepLedgerIds(row, step, policyChannels); }
     catch (err) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — step ledger unavailable: ${err.message}`);
+      await holdTouchUntilNextDay(row, claimStamp, 'step_ledger_unavailable');
       return;
     }
   }
@@ -1479,6 +1509,9 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
   const emailPermitted = channelPolicy.email === true;
   if (!Object.values(channelPolicy).some(Boolean)) {
     logger.info(`[invoice-followups] collections policy denied selected channels for sequence ${row.id} — touch deferred to a later run`);
+    // Held, not skipped: retimed past today so the daily tick's stale grace
+    // does not pass this step by. Nothing was drawn or sent here.
+    await holdTouchUntilNextDay(row, claimStamp, 'collections_policy_denied');
     return;
   }
   // Apply any available account credit before dunning so the reminder bills amount
@@ -1887,9 +1920,12 @@ async function fireTouch(row, { operatorInitiated = false } = {}) {
       || ['collections_policy_denied', 'ledger_unavailable'].includes(emailResult.reason)
     ) {
       // Transient collections-policy denial / ledger outage — NOT a
-      // delivery failure. Leave the sequence armed and due (no status
-      // write) so a later tick re-decides; pausing terminally here would
-      // turn a 24h frequency window into a permanently silenced sequence.
+      // delivery failure. Keep the sequence active (no status write) and
+      // retime it to the next day so a later tick re-decides; pausing
+      // terminally here would turn a 24h frequency window into a
+      // permanently silenced sequence, and leaving the row due would let the
+      // daily tick's stale grace skip the step instead of retrying it.
+      await holdTouchUntilNextDay(row, claimStamp, smsSkipReason || emailResult.reason);
       logger.info(`[invoice-followups] touch for sequence ${row.id} held by collections policy/ledger — retrying on a later run`);
     } else {
       await db('invoice_followup_sequences').where({ id: row.id }).update({

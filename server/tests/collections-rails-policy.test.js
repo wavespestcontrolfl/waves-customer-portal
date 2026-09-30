@@ -588,6 +588,22 @@ function armFollowupHappyPath({ sequenceUpdate = chain(), prefs = { email_enable
   return sequenceUpdate;
 }
 
+// Held retime (PR 0): a touch nothing was delivered for, that is not
+// terminal, is retimed to the start of the next NY day — never left due, where
+// the daily tick's 20h stale grace would skip the step forward.
+const HELD_FLOOR = new Date('2026-05-27T04:00:00.000Z'); // Wed 00:00 EDT, after the Tue-14:00Z clock
+
+function expectHeldRetime(update, { at = HELD_FLOOR } = {}) {
+  expect(update.where).toHaveBeenCalledWith({
+    id: 'seq-1', status: 'active', step_index: 0, touch_claimed_at: expect.any(Date),
+  });
+  expect(update.update).toHaveBeenCalledTimes(1);
+  const [patch] = update.update.mock.calls[0];
+  expect(patch).toEqual({ updated_at: 'CURRENT_TIMESTAMP', next_touch_at: at });
+  expect(patch).not.toHaveProperty('step_index');
+  expect(patch).not.toHaveProperty('status');
+}
+
 describe('invoice-followups rail', () => {
   test('App-only invoice touch evaluates push policy and sends without phone despite do_not_text', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
@@ -1026,9 +1042,10 @@ describe('invoice-followups rail', () => {
     expect(result).toEqual({ sent: 1, skipped: 0 });
   });
 
-  test("gate 'true' + both channels denied: no sends, no ledger rows, sequence left armed (not paused) for a later run", async () => {
+  test("gate 'true' + both channels denied: no sends, no ledger rows, sequence held (not paused, not left due) for a later run", async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    const heldRetime = chain({ result: 1 });
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: FU_CUSTOMER })],
@@ -1039,18 +1056,20 @@ describe('invoice-followups rail', () => {
       invoice_followup_sequences: [
         chain({ first: FU_LIVE_SEQ }),
         chain({ result: 1 }), // touch claim
+        heldRetime, // held retime (PR 0): held, not skipped
         chain({ result: 1 }), // claim clear (finally)
       ],
     });
     await InvoiceFollowUps.runPending();
+    expectHeldRetime(heldRetime);
     expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'sms' }));
     expect(ContactPolicy.evaluate).toHaveBeenCalledWith('cust-1', expect.objectContaining({ channel: 'email' }));
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
     expect(smsTemplates.getTemplate).not.toHaveBeenCalled();
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();
-    // No cadence advance and no pause happened: the sequence queue's only
-    // consumed entries were revalidate/claim/clear (a 4th access would throw).
+    // No cadence advance and no pause happened: the only sequence writes were
+    // the claim, the held retime and the claim clear (a 5th access would throw).
   });
 
   test("gate 'true' + allowed: the touch fires with the unchanged send shape", async () => {
@@ -1116,6 +1135,7 @@ describe('invoice-followups rail', () => {
 
   test('LEDGER FAILURE ⇒ NO SENDS, and the sequence is NOT paused (transient hold, retried later)', async () => {
     ContactLedger.recordContact.mockRejectedValue(new Error('ledger down'));
+    const heldRetime = chain({ result: 1 });
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
       customers: [chain({ first: FU_CUSTOMER })],
@@ -1128,13 +1148,133 @@ describe('invoice-followups rail', () => {
       invoice_followup_sequences: [
         chain({ first: FU_LIVE_SEQ }),
         chain({ result: 1 }), // touch claim
-        chain({ result: 1 }), // claim clear — NO pause/advance writes in between
+        heldRetime, // held retime (PR 0) — NO pause/advance writes
+        chain({ result: 1 }), // claim clear
       ],
     });
     await InvoiceFollowUps.runPending();
+    expectHeldRetime(heldRetime);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
+
+  test('held retime lands on the claim-holder only: a changed sequence (0 rows) is left alone and never throws', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    const heldRetime = chain({ result: 0 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      invoice_followup_sequences: [
+        chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), heldRetime, chain({ result: 1 }),
+      ],
+    });
+    expect(await InvoiceFollowUps.runPending()).toEqual({ sent: 1, skipped: 0 });
+    expect(heldRetime.update).toHaveBeenCalledTimes(1);
+  });
+
+  test('held retime: a failed write is swallowed (row stays due, the touch does not throw)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    const heldRetime = chain();
+    heldRetime.update = jest.fn(() => { throw new Error('db blip'); });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      invoice_followup_sequences: [
+        chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), heldRetime, chain({ result: 1 }),
+      ],
+    });
+    expect(await InvoiceFollowUps.runPending()).toEqual({ sent: 1, skipped: 0 });
+  });
+
+  test('explicit channels: the step-ledger read failing holds the touch to the next day', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    const heldRetime = chain({ result: 1 });
+    const ledgerQuery = chain();
+    ledgerQuery.whereIn = jest.fn(() => { throw new Error('ledger read down'); });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      notification_prefs: [chain({ first: { invoice_channels: ['push', 'sms'] } })],
+      collections_contact_ledger: [ledgerQuery],
+      invoice_followup_sequences: [
+        chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), heldRetime, chain({ result: 1 }),
+      ],
+    });
+    await InvoiceFollowUps.runPending();
+    expectHeldRetime(heldRetime);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+  });
+
+  test('a next-day tick SENDS a policy-held step; the pre-fix due-row shape is stale-skipped instead', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    // Tick 1 (Tue 14:00Z): everything denied -> held, and the retime is captured.
+    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    const heldRetime = chain({ result: 1 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      invoice_followup_sequences: [
+        chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), heldRetime, chain({ result: 1 }),
+      ],
+    });
+    await InvoiceFollowUps.runPending();
+    expectHeldRetime(heldRetime);
+    const heldAt = heldRetime.update.mock.calls[0][0].next_touch_at;
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+
+    // Tick 2 (Wed 10:16 ET, the next daily cron): the retimed row is inside its
+    // grace and the step goes out.
+    jest.setSystemTime(new Date('2026-05-27T14:16:00.000Z'));
+    ContactPolicy.evaluate.mockResolvedValue(ALLOWED);
+    armFollowupHappyPath({ rowOverrides: { next_touch_at: heldAt } });
+    expect(await InvoiceFollowUps.runPending()).toEqual({ sent: 1, skipped: 0 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+
+    // Control: the row as it stood before the fix (still due Tue 09:00 ET) is
+    // more than 20h old at the same tick and is passed over, never sent.
+    sendCustomerMessage.mockClear();
+    const staleSkip = chain({ result: 1 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      invoice_followup_sequences: [staleSkip],
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(staleSkip.update.mock.calls[0][0]).toMatchObject({ step_index: expect.any(Number) });
+  });
+
+  test('a Friday hold rolls to Saturday 00:00, and Tuesday still sends it (weekend roll)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    jest.setSystemTime(new Date('2026-05-29T14:16:00.000Z')); // Fri
+    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    const heldRetime = chain({ result: 1 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({ next_touch_at: '2026-05-29T13:00:00.000Z' })] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      invoice_followup_sequences: [
+        chain({ first: { ...FU_LIVE_SEQ, next_touch_at: '2026-05-29T13:00:00.000Z' } }),
+        chain({ result: 1 }), heldRetime, chain({ result: 1 }),
+      ],
+    });
+    await InvoiceFollowUps.runPending();
+    const heldAt = heldRetime.update.mock.calls[0][0].next_touch_at;
+    expect(heldAt).toEqual(new Date('2026-05-30T04:00:00.000Z')); // Sat 00:00 EDT
+
+    jest.setSystemTime(new Date('2026-06-02T14:16:00.000Z')); // Tue 10:16 ET
+    ContactPolicy.evaluate.mockResolvedValue(ALLOWED);
+    armFollowupHappyPath({ rowOverrides: { next_touch_at: heldAt } });
+    expect(await InvoiceFollowUps.runPending()).toEqual({ sent: 1, skipped: 0 });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
 
   test('SEND FAILURE ⇒ the sms ledger row is stamped send_failed', async () => {
     sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
