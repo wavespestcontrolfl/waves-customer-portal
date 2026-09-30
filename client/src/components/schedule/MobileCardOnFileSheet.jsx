@@ -6,6 +6,9 @@
 
 import { ArrowLeft } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { getAdminUser } from "../../lib/adminAuth";
+import { useCollectionHold } from "../../hooks/useCollectionHold";
+import { CollectionHoldStatus } from "../admin/CollectionHoldNotice";
 import {
   ActionFeedback,
   Button,
@@ -119,6 +122,14 @@ export default function MobileCardOnFileSheet({
     service?.customerName ||
     service?.customer_name ||
     "Customer";
+
+  // B10: charge-card goes past a collections dispute hold, so the hold (or a
+  // failed check) shows beside the Charge buttons. Admin-only read: the route
+  // itself is requireAdmin, so anyone else never reaches a charge.
+  const collectionHold = useCollectionHold(
+    resolvedCustomerId,
+    getAdminUser()?.role === "admin",
+  );
 
   useEffect(() => {
     if (!resolvedCustomerId) {
@@ -269,6 +280,7 @@ export default function MobileCardOnFileSheet({
           </div>
         </DialogHeader>
         <DialogBody className="space-y-4 text-ui-body u-nums">
+          <CollectionHoldStatus hold={collectionHold} variant="charge" />
           {loading ? (
             <ActionFeedback>Loading cards…</ActionFeedback>
           ) : readError ? (
@@ -361,6 +373,7 @@ export default function MobileCardOnFileSheet({
       </div>
 
       <div className="px-4 pt-6 pb-10 mx-auto" style={{ maxWidth: 560 }}>
+        <CollectionHoldStatus hold={collectionHold} variant="charge" />
         {loading && (
           <div
             className="text-ink-secondary text-center"

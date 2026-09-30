@@ -147,6 +147,20 @@ async function createScratchDb() {
   // The account-deletion read (successorRecoveryRefusal, Codex #4971 r10):
   // a term's customer with no row here reads as live.
   await db.raw('CREATE TABLE customers (id uuid PRIMARY KEY, deleted_at timestamptz)');
+  // B10: the collections dispute hold the held-renewal bell scan keys on, and
+  // the admin notifications table its dedupe (ringRenewalBell) writes to.
+  await db.raw(`CREATE TABLE collections_flags (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id uuid NOT NULL,
+    flag text NOT NULL,
+    reason text,
+    released_at timestamptz
+  )`);
+  await db.raw(`CREATE TABLE notifications (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    recipient_type text NOT NULL,
+    metadata jsonb
+  )`);
   await db.raw(`CREATE TABLE stripe_invoice_charge_attempts (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     invoice_id uuid NOT NULL,
@@ -1855,6 +1869,55 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       const row = await db('annual_prepay_terms').where({ id: successor.id }).first();
       expect(row.status).toBe('payment_pending');
       expect(row.renewal_sweep_deferred_at).not.toBeNull();
+    });
+  });
+  describe('B10: the held-renewal bell scan covers a backlog past its page', () => {
+    test('with more than 50 held overdue renewals, each pass belles the next unnotified rows until all are told', async () => {
+      const { bellHeldOverdueRenewals, HELD_RENEWAL_BELL_SCAN_LIMIT } = Charge._private;
+      const total = HELD_RENEWAL_BELL_SCAN_LIMIT + 12;
+      // Mirrors notifyAdmin's dedupe: a bell for a key that already has a
+      // notification row is a no-op, a new one writes the row.
+      mockNotifyAdmin.mockImplementation(async (_cat, _title, _body, opts) => {
+        const exists = await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [opts.dedupeKey]).first('id');
+        if (exists) return { deduped: true };
+        await db('notifications').insert({ recipient_type: 'admin', metadata: JSON.stringify({ dedupeKey: opts.dedupeKey }) });
+        return { deduped: false };
+      });
+      const terms = [];
+      for (let n = 0; n < total; n += 1) {
+        const holdCustomer = randomUUID();
+        await db('collections_flags').insert({ customer_id: holdCustomer, flag: 'collection_hold', reason: 'dispute: says the visit never happened' });
+        const parent = await insertParent({ customer_id: holdCustomer });
+        const invoice = await insertInvoice({ status: 'draft' });
+        terms.push(await insertSuccessor(parent, invoice, { customer_id: holdCustomer }));
+      }
+      // A held customer whose lapse is NOT overdue yet, and an overdue one
+      // with no hold: neither is belled.
+      const freshParent = await insertParent({ customer_id: randomUUID() });
+      await insertSuccessor(freshParent, await insertInvoice({ status: 'draft' }), { customer_id: freshParent.customer_id, term_start: daysFromToday(0), term_end: daysFromToday(365) });
+      await db('collections_flags').insert({ customer_id: freshParent.customer_id, flag: 'collection_hold', reason: 'dispute: x' });
+      const noHoldParent = await insertParent({ customer_id: randomUUID() });
+      await insertSuccessor(noHoldParent, await insertInvoice({ status: 'draft' }), { customer_id: noHoldParent.customer_id });
+
+      const belledIds = () => new Set(mockNotifyAdmin.mock.calls.map(([, , , opts]) => opts.metadata.termId));
+
+      const first = { };
+      await bellHeldOverdueRenewals({ conn: db, counts: first });
+      expect(first.graceHeldByCollectionsHold).toBe(HELD_RENEWAL_BELL_SCAN_LIMIT);
+      expect(belledIds().size).toBe(HELD_RENEWAL_BELL_SCAN_LIMIT);
+
+      // Day two: the first page is already notified, so the scan moves on to
+      // the remaining rows instead of returning the same 50.
+      const second = {};
+      await bellHeldOverdueRenewals({ conn: db, counts: second });
+      expect(second.graceHeldByCollectionsHold).toBe(total - HELD_RENEWAL_BELL_SCAN_LIMIT);
+      expect(belledIds()).toEqual(new Set(terms.map((t) => t.id)));
+
+      // Day three: everything is told; nothing left to scan.
+      const third = {};
+      await bellHeldOverdueRenewals({ conn: db, counts: third });
+      expect(third.graceHeldByCollectionsHold).toBe(0);
+      expect(await db('notifications').count('* as n').first()).toEqual({ n: String(total) });
     });
   });
 });

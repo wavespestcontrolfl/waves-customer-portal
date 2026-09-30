@@ -83,6 +83,8 @@ import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
 import { formatETDate, formatETDateOnly } from "../../lib/timezone";
+import { useCollectionHold } from "../../hooks/useCollectionHold";
+import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
 import useModalFocus from "../../hooks/useModalFocus";
 import AuthenticatedCallAudio from "./AuthenticatedCallAudio";
 import OwedCommitmentsSummary from "./OwedCommitmentsSummary";
@@ -3273,6 +3275,7 @@ function AdminAutopayPanelV2({
   monthlyRate,
   customerName,
   canCharge = false,
+  collectionHold = null,
 }) {
   const [state, setState] = useState(null);
   const [charging, setCharging] = useState(false);
@@ -3304,7 +3307,25 @@ function AdminAutopayPanelV2({
       setErr("Customer has no monthly_rate set");
       return;
     }
-    if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
+    // Charge now goes PAST a collections dispute hold (operatorOverride), so
+    // the confirm says so, and an unknown hold state needs its own explicit
+    // yes rather than reading as "no hold".
+    const holdStatus = collectionHold?.status;
+    if (collectionHold && holdStatus !== "ready" && holdStatus !== "idle") {
+      if (
+        !window.confirm(
+          `${HOLD_UNKNOWN_MESSAGE}.\n\nThis customer may have a billing hold from a disputed bill, and Charge now goes past it. Charge ${customerName} $${amt.toFixed(2)} anyway?`,
+        )
+      )
+        return;
+    } else if (collectionHold?.dispute) {
+      if (
+        !window.confirm(
+          `This customer has a billing hold (they disputed a bill on a collections call). Charge now goes past the hold.\n\nCharge ${customerName} $${amt.toFixed(2)} anyway?`,
+        )
+      )
+        return;
+    } else if (!window.confirm(`Charge ${customerName} $${amt.toFixed(2)} now?`))
       return;
     setCharging(true);
     setErr("");
@@ -3386,6 +3407,9 @@ function AdminAutopayPanelV2({
             </Button>
           )}
         </div>
+        {canCharge && (
+          <CollectionHoldStatus hold={collectionHold} variant="charge" className="mt-2.5" />
+        )}
         {msg && (
           <div ref={outcomeRef} role="status" className="mt-2.5 px-2 py-1.5 bg-zinc-100 text-zinc-900 rounded-xs text-14">
             {msg}
@@ -6258,6 +6282,7 @@ function CustomerProfileBilling({
   data,
   billingSummary,
   isAdmin,
+  collectionHold,
   setAnnualPrepayOpen,
   setAnnualPrepayInvoiceOpen,
   invoices,
@@ -6317,7 +6342,8 @@ function CustomerProfileBilling({
           </div>
           {(c.servicePausedAt ||
             displayedAnnualPrepayTerm ||
-            data.prepaidPlans?.length > 0) &&
+            data.prepaidPlans?.length > 0 ||
+            collectionHold.dispute) &&
             billingSummary}
           <Customer360Estimates estimates={data.estimates || []} />
         </>
@@ -6334,6 +6360,7 @@ function CustomerProfileBilling({
         monthlyRate={c.monthlyRate}
         customerName={`${c.firstName} ${c.lastName}`}
         canCharge={isAdmin}
+        collectionHold={collectionHold}
       />{" "}
       <AccountCreditPanelV2
         customerId={c.id}
@@ -8280,151 +8307,11 @@ function CustomerBillingPause({
   );
 }
 
-// B10: a collections DISPUTE hold ("stops_charges") halts every off-session
-// charge (monthly dues, completion, sweeps) and the customer was told billing
-// follow-up is on hold. GET /collection-holds lists the active holds (admin
-// only, so the read is skipped for anyone else) and POST /collection-holds/
-// release lifts it (audited server-side; body `{ holdId }` names exactly the
-// hold shown, reply `{ released: <rows released> }`). A 409 means that hold
-// changed since it was loaded — re-read the holds instead of releasing blind.
-// Errors arrive as `{ error }`, which adminFetch surfaces as err.message.
-function CustomerCollectionHold({ customerId, isAdmin }) {
-  const [holds, setHolds] = useState([]);
-  const [releasing, setReleasing] = useState(false);
-  const [releaseErr, setReleaseErr] = useState("");
-  const [releaseNote, setReleaseNote] = useState("");
-  const seqRef = useRef(0);
-  const customerRef = useRef(customerId);
-  customerRef.current = customerId;
-
-  useEffect(() => {
-    seqRef.current += 1;
-    const seq = seqRef.current;
-    setHolds([]);
-    setReleasing(false);
-    setReleaseErr("");
-    setReleaseNote("");
-    if (!isAdmin || !customerId) return undefined;
-    let cancelled = false;
-    adminFetch(`/admin/customers/${customerId}/collection-holds`)
-      .then((body) => {
-        if (cancelled || seqRef.current !== seq) return;
-        setHolds(Array.isArray(body?.holds) ? body.holds : []);
-      })
-      .catch(() => {
-        // A failed read shows nothing rather than a false "no hold"; the
-        // profile itself is unaffected.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [customerId, isAdmin]);
-
-  const dispute = holds.find((h) => h.stops_charges);
-
-  const release = async () => {
-    if (
-      !window.confirm(
-        "Release this billing hold?\n\nAutomatic charges (monthly dues and the other automatic card charges) will resume on their next attempt, and any invoice that was held back will be sent. Only release once the dispute is resolved.",
-      )
-    )
-      return;
-    const forCustomerId = customerId;
-    const seq = seqRef.current;
-    const stillViewing = () =>
-      seqRef.current === seq &&
-      String(customerRef.current) === String(forCustomerId);
-    setReleasing(true);
-    setReleaseErr("");
-    setReleaseNote("");
-    try {
-      const result = await adminFetch(
-        `/admin/customers/${forCustomerId}/collection-holds/release`,
-        { method: "POST", body: JSON.stringify({ holdId: dispute.id }) },
-      );
-      if (!stillViewing()) return;
-      setHolds([]);
-      setReleaseNote(
-        Number(result?.released) > 0
-          ? "Billing hold released. Automatic charges resume on their next attempt, and any held-back invoice is sent."
-          : "This hold was already released.",
-      );
-    } catch (err) {
-      if (!stillViewing()) return;
-      if (err.status === 409) {
-        // The hold changed under us (released elsewhere, or replaced by a
-        // newer one): show what is current instead of releasing blind.
-        setReleaseErr("This hold changed — reload. Nothing was released; the current billing hold status has been reloaded.");
-        try {
-          const body = await adminFetch(`/admin/customers/${forCustomerId}/collection-holds`);
-          if (stillViewing()) setHolds(Array.isArray(body?.holds) ? body.holds : []);
-        } catch {
-          // The message above already says to reload.
-        }
-      } else {
-        setReleaseErr(
-          err.status === 403
-            ? "Only an admin can release a billing hold."
-            : err.message || "Could not release the billing hold",
-        );
-      }
-    } finally {
-      if (stillViewing()) setReleasing(false);
-    }
-  };
-
-  return (
-    <>
-      {dispute && (
-        <div role="alert" className="mb-3 rounded border border-hairline p-2.5">
-          <div className="text-ui-label font-medium text-alert-fg">
-            Billing on hold — customer disputed a bill on a collections call
-          </div>
-          <div className="text-ui-label text-ink-secondary mt-0.5">
-            {dispute.reason ? `Reason: ${dispute.reason}. ` : ""}
-            {dispute.created_at
-              ? `Placed ${formatETDate(dispute.created_at, { month: "short", day: "numeric", year: "numeric" })}. `
-              : ""}
-            Automatic card charges are stopped until the hold is released.
-          </div>
-          <Button
-            size="sm"
-            variant="secondary"
-            className="mt-2"
-            onClick={release}
-            disabled={releasing}
-          >
-            {releasing ? "Releasing…" : "Release hold"}
-          </Button>
-          {releaseErr && (
-            <div className="text-ui-label text-alert-fg mt-1">{releaseErr}</div>
-          )}
-        </div>
-      )}
-      {!dispute && releaseErr && (
-        <div
-          role="alert"
-          className="mb-3 rounded border border-hairline p-2.5 text-ui-label text-alert-fg"
-        >
-          {releaseErr}
-        </div>
-      )}
-      {releaseNote && (
-        <div
-          role="status"
-          className="mb-3 rounded border border-hairline p-2.5 text-ui-label text-ink-secondary"
-        >
-          {releaseNote}
-        </div>
-      )}
-    </>
-  );
-}
-
 function CustomerBillingSummary({
   embedded,
   c,
   isAdmin,
+  collectionHold,
   resumeBilling,
   resumingBilling,
   resumeBillingErr,
@@ -8443,7 +8330,7 @@ function CustomerBillingSummary({
       <SectionTitle>
         {embedded ? "Billing status & prepay" : "Billing Summary"}
       </SectionTitle>{" "}
-      <CustomerCollectionHold customerId={c.id} isAdmin={isAdmin} />
+      <CollectionHoldStatus hold={collectionHold} variant="banner" />
       <CustomerBillingPause
         c={c}
         isAdmin={isAdmin}
@@ -10470,6 +10357,9 @@ export default function Customer360ProfileV2({
   const customerIdRef = useRef(customerId);
   customerIdRef.current = customerId;
   const isAdmin = getAdminRole() === "admin";
+  // B10: read the dispute hold ONCE per customer; the billing summary shows
+  // it (with Release) and every manual charge control shows it beside itself.
+  const collectionHold = useCollectionHold(customerId, isAdmin);
   const { open: openIntelligenceBar, lastMutation } = useIntelligenceBarActions();
   usePublishIntelligenceBarPageData({ customer_id: customerId, overlay: true });
   const {
@@ -10711,6 +10601,7 @@ export default function Customer360ProfileV2({
       embedded={embedded}
       c={c}
       isAdmin={isAdmin}
+      collectionHold={collectionHold}
       resumeBilling={resumeBilling}
       resumingBilling={resumingBilling}
       resumeBillingErr={resumeBillingErr}
@@ -10825,6 +10716,7 @@ export default function Customer360ProfileV2({
         data={data}
         billingSummary={billingSummary}
         isAdmin={isAdmin}
+        collectionHold={collectionHold}
         setAnnualPrepayOpen={setAnnualPrepayOpen}
         setAnnualPrepayInvoiceOpen={setAnnualPrepayInvoiceOpen}
         invoices={invoices}

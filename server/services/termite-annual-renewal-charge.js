@@ -3173,6 +3173,7 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
 // DISPUTE hold (B10): tell staff once (ringRenewalBell dedupes per term/kind)
 // that the lapse is waiting on the hold, so a long-running dispute is visible
 // instead of silent. Best-effort, bounded.
+const HELD_RENEWAL_BELL_SCAN_LIMIT = 50;
 async function bellHeldOverdueRenewals({ conn, counts }) {
   try {
     // Own alias ('tt', not the scans' 't') so this stays a separate query.
@@ -3188,8 +3189,19 @@ async function bellHeldOverdueRenewals({ conn, counts }) {
         require('./collections/collection-hold').disputeHoldExistsSql(this, 'tt.customer_id');
       })
       .whereRaw(`${deadlineSql} < ?`, [etDateString()])
+      // Skip terms staff was already told about: ringRenewalBell dedupes on
+      // this exact key, so a term that already has its bell would only burn
+      // a slot in the bounded page. Without this the same first 50 rows come
+      // back every day and a backlog past 50 never gets its alerts; with it
+      // each daily pass moves on to the next unbelled 50 until all are told.
+      .whereNotExists(function alreadyBelled() {
+        this.select(1).from('notifications as n')
+          .where('n.recipient_type', 'admin')
+          .whereRaw("n.metadata->>'dedupeKey' = 'termite-renewal-charge:' || tt.id::text || ':ineligible'");
+      })
+      .orderByRaw(`${deadlineSql} asc, tt.id asc`) // most overdue first, stable
       .select('tt.*')
-      .limit(50);
+      .limit(HELD_RENEWAL_BELL_SCAN_LIMIT);
     counts.graceHeldByCollectionsHold = held.length;
     for (const term of held) {
       await ringRenewalBell(term, 'ineligible', 'the renewal is past its grace window but the customer has an active collections dispute hold, so it will not be lapsed or withdrawn until the office releases the hold');
@@ -4577,6 +4589,8 @@ module.exports = {
     checkStillEligibleForRenewalAction,
     processGraceLapseForTerm,
     processGraceLapses,
+    bellHeldOverdueRenewals,
+    HELD_RENEWAL_BELL_SCAN_LIMIT,
     successorRecoveryRefusal,
     actOnRecoveryRefusal,
     successorActionBlocker,
