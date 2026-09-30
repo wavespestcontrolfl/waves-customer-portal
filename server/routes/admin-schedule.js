@@ -24759,12 +24759,17 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // visit's: a catalog product the prompt itself mentions (a note saying
     // "the customer asked about <product>") joins the trade-name screen.
     const mentionedCatalogNames = [];
+    const mentionedCatalogActives = [];
     if (writerRulesOn) {
       try {
-        const catalogRows = await db('products_catalog').select('name');
-        mentionedCatalogNames.push(...(Array.isArray(catalogRows) ? catalogRows : [])
-          .map((row) => row?.name)
-          .filter((name) => name && CompletionRecap.containsProductName(fullUserMessage, [{ name }], { wholeWord: true })));
+        const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
+        for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
+          if (!row?.name || !CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true })) continue;
+          mentionedCatalogNames.push(row.name);
+          // Its actives too: a draft must not swap the named product for
+          // its active ingredient.
+          if (row.active_ingredient) mentionedCatalogActives.push(row.active_ingredient);
+        }
       } catch (err) {
         logger.warn(`[generate-report] catalog name screen build failed — failing retryable: ${err.message}`);
         return res.status(503).json({
@@ -24790,7 +24795,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // Under the writer rules the copy may not name an active ingredient
     // either: this visit's catalog actives join the rules screen (fail-soft
     // to the screen's common list when the catalog read misses).
-    const visitActiveIngredients = [];
+    const visitActiveIngredients = [...mentionedCatalogActives];
     if (writerRulesOn) {
       // By id, and by name for name-only products (a legacy or restored row
       // has productId null), the same two ways the grounding loader matches.

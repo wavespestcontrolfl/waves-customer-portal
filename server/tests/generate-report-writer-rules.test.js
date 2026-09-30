@@ -189,6 +189,18 @@ test('gate on: a catalog product the note mentions is screened even though it wa
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
 });
 
+test('gate on: the active ingredients of a mentioned catalog product are screened too', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ name: 'In2Care Mosquito Station', active_ingredient: 'Beauveria bassiana; Pyriproxyfen' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('Ghost ants were trailing', 'You asked about a Beauveria bassiana station. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Customer asked about In2Care stations. Treated the thresholds (mentioned actives case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+});
+
 test('gate on: a name-only product still has its catalog actives screened', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ active_ingredient: 'Bacillus thuringiensis israelensis (Bti)' }];

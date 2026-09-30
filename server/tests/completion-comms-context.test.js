@@ -247,12 +247,18 @@ describe('buildCompletionCommsContext', () => {
           { received_at: mk(1), subject: 'Re: Your visit', body_text: 'Sounds good, see you then.\n\nOn Mon, Sep 28, 2026 at 9:00 AM Waves Pest Control <contact@wavespestcontrol.com> wrote:\n> We will retreat the kitchen for free next week.', from_address: 'pat@example.com', label_ids: ['INBOX'] },
           // A three-digit PIN in a snippet with no body.
           { received_at: mk(2), subject: 'PIN', snippet: 'The pin is 123 if you need it', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+          // Bare replies to a quoted credential question: the question is
+          // stripped with the history, so the reply alone must be masked.
+          { received_at: mk(3), subject: 'Re: Gate', body_text: '4821\n\nOn Mon, Sep 28, 2026 at 9:00 AM Waves Pest Control <contact@wavespestcontrol.com> wrote:\n> What is the gate code for the side gate?', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+          { received_at: mk(4), subject: 'Re: Gate again', body_text: 'BLUE\n\nOn Mon, Sep 28, 2026 at 9:00 AM Waves Pest Control <contact@wavespestcontrol.com> wrote:\n> What is the gate code for the side gate?', from_address: 'pat@example.com', label_ids: ['INBOX'] },
         ],
       }),
     });
     expect(ctx.text).toContain('Sounds good, see you then.');
     expect(ctx.text).not.toContain('retreat the kitchen');
     expect(ctx.text).not.toMatch(/\b123\b/);
+    expect(ctx.text).not.toContain('4821');
+    expect(ctx.text).not.toContain('BLUE');
   });
 
   test('no customerId returns an empty context', async () => {

@@ -185,6 +185,9 @@ async function resolveContextWindow({
   return { floor: cap, reason: `last ${ONE_TIME_CAP_DAYS} days`, serviceLine, isRecurring };
 }
 
+// Words that name a credential anywhere in an email (see customerEmailText).
+const CREDENTIAL_ANCHOR_RE = /\b(?:gate|codes?|lock\s*box(?:es)?|alarm|keypad|pins?|pass(?:code|word)s?|combo|combination)\b/i;
+
 // A mailbox copy of something Waves sent (Gmail SENT label or a Waves
 // address), which is never the customer's own words.
 function wavesSentEmail(email) {
@@ -280,13 +283,19 @@ async function buildCompletionCommsContext({
   const source = (text) => (customerWordsOnly ? redactAccessCodes(String(text || '')) : text);
   // customerWordsOnly email text: only what the customer wrote (quoted
   // history and signature stripped, so a quoted Waves promise is never read
-  // as theirs), redacted over the whole body before the preview is cut. A
-  // snippet with no body has lost the anchor context: any run of three or
-  // more digits in it (the redactor's credential length) is masked outright.
+  // as theirs), redacted over the whole of it before the preview is cut.
+  // A bare reply can answer a credential question the strip removed ("What
+  // is the gate code?" → "4821" or "BLUE"), and a snippet with no body has
+  // lost its context entirely: in either case anything credential-shaped
+  // (three or more digits, an all-caps word) is masked outright.
   const customerEmailText = (email) => {
     const body = String(email.body_text || '').trim();
-    if (body) return compactText(source(stripQuotedAndSignature(body)), 260);
-    return compactText(source(stripQuotedAndSignature(String(email.snippet || ''))).replace(/\d{3,}/g, '[redacted]'), 260);
+    const text = body || String(email.snippet || '');
+    let own = source(stripQuotedAndSignature(text));
+    if (!body || CREDENTIAL_ANCHOR_RE.test(text)) {
+      own = own.replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
+    }
+    return compactText(own, 260);
   };
   const callRows = customerWordsOnly
     ? calls.filter((call) => !ContextAggregator.isExcludedCall(call)).slice(0, 6)
