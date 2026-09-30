@@ -86,45 +86,72 @@ describe('gate on — section rendering', () => {
     return { facts, text: labelFactsLib.labelFactsSectionFrom(facts) };
   };
 
-  test('rainfast present: header names the visit date, line uses the type phrase, hours for whole hours', () => {
+  const WV = '- Whole visit (the longest across every product applied): ';
+
+  test('rainfast present: header names the visit date; two whole-visit lines, hours for whole hours', () => {
     const { facts, text } = section([product({ rainfastMinutes: 180 })]);
     expect(text.split('\n')[0]).toBe('LABEL FACTS (from the labels of products applied at the last visit on Friday, Jun 5):');
-    expect(text).toContain('- an insecticide: rainfast after 3 hours; re-entry: Keep people and pets off treated areas until dry');
+    expect(text.split('\n').filter((l) => l.startsWith('- '))).toEqual([
+      `${WV}rainfast after 3 hours`,
+      `${WV}re-entry: keep people and pets off treated areas until dry`,
+    ]);
     expect(facts.indexOf('COMPANY FACTS')).toBeLessThan(facts.indexOf('LABEL FACTS'));
     expect(facts.indexOf('LABEL FACTS')).toBeLessThan(facts.indexOf('BILLING:'));
   });
 
-  test('rainfast absent: only the re-entry clause; non-hour minutes stay in minutes', () => {
-    expect(section([product()]).text).toContain('- an insecticide: re-entry: Keep people and pets off treated areas until dry');
+  test('rainfast absent: no rainfast line; non-hour minutes stay in minutes', () => {
+    expect(section([product()]).text).toContain(`${WV}re-entry: keep people and pets off treated areas until dry`);
     expect(section([product()]).text).not.toContain('rainfast');
     expect(section([product({ rainfastMinutes: 90 })]).text).toContain('rainfast after 90 minutes');
-    expect(section([product({ rainfastMinutes: 60 })]).text).toContain('rainfast after 1 hour;');
+    expect(section([product({ rainfastMinutes: 60 })]).text).toContain('rainfast after 1 hour\n');
   });
 
-  test('rei_hours = 0 with no summary reads "until dry"; rei_hours > 0 states the label hours', () => {
+  test('rei_hours = 0 or an "until dry" summary reads "until dry"; rei_hours > 0 states the label hours; unknown omits the line', () => {
     expect(section([product({ reentrySummary: null })]).text).toContain('re-entry: keep people and pets off treated areas until dry');
     expect(section([product({ reentrySummary: null, reiHours: 4 })]).text).toContain('re-entry: keep people and pets off treated areas for 4 hours');
-    // the catalog's generic placeholder is not a re-entry statement
-    expect(section([product({ reentrySummary: 'Follow the product label and technician service report before re-entering treated areas.' })]).text)
-      .toContain('until dry');
+    expect(section([product({ reiHours: null })]).text).toContain('until dry'); // summary says until dry
+    // the catalog's generic placeholder is not a re-entry statement -> unknown -> no re-entry line
+    const unknown = section([product({ rainfastMinutes: 180, reiHours: null, reentrySummary: 'Follow the product label and technician service report before re-entering treated areas.' })]).text;
+    expect(unknown).toContain('rainfast after 3 hours');
+    expect(unknown).not.toContain('re-entry');
   });
 
-  test('a summary that would itself be banned copy (a "safe" claim) is replaced by the derived wording', () => {
+  test('two products: 4 h lawn + until-dry pest -> the visit states 4 hours re-entry, never per product', () => {
+    const lawn = product({ phrase: 'a weed control', reiHours: 4, reentrySummary: null });
+    const pest = product({ phrase: 'an insecticide', reiHours: 0 });
+    for (const order of [[lawn, pest], [pest, lawn]]) {
+      const { text } = section(order);
+      const lines = text.split('\n').filter((l) => l.startsWith('- '));
+      expect(lines).toEqual([`${WV}re-entry: keep people and pets off treated areas for 4 hours`]);
+      expect(text).not.toMatch(/weed control|insecticide|lanai|lawn|pest/i);
+    }
+    // every product until dry -> "until dry"
+    expect(section([pest, product({ reiHours: 0 })]).text).toContain('until dry');
+    // longest rainfast across products, omitted when none
+    expect(section([product({ rainfastMinutes: 60 }), product({ rainfastMinutes: 180 })]).text).toContain('rainfast after 3 hours');
+    expect(section([lawn, pest]).text).not.toContain('rainfast');
+    // one product with unknown re-entry makes the whole-visit re-entry unstatable
+    expect(section([lawn, product({ reiHours: null, reentrySummary: null })]).text).not.toContain('re-entry');
+  });
+
+  test('fail closed: any unverified product at the visit means no whole-visit figures at all', () => {
+    const facts = buildFactsBlock(context, { now: NOW, labelFacts: { ...labelFacts([product({ rainfastMinutes: 180 })]), unverifiedCount: 1 } });
+    expect(facts).toContain('LABEL FACTS (none on file for the last visit):');
+    expect(facts).not.toContain('rainfast after');
+  });
+
+  test('a summary that would itself be banned copy is never rendered; only the derived wording is', () => {
     const { text } = section([product({ reentrySummary: 'Safe for pets once dry.' })]);
     expect(text).toContain('re-entry: keep people and pets off treated areas until dry');
     expect(text).not.toMatch(/safe/i);
   });
 
-  test('never a brand name: only the neutral type phrase reaches the section', () => {
+  test('never a brand name or product type: only the whole-visit wording reaches the section', () => {
     const { text } = section([product({ phrase: 'an insect growth regulator', rainfastMinutes: 60 })]);
-    expect(text).toContain('an insect growth regulator');
-    expect(text).not.toMatch(/talak|taurus|gentrol|speedzone|bifen/i);
+    expect(text).not.toMatch(/insect growth|talak|taurus|gentrol|speedzone|bifen/i);
   });
 
-  test('identical lines collapse, no timing at all renders no section', () => {
-    const { text } = section([product({ rainfastMinutes: 180 }), product({ rainfastMinutes: 180 })]);
-    expect(text.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(1);
-    // nothing to state: the header is still rendered ("none on file"), never a full section
+  test('no timing at all renders the none-on-file section', () => {
     for (const extras of [{ labelFacts: labelFacts([product({ reentrySummary: null, reiHours: null })]) }, {}, { labelFacts: null }]) {
       const facts = buildFactsBlock(context, { now: NOW, ...extras });
       expect(facts).toContain('LABEL FACTS (none on file for the last visit):');
@@ -232,6 +259,17 @@ describe('compliance grounding', () => {
     expect(check('It is rainfast after 4 hours.').ok).toBe(false);
   });
 
+  test('two-product visit: only the visit-level 4 hours grounds; a different product-specific figure is rejected', () => {
+    const f = factsWith([product({ phrase: 'a weed control', reiHours: 4, reentrySummary: null }), product({ phrase: 'an insecticide', reiHours: 0 })]);
+    expect(check('Please keep pets off the treated areas for 4 hours.', f).ok).toBe(true);
+    expect(check('Keep pets off the treated areas until dry.', f).ok).toBe(true);
+    // the pest spray's own (shorter) figure, or any other product-specific number, is not a fact of the section
+    expect(check('The pest spray is dry in 30 minutes.', f).ok).toBe(false);
+    expect(check('You can go back out after 2 hours.', f).ok).toBe(false);
+    expect(check('Keep the kids off the lawn for 6 hours.', f).ok).toBe(false);
+    expect(check('Keep the kids off the lawn for two hours.', f).ok).toBe(false);
+  });
+
   test('a spelled-out figure never grounds', () => {
     expect(check('It is rainfast after three hours.').ok).toBe(false);
   });
@@ -277,7 +315,8 @@ describe('prompt rules and hand-off narrowing', () => {
     const { system } = buildSystemPromptWithProfile();
     expect(system).toContain('LABEL FACTS (product timing from the label):');
     expect(system).toContain('COMPANY FACTS, LABEL FACTS, the thread');
-    expect(system).toContain('never a brand name');
+    expect(system).toContain('Never name a product or brand');
+    expect(system).toContain('never attribute one to a particular product, area, or service line');
     expect(system).toMatch(/Never call a treatment safe/);
   });
 
@@ -333,7 +372,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const client = makeClient([draft('Rain will not wash it off after 3 hours.'), { supported: true, violations: [] }]);
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
-    expect(r.factsBlock).toContain('- an insecticide: rainfast after 3 hours; re-entry:');
+    expect(r.factsBlock).toContain('- Whole visit (the longest across every product applied): rainfast after 3 hours');
     expect(r.promptVersion).toBe('house_voice_v12_real_answers_cfl');
     expect(r.converged).toBe(true);
     expect(r.passes).toBe(1);

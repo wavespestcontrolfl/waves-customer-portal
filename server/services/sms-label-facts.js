@@ -38,8 +38,8 @@ const LABEL_FACTS_FILLED_HEADER_RE = /^LABEL FACTS \(from the labels of products
 // Structural bounds of a rendered section (shared by the judge exemption and
 // the sealed-eval exact-structure test; 255 is also the Postgres regex
 // repetition ceiling the SQL twin runs under).
-const LABEL_LINE_MAX = 250;
-const LABEL_LINES_MAX = 20;
+const LABEL_LINE_MAX = 160;
+const LABEL_LINES_MAX = 2; // the longest rainfast + the longest re-entry, nothing else
 const escapeRegex = (t) => String(t).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
 // Regex SOURCE (JS + Postgres ARE compatible) of a whole rendered LABEL FACTS
 // section, no leading/trailing newline: the exact "none on file" section, or
@@ -159,23 +159,36 @@ function rainfastClause(minutes) {
   return `rainfast after ${minutes % 60 === 0 ? plural(minutes / 60, 'hour') : plural(minutes, 'minute')}`;
 }
 
-// Re-entry wording: the catalog's customer-facing summary; "until dry" when
-// rei_hours = 0 (the residential value); else the label hours. `isBanned` is
-// the drafter's own compliance screen (injected: this file must not require
-// the drafter). A summary the screen rejects on its own (a "safe" claim, a
-// number it does not ground) is replaced by the derived wording, then dropped.
-function reentryClause(product, isBanned) {
+// VISIT-LEVEL, CONSERVATIVE values only (pre-push audit P1). A visit can apply
+// several products (a lawn product and a pest spray, different areas); a
+// per-product line invites quoting one product's time for another's area, and
+// per-number grounding cannot tell them apart. So the section states at most
+// TWO figures, each true of the whole visit: the LONGEST re-entry and the
+// LONGEST rainfast time across the verified customer-visible products, named
+// as such and never per product or area.
+//
+// Re-entry level per product, in hours: rei_hours > 0 -> that many hours;
+// rei_hours = 0 (the residential value) or a summary that says "until dry" ->
+// 0 (the shortest, "until dry"); anything else is unknown, and one unknown
+// product makes the whole-visit re-entry unstatable (line omitted).
+const UNTIL_DRY_RE = /\buntil\b[^.]{0,30}\bdr(?:y|ied)\b/i;
+function reentryLevelHours(product) {
+  if (Number.isFinite(product.reiHours) && product.reiHours > 0) return product.reiHours;
+  if (product.reiHours === 0) return 0;
   const summary = singleLine(product.reentrySummary || product.reentryText, 160);
-  const usable = summary && !REENTRY_PLACEHOLDER_RE.test(summary) ? summary : null;
-  const derived = product.reiHours == null ? null
-    : (product.reiHours === 0 ? 'keep people and pets off treated areas until dry'
-      : `keep people and pets off treated areas for ${plural(product.reiHours, 'hour')}`);
-  for (const text of [usable, derived]) {
-    if (!text) continue;
-    const clause = `re-entry: ${text.replace(/[.;\s]+$/, '')}`;
-    if (!isBanned || !isBanned(clause)) return clause;
-  }
-  return null;
+  return summary && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) ? 0 : null;
+}
+const WHOLE_VISIT_LABEL = 'Whole visit (the longest across every product applied)';
+function wholeVisitReentryClause(products, isBanned) {
+  const levels = products.map(reentryLevelHours);
+  if (!levels.length || levels.some((l) => l == null)) return null;
+  const hours = Math.max(...levels);
+  const clause = `re-entry: keep people and pets off treated areas ${hours === 0 ? 'until dry' : `for ${plural(hours, 'hour')}`}`;
+  return !isBanned || !isBanned(clause) ? clause : null;
+}
+function wholeVisitRainfastClause(products) {
+  const minutes = products.map((p) => p.rainfastMinutes).filter((m) => Number.isFinite(m) && m > 0);
+  return minutes.length ? rainfastClause(Math.max(...minutes)) : null;
 }
 
 /**
@@ -183,19 +196,18 @@ function reentryClause(product, isBanned) {
  * `formatDate` is the drafter's SERVICE HISTORY date formatter, so the date in
  * the header matches SERVICE HISTORY verbatim. `isBanned(clause)` screens each
  * timing clause against the compliance guard with that clause as its own
- * grounding.
+ * grounding. Fail closed: a visit with ANY applied product whose label is not
+ * verified (`unverifiedCount`) states nothing, since that product's own times
+ * are unknown and a "whole visit" figure would understate them.
  */
 function renderLabelFactsSection(labelFacts, { formatDate, isBanned } = {}) {
   if (!labelFacts || !Array.isArray(labelFacts.products) || !labelFacts.products.length) return '';
+  if (labelFacts.unverifiedCount > 0) return '';
   const lines = [];
-  for (const product of labelFacts.products) {
-    const clauses = [rainfastClause(product.rainfastMinutes), reentryClause(product, isBanned)].filter(Boolean);
-    if (!clauses.length) continue;
-    const line = `- ${product.phrase}: ${clauses.join('; ')}`;
-    // An over-long line would fall outside the section's exact structure: drop it (fail closed).
-    if (line.length - 1 > LABEL_LINE_MAX) continue;
-    if (!lines.includes(line) && lines.length < LABEL_LINES_MAX) lines.push(line);
-  }
+  const rain = wholeVisitRainfastClause(labelFacts.products);
+  const reentry = wholeVisitReentryClause(labelFacts.products, isBanned);
+  if (rain) lines.push(`- ${WHOLE_VISIT_LABEL}: ${rain}`);
+  if (reentry) lines.push(`- ${WHOLE_VISIT_LABEL}: ${reentry}`);
   if (!lines.length) return '';
   const date = (formatDate ? formatDate(labelFacts.serviceDate) : labelFacts.serviceDate) || labelFacts.serviceDate;
   return `${LABEL_FACTS_HEADER_PREFIX}${date}):\n${lines.join('\n')}\n`;
@@ -294,21 +306,33 @@ function neutralizeGroundedTimes(text, sectionText) {
   });
 }
 
+// A sentence about people/pets going back to a treated area.
+const EXPOSURE_WORD_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|people|family|toddlers?|babies|baby|treated|re-?enter(?:ing)?|walk(?:ing)?|play(?:ing)?|stay(?:ing)?\s+off|keep(?:ing)?\s+off|back\s+(?:out|outside|inside|on)|go(?:ing)?\s+(?:back\s+)?(?:out|outside|on)|dry(?:ing)?|dried)\b/i;
+
 /**
- * Rainfast is not on the drafter's older banned-copy list (which screens only
- * dry / re-entry times), so an invented "rain won't wash it off after 2 hours"
- * needs its own deterministic check: in a sentence about rain, ANY time
- * expression — digits or spelled out — must be a rainfast time the LABEL
- * FACTS section states (same number+unit). No section -> none grounded.
+ * The older banned-copy lists screen only dry / re-entry phrasing, so an
+ * invented time in other words ("rain won't wash it off after 2 hours", "keep
+ * the kids off for 6 hours") needs its own deterministic check: in a sentence
+ * about rain, ANY time expression — digits or spelled out — must be a rainfast
+ * time the LABEL FACTS section states; in a sentence about people or pets
+ * returning to a treated area, a re-entry time it states (same number+unit).
+ * No section -> none grounded.
  */
-function hasUngroundedRainTime(text, sectionText) {
+function hasUngroundedLabelTime(text, sectionText) {
   const src = String(text || '');
-  const { rain } = groundedTimeKeys(sectionText);
+  const { rain, reentry } = groundedTimeKeys(sectionText);
+  const kind = (index) => {
+    const sentence = sentenceAt(src, index);
+    if (RAIN_WORD_RE.test(sentence)) return 'rain';
+    return EXPOSURE_WORD_RE.test(sentence) ? 'reentry' : null;
+  };
   for (const m of src.matchAll(TIME_EXPR_RE)) {
-    if (RAIN_WORD_RE.test(sentenceAt(src, m.index)) && !rain.has(timeKey(m))) return true;
+    const k = kind(m.index);
+    if (k === 'rain' && !rain.has(timeKey(m))) return true;
+    if (k === 'reentry' && !reentry.has(timeKey(m))) return true;
   }
   for (const m of src.matchAll(SPELLED_TIME_RE)) {
-    if (RAIN_WORD_RE.test(sentenceAt(src, m.index))) return true;
+    if (kind(m.index)) return true;
   }
   return false;
 }
@@ -321,7 +345,7 @@ module.exports = {
   LABEL_SECTION_REGEX_SRC,
   escapeRegex,
   LABEL_FACTS_NONE_SECTION,
-  hasUngroundedRainTime,
+  hasUngroundedLabelTime,
   LABEL_FACTS_HEADER_PREFIX,
   LABEL_FACTS_TIMEOUT_MS,
   readLastVisitLabelFacts,

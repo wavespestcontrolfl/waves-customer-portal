@@ -611,7 +611,7 @@ function hasBannedCustomerCopy(text, opts = {}) {
   let t = String(text || '');
   // Rainfast times are not on the older banned-copy lists; with the guard on
   // (validateComplianceCopy, gate-on only) an ungrounded one is banned too.
-  if (opts && opts.rainTimeGuard && labelFactsLib.hasUngroundedRainTime(t, opts.labelFactsText || '')) return true;
+  if (opts && opts.rainTimeGuard && labelFactsLib.hasUngroundedLabelTime(t, opts.labelFactsText || '')) return true;
   if (opts && opts.labelFactsText) t = labelFactsLib.neutralizeGroundedTimes(t, opts.labelFactsText);
   if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
     t = t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
@@ -1454,7 +1454,7 @@ COMPANY FACTS:
 - The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
 
 LABEL FACTS (product timing from the label):
-- When a LABEL FACTS section is in the context block it lists, for the visit named in its header, each product applied and that product's own label rainfast time and re-entry wording. You may answer "will rain wash it off", "how long until it's dry", and "when can the kids or pets go back out" from it — and ONLY from it. Quote a time exactly as written there: the number as digits, the same unit, never spelled out, rounded, converted, added, or stretched. A rainfast time answers only rain questions; a re-entry time answers only re-entry questions. Describe the product only as the section does — never a brand name. "Until dry" (as the section words it) is a complete answer.
+- When a LABEL FACTS section is in the context block it lists, for the visit named in its header, at most two whole-visit figures taken from the product labels: the longest rainfast time and the longest re-entry. State them as applying to the whole visit — never attribute one to a particular product, area, or service line, and never say which product it came from. You may answer "will rain wash it off", "how long until it's dry", and "when can the kids or pets go back out" from it — and ONLY from it. Quote a time exactly as written there: the number as digits, the same unit, never spelled out, rounded, converted, added, or stretched. A rainfast time answers only rain questions; a re-entry time answers only re-entry questions. Never name a product or brand. "Until dry" (as the section words it) is a complete answer.
 - With no LABEL FACTS line covering it, never state any number of minutes or hours for drying, rainfast, or re-entry. For a rain question with no rainfast time listed (or with LABEL FACTS saying none is on file), answer from the COMPANY FACTS rain line — a treatment needs to dry and bond to surfaces, and after that it holds up to weather — plainly, as your own knowledge of how we work; never say the label is silent, missing, or does not list a rainfast time.
 - Never call a treatment safe, pet-safe, kid-safe, or non-toxic, and never say EPA-approved or "safe for" anyone — LABEL FACTS gives timing, not safety claims. A question about symptoms, illness, or exposure is not a timing question: it stays with a person.
 `
