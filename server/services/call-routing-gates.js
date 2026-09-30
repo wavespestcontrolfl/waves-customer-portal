@@ -427,7 +427,10 @@ async function upsertRouteDecision(conn, decision, fence = null) {
       recording_sid: decision.recording_sid,
     })
     .update(refresh);
-  if (fence && fence.callLogId && fence.processingToken) {
+  if (fence) {
+    // A fence that was ASKED FOR but is incomplete (a missing processing
+    // token) fails closed: the refresh is skipped, never run unfenced.
+    if (!fence.callLogId || !fence.processingToken) return 0;
     update.whereRaw(
       'EXISTS (SELECT 1 FROM call_log WHERE call_log.id = ? AND call_log.processing_token = ?)',
       [fence.callLogId, fence.processingToken],

@@ -583,6 +583,12 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     expect(sqls[1].bindings.slice(-2)).toEqual(['c1', 'tok']);
   });
 
+  test('an incomplete fence (no processing token) fails closed: no refresh runs', async () => {
+    const { conn, sqls } = recordingConn();
+    expect(await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: undefined })).toBe(0);
+    expect(sqls).toHaveLength(1); // only the targetless insert
+  });
+
   test('no fence handed: unfenced refresh (audit/backfill callers)', async () => {
     const { conn, sqls } = recordingConn();
     await upsertRouteDecision(conn, decision);
