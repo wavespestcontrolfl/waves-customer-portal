@@ -1,6 +1,6 @@
 // Opt-in PostgreSQL regression. Every write stays inside a disposable schema.
 //
-// 20260930100000 follows the frozen 20260930090000: that one treated any
+// 20260930100100 follows the frozen 20260930090000: that one treated any
 // {{property_full_address}} reference as "template done", so a template where
 // staff had added only the Property row never got the plan's other rows. The
 // follow-up adds only the rows still missing, and is a no-op wherever the first
@@ -15,8 +15,8 @@ const { randomUUID } = require('node:crypto');
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
 const schema = `billing_email_fill_missing_${randomUUID().replaceAll('-', '')}`;
-const MARKERS = ['migration:20260930090000', 'migration:20260930100000'];
-const MARKER = 'migration:20260930100000';
+const MARKERS = ['migration:20260930090000', 'migration:20260930100100'];
+const MARKER = 'migration:20260930100100';
 let admin;
 let db;
 let first;
@@ -91,7 +91,7 @@ postgres('billing email detail rows fill-missing migration (PostgreSQL)', () => 
     }
     await db.raw('ALTER TABLE email_template_versions ADD CONSTRAINT v_tpl_fk FOREIGN KEY (template_id) REFERENCES email_templates(id) ON DELETE CASCADE');
     first = require('../models/migrations/20260930090000_billing_email_detail_rows');
-    second = require('../models/migrations/20260930100000_billing_email_detail_rows_fill_missing');
+    second = require('../models/migrations/20260930100100_billing_email_detail_rows_fill_missing');
     library = jest.requireActual('../services/email-template-library');
 
     pre = {};

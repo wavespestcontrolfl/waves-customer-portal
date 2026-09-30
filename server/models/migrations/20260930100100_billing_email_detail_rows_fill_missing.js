@@ -29,7 +29,7 @@
 
 const first = require('./20260930090000_billing_email_detail_rows');
 
-const MIGRATION = '20260930100000';
+const MIGRATION = '20260930100100';
 const MARKER = `migration:${MIGRATION}`;
 const FIRST_MARKER = 'migration:20260930090000';
 
