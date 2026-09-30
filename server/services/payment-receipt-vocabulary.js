@@ -77,6 +77,7 @@ function paymentAckPatternSource() {
 //                ("isn't showing", "haven't received", …). Its rowStatuses are the
 //                statuses that CONTRADICT the claim: the claim is valid only when no
 //                matching row of those statuses exists NOW (Codex round-8 P1).
+const ANY_STATUS = '*';
 const PAYMENT_STATUS_VOCABULARY = Object.freeze({
   paid: Object.freeze({
     rowStatuses: Object.freeze(['paid']),
@@ -105,8 +106,11 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
     rowStatuses: Object.freeze(['refunded', 'disputed']),
     phrases: Object.freeze(['was reversed']),
   }),
+  // '*' = a row of ANY status contradicts it: "isn't showing" is false when the
+  // payment is on file as failed/refunded/canceled/… too — the reply must
+  // report that real status instead (Codex round-9 P1).
   not_found: Object.freeze({
-    rowStatuses: Object.freeze(['paid', 'pending', 'processing', 'requires_action']),
+    rowStatuses: Object.freeze([ANY_STATUS]),
     phrases: Object.freeze([
       "isn't showing", 'is not showing', "aren't showing", 'not showing', "don't see", 'do not see', 'no record',
       "isn't reflected", 'not on file',
@@ -119,7 +123,8 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
     rowStatuses: Object.freeze(['paid']),
     phrases: Object.freeze([
       "haven't received", 'have not received', "hasn't been received", 'has not been received',
-      "hasn't come through", "hasn't posted", "hasn't cleared",
+      "wasn't received", 'was not received', 'not received',
+      "hasn't come through", 'has not come through', 'no payment has come through', "hasn't posted", "hasn't cleared",
     ]),
   }),
 });
@@ -146,18 +151,36 @@ const inboundNamesPayment = (text) => INBOUND_PAYMENT_RE.test(String(text || '')
 // null | 'not_found' | 'reversed' | 'failed' | 'pending' for a clause that
 // asserts a payment's status. `namesPayment` = the caller already knows the
 // clause is about a payment (it carries an amount, or the inbound is about one).
+// Codex round-9 P1: polarity. A POSITIVE-family phrase ("pending", "refunded",
+// "failed", "disputed", …) preceded by a negator — "is not pending", "wasn't
+// refunded", "didn't fail" — is a negated PRESENCE claim the family binder
+// cannot judge, so it classifies as 'negated' and every guard rejects it
+// (fail closed, draft + send). The families' OWN negative phrases ("didn't go
+// through", "haven't received", "isn't showing") are members of their family
+// and are matched first, so they keep their positive meaning.
+const NEGATOR_BEFORE_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s*$/i;
+const NEGATED_STEM_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s+(?:fail|decline|refund|dispute|bounce|reverse|process|pend)(?:ed|ing|s|e)?\b/i;
+const POSITIVE_FAMILIES = new Set(['pending', 'failed', 'refunded', 'disputed', 'reversed']);
 function paymentStatusPhraseClaim(clause, namesPayment = false) {
   const text = String(clause || '');
   if (/\?/.test(text)) return null;
   if (!namesPayment && !PAYMENT_NOUN_RE.test(text)) return null;
-  for (const [family, re] of STATUS_PHRASE_RES) if (re.test(text)) return family;
+  for (const [family, re] of STATUS_PHRASE_RES) {
+    const m = re.exec(text);
+    if (!m) continue;
+    if (POSITIVE_FAMILIES.has(family) && NEGATOR_BEFORE_RE.test(text.slice(0, m.index))) return 'negated';
+    return family;
+  }
+  // "didn't fail", "wasn't declined", "not refunded" forms whose positive stem
+  // is not itself a table phrase: still a negated status claim.
+  if (NEGATED_STEM_RE.test(text)) return 'negated';
   return null;
 }
 // The prompt sentence derived from the table above.
 function paymentStatusPromptLine() {
   const q = (list) => list.map((p) => `"${p}"`).join(', ');
   const V = PAYMENT_STATUS_VOCABULARY;
-  return `Payment-status wording and the Recent payments status each requires: say a payment was ${q(V.paid.phrases)} ONLY for a line marked ${V.paid.rowStatuses.join('/')}; say it is ${q(V.pending.phrases)} ONLY for a line marked ${V.pending.rowStatuses.join(' or ')}; say it ${q(V.failed.phrases)} ONLY for a line marked ${V.failed.rowStatuses.slice(0, 3).join(', ')}; say it ${q(V.refunded.phrases)} ONLY for a line marked ${V.refunded.rowStatuses.join('/')}, ${q(V.disputed.phrases)} ONLY for a line marked ${V.disputed.rowStatuses.join('/')}, and ${q(V.reversed.phrases)} for either (a refunded or disputed payment WAS received and then reversed — never say it failed, and never say it is still paid); say ${q(V.not_found.phrases)} ONLY when NO line marked ${V.not_found.rowStatuses.join('/')} matches the payment the customer asked about; say ${q(V.not_received.phrases)} ONLY when NO line marked ${V.not_received.rowStatuses.join('/')} matches it (a processing line is not received yet). Any other wording about a payment's status is not allowed.`;
+  return `Payment-status wording and the Recent payments status each requires: say a payment was ${q(V.paid.phrases)} ONLY for a line marked ${V.paid.rowStatuses.join('/')}; say it is ${q(V.pending.phrases)} ONLY for a line marked ${V.pending.rowStatuses.join(' or ')}; say it ${q(V.failed.phrases)} ONLY for a line marked ${V.failed.rowStatuses.slice(0, 3).join(', ')}; say it ${q(V.refunded.phrases)} ONLY for a line marked ${V.refunded.rowStatuses.join('/')}, ${q(V.disputed.phrases)} ONLY for a line marked ${V.disputed.rowStatuses.join('/')}, and ${q(V.reversed.phrases)} for either (a refunded or disputed payment WAS received and then reversed — never say it failed, and never say it is still paid); say ${q(V.not_found.phrases)} ONLY when NO line of ANY status (paid, pending, failed, refunded, …) matches the payment the customer asked about — if a matching line exists, report its real status instead; say ${q(V.not_received.phrases)} ONLY when NO line marked ${V.not_received.rowStatuses.join('/')} matches it (a processing line is not received yet). Any other wording about a payment's status is not allowed.`;
 }
 
 // Cheap, drafter-free PRE-SCREEN for "could this body assert a payment
@@ -190,6 +213,7 @@ function mayAssertPaymentStatus(text) {
 
 module.exports = {
   PAYMENT_STATUS_VOCABULARY,
+  ANY_STATUS,
   inboundNamesPayment,
   paymentStatusPhraseClaim,
   paymentStatusPromptLine,

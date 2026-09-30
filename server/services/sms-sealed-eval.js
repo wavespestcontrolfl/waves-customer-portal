@@ -165,68 +165,62 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
-// Independent-review P1 (round 6, PR #5331): every fact marker above is a
-// literal substring of buildFactsBlock's own FIXED sections (BILLING,
-// ACCOUNT FLAGS, etc.) — it must never be looked for anywhere else in the
-// facts block, because three of the block's own sections quote raw,
-// untrusted text: RECENT PHONE CALLS (call summaries), LATEST CALL
-// TRANSCRIPT (a verbatim quoted call), and RECENT SMS THREAD (the actual
-// customer/agent conversation, which can itself quote or reference an old
-// agent reply's own "Payment options:" wording, or literally contain the
-// words "FREE RE-SERVICE"). A marker that only happens to appear inside one
-// of those free-text sections must never satisfy a required-marker check or
-// trip a forbidden-marker check — both would misjudge the item's real fact
-// contract. buildFactsBlock always writes these three headers, in this
-// order, strictly AFTER every fixed section, so truncating at the EARLIEST
-// of them isolates exactly the fixed-section text markers live in.
-const FREE_TEXT_SECTION_HEADERS = Object.freeze(['RECENT PHONE CALLS', 'LATEST CALL TRANSCRIPT', 'RECENT SMS THREAD:']);
-function factsSectionOnly(factsBlock) {
-  const text = String(factsBlock || '');
-  let cut = text.length;
-  for (const header of FREE_TEXT_SECTION_HEADERS) {
-    const idx = text.indexOf(header);
-    if (idx !== -1 && idx < cut) cut = idx;
-  }
-  return text.slice(0, cut);
+// Codex round-9 P1 (PR #5331): every fact marker is detected ONLY by its
+// STRUCTURAL position in the block buildFactsBlock emits — never as a bare
+// substring, which customer/admin free text (property notes, invoice titles,
+// service notes, account flags, call summaries, the SMS thread) can contain.
+// buildFactsBlock writes the fixed marker lines at column 0, in this order:
+//     ...UPCOMING SERVICES / OPEN TIMES
+//     FOLLOW-UP SLA RIGHT NOW: <phrase>          (gate on)
+//     FREE RE-SERVICE: <lanes>                   (gate on + complaints on)
+//     BILLING:
+//     - <billing lines…>  (incl. "- Payment options: …")
+//     PENDING ESTIMATE: …
+// while every free-text value it interpolates is collapsed to ONE line
+// (sanitizeSingleLine) and prefixed ("- Pets: …", "notes: \"…\"") — free text
+// can neither start a line with a marker nor contain the newline-delimited
+// BILLING/PENDING ESTIMATE anchors. So a marker counts only as:
+//   SLA           a column-0 line immediately before [FREE RE-SERVICE:] BILLING:
+//   FREE RE-SERVICE  a column-0 line immediately before BILLING:
+//   Payment options  a column-0 line INSIDE the BILLING section (before PENDING ESTIMATE:)
+// The pattern source below is valid for BOTH JS RegExp and PostgreSQL ARE (`~`),
+// so itemCompatibleWith and the SQL twin (compatibleWhereRaw) cannot drift.
+const MARKER_STRUCTURE = Object.freeze({
+  [V12_FACTS_MARKER]: '(?:^|\\n)FOLLOW-UP SLA RIGHT NOW: [^\\n]*\\n(?:FREE RE-SERVICE:[^\\n]*\\n)?BILLING:\\n',
+  [CATEGORY_FACT_MARKERS.c]: '\\nFREE RE-SERVICE:[^\\n]*\\nBILLING:\\n',
+  [V12_PAYMENT_OPTIONS_MARKER]: '\\nBILLING:\\n(?:(?!PENDING ESTIMATE:|RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:)[^\\n]*\\n)*?- Payment options:',
+});
+// Defense in depth: the three free-text sections buildFactsBlock writes AFTER
+// every fixed section (call summaries, a per-line-sanitized call transcript, the
+// SMS thread) are never searched — the match must start before the earliest of
+// their headers and cannot run into one. `(?:.|\\n)` (not [^]) is valid in
+// both JS and PostgreSQL ARE.
+const FREE_TEXT_HEADERS_ALT = 'RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:';
+function markerPattern(marker) {
+  const inner = MARKER_STRUCTURE[marker] || `(?:^|\\n)${String(marker).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`;
+  return `^(?:(?!${FREE_TEXT_HEADERS_ALT})(?:.|\\n))*?${inner}`;
+}
+const MARKER_REGEXES = new Map();
+function markerRegex(marker) {
+  if (!MARKER_REGEXES.has(marker)) MARKER_REGEXES.set(marker, new RegExp(markerPattern(marker)));
+  return MARKER_REGEXES.get(marker);
+}
+function factsHasMarker(factsBlock, marker) {
+  return markerRegex(marker).test(String(factsBlock || ''));
 }
 function itemCompatibleWith(factsBlock, promptVersion) {
-  const facts = factsSectionOnly(factsBlock);
-  return requiredFactMarkers(promptVersion).every((m) => facts.includes(m))
-    && forbiddenFactMarkers(promptVersion).every((m) => !facts.includes(m));
-}
-// The SQL equivalent of factsSectionOnly() above: `facts_block` truncated to
-// before the EARLIEST free-text section header, as a raw SQL expression.
-// `expr` contains one bare `?` per FREE_TEXT_SECTION_HEADERS entry (in that
-// order) — every caller must splice `bindings` into its own parameter list
-// at each point `expr` is used. LEAST() (Postgres) ignores NULL arguments,
-// so a header POSITION() of 0 (not found) is turned into NULL via NULLIF and
-// so never wins the LEAST() over a header that IS present; the
-// `LENGTH(...) + 1` fallback (never NULL) makes LEAST() resolve to the whole
-// string's length when NONE of the headers are present, matching
-// factsSectionOnly()'s "no header found ⇒ the whole block" behavior.
-function factsSectionSql(column = "COALESCE(facts_block, '')") {
-  const positions = FREE_TEXT_SECTION_HEADERS
-    .map(() => `COALESCE(NULLIF(POSITION(? IN ${column}), 0), LENGTH(${column}) + 1)`)
-    .join(', ');
-  return {
-    expr: `SUBSTRING(${column} FROM 1 FOR LEAST(${positions}) - 1)`,
-    bindings: [...FREE_TEXT_SECTION_HEADERS],
-  };
+  return requiredFactMarkers(promptVersion).every((m) => factsHasMarker(factsBlock, m))
+    && forbiddenFactMarkers(promptVersion).every((m) => !factsHasMarker(factsBlock, m));
 }
 // SQL for "this row matches the exact contract" (wrap in NOT (...) for the
 // complement), parameterized: required markers present, forbidden absent —
-// both checked ONLY within the facts section (factsSectionSql above), never
-// against the raw call/thread text the row's facts_block also carries.
+// each marker matched by the SAME structural pattern via Postgres `~`.
 function compatibleWhereRaw(markers, forbidden = []) {
-  const sectionExpr = factsSectionSql().expr;
   const clauses = [
-    ...markers.map(() => `${sectionExpr} LIKE ?`),
-    ...forbidden.map(() => `${sectionExpr} NOT LIKE ?`),
+    ...markers.map(() => "COALESCE(facts_block, '') ~ ?"),
+    ...forbidden.map(() => "COALESCE(facts_block, '') !~ ?"),
   ];
-  const bindings = [];
-  markers.forEach((m) => { bindings.push(...factsSectionSql().bindings, `%${m}%`); });
-  forbidden.forEach((m) => { bindings.push(...factsSectionSql().bindings, `%${m}%`); });
-  return { sql: clauses.join(' AND ') || 'TRUE', bindings };
+  return { sql: clauses.join(' AND ') || 'TRUE', bindings: [...markers, ...forbidden].map((m) => markerPattern(m)) };
 }
 
 /* ── Freezer ──────────────────────────────────────────────────────────── */
@@ -1456,9 +1450,8 @@ module.exports = {
     SEALED_EVAL_MIN_AGE_DAYS,
     MAX_CONSECUTIVE_FAILURES,
     SIGNIFICANCE_ALPHA,
-    factsSectionOnly,
-    factsSectionSql,
+    factsHasMarker,
+    markerPattern,
     compatibleWhereRaw,
-    FREE_TEXT_SECTION_HEADERS,
   },
 };

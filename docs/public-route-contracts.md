@@ -566,16 +566,16 @@ the combined-siblings lookup withholds Zelle exactly as an already-stamped
 `payer_id` would, so a Bill-To resolved mid-request can never leave a
 Zelle transfer offered to the wrong party) — has no saved-card charge
 reconciliation pending, and any stamped PaymentIntent is still cancelable
-(inspect-only, fail-closed — unverifiable ⇒ key withheld). Layered on top
-of that full eligibility check, a positive PARTIAL projected account
-credit (one that would not itself fully cover the invoice — a credit that
-WOULD fully cover it is already excluded above) withholds the key too,
-distinctly: it still rides `manualPayOptions` (server and client must
-agree a Zelle transfer is live at all before the client can wait on a
-resolving amount) but flags `creditPending: true`, matching
-`PayPageV2.jsx`'s own `creditPending && !stripeSetup` rule — the client
-hides the transfer controls until `/setup` resolves the real post-credit
-amount, since a projection is not a reservation. The
+(inspect-only, fail-closed — unverifiable ⇒ key withheld). Partial account
+credit is NOT a withholding condition on this route: when a positive PARTIAL
+projected account credit applies (one that would not itself fully cover the
+invoice — a credit that WOULD fully cover it is already excluded above), the
+server STILL INCLUDES `manualPayOptions` and sets `creditPending: true` on it.
+The client (`PayPageV2.jsx`, `creditPending && !stripeSetup`) then HIDES its
+transfer controls until `/setup` resolves the real post-credit amount, since a
+projection is not a reservation. (The SMS drafter and send-time recheck, which
+have no client to hide anything, treat that same state as not-visible and never
+offer Zelle while a partial credit is pending.) The
 recipient is the business's own Zelle contact, never customer data. The
 client re-reads this payload on expand / tab re-focus / 45 s cadence and
 keeps every control disabled until a fresh read succeeds; no pre-filled

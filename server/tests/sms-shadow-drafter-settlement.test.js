@@ -96,7 +96,7 @@ describe('payment-status vocabulary: the prompt and the classifier share ONE tab
           : family === 'paid'
             ? `Your $120.00 payment ${phrase} on Sep 12.`
             : `Your $120.00 payment ${/^(?:is|still|currently|being|was|has|refunded|disputed|charged|failed|declined|didn|did|bounced|unsuccessful|pending|processing|in )/.test(phrase) ? (phrase.startsWith('being') ? `is ${phrase}` : (/^(?:refunded|disputed|failed|declined|bounced|unsuccessful|pending|processing)/.test(phrase) ? `is ${phrase}` : phrase)) : `is ${phrase}`}.`;
-        const backing = ctx([row(rowStatuses[0])]);
+        const backing = ctx([row(rowStatuses[0] === '*' ? 'failed' : rowStatuses[0])]);
         const noRow = check(reply, ctx([]));
         const withRow = check(reply, backing);
         // an ordinary family needs a matching row; an ABSENCE family is contradicted by one
@@ -207,10 +207,13 @@ describe('round-8: reversed rows, absence claims, tender label, inbound identity
     expect(line).toMatch(/refunded or disputed payment WAS received and then reversed/);
   });
 
-  test('#3 "isn\'t showing" is valid only when NO matching paid/pending row exists NOW', () => {
+  test('#3 "isn\'t showing" is valid only when NO matching row of ANY status exists NOW', () => {
     const reply = "Your $120 payment isn't showing on our end yet.";
     expect(check(reply, ctx([]))).toBe(false);
-    expect(check(reply, ctx([failedRow]))).toBe(false);
+    // Codex round-9: a row of ANY status matching the identity contradicts "isn't showing" (failed, refunded, …)
+    expect(check(reply, ctx([failedRow]))).toBe(true);
+    expect(check(reply, ctx([refunded]))).toBe(true);
+    expect(check(reply, ctx([{ ...failedRow, amount: 95 }]))).toBe(false); // a different amount does not
     expect(check(reply, ctx([{ ...paidZelleToday, payment_method_type: 'card' }]))).toBe(true);
     expect(check(reply, ctx([{ ...oldPaid, amount: 95 }]))).toBe(false); // different amount
     expect(check(reply, ctx([{ amount: 120, status: 'processing', payment_date: today, payment_method_type: 'card' }]))).toBe(true);
@@ -283,4 +286,45 @@ describe('round-9: refunded vs disputed are distinct reversals', () => {
     const line = paymentStatusPromptLine();
     expect(line).toMatch(/"was refunded".*ONLY for a line marked refunded, "was disputed".*ONLY for a line marked disputed, and "was reversed" for either/);
   });
+});
+
+describe('round-9: negated status phrases fail closed; "isn\'t showing" is contradicted by ANY status', () => {
+  const ctx = (payments) => ({ billing: { outstandingBalance: 0, recentPayments: payments } });
+  const zelle = (status) => ({ amount: 120, status, payment_date: '2026-09-12', description: 'Invoice INV-9 — zelle' });
+  const { paymentStatusPhraseClaim } = require('../services/payment-receipt-vocabulary');
+
+  test('#1 a negated presence claim classifies as "negated" and is rejected even beside a matching row', () => {
+    for (const c of ['Your payment is not pending', "Your payment wasn't refunded", "Your payment didn't fail", "Your payment wasn't declined",
+      'Your payment is not being processed', 'Your payment has not yet been refunded', "Your payment isn't still processing"]) {
+      expect({ c, kind: paymentStatusPhraseClaim(c) }).toEqual({ c, kind: 'negated' });
+    }
+    expect(check('Your $120.00 payment is not pending.', ctx([zelle('paid')]))).toBe(true);
+    expect(check('Your $120.00 payment is not pending.', ctx([zelle('processing')]))).toBe(true);
+    expect(check("Your $120.00 payment wasn't refunded.", ctx([zelle('refunded')]))).toBe(true);
+    expect(check("Your $120.00 payment didn't fail.", ctx([zelle('paid')]))).toBe(true);
+  });
+
+  test('#1 the families\' own negative phrases keep their positive meaning ("didn\'t go through", "haven\'t received")', () => {
+    expect(paymentStatusPhraseClaim("Your payment didn't go through")).toBe('failed');
+    expect(paymentStatusPhraseClaim("We haven't received your payment")).toBe('not_received');
+    expect(paymentStatusPhraseClaim('Your payment was not received')).toBe('not_received');
+    expect(check("Your $120.00 payment didn't go through.", ctx([zelle('failed')]))).toBe(false);
+    expect(check('We have not received your $120.00 payment yet.', ctx([zelle('processing')]))).toBe(false);
+    expect(check('Your $120.00 payment was not received.', ctx([zelle('paid')]))).toBe(true);
+    // an ordinary positive claim is unaffected, and distant negation elsewhere does not flip it
+    expect(check("Don't worry, your $120.00 payment is pending.", ctx([zelle('pending')]))).toBe(false);
+  });
+
+  test('#2 "isn\'t showing" is contradicted by a FAILED or REFUNDED Zelle row for the named payment', () => {
+    const reply = "Your $120 Zelle payment isn't showing on our end yet.";
+    expect(check(reply, ctx([zelle('failed')]))).toBe(true);
+    expect(check(reply, ctx([zelle('refunded')]))).toBe(true);
+    expect(check(reply, ctx([zelle('canceled')]))).toBe(true);
+    expect(check(reply, ctx([]))).toBe(false);
+    expect(check(reply, ctx([{ ...zelle('failed'), payment_method_type: 'card', description: null }]))).toBe(false); // a card row is not the Zelle payment
+    expect(paymentStatusPromptLineHas()).toBe(true);
+  });
+  function paymentStatusPromptLineHas() {
+    return /NO line of ANY status \(paid, pending, failed, refunded, …\) matches/.test(require('../services/payment-receipt-vocabulary').paymentStatusPromptLine());
+  }
 });

@@ -1058,7 +1058,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, inboundNamesPayment } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1353,8 +1353,9 @@ function bindPaymentRow({
 }) {
   if (requireDate && !claimedDate) return null;
   const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
+  const anyStatus = wanted.has(ANY_STATUS);
   let candidates = (context?.billing?.recentPayments || []).filter((p) => (
-    p && wanted.has(String(p.status || '').toLowerCase())
+    p && (anyStatus || wanted.has(String(p.status || '').toLowerCase()))
       && (amountCents == null
         || (Number.isFinite(Number(p.amount)) && Math.round(Number(p.amount) * 100) === amountCents))
   ));
@@ -1492,6 +1493,9 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     const phraseClaim = paymentStatusPhraseClaim(masked, amounts.length > 0 || inboundNamesPayment(inboundText));
     if (phraseClaim) {
       if (billingUnavailable) return true;
+      // Codex round-9 P1: a NEGATED presence claim ("is not pending", "wasn't
+      // refunded") is not judgeable by the family binder — fail closed.
+      if (phraseClaim === 'negated') return true;
       const binding = paymentClaimBinding(text, inboundText);
       if (!binding) return true;
       // Identity of an amount-free claim: the amount(s) the CUSTOMER named.

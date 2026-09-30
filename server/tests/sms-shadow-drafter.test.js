@@ -887,10 +887,13 @@ describe('pre-push audit P1: the amount-free receipt guard fires only on AFFIRMA
     expect(replyQuotesUngroundedAmount("We haven't received your payment yet.", ctx, { byMeaning: true })).toBe(false);
   });
 
-  test('a truthful negative reply passes against a FAILED-only history', () => {
+  test('"isn\'t showing"/"don\'t see" against a FAILED-only history: a matching row of ANY status contradicts it (report the real status instead)', () => {
     const ctx = ctxWith([{ amount: 50, status: 'failed' }]);
-    expect(replyQuotesUngroundedAmount("It isn't showing as paid on our end.", ctx, { byMeaning: true })).toBe(false);
-    expect(replyQuotesUngroundedAmount('We don\'t see a payment from you yet.', ctx, { byMeaning: true })).toBe(false);
+    // Codex round-9: the failed payment IS on file, so "isn't showing" is false for an unnamed identity
+    expect(replyQuotesUngroundedAmount("It isn't showing as paid on our end.", ctx, { byMeaning: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount('We don\'t see a payment from you yet.', ctx, { byMeaning: true })).toBe(true);
+    // ...but it is truthful when the customer asked about a DIFFERENT payment
+    expect(replyQuotesUngroundedAmount('We don\'t see a payment from you yet.', ctx, { byMeaning: true, inboundMessage: 'Did my $95 payment arrive?' })).toBe(false);
   });
 
   test('a truthful negative reply passes against a REFUNDED-only history', () => {
