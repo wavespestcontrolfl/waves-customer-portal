@@ -288,6 +288,13 @@ function propertyCompatible(a, b, deps) {
   return !hasPropertyIdentity(a, deps) || !hasPropertyIdentity(b, deps) || sameProperty(a, b, deps);
 }
 
+// `lock` share-locks every row a predicate below decides on (the provider-boundary
+// re-runs), so a cancellation or reclassification cannot commit between the check
+// and the provider request.
+function shared(query, lock) {
+  return lock ? query.forShare() : query;
+}
+
 // The customer's next upcoming PEST appointment AT THE VISIT'S PROPERTY, as
 // { ymd } or { ambiguous: true } or { ymd: '' }. readVisitSummary's own next-
 // visit read spans every service line and every property (a pest email could
@@ -298,18 +305,18 @@ function propertyCompatible(a, b, deps) {
 // accepted only if they all agree on ONE property; otherwise the answer is
 // ambiguous and the caller skips.
 async function nextPestVisit({
-  conn, deps, record, serviceYmd,
+  conn, deps, record, serviceYmd, lock = false,
 }) {
   const today = etDateString(deps.now());
   const lowerBound = serviceYmd && serviceYmd > today ? serviceYmd : today;
   const linked = record.scheduled_service_id
-    ? await conn('scheduled_services').where({ id: record.scheduled_service_id }).first(...PROPERTY_COLUMNS)
+    ? await shared(conn('scheduled_services').where({ id: record.scheduled_service_id }), lock).first(...PROPERTY_COLUMNS)
     : null;
-  const upcoming = await conn('scheduled_services')
+  const upcoming = await shared(conn('scheduled_services')
     .where({ customer_id: record.customer_id })
     .whereNotIn('status', CLOSED_VISIT_STATUSES)
     .where('scheduled_date', '>=', lowerBound)
-    .orderBy('scheduled_date', 'asc')
+    .orderBy('scheduled_date', 'asc'), lock)
     .select('id', 'scheduled_date', 'service_type', ...PROPERTY_COLUMNS);
   const pest = upcoming.filter((row) => deps.detectServiceLine(row.service_type) === 'pest');
   if (hasPropertyIdentity(linked, deps)) {
@@ -329,22 +336,24 @@ async function nextPestVisit({
 // isCommercialAccount), the service text (isCommercialServiceRow) of the record,
 // the appointment and its series root, and the linked property's type
 // (commercial/business). The account check runs for EVERY record, linked or not.
-async function isCommercialPlan({ conn, deps, record }) {
+async function isCommercialPlan({
+  conn, deps, record, lock = false,
+}) {
   const asRow = (row) => ({ service_type: row?.service_type, service_key: row?.service_key_snapshot });
   if (deps.isCommercialServiceRow({ service_type: record.service_type })) return true;
-  const customer = await conn('customers').where({ id: record.customer_id }).first('waveguard_tier', 'property_type');
+  const customer = await shared(conn('customers').where({ id: record.customer_id }), lock).first('waveguard_tier', 'property_type');
   if (deps.isCommercialAccount(customer)) return true;
   if (!record.scheduled_service_id) return false;
-  const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id })
+  const visit = await shared(conn('scheduled_services').where({ id: record.scheduled_service_id }), lock)
     .first('service_type', 'service_key_snapshot', 'recurring_parent_id', 'property_id');
   if (!visit) return false;
   if (deps.isCommercialServiceRow(asRow(visit))) return true;
   if (visit.recurring_parent_id) {
-    const parent = await conn('scheduled_services').where({ id: visit.recurring_parent_id }).first('service_type', 'service_key_snapshot');
+    const parent = await shared(conn('scheduled_services').where({ id: visit.recurring_parent_id }), lock).first('service_type', 'service_key_snapshot');
     if (parent && deps.isCommercialServiceRow(asRow(parent))) return true;
   }
   if (visit.property_id) {
-    const property = await conn('customer_properties').where({ id: visit.property_id }).first('property_type');
+    const property = await shared(conn('customer_properties').where({ id: visit.property_id }), lock).first('property_type');
     if (deps.commercialPropertyTypes.includes(clean(property?.property_type).toLowerCase())) return true;
   }
   return false;
@@ -357,12 +366,26 @@ async function isCommercialPlan({ conn, deps, record }) {
 // the visit's own series root must be one of its active pest series. An unlinked
 // record cannot be tied to a series, so it counts only when the customer's active
 // pest series are all at ONE property.
-async function activeRecurringPestPlan({ conn, deps, record }) {
+async function activeRecurringPestPlan({
+  conn, deps, record, lock = false,
+}) {
   const linked = record.scheduled_service_id
-    ? await conn('scheduled_services').where({ id: record.scheduled_service_id }).first('id', 'service_type', 'recurring_parent_id')
+    ? await shared(conn('scheduled_services').where({ id: record.scheduled_service_id }), lock).first('id', 'service_type', 'recurring_parent_id')
     : null;
   const serviceType = clean(linked?.service_type) || clean(record.service_type);
   if (!serviceType) return false;
+  if (lock) {
+    // What "active" decides on: the customer's series roots (status, ongoing flag,
+    // template) and the members of the visit's own series (a live future member).
+    // Locked in id order before findActiveRecurringSeries reads them.
+    const rootId = linked ? (linked.recurring_parent_id || linked.id) : null;
+    await conn('scheduled_services').where({ customer_id: record.customer_id })
+      .where((qb) => {
+        qb.where((roots) => roots.where({ is_recurring: true }).whereNull('recurring_parent_id'));
+        if (rootId) qb.orWhere('recurring_parent_id', rootId);
+      })
+      .orderBy('id').forShare().select('id');
+  }
   const active = (await deps.findActiveRecurringSeries(conn, { customerId: record.customer_id, serviceType }))
     .filter((parent) => deps.detectServiceLine(parent.service_type) === 'pest');
   if (linked) {
@@ -384,21 +407,27 @@ async function activeRecurringPestPlan({ conn, deps, record }) {
 // record's, the appointment's, the series root's — must parse as that one lane.
 // Commercial and active-series checks are inputs to this predicate. Returns null
 // when eligible, else the skip.
-async function freeReserviceEligible({ conn, deps, record }) {
-  if (await isCommercialPlan({ conn, deps, record })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
+async function freeReserviceEligible({
+  conn, deps, record, lock = false,
+}) {
+  if (await isCommercialPlan({
+    conn, deps, record, lock,
+  })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
   const labels = [record.service_type];
   if (record.scheduled_service_id) {
-    const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id }).first('service_type', 'recurring_parent_id');
+    const visit = await shared(conn('scheduled_services').where({ id: record.scheduled_service_id }), lock).first('service_type', 'recurring_parent_id');
     labels.push(visit?.service_type);
     if (visit?.recurring_parent_id) {
-      labels.push((await conn('scheduled_services').where({ id: visit.recurring_parent_id }).first('service_type'))?.service_type);
+      labels.push((await shared(conn('scheduled_services').where({ id: visit.recurring_parent_id }), lock).first('service_type'))?.service_type);
     }
   }
   const named = labels.map(clean).filter(Boolean);
   if (!named.length || named.some((label) => deps.copyCategoryForEstimate({ service_interest: label }) !== 'pest')) {
     return skip('the plan is not a single residential general-pest service (bundles, other lanes and unrecognised labels stay terms-neutral)', 'not_single_pest_lane');
   }
-  if (!(await activeRecurringPestPlan({ conn, deps, record }))) {
+  if (!(await activeRecurringPestPlan({
+    conn, deps, record, lock,
+  }))) {
     return skip('the visit does not belong to an active recurring pest plan', 'not_recurring_plan');
   }
   return null;
@@ -416,7 +445,9 @@ async function firstVisitGate({
     return skip('the visit does not belong to the recipient customer', 'recipient_not_visit_customer');
   }
   if (record.service_line !== 'pest') return skip('not a pest-line visit', 'not_pest_line');
-  const ineligible = await freeReserviceEligible({ conn, deps, record });
+  const ineligible = await freeReserviceEligible({
+    conn, deps, record, lock,
+  });
   if (ineligible) return ineligible;
 
   // First performed visit on the line, judged against records that existed
@@ -691,14 +722,22 @@ async function anyRivalAtSameProperty(conn, run, rivals) {
 // The next appointment the first-visit email NAMES, re-read under a share lock at the
 // provider boundary: it must still exist, still be open (not cancelled, rescheduled,
 // skipped, no-show or completed) and still be on the date the email says.
-async function nextVisitStillValid(trx, payload) {
+async function nextVisitStillValid(trx, deps, record, payload) {
   const id = clean(payload.next_visit_id);
   if (!id) return null; // nothing was named: no claim to keep true
-  const row = await trx('scheduled_services').where({ id }).forShare().first('status', 'scheduled_date');
-  const open = row && !CLOSED_VISIT_STATUSES.includes(clean(row.status));
-  if (!open || dateOnlyString(row.scheduled_date) !== clean(payload.next_visit_ymd)) {
+  const ymd = clean(payload.next_visit_ymd);
+  const row = await trx('scheduled_services').where({ id }).forShare().first('customer_id', 'status', 'scheduled_date');
+  if (!row || String(row.customer_id) !== String(record.customer_id)
+    || CLOSED_VISIT_STATUSES.includes(clean(row.status)) || dateOnlyString(row.scheduled_date) !== ymd) {
     return { reason: NEXT_VISIT_CHANGED };
   }
+  // The builder's ORIGINAL selector, re-run under share locks: same customer, a
+  // pest appointment (detectServiceLine), at the visit's property, open, and still
+  // THE next one — the carried id and date must be what it resolves to now.
+  const current = await nextPestVisit({
+    conn: trx, deps, record, serviceYmd: dateOnlyString(record.service_date), lock: true,
+  });
+  if (current.ambiguous || String(current.id || '') !== id || current.ymd !== ymd) return { reason: NEXT_VISIT_CHANGED };
   return null;
 }
 
@@ -741,7 +780,7 @@ function ledgerGuardsFor(run, payload = {}) {
         run, conn: trx, deps, lock: true,
       });
       if (gate.skip) return { reason: VISIT_NOT_ELIGIBLE, detail: gate.reason };
-      return run.template_key === 'lc.first_visit_pest' ? nextVisitStillValid(trx, payload) : null;
+      return run.template_key === 'lc.first_visit_pest' ? nextVisitStillValid(trx, deps, gate.record, payload) : null;
     },
   };
 }
@@ -759,7 +798,9 @@ async function whyPlanGate({
   }
   // The plan's service line: this email's cohort figures are that line's.
   if (record.service_line !== 'pest') return skip('not a pest-line visit', 'not_pest_line');
-  const ineligible = await freeReserviceEligible({ conn, deps, record });
+  const ineligible = await freeReserviceEligible({
+    conn, deps, record, lock,
+  });
   if (ineligible) return ineligible;
   const plan = await planService(conn, deps, record);
   if (plan.pattern !== QUARTERLY_PATTERN) return skip('the customer\'s plan is not the quarterly cadence', 'plan_not_quarterly');

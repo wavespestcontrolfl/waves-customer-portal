@@ -45,7 +45,7 @@ const describeOrSkip = SKIP ? describe.skip : describe;
 
 // The library's locked handoff, as the stand-in sendTemplate runs it: the
 // boundary check is awaited inside `dispatch`; its veto is a definite non-send.
-function libraryLike({ result, beforeHandoff = null } = {}) {
+function libraryLike({ result, beforeHandoff = null, duringHandoff = null } = {}) {
   return async (args) => {
     if (beforeHandoff) await beforeHandoff(args);
     let dispatched = false;
@@ -59,6 +59,8 @@ function libraryLike({ result, beforeHandoff = null } = {}) {
         return;
       }
       dispatched = true;
+      // Still inside the provider handoff: the boundary transaction (and its share locks) is open.
+      if (duringHandoff) await duringHandoff(args);
     });
     if (verdict?.ok !== true || vetoed) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
     if (!dispatched) throw new Error('handoff returned without dispatching');
@@ -788,6 +790,82 @@ describeOrSkip('email division wiring (Postgres)', () => {
       const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
       expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'next_visit_changed' }));
       expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
+    test.each([
+      ['changed to a lawn appointment', (id) => db('scheduled_services').where({ id }).update({ service_type: 'Lawn Care Service' })],
+      ['moved to another property', (id) => db('scheduled_services').where({ id }).update({ service_address_line1: '999 Other Rd', service_address_city: 'Venice', service_address_zip: '34285' })],
+      ['reassigned to another customer', async (id) => {
+        const other = await makeCustomer();
+        await db('scheduled_services').where({ id }).update({ customer_id: other.id });
+      }],
+    ])('B1: the named next appointment is %s AFTER the build (same id, same date): refused at the boundary, nothing sent', async (_label, change) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      const nextId = await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => change(nextId) }));
+      const run = (await Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      })).results[0].run;
+      expect(run.status).toBe('skipped');
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'next_visit_changed' }));
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
+    // The plan predicates read scheduled_services and customers: their rows are share-locked on
+    // the boundary transaction, so a change committed by another writer WAITS for the handoff.
+    test.each([
+      ['the series is cancelled', (ids) => db('scheduled_services').where({ id: ids.series }).update({ status: 'cancelled', recurring_ongoing: false })],
+      ['the account is reclassified commercial', (ids) => db('customers').where({ id: ids.customerId }).update({ property_type: 'commercial' })],
+    ])('B1: %s in another transaction DURING the provider handoff: the write waits for the handoff (the locks the gate took), the send was judged on the state it locked', async (_label, change) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      let writer = null;
+      let writerDone = false;
+      let waitedForHandoff = false;
+      sendTemplate.mockImplementation(libraryLike({
+        duringHandoff: async () => {
+          writer = Promise.resolve(change({ series, customerId: customer.id })).then(() => { writerDone = true; });
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          waitedForHandoff = !writerDone;
+        },
+      }));
+      const run = (await Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      })).results[0].run;
+      await writer;
+      expect(waitedForHandoff).toBe(true);
+      expect(run.status).toBe('sent');
     });
 
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
