@@ -241,10 +241,11 @@ const MAILBOX_KEY_SQL = (fieldExpr) => {
 // The pick runs only over rows that can actually be mailed on their own —
 // active AND past the archived-customer and global-suppression predicates
 // (codex #5165 :235). Otherwise an oldest alias linked to an archived
-// customer (or carrying an exact-address bounce) wins the pick, is then
-// dropped by that predicate, and the live sibling is dropped as
-// non-canonical: the mailbox gets nothing. The CTE is built on the
-// unaliased table so both shared helpers apply to it unchanged.
+// customer wins the pick, is then dropped by the archive predicate, and the
+// live sibling is dropped as non-canonical: the mailbox gets nothing.
+// (Suppression is already inbox-wide for Gmail since #5323, so it filters
+// the pick set the same way it filters the audience.) The CTE is built on
+// the unaliased table so both shared helpers apply to it unchanged.
 const CANONICAL_ACTIVE_MAILBOX_SQL = (qb) => {
   excludeArchivedCustomers(excludeGloballySuppressed(
     qb.distinctOn(db.raw(MAILBOX_KEY_SQL('newsletter_subscribers.email')))

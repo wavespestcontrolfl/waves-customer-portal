@@ -203,14 +203,18 @@ postgres('newsletter sender — explicit marketing opt-out at send time (real Po
     expect(await audienceIds([older.id, newer.id])).toEqual([newer.id]);
   });
 
-  test('older alias with an active global bounce on its exact address: the newer alias is canonical and sent', async () => {
+  // With #5323 (owner 2026-09-29) a suppression on ANY spelling of a Gmail
+  // inbox covers every spelling, so a bounced older alias takes the whole
+  // inbox out — the canonical pick's suppression filter never hands the
+  // mailbox to a sibling spelling of a bounced address.
+  test('older alias with an active global bounce: the whole Gmail inbox is suppressed, no sibling spelling is sent', async () => {
     const t = tag().replace(/-/g, '');
     const olderEmail = `bouncecanon${t}@gmail.com`;
     const older = await subscriber(olderEmail, { created_at: new Date(Date.now() - 60000) });
     const newer = await subscriber(`b.o.u.n.c.e.c.a.n.o.n${t}+x@gmail.com`, { created_at: new Date() });
     await db('email_suppressions').insert({ email: olderEmail, suppression_type: 'bounce', status: 'active' });
     try {
-      expect(await audienceIds([older.id, newer.id])).toEqual([newer.id]);
+      expect(await audienceIds([older.id, newer.id])).toEqual([]);
     } finally {
       await db('email_suppressions').where({ email: olderEmail }).del();
     }
