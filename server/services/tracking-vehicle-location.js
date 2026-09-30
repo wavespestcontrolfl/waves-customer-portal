@@ -23,14 +23,14 @@ async function withTimeout(promise, timeoutMs, fallbackValue = null) {
 // (technicians LEFT JOIN tech_status), so the cutoff is derived from the mapping as it is NOW, not
 // from a row a caller read earlier (an A->B remap between the caller's read and this lookup used
 // to leave an A-device point acceptable). tech_status stores no device identity, so a cached fix
-// is accepted only if it was reported STRICTLY AFTER the mapping's last change
+// is accepted only if it was reported AND received by the server STRICTLY AFTER the mapping's last change
 // (technicians.bouncie_imei_changed_at; NULL = never remapped = no cutoff). A caller-passed
 // `cachedNotBefore` is honored only as an EXTRA floor (it can tighten, never loosen).
 async function readMappingAndCache(techId) {
   return db('technicians as t')
     .leftJoin('tech_status as ts', 'ts.tech_id', 't.id')
     .where('t.id', techId)
-    .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at');
+    .first('t.bouncie_imei', 't.bouncie_imei_changed_at', 'ts.lat', 'ts.lng', 'ts.location_updated_at', 'ts.location_received_at');
 }
 
 function cachedPositionFrom(row, extraFloor = null) {
@@ -40,7 +40,17 @@ function cachedPositionFrom(row, extraFloor = null) {
   if (lat == null || lng == null || !isFreshTimestamp(lastReportedAt)) return null;
   const fixMs = new Date(lastReportedAt).getTime();
   const mapped = techMappingCutoff(row.bouncie_imei_changed_at);
-  if (mapped != null && !(fixMs > new Date(mapped).getTime())) return null;
+  if (mapped != null) {
+    const mappedMs = new Date(mapped).getTime();
+    // BOTH must postdate the remap. The provider fix time alone is not proof: the tracker accepts
+    // provider timestamps up to two minutes in the FUTURE, so an old device's point committed before
+    // the remap can carry a fix time past the remap. The server's own receipt time for these
+    // coordinates (tech_status.location_received_at — stamped NOW() only by writers that change
+    // lat/lng; tech_status.updated_at is NOT used because status-only writes restamp it) proves the
+    // point was written after the remap. A missing receipt cannot prove it -> untrusted.
+    const receivedMs = row.location_received_at ? new Date(row.location_received_at).getTime() : NaN;
+    if (!(fixMs > mappedMs) || !(receivedMs > mappedMs)) return null;
+  }
   if (extraFloor != null && !(fixMs >= new Date(extraFloor).getTime())) return null;
   return {
     lat,

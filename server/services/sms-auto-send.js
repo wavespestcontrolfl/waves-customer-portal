@@ -309,7 +309,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
       // Independent review finding (PR #5334): carried in-memory so
       // dispatchClaimedSend's pre-send LIVE ETA recheck needs no round trip
       // through the row it just inserted.
-      liveEtaSnapshot, factsGeneratedAt, techNames,
+      liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion: promptVersion || null,
     };
   });
 }
@@ -765,7 +765,7 @@ function autoSendMessage({ claim, gratitudeLane, reply, customerId, checkHandoff
       const { etaSnapshotProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
       return composeProviderPreSendChecks(
         laneFields.providerPreSendCheck,
-        etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, getBody: () => reply }),
+        etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: claim.liveEtaSnapshot, factsGeneratedAt: claim.factsGeneratedAt, techNames: claim.techNames, promptVersion: claim.promptVersion, getBody: () => reply }),
       );
     })(),
     // Both lanes lend the claim's own reservation to the provider layer, so an
@@ -871,6 +871,7 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
       liveEtaSnapshot: claim.liveEtaSnapshot,
       factsGeneratedAt: claim.factsGeneratedAt,
       techNames: claim.techNames,
+      promptVersion: claim.promptVersion,
       outgoingBody: reply,
     });
     if (etaReason && require('./sms-eta-freshness').isEtaInfrastructureFailure(etaReason)) {

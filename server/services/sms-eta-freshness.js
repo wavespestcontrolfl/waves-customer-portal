@@ -241,7 +241,7 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
 // consults (provider-boundary predicates, scheduler, Agent Review, auto-send): such a
 // failure is retryable / non-terminal, never a permanent "stale". 'eta_recheck_failed' is
 // the decision-row read / parse failure agent-decision-send-checks reports.
-const ETA_INFRASTRUCTURE_FAILURE_REASONS = Object.freeze(['eta_claim_recheck_failed', 'eta_recheck_failed']);
+const ETA_INFRASTRUCTURE_FAILURE_REASONS = Object.freeze(['eta_claim_recheck_failed', 'eta_recheck_failed', 'eta_claim_recompute_unavailable']);
 function isEtaInfrastructureFailure(reason) {
   return ETA_INFRASTRUCTURE_FAILURE_REASONS.includes(reason);
 }
@@ -255,7 +255,18 @@ function realAnswersGateOn() {
   return ['1', 'true', 'on'].includes(String(process.env.GATE_SMS_REAL_ANSWERS || '').toLowerCase());
 }
 
-function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [] }) {
+// Is this decision held to the real-answers rule that status wording needs a LIVE STATUS fact?
+// Derived from the PERSISTED prompt version, like the amount recheck (Codex round-45 P2): a
+// house_voice_v12* decision was drafted under that rule and stays strict even if the runtime gate
+// is rolled back while it is pending; any other recorded version (v11 and older) is not. Only when
+// no version is available does the runtime gate decide.
+const REAL_ANSWERS_PROMPT_PREFIX = 'house_voice_v12';
+function requiresLiveStatusEvidence(promptVersion) {
+  if (typeof promptVersion === 'string' && promptVersion.trim()) return promptVersion.startsWith(REAL_ANSWERS_PROMPT_PREFIX);
+  return realAnswersGateOn();
+}
+
+function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [], promptVersion = null }) {
   const drafter = require('./sms-shadow-drafter');
   const trackTokens = extractTrackTokens(fullBody);
   // The link itself is not prose: a token like "a-12-b" must never read as a
@@ -292,7 +303,7 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames
   // has nothing backing it. Scoped to GATE_SMS_REAL_ANSWERS so legacy / human flows
   // with the gate off are unchanged, and the approved follow-up SLA wording ("within
   // the hour") keeps its exemption.
-  const ungroundedStatus = !liveContext && realAnswersGateOn()
+  const ungroundedStatus = !liveContext && requiresLiveStatusEvidence(promptVersion)
     && !require('./sms-followup-sla').replyPromisesFollowup(outgoingBody)
     && Boolean(drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true, techNames })
       || drafter.bodyMentionsArrival(outgoingBody, { techNames })
@@ -393,7 +404,7 @@ function bindEtaClaim(claim, entries, freshness) {
  * through; the auto-send executor passes its in-memory claim copies
  * instead of round-tripping through JSON.
  */
-async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, techNames: persistedTechNames = [], now = new Date(), dbh = db }) {
+async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, techNames: persistedTechNames = [], promptVersion = null, now = new Date(), dbh = db }) {
   // Codex round-13 P2: any /track/ link that is not the canonical origin's exact
   // token path is refused outright, claim or not.
   if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';
@@ -407,7 +418,7 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
     ...(Array.isArray(persistedTechNames) ? persistedTechNames : []),
     ...(liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])),
   ]);
-  const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0, techNames });
+  const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0, techNames, promptVersion });
   const entries = usableSnapshotEntries(liveEtaSnapshot);
   // Round-20 structural rule: wording classification decides WHICH claim to
   // verify, never WHETHER to recheck. A draft that carries a live-ETA/on-site
@@ -530,20 +541,25 @@ function recomputedStillMatches(claimed, recomputed) {
   const tolerance = Math.max(RECOMPUTE_TOLERANCE_MIN, Math.round(claimed * RECOMPUTE_TOLERANCE_PCT));
   return Math.abs(recomputed - claimed) <= tolerance;
 }
+// Outcome of a send-time recompute (Codex round-45 P2): { minutes } on success;
+// { unavailable: true } when the PROVIDER or the DATABASE could not answer (a Distance Matrix
+// timeout / non-Google result, a failed read) — an infrastructure condition, retryable; and
+// { impossible: true } when the entry itself cannot be recomputed (no recorded destination, no
+// technician row) — a property of the draft, terminal.
 async function recomputedLiveEtaMinutes(entry, dbh) {
   try {
     const dest = (entry.destinations || []).map((d) => d?.resolved).find((r) => r && Number.isFinite(Number(r.lat)) && Number.isFinite(Number(r.lng)) && r.lat != null && r.lng != null);
-    if (!dest) return null;
+    if (!dest) return { impossible: true };
     const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at');
-    if (!tech) return null;
+    if (!tech) return { impossible: true };
     const fact = await require('./context-aggregator').resolveLiveEtaMinutesUncached(
       { technician_id: entry.technicianId, tech_bouncie_imei: tech.bouncie_imei, tech_mapping_changed_at: tech.bouncie_imei_changed_at },
       { lat: Number(dest.lat), lng: Number(dest.lng) },
     );
-    return fact && Number.isFinite(fact.minutes) ? fact.minutes : null;
+    return fact && Number.isFinite(fact.minutes) ? { minutes: fact.minutes } : { unavailable: true };
   } catch (err) {
     logger.warn(`[sms-eta-freshness] live ETA recompute failed: ${err.message}; blocking send`);
-    return null;
+    return { unavailable: true };
   }
 }
 async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson, checkFix = false }) {
@@ -590,7 +606,14 @@ async function entryIdentityReason(boundEntries, rows, dbh, { checkPerson, check
       // is treated like a newer ping: RECOMPUTE with the same path and tolerance,
       // and block only if the recompute is unavailable or differs.
       const unverifiable = !Number.isFinite(latest);
-      if ((unverifiable || latest > entry.fixAtMs + 1000) && !recomputedStillMatches(entry.minutes, await recomputedLiveEtaMinutes(entry, dbh))) return 'eta_claim_superseded_fix';
+      if (unverifiable || latest > entry.fixAtMs + 1000) {
+        const recomputed = await recomputedLiveEtaMinutes(entry, dbh);
+        // The provider / database could not answer: an infrastructure reason (retryable, in the
+        // shared set), NEVER a verdict about the message. Only a recompute that SUCCEEDED and
+        // differs is the terminal superseded-fix verdict.
+        if (recomputed.unavailable) return 'eta_claim_recompute_unavailable';
+        if (recomputed.impossible || !recomputedStillMatches(entry.minutes, recomputed.minutes)) return 'eta_claim_superseded_fix';
+      }
     }
   }
   return null;

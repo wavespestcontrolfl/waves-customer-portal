@@ -69,6 +69,7 @@ describe('tech_status GPS freshness writes', () => {
     }));
     expect(merge).toHaveBeenCalledWith(expect.objectContaining({
       location_updated_at: 'NOW()',
+      location_received_at: 'NOW()', // round 45: server-side receipt stamped with new coordinates
     }));
 
     await techStatus.upsertTechStatus({
@@ -81,6 +82,7 @@ describe('tech_status GPS freshness writes', () => {
       lat: { raw: 'tech_status.lat' },
       lng: { raw: 'tech_status.lng' },
       location_updated_at: { raw: 'tech_status.location_updated_at' },
+      location_received_at: { raw: 'tech_status.location_received_at' }, // status-only keeps the previous receipt
     }));
   });
 
@@ -228,5 +230,18 @@ describe('tech_status GPS freshness writes', () => {
     expect(sql).toContain('VALUES (?, ?, ?, ?, NOW(), ?)');
     expect(sql).not.toContain('WHERE EXISTS');
     expect(values).toHaveLength(5);
+  });
+  // Codex round-45 P2: the server's own receipt time for stored coordinates.
+  test('a location ping stamps location_received_at = NOW() only when it writes the newer coordinates', async () => {
+    const raw = jest.fn().mockResolvedValue({ rows: [{ tech_id: 'tech-1', status: 'idle', lat: 27.1, lng: -82.2, current_job_id: null, updated_at: 'x', location_updated_at: 'y' }] });
+    db.transaction = jest.fn(async (cb) => cb({ raw }));
+    await techStatus.pingTechLocation({ tech_id: 'tech-1', lat: 27.1, lng: -82.2 });
+    const [sql] = raw.mock.calls[0];
+    expect(sql).toMatch(/location_received_at = CASE\s+WHEN tech_status\.location_updated_at IS NULL\s+OR EXCLUDED\.location_updated_at >= tech_status\.location_updated_at\s+THEN NOW\(\)\s+ELSE tech_status\.location_received_at\s+END/);
+  });
+  test('a status-only write (setTechJobStatus) never touches location_received_at (nor lat/lng)', async () => {
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ tech_id: 'tech-1', status: 'en_route', current_job_id: 'job-1', updated_at: 'x', location_updated_at: 'y' }] });
+    await techStatus.setTechJobStatus({ tech_id: 'tech-1', status: 'en_route', current_job_id: 'job-1' });
+    expect(db.raw.mock.calls[0][0]).not.toContain('location_received_at');
   });
 });

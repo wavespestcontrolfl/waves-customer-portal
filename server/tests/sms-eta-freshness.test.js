@@ -1686,12 +1686,21 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
           expect(await runF(newer)).toBe('eta_claim_superseded_fix');
         }
       });
-      test('a newer ping + recompute unavailable (null, throws, no technician row, no recorded destination): blocked', async () => {
+      // Round 45: a provider / database outage is an INFRASTRUCTURE reason (retryable, in the shared set);
+      // only a recompute that SUCCEEDED and differs — or one that is impossible for the entry — is the
+      // terminal superseded-fix verdict.
+      test('a newer ping + recompute UNAVAILABLE (provider null / throws): retryable infrastructure reason, not a permanent verdict', async () => {
+        const { isEtaInfrastructureFailure } = require('../services/sms-eta-freshness');
         const newer = { location_updated_at: new Date(FIX + 30e3) };
         resolveLiveEtaMinutesUncached.mockResolvedValue(null);
-        expect(await runF(newer)).toBe('eta_claim_superseded_fix');
+        const nullReason = await runF(newer);
+        expect(nullReason).toBe('eta_claim_recompute_unavailable');
         resolveLiveEtaMinutesUncached.mockRejectedValue(new Error('provider down'));
-        expect(await runF(newer)).toBe('eta_claim_superseded_fix');
+        expect(await runF(newer)).toBe('eta_claim_recompute_unavailable');
+        expect(isEtaInfrastructureFailure(nullReason)).toBe(true);
+      });
+      test('a newer ping + recompute IMPOSSIBLE for the entry (no technician row, no recorded destination): terminal superseded', async () => {
+        const newer = { location_updated_at: new Date(FIX + 30e3) };
         resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9 });
         expect(await etaClaimBlockReason({ liveEtaSnapshot: fSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWithStatus([row()], newer, null) })).toBe('eta_claim_superseded_fix');
         expect(await runF(newer, 'The tech is 9 minutes away.', snap({ fixAtMs: FIX }))).toBe('eta_claim_superseded_fix');
@@ -1710,9 +1719,9 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       });
       test.each([['no tech_status row', undefined], ['null timestamp', { location_updated_at: null }]])('%s + recompute unavailable (null / throws): blocked', async (_n, status) => {
         resolveLiveEtaMinutesUncached.mockResolvedValue(null);
-        expect(await runF(status)).toBe('eta_claim_superseded_fix');
+        expect(await runF(status)).toBe('eta_claim_recompute_unavailable');
         resolveLiveEtaMinutesUncached.mockRejectedValue(new Error('provider down'));
-        expect(await runF(status)).toBe('eta_claim_superseded_fix');
+        expect(await runF(status)).toBe('eta_claim_recompute_unavailable');
       });
       test('a status-only claim (no minutes figure) is not held to the fix and never recomputes', async () => {
         expect(await runF({ location_updated_at: new Date(FIX + 30e3) }, 'Your technician is en-route.')).toBeNull();
@@ -2180,5 +2189,63 @@ describe('persisted tech_names classify name-subjected status wording with no sn
     const reason = await etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: 'The technician is on the way.', now: NOW, dbh: () => { throw new Error('db down'); } });
     expect(reason).toBe('eta_claim_recheck_failed');
     expect(require('../services/sms-eta-freshness').isEtaInfrastructureFailure(reason)).toBe(true);
+  });
+});
+
+// Codex round-45 P2 (PR #5334): strictness comes from the PERSISTED prompt version; future on-site wording with a
+// vague time is a timed claim.
+describe('no-snapshot strictness follows the persisted prompt version', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  let prior;
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); prior = process.env.GATE_SMS_REAL_ANSWERS; });
+  afterEach(() => { if (prior === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prior; });
+  const run = (promptVersion, gate, body = 'The technician is on the way.') => {
+    if (gate) process.env.GATE_SMS_REAL_ANSWERS = 'true'; else delete process.env.GATE_SMS_REAL_ANSWERS;
+    return etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, promptVersion, now: NOW, dbh: fakeDb([]) });
+  };
+  test.each(['house_voice_v12_real_answers_cf_eta', 'house_voice_v12_real_answers', 'house_voice_v12_real_answers_cf_eta+bclm'])('v12 identity %p stays strict with the gate ROLLED BACK (off)', async (version) => {
+    expect(await run(version, false)).toBe('eta_claim_no_snapshot');
+    expect(await run(version, true)).toBe('eta_claim_no_snapshot');
+  });
+  test('a pre-real-answers version (v11) is never strict, even with the gate on now', async () => {
+    expect(await run('house_voice_v11', true)).toBeNull();
+    expect(await run('house_voice_v11', false)).toBeNull();
+  });
+  test('no version at all: the runtime gate is the fallback (unchanged)', async () => {
+    expect(await run(null, true)).toBe('eta_claim_no_snapshot');
+    expect(await run(undefined, false)).toBeNull();
+    expect(await run('  ', true)).toBe('eta_claim_no_snapshot');
+  });
+  test('the SLA wording keeps its exemption for v12 decisions', async () => {
+    expect(await run('house_voice_v12_real_answers', false, 'Your technician is nearby and should arrive within the hour.')).toBeNull();
+  });
+  test('non-status copy is untouched for v12', async () => {
+    expect(await run('house_voice_v12_real_answers', false, 'Thanks, 5 stars!')).toBeNull();
+  });
+  test('the agent-decision seam hands the persisted version through (source pin)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/agent-decision-send-checks.js'), 'utf8');
+    expect(src).toContain('promptVersion: decision.prompt_version ?? null');
+    expect(src).toContain("first('input_snapshot', 'prompt_version')");
+  });
+});
+
+describe('future on-site wording with a vague time is a timed claim -> unbound', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  const rows = [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE }];
+  const run = (body) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+  test.each([
+    'The technician will be on site soon.', 'The tech should be on-site any minute.', 'The technician will arrive on site shortly.', 'He will be on the property soon.',
+    'The tech will be at your door momentarily.',
+  ])('%p is unbound (an unsupported arrival promise), not ordinary en-route status', async (body) => {
+    expect(await run(body)).toBe('eta_claim_unbound');
+  });
+  test.each(['The technician will be on site.', 'The on-site inspection will be done soon.', 'We will be on site Tuesday.'])('%p is not a timed arrival claim', async (body) => {
+    expect(await run(body)).not.toBe('eta_claim_unbound');
   });
 });

@@ -242,7 +242,7 @@ describe('etaSnapshotProviderPreSendCheck', () => {
     const check = etaSnapshotProviderPreSendCheck({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', getBody: () => body });
     body = 'The tech is 9 minutes away.';
     await expect(check()).resolves.toEqual({ ok: true });
-    expect(etaClaimBlockReason).toHaveBeenCalledWith({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', techNames: [], outgoingBody: 'The tech is 9 minutes away.' });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith({ liveEtaSnapshot: snap, factsGeneratedAt: '2026-09-29T14:00:00.000Z', techNames: [], promptVersion: null, outgoingBody: 'The tech is 9 minutes away.' });
   });
   test('stale -> terminal refusal; a throwing recheck -> retryable', async () => {
     etaClaimBlockReason.mockResolvedValue('eta_claim_stale_facts');
@@ -258,7 +258,7 @@ describe('infrastructure failures are retryable at every wrapper, never permanen
   const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
 
   test('the exported set names both codes; verdicts about the message are not in it', () => {
-    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_recheck_failed']);
+    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_claim_recompute_unavailable', 'eta_recheck_failed']);
     for (const verdict of ['eta_claim_stale_facts', 'eta_claim_no_longer_en_route', 'eta_claim_no_snapshot', 'eta_claim_superseded_fix', 'eta_claim_visit_not_today']) {
       expect(isEtaInfrastructureFailure(verdict)).toBe(false);
     }

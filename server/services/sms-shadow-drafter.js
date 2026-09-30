@@ -1465,12 +1465,14 @@ function bodyMentionsVisitStatus(text, { techNames = [] } = {}) {
 // so "the treatment needs about half an hour to dry" (no arrival word at
 // all besides "out" from an unrelated "letting pets out") never
 // false-positives.
-const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?(?:min(?:ute)?s?|sec(?:ond)?s?)|any\s+minute\s+now|shortly|soon)\b/i;
+const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of\s+an?\s+)?hour|an?\s+hour\b|a\s+(?:few|couple)\s+(?:of\s+)?(?:min(?:ute)?s?|sec(?:ond)?s?)|any\s+minute(?:\s+now)?|momentarily|shortly|soon)\b/i;
 // `unnormalizedHoursOnly` (Codex round-9 P2, PR #5334): instead of the vague
 // phrase list, report only whether an hour-based duration normalizeTimeQuantities
 // could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
 // Routed through this one already-shared entry point so every send seam's
 // existing import of the drafter keeps working unchanged.
+// "on-site inspection/visit/..." is an adjective use, not an arrival.
+const ON_SITE_ARRIVAL_TRIGGER_RE = /\b(?:on[\s-]?site(?!\s+(?:inspection|visit|service|treatment|appointment|estimate|work|fee|consult\w*|tech\w*|crew))|on\s+(?:the|your)\s+property|at\s+your\s+(?:door|home|house))\b/i;
 function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false, ignoreSlaPhrases = false, techNames = [] } = {}) {
   if (unclassifiedSignalOnly) return bodyHasUnclassifiedEtaSignal(text);
   if (completedArrivalOnly) return bodyClaimsCompletedArrival(text, { techNames });
@@ -1487,7 +1489,11 @@ function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconv
   while ((m = re.exec(str))) {
     if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
     const sentence = sentenceFor(m.index);
-    if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
+    // Round-45 P2: future on-site / at-the-property wording ("will be on site soon") is arrival
+    // wording too, so a vague time beside it is a TIMED claim. Scoped to THIS vague-phrase check
+    // (not the numeric claim judges), and only past the same duration exclusions as a weak trigger.
+    const onSiteArrival = ON_SITE_ARRIVAL_TRIGGER_RE.test(sentence);
+    if (!ARRIVAL_TRIGGER_RE.test(sentence) && !onSiteArrival) continue;
     if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
     const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
     const before = str.slice(Math.max(0, m.index - 30), m.index);

@@ -97,6 +97,9 @@ async function etaBlockReason({ decision, outgoingBody }) {
     // The draft's technician first name(s), persisted independently of live entries
     // (round-42 P2); absent on older decisions, which keep the entries-only behavior.
     techNames: Array.isArray(snapshot?.tech_names) ? snapshot.tech_names : [],
+    // The persisted prompt version decides whether status wording needs a LIVE STATUS fact, so a
+    // v12 decision stays strict across a gate rollback (round-45 P2).
+    promptVersion: decision.prompt_version ?? null,
     outgoingBody,
   });
 }
@@ -114,7 +117,7 @@ async function scheduledEtaBlockReason({ decisionId, outgoingBody, skip = false 
   if (skip) return null; // an earlier revalidation already blocked this send
   try {
     const db = require('../models/db');
-    const decision = await db('agent_decisions').where({ id: decisionId }).first('input_snapshot');
+    const decision = await db('agent_decisions').where({ id: decisionId }).first('input_snapshot', 'prompt_version');
     return await etaBlockReason({ decision: decision || {}, outgoingBody });
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] LIVE ETA revalidation failed for decision ${decisionId}: ${err.message}; blocking send`);
@@ -149,13 +152,13 @@ function etaProviderPreSendCheck({ decisionId, getBody }) {
 // Snapshot-carrying variant for a caller that already holds the decision's live-ETA
 // snapshot in memory (the auto-send executor's claim): same check, same verdicts, no
 // extra row read.
-function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, techNames = [], getBody }) {
+function etaSnapshotProviderPreSendCheck({ liveEtaSnapshot, factsGeneratedAt, techNames = [], promptVersion = null, getBody }) {
   const check = async () => {
     const { etaClaimBlockReason } = require('./sms-eta-freshness');
     const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
     let reason;
     try {
-      reason = await etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, techNames, outgoingBody });
+      reason = await etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, techNames, promptVersion, outgoingBody });
     } catch (err) {
       require('./logger').warn(`[agent-decision-send-checks] LIVE ETA boundary recheck failed: ${err.message}; blocking send`);
       reason = 'eta_recheck_failed';

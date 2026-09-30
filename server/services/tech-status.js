@@ -102,6 +102,9 @@ async function upsertTechStatus(payload) {
         current_job_id: upsertCols.current_job_id,
         updated_at: upsertCols.updated_at,
         location_updated_at: upsertCols.location_updated_at || db.raw('tech_status.location_updated_at'),
+        // Server-side receipt time of the stored coordinates (round-45 P2): restamped only when this
+        // write supplies new coordinates; a status-only upsert keeps the previous receipt.
+        location_received_at: payload.lat != null && payload.lng != null ? db.fn.now() : db.raw('tech_status.location_received_at'),
       })
       .returning(['id', 'tech_id', 'status', 'lat', 'lng', 'current_job_id', 'updated_at', 'location_updated_at']);
     row = committed;
@@ -278,6 +281,12 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
             OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
             THEN EXCLUDED.location_updated_at
           ELSE tech_status.location_updated_at
+        END,
+        location_received_at = CASE
+          WHEN tech_status.location_updated_at IS NULL
+            OR EXCLUDED.location_updated_at >= tech_status.location_updated_at
+            THEN NOW()
+          ELSE tech_status.location_received_at
         END,
         status = CASE
           WHEN tech_status.status IN ('en_route','on_site','wrapping_up')

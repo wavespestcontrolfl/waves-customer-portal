@@ -1960,6 +1960,30 @@ describe('round 42 P2: tech_names plumbing (source pins)', () => {
   });
 });
 
+// Codex round-45 P2 (PR #5334): future on-site wording with a vague time is a timed arrival claim.
+describe('round 45 P2: "will be on site soon" is a timed arrival claim', () => {
+  test.each([
+    'The technician will be on site soon.', 'The tech should be on-site any minute.', 'The technician will arrive on site shortly.',
+    'He will be on the property soon.', 'The tech will be at your door momentarily.', 'Our driver will be at your home shortly.',
+  ])('%p', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply)).toBe(true);
+  });
+  test.each([
+    'The on-site inspection will be done soon.', 'We will be on site for about 45 minutes.', 'The on-site visit takes about 20 minutes.', 'He is on site.',
+    'The technician will be on site.', 'We will be on site Tuesday.', 'Soon we will have your report.',
+  ])('%p is not a timed arrival claim', (reply) => {
+    expect(bodyHasTimedArrivalPhrase(reply)).toBe(false);
+    expect(findEtaMinutesClaims(reply).filter((c) => c.minutes === 45 || c.minutes === 20)).toEqual([]);
+  });
+  test('draft-time: the validator rejects it beside an en-route fact (an unsupported promise)', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+      expect(validateLiveEtaMinutes({ reply: 'The technician will be on site soon.', factsBlock: facts }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
 // Codex round-44 P2 (PR #5334): unit / apartment / suite identifiers are address numbers.
 describe('round 44 P2: unit identifiers are not ETA minutes', () => {
   test.each([
