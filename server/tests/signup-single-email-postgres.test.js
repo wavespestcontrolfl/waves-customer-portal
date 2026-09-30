@@ -69,8 +69,6 @@ postgres('one signup email against migrated PostgreSQL', () => {
     return id;
   }
 
-  const Signup = require('../services/signup-single-email');
-
   describe('added property (same-ET-day short email)', () => {
     const { _private } = require('../services/estimate-accepted-email');
     const HERE = { full: '200 Test Lane, Test City, 00000', street: '200 Test Lane' };
