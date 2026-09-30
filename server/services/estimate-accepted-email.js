@@ -148,7 +148,7 @@ async function buildSignupEmail({ customerId, estimateId, appointment, email, si
   };
   const property = await safe('property', () => propertyForEstimate({ estimateId, customerId, appointment }));
   const plan = signup.membershipEmail
-    ? await safe('plan', () => require('./account-membership-email').buildMembershipStartedSection(signup.membershipEmail))
+    ? await safe('plan', () => require('./account-membership-email').buildMembershipStartedSection({ ...signup.membershipEmail, recipientEmail: email }))
     : null;
   // A later same-day acceptance for a DIFFERENT property is an added property —
   // but only when the email can name it; otherwise the full email (which names

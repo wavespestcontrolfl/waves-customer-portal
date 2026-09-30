@@ -38,6 +38,8 @@ const ARGS = {
   monthlyRate: 89,
   billingCadence: 'monthly',
   includedServices: 'Quarterly Pest Control, Lawn Care',
+  // The onboarding email's resolved recipient (ignored by sendMembershipStarted).
+  recipientEmail: 'pat@example.com',
 };
 
 beforeEach(() => { jest.clearAllMocks(); sentTemplates.length = 0; });
@@ -91,4 +93,29 @@ test('the customer opted out of email (notification_prefs.email_enabled = false)
 test('an unreadable preference fails closed (no section); membership.started then decides for itself', async () => {
   stub({ prefsError: new Error('db down') });
   expect(await buildMembershipStartedSection(ARGS)).toBe(null);
+});
+
+// GH Codex r6 P1: the onboarding email can fall back to the estimate's own
+// contact (a tenant); the account holder's plan must never go to that address.
+describe('plan section only for the customer\'s own email', () => {
+  test('a different recipient (the estimate contact) gets no plan section', async () => {
+    stub();
+    expect(await buildMembershipStartedSection({ ...ARGS, recipientEmail: 'tenant@example.com' })).toBe(null);
+  });
+
+  test('no recipient email → no plan section', async () => {
+    stub();
+    expect(await buildMembershipStartedSection({ ...ARGS, recipientEmail: undefined })).toBe(null);
+  });
+
+  test('a customer with no email of their own → no plan section', async () => {
+    stub({ customer: { ...CUSTOMER, email: '' } });
+    expect(await buildMembershipStartedSection({ ...ARGS, recipientEmail: '' })).toBe(null);
+  });
+
+  test('the same address in another case and with spaces still matches', async () => {
+    stub();
+    const section = await buildMembershipStartedSection({ ...ARGS, recipientEmail: '  PAT@Example.com ' });
+    expect(section?.variables?.plan_name).toBeTruthy();
+  });
 });

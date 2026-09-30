@@ -799,9 +799,17 @@ async function sendMembershipStarted({
 // fail-closed posture as sendTemplate) — so the caller keeps sending the
 // separate email under its own rules and nothing is folded into an email the
 // customer opted out of.
-async function buildMembershipStartedSection({ customerId, ...args } = {}) {
+async function buildMembershipStartedSection({ customerId, recipientEmail, ...args } = {}) {
   const customer = await loadCustomer(customerId);
   if (!customer) return null;
+  // Plan details go only where membership.started itself would send them: the
+  // customer's own primary email. The onboarding email can fall back to the
+  // estimate's contact (a tenant, or someone else the estimate was addressed
+  // to), and that person must not receive the account holder's plan and rate
+  // (GH Codex r6 P1). No match → no section; membership.started then goes out
+  // separately under its own rules (and skips when the customer has no email).
+  const own = String(getPrimaryContact(customer).email || '').trim().toLowerCase();
+  if (!own || own !== String(recipientEmail || '').trim().toLowerCase()) return null;
   try {
     const prefs = await db('notification_prefs').where({ customer_id: customer.id }).first();
     if (prefs && prefs.email_enabled === false) return null;

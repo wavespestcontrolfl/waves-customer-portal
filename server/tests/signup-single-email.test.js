@@ -145,6 +145,14 @@ describe('the onboarding email itself', () => {
       }
     });
 
+    test('the plan section is asked for the address the email is actually going to (GH Codex r6 P1)', async () => {
+      mockDb();
+      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+      await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+      const to = EmailTemplates.sendTemplate.mock.calls[0][0].to;
+      expect(Membership.buildMembershipStartedSection).toHaveBeenCalledWith(expect.objectContaining({ recipientEmail: to }));
+    });
+
     describe('does the send cover membership.started? (decided here, at send time)', () => {
       test('accepted by the provider and every plan value rendered: covered', async () => {
         mockDb();
