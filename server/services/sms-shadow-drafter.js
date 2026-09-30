@@ -323,7 +323,7 @@ function realAnswersHandoffBullets() {
   // generateGroundedDraft's auto-send-safety check), so a model that misreads
   // a complaint as a plain pest report is caught by the human in the loop,
   // not by code.
-  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — anger, property damage, a refund/credit demand, a dispute over what happened or over billing, or a threat to cancel over it — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says that service line is ALREADY BOOKED, do NOT offer a new link, OPEN TIMES or a paid visit for it — acknowledge what they're seeing and refer to the appointment already on the schedule (the date/window in the fact), offering to help with that visit. When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
+  lines.push(`- PEST REPORTS ("still seeing bugs/ants/etc", "they're back", a new pest sighting after a service) are NOT a complaint for hand-off purposes — answer from the facts, don't hold this for a person, but ONLY when it is a plain report of pest activity. If the SAME text is ALSO a complaint — ${pestComplaintTieBreakLabels()} — ${pestComplaintTieBreak}; pest activity never overrides an actual complaint. Offer a free re-service ONLY when FREE RE-SERVICE in the facts says eligible, and only for the service line(s) it lists: acknowledge what they're seeing, say CONCRETELY that you're sending their free re-service booking link now, and add {"type":"escalate","note":"send_reservice_link"} to intended_actions so a teammate texts it right away (that page shows its own real availability; NEVER quote OPEN TIMES for a re-service). When FREE RE-SERVICE says that service line is ALREADY BOOKED, do NOT offer a new link, OPEN TIMES or a paid visit for it — acknowledge what they're seeing and refer to the appointment already on the schedule (the date/window in the fact), offering to help with that visit. When FREE RE-SERVICE says not eligible, is absent, or doesn't list that service line, never offer or imply a free visit: acknowledge, then offer 2–3 SPECIFIC times from OPEN TIMES for a normal visit when OPEN TIMES is present (add {"type":"book_appointment"} once they confirm one), or — only when OPEN TIMES is absent — add {"type":"escalate"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.`);
   lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
   return lines.join('\n');
 }
@@ -759,7 +759,13 @@ const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|(?:another|ext
 // an offer. The intervening words must not themselves be an offer noun, so
 // "your free pest re-service and a quote" still binds "free" to the re-service.
 const FREE_ESTIMATE_BIND_SOURCE = `(?!(?:\\s+(?!(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b)[\\w'’-]+){0,3}\\s+(?:estimates?|quotes?|quotations?|consultations?|cost\\s+assessments?|price\\s+checks?)\\b)`;
-const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)\\bfree\\b(?!\\s+(?:to|from)\\b)(?!\\s+of\\b(?!\\s+charge\\b))" + FREE_ESTIMATE_BIND_SOURCE
+// Codex round-23 P2 (PR #5336): "free" describing a PERSON'S AVAILABILITY is not a price word — "If you're free
+// Tuesday", "are you free this week", "when you're free", "I'm free at 3", "free on Thursday / after 5 /
+// between 9 and 11". The person construct must sit right before "free" (a price "free re-service" is
+// untouched, and "the re-service is free Tuesday" stays a promise: its subject is the service, not a person).
+const FREE_AVAILABILITY_BEFORE = "(?<!\\b(?:you(?:'|’)re|you\\s+are|are\\s+you|we(?:'|’)re|we\\s+are|are\\s+we|i(?:'|’)m|i\\s+am|am\\s+i|is\\s+anyone|is\\s+someone|if\\s+you|when\\s+you|whenever\\s+you)\\s+(?:(?:not|also|still|ever|only|usually|generally|really|actually|just|both)\\s+)?)";
+const FREE_AVAILABILITY_AFTER = "(?!\\s+(?:on|at|after|before|between|around|anytime|any\\s+time)\\b)";
+const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)" + FREE_AVAILABILITY_BEFORE + "\\bfree\\b(?!\\s+(?:to|from)\\b)" + FREE_AVAILABILITY_AFTER + "(?!\\s+of\\b(?!\\s+charge\\b))" + FREE_ESTIMATE_BIND_SOURCE
   + "|complimentary" + FREE_ESTIMATE_BIND_SOURCE + "|gratis|\\bcomp(?:ed)?\\b|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)" + FREE_ESTIMATE_BIND_SOURCE + "|at no (?:additional )?(?:charge|cost)" + FREE_ESTIMATE_BIND_SOURCE
   + "|without\\s+(?:any\\s+)?(?:charge|cost|fee)|nothing\\s+extra|cost\\s+(?:you\\s+)?nothing"
   + "|waiv(?:e|ed|ing)\\s+(?:the\\s+|any\\s+)?(?:charge|cost|fee)s?"
@@ -780,7 +786,7 @@ const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)\\bfree\\b(?!\\s+(?:to|
 // between the price word and the noun are modifiers only (never a
 // determiner/preposition, which would make it "no charge for your treatment").
 const GENERIC_SERVICE_NOUN = `${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:treatment|service|application)s?\\b(?!\\s+(?:estimates?|quotes?|consultations?)\\b)`;
-const BOUND_PRICE_ADJ = "(?:(?<!\\bfeel\\s)(?<!-)\\bfree(?!\\s+(?:to|from|of)\\b)|complimentary|no[- ](?:charge|cost))";
+const BOUND_PRICE_ADJ = "(?:(?<!\\bfeel\\s)(?<!-)" + FREE_AVAILABILITY_BEFORE + "\\bfree(?!\\s+(?:to|from|of)\\b)" + FREE_AVAILABILITY_AFTER + "|complimentary|no[- ](?:charge|cost))";
 const BOUND_MODIFIER = "(?:(?!(?:for|your|the|our|this|that|its|of|with|on|to|and|a|an|is|are)\\b)[\\w'’-]+\\s+){0,2}";
 const BOUND_GENERIC_OFFER_SOURCE = `\\b${BOUND_PRICE_ADJ}\\s+${BOUND_MODIFIER}${GENERIC_SERVICE_NOUN}`
   + `|\\b${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:treatment|service|application)s?\\s+(?:at\\s+no\\s+(?:additional\\s+)?(?:charge|cost)|(?:is|are|will\\s+be)\\s+(?:free|complimentary|on\\s+(?:us|the\\s+house)))\\b`;
@@ -1160,9 +1166,31 @@ function reportedPestLane({ inboundMessage, context, lanes }) {
 // where the COMPLAINTS rule offers the re-service, and "the ants came back" classifies as a customer
 // issue). Cancellation, refund, dispute/chargeback/wrong charge, legal, damage, chemical/medical
 // exposure. Plain frustration (upset, frustrated, angry, disappointed) does NOT suppress it.
-const RESERVICE_HANDOFF_TEXT_RE = /\b(?:cancel\w*|refund\w*|disput\w*|chargeback|charged\s+(?:me\s+)?(?:wrong|twice|again|incorrect\w*)|(?:double|over|wrongly|incorrectly)[- ]?charg\w*|legal\w*|lawyer|attorney|lawsuit|sue|suing|damag\w*|chemical\w*|toxic|poisoned|poisoning|allerg\w*|hospital|medical|exposure|exposed|sick(?!\s+(?:of|and\s+tired)\b))\b/i;
+// Codex round-23 P2: ONE list drives both the prompt's PEST REPORTS complaint tie-break wording (its labels,
+// rendered by pestComplaintTieBreakLabels below — byte-identical to the old prose, so the pinned system-prompt
+// hash does not move) and the owed-offer exception (its patterns). The tie-break says a pest report that is
+// ALSO one of these is a complaint. With GATE_SMS_AGENT_COMPLAINTS ON the COMPLAINTS rule answers complaints
+// (offering the re-service when eligible), so only the true hand-offs — cancel / refund / dispute / damage,
+// plus legal and chemical/medical exposure, which the prompt's held categories cover — suppress the offer and
+// plain anger stays owed. With it OFF the prompt HOLDS complaints for a person, so anger suppresses it too.
+const PEST_COMPLAINT_TIEBREAK = Object.freeze([
+  { label: 'anger', anger: true, source: "angry|furious|upset|frustrated|disappointed|unacceptable|ridiculous|terrible|awful|outraged|livid|fed\\s+up|sick\\s+of|sick\\s+and\\s+tired|worst" },
+  { label: 'property damage', source: 'damag\\w*' },
+  { label: 'a refund/credit demand', source: 'refund\\w*' },
+  { label: 'a dispute over what happened or over billing', source: "disput\\w*|chargeback|charged\\s+(?:me\\s+)?(?:wrong|twice|again|incorrect\\w*)|(?:double|over|wrongly|incorrectly)[- ]?charg\\w*" },
+  { label: 'a threat to cancel over it', source: 'cancel\\w*' },
+]);
+function pestComplaintTieBreakLabels() {
+  const labels = PEST_COMPLAINT_TIEBREAK.map((c) => c.label);
+  return `${labels.slice(0, -1).join(', ')}, or ${labels[labels.length - 1]}`;
+}
+const RESERVICE_HANDOFF_EXTRA_SOURCE = "legal\\w*|lawyer|attorney|lawsuit|sue|suing|chemical\\w*|toxic|poisoned|poisoning|allerg\\w*|hospital|medical|exposure|exposed|sick(?!\\s+(?:of|and\\s+tired)\\b)";
+const reserviceHandoffRe = (withAnger) => new RegExp(`\\b(?:${[...PEST_COMPLAINT_TIEBREAK.filter((c) => withAnger || !c.anger).map((c) => c.source), RESERVICE_HANDOFF_EXTRA_SOURCE].join('|')})\\b`, 'i');
+const RESERVICE_HANDOFF_TEXT_RE = reserviceHandoffRe(false); // complaints answered (gate on): true hand-offs only
+const RESERVICE_HANDOFF_WITH_ANGER_RE = reserviceHandoffRe(true); // complaints held (gate off): the prompt's whole tie-break
 function reserviceOfferOwed({ inboundMessage, lanes, context }) {
-  if (RESERVICE_HANDOFF_TEXT_RE.test(String(inboundMessage || ''))) return false;
+  const handoffRe = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS') ? RESERVICE_HANDOFF_TEXT_RE : RESERVICE_HANDOFF_WITH_ANGER_RE;
+  if (handoffRe.test(String(inboundMessage || ''))) return false;
   return reportedPestLane({ inboundMessage, context, lanes }) === 'pest';
 }
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
@@ -1332,8 +1360,14 @@ function reserviceBodyRefersToBooked(body, info, lane) {
   const named = reserviceBookedDayNames(info).map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
   const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
   const contextRe = new RegExp(`\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})`, 'i');
+  // Codex round-23 P2: a generic visit noun counts as callback context only when the same sentence QUALIFIES it
+  // as the free callback (free / complimentary / no-charge / follow-up / callback): "Your free pest visit is
+  // already scheduled for Thursday". A plain "your visit is scheduled" still does not.
+  const qualifiedVisitRe = /\b(?:free|complimentary|no[- ]charge|at\s+no\s+(?:additional\s+)?(?:charge|cost)|follow-?up|call-?back)\b/i;
+  const visitNounRe = /\b(?:visit|appointment|treatment|service|trip)s?\b/i;
   return String(body).split(/[.!?\n]+/).some((sentence) => {
-    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || named.some((rx) => rx.test(sentence))) || !contextRe.test(sentence)) return false;
+    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || named.some((rx) => rx.test(sentence)))) return false;
+    if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) return false;
     const lanesNamed = RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l);
     return !lanesNamed.length || lanesNamed.includes(lane);
   });

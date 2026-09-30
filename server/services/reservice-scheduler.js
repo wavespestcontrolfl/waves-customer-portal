@@ -403,7 +403,18 @@ const RESERVICE_CLAUSE_NEGATED_RE = new RegExp(
   + `|\\b${RESERVICE_NEG}\\s+(?:(?:any|a|an|the|more|even|just|really|actually|about)\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b`,
   'i',
 );
-const RESERVICE_CLAUSE_RESOLVED_RE = /\b(?:anymore|any\s+more|no\s+more|no\s+longer|gone|stopped|disappeared|went\s+away|nothing\s+since|nothing\s+left|no\s+(?:sign|signs|activity)|none\s+(?:left|since))\b/i;
+const RESERVICE_CLAUSE_RESOLVED_RE = /\b(?:anymore|any\s+more|no\s+more|no\s+longer|nothing\s+since|nothing\s+left|no\s+(?:sign|signs|activity)|none\s+(?:left|since))\b/i;
+// "gone / stopped / went away / left" resolve a sighting ONLY when not negated: "the ants never went away",
+// "they haven't stopped", "won't go away" say the infestation PERSISTS (Codex round-23 P2).
+const RESERVICE_CLAUSE_RESOLUTION_WORD_RE = /\b(?:gone|stopped|disappeared|went\s+away|left)\b/gi;
+const RESERVICE_PERSISTENCE_NEGATOR_RE = new RegExp(`\\b${RESERVICE_NEG}\\b(?:\\W+(?:yet|even|really|fully|completely|entirely|quite|been|ever|just))*\\W*$`, 'i');
+function reserviceClauseResolved(clause) {
+  if (RESERVICE_CLAUSE_RESOLVED_RE.test(clause)) return true;
+  for (const m of clause.matchAll(RESERVICE_CLAUSE_RESOLUTION_WORD_RE)) {
+    if (!RESERVICE_PERSISTENCE_NEGATOR_RE.test(clause.slice(0, m.index))) return true;
+  }
+  return false;
+}
 const RESERVICE_LOCATION_PHRASE_RE = new RegExp(
   '\\b(?:in|on|at|near|around|by|under|across|through|throughout|over|into|onto|from|outside|inside)\\s+(?:(?:the|my|our|your|a)\\s+)?(?:(?:front|back|side)\\s+)?(?:lawn|grass|yard|turf|sod)\\b'
   + '(?!\\s+(?:service|treatment|care|program|maintenance|spray(?:ing)?))',
@@ -411,7 +422,7 @@ const RESERVICE_LOCATION_PHRASE_RE = new RegExp(
 );
 // A pest noun that is really a SERVICE name ("pest control", "ant service", "ant plan") is not a sighting.
 const RESERVICE_NOUN_NOT_SERVICE = '(?!\\s+(?:control|service|services|treatment|treatments|plan|plans|program|visit|visits|schedule|contract|guarantee|coverage|company|inspection|inspections|spray|application|appointment)\\b)';
-const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|returned?|returning|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
+const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|(?:never|haven'?t|hasn'?t|hadn'?t|didn'?t|won'?t|wouldn'?t|can'?t|not)\\s+(?:(?:yet|even|really|fully|completely|entirely)\\s+)?(?:went\\s+away|gone(?:\\s+away)?|go(?:ne|ing)?\\s+away|stopp\\w+|stop|left|leave|leaving)\\b|returned?|returning|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
 const RESERVICE_ACTIVITY_BOUND_RES = [
   // noun … activity ("the ants are back", "roaches keep coming", "ants are everywhere")
   new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}(?:\\W+[\\w'’-]+){0,6}?\\W+${RESERVICE_ACTIVITY_AFTER}`, 'i'),
@@ -421,7 +432,7 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
 ];
 
 function reserviceClauseDropped(clause) {
-  return RESERVICE_CLAUSE_NEGATED_RE.test(clause) || RESERVICE_CLAUSE_RESOLVED_RE.test(clause);
+  return RESERVICE_CLAUSE_NEGATED_RE.test(clause) || reserviceClauseResolved(clause);
 }
 // { kept: clauses that still count, survivingText: the original text with dropped clauses blanked }
 function reservicePestReportFacts(text) {

@@ -2797,6 +2797,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
 
       // Codex round-20 P2: only the customer's own true hand-off words suppress the offer — never intent, never frustration.
       test('plain frustration and pest wording keep the offer owed; refund/cancel/damage/legal/chemical wording suppresses it', () => {
+        process.env.GATE_SMS_AGENT_COMPLAINTS = 'true'; // complaints are ANSWERED (offered the re-service), not held
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
         const owed = (inboundMessage) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage }).ok === false;
         for (const m of ['the ants came back', "I'm frustrated, the roaches are back", 'so upset, ants are back again', 'angry and disappointed, the ants are still showing up', "I'm sick of these roaches, they're back", 'sick and tired of the ants coming back', 'the roach poison is not working, they are back']) expect(owed(m)).toBe(true);
@@ -2822,6 +2823,31 @@ describe('free re-service is an entitlement resolved through the existing mechan
         expect(PEST_REPORT_TEXT_RE.test(text)).toBe(expected);
         // ...and the owed offer follows it
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: text }).ok).toBe(!expected);
+      });
+
+      // Codex round-23 P2: the owed-offer exception agrees with the prompt's complaint tie-break and the complaint gate.
+      test('"I\'m angry — the ants are back": owed with GATE_SMS_AGENT_COMPLAINTS on (complaints answered), NOT owed with it off (the prompt HOLDS the complaint)', () => {
+        const drafter = require('../services/sms-shadow-drafter');
+        const check = (m) => drafter.validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts(['pest']), intendedActions: [{ type: 'escalate' }], inboundMessage: m }).ok;
+        const angry = ["I'm angry—the ants are back", 'furious, the roaches are back again', 'this is unacceptable, ants everywhere again', "I'm sick of these ants, they're back"];
+        delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+        for (const m of angry) expect(check(m)).toBe(true);
+        expect(drafter.buildSystemPrompt()).toContain('HELD FOR A PERSON while that category is still held above');
+        process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
+        for (const m of angry) expect(check(m)).toBe(false);
+        // a plain pest report is owed either way
+        for (const on of [true, false]) {
+          if (on) process.env.GATE_SMS_AGENT_COMPLAINTS = 'true'; else delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+          expect(check('the ants are back')).toBe(false);
+        }
+        delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+      });
+
+      test('the tie-break wording in the prompt is rendered from the SAME list the exception reads', () => {
+        process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
+        const { buildSystemPrompt } = require('../services/sms-shadow-drafter');
+        expect(buildSystemPrompt()).toContain('anger, property damage, a refund/credit demand, a dispute over what happened or over billing, or a threat to cancel over it');
+        delete process.env.GATE_SMS_AGENT_COMPLAINTS;
       });
 
       // Codex round-19 P2: a pronoun-only report ("they're back") from a customer with a pest relationship
@@ -2924,6 +2950,8 @@ describe('free re-service is an entitlement resolved through the existing mechan
           'Your quarterly service is on Thursday, October 8.',
           'We will see you Thursday, October 8.',
           'Your free lawn re-service is already scheduled for Thursday.', // another lane's re-service
+          'Your visit is scheduled for Thursday.', // a plain visit with no free/follow-up qualifier
+          'Your regular pest treatment is already scheduled for Thursday.',
         ]) {
           await expect(send(unrelated)).resolves.toBeNull();
         }
@@ -2931,6 +2959,8 @@ describe('free re-service is an entitlement resolved through the existing mechan
           'Your free pest re-service is already scheduled for Thursday.',
           'Your pest callback visit is set for Thursday, October 8.',
           'Your re-service is booked for Thursday at 9.',
+          'Your free pest visit is already scheduled for Thursday.',
+          'Your complimentary pest follow-up appointment is set for Thursday, October 8.',
         ]) {
           await expect(send(related)).resolves.toMatch(/reservice_booking_changed/);
         }
@@ -3074,6 +3104,14 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["We'll inspect the property on Tuesday between 9 and 11.", false, []],
   ["Your invoice is covered - here is the payment link.", false, []],
   ["We can't offer a free lawn re-service nor a free pest re-service.", false, []],
+  ["If you're free Tuesday, we can schedule the visit.", false, []],
+  ["Are you free this week? We can schedule the visit.", false, []],
+  ["When you are free, we can come out and take a look.", false, []],
+  ["I'm free at 3 if you want to talk.", false, []],
+  ["Free on Thursday after 5, we can send a tech.", false, []],
+  ["The re-service is free Tuesday.", true, []],
+  ["We can send a tech for a free visit Tuesday.", true, []],
+  ["Feel free to pick a time; your free pest re-service link is on the way.", true, ['pest']],
   ["Your already scheduled free pest re-service falls on Thursday.", false, []],
   ["The booked complimentary lawn re-service is Tuesday at 9.", false, []],
   ["Your upcoming free pest re-service is confirmed.", false, []],

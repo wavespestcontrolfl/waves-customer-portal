@@ -339,6 +339,13 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['the roaches have returned', true, 'pest', false],
     ['more ants showed up after the treatment', true, 'pest', false],
     ['the ants came back', true, 'pest', false],
+    // negated resolution = PERSISTENCE (Codex round-23 P2); an un-negated one is still resolved
+    ['the ants never went away', true, 'pest', false],
+    ["the ants didn't go away", true, 'pest', false],
+    ["the ants haven't stopped", true, 'pest', false],
+    ["the ants won't go away", true, 'pest', false],
+    ['the ants are gone', false, null, false],
+    ['the ants stopped', false, null, false],
     ['Why are the ants back?', true, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
