@@ -10,7 +10,7 @@
  * transaction. A rejected member rolls back the packet and ALL member writes.
  */
 const crypto = require('crypto');
-const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_CARRIED_ERROR } = require('./invoice-helpers');
+const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_CARRIED_ERROR, SUMMARY_TEXT_PLANNED_ERROR } = require('./invoice-helpers');
 const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
 const { hashCompletionRequest, withoutPhotoBytes, isOperatorTimeOnSite } = require('./completion-attempts');
@@ -886,9 +886,10 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
       const scheduled = await trx('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
         .whereNull('payer_id').whereNull('payer_statement_id').update({
           status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0,
-          // The accepted-Text/pending-Email state, from the start: the queue's sender sends
-          // only the email, through retries, and never texts this invoice.
-          scheduled_send_error: foldsPayLink ? SUMMARY_TEXT_CARRIED_ERROR : null,
+          // The planned state, from the start: the Text leg is owned by the visit summary text, so
+          // the queue's sender sends only the email and never texts this invoice; it is promoted to
+          // the accepted-Text marker only when the summary's link-bearing text is accepted.
+          scheduled_send_error: foldsPayLink ? SUMMARY_TEXT_PLANNED_ERROR : null,
           updated_at: trx.fn.now(),
         });
       if (scheduled && foldsPayLink) await recordSummaryBillingLink(trx, packet.id, summaryLink);
@@ -1291,13 +1292,14 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   // A pay link the visit summary text carries (already accepted, or still to go) is not texted
   // a second time by the invoice: it goes back email-only. If the summary went plain or was
   // refused, the link never reached the customer by text and the invoice texts as today.
-  const carried = requeue && (invoice.sms_sent_at || await summaryStillToCarryLink(trx, packet, invoice.id));
+  const carriedMarker = !requeue ? null : invoice.sms_sent_at ? SUMMARY_TEXT_CARRIED_ERROR
+    : await summaryStillToCarryLink(trx, packet, invoice.id) ? SUMMARY_TEXT_PLANNED_ERROR : null;
   const moved = await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
     .update(requeue
       // A pay link the visit summary text already carried (its acceptance stamped the invoice's
       // Text leg) goes back to the queue email-only, not to text it a second time.
       ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0,
-        scheduled_send_error: carried ? SUMMARY_TEXT_CARRIED_ERROR : null, updated_at: trx.fn.now() }
+        scheduled_send_error: carriedMarker, updated_at: trx.fn.now() }
       // A parked ambiguous send returns to the park it came from — its
       // evidence restored, its send time still empty — never to the queue.
       : { scheduled_send_error: parked ? STALE_SEND_PARK_ERROR : null, updated_at: trx.fn.now() });

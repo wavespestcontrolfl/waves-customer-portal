@@ -447,11 +447,19 @@ async function summaryReceiptTextHandled(database, invoice) {
 // a billing hold or payer, an invoice no longer payable (or a receipt no longer paid), and
 // the same consent verdict. False sends the plain summary; the email already carries the link.
 async function summaryLinkStillValid(database, link, visitId, recipientPhone) {
-  const invoice = await database('invoices').where({ id: link.invoiceId }).first();
+  // In a handoff the invoice row is read FOR UPDATE, the row every invoice send claim takes
+  // (claimInvoiceForSend / claimPacketInvoiceForSend): a claim either lands first, so the
+  // summary goes plain, or waits for the summary's text.
+  const invoiceQuery = database('invoices').where({ id: link.invoiceId });
+  if (database.isTransaction && link.kind === 'pay_link') invoiceQuery.forUpdate();
+  const invoice = await invoiceQuery.first();
   const visit = await database('service_visits').where({ id: visitId }).first('billing_hold');
   if (!invoice || !visit || visit.billing_hold || invoice.payer_id || invoice.payer_statement_id) return false;
   if (link.kind === 'receipt' ? invoice.status !== 'paid' : !(isInvoiceCollectibleStatus(invoice.status) && invoiceAmountDue(invoice) > 0)) return false;
   if (link.kind === 'receipt' && await summaryReceiptTextHandled(database, invoice)) return false;
+  // A send already claimed for this invoice (an operator send in flight, whose text row may not
+  // exist yet): the summary goes plain rather than both reaching the provider.
+  if (link.kind === 'pay_link' && (invoice.status === 'sending' || invoice.send_claim_token)) return false;
   // The invoice's own text already went or is queued (an operator send-now): the link is
   // not texted a second time. Read from the text's own event key, not sms_sent_at, which
   // the queue's email-only finalization stamps too.
@@ -465,8 +473,12 @@ async function summaryLinkStillValid(database, link, visitId, recipientPhone) {
 // The link-carrying summary text was accepted: the invoice's Text leg is recorded as
 // delivered (an operator Resend sees it, and no later text carries the link again).
 async function recordSummaryLinkTextAccepted(link, database = db) {
-  if (link?.kind !== 'pay_link') return;
-  await database('invoices').where({ id: link.invoiceId }).whereNull('sms_sent_at').update({ sms_sent_at: database.fn.now(), updated_at: database.fn.now() });
+  if (link?.kind === 'pay_link') return require('./invoice').markSummaryTextAccepted(link.invoiceId);
+  // A carried receipt text is a receipt SMS delivery (staff re-share and Quick Link read it).
+  if (link?.kind === 'receipt') {
+    await database('invoices').where({ id: link.invoiceId }).whereNull('receipt_sms_sent_at')
+      .update({ receipt_sms_sent_at: database.fn.now(), updated_at: database.fn.now() });
+  }
 }
 
 async function summaryBillingLinkText(link) {

@@ -153,6 +153,11 @@ const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = 'BILLING_EMAIL_PENDING_AFTE
 // suffix says the Email is then the customer's only guaranteed path to the link, so a failed
 // Email is retried (the queue's own attempt cap) instead of finalizing the invoice as sent.
 const SUMMARY_TEXT_CARRIED_ERROR = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}:visit_summary`;
+// The planned state that precedes it: the Text leg belongs to the visit summary text, which has
+// not been accepted yet. The queue's sender never texts the invoice and does NOT count the Text
+// leg as delivered (no BILLING_EMAIL_PENDING... prefix on purpose); it is promoted to the
+// carried marker above only when the summary's link-bearing text is accepted.
+const SUMMARY_TEXT_PLANNED_ERROR = 'SUMMARY_TEXT_PLANNED';
 
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
@@ -306,6 +311,7 @@ module.exports = {
   STALE_SEND_PARK_ERROR,
   BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
   SUMMARY_TEXT_CARRIED_ERROR,
+  SUMMARY_TEXT_PLANNED_ERROR,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,
