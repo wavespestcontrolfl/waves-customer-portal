@@ -40,6 +40,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const { COMPANY_FACTS_HEADER } = require('./sms-company-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -131,10 +132,29 @@ function isV12PromptVersion(promptVersion) {
 // stamped with that category's tag must grade only items frozen with it —
 // otherwise it scores category behavior on inputs live drafts never lack.
 const CATEGORY_FACT_MARKERS = Object.freeze({ c: 'FREE RE-SERVICE:' });
+// Version-SUFFIX fact contract (Codex #5392 r1 P1): the real-answers base
+// identity carries a suffix token for every per-draft fact section a later
+// revision added ('house_voice_v12_real_answers_cf' = COMPANY FACTS). A suffix
+// token REQUIRES its marker, and — since the contract is exact — versions
+// without the token FORBID it, so items frozen before the section existed
+// never grade a suffixed version and suffixed items never grade an older one.
+// A future fact section (LABEL FACTS, ...) is one more row here plus its
+// suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
+const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER });
+function versionSuffixTokens(promptVersion) {
+  const base = String(promptVersion).split('+')[0];
+  if (!base.startsWith(REAL_ANSWERS_BASE_VERSION)) return [];
+  return base.slice(REAL_ANSWERS_BASE_VERSION.length).split('_').filter(Boolean);
+}
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
   const tags = String(promptVersion).split('+')[1] || '';
-  return [V12_FACTS_MARKER, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
+  return [
+    V12_FACTS_MARKER,
+    ...versionSuffixTokens(promptVersion).map((t) => VERSION_SUFFIX_FACT_MARKERS[t]).filter(Boolean),
+    ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
+  ];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
 // carry must be ABSENT too — an item frozen while complaints were on carries
@@ -142,7 +162,7 @@ function requiredFactMarkers(promptVersion) {
 // grade the plain v12 prompt after a rollback or switch. Every version has
 // one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
 // replay items frozen with the v12 SLA or category lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)]);
+const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS), ...Object.values(CATEGORY_FACT_MARKERS)]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));

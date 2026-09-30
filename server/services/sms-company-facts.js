@@ -19,10 +19,12 @@ const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly
 // held as "an amount the facts do not show".
 const REFERRAL_CREDIT_CENTS = 2500;
 
-// A customer-referral phrase: "referral(s)", "refer a friend/neighbor/someone",
-// "friends you refer", "referring". NOT the staff verb in "refer this to the
-// office" / "referring you to".
-const REFERRAL_PHRASE_RE = /\breferrals?\b|\brefer(?:s|red|ring)?\s+(?:a\s+|an\s+|your\s+|any\s+|another\s+)?(?:friends?|neighbou?rs?|someone|somebody|anyone|family|others?)\b|\b(?:friends?|neighbou?rs?)\s+(?:you|who)\s+refer\b|\breferring\b(?!\s+(?:this|that|it|you|them)\b)/i;
+// A customer-referral phrase, POSITIVE forms only: "referral(s)", "refer a
+// friend/neighbor/family member/someone/people", "friends/people you refer",
+// "when you refer". Never the bare verb: staff "referring your squirrel
+// problem to a wildlife company" / "refer this to the office" must not
+// authorize the credit.
+const REFERRAL_PHRASE_RE = /\breferrals?\b|\brefer(?:s|red|ring)?\s+(?:a\s+|an\s+|your\s+|any\s+|another\s+)?(?:friends?|neighbou?rs?|famil(?:y|ies)|family\s+members?|someone|somebody|anyone|people)\b|\b(?:friends?|neighbou?rs?|people|famil(?:y|ies)|family\s+members?)\s+(?:that\s+|who\s+)?you\s+refer\b|\bwhen\s+you\s+refer\b(?!\s+(?:this|that|it)\b)/i;
 
 const COMPANY_FACTS = Object.freeze([
   'Recurring, one-time and re-service pest visits include an interior spray as well as the exterior. The only exception is a customer who does not want the inside done.',
@@ -36,7 +38,7 @@ const COMPANY_FACTS = Object.freeze([
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
   'Paying: technicians accept cards at the visit, never cash. Checks are mailed to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
-  'Referrals: a $25 credit for both the customer who refers and the new customer.',
+  'Referral credit: $25 referral credit for each person (the customer who refers and the new customer).',
   'Pest seen again after a visit: offer the free re-service when the FREE RE-SERVICE fact says they are eligible, and mention they can book re-services in the Waves app. Do not explain why pests are still showing.',
 ]);
 

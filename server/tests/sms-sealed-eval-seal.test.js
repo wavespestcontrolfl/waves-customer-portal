@@ -228,14 +228,14 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers_cf+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
-      expect(String(args[0])).not.toMatch(/NOT LIKE/); // +c: every category fact is required, none forbidden
+      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
+      expect(String(args[0])).not.toMatch(/NOT LIKE/); // _cf+c: every fact the version carries is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
   });
@@ -251,7 +251,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
       expect(String(args[0])).not.toMatch(/(?<!NOT )LIKE \?/); // nothing required, both lines forbidden
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
     }
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^md\.facts_block NOT LIKE/.test(String(args[0])))).toBe(true);
     // the v12 items beyond the target are retired (the fake reports 3)
@@ -278,7 +278,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
       expect(likeRaws.length).toBeGreaterThanOrEqual(2); // the compat count + the restore filter
       for (const [, args] of likeRaws) {
-        expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+        expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
       }
       // restore targets INACTIVE rows, newest sealed_at first, limited to the whole shortfall (100)
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
@@ -321,7 +321,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       // the restore selects RETIRED rows under the v11 contract: both v12 lines forbidden
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
       expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^COALESCE\(facts_block, ''\) NOT LIKE \?/.test(String(args[0]))
-        && JSON.stringify(args[1]) === JSON.stringify(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']))).toBe(true);
+        && JSON.stringify(args[1]) === JSON.stringify(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']))).toBe(true);
       expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1); // the v12 items are retired
     });
   });
@@ -330,7 +330,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 
 // #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
 // freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
-test('v12 without +c: the compatibility SQL requires the SLA line AND forbids the FREE RE-SERVICE line', async () => {
+test('v12 without +c or _cf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS and FREE RE-SERVICE lines', async () => {
   const drafter = require('../services/sms-shadow-drafter');
   const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
   try {
@@ -346,8 +346,9 @@ test('v12 without +c: the compatibility SQL requires the SLA line AND forbids th
     dbi.raw = (sql) => sql;
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
-    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') NOT LIKE ?");
-    expect(compat[1][1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%FREE RE-SERVICE:%']);
+    // the pre-_cf identity also forbids COMPANY FACTS (Codex #5392 r1)
+    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') NOT LIKE ? AND COALESCE(facts_block, '') NOT LIKE ?");
+    expect(compat[1][1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%COMPANY FACTS (owner-approved; state these plainly):%', '%FREE RE-SERVICE:%']);
   } finally {
     spy.mockRestore();
   }
