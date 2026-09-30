@@ -5847,7 +5847,9 @@ async function createSelfBooking(payload = {}) {
     // convert a lead the booker doesn't own. Idempotent (convertLeadFromEvent's
     // markConverted claim is conditional; an already-won lead no-ops), and
     // best-effort — the booking is already committed. Returns the
-    // convertLeadFromEvent result, or null when there was no trigger / it threw.
+    // convertLeadFromEvent result; null ONLY when there was no trigger (nothing
+    // attempted). A conversion that threw is { converted:false, reason:'error' }
+    // so callers can tell "attempted, unresolved" from "not attempted".
     const convertOriginatingLeadOnBooking = async ({ seriesBooked = false } = {}) => {
       let leadTrigger = !!lead_id;
       if (!leadTrigger && !seriesBooked && pricing_estimate_id) {
@@ -5871,9 +5873,16 @@ async function createSelfBooking(payload = {}) {
         });
       } catch (err) {
         logger.warn(`[lead-trigger] self-booking conversion failed for customer=${custId}: ${err.message}`);
-        return null;
+        return { converted: false, reason: 'error' };
       }
     };
+
+    // An originating conversion was ATTEMPTED and did not win for any reason
+    // other than "there was no open lead" (ambiguous contact, a lost claim, an
+    // error...): the real quote/series lead may still be open, so the
+    // phone-matched preferred-time lead must not take the booking's one win
+    // (codex #5399 r12). null (no trigger) and 'no_open_lead' are resolved.
+    const originatingLeftUnresolved = (conv) => !!conv && !conv.converted && conv.reason !== 'no_open_lead';
 
     if (txResult.existing) {
       await markBookingIntentsConverted(txResult.existing.id);
@@ -6110,6 +6119,7 @@ async function createSelfBooking(payload = {}) {
             booking: replayBooked || null,
             bookedAt: txResult.existing.created_at || null,
             wonLeadIds: replayLeadConversion?.converted ? (replayLeadConversion.leadIds || []) : null,
+            originatingUnresolved: originatingLeftUnresolved(replayLeadConversion),
             // A replay only settles requests the customer made before this
             // booking — a newer request is new work (codex #5399 r11).
             requestedBy: txResult.existing.created_at || null,
@@ -6495,6 +6505,7 @@ async function createSelfBooking(payload = {}) {
         booking: serviceRow,
         bookedAt: booking?.created_at || serviceRow?.created_at || null,
         wonLeadIds: leadConversion?.converted ? (leadConversion.leadIds || []) : null,
+        originatingUnresolved: originatingLeftUnresolved(leadConversion),
       })).converted > 0;
     }
 

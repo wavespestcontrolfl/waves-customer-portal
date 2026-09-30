@@ -480,13 +480,20 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
 async function wonLeadIdsForBooking(db, { customerId, bookedAt }) {
   if (!customerId || !bookedAt) return [];
   try {
-    const since = new Date(new Date(bookedAt).getTime() - 60 * 1000);
-    if (Number.isNaN(since.getTime())) return [];
+    const bookedMs = new Date(bookedAt).getTime();
+    const since = new Date(bookedMs - 60 * 1000);
+    // Upper bound: only wins near the ORIGINAL booking count. A crash-replay
+    // hands its own originating win in directly (wonLeadIds), so this lookup
+    // never needs a later win; without a ceiling, an unrelated lead won days
+    // after the booking would block this request from ever converting.
+    const until = new Date(bookedMs + 15 * 60 * 1000);
+    if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) return [];
     const rows = await db('leads as won_lead')
       .where('won_lead.customer_id', customerId)
       .where('won_lead.status', 'won')
       .whereNull('won_lead.deleted_at')
       .where('won_lead.converted_at', '>=', since)
+      .where('won_lead.converted_at', '<=', until)
       .select('won_lead.id');
     return (rows || []).map((r) => r.id).filter(Boolean);
   } catch (err) {
@@ -521,6 +528,29 @@ async function noteBookingAlreadyWon(db, { leadId, wonLeadIds }) {
   }
 }
 
+// Same idea as noteBookingAlreadyWon, for a booking whose ORIGINATING lead
+// (quote / estimate / series) conversion was attempted but did not resolve
+// (ambiguous contact, lost claim, error). The real lead may still be open, so
+// this request stays open too, with one note (deduped by its own reason).
+async function noteOriginatingUnresolved(db, { leadId }) {
+  try {
+    const seen = await db('lead_activities')
+      .where({ lead_id: leadId, activity_type: 'note' })
+      .whereRaw("metadata::jsonb->>'reason' = 'originating_lead_unresolved'")
+      .first('id');
+    if (seen) return;
+    await db('lead_activities').insert({
+      lead_id: leadId,
+      activity_type: 'note',
+      description: 'Customer booked on /book, but the lead that started that booking could not be settled automatically, so this request was NOT counted as the win. Settle the original lead first, then close this one if nothing else is needed.',
+      performed_by: 'system',
+      metadata: JSON.stringify({ reason: 'originating_lead_unresolved' }),
+    });
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] unresolved-originating note on lead ${leadId} failed: ${err.message}`);
+  }
+}
+
 /**
  * A customer who just completed a booking no longer needs the office to chase
  * their preferred-time request: convert THE open preferred-time lead for the
@@ -544,13 +574,17 @@ async function noteBookingAlreadyWon(db, { leadId, wonLeadIds }) {
  * lead converted since `bookedAt`), this one is NOT won — it stays open with a
  * note and { alreadyWon: true } is returned (no bell; see noteBookingAlreadyWon).
  *
+ * `originatingUnresolved` (caller attempted the originating lead's conversion
+ * and it neither won nor found "no open lead") likewise leaves this lead open
+ * with a note and returns { converted: 0, originatingUnresolved: true }.
+ *
  * Idempotent (a converted lead is no longer open) so the normal commit path and
  * the txResult.existing replay path can both call it. Never throws into the
  * booking. Returns { converted, ambiguous } — converted is 1 only when
  * markConverted actually won its conditional write, so the caller can tell
  * attributeSelfBooking that the funnel entry is the lead's.
  */
-async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null, bookedAt = null, wonLeadIds = null, requestedBy = null } = {}) {
+async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null, bookedAt = null, wonLeadIds = null, requestedBy = null, originatingUnresolved = false } = {}) {
   if (!customerId) return { converted: 0 };
   try {
     const customer = await db('customers').where({ id: customerId }).first('phone');
@@ -571,6 +605,15 @@ async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = nu
     if (open.length > 1) {
       logger.warn(`[booking:preferred-time] ${open.length} open preferred-time leads for customer=${customerId}'s phone — not converting any (ambiguous); staff resolve`);
       return { converted: 0, ambiguous: true };
+    }
+    // The caller attempted the originating (quote / estimate / series) lead's
+    // conversion and it did not resolve (not merely "no open lead"): that lead
+    // may still be open and is the booking's real win, so this one must not
+    // take it (codex #5399 r12). Leave it open with a note.
+    if (originatingUnresolved) {
+      logger.info(`[booking:preferred-time] originating lead conversion unresolved for customer=${customerId} — leaving preferred-time lead ${open[0].id} unconverted`);
+      await noteOriginatingUnresolved(db, { leadId: open[0].id });
+      return { converted: 0, originatingUnresolved: true };
     }
     // One booking, at most one won lead: when the booking already won another
     // lead (the caller's own conversion result, or — for the replay and

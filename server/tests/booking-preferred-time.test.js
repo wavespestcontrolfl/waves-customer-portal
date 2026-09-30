@@ -29,7 +29,12 @@ const mockOrder = [];          // op order inside/after the transaction
 
 function builder(table) {
   const b = {
-    where: (a) => { if (typeof a === 'function') a(b); return b; },
+    where: (a, op, val) => {
+      if (typeof a === 'function') a(b);
+      // The won-lead lookup's converted_at bounds: rows carrying a converted_at are filtered by them.
+      if (table === 'leads as won_lead' && a === 'won_lead.converted_at') (b._bounds = b._bounds || []).push({ op, val });
+      return b;
+    },
     orWhere: () => b,
     whereNull: () => b,
     whereNotNull: () => b,
@@ -43,7 +48,7 @@ function builder(table) {
     limit: () => b,
     select: () => b,
     then: (resolve, reject) => Promise.resolve(
-      table === 'leads as won_lead' ? mockWonLeads
+      table === 'leads as won_lead' ? mockWonLeads.filter((r) => !r.converted_at || (b._bounds || []).every(({ op, val }) => (op === '>=' ? new Date(r.converted_at) >= val : new Date(r.converted_at) <= val)))
       : table === 'leads' ? (b._requestedBy && mockOpenLeadsNewerOnly ? [] : mockOpenLeads)
         : table === 'self_booked_appointments as sba' ? (mockBookedList || (mockBookedSince ? [mockBookedSince] : []))
           : [],
@@ -915,6 +920,56 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
       expect(mockDb.mock.calls.filter((c) => c[0] === 'leads as won_lead')).toHaveLength(0);
     });
 
+    test('an unrelated win LATER than the booking is ignored (codex r12 P2): the lookup is bounded to 15 minutes after the booking, so the preferred lead still converts', async () => {
+      mockWonLeads = [{ id: 'later-lead', converted_at: new Date(bookedAt.getTime() + 3 * 24 * 3600 * 1000) }];
+      const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null, bookedAt });
+      expect(out).toEqual({ converted: 1 });
+      expect(noteInserts()).toHaveLength(0);
+    });
+
+    test('a win inside the window (60 s before .. 15 min after the booking) still blocks a second win', async () => {
+      for (const ms of [-30 * 1000, 0, 14 * 60 * 1000]) {
+        mockMarkConverted.mockClear();
+        mockWonLeads = [{ id: 'near-lead', converted_at: new Date(bookedAt.getTime() + ms) }];
+        expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', booking: null, bookedAt })).toEqual({ converted: 0, alreadyWon: true });
+        expect(mockMarkConverted).not.toHaveBeenCalled();
+      }
+    });
+
+    test('originatingUnresolved (codex r12 P1): the originating conversion was attempted and did not resolve -> the preferred lead is NOT won, left open with ONE note', async () => {
+      mockWonLeads = [];
+      const args = { customerId: 'cust-1', booking: null, bookedAt, wonLeadIds: null, originatingUnresolved: true };
+      expect(await convertPreferredTimeLeadsOnBooking(mockDb, args)).toEqual({ converted: 0, originatingUnresolved: true });
+      expect(mockMarkConverted).not.toHaveBeenCalled();
+      expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update')).toHaveLength(0);
+      expect(noteInserts()).toHaveLength(1);
+      expect(noteInserts()[0].arg).toMatchObject({ lead_id: 'lead-1', activity_type: 'note' });
+      expect(JSON.parse(noteInserts()[0].arg.metadata)).toEqual({ reason: 'originating_lead_unresolved' });
+      // dedupe is by its OWN reason: a booking_already_won note does not suppress it, an existing one does.
+      mockOps.length = 0;
+      const dedupeDb = jest.fn((table) => {
+        const b = builder(table);
+        if (table === 'lead_activities') b.first = () => Promise.resolve({ id: 'act-1' });
+        return b;
+      });
+      dedupeDb.fn = mockDb.fn;
+      expect(await convertPreferredTimeLeadsOnBooking(dedupeDb, args)).toEqual({ converted: 0, originatingUnresolved: true });
+      expect(noteInserts()).toHaveLength(0);
+    });
+
+    test('originatingUnresolved false (no trigger / no open originating lead): converts as before', async () => {
+      mockWonLeads = [];
+      expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt, originatingUnresolved: false })).toEqual({ converted: 1 });
+    });
+
+    test('originatingUnresolved does not act on an ambiguous phone or with nothing open (it never notes a lead that is not the one candidate)', async () => {
+      mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
+      expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt, originatingUnresolved: true })).toEqual({ converted: 0, ambiguous: true });
+      mockOpenLeads = [];
+      expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt, originatingUnresolved: true })).toEqual({ converted: 0 });
+      expect(noteInserts()).toHaveLength(0);
+    });
+
     test('a failed won-lead lookup is ambiguous, not "won": the lead converts as before', async () => {
       mockDb.mockImplementation((table) => {
         if (table === 'leads as won_lead') throw new Error('db down');
@@ -978,6 +1033,14 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
     expect(normal).toContain('wonLeadIds: leadConversion?.converted ? (leadConversion.leadIds || []) : null');
     expect(normal.slice(0, normal.indexOf('wonLeadIds: leadConversion'))).not.toContain('requestedBy');
     expect(src).toMatch(/leadConverted: !!leadConversion\?\.converted \|\| preferredLeadConverted/);
+    // codex #5399 r12 P1: both paths flag an attempted-but-unresolved originating conversion so the preferred lead does not win in its place.
+    expect(normal).toContain('originatingUnresolved: originatingLeftUnresolved(leadConversion)');
+    expect(replaySrc).toContain('originatingUnresolved: originatingLeftUnresolved(replayLeadConversion)');
+    expect(src).toContain("const originatingLeftUnresolved = (conv) => !!conv && !conv.converted && conv.reason !== 'no_open_lead';");
+    // A throw inside the shared conversion is "attempted, unresolved" (reason 'error'), never null (= no trigger).
+    const helperSrc = src.slice(src.indexOf('const convertOriginatingLeadOnBooking'), src.indexOf('const originatingLeftUnresolved'));
+    expect(helperSrc).toContain("return { converted: false, reason: 'error' };");
+    expect(helperSrc).toContain('if (!seriesBooked && !leadTrigger) return null;');
     // No raw status write anywhere in the service.
     const svc = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
     expect(svc).not.toMatch(/status:\s*'won'/);

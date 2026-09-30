@@ -121,6 +121,16 @@ const LEAD_WRITERS = [
 
   // ── Services ──────────────────────────────────────────────────────────────
   {
+    file: 'services/booking-preferred-time.js',
+    anchor: "const [row] = await trx('leads').insert({",
+    context: 'recordPreferredTimeRequest — /book "Can\'t find a time?" request → book_preferred_time lead (phone-locked refresh-or-create)',
+    // The phone-keyed lookup, under the per-phone advisory lock, for this
+    // customer's own open book_preferred_time lead inside the SAME transaction:
+    // a repeat request refreshes it (sliding window) and only a request with no
+    // open lead mints one.
+    identityResolver: 'tenMatch',
+  },
+  {
     file: 'services/call-recording-processor.js',
     anchor: "const [newLead] = await db('leads').insert({",
     context: 'processRecording Step 4 — fresh lead when findReusableCallLead returns none',

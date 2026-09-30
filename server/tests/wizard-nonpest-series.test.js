@@ -650,7 +650,13 @@ describe('booking route wiring (source contracts)', () => {
     // codex #3504 r7: the replay branch returns before the primary lead
     // conversion block — a plan booked on the retry must not leave the
     // quote-wizard lead pre-sale.
-    expect(booking).toMatch(/if \(replaySeriesActivated\) \{[\s\S]{0,600}convertLeadFromEvent\(\{\s*\n\s*source: 'recurring_service_booked',/);
+    // The conversion is one shared helper (convertOriginatingLeadOnBooking,
+    // codex #5399 r10): the replay-activated branch calls it with
+    // seriesBooked: true, and the helper converts with source
+    // 'recurring_service_booked' when seriesBooked, keyed off the verified
+    // customer (enforceOriginating) exactly like the primary path.
+    expect(booking).toMatch(/if \(replaySeriesActivated\) \{[\s\S]{0,600}convertOriginatingLeadOnBooking\(\{ seriesBooked: true \}\)/);
+    expect(booking).toMatch(/const convertOriginatingLeadOnBooking = async[\s\S]{0,2500}convertLeadFromEvent\(\{\s*\n\s*source: seriesBooked \? 'recurring_service_booked' : 'self_booking_estimate',\s*\n\s*customerId: custId,\s*\n\s*enforceOriginating: true,/);
     // Both replay shapes set the flag: fresh/already activation AND the
     // committed-heal branch.
     expect((booking.match(/replaySeriesActivated = true;/g) || []).length).toBe(2);
