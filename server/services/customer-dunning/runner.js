@@ -443,8 +443,7 @@ async function dispose(run, facts) {
   return verdict.kind === 'held' ? hold(run, verdict.reason) : pause(run, verdict.reason);
 }
 
-async function sendPhase(run) {
-  const set = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
+async function sendPhase(run, set) {
   const blocked = await decideSet(run, set);
   if (blocked) return applyDecision(run, blocked);
   const staged = await applyStage(run);
@@ -456,10 +455,28 @@ async function sendPhase(run) {
 
 // ── entry points ─────────────────────────────────────────────────────────
 
+// A balance that is gone closes the schedule whether or not the customer is on autopay: the empty set is
+// judged BEFORE the autopay guard (an autopay hold parks a schedule, and nothing else would ever close it).
+const decideEmptySet = (set) => (set.kind !== 'hold' && !sendable(set) ? decideEndOfSet(set) : null);
+
+/** The guards after recover-first and the set read, shared by the live and the shadow run. */
+async function decideAfterSet(run, set) {
+  return decideEmptySet(set) || await decideAutopay(run);
+}
+
 async function runClaimed(claimed, opts) {
   const run = { ...opts, schedule: claimed.schedule, claimStamp: claimed.claimStamp };
-  const early = await decideCustomer(run) || await decideRecovery(run) || await decideAutopay(run);
-  return early ? applyDecision(run, early) : sendPhase(run);
+  const early = await decideCustomer(run) || await decideRecovery(run);
+  if (early) return applyDecision(run, early);
+  const set = await resolveDunnableSet(run.schedule.customer_id, { database: run.database, now: run.now });
+  const stop = await decideAfterSet(run, set);
+  if (stop) return applyDecision(run, stop);
+  // Revisited from an autopay hold and no longer on autopay: the ordinary send path takes the step.
+  if (run.schedule.status === 'autopay_hold') {
+    if (!await Schedule.resumeFromAutopay(run.schedule, run)) return outcome('stale');
+    run.schedule = { ...run.schedule, status: 'active' };
+  }
+  return sendPhase(run, set);
 }
 
 /**
@@ -479,7 +496,7 @@ async function processSchedule(scheduleId, now = new Date(), { database = db, op
 }
 
 async function dueScheduleIds(now, database) {
-  const rows = await database(Schedule.TABLE).whereIn('status', ['active', 'held'])
+  const rows = await database(Schedule.TABLE).whereIn('status', ['active', 'held', 'autopay_hold'])
     .where('next_touch_at', '<=', now).orderBy('next_touch_at', 'asc').select('id', 'customer_id');
   return allowlisted(rows).map((r) => r.id);
 }
@@ -576,7 +593,7 @@ function standingReservation(event, channel) {
 async function judgeShadowSchedule(schedule, set, { now, database, due = null }) {
   const run = { schedule, now, database, operatorInitiated: false, claimStamp: null, readOnly: true };
   const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
-  const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAutopay(run)
+  const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAfterSet(run, set)
     || await decideSet(run, set) || await decideShadowPolicy(run, set);
   if (!stop) {
     line('send', {
@@ -642,7 +659,7 @@ async function shadowRun(now = new Date(), { database = db } = {}) {
       logger.warn(`[customer-dunning] SHADOW promote check failed for customer ${customerId}: ${redactContact(err.message)}`);
     }
   }
-  const open = allowlisted(await database(Schedule.TABLE).whereIn('status', ['active', 'held']).where('next_touch_at', '<=', now));
+  const open = allowlisted(await database(Schedule.TABLE).whereIn('status', ['active', 'held', 'autopay_hold']).where('next_touch_at', '<=', now));
   for (const schedule of open) {
     try { bump(await shadowSchedule(schedule, now, database)); } catch (err) {
       tally.failed += 1;

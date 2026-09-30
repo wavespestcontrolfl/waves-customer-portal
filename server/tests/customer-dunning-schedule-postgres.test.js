@@ -609,13 +609,70 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(new Date(row.next_touch_at).getTime()).toBe(Followups.heldTouchFloor(NOW).getTime());
     });
 
-    test('autopay hold: status autopay_hold, next_touch_at null (still owns its members)', async () => {
+    test('autopay hold: status autopay_hold, revisited the next day (next_touch_at = the held-touch floor), still owns its members', async () => {
       const { s, claim } = await claimed();
-      await Schedule.markAutopayHold(claim.schedule, { claimStamp: claim.claimStamp, database: app });
-      expect(await fresh(s.id)).toMatchObject({ status: 'autopay_hold', next_touch_at: null });
+      expect(await Schedule.markAutopayHold(claim.schedule, { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(true);
+      const row = await fresh(s.id);
+      expect(row.status).toBe('autopay_hold');
+      expect(new Date(row.next_touch_at).getTime()).toBe(Followups.heldTouchFloor(NOW).getTime());
       expect(await Schedule.openScheduleFor(claim.schedule.customer_id, { database: app })).toBeDefined();
     });
 
+    test('an autopay_hold schedule is claimable once due (not before), re-armable, and resumable only under its own claim', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: new Date(NOW.getTime() + DAY) });
+      expect(await Schedule.claim(s.id, NOW, { database: app })).toBeNull(); // not due yet
+      const later = new Date(NOW.getTime() + 2 * DAY);
+      const claim = await Schedule.claim(s.id, later, { database: app });
+      expect(claim).not.toBeNull();
+      expect(await Schedule.markAutopayHold(claim.schedule, { claimStamp: claim.claimStamp, now: later, database: app })).toBe(true); // re-armed
+      expect((await fresh(s.id)).status).toBe('autopay_hold');
+      expect(await Schedule.resumeFromAutopay(claim.schedule, { claimStamp: new Date(later.getTime() - 1), database: app })).toBe(false);
+      expect(await Schedule.resumeFromAutopay(claim.schedule, { claimStamp: claim.claimStamp, database: app })).toBe(true);
+      expect((await fresh(s.id)).status).toBe('active');
+    });
+
+    describe('processSchedule on a revisited autopay hold (real SQL)', () => {
+      const autopay = () => require('../services/autopay-eligibility').customerOnAutopay;
+      afterEach(() => autopay().mockResolvedValue(false));
+
+      test('the invoices were paid meanwhile: the hold is CLOSED (balance_cleared), the customer is freed', async () => {
+        const c = await customer();
+        const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
+        autopay().mockResolvedValue(true);
+        mockResolve.mockResolvedValue({ kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 });
+        expect(await Runner.processSchedule(s.id, NOW, { database: app })).toMatchObject({ outcome: 'closed', reason: 'balance_cleared' });
+        expect(await fresh(s.id)).toMatchObject({ status: 'completed', closed_reason: 'balance_cleared', next_touch_at: null });
+        expect(await Schedule.openScheduleFor(c, { database: app })).toBeUndefined();
+      });
+
+      test('a live schedule whose invoices are all paid, with the customer on autopay, CLOSES instead of going to autopay_hold', async () => {
+        const c = await customer();
+        const s = await openSchedule(c);
+        autopay().mockResolvedValue(true);
+        mockResolve.mockResolvedValue({ kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 });
+        expect((await Runner.processSchedule(s.id, NOW, { database: app })).outcome).toBe('closed');
+        expect((await fresh(s.id)).status).toBe('completed');
+      });
+
+      test('still owing and still on autopay: the hold is re-armed for tomorrow and the claim released; the due scan revisits it then', async () => {
+        const c = await customer();
+        const m = await member(c, { sentDaysAgo: 60, step: 4 });
+        const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
+        autopay().mockResolvedValue(true);
+        mockResolve.mockResolvedValue(setFor([m]));
+        expect((await Runner.processSchedule(s.id, NOW, { database: app })).outcome).toBe('autopay_hold');
+        const row = await fresh(s.id);
+        expect(row.status).toBe('autopay_hold');
+        expect(new Date(row.next_touch_at).getTime()).toBe(Followups.heldTouchFloor(NOW).getTime());
+        expect(row.touch_claimed_at).toBeNull();
+        const tomorrow = new Date(NOW.getTime() + 2 * DAY);
+        expect((await Runner.runCustomerSchedules(tomorrow, { database: app })).outcomes.autopay_hold).toBeGreaterThanOrEqual(1);
+        // this schedule was among those revisited: re-armed again, for the day after
+        expect(new Date((await fresh(s.id)).next_touch_at).getTime()).toBe(Followups.heldTouchFloor(tomorrow).getTime());
+      });
+    });
     test('stage catch-up write moves step_index up and drops the link cache', async () => {
       const { s, claim } = await claimed({ step_index: 2, link_digest: 'a'.repeat(64), link_url: 'u' });
       expect(await Schedule.writeStage(claim.schedule, 4, { claimStamp: claim.claimStamp, database: app })).toBe(true);

@@ -173,7 +173,7 @@ jest.mock('../services/customer-dunning/schedule', () => {
   return {
     ...actual,
     claim: jest.fn(), releaseClaim: jest.fn(), activeMemberRows: jest.fn(), advance: jest.fn(), completeFinal: jest.fn(),
-    close: jest.fn(), markHeld: jest.fn(), markPaused: jest.fn(), markTold: jest.fn(), markAutopayHold: jest.fn(),
+    close: jest.fn(), markHeld: jest.fn(), markPaused: jest.fn(), markTold: jest.fn(), markAutopayHold: jest.fn(), resumeFromAutopay: jest.fn(),
     writeStage: jest.fn(), alertStaff: jest.fn(), promotionCandidates: jest.fn(),
     inReadOnlyTransaction: jest.fn(async (database, fn) => fn(database)),
   };
@@ -264,6 +264,7 @@ function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-
   Schedule.markPaused.mockResolvedValue(true);
   Schedule.markTold.mockResolvedValue(true);
   Schedule.markAutopayHold.mockResolvedValue(true);
+  Schedule.resumeFromAutopay.mockImplementation(async () => { mockScheduleRow = { ...mockScheduleRow, status: 'active' }; return true; });
   Schedule.writeStage.mockResolvedValue(true);
   mockResolve.mockImplementation(async () => live);
 }
@@ -1492,6 +1493,84 @@ describe('the text is re-checked at the FINAL provider hook, after provider prep
     mockResolve.mockClear();
     expect(await input.preSendCheck()).toEqual({ ok: true }); // fcm.send calls shouldContinue() bare, after the token fetch
     expect(mockResolve).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('a cleared balance closes the schedule before the autopay guard; autopay holds are revisited (R8)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+  const empty = () => ({ kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 });
+
+  test('every invoice paid / voided and the customer still on autopay: the schedule CLOSES (balance_cleared), it is not parked as autopay_hold', async () => {
+    mockOnAutopay.mockResolvedValue(true);
+    live = empty();
+    expect(await run()).toMatchObject({ outcome: 'closed', reason: 'balance_cleared' });
+    expect(Schedule.close).toHaveBeenCalledWith(expect.anything(), 'balance_cleared', NOW, expect.objectContaining({ claimStamp: NOW }));
+    expect(Schedule.markAutopayHold).not.toHaveBeenCalled();
+    expect(mockOnAutopay).not.toHaveBeenCalled(); // the empty set is judged first
+  });
+
+  test('an existing autopay_hold schedule whose invoices were paid meanwhile is closed on the next run', async () => {
+    setup({ stepStatus: 'autopay_hold' });
+    mockOnAutopay.mockResolvedValue(true);
+    live = empty();
+    expect(await run()).toMatchObject({ outcome: 'closed', reason: 'balance_cleared' });
+    expect(Schedule.markAutopayHold).not.toHaveBeenCalled();
+  });
+
+  test('still owing and still on autopay: the hold is re-armed (revisited again tomorrow), nothing is sent', async () => {
+    setup({ stepStatus: 'autopay_hold' });
+    mockOnAutopay.mockResolvedValue(true);
+    expect((await run()).outcome).toBe('autopay_hold');
+    expect(Schedule.markAutopayHold).toHaveBeenCalledTimes(1);
+    expect(Schedule.resumeFromAutopay).not.toHaveBeenCalled();
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('the customer left autopay while held: the schedule resumes (active) and the ordinary send path takes the step', async () => {
+    setup({ stepStatus: 'autopay_hold' });
+    mockOnAutopay.mockResolvedValue(false);
+    expect((await run()).outcome).toBe('advanced');
+    expect(Schedule.resumeFromAutopay).toHaveBeenCalledTimes(1);
+    expect(Schedule.resumeFromAutopay.mock.invocationCallOrder[0]).toBeLessThan(Schedule.advance.mock.invocationCallOrder[0]);
+  });
+
+  test('a hold that a stale worker cannot resume does not send', async () => {
+    setup({ stepStatus: 'autopay_hold' });
+    mockOnAutopay.mockResolvedValue(false);
+    Schedule.resumeFromAutopay.mockResolvedValue(false);
+    expect((await run()).outcome).toBe('stale');
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  test('the due scan includes autopay_hold schedules (so they are revisited)', async () => {
+    const statuses = [];
+    const db = jest.fn(() => {
+      const q = { where() { return q; }, orderBy() { return q; }, select: async () => [] };
+      q.whereIn = (_col, list) => { statuses.push(...list); return q; };
+      return q;
+    });
+    await Runner.runCustomerSchedules(NOW, { database: db });
+    expect(statuses).toEqual(expect.arrayContaining(['active', 'held', 'autopay_hold']));
+  });
+
+  test('SHADOW mirrors it: an autopay_hold schedule with nothing owed is a would-close; one still owing on autopay is a would-hold', async () => {
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    const open = [{ id: 's-ap', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'autopay_hold' }];
+    mockOnAutopay.mockResolvedValue(true);
+    live = empty();
+    const database = shadowDb(open);
+    await Runner.shadowRun(NOW, { database });
+    expect(lines()).toMatch(/SHADOW would close customer=cust-0000-synthetic schedule=s-ap step=d60_reminder reason=balance_cleared/);
+    expect(lines()).not.toMatch(/autopay_hold/);
+    logger.info.mockClear();
+    live = makeSet(['inv-a', 'inv-b', 'inv-c']);
+    await Runner.shadowRun(NOW, { database });
+    expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-ap step=d60_reminder reason=autopay_hold/);
+    expect(database.writes).toEqual([]);
+    expect(Schedule.close).not.toHaveBeenCalled();
+    expect(Schedule.markAutopayHold).not.toHaveBeenCalled();
   });
 });
 

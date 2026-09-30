@@ -236,8 +236,12 @@ async function promote(now = new Date(), { database = db } = {}) {
 
 // ── claim / release claim ────────────────────────────────────────────────
 
+// An autopay_hold schedule is revisited on its (daily) next_touch_at: closed when its balance is gone,
+// resumed when the customer is no longer on autopay, re-armed while they are.
+const CLAIMABLE_STATUSES = Object.freeze(['active', 'held', 'autopay_hold']);
+
 const claimReadable = (row, { expectedStepIndex, force, now }) => {
-  if (!row || !['active', 'held'].includes(row.status)) return false;
+  if (!row || !CLAIMABLE_STATUSES.includes(row.status)) return false;
   if (expectedStepIndex != null && Number(row.step_index) !== Number(expectedStepIndex)) return false;
   if (!force && (!row.next_touch_at || new Date(row.next_touch_at).getTime() > now.getTime())) return false;
   return !claimIsFresh(row, now);
@@ -377,7 +381,7 @@ async function close(schedule, reason, now = new Date(), {
     if (!row) return { closed: false, landed: [] };
     if (claimStamp) {
       const ownsClaim = sameStamp(row.touch_claimed_at, claimStamp)
-        && ['active', 'held'].includes(row.status) && Number(row.step_index) === Number(expectedStepIndex);
+        && CLAIMABLE_STATUSES.includes(row.status) && Number(row.step_index) === Number(expectedStepIndex);
       if (!ownsClaim) return { closed: false, landed: [], reason: 'claim_lost' };
     } else if (claimIsFresh(row, now)) {
       return { closed: false, landed: [], reason: 'in_flight' };
@@ -601,11 +605,24 @@ async function markPaused(schedule, reason, { claimStamp, now = new Date(), data
   return true;
 }
 
-/** AUTOPAY HOLD: the customer is on autopay; the failure hook releases it later. */
-async function markAutopayHold(schedule, { claimStamp, database = db }) {
-  const changed = await guardedOpen(database, schedule, claimStamp).update({
-    status: 'autopay_hold', next_touch_at: null, updated_at: database.fn.now(),
-  });
+/**
+ * AUTOPAY HOLD: the customer is on autopay, so nothing is sent. The schedule is REVISITED the next
+ * day (next_touch_at = the held-touch floor), never parked with no date: a balance that clears
+ * meanwhile closes it, and a customer who leaves autopay resumes it. Also re-arms an existing hold.
+ */
+async function markAutopayHold(schedule, { claimStamp, now = new Date(), database = db }) {
+  const changed = await database(TABLE)
+    .where({ id: schedule.id, step_index: schedule.step_index, touch_claimed_at: claimStamp })
+    .whereIn('status', CLAIMABLE_STATUSES)
+    .update({ status: 'autopay_hold', next_touch_at: Followups.heldTouchFloor(now), updated_at: database.fn.now() });
+  return Number(changed) === 1;
+}
+
+/** The revisit found the customer no longer on autopay: back to active so the ordinary send path owns the step. */
+async function resumeFromAutopay(schedule, { claimStamp, database = db }) {
+  const changed = await database(TABLE)
+    .where({ id: schedule.id, step_index: schedule.step_index, touch_claimed_at: claimStamp, status: 'autopay_hold' })
+    .update({ status: 'active', updated_at: database.fn.now() });
   return Number(changed) === 1;
 }
 
@@ -656,6 +673,7 @@ module.exports = {
   markHeld,
   markPaused,
   markAutopayHold,
+  resumeFromAutopay,
   writeStage,
   alertStaff,
   inReadOnlyTransaction,
