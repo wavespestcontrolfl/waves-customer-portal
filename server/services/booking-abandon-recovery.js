@@ -553,6 +553,8 @@ async function runEmailStage(now, sentPhones) {
           recipientId: intent.customer_id || null,
           triggerEventId: `booking_recovery:${intent.id}`,
           idempotencyKey: `booking_recovery_email:${intent.id}`,
+          // Provenance only: the quote the caller was pricing, so a later customer sees this mail.
+          linkEstimateId: intent.pricing_estimate_id || null,
           categories: ['booking_recovery'],
         });
         if (result && result.blocked) {

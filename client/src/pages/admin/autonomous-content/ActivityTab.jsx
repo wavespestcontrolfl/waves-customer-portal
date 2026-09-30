@@ -51,8 +51,39 @@ function PipelineStatus({ selected }) {
   );
 }
 
+// A may-have-published blog hold (an interrupted approval) is the one blog
+// state a person decides: the server offers Dismiss only, after GitHub has
+// been checked. Every other blog row stays engine-managed.
+export function blogHoldDismissable(selected) {
+  return selected?.action_type === "new_supporting_blog"
+    && selected?.status === "pending_review"
+    && !!selected?.review_actions?.can_dismiss;
+}
+
 function ContentDecisions({ selected, view, reviewNote, setReviewNote, loading, actionPending, submitDecision }) {
   const reviewActions = selected?.review_actions || {};
+  if (blogHoldDismissable(selected)) {
+    return (
+      <div className="flex flex-col gap-3 border-t border-zinc-200 pt-4">
+        <p className="m-0 text-sm text-zinc-700">
+          This publish was interrupted and may already be on GitHub. Check for an open Astro PR or a live post, close or keep it, then dismiss.
+        </p>
+        <Textarea
+          value={reviewNote}
+          onChange={(e) => setReviewNote(e.target.value)}
+          placeholder="Reviewer note (optional)"
+          rows={3}
+        />
+        <DecisionButtons
+          actions={[{ decision: "dismiss", label: "Dismiss", icon: XCircle, variant: "danger" }]}
+          allowed={reviewActions}
+          pending={actionPending}
+          disabled={loading}
+          onDecision={submitDecision}
+        />
+      </div>
+    );
+  }
   return (
     view === "review" &&
     selected.action_type !== "new_supporting_blog" &&

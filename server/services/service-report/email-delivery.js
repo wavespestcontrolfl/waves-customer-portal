@@ -125,9 +125,12 @@ function serviceReportTemplatePayload({ recipient, data, reportUrl, serviceLabel
     service_date: data?.serviceDate ? formatDate(data.serviceDate) : '',
     technician_name: data?.technicianName || '',
     property_address: propertyAddressLine(data),
+    // Nothing logged = blank, so the template's "Findings" row drops (a
+    // details row with a blank value is not rendered). The row never
+    // announces an empty result.
     finding_summary: findings.length
       ? `${countLabel(findings.length, 'finding')} documented for review`
-      : 'No action-required findings were documented.',
+      : '',
     application_summary: countLabel(applications.length, 'application'),
     reentry_summary: reentryParts.join(' '),
     pressure_summary: dynamicContext.pressureTrend?.customerSummary || (pressureValue ? `Pressure index: ${pressureValue}` : ''),
@@ -388,7 +391,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     ['Service', escapeHtml(serviceLine)],
     serviceDate ? ['Date', escapeHtml(serviceDate)] : null,
     ['Applications', escapeHtml(countLabel(applications.length, 'application'))],
-    ['Findings', escapeHtml(countLabel(findings.length, 'finding'))],
+    findings.length ? ['Findings', escapeHtml(countLabel(findings.length, 'finding'))] : null,
     pressureValue ? ['Pressure index', escapeHtml(pressureValue), true] : null,
     ...reentryRows,
     dynamicContext.pressureTrend?.customerSummary ? ['Pressure trend', escapeHtml(dynamicContext.pressureTrend.customerSummary), true] : null,
@@ -428,7 +431,7 @@ function buildServiceReportV1Email({ data, reportUrl, pdfAttached = false, inspe
     dynamicContext.pressureTrend?.customerSummary || null,
     pressureValue ? `Pressure index: ${pressureValue}` : null,
     inspectionCreditNote || null,
-    `Findings: ${countLabel(findings.length, 'finding')}`,
+    findings.length ? `Findings: ${countLabel(findings.length, 'finding')}` : null,
     '',
     topFindings.length ? `Top findings: ${topFindings.map((finding) => finding.title || 'Finding documented').join('; ')}` : 'No action-required findings were documented during this visit.',
     '',
@@ -911,6 +914,7 @@ async function sendServiceReportV1Email(recordId, {
 
 module.exports = {
   buildServiceReportV1Email,
+  serviceReportTemplatePayload,
   sendServiceReportV1Email,
   REENTRY_SEND_LOCK_CLASS,
   REENTRY_SEND_SEAL_KEY,

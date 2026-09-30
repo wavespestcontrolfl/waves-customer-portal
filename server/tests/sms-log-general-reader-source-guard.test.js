@@ -488,11 +488,6 @@ const ALLOWLIST = [
   },
   {
     file: 'services/sms-operational-actions.js',
-    snippet: 'const source = await trx(\'sms_log\').where({ id: initial.sms_log_id }).forUpdate().first();',
-    reason: 'single-row lookup by id — not a list read.',
-  },
-  {
-    file: 'services/sms-operational-actions.js',
     snippet: 'const source = customer && await scheduledSourceMessage(trx, await trx(\'sms_log\').where({ id: message.id }).forUpdate().first());',
     reason: 'single-row lookup by id — not a list read.',
   },
