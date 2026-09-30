@@ -136,10 +136,10 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
   }
 
   // A synthetic template carrying an email-division prefix: no builder knows it.
-  async function makeTemplate(prefix, group) {
+  async function makeTemplate(prefix, group, mode = 'service') {
     const key = `${prefix}qa_probe_${randomUUID().slice(0, 8)}`;
     await db('email_templates').insert({
-      template_key: key, name: key, status: 'draft', send_stream: group, suppression_group_key: group,
+      template_key: key, name: key, status: 'draft', send_stream: group, suppression_group_key: group, mode,
     });
     created.templates.push(key);
     return key;
@@ -248,7 +248,41 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       expect(sendTemplate).not.toHaveBeenCalled();
     });
 
-    test('a provider-side library failure follows the bounded retry path (ledger row failed, run retry_scheduled) — never settled skipped', async () => {
+    // A provider 5xx AFTER the handoff: the library leaves a message row failed /
+    // queued with provider_handoff_phase 'started' and throws. The ledger keeps
+    // counting the send toward the caps (an uncertain completion), but the RUN is
+    // not delivered: it takes the same retry-then-failed path the direct dispatch
+    // takes, never 'sent'.
+    const handoffStartedThenFail = () => async (args) => {
+      await db('email_messages').insert({
+        recipient_email_snapshot: args.to, template_key: args.templateKey, idempotency_key: args.idempotencyKey,
+        status: 'queued', provider_handoff_phase: 'started', automation_run_id: args.automationRunId || null,
+      });
+      throw Object.assign(new Error('provider 503'), { status: 503 });
+    };
+
+    test('a provider 5xx after the handoff is NOT a delivery: the run retries then fails (never sent), the ledger keeps the uncertain send counted', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const automation = await nurture();
+      sendTemplate.mockImplementation(handoffStartedThenFail());
+
+      const run = (await fire(automation, customer)).results[0].run;
+
+      expect(run.status).toBe('retry_scheduled');
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]).toEqual(expect.objectContaining({ status: 'sent', reason: 'provider_handoff_uncertain' }));
+
+      // The retry meets the ledger's uncertain row (a duplicate): still not a delivery.
+      await db('email_template_automation_runs').where({ id: run.id }).update({ run_after: new Date(Date.now() - 1000) });
+      const retried = await Executor.executeRun(run.id);
+      expect(retried.status).toBe('failed');
+      expect(retried.last_error).toContain('unconfirmed');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failure with no handoff at all (nothing reached the provider) frees the slot: ledger failed, run retry_scheduled', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
       const automation = await nurture();
@@ -258,7 +292,6 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
 
       expect(run.status).toBe('retry_scheduled');
       const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
-      expect(ledger).toHaveLength(1);
       expect(ledger[0].status).toBe('failed');
     });
 
@@ -276,6 +309,56 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       expect(args.suppressionGroupKey).toBe('service_operational');
       const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
       expect(ledger[0]).toEqual(expect.objectContaining({ stream: 'lifecycle', marketing_class: 'relationship', status: 'sent' }));
+    });
+  });
+
+  describe('a lifted lc.* key never turns a marketing-stream template into relationship mail', () => {
+    test('an lc.* template whose OWN stream is marketing_* is judged as marketing: opt-in, marketing group, marketing class', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const optedOut = await makeCustomer();
+      await db('notification_prefs').where({ customer_id: optedOut.id }).update({ marketing_offers: false });
+      const automation = await makeAutomation(await makeTemplate('lc.', 'marketing_nurture'), 'marketing_nurture');
+
+      const refused = (await fire(automation, optedOut)).results[0].run;
+      expect(refused.status).toBe('skipped');
+      expect(refused.exit_reason).toContain('STREAM_FLAG_OFF'); // marketing_offers is off
+      expect(sendTemplate).not.toHaveBeenCalled();
+
+      const customer = await makeCustomer();
+      sendTemplate.mockImplementation(libraryLike());
+      const run = (await fire(automation, customer)).results[0].run;
+      expect(run.status).toBe('sent');
+      expect(sendTemplate.mock.calls[0][0].suppressionGroupKey).toBe('marketing_newsletter');
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger[0]).toEqual(expect.objectContaining({ stream: 'lifecycle', marketing_class: 'marketing' }));
+    });
+
+    test('a template with mode marketing (even on a service stream) is marketing too; a plain service lc.* template stays relationship mail', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      sendTemplate.mockImplementation(libraryLike());
+      const marketingMode = await makeAutomation(await makeTemplate('lc.', 'service_operational', 'marketing'), 'service_operational');
+      await fire(marketingMode, customer);
+      const plain = await lifecycle();
+      const other = await makeCustomer();
+      await fire(plain, other);
+
+      const rows = await db('marketing_email_ledger').whereIn('customer_id', [customer.id, other.id]);
+      expect(rows.find((r) => r.customer_id === customer.id).marketing_class).toBe('marketing');
+      expect(rows.find((r) => r.customer_id === other.id).marketing_class).toBe('relationship');
+    });
+
+    test('shadow judges the same class: an opted-out customer is would_block for a marketing-stream lc.* template', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      const customer = await makeCustomer();
+      await db('notification_prefs').where({ customer_id: customer.id }).update({ marketing_offers: false });
+      const automation = await makeAutomation(await makeTemplate('lc.', 'marketing_nurture'), 'marketing_nurture');
+
+      const run = (await fire(automation, customer)).results[0].run;
+
+      expect(run.status).toBe('skipped');
+      const wouldBlock = (await events(run.id)).find((e) => e.event_type === 'would_block');
+      expect(wouldBlock.metadata).toEqual(expect.objectContaining({ guard: 'ledger_ineligible' }));
     });
   });
 
@@ -411,21 +494,62 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       expect(sendTemplate).toHaveBeenCalledTimes(1);
     });
 
-    test('an OUTSTANDING reservation (a crashed earlier attempt) defers through the bounded retry — never a terminal skip — and sends once it settles', async () => {
+    // A crashed worker's run, reclaimed through the REAL stale 'running' path: its
+    // attempt was already counted (max - 1), the reclaim counts the next one (= max).
+    const crash = async (run, { reservation = 'reserved' } = {}) => {
+      await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).update({ status: reservation, reserved_at: new Date(), reason: null, sent_at: null, email_message_id: null });
+      await db('email_template_automation_runs').where({ id: run.id }).update({
+        status: 'running', attempts: 1, run_after: new Date(Date.now() - 3600 * 1000), completed_at: null, email_message_id: null, last_error: null,
+        updated_at: new Date(Date.now() - Executor.RUNNING_STALE_AFTER_MS - 60 * 1000),
+      });
+    };
+
+    test('an OUTSTANDING reservation on a stale-reclaimed run on its LAST attempt defers without spending the budget (attempts restored, short delay) and the send happens once the reservation settles', async () => {
       const { run } = await firstAttempt(async () => { throw Object.assign(new Error('provider down'), { status: 503 }); });
-      await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).update({ status: 'reserved', reserved_at: new Date(), reason: null });
-      await reclaim(run);
+      await db('email_messages').where({ idempotency_key: run.idempotency_key }).del();
+      await crash(run);
       const deferred = await Executor.executeRun(run.id);
       expect(deferred.status).toBe('retry_scheduled');
+      expect(deferred.attempts).toBe(1); // restored: the deferral spent nothing
       expect(deferred.last_error).toContain('still outstanding');
+      expect(new Date(deferred.run_after).getTime()).toBeGreaterThan(Date.now());
+      expect(new Date(deferred.run_after).getTime()).toBeLessThan(Date.now() + 5 * 60 * 1000);
       expect(sendTemplate).toHaveBeenCalledTimes(1);
 
+      // The reservation lease expires (the ledger sweeps it); the run, still on its last attempt, sends.
       await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).update({ reserved_at: new Date(Date.now() - 31 * 60 * 1000) });
       await db('email_template_automation_runs').where({ id: run.id }).update({ run_after: new Date(Date.now() - 1000) });
       sendTemplate.mockImplementation(libraryLike());
       const retried = await Executor.executeRun(run.id);
       expect(retried.status).toBe('sent');
       expect(sendTemplate).toHaveBeenCalledTimes(2);
+    });
+
+    test('the deferral is capped so it can never loop forever: past the cap the normal retry / failure path decides', async () => {
+      const { run } = await firstAttempt(async () => { throw Object.assign(new Error('provider down'), { status: 503 }); });
+      await db('email_messages').where({ idempotency_key: run.idempotency_key }).del();
+      await crash(run);
+      const cap = Math.ceil(Ledger.RESERVATION_LIFETIME_MS / (2 * 60 * 1000)) + 2;
+      await db('email_template_automation_run_events').insert(Array.from({ length: cap }, () => ({
+        run_id: run.id, event_type: 'retry_scheduled', message: 'Deferred: email division reservation outstanding', metadata: {},
+      })));
+      const exhausted = await Executor.executeRun(run.id);
+      expect(exhausted.status).toBe('failed'); // last attempt, cap reached: no endless deferral
+    });
+
+    test('an uncertain duplicate (handoff started, no acceptance) is not finalized sent', async () => {
+      const { run } = await firstAttempt(async (args) => {
+        await db('email_messages').insert({
+          recipient_email_snapshot: args.to, template_key: args.templateKey, idempotency_key: args.idempotencyKey,
+          status: 'queued', provider_handoff_phase: 'started', automation_run_id: args.automationRunId || null,
+        });
+        throw Object.assign(new Error('provider 503'), { status: 503 });
+      });
+      await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).update({ status: 'reserved', sent_at: null, reason: null });
+      await reclaim(run);
+      const again = await Executor.executeRun(run.id);
+      expect(again.status).toBe('retry_scheduled'); // thrown unconfirmed, never 'sent'
+      expect(again.last_error).toContain('unconfirmed');
     });
 
     test('a duplicate owned by a different recipient, or by another run\'s message, stays a terminal skip', async () => {
