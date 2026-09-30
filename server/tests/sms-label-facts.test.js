@@ -1438,15 +1438,16 @@ describe('r22: lowercase "may" as a month; an unverified inbound language', () =
     expect(labelFactsLib.inboundRefersToOtherVisit('the may treatment', '2026-05-12', '2026-05-20')).toBe(false); // the visit IS in May
   });
 
-  test('an inbound whose words or letters cannot be tied to en / es / pt / fr is unverified; terse English, Spanish and French are not', () => {
+  test('an inbound that is not mostly English (by proportion of known words, or by letters) is unverified; terse and natural English is not', () => {
     const un = labelFactsLib.isUnverifiedLanguageInbound;
     for (const text of ['Kiedy psy mog\u0105 wyj\u015b\u0107?', 'Poczekaj dwie godziny', 'Ne zaman k\u00f6pekler \u00e7\u0131kabilir', 'Mikor mehetnek ki a kuty\u00e1k', 'Kdy m\u016f\u017eou psi ven', 'Wann d\u00fcrfen die Hunde raus', 'Dlaczego nie']) {
       expect([text, un(text)]).toEqual([text, true]);
     }
     for (const text of [
       'dogs out?', 'pets ok now', 'lawn safe yet', 'when can the kids play', 'Is it okay now?', 'rain?', 'Tuesday works', 'kids on lawn now?', 'thanks!', 'ok', 'wash off?',
-      '\u00bfCu\u00e1nto tiempo hasta que los perros puedan salir?', 'Quand les chiens peuvent-ils sortir ?', 'Quanto tempo at\u00e9 os c\u00e3es sa\u00edrem?', 'Hola, tengo una pregunta sobre mi cita',
     ]) expect([text, un(text)]).toEqual([text, false]);
+    // (r27: Spanish / French / Portuguese are unverified as English too - they take the same fail-closed path)
+    for (const text of ['\u00bfCu\u00e1nto tiempo hasta que los perros puedan salir?', 'Quand les chiens peuvent-ils sortir ?', 'Quanto tempo at\u00e9 os c\u00e3es sa\u00edrem?', 'Hola, tengo una pregunta sobre mi cita']) expect([text, un(text)]).toEqual([text, true]);
   });
   test('the Polish inbound: none on file, both kinds plus unverified_language asked, and only allowlisted sentence types answer', async () => {
     const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
@@ -1772,6 +1773,35 @@ describe('r26: the follow-up deadline the real-answers prompt requires may trail
     expect(guard('Sorry about that, go ahead.')).toBe(true);
     expect(guard("I'm sorry the dogs can't go out yet.")).toBe(true);
     expect(guard('So sorry about that \u2014 you can go out now.')).toBe(true);
+  });
+});
+
+describe('r27: English by proportion - code-switched inbounds are unverified', () => {
+  const un = labelFactsLib.isUnverifiedLanguageInbound;
+  const asked = labelFactsLib.askedLabelKinds;
+  test('code-switched and unclassified-language inbounds (Tagalog, Spanish, Creole, Vietnamese without diacritics ...) are unverified', () => {
+    for (const text of [
+      'Kailan puwedeng lumabas ang aso after treatment?', '\u00bfcu\u00e1ndo pueden salir los perros after the treatment?', 'cuando puedo mojar el pasto after the spray', 'Kil\u00e8 chen yo ka soti apre treatment la',
+      'khi nao cho co the ra ngoai sau khi xit thuoc', 'Maghintay ng dalawang oras bago lumabas ang aso', 'po pwede na ba lumabas ang mga bata sa lawn', 'anong oras kayo darating bukas', 'kailan ang next service ko',
+      'ang aso ko nasa labas after ninyo mag spray', 'cho toi hoi khi nao tre em co the choi tren co', 'ang ulan ba ay mag wash off ng treatment', 'Kiedy psy mog\u0105 wyj\u015b\u0107?', 'Quand mon chien peut sortir after treatment', 'Quando o cachorro pode sair after the spray',
+    ]) {
+      expect([text, un(text) || !labelFactsLib.isEnglishInbound(text)]).toEqual([text, true]);
+      expect([text, asked(text)]).toEqual([text, ['reentry', 'rain', 'unverified_language']]);
+    }
+  });
+  test('terse and natural English - names, typos, slang, contractions, numbers, links - is English', () => {
+    for (const text of [
+      'dogs out?', 'pets ok now', 'lawn safe yet', 'when can the kids play', 'Is it okay now?', 'rain?', 'Tuesday works', 'kids on lawn now?', 'thanks!', 'ok', 'wash off?', 'can we water today', 'pls call me', 'k thx', 'Hey Adam?',
+      "Hi it's Jane Smith, can the dogs go out after the spray?", 'hey just wondering if its safe for my kids to play on the lawn today', 'we have ants in the kitchen again, can someone come thursday', "what's my balance",
+      'I got a bill but I already paid', "I'm not home but the side gate is open", 'the gate code is 1234', 'Yes please schedule me for Tuesday morning', "no thanks, we're all set", 'ok thx see u then', 'Hello Dale! All set.',
+      'did the lawn guy already come today? https://example.com/a', 'the brown patch is spreading, what should I do', 'are the sprinklers ok to run tomorrow morning', 'Sorry, wrong number',
+    ]) expect([text, un(text) || !labelFactsLib.isEnglishInbound(text)]).toEqual([text, false]);
+  });
+  test('Tagalog reply words are held (function words and timing vocabulary)', () => {
+    for (const reply of ['Maghintay ng dalawang oras.', 'Puwede na po silang lumabas.', 'Ang aso ay puwede na.', 'Pwede na po.', 'Kailan po ang ulan?']) {
+      expect([reply, labelFactsLib.hasUnsupportedLanguage(reply), labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', [])]).toEqual([reply, true, true]);
+    }
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming('Maghintay ng dalawang oras.', '', asked('Kailan puwedeng lumabas ang aso after treatment?'))).toBe(true);
   });
 });
 
