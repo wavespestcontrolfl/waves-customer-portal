@@ -818,6 +818,19 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(paymentTenderLabel({})).toBeNull();
     expect(paymentTenderLabel(null)).toBeNull();
 
+    // Independent-review P2 (round 6, PR #5331): ONLY the fixed method
+    // token (right after "— ", before the optional "(<reference>)") is
+    // ever read — the operator's free-text reference is never scanned, so
+    // it can never fabricate or deny a tender on its own.
+    // "other" + a reference that happens to name a real tender word ⇒ no tender.
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — other (Cash App transfer)' })).toBeNull();
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — other (Zelle to the wrong account, refunded)' })).toBeNull();
+    // A "not Zelle" reference on the SAME "other" method ⇒ still no tender —
+    // the negation wording in the reference is never read either.
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — other (not Zelle, paid in person)' })).toBeNull();
+    // The fixed method token itself is unaffected by what the reference says.
+    expect(paymentTenderLabel({ description: 'Invoice INV-104 — zelle (not the usual account)' })).toBe('Zelle');
+
     const block = buildFactsBlock({
       summary: 'X',
       billing: {
@@ -1473,5 +1486,45 @@ describe('fetchZelleEligibility — independent-review P1 (round 2, PR #5331): a
   test('an unexpected deposit-settlement read error fails closed too (never a throw)', async () => {
     const drafter = freshDrafter({ invoiceRow: { id: 'inv-1', customer_id: 'c1' }, depositError: new Error('db down'), zelleVisible: true });
     expect(await drafter.fetchZelleEligibility({ customerId: 'c1', openInvoiceId: 'inv-1' })).toBe(false);
+  });
+});
+
+describe('Codex round-6 (PR #5331): inbound-bound confirmations, unavailable billing, receipts vs trusted owed language', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const ctxWith = (payments, extra = {}) => ({ billing: { outstandingBalance: 0, recentPayments: payments, ...extra } });
+  const cardRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const zelleRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-1 — zelle' };
+
+  test('a generic confirmation answering a Zelle question never binds to an unrelated card row', () => {
+    const reply = 'Yes, we received your $120.00 payment from Sep 12.';
+    const inboundMessage = 'Did you get my $120 Zelle payment?';
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([cardRow]), { byMeaning: true, inboundMessage })).toBe(true);
+    // ...but the same reply with no inbound tender still binds (unchanged)
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([cardRow]), { byMeaning: true })).toBe(false);
+    // ...and it binds when the Zelle row genuinely exists
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([zelleRow]), { byMeaning: true, inboundMessage })).toBe(false);
+  });
+
+  test('the date the customer named in the inbound message also binds a date-less confirmation', () => {
+    const reply = 'Yes, we received your $120.00 payment.';
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([cardRow]), { byMeaning: true, inboundMessage: 'Did my $120 from Aug 1 go through?' })).toBe(true);
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([cardRow]), { byMeaning: true, inboundMessage: 'Did my $120 from Sep 12 go through?' })).toBe(false);
+  });
+
+  test('billing.unavailable rejects a settlement claim (an empty owed set is unknowable, not zero)', () => {
+    expect(replyQuotesUngroundedAmount("You're paid up.", ctxWith([]), { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount("You're paid up.", ctxWith([], { unavailable: true }), { byMeaning: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount('Your account is current.', ctxWith([], { unavailable: true }), { byMeaning: true })).toBe(true);
+  });
+
+  test('trustOwedAmounts excuses genuine owed language but never a receipt claim that merely says "invoice"', () => {
+    const owedCtx = ctxWith([cardRow], { outstandingBalance: 50 });
+    // owed clause, an amount nothing backs: the human-review exemption applies
+    expect(replyQuotesUngroundedAmount('Your invoice balance is $9,999.00.', owedCtx, { byMeaning: true, trustOwedAmounts: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your invoice balance is $9,999.00.', owedCtx, { byMeaning: true, trustOwedAmounts: false })).toBe(true);
+    // receipt-shaped clause with an owed noun: the exemption must NOT skip the binder
+    const refundedCtx = ctxWith([{ ...cardRow, status: 'refunded' }]);
+    expect(replyQuotesUngroundedAmount('We received your $120 invoice payment from Sep 12.', refundedCtx, { byMeaning: true, trustOwedAmounts: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount('We received your $120 invoice payment from Sep 12.', ctxWith([cardRow]), { byMeaning: true, trustOwedAmounts: true })).toBe(true);
   });
 });

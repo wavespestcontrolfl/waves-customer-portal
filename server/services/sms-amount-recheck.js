@@ -102,7 +102,13 @@ const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bz
 // Zelle the rest" is still an offer for its own half — that clause already
 // splits out under CLAUSE_SPLIT_RE, this guard covers the residual case
 // where it doesn't).
-const ZELLE_RECEIPT_VERB_RE = /\b(?:received|got|came\s+through|cleared|posted|processed|arrived|went\s+through)\b/i;
+// P2 (round 6, PR #5331): the verb list is now the SHARED
+// payment-receipt-vocabulary.js RECEIPT_VERB_RE — one definition with
+// sms-shadow-drafter.js's PAYMENT_ACK_RE, rather than a second copy of the
+// same words maintained independently here — plus THANKS_FOR_PAYMENT_RE, so
+// "Thanks for processing my Zelle payment!" / "Thank you, the Zelle payment
+// cleared" read as a historical RECEIPT exactly like a bare verb does.
+const { RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus } = require('./payment-receipt-vocabulary');
 const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
 function classifyZelleClause(clause) {
@@ -114,7 +120,7 @@ function classifyZelleClause(clause) {
   // "For your Zelle payment, use old@example.com" names no offer VERB, but
   // a contact address is never something a historical receipt states.
   if (zelleBodyContacts(text).length) return 'offer';
-  if (ZELLE_RECEIPT_VERB_RE.test(text) && !ZELLE_INSTRUCTION_MARKER_RE.test(text)) return 'receipt';
+  if ((RECEIPT_VERB_RE.test(text) || THANKS_FOR_PAYMENT_RE.test(text)) && !ZELLE_INSTRUCTION_MARKER_RE.test(text)) return 'receipt';
   // Ambiguous — mentions Zelle affirmatively but matches neither pattern —
   // fails closed as an OFFER (the stricter path).
   return 'offer';
@@ -234,10 +240,14 @@ function strictForVersion(promptVersion) {
 // claim carries no dollar figure and so clears that guard too, yet still
 // needs this same recheck before it actually sends.
 async function amountFreeStatusClaimStale({
-  customerId, body, strict, trustOwedAmounts = false, dbh = db,
+  customerId, body, strict, trustOwedAmounts = false, dbh = db, inboundMessage = null,
 } = {}) {
   if (!strict) return { stale: false };
   const text = String(body || '');
+  // Codex round-6 (PR #5331): a body naming no payment/paid/account word
+  // cannot assert a payment status — skip the drafter + billing re-read
+  // entirely (gratitude/scheduling copy on the auto-send lane).
+  if (!mayAssertPaymentStatus(text)) return { stale: false };
   const hasStatusClaim = text.split(CLAUSE_SPLIT_RE)
     .some((clause) => drafter.hasAffirmativePaymentAck(clause) || drafter.paymentStatusClaimKind(clause) != null);
   if (!hasStatusClaim) return { stale: false };
@@ -245,7 +255,7 @@ async function amountFreeStatusClaimStale({
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
     const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
-    const stale = drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts });
+    const stale = drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage });
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] amount-free status-claim recheck failed for customer ${customerId}: ${err.message}; blocking send`);
@@ -262,6 +272,12 @@ async function amountFreeStatusClaimStale({
 // wrote the words.
 async function outgoingAmountsStale({
   customerId, body, promptVersion = null, zelleInvoiceId = null, dbh = db, trustOwedAmounts = false,
+  // Independent-review P1 (round 6, PR #5331): the customer's own inbound
+  // wording (decision.inbound_message / the sms_log row's body), threaded
+  // through to the clause-aware binder so a confirmation binds to the
+  // tender/date the customer actually named, not only what the outgoing
+  // body happens to restate.
+  inboundMessage = null,
 } = {}) {
   const text = String(body || '');
   // Independent-review P1 (finding 4): checked unconditionally, ahead of
@@ -317,7 +333,7 @@ async function outgoingAmountsStale({
     // Independent-review P1 (round 5, finding 1): a payment-status or receipt
     // claim with no dollar figure at all ("You're paid up.") still needs
     // fresh billing before it sends — see amountFreeStatusClaimStale above.
-    return amountFreeStatusClaimStale({ customerId, body: text, strict, trustOwedAmounts, dbh });
+    return amountFreeStatusClaimStale({ customerId, body: text, strict, trustOwedAmounts, dbh, inboundMessage });
   }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   // trustOwedAmounts on the POOLED (pre-v12) rule has nothing left to check —
@@ -347,7 +363,7 @@ async function outgoingAmountsStale({
     // whole amount check for a human-reviewed legacy reply), same as before
     // this finding widened the STRICT rule's own, finer-grained trust.
     const stale = strict
-      ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts })
+      ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage })
       : !trustOwedAmounts && amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {

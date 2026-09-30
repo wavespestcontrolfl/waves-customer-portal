@@ -668,7 +668,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // passes.
     if (parsed.reply) {
       if (gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
-        if (drafter.replyQuotesUngroundedAmount(parsed.reply, context)) {
+        if (drafter.replyQuotesUngroundedAmount(parsed.reply, context, { inboundMessage: body })) {
           logger.warn(`[estimate-conversion-agent] LLM review draft quoted an ungrounded amount (customer=${customer.id}); using template`);
           return null;
         }

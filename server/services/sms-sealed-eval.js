@@ -165,19 +165,68 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
+// Independent-review P1 (round 6, PR #5331): every fact marker above is a
+// literal substring of buildFactsBlock's own FIXED sections (BILLING,
+// ACCOUNT FLAGS, etc.) — it must never be looked for anywhere else in the
+// facts block, because three of the block's own sections quote raw,
+// untrusted text: RECENT PHONE CALLS (call summaries), LATEST CALL
+// TRANSCRIPT (a verbatim quoted call), and RECENT SMS THREAD (the actual
+// customer/agent conversation, which can itself quote or reference an old
+// agent reply's own "Payment options:" wording, or literally contain the
+// words "FREE RE-SERVICE"). A marker that only happens to appear inside one
+// of those free-text sections must never satisfy a required-marker check or
+// trip a forbidden-marker check — both would misjudge the item's real fact
+// contract. buildFactsBlock always writes these three headers, in this
+// order, strictly AFTER every fixed section, so truncating at the EARLIEST
+// of them isolates exactly the fixed-section text markers live in.
+const FREE_TEXT_SECTION_HEADERS = Object.freeze(['RECENT PHONE CALLS', 'LATEST CALL TRANSCRIPT', 'RECENT SMS THREAD:']);
+function factsSectionOnly(factsBlock) {
+  const text = String(factsBlock || '');
+  let cut = text.length;
+  for (const header of FREE_TEXT_SECTION_HEADERS) {
+    const idx = text.indexOf(header);
+    if (idx !== -1 && idx < cut) cut = idx;
+  }
+  return text.slice(0, cut);
+}
 function itemCompatibleWith(factsBlock, promptVersion) {
-  const facts = String(factsBlock || '');
+  const facts = factsSectionOnly(factsBlock);
   return requiredFactMarkers(promptVersion).every((m) => facts.includes(m))
     && forbiddenFactMarkers(promptVersion).every((m) => !facts.includes(m));
 }
+// The SQL equivalent of factsSectionOnly() above: `facts_block` truncated to
+// before the EARLIEST free-text section header, as a raw SQL expression.
+// `expr` contains one bare `?` per FREE_TEXT_SECTION_HEADERS entry (in that
+// order) — every caller must splice `bindings` into its own parameter list
+// at each point `expr` is used. LEAST() (Postgres) ignores NULL arguments,
+// so a header POSITION() of 0 (not found) is turned into NULL via NULLIF and
+// so never wins the LEAST() over a header that IS present; the
+// `LENGTH(...) + 1` fallback (never NULL) makes LEAST() resolve to the whole
+// string's length when NONE of the headers are present, matching
+// factsSectionOnly()'s "no header found ⇒ the whole block" behavior.
+function factsSectionSql(column = "COALESCE(facts_block, '')") {
+  const positions = FREE_TEXT_SECTION_HEADERS
+    .map(() => `COALESCE(NULLIF(POSITION(? IN ${column}), 0), LENGTH(${column}) + 1)`)
+    .join(', ');
+  return {
+    expr: `SUBSTRING(${column} FROM 1 FOR LEAST(${positions}) - 1)`,
+    bindings: [...FREE_TEXT_SECTION_HEADERS],
+  };
+}
 // SQL for "this row matches the exact contract" (wrap in NOT (...) for the
-// complement), parameterized: required markers present, forbidden absent.
+// complement), parameterized: required markers present, forbidden absent —
+// both checked ONLY within the facts section (factsSectionSql above), never
+// against the raw call/thread text the row's facts_block also carries.
 function compatibleWhereRaw(markers, forbidden = []) {
+  const sectionExpr = factsSectionSql().expr;
   const clauses = [
-    ...markers.map(() => "COALESCE(facts_block, '') LIKE ?"),
-    ...forbidden.map(() => "COALESCE(facts_block, '') NOT LIKE ?"),
+    ...markers.map(() => `${sectionExpr} LIKE ?`),
+    ...forbidden.map(() => `${sectionExpr} NOT LIKE ?`),
   ];
-  return { sql: clauses.join(' AND ') || 'TRUE', bindings: [...markers, ...forbidden].map((m) => `%${m}%`) };
+  const bindings = [];
+  markers.forEach((m) => { bindings.push(...factsSectionSql().bindings, `%${m}%`); });
+  forbidden.forEach((m) => { bindings.push(...factsSectionSql().bindings, `%${m}%`); });
+  return { sql: clauses.join(' AND ') || 'TRUE', bindings };
 }
 
 /* ── Freezer ──────────────────────────────────────────────────────────── */
@@ -1407,5 +1456,9 @@ module.exports = {
     SEALED_EVAL_MIN_AGE_DAYS,
     MAX_CONSECUTIVE_FAILURES,
     SIGNIFICANCE_ALPHA,
+    factsSectionOnly,
+    factsSectionSql,
+    compatibleWhereRaw,
+    FREE_TEXT_SECTION_HEADERS,
   },
 };

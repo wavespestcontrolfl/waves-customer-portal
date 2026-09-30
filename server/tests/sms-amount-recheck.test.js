@@ -62,7 +62,7 @@ test('gate ON: the drafter\'s clause-aware guard is the stricter authority (a re
   ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
   replyQuotesUngroundedAmount.mockReturnValue(true);
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
-  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment — thank you!', ctx, { byMeaning: true, trustOwedAmounts: false });
+  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment — thank you!', ctx, { byMeaning: true, trustOwedAmounts: false, inboundMessage: null });
   replyQuotesUngroundedAmount.mockReturnValue(false);
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: false });
 });
@@ -72,7 +72,7 @@ test('a v12 decision is rechecked strictly even after a gate rollback (prompt ve
   ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 95, recentPayments: [{ amount: 95, status: 'failed' }] } });
   replyQuotesUngroundedAmount.mockReturnValue(true);
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $95 payment.', promptVersion: 'house_voice_v12_real_answers', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toMatchObject({ stale: true });
-  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment.', expect.any(Object), { byMeaning: true, trustOwedAmounts: false });
+  expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('We received your $95 payment.', expect.any(Object), { byMeaning: true, trustOwedAmounts: false, inboundMessage: null });
   await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is fifty dollars.', promptVersion: 'house_voice_v12_real_answers', dbh: dbWithCustomer({ id: 'c1' }) })).resolves.toEqual({ stale: true, reason: 'amount_unverifiable' });
   // an older-prompt decision under a gate that is ON stays on the legacy rule
   realAnswersGateOn.mockReturnValue(true);
@@ -490,7 +490,7 @@ describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\
     replyQuotesUngroundedAmount.mockReturnValue(false);
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
     await outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $9,999.00.', dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true });
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('Your balance is $9,999.00.', expect.any(Object), { byMeaning: true, trustOwedAmounts: true });
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('Your balance is $9,999.00.', expect.any(Object), { byMeaning: true, trustOwedAmounts: true, inboundMessage: null });
   });
 });
 
@@ -503,7 +503,7 @@ describe('Codex round 5 (finding 1): an amount-free payment-status claim still r
     await expect(outgoingAmountsStale({ customerId: 'c1', body: "You're paid up!", dbh: dbWithCustomer({ id: 'c1' }) }))
       .resolves.toEqual({ stale: false });
     expect(ContextAggregator.getContextForCustomer).toHaveBeenCalled();
-    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith("You're paid up!", ctx, { byMeaning: true, trustOwedAmounts: false });
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith("You're paid up!", ctx, { byMeaning: true, trustOwedAmounts: false, inboundMessage: null });
   });
 
   test('strict + the claim no longer grounds against CURRENT billing ⇒ stale', async () => {
@@ -518,6 +518,23 @@ describe('Codex round 5 (finding 1): an amount-free payment-status claim still r
     realAnswersGateOn.mockReturnValue(true);
     await expect(outgoingAmountsStale({ customerId: 'c1', body: 'See you Tuesday!', dbh: dbWithCustomer({ id: 'c1' }) }))
       .resolves.toEqual({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+
+  // Codex round-6 (PR #5331): CI regression on the gratitude auto-send lane —
+  // a body naming no payment/paid/account word is skipped BEFORE the drafter is
+  // touched, so a stubbed/absent drafter export can never turn thank-you copy
+  // into a send_error.
+  test('strict + gratitude copy never reaches the drafter or billing (pre-screen)', async () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    const saved = drafter.hasAffirmativePaymentAck;
+    drafter.hasAffirmativePaymentAck = undefined;
+    try {
+      await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "You're welcome, Dana! Glad we could help.", strict: true, dbh: dbWithCustomer({ id: 'c1' }) }))
+        .resolves.toEqual({ stale: false });
+    } finally {
+      drafter.hasAffirmativePaymentAck = saved;
+    }
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
   });
 
@@ -564,5 +581,47 @@ describe('Codex round 5 (finding 2): a Zelle clause needs an explicit past-tense
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'For your Zelle payment, use old@example.com.', zelleInvoiceId: null, dbh: dbWithCustomer({ id: 'c1' }),
     })).resolves.toEqual({ stale: true, reason: 'zelle_recipient_stale' });
+  });
+});
+
+describe('P2 (round 6, PR #5331): thank-you wording reads as a historical Zelle receipt', () => {
+  test('classifyZelleClause: "thanks/thank you for the Zelle payment" is a receipt with no other verb needed', () => {
+    expect(classifyZelleClause('Thanks for the Zelle payment!')).toBe('receipt');
+    expect(classifyZelleClause('Thank you for your Zelle payment.')).toBe('receipt');
+  });
+
+  test('classifyZelleClause: a contact token still forces "offer" even alongside thank-you wording', () => {
+    expect(classifyZelleClause('Thanks for your Zelle payment, please send the rest to old@example.com')).toBe('offer');
+  });
+
+  test('hasAffirmativeZelleMention: a thank-you-only receipt body is NOT an affirmative offer (never re-runs the recipient recheck)', () => {
+    expect(hasAffirmativeZelleMention('Thanks for the Zelle payment!')).toBe(false);
+  });
+});
+
+describe('P1 (round 6, PR #5331): the customer\'s inbound wording threads through to the clause-aware binder', () => {
+  test('outgoingAmountsStale passes inboundMessage through to replyQuotesUngroundedAmount (strict path)', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid' }] } });
+    await outgoingAmountsStale({
+      customerId: 'c1', body: 'We received your $120.00 payment — thank you!', dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'Did you get my $120 Zelle payment?',
+    });
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith(
+      'We received your $120.00 payment — thank you!',
+      expect.any(Object),
+      { byMeaning: true, trustOwedAmounts: false, inboundMessage: 'Did you get my $120 Zelle payment?' },
+    );
+  });
+
+  test('amountFreeStatusClaimStale passes inboundMessage through too', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
+    await amountFreeStatusClaimStale({
+      customerId: 'c1', body: "You're paid up!", strict: true, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'Did I pay in full?',
+    });
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith(
+      "You're paid up!",
+      expect.any(Object),
+      { byMeaning: true, trustOwedAmounts: false, inboundMessage: 'Did I pay in full?' },
+    );
   });
 });

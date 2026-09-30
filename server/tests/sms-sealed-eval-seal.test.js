@@ -142,6 +142,13 @@ describe('sealEvalItems — selection contract', () => {
 // deleted. v11 has a contract too since #5194 r7 (rollbacks).
 describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   const MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
+  // Independent-review P1 (round 6, PR #5331): every compat clause is now a
+  // position-scoped SUBSTRING/LEAST/POSITION expression (factsSectionSql in
+  // sms-sealed-eval.js), never a bare column reference — so each marker's
+  // `%marker%` binding is preceded by one POSITION(...) binding per free-text
+  // section header. Mirrors FREE_TEXT_SECTION_HEADERS in the service module.
+  const FREE_TEXT_HEADERS = ['RECENT PHONE CALLS', 'LATEST CALL TRANSCRIPT', 'RECENT SMS THREAD:'];
+  const expectedBindingsFor = (markers) => markers.flatMap((m) => [...FREE_TEXT_HEADERS, `%${m}%`]);
   const drafter = require('../services/sms-shadow-drafter');
   let versionSpy;
   afterEach(() => { if (versionSpy) versionSpy.mockRestore(); versionSpy = null; });
@@ -158,8 +165,17 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const record = (name) => (...args) => {
         calls.push([name, args, tableKey]);
         if (name === 'count') b._isCount = true;
-        // the compatibility predicate (count + candidates) starts with the LIKE clause; retirement wraps it in NOT (...)
-        if (name === 'whereRaw' && /^(?:md\.facts_block|COALESCE\(facts_block, ''\)) (?:NOT )?LIKE \?/.test(String(args[0])) && String(args[1]?.[0] || '').includes(MARKER)) b._compat = true;
+        // The compatibility predicate (count + candidates) is a bare `... LIKE
+        // ?` clause (never wrapped in `NOT (...)`, which is retirement's own
+        // wrapper) whose bindings carry the marker text somewhere — since
+        // independent-review P1 (round 6, PR #5331) the clause is a
+        // position-scoped SUBSTRING/LEAST/POSITION expression (see
+        // factsSectionSql in sms-sealed-eval.js) rather than a bare column
+        // reference, so this no longer anchors on the column name, only on
+        // "is a LIKE clause, not a NOT (...) wrapper, whose bindings name the
+        // marker".
+        if (name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0]))
+          && (args[1] || []).some((v) => String(v).includes(MARKER))) b._compat = true;
         if (name === 'whereRaw') b._raws.push([args[0], args[1]]);
         if (name === 'modify') args[0](b);
         if (name === 'insert') { b._insertRows = args[0]; inserts.push(args[0]); }
@@ -193,8 +209,10 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(out.retired).toBe(3);
     expect(out.reactivated).toBe(0); // no retired plain items to restore in this fake (restorable defaults to 0)
     expect(out.activeCount).toBe(100);
-    // candidates were restricted to v12-compatible drafts
-    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block LIKE/.test(String(args[0])))).toBe(true);
+    // candidates were restricted to v12-compatible drafts (the compat clause
+    // rewritten onto the aliased `md.facts_block` column — round 6: now a
+    // position-scoped SUBSTRING/LEAST expression, not a bare column ref)
+    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /LIKE \?/.test(String(args[0])))).toBe(true);
     // the reactivation attempt ran first (Codex r5 #5194 P2), found nothing, then the retirement
     // targeted pre-v12 rows (NOT LIKE marker), oldest first, capped at the overflow
     const restoreUpdates = dbi.updates.filter((u) => u.patch.active === true);
@@ -234,7 +252,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%- Payment options:%', '%FREE RE-SERVICE:%']);
+      expect(args[1]).toEqual(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']));
       expect(String(args[0])).not.toMatch(/NOT LIKE/); // +c: every category fact is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
@@ -251,9 +269,9 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
       expect(String(args[0])).not.toMatch(/(?<!NOT )LIKE \?/); // nothing required, both lines forbidden
-      expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%- Payment options:%', '%FREE RE-SERVICE:%']);
+      expect(args[1]).toEqual(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']));
     }
-    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^md\.facts_block NOT LIKE/.test(String(args[0])))).toBe(true);
+    expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /NOT LIKE/.test(String(args[0])))).toBe(true);
     // the v12 items beyond the target are retired (the fake reports 3)
     expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1);
   });
@@ -278,7 +296,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /LIKE \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
       expect(likeRaws.length).toBeGreaterThanOrEqual(2); // the compat count + the restore filter
       for (const [, args] of likeRaws) {
-        expect(args[1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%- Payment options:%', '%FREE RE-SERVICE:%']);
+        expect(args[1]).toEqual(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']));
       }
       // restore targets INACTIVE rows, newest sealed_at first, limited to the whole shortfall (100)
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
@@ -320,8 +338,8 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       expect(dbi.updates.filter((u) => u.patch.active === true)).toHaveLength(1);
       // the restore selects RETIRED rows under the v11 contract: both v12 lines forbidden
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
-      expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^COALESCE\(facts_block, ''\) NOT LIKE \?/.test(String(args[0]))
-        && JSON.stringify(args[1]) === JSON.stringify(['%FOLLOW-UP SLA RIGHT NOW:%', '%- Payment options:%', '%FREE RE-SERVICE:%']))).toBe(true);
+      expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^SUBSTRING\(COALESCE\(facts_block, ''\)/.test(String(args[0])) && /NOT LIKE \?/.test(String(args[0]))
+        && JSON.stringify(args[1]) === JSON.stringify(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:'])))).toBe(true);
       expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1); // the v12 items are retired
     });
   });
@@ -346,8 +364,18 @@ test('v12 without +c: the compatibility SQL requires the SLA line AND forbids th
     dbi.raw = (sql) => sql;
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /LIKE \?/.test(String(args[0])));
-    expect(compat[1][0]).toBe("COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') LIKE ? AND COALESCE(facts_block, '') NOT LIKE ?");
-    expect(compat[1][1]).toEqual(['%FOLLOW-UP SLA RIGHT NOW:%', '%- Payment options:%', '%FREE RE-SERVICE:%']);
+    // Independent-review P1 (round 6, PR #5331): the compat clause is now
+    // computed via the shared, position-scoped compatibleWhereRaw (see
+    // sms-sealed-eval.js's factsSectionSql) rather than a bare column
+    // reference — compare against that SAME helper instead of a hand-written
+    // SQL string, so this test tracks the real contract rather than a frozen
+    // snapshot of its SQL shape.
+    const expected = require('../services/sms-sealed-eval')._test.compatibleWhereRaw(
+      ['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:'],
+      ['FREE RE-SERVICE:'],
+    );
+    expect(compat[1][0]).toBe(expected.sql);
+    expect(compat[1][1]).toEqual(expected.bindings);
   } finally {
     spy.mockRestore();
   }

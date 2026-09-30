@@ -542,10 +542,34 @@ an OPTIONAL `manualPayOptions` = `{ zelle: { recipient }, amountDue,
 version, creditPending? }` only when `ZELLE_RECIPIENT` is set (unset ⇒ key
 absent, payload byte-identical — that is the kill switch; `VENMO_HANDLE` /
 `PAYPAL_ME_HANDLE` are ignored and cannot resurrect a tender) AND the
-invoice is collectible, not saved-method-required, not fully covered by
-account credit, not riding a combined-balance session, has no saved-card
-charge reconciliation pending, and any stamped PaymentIntent is still
-cancelable (inspect-only, fail-closed — unverifiable ⇒ key withheld). The
+invoice clears `payPageZelleVisibility` (`pay-v2.js`; PR #5331) — the ONE
+function this route, the SMS drafter's draft-time eligibility fetch, and
+the send-time recheck all call, so none of them can quietly disagree.
+Exhaustively, every condition it applies: the invoice is collectible, not
+withdrawn from the customer (a Bill-To move to a payer after the homeowner
+already held this link, see THIRD-PARTY BILL-TO WITHDRAWAL below), not
+saved-method-required, not fully covered by account credit, not riding a
+combined-balance session — this arm ALSO denies Zelle the instant a live
+payer resolves while probing for a sibling balance, even when that probe
+finds no sibling itself (`payerOwnedLive`: a payer discovered live during
+the combined-siblings lookup withholds Zelle exactly as an already-stamped
+`payer_id` would, so a Bill-To resolved mid-request can never leave a
+Zelle transfer offered to the wrong party; concretely, `GET /api/pay/:token`
+on an invoice whose frozen `payer_id` is NULL runs the live payer resolution
+and, when it resolves to a third-party payer, OMITS `manualPayOptions` — a
+payload-only gate: status, headers and every other field are unchanged) —
+has no saved-card charge
+reconciliation pending, and any stamped PaymentIntent is still cancelable
+(inspect-only, fail-closed — unverifiable ⇒ key withheld). Layered on top
+of that full eligibility check, a positive PARTIAL projected account
+credit (one that would not itself fully cover the invoice — a credit that
+WOULD fully cover it is already excluded above) withholds the key too,
+distinctly: it still rides `manualPayOptions` (server and client must
+agree a Zelle transfer is live at all before the client can wait on a
+resolving amount) but flags `creditPending: true`, matching
+`PayPageV2.jsx`'s own `creditPending && !stripeSetup` rule — the client
+hides the transfer controls until `/setup` resolves the real post-credit
+amount, since a projection is not a reservation. The
 recipient is the business's own Zelle contact, never customer data. The
 client re-reads this payload on expand / tab re-focus / 45 s cadence and
 keeps every control disabled until a fresh read succeeds; no pre-filled

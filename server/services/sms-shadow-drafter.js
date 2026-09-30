@@ -1052,7 +1052,14 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // all ("Yes, you're all set!") is outside what a regex can safely
 // distinguish from a scheduling confirmation — see the whole-reply
 // settled-payment guard below, which relies on this same anchor.
-const PAYMENT_ACK_RE = /\b(?:received|processed|went through|got)\b[^.\n]{0,30}\bpayment\b|\bpayment\b[^.\n]{0,30}\b(?:received|processed|went through|got|all set|all paid|paid in full)\b|\b(?:all set|all paid|paid in full)\b[^.\n]{0,30}\bpayment\b|\bthank(?:s| you)\b[^.\n]{0,25}\bpayment\b/i;
+//
+// P2 (round 6, PR #5331): built from the shared receipt-verb vocabulary in
+// payment-receipt-vocabulary.js (ONE definition of "received/processed/went
+// through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
+// payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
+// than a second, independently-maintained copy of the same words.
+const { paymentAckPatternSource } = require('./payment-receipt-vocabulary');
+const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
 // haven't received your payment yet", "we don't see a payment") was
@@ -1257,13 +1264,19 @@ function paymentDateMatchesClaim(p, claimed) {
 // send-time recheck (sms-amount-recheck.js's outgoingAmountsStale, which
 // re-runs replyQuotesUngroundedAmount against FRESHLY fetched context on
 // every send — so a row a refund voided since drafting no longer binds, even
-// when another paid row shares the same amount and date). Requires the reply
-// to state a date; requires that date, the amount, and (when claimed) the
-// tender to all point at the SAME settled row. Returns the bound row or null.
-function bindPaidPaymentRow({ text, amountCents, context, claimedTender = null }) {
-  const claimed = parseClaimedPaymentDate(text);
-  if (!claimed) return null;
-  const candidates = paidRowsForCents(context, amountCents).filter((p) => paymentDateMatchesClaim(p, claimed));
+// when another paid row shares the same amount and date). Requires a claimed
+// date (from the OUTGOING clause, or — see replyQuotesUngroundedAmount —
+// from the customer's own inbound message when the outgoing clause is
+// generic); requires that date, the amount, and (when claimed) the tender to
+// all point at the SAME settled row. Returns the bound row or null.
+//
+// Independent-review P1 (round 6, PR #5331): `claimedDate` is now an
+// explicit param, resolved by the caller from EITHER the outgoing clause or
+// the inbound message, rather than re-derived here from `text` alone — the
+// caller is the one place that knows which of the two named a date/tender.
+function bindPaidPaymentRow({ amountCents, context, claimedTender = null, claimedDate = null }) {
+  if (!claimedDate) return null;
+  const candidates = paidRowsForCents(context, amountCents).filter((p) => paymentDateMatchesClaim(p, claimedDate));
   const matched = claimedTender ? candidates.filter((p) => paymentTenderLabel(p) === claimedTender) : candidates;
   return matched[0] || null;
 }
@@ -1278,6 +1291,22 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
+  // Independent-review P1 (round 6, PR #5331): billing.unavailable means the
+  // account's whole money picture is UNKNOWABLE (context-aggregator.js: the
+  // invoice-grounding read itself failed) — owedCents/paidCents above come
+  // back EMPTY in that case, same shape as a customer who genuinely owes and
+  // has paid nothing. Never read that emptiness as "nothing is owed" — a
+  // settlement claim ("you're paid up") is fabricated confidence about a
+  // fact the draft literally could not check, structurally as dangerous as
+  // stating a wrong balance.
+  const billingUnavailable = !!context?.billing?.unavailable;
+  // Independent-review P1 (round 6, PR #5331): the customer's own inbound
+  // wording, threaded through by every caller that has it (draft time:
+  // generateGroundedDraft; send time: outgoingAmountsStale, from the
+  // decision's inbound_message / sms_log body). Used only as a FALLBACK
+  // source of a claimed tender/date below — never to relax anything the
+  // outgoing clause itself states.
+  const inboundText = String(opts.inboundMessage || '');
   const amountsIn = (t) => (t.match(AMOUNT_MASK_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
   // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
   // hasPriceQuote recognizes spelled amounts ("fifty dollars"), cents,
@@ -1351,7 +1380,9 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
       // grounded only when nothing is actually owed right now.
       const kind = paymentStatusClaimKind(masked);
       if (kind === 'event') return true;
-      if (kind === 'settlement' && owedCents.size > 0) return true;
+      // billingUnavailable: never let an empty owedCents set (unknowable,
+      // not zero) ground a "nothing is owed" claim.
+      if (kind === 'settlement' && (owedCents.size > 0 || billingUnavailable)) return true;
       continue;
     }
     const owed = AMOUNT_OWED_RE.test(masked);
@@ -1362,7 +1393,18 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     // operator approved), never a RECEIPT/status claim, which asserts a
     // fact about what already happened and can go stale (a refund, a
     // settled invoice) exactly like a Zelle recipient can.
-    if (owed && opts.trustOwedAmounts) continue;
+    //
+    // Codex round-6 (PR #5331): classify the clause as a receipt/status
+    // assertion FIRST. AMOUNT_OWED_RE matches bare nouns like "invoice",
+    // "amount", "bill", "charge", so "We received your $120 invoice payment
+    // from Sep 12" reads as `owed` — and must NOT ride the human-review
+    // exemption past the paid-row/date/tender binder (a payment refunded
+    // after scheduling would still authorize the false confirmation at fire
+    // time). The exemption applies only to a clause that is genuinely owed
+    // language and makes no receipt/status claim; a receipt-shaped clause
+    // falls through to the `owed === ack` ambiguity rejection below.
+    const receiptShaped = PAYMENT_ACK_RE.test(masked) || paymentStatusClaimKind(masked) === 'event';
+    if (owed && opts.trustOwedAmounts && !receiptShaped) continue;
     // Independent-review P1 (round 4, finding 4): an amount-bearing EVENT
     // status claim ("Your $120.00 payment cleared") is exactly as specific
     // as a PAYMENT_ACK_RE claim and binds the same way — but never when the
@@ -1373,8 +1415,22 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     const allowed = owed ? owedCents : paidCents;
     if (amounts.some((a) => !allowed.has(a))) return true;
     if (ack) {
-      const claimedTender = replyClaimedTender(text);
-      if (amounts.some((a) => !bindPaidPaymentRow({ text, amountCents: a, context, claimedTender }))) return true;
+      // Independent-review P1 (round 6, PR #5331): bind to the tender/date
+      // the CUSTOMER named, not only what the outgoing clause happens to
+      // restate. A generic "Yes, we received your $120.00 payment" answering
+      // "did you get my $120 ZELLE payment?" must bind to the Zelle row —
+      // never to an unrelated $120 CARD payment that merely shares the
+      // amount and date — so a confirmation can never tell the customer
+      // their asked-about payment went through when a totally different one
+      // did. The outgoing clause's own claim wins when it states one (the
+      // business may confirm a DIFFERENT tender/date than what was asked,
+      // e.g. correcting the customer); the inbound message is the fallback
+      // ONLY when the outgoing clause is silent on that point — a generic
+      // confirmation that omits the tender the customer asked about must
+      // still bind against that tender, not slip through unchecked.
+      const claimedTender = replyClaimedTender(text) || (inboundText && replyClaimedTender(inboundText)) || null;
+      const claimedDate = parseClaimedPaymentDate(text) || (inboundText && parseClaimedPaymentDate(inboundText)) || null;
+      if (amounts.some((a) => !bindPaidPaymentRow({ amountCents: a, context, claimedTender, claimedDate }))) return true;
     }
   }
   return false;
@@ -1670,13 +1726,24 @@ function monthlyChargeNote(dues) {
 // only ONE of the fixed tender words below, or null when it can't be
 // reliably told apart. Drawn from the SAME shared TENDER_VOCABULARY as
 // replyClaimedTender above (independent-review P1, round 3, PR #5331).
-const MANUAL_TENDER_RE = new RegExp(`\\b(${tenderVocabPattern((t) => t.manual)})\\b`, 'i');
+//
+// Independent-review P2 (round 6, PR #5331): the OLD regex scanned the
+// WHOLE description, including the operator's free-text reference
+// (invoice-manual-payment.js writes `Invoice <number> — <method>
+// (<reference>)`, ~330-358) — a reference of "Cash App transfer" on an
+// "other" payment matched the bare word "Cash", and a reference of "not
+// Zelle, paid in person" matched "Zelle", either way fabricating a tender
+// the operator never selected. Parse ONLY the fixed method token in the
+// EXACT position that description format writes it: right after the "— "
+// separator, ending at the optional " (<reference>)" suffix or end of
+// string. The reference text itself is never inspected.
+const MANUAL_TENDER_FIELD_RE = /—\s*([a-z]+)\s*(?:\(|$)/i;
 function paymentTenderLabel(p) {
   if (!p) return null;
   const type = String(p.payment_method_type || '').toLowerCase();
   if (type.includes('bank') || type === 'us_bank_account' || type === 'ach') return 'bank/ACH';
   if (type === 'card' || p.card_brand || p.card_last_four) return 'card';
-  const m = MANUAL_TENDER_RE.exec(String(p.description || ''));
+  const m = MANUAL_TENDER_FIELD_RE.exec(String(p.description || '').trim());
   return m ? tenderLabelForWord(m[1]) : null;
 }
 
@@ -2764,7 +2831,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // The whitelist itself (authoritative values only, never the thread text
     // the facts block also carries; dues included) is replyQuotesUngroundedAmount
     // above — shared with the estimate-review lane since Codex r3.
-    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context);
+    // Independent-review P1 (round 6, PR #5331): thread the customer's OWN
+    // inbound wording through so a confirmation binds to the tender/date the
+    // customer actually asked about, not just what the drafted reply itself
+    // restates.
+    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context, { inboundMessage });
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }

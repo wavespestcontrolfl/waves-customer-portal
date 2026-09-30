@@ -1014,3 +1014,65 @@ describe('category-aware sealed compatibility', () => {
       .rejects.toThrow(/only 0 of 2 active items carry "FOLLOW-UP SLA RIGHT NOW:" \+ "- Payment options:" \+ "FREE RE-SERVICE:"/);
   });
 });
+
+// Independent-review P1 (round 6, PR #5331): a fact marker must be scoped to
+// the FIXED facts sections — never a false positive/negative from raw
+// customer/call/thread text the facts block also carries.
+describe('itemCompatibleWith / factsSectionOnly — fact markers are scoped OUTSIDE free-text sections', () => {
+  const { factsSectionOnly, compatibleWhereRaw, FREE_TEXT_SECTION_HEADERS } = sealedEval._test;
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour';
+  const PO = '- Payment options: card or bank account (ACH) through their personal pay link';
+
+  test('factsSectionOnly truncates at the EARLIEST free-text header', () => {
+    const block = `X\n${SLA}\n${PO}\nRECENT PHONE CALLS (AI summaries...):\n- some call\nRECENT SMS THREAD:\nagent: - Payment options: whatever the customer wants`;
+    const section = factsSectionOnly(block);
+    expect(section).toContain(SLA);
+    expect(section).toContain(PO);
+    expect(section).not.toContain('RECENT PHONE CALLS');
+    expect(section).not.toContain('RECENT SMS THREAD');
+  });
+
+  test('a REQUIRED marker that appears ONLY inside RECENT SMS THREAD does not satisfy the contract (a customer quoting an old reply does not fabricate the fact)', () => {
+    // No PAYMENT OPTIONS marker in the fixed facts section — it only shows up
+    // because the thread quotes a prior agent reply verbatim.
+    const block = `X\n${SLA}\nRECENT SMS THREAD:\nagent: - Payment options: card or bank account (ACH)`;
+    expect(sealedEval.itemCompatibleWith(block, 'house_voice_v12_real_answers')).toBe(false);
+  });
+
+  test('a FORBIDDEN marker that appears ONLY inside RECENT SMS THREAD does not trip the contract (v11 stays compatible)', () => {
+    // v11 forbids the v12 SLA/PAYMENT OPTIONS lines — but here they only
+    // appear because the customer's own inbound text (quoted in the thread)
+    // happens to contain that literal wording.
+    const block = `CUSTOMER: old\nRECENT SMS THREAD:\ncustomer: hey, what were my "- Payment options:" again? also FOLLOW-UP SLA RIGHT NOW: whatever`;
+    expect(sealedEval.itemCompatibleWith(block, 'house_voice_v11')).toBe(true);
+  });
+
+  test('a marker inside RECENT PHONE CALLS or LATEST CALL TRANSCRIPT is equally out of scope', () => {
+    const viaCalls = `X\n${SLA}\nRECENT PHONE CALLS (AI summaries...):\n- customer asked about - Payment options: on the call`;
+    expect(sealedEval.itemCompatibleWith(viaCalls, 'house_voice_v12_real_answers')).toBe(false);
+    const viaTranscript = `X\n${SLA}\nLATEST CALL TRANSCRIPT (...):\n"""\ncustomer: - Payment options: please\n"""\nRECENT SMS THREAD:\n(no recent thread)`;
+    expect(sealedEval.itemCompatibleWith(viaTranscript, 'house_voice_v12_real_answers')).toBe(false);
+  });
+
+  test('a genuine fixed-section marker still passes when the thread ALSO happens to mention it (no false negative)', () => {
+    const block = `X\n${SLA}\n${PO}\nRECENT SMS THREAD:\ncustomer: what are my - Payment options: again?`;
+    expect(sealedEval.itemCompatibleWith(block, 'house_voice_v12_real_answers')).toBe(true);
+  });
+
+  test('no free-text header present ⇒ the whole block is the facts section (unchanged legacy behavior)', () => {
+    expect(factsSectionOnly(`X\n${SLA}\n${PO}\n`)).toBe(`X\n${SLA}\n${PO}\n`);
+  });
+
+  test('compatibleWhereRaw builds a position-scoped SQL expression, with header bindings ahead of each marker binding', () => {
+    const { sql, bindings } = compatibleWhereRaw([SLA], [PO]);
+    expect(sql).toContain('SUBSTRING');
+    expect(sql).toContain('LEAST');
+    expect(sql).toMatch(/LIKE \?.*NOT LIKE \?/s);
+    // header bindings (one per FREE_TEXT_SECTION_HEADERS entry) precede each
+    // marker's own `%marker%` binding, once per clause.
+    expect(bindings).toEqual([
+      ...FREE_TEXT_SECTION_HEADERS, `%${SLA}%`,
+      ...FREE_TEXT_SECTION_HEADERS, `%${PO}%`,
+    ]);
+  });
+});

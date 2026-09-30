@@ -4281,6 +4281,11 @@ function initScheduledJobs() {
                 body: msg.message_body,
                 promptVersion: amountDecision?.prompt_version ?? null,
                 zelleInvoiceId,
+                // Codex round-6 (PR #5331): the customer's own inbound
+                // wording (stashed on the decision's input_snapshot at draft
+                // time) so a confirmation still binds to the tender/date the
+                // customer named when this fires later.
+                inboundMessage: parseInputSnapshot(amountDecision?.input_snapshot)?.sms?.body || null,
                 trustOwedAmounts: claimMeta.human_authored === true,
               })).stale;
             }

@@ -129,6 +129,14 @@ async function verifyAgentDecisionForSend({ agentDecisionId, to, trustedCustomer
         's.created_at as inbound_created_at',
         's.from_phone as sms_from_phone',
         's.to_phone as sms_to_phone',
+        // Independent-review P1 (round 6, PR #5331): the customer's own
+        // inbound wording — the thing a tender/date the customer named must
+        // be bound against, since a confirmation must never bind a generic
+        // "we received your payment" to a DIFFERENT tender than the one the
+        // customer actually asked about. input_snapshot's own `sms.body` is
+        // the same text for a drafted card and is kept as the fallback in
+        // agent-decision-send-checks.js for a row with no linked sms_log.
+        's.message_body as inbound_message',
         'c.phone as customer_phone'
       )
       .first();

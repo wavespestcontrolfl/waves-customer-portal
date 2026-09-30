@@ -15,7 +15,14 @@ jest.mock('../services/sms-followup-sla', () => ({
   ...jest.requireActual('../services/sms-followup-sla'),
   followupPromiseBlockReason: jest.fn(() => null),
 }));
-jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
+// hasAffirmativeZelleMention is kept REAL (only outgoingAmountsStale is
+// mocked) so this suite exercises the actual Zelle-offer detection that now
+// gates whether the amounts/Zelle recheck runs at all (independent-review
+// P1, round 6, PR #5331), not a stand-in.
+jest.mock('../services/sms-amount-recheck', () => ({
+  ...jest.requireActual('../services/sms-amount-recheck'),
+  outgoingAmountsStale: jest.fn(async () => ({ stale: false })),
+}));
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
@@ -41,7 +48,7 @@ test('parseInputSnapshot: string, object, malformed, absent', () => {
 test('everything passes → null; the recheck carries the snapshot lookup including serviceType', async () => {
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ city: 'Venice', customerId: 'c1', serviceType: 'Lawn Care' }));
-  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers', zelleInvoiceId: null });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers', zelleInvoiceId: null, inboundMessage: null, trustOwedAmounts: false });
 });
 
 // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
@@ -108,4 +115,72 @@ test('no snapshot → no availability call; an older-prompt decision skips the a
   await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
+});
+
+// Independent-review P1 (round 6, PR #5331): the Zelle recipient-plus-
+// eligibility recheck must run for ANY outgoing body with an affirmative
+// Zelle offer, whatever prompt version drafted it, and fail CLOSED when the
+// decision carries no customer_id — an unverifiable Zelle offer must never
+// go out unchecked.
+describe('Zelle offers recheck regardless of prompt version (round 6)', () => {
+  test('an older-prompt decision with a Zelle offer still runs the recheck', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'Yes, you can use Zelle for that.',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'c1', body: 'Yes, you can use Zelle for that.', promptVersion: 'house_voice_v11',
+    }));
+  });
+
+  test('an older-prompt decision never widens to the pooled amount rule (only its Zelle offer is rechecked)', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'Yes, you can use Zelle for that.',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ trustOwedAmounts: true }));
+  });
+
+  test('a Zelle offer with NO customer_id on the decision fails closed without calling the recheck (unverifiable)', async () => {
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ customer_id: null, input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'Yes, you can use Zelle for that.',
+    })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+    expect(outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+
+  test('an older-prompt decision with NO Zelle offer and NO customer_id still skips the recheck entirely (unchanged scope)', async () => {
+    await expect(agentDecisionSendBlockReason({
+      decision: decision({ customer_id: null, input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }),
+      outgoingBody: 'See you Tuesday!',
+    })).resolves.toBeNull();
+    expect(outgoingAmountsStale).not.toHaveBeenCalled();
+  });
+});
+
+// Independent-review P1 (round 6, PR #5331): the customer's own inbound
+// wording threads through to the amount/tender binder — from the joined
+// sms_log row (decision.inbound_message) or, failing that, the drafted
+// input_snapshot's own sms.body.
+describe('inbound message threading (round 6)', () => {
+  test('decision.inbound_message (the joined sms_log body) is passed through', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ inbound_message: 'Did you get my $120 Zelle payment?' }),
+      outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: 'Did you get my $120 Zelle payment?' }));
+  });
+
+  test('falls back to input_snapshot.sms.body when the decision carries no inbound_message', async () => {
+    await agentDecisionSendBlockReason({
+      decision: decision({ input_snapshot: JSON.stringify({ ...SNAP, sms: { body: 'Did you get my $120 Zelle payment?' } }) }),
+      outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?',
+    });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: 'Did you get my $120 Zelle payment?' }));
+  });
+
+  test('neither present → inboundMessage is null', async () => {
+    await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundMessage: null }));
+  });
 });

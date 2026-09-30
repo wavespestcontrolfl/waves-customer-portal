@@ -18,6 +18,18 @@ function parseInputSnapshot(inputSnapshot) {
   }
 }
 
+// The customer's own inbound wording for this decision (independent-review
+// P1, round 6, PR #5331) — the thing a confirmation's claimed tender/date
+// must be checked against. `decision.inbound_message` is the linked
+// sms_log row's body (verifyAgentDecisionForSend's own select, joined at
+// query time); input_snapshot's `sms.body` is the same text stashed at
+// draft time and covers a decision the caller selected without that join.
+function resolveInboundMessage(decision) {
+  if (typeof decision?.inbound_message === 'string' && decision.inbound_message) return decision.inbound_message;
+  const fromSnapshot = parseInputSnapshot(decision?.input_snapshot)?.sms?.body;
+  return typeof fromSnapshot === 'string' ? fromSnapshot : null;
+}
+
 // OPEN TIMES: a draft that offered appointment times persists the exact
 // (date, window) pairs; a reviewer-edited body is matched to them pair by
 // pair, an unverifiable edit refuses, and surviving pairs are rechecked
@@ -58,16 +70,43 @@ function followupBlock({ decision, outgoingBody }) {
 
 // AMOUNTS: a real-answers card may carry exact billing figures and can wait
 // through a payment; re-read billing now, same check the scheduler runs at
-// fire time. Older-prompt decisions are untouched.
+// fire time. Older-prompt decisions are untouched for the AMOUNT half.
+//
+// Independent-review P1 (round 6, PR #5331): the Zelle recipient-plus-
+// invoice-eligibility half must NOT stay gated behind `realAnswers &&
+// customer_id` the way the amount half is — ZELLE_RECIPIENT is a live env
+// var and the invoice it was drafted against can settle or start a saved-
+// card charge at any time, whatever prompt version drafted the body. The
+// scheduler's own fire-time path (scheduler.js) already reruns
+// outgoingAmountsStale — which runs this same Zelle check first, ahead of
+// its own amount rules — for EVERY agent-decision-linked scheduled reply,
+// human-edited or not, regardless of prompt version; this immediate-send
+// seam now matches it. A body with an affirmative Zelle offer but no
+// customer_id on the decision can never be checked against a real invoice —
+// fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
   const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
-  if (!realAnswers || !decision.customer_id) return null;
-  const { outgoingAmountsStale } = require('./sms-amount-recheck');
+  const { outgoingAmountsStale, hasAffirmativeZelleMention } = require('./sms-amount-recheck');
+  const hasZelleOffer = hasAffirmativeZelleMention(outgoingBody);
+  if (!realAnswers && !hasZelleOffer) return null;
+  if (!decision.customer_id) {
+    return hasZelleOffer ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+  }
   // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
   // built for, so a body carrying a Zelle contact is rechecked against that
   // SAME invoice's CURRENT eligibility, not just its recipient.
   const zelleInvoiceId = parseInputSnapshot(decision.input_snapshot)?.zelle_invoice_id || null;
-  const amounts = await outgoingAmountsStale({ customerId: decision.customer_id, body: outgoingBody, promptVersion: decision.prompt_version, zelleInvoiceId });
+  const amounts = await outgoingAmountsStale({
+    customerId: decision.customer_id,
+    body: outgoingBody,
+    promptVersion: decision.prompt_version,
+    zelleInvoiceId,
+    inboundMessage: resolveInboundMessage(decision),
+    // A pre-v12 decision reaches here ONLY for its Zelle offer (above): its
+    // amount rules stay untouched (trustOwedAmounts on the pooled rule is a
+    // no-op after the Zelle check, same as the scheduler's human-authored path).
+    trustOwedAmounts: !realAnswers,
+  });
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
