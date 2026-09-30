@@ -917,17 +917,24 @@ describe('verdict box with a JSX spread fails closed', () => {
       .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
   });
   test.each([
-    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." /* {editor note} */ />'],
-    ['<BottomLineBox verdict="Yes, they sting." // {editor note}\n recommendation="Seal gaps." />'],
-  ])('a brace inside comment trivia is not a spread: %s', (tag) => {
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." // =\n {...{recommendation: "Call today."}} />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." /* {note} */ />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation=Seal />'],
+  ])('a box with anything but plain props fails closed: %s', (tag) => {
     const body = `${tag}\n\nMore.`;
-    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
-      .toEqual({ ok: true });
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()).ok).toBe(false);
   });
-  test('a spread after comment trivia still fails closed', () => {
-    const body = '<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." /* x */ {...props} />\n\nMore.';
+  test('an unreadable leading box tag is not "no box" (#5380 r4)', () => {
+    const body = '<BottomLineBox verdict="Yes, fire ants sting." recommendation="Seal gaps." /* { */ {...{recommendation: "Call today."}} />\n\nMore.';
     expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
-      .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+      .toEqual({ ok: false, reason: 'verdict_box_unreadable' });
+    const { checkVerdictBoxFirst } = require('../services/content/content-quality-gate')._internals;
+    expect(checkVerdictBoxFirst({ frontmatter: { post_type: 'diagnostic' }, body }, { page_type: 'customer-question' }))
+      .toEqual({ ok: false, reason: 'verdict_box_unreadable' });
+  });
+  test('a plain box still passes', () => {
+    const body = '<BottomLineBox verdict="Yes, they sting." recommendation={"Seal gaps."} confidence="high" />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief())).toEqual({ ok: true });
   });
   test('a spread box has no readable verdict for the answer-first check', () => {
     const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;

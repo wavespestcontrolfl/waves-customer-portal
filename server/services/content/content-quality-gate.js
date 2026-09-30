@@ -703,12 +703,12 @@ function checkLocalBusinessServiceSchema(draft) {
 // shows SOMETHING the checks cannot read, so callers fail closed (Codex r8
 // on #5272).
 function boxPropInfo(tag, name) {
-  const { eachJsxAttr, hasAttrSpreadAfter } = require('./content-guardrails')._internals;
+  const { eachJsxAttr } = require('./content-guardrails')._internals;
   const attrs = String(tag).replace(/^<BottomLineBox\b/, '').replace(/\/?>\s*$/, '');
-  // A JSX spread ({...{recommendation: "Call today."}}) can set or override
-  // any prop at render time, and eachJsxAttr skips spreads, so every prop
-  // of a box that carries one is opaque (fails closed).
-  if (hasAttrSpreadAfter(attrs)) return { text: '', opaque: true };
+  // A spread ({...{recommendation: "Call today."}}) can set or override any
+  // prop at render time and eachJsxAttr skips it, so a box that is not
+  // plain props only is opaque (fails closed).
+  if (!plainBoxAttrs(attrs)) return { text: '', opaque: true };
   // A repeated prop renders its LAST value; rather than guess, a box that
   // repeats verdict/recommendation is opaque and fails closed (Codex r9 on
   // #5272).
@@ -724,6 +724,35 @@ function boxPropInfo(tag, name) {
     text = value;
   }
   return { text: text.replace(/[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]/g, ' '), opaque: false };
+}
+// The box's attributes are plain props only — name, name="…", name='…' or
+// name={…}, separated by whitespace. The writer never emits anything else;
+// a spread, comment trivia or any other token makes the box unreadable
+// (#5380: pattern-matching spreads through comments did not converge).
+function plainBoxAttrs(attrs) {
+  const { closeOfExpressionAt } = require('./content-guardrails')._internals;
+  const s = String(attrs || '');
+  let i = 0;
+  for (;;) {
+    while (i < s.length && /\s/.test(s[i])) i += 1;
+    if (i >= s.length) return true;
+    const nm = /^[A-Za-z_$][\w$-]*/.exec(s.slice(i));
+    if (!nm) return false;
+    i += nm[0].length;
+    if (s[i] !== '=') {
+      if (i < s.length && !/\s/.test(s[i])) return false;
+      continue;
+    }
+    i += 1;
+    const c = s[i];
+    let end;
+    if (c === '"' || c === "'") end = s.indexOf(c, i + 1);
+    else if (c === '{') end = closeOfExpressionAt(s, i);
+    else return false;
+    if (end < 0) return false;
+    i = end + 1;
+    if (i < s.length && !/\s/.test(s[i])) return false;
+  }
 }
 function boxProp(tag, name) {
   return boxPropInfo(tag, name).text;
@@ -1367,6 +1396,10 @@ function checkVerdictBoxFirst(draft, brief, context) {
   const body = String(draft.body || '').trim();
   if (!body) return { ok: false, reason: 'empty_body' };
   if (!/^<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_not_first_block' };
+  // A leading box whose tag cannot be read (unbalanced braces, comment
+  // trivia, a spread) is never a compliant answer box (#5380 r4).
+  const firstTag = findBottomLineBoxTag(body);
+  if (!firstTag || firstTag.index !== 0 || boxPropInfo(firstTag.text, 'verdict').opaque) return { ok: false, reason: 'verdict_box_unreadable' };
   // Codex r6 on #5216: an identification post's box must also say
   // something — the writer frames verdict as the answer to "Is it
   // dangerous?" and recommendation as "What to do now". The verdict is
@@ -1443,7 +1476,11 @@ function checkCtaAfterVerdictBox(draft, brief, context) {
   // literal `>` INSIDE a prop value ("more than > 1/4 inch"), truncating the
   // tag so a link later in the same prop escaped both checks below.
   const box = findBottomLineBoxTag(body);
-  if (!box) return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
+  if (!box) {
+    // A body that opens on a box tag nobody can read is not "no box" (#5380 r4).
+    if (/^\s*<BottomLineBox\b/.test(body)) return { ok: false, reason: 'verdict_box_unreadable' };
+    return { ok: true, reason: 'no_verdict_box_present' }; // verdict_box_first already fails this
+  }
   const boxStart = box.index;
   ANY_MD_LINK_RE.lastIndex = 0;
   if (ANY_MD_LINK_RE.test(box.text)) return { ok: false, reason: 'link_inside_verdict_box' };

@@ -225,17 +225,9 @@ function hasAttrSpreadAfter(attrs, from = 0) {
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
-    // Top-level comment trivia between attributes is skipped whole, so a
-    // brace inside it is never read as a spread (#5380 r3).
-    if (c === '/' && s[i + 1] === '*') { const end = s.indexOf('*/', i + 2); if (end < 0) return true; i = end + 1; continue; }
-    if (c === '/' && s[i + 1] === '/') { const end = s.indexOf('\n', i + 2); if (end < 0) break; i = end; continue; }
     if (c !== '{') continue;
-    // Quoted values and expressions are skipped whole, so a { reached here
-    // is a value (`name={…}`) or at attribute position — and there JSX
-    // allows only a spread (anything else fails the MDX build). It counts as
-    // one with no whitespace before it and whatever trivia (block or line
-    // comments) precedes the ellipsis (#5380 r1, r2).
-    if (!/=\s*$/.test(s.slice(0, i))) return true;
+    const attrPos = i === 0 || /\s/.test(s[i - 1]);
+    if (attrPos && /^\{(?:\s|\/\*[\s\S]*?\*\/)*\.\.\./.test(s.slice(i))) return true;
     const e = closeOfExpressionAt(s, i);
     if (e < 0) return true;
     i = e;
@@ -7106,7 +7098,7 @@ module.exports = {
   SANCTIONED_META_TOKEN_RE,
   outOfAreaCities,
   GEO_COMPOUND_EXEMPT_RE,
-  _internals: { closeOfExpressionAt, eachJsxAttr, hasAttrSpreadAfter, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
+  _internals: { closeOfExpressionAt, eachJsxAttr, decodeEntitiesForScan, renderedInternalDestinations, competitorLinkFinding, priceFinding, brandTokenFinding, faqBlockedFinding, keywordStuffingFinding, blockedServiceCandidates, BLOCKED_SERVICE_ALIASES, externalLinkFinding, allowedLinkHosts, hostAllowed, TRUSTED_CITATION_HOSTS, productClaimFinding, preventionPromiseFinding, uncatalogedComponentFinding, citationResidueFinding, tenureClaimFinding, offFootprintCityFinding, internalRouteFinding, normalizeInternalPath, CITY_SERVICE_LINK_RE, affiliateComponentFindings, collectAffiliateLinkTags, hasServiceCtaLink, inlineCtaContractFinding, nextStepsFrontmatterFinding, relatedPostsFrontmatterFinding, nextStepsLinkMarkdown,
     // #4905 perf regression guard (content-guardrails.test.js): exposes the
     // precompiled reentry-safety RegExp objects so a test can confirm
     // reentrySafetyClaimFinding reuses the SAME objects call over call
