@@ -2679,6 +2679,7 @@ function reviewCardDone(serviceRecordId) {
   try { return JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').includes(serviceRecordId); } catch { return false; }
 }
 function rememberReviewCardDone(serviceRecordId) {
+  if (!serviceRecordId) return; // no visit id to remember: the dismissal lasts this session only
   try {
     const ids = JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').filter((id) => id !== serviceRecordId);
     localStorage.setItem(REVIEW_CARD_DONE_KEY, JSON.stringify([...ids, serviceRecordId].slice(-20)));
