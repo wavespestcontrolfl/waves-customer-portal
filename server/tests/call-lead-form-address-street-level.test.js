@@ -607,7 +607,10 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     const conn = (found) => () => ({ where() { return this; }, whereRaw() { return this; }, orderBy() { return this; }, first: async () => (found ? { id: 't1', status: 'open', payload: {} } : undefined) });
     expect(await isStreetLevelHoldRow(conn(true), row)).toBe(true);
     expect(await isStreetLevelHoldRow(conn(false), row)).toBe(false);         // a plain voice-agent row
-    expect(await isStreetLevelHoldRow(conn(true), { ...row, status: 'confirmed' })).toBe(false);
+    // Confirmed-but-unstamped (the office confirm commits status before the activation stamps) is still the hold.
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, status: 'confirmed' })).toBe(true);
+    expect(await isStreetLevelHoldRow(conn(true), { ...row, status: 'confirmed', customer_confirmed: true })).toBe(false);
+    for (const status of ['cancelled', 'skipped', 'rescheduled']) expect(await isStreetLevelHoldRow(conn(true), { ...row, status })).toBe(false);
     expect(await isStreetLevelHoldRow(conn(true), { ...row, source_action: 'ai_call_pipeline' })).toBe(false);
     expect(await isStreetLevelHoldRow(conn(true), { ...row, source_call_log_id: null })).toBe(false);
     expect(await isStreetLevelHoldRow(() => { throw new Error('db down'); }, row)).toBe(true);
@@ -634,7 +637,7 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
 
   test('gate off / any other pending row: the pending branches are scoped to street-level holds, so a reused legacy or voice-agent row keeps its exact prior behavior', () => {
     const s = src();
-    expect(s).toContain('if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
+    expect(s).toContain('if (await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
     expect(s).not.toMatch(/if \(isPendingOutboundReviewBooking\(svc\)\) \{\s*pendingOfficeReview = true;/);
     // The confirm hook's own conversion is untouched (no deferConversion passed there).
     expect(read('../services/outbound-review-confirm.js')).not.toContain('deferConversion');
@@ -680,7 +683,7 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(decide).toBeGreaterThan(0);
     expect(s.slice(decide, decide + 700)).not.toContain('street_level_address_review');
     // ...but at booking time, inside the branch that sets pendingOfficeReview.
-    const branch = s.indexOf('if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
+    const branch = s.indexOf('if (await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
     expect(branch).toBeGreaterThan(0);
     const push = s.indexOf("bridgeNeedsConfirmation.push('street_level_address_review');", branch);
     expect(push).toBeGreaterThan(branch);

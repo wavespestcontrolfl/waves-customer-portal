@@ -1842,7 +1842,11 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
 // CLOSED (treated as a hold) on a lookup error.
 async function isStreetLevelHoldRow(conn, row) {
   try {
-    if (!row?.id || !row.source_call_log_id || !isPendingOutboundReviewBooking(row)) return false;
+    // Same lifetime as the shared hold predicate: unconfirmed (customer_confirmed false) and
+    // not ended — NOT status = 'pending' alone, since the office confirm commits the status
+    // before the activation stamps customer_confirmed.
+    if (!row?.id || !row.source_call_log_id || row.source_action !== VOICE_AGENT_BOOKING_SOURCE_ACTION
+      || row.customer_confirmed || ['cancelled', 'skipped', 'rescheduled'].includes(String(row.status || ''))) return false;
     const card = await findStreetLevelHoldCard(conn, { callLogId: row.source_call_log_id, visitId: row.id });
     return !!card;
   } catch (err) {
@@ -18155,7 +18159,7 @@ const CallRecordingProcessor = {
               // visit id so a reprocess never rings twice. Best effort.
               // Street-level holds only: every other reused row (legacy outbound-review,
               // voice agent) keeps its exact prior behavior.
-              if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {
+              if (await isStreetLevelHoldRow(db, svc)) {
                 pendingOfficeReview = true;
                 // The open review is call-level state too, raised only now that the
                 // booking really became the hold (so a booking that never does can
