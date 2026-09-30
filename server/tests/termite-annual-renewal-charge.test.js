@@ -3113,6 +3113,106 @@ describe('termite annual renewal charge', () => {
       expect(completedUpdate).toHaveBeenCalledWith(expect.objectContaining({ renewal_lapse_completed_at: expect.any(Date) }));
     });
 
+    // B10 (Codex r3 P1): the dispute-hold predicate on the candidate query is
+    // only a scan-time filter. The lapse state machine itself re-checks the hold
+    // under the term's row lock on EVERY entry - a fresh lapse selected before
+    // the hold landed, and a started lapse the recovery pass resumes.
+    describe('B10: a collections dispute hold defers the lapse state machine itself', () => {
+      const lapseTerm = () => ({
+        id: 'succ-term-1', customer_id: 'cust-1', prepay_invoice_id: 'succ-invoice-1', renewed_from_term_id: 'parent-1',
+      });
+      const freshRows = () => ({
+        freshSuccessor: { status: 'payment_pending', prepay_invoice_id: 'succ-invoice-1', customer_id: 'cust-1' },
+        freshInvoice: { status: 'sent', paid_at: null },
+      });
+      function loadWithHold(holdImpl) {
+        mockCommon();
+        const deps = mockLapseDeps();
+        const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+        jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+        const customerHasActiveCollectionHold = jest.fn(holdImpl);
+        jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold }));
+        return { ...deps, notifyAdmin, customerHasActiveCollectionHold, _private: require('../services/termite-annual-renewal-charge')._private };
+      }
+      function expectNothingIrreversible({ voidInvoice, raiseTermiteRetrievalTask, recordDecision }, conn) {
+        expect(voidInvoice).not.toHaveBeenCalled();
+        expect(raiseTermiteRetrievalTask).not.toHaveBeenCalled();
+        expect(recordDecision).not.toHaveBeenCalled();
+        expect(conn.completedUpdate).not.toHaveBeenCalled();
+        expect(conn.manualReviewUpdate).not.toHaveBeenCalled();
+      }
+
+      test('a hold created AFTER the candidate scan: the locked re-check defers - no void, no retrieval, no parent cancel; bells once and rotates', async () => {
+        const ctx = loadWithHold(async () => true);
+        const lc = makeLapseConn(freshRows());
+        const outcome = await ctx._private.processGraceLapseForTerm(lapseTerm(), lc.conn);
+        expect(outcome).toBe('deferred');
+        // the check ran on the eligibility TRANSACTION, not the outer connection
+        expect(ctx.customerHasActiveCollectionHold).toHaveBeenCalledWith('cust-1', lc.trx);
+        expectNothingIrreversible(ctx, lc);
+        expect(lc.deferredUpdate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+        expect(ctx.notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('collections dispute hold'), expect.objectContaining({
+          dedupeKey: 'termite-renewal-charge:succ-term-1:ineligible',
+        }));
+      });
+
+      test('a hold that lands between the eligibility transaction and the void is caught by the pre-void re-check', async () => {
+        let calls = 0;
+        const ctx = loadWithHold(async () => { calls += 1; return calls > 1; });
+        const lc = makeLapseConn(freshRows());
+        const outcome = await ctx._private.processGraceLapseForTerm(lapseTerm(), lc.conn);
+        expect(outcome).toBe('deferred');
+        expect(calls).toBe(2);
+        expectNothingIrreversible(ctx, lc);
+        expect(lc.deferredUpdate).toHaveBeenCalled();
+      });
+
+      test('a hold that lands after the retrieval task but before the parent cancel is caught by the pre-cancel re-check', async () => {
+        let calls = 0;
+        const ctx = loadWithHold(async () => { calls += 1; return calls > 3; });
+        const lc = makeLapseConn(freshRows());
+        const outcome = await ctx._private.processGraceLapseForTerm(lapseTerm(), lc.conn);
+        expect(outcome).toBe('deferred');
+        expect(calls).toBe(4);
+        expect(ctx.recordDecision).not.toHaveBeenCalled();
+        expect(lc.completedUpdate).not.toHaveBeenCalled();
+        expect(lc.deferredUpdate).toHaveBeenCalled();
+      });
+
+      test('a RESUMED lapse (recovery pass, renewal_lapse_started_at set) with a hold defers too - never resumes the void/retrieval', async () => {
+        const ctx = loadWithHold(async () => true);
+        const term = { ...lapseTerm(), renewal_lapse_started_at: new Date('2026-10-01T00:00:00Z'), renewal_lapse_completed_at: null };
+        const lc = makeLapseConn(freshRows());
+        const scan = {};
+        for (const m of ['whereNotNull', 'whereNull', 'where', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'select']) scan[m] = jest.fn(() => scan);
+        scan.then = (resolve, reject) => Promise.resolve([term]).then(resolve, reject);
+        const conn = jest.fn((table) => (table === 'annual_prepay_terms as t' ? scan : lc.conn(table)));
+        conn.transaction = lc.conn.transaction;
+        const counts = { lapseEffectsScanned: 0, lapseEffectsReconciled: 0, graceReconciliationDeferred: 0 };
+        await ctx._private.reconcileMissedLapseEffects({ conn, limit: 200, counts });
+        expect(counts.graceReconciliationDeferred).toBe(1);
+        expect(counts.lapseEffectsReconciled).toBe(0);
+        expectNothingIrreversible(ctx, lc);
+        expect(ctx.notifyAdmin).toHaveBeenCalledTimes(1);
+      });
+
+      test('a hold-lookup failure fails closed: the lapse defers (not retired, not voided)', async () => {
+        const ctx = loadWithHold(async () => { throw new Error('flags unreadable'); });
+        const lc = makeLapseConn(freshRows());
+        const outcome = await ctx._private.processGraceLapseForTerm(lapseTerm(), lc.conn);
+        expect(outcome).toBe('deferred');
+        expectNothingIrreversible(ctx, lc);
+        expect(lc.deferredUpdate).toHaveBeenCalled();
+      });
+
+      test('no hold: the same term lapses exactly as before (regression)', async () => {
+        const ctx = loadWithHold(async () => false);
+        const lc = makeLapseConn(freshRows());
+        expect(await ctx._private.processGraceLapseForTerm(lapseTerm(), lc.conn)).toBe('lapsed');
+        expect(ctx.voidInvoice).toHaveBeenCalledTimes(1);
+      });
+    });
+
     // Codex round-7 P1 (2nd audit round): the eligibility re-check used to
     // commit on its OWN short-lived transaction, releasing its row lock
     // BEFORE the void and retrieval ran — a renew/switch_plan decision

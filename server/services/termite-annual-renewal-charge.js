@@ -3371,6 +3371,15 @@ async function resolveLapseVoidEligibility(term, conn = db) {
     const fresh = await trx('annual_prepay_terms').where({ id: term.id }).forUpdate().first();
     if (!fresh) return { outcome: 'retired', reason: 'the term no longer exists' };
 
+    // Collections DISPUTE hold (B10), binding: read under this term's row lock
+    // on EVERY path through here - a fresh lapse the scan selected before the
+    // hold landed, AND a started lapse the recovery pass resumes. A hold (or a
+    // lookup failure) defers: nothing is voided, retrieved or cancelled, and
+    // the lapse is not retired - it resumes after the office releases it.
+    if (await collectionsDisputeHoldBlocks(trx, fresh.customer_id)) {
+      return { outcome: 'deferred', kind: 'collections_hold', reason: HOLD_DEFER_REASON };
+    }
+
     let invoice = null;
     if (fresh.prepay_invoice_id) {
       invoice = await trx('invoices').where({ id: fresh.prepay_invoice_id }).first(...INVOICE_EVIDENCE_COLUMNS);
@@ -3733,7 +3742,7 @@ async function voidLapsedInvoice(term, conn) {
   }
 }
 
-const LAPSE_HOLD_BELL_KIND = { parent_decided_elsewhere: 'lapse_parent_decided_elsewhere', parent_suspended: null, successor_dispute_suspended: null, parent_cancelled_elsewhere: null };
+const LAPSE_HOLD_BELL_KIND = { parent_decided_elsewhere: 'lapse_parent_decided_elsewhere', collections_hold: 'ineligible', parent_suspended: null, successor_dispute_suspended: null, parent_cancelled_elsewhere: null };
 
 function lapseParentHoldKind(parentCheck) {
   if (parentCheck.externalCancel) return 'parent_cancelled_elsewhere';
@@ -3758,6 +3767,17 @@ async function closeLapseForExternalParentCancel(term, reason, conn) {
   return 'retired';
 }
 
+// A collections dispute hold defers a lapse: bell the office once
+// ('ineligible' dedupes per term) and rotate the row - never retire or
+// manual-review it, so it resumes after release.
+async function holdLapseForCollectionsHold(term, conn) {
+  return holdLapse(term, conn, {
+    manualReview: false,
+    kind: 'ineligible',
+    reason: `the renewal lapse is waiting: ${HOLD_DEFER_REASON}; it resumes after the office releases the hold`,
+  });
+}
+
 async function processGraceLapseSequence(term, conn) {
   const eligibility = await resolveLapseVoidEligibility(term, conn);
   if (eligibility.kind === 'parent_cancelled_elsewhere') return closeLapseForExternalParentCancel(term, eligibility.reason, conn);
@@ -3779,6 +3799,9 @@ async function processGraceLapseSequence(term, conn) {
   // lost after the eligibility read would let a concurrent manual renew /
   // switch commit while this still voided the successor.
   assertRenewalLockAlive();
+  // Re-check the hold right before the first irreversible step (a hold that
+  // landed after the eligibility transaction committed); same deferral.
+  if (await collectionsDisputeHoldBlocks(conn, term.customer_id)) return holdLapseForCollectionsHold(term, conn);
   const voidOutcome = await voidLapsedInvoice(term, conn);
   if (voidOutcome) return voidOutcome;
   // Codex #4971 r24 P1: the station-retrieval task is a durable side effect
@@ -3788,11 +3811,13 @@ async function processGraceLapseSequence(term, conn) {
   // exactly as every provider boundary does. A lost gate throws; the sweep
   // logs it and this lapse resumes next tick (lapseVoidAlreadyRanFor).
   assertRenewalLockAlive();
+  if (await collectionsDisputeHoldBlocks(conn, term.customer_id)) return holdLapseForCollectionsHold(term, conn);
   if (!(await raiseGraceLapseRetrievalTask(term, conn))) {
     return holdLapse(term, conn, { manualReview: false, reason: 'the station-retrieval step is not confirmed yet' });
   }
   // ...and before the parent decision, the last gated write of the lapse.
   assertRenewalLockAlive();
+  if (await collectionsDisputeHoldBlocks(conn, term.customer_id)) return holdLapseForCollectionsHold(term, conn);
   if (!(await decideParentLapse(term, conn))) {
     return holdLapse(term, conn, { manualReview: false, reason: 'the parent lapse decision did not record' });
   }

@@ -299,7 +299,11 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
     jest.doMock('../config', () => ({}));
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
     jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: false } }));
-    return { StripeService: require('../services/stripe'), stripeClient, events, db };
+    const audit = jest.fn(async () => {});
+    const autopay = jest.fn(async () => {});
+    jest.doMock('../services/audit-log', () => ({ recordAuditEvent: audit }));
+    jest.doMock('../services/autopay-log', () => ({ logAutopay: autopay }));
+    return { StripeService: require('../services/stripe'), stripeClient, events, db, audit, autopay };
   }
 
   const HOLD_ROW = [{ id: 'f1' }];
@@ -326,15 +330,51 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
       expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     });
 
-    test.each([
-      ['customerInitiated (the customer is at the keyboard)', { customerInitiated: true }],
-      ['operatorOverride (staff ordered the charge)', { operatorOverride: true }],
-    ])('%s opts out — a hold does not refuse and the hold is not even read', async (_label, opts) => {
+    test('customerInitiated (the customer is at the keyboard) opts out - a hold does not refuse and the hold is not even read', async () => {
       const { StripeService, stripeClient, events } = setup({ holdRows: HOLD_ROW });
-      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', opts))
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { customerInitiated: true }))
         .rejects.not.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
       expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
       expect(events).not.toContain('flags-read');
+    });
+
+    describe('operatorOverride records the override AT the charge boundary', () => {
+      const trail = { actorId: 'admin-7', ip: '1.2.3.4', userAgent: 'ua', route: 'admin_invoice_charge_card', invoiceId: 'inv-1' };
+
+      test('an active dispute hold at the locked check: the charge proceeds and audit + collection_hold_overridden name the admin', async () => {
+        const { StripeService, stripeClient, audit, autopay } = setup({ holdRows: HOLD_ROW });
+        await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { operatorOverride: true, overrideTrail: trail }))
+          .rejects.not.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+        expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+        expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'customer.collection_hold_overridden', actor_id: 'admin-7', resource_id: 'cust-1', ip_address: '1.2.3.4' }));
+        expect(autopay).toHaveBeenCalledWith('cust-1', 'collection_hold_overridden', { details: expect.objectContaining({ admin_id: 'admin-7', route: 'admin_invoice_charge_card', invoice_id: 'inv-1' }) });
+      });
+
+      test('no hold: the charge proceeds and nothing is recorded', async () => {
+        const { StripeService, stripeClient, audit, autopay } = setup({ holdRows: [] });
+        await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { operatorOverride: true, overrideTrail: trail }).catch(() => {});
+        expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+        expect(audit).not.toHaveBeenCalled();
+        expect(autopay).not.toHaveBeenCalled();
+      });
+
+      test('a failing hold lookup or audit write never blocks the charge', async () => {
+        const broken = setup({ holdThrows: true });
+        await expect(broken.StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { operatorOverride: true, overrideTrail: trail }))
+          .rejects.not.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
+        expect(broken.stripeClient.paymentIntents.create).toHaveBeenCalled();
+        const auditDown = setup({ holdRows: HOLD_ROW });
+        auditDown.audit.mockRejectedValueOnce(new Error('audit down'));
+        await auditDown.StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { operatorOverride: true, overrideTrail: trail }).catch(() => {});
+        expect(auditDown.stripeClient.paymentIntents.create).toHaveBeenCalled();
+      });
+
+      test('the hold is read AFTER the invoice lock inside the charge transaction, not pre-checked by the route', async () => {
+        const { StripeService, db } = setup({ holdRows: HOLD_ROW });
+        await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { operatorOverride: true, overrideTrail: trail }).catch(() => {});
+        const tables = db.mock.calls.map((c) => c[0]);
+        expect(tables.indexOf('collections_flags')).toBeGreaterThan(tables.indexOf('invoices'));
+      });
     });
 
     test('the hold read takes NO advisory lock — the hold writer never waits on a charge', async () => {
@@ -366,10 +406,26 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
       await expect(broken.StripeService.chargeOneTime('cust-1', 50, 'x', 'k3', {})).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
     });
 
-    test('operatorOverride (admin Charge now) skips the guard', async () => {
-      const { StripeService, events } = setup({ holdRows: HOLD_ROW });
-      await StripeService.charge('cust-1', 89, 'x', {}, 'k4', { operatorOverride: true }).catch(() => {});
-      expect(events).not.toContain('flags-read');
+    test('operatorOverride (admin Charge now) is not refused and records the override at the boundary when a hold is active', async () => {
+      const { StripeService, audit, autopay, stripeClient } = setup({ holdRows: HOLD_ROW });
+      await expect(StripeService.charge('cust-1', 89, 'x', {}, 'k4', {
+        operatorOverride: true, overrideTrail: { actorId: 'admin-7', route: 'admin_charge_now' },
+      })).rejects.not.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+      expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'customer.collection_hold_overridden', actor_id: 'admin-7' }));
+      expect(autopay).toHaveBeenCalledWith('cust-1', 'collection_hold_overridden', { details: expect.objectContaining({ admin_id: 'admin-7', route: 'admin_charge_now' }) });
+      expect(stripeClient.paymentIntents.create).toBeDefined();
+    });
+
+    test('chargeOneTime forwards the override + its trail to charge()', async () => {
+      const { StripeService, audit } = setup({ holdRows: HOLD_ROW });
+      await StripeService.chargeOneTime('cust-1', 50, 'x', 'k6', {}, { operatorOverride: true, overrideTrail: { actorId: 'admin-8', route: 'admin_charge_now' } }).catch(() => {});
+      expect(audit).toHaveBeenCalledWith(expect.objectContaining({ actor_id: 'admin-8' }));
+    });
+
+    test('chargeMonthly has no override option (no production caller uses one): it always goes through the default-on guard', () => {
+      const { StripeService } = setup({ holdRows: HOLD_ROW });
+      expect(StripeService.chargeMonthly.toString()).not.toMatch(/operatorOverride/);
+      expect(StripeService.chargeMonthly.length).toBeLessThanOrEqual(2);
     });
 
     test('no hold: charge() gets past the guard', async () => {
@@ -387,12 +443,15 @@ describe('off-session charge primitives — the hold check is default-ON', () =>
       expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     });
 
-    test('a lookup failure fails closed; an operator override skips the guard', async () => {
+    test('a lookup failure fails closed', async () => {
       const broken = setup({ holdThrows: true });
       await expect(broken.StripeService.chargeSavedPaymentMethodOffSession(feeArgs)).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
-      const overridden = setup({ holdRows: HOLD_ROW });
-      await overridden.StripeService.chargeSavedPaymentMethodOffSession({ ...feeArgs, operatorOverride: true }).catch(() => {});
-      expect(overridden.events).not.toContain('flags-read');
+    });
+
+    test('there is no override option: a fee charge is always automatic, so a stray operatorOverride is ignored and the hold still refuses', async () => {
+      const { StripeService, stripeClient } = setup({ holdRows: HOLD_ROW });
+      await expect(StripeService.chargeSavedPaymentMethodOffSession({ ...feeArgs, operatorOverride: true })).rejects.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
     });
   });
 });
@@ -528,12 +587,14 @@ describe('operator override leaves a trail (never blocks)', () => {
     await expect(b.m.recordHoldOverride(who)).resolves.toBe(false);
   });
 
-  test('both operatorOverride routes call it before charging', () => {
+  test('the routes pass the override trail INTO the charge (recorded at the boundary) and no longer pre-check the hold', () => {
     const fs = require('fs'); const path = require('path');
     const bh = fs.readFileSync(path.join(__dirname, '../routes/admin-billing-health.js'), 'utf8');
-    expect((bh.match(/await recordChargeNowHoldOverride\(req, customerId\)/g) || []).length).toBe(2);
+    expect((bh.match(/operatorOverride: true, overrideTrail: chargeNowOverrideTrail\(req\)/g) || []).length).toBe(2);
+    expect(bh).not.toMatch(/recordHoldOverride|recordChargeNowHoldOverride/);
     const inv = fs.readFileSync(path.join(__dirname, '../routes/admin-invoices.js'), 'utf8');
-    expect(inv.indexOf("route: 'admin_invoice_charge_card'")).toBeGreaterThan(0);
-    expect(inv.indexOf("route: 'admin_invoice_charge_card'")).toBeLessThan(inv.indexOf('operatorOverride: true'));
+    expect(inv).not.toMatch(/recordHoldOverride/);
+    expect(inv.indexOf("route: 'admin_invoice_charge_card'")).toBeGreaterThan(inv.indexOf('operatorOverride: true'));
+    expect(inv).toMatch(/overrideTrail: \{/);
   });
 });

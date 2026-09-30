@@ -112,11 +112,14 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
 
 // An operator-ordered charge (operatorOverride) goes past an active dispute
 // hold. It is never blocked, but it must leave a trail: an audit row naming the
-// admin and a distinct autopay event. Best-effort - a failed lookup or write
-// only logs, it never blocks or fails the charge.
-async function recordHoldOverride({ customerId, actorId = null, ip = null, userAgent = null, route, invoiceId = null }) {
+// admin and a distinct autopay event. The charge primitives call this AT the
+// charge boundary (the same place the default guard would have refused), so a
+// hold that lands between the route and the charge is still attributed.
+// `database` is the transaction the primitive already holds. Best-effort - a
+// failed lookup or write only logs, it never blocks or fails the charge.
+async function recordHoldOverride({ customerId, actorId = null, ip = null, userAgent = null, route = null, invoiceId = null, database = db }) {
   try {
-    if (!(await customerHasActiveCollectionHold(customerId))) return false;
+    if (!(await customerHasActiveCollectionHold(customerId, database))) return false;
     const { recordAuditEvent } = require('../audit-log');
     const { logAutopay } = require('../autopay-log');
     await recordAuditEvent({

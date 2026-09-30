@@ -3,7 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
-const { assertNoCollectionHold } = require('./collections/collection-hold');
+const { assertNoCollectionHold, recordHoldOverride } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
@@ -1291,13 +1291,13 @@ const StripeService = {
    * disputes. Throws on decline / authentication_required so the caller records
    * the failure; idempotency-keyed so retries replay one PaymentIntent.
    */
-  async chargeSavedPaymentMethodOffSession({ customerId, paymentMethodId, amountDollars, description, metadata = {}, idempotencyKey = null, operatorOverride = false }) {
+  async chargeSavedPaymentMethodOffSession({ customerId, paymentMethodId, amountDollars, description, metadata = {}, idempotencyKey = null }) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
     // Default-on: an active collections DISPUTE hold refuses the fee charge
     // before any Stripe call (COLLECTION_HOLD_ACTIVE / _CHECK_FAILED,
-    // retryable). Only an explicit staff override skips it.
-    if (!operatorOverride) await assertNoCollectionHold(customerId);
+    // retryable). No caller overrides it (a fee charge is always automatic).
+    await assertNoCollectionHold(customerId);
     if (!paymentMethodId) throw new Error('No payment method to charge');
     const amountCents = Math.round(Number(amountDollars) * 100);
     if (!Number.isFinite(amountCents) || amountCents <= 0) throw new Error('Invalid charge amount');
@@ -1472,14 +1472,17 @@ const StripeService = {
    *   same request but provides no cross-process dedupe.
    * @returns {object} payments table row
    */
-  async charge(customerId, amountDollars, description, metadata = {}, idempotencyKey = null, { operatorOverride = false } = {}) {
+  async charge(customerId, amountDollars, description, metadata = {}, idempotencyKey = null, { operatorOverride = false, overrideTrail = null } = {}) {
     const stripe = getStripe();
     if (!stripe) throw new Error('Stripe not configured');
     // Default-on: an active collections DISPUTE hold refuses monthly dues and
     // every retry before any Stripe call (COLLECTION_HOLD_ACTIVE /
     // _CHECK_FAILED, retryable — billing-cron defers instead of failing the
-    // obligation). Only an explicit staff override (admin Charge now) skips it.
-    if (!operatorOverride) await assertNoCollectionHold(customerId);
+    // obligation). Only an explicit staff override (admin Charge now) skips it,
+    // and it records the override HERE, at the boundary, when a hold is active
+    // (overrideTrail names the admin/route; never blocks the charge).
+    if (operatorOverride) await recordHoldOverride({ customerId, ...(overrideTrail || {}) });
+    else await assertNoCollectionHold(customerId);
 
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
@@ -1912,7 +1915,7 @@ const StripeService = {
    *   otherwise share the date key and replay one PaymentIntent while
    *   both originals get marked superseded.
    */
-  async chargeMonthly(customerId, idempotencyKey = null, { operatorOverride = false } = {}) {
+  async chargeMonthly(customerId, idempotencyKey = null) {
     const customer = await db('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
     // NULL/0 monthly_rate = unpriced (manual quote pending), not "charge
@@ -1940,7 +1943,7 @@ const StripeService = {
       // retry sweep match on this, not on the date the money landed, so a
       // late-recovered charge can't satisfy the wrong month.
       billed_month: etDateString().slice(0, 7),
-    }, effectiveKey, { operatorOverride });
+    }, effectiveKey);
   },
 
   // =========================================================================
@@ -1956,8 +1959,8 @@ const StripeService = {
   // ladder) stamp `initiated_by: 'machine'` — the webhook's send-window
   // provenance classifier otherwise reads a bare 'one_time' PI as the
   // customer's own payment and texts its ACH lifecycle notices at night.
-  async chargeOneTime(customerId, amount, description, idempotencyKey = null, metadata = {}, { operatorOverride = false } = {}) {
-    return this.charge(customerId, amount, description, { type: 'one_time', ...metadata }, idempotencyKey, { operatorOverride });
+  async chargeOneTime(customerId, amount, description, idempotencyKey = null, metadata = {}, { operatorOverride = false, overrideTrail = null } = {}) {
+    return this.charge(customerId, amount, description, { type: 'one_time', ...metadata }, idempotencyKey, overrideTrail ? { operatorOverride, overrideTrail } : { operatorOverride });
   },
 
   // =========================================================================
@@ -2063,7 +2066,9 @@ const StripeService = {
   // which caps the PRE-surcharge amount due, and from expectedTotal, which
   // demands exact equality.
   // opts.operatorOverride — a staff member explicitly ordered THIS charge
-  // (admin card-on-file): skips the default collections-dispute-hold guard.
+  // (admin card-on-file): skips the default collections-dispute-hold guard and
+  // records the override (opts.overrideTrail = {actorId, ip, userAgent, route,
+  // invoiceId}) at the charge boundary when a dispute hold is active.
   // opts.customerInitiated — the customer is at the keyboard for THIS charge
   // (estimate-accept annual prepay on a saved method). Stamps the PI
   // `initiated_by: 'customer'` and the receipt job `customer_initiated`, so
@@ -2071,7 +2076,7 @@ const StripeService = {
   // 2026-08-29). Default false = machine ('admin_card_on_file' rails:
   // completion/balance sweeps, admin card-on-file, no-show, recurring) —
   // fenced to the 8AM-8PM window like every other schedule-driven send.
-  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
+  async chargeInvoiceWithSavedCard(invoiceId, paymentMethodId, { customerInitiated = false, deferReceiptDelivery = false, expectedTotal = null, maxAuthorizedSubtotal = null, maxAuthorizedChargeCents = null, maxAuthorizedTotalCents = null, requireAutopayForCustomerId = null, requireSelfPayScheduledServiceId = null, requireSelfPayCustomerId = null, requireOneTimeLane = false, requireInvoiceScheduledServiceBinding = false, requireCompletedOneTimeVisit = false, requireCompletedVisit = false, requireNoAppointmentCardLane = false, requireExtendedCompletionAnchor = false, refuseWhenDunningStopped = false, operatorOverride = false, overrideTrail = null, requireVisitCompletionPacketId = null, assertBeforeMoneyMoves = null } = {}) {
     // The performed-visit gate runs under the visit lock; asking for it
     // without naming the visit would silently skip it.
     if (requireCompletedVisit && requireSelfPayScheduledServiceId == null) {
@@ -2244,6 +2249,11 @@ const StripeService = {
         // closed). Both refusals are pre-Stripe and retryable.
         if (!customerInitiated && !operatorOverride) {
           await assertNoCollectionHold(lockedInvoice.customer_id, trx);
+        } else if (operatorOverride && !customerInitiated) {
+          // Override recorded at the boundary: read inside this transaction
+          // (the same read the default guard would have refused on), so a hold
+          // that landed after the route was entered is still attributed.
+          await recordHoldOverride({ customerId: lockedInvoice.customer_id, ...(overrideTrail || {}), database: trx });
         }
         // Auto Pay SERIALIZED with the charge (Codex #3153 r13 P1): the
         // callers' boundary snapshots leave an interval a pause/opt-out
