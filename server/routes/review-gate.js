@@ -73,8 +73,9 @@ const reviewPageLimiter = rateLimit({
 });
 
 // GET /api/rate/:token/go — tracked redirect straight to the Google review
-// form (GATE_REVIEW_DIRECT_LINK rollout; the SMS/email {review_url} resolves
-// here via a /l/ short link). Stamps the open + click on the review_requests
+// form (the SMS/email {review_url} resolves here via a /l/ short link when
+// GATE_REVIEW_DIRECT_LINK is on, and the /rate page's Open Google button always
+// does). Stamps the open + click on the review_requests
 // row, stops the customer's active cadence (they acted — no Day-3/4 chasers),
 // bells the owner so an unmatched review can be manually attributed, and 302s
 // to the location's GBP review URL. Every failure path degrades to the /rate
@@ -88,13 +89,12 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
   const { publicPortalUrl } = require('../utils/portal-url');
   const ratePageFallback = `${publicPortalUrl()}/rate/${encodeURIComponent(token)}`;
   try {
-    // Kill switch must govern ALREADY-DELIVERED links too (Codex P1, r2):
-    // with the gate off, /go behaves as a plain alias of the rate page — no
-    // click stamping, no cadence stop, no Google redirect — so unsetting
-    // GATE_REVIEW_DIRECT_LINK rolls the whole direct flow back even for
-    // links sitting in old texts.
-    const { isEnabled } = require('../config/feature-gates');
-    if (!isEnabled('reviewDirectLink')) return res.redirect(302, ratePageFallback);
+    // The tracked flow runs whatever GATE_REVIEW_DIRECT_LINK says (that gate
+    // only decides whether ask texts/emails link HERE or to the /rate thank-you
+    // page). With the 1-10 rating retired there is no old flow for a gate-off
+    // alias to fall back to, and the /rate page's own button points here — a
+    // gate-off bounce back to /rate would be a loop and would skip the click
+    // stamp and the cadence stop.
     // Shared review-token shape, NOT 64-hex-only (codex #3287 r1): live
     // tokens are 32-64 url-safe (prod-verified incl. one legacy 32-char
     // row), and the Track CTA + tech-trigger now emit /go for those rows
@@ -359,19 +359,14 @@ router.get('/:token', reviewPageLimiter, async (req, res, next) => {
     }
 
     // The page is a thank-you plus ONE tap to Google (owner ruling 2026-09-29:
-    // the 1-10 rating is retired). The button points at the tracked /go
-    // redirect (stamps the click, stops the cadence) while GATE_REVIEW_DIRECT_LINK
-    // is on; with it off /go only bounces back here, so the official Google
-    // review URL is used directly. A customer already marked as a reviewer gets
-    // no button (same finality /go enforces).
-    const { isEnabled } = require('../config/feature-gates');
+    // the 1-10 rating is retired). The button ALWAYS points at the tracked /go
+    // redirect (stamps the click, stops the cadence, sends the referral invite),
+    // whatever GATE_REVIEW_DIRECT_LINK says. A customer already marked as a
+    // reviewer gets no button (same finality /go enforces).
     const { publicPortalUrl } = require('../utils/portal-url');
-    let reviewUrl = null;
-    if (customer?.has_left_google_review !== true) {
-      reviewUrl = isEnabled('reviewDirectLink')
-        ? `${publicPortalUrl()}/api/rate/${encodeURIComponent(request.token)}/go`
-        : loc.googleReviewUrl || null;
-    }
+    const reviewUrl = customer?.has_left_google_review === true
+      ? null
+      : `${publicPortalUrl()}/api/rate/${encodeURIComponent(request.token)}/go`;
 
     res.json({
       firstName: contact.name || customer?.first_name || 'there',

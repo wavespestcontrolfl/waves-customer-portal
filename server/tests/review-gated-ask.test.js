@@ -554,6 +554,23 @@ describe('portal review card link vs pending sends (overlapping states)', () => 
     expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(OFFICE.googleReviewUrl);
   });
 
+  test('GATE_REVIEW_DIRECT_LINK off: livePortalReviewUrlFor hands back /rate/<token>, the card link is that request\'s tracked /go URL', async () => {
+    mockGates.reviewDirectLink = false;
+    installMock({
+      customers: [CUSTOMER],
+      review_sequences: [{ id: 'seq-1', customer_id: 'cust-1', status: 'active' }],
+      review_requests: [live('a', 2)],
+    });
+    expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBe(`https://portal.test/rate/${'a'.repeat(64)}`);
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(LIVE('a'));
+    // No pending, no cadence: still the tracked /go form, not the /rate page.
+    installMock({ customers: [CUSTOMER], review_requests: [live('b', 5)] });
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(LIVE('b'));
+    // Nothing live and nothing pending: the office URL, as before.
+    installMock({ customers: [CUSTOMER], review_requests: [] });
+    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(OFFICE.googleReviewUrl);
+  });
+
   test('cadence gate off (frozen cron): a stranded active row is not a pending send', async () => {
     mockGates.reviewSequences = false;
     installMock({

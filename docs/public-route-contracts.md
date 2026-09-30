@@ -3683,8 +3683,8 @@ whole defense.)
 `/api/rate/:token` (+ `/:token/go`) (review-gate; token-scoped thank-you
 page from a review-request link. The 1-10 rating, its feedback form and the AI
 review writer are retired (owner ruling 2026-09-29): the page GET returns
-`reviewUrl` — the tracked `/api/rate/:token/go` link while GATE_REVIEW_DIRECT_LINK
-is on, else the nearest GBP write-a-review URL, and null for a customer already
+`reviewUrl` — ALWAYS the tracked `/api/rate/:token/go` link (whatever
+GATE_REVIEW_DIRECT_LINK says), null for a customer already
 marked as a reviewer — and the page shows one "Open Google" button; going to
 Google is always the customer's own click. `POST /:token/score`, `/:token/submit`
 and `/:token/generate-review` no longer exist (404). Finalized (legacy-rated)
@@ -3692,7 +3692,7 @@ requests answer `alreadySubmitted` with no button. Router-wide url-safe
 32-64 token param gate (generic 404; malformed tokens on `/go` degrade to
 the /rate page per its every-failure-lands-somewhere contract); the page
 GET carries a 30/min limiter. `/:token/go` is the
-GATE_REVIEW_DIRECT_LINK tracked redirect: the same 32–64 URL-safe token format gate, 30
+tracked redirect (ALWAYS live, not gate-dependent; GATE_REVIEW_DIRECT_LINK now only decides whether ask texts and emails link here or to the /rate thank-you page): the same 32–64 URL-safe token format gate, 30
 req/min per-IP limit, stamps open/click on the review_requests row, stops
 the customer's active review cadence, fire-and-forgets the referral invite
 email on the FIRST tracked click only (`sendReferralInviteEmail`, trigger

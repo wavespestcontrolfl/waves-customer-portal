@@ -1,8 +1,7 @@
 /**
  * The 1-10 rating is retired (owner ruling 2026-09-29). /api/rate/:token is a
  * thank-you page with ONE tap to Google: the page GET returns `reviewUrl`
- * (the tracked /go link while GATE_REVIEW_DIRECT_LINK is on, else the office's
- * Google review URL, null for a customer who already reviewed) and nothing
+ * (always the tracked /go link, null for a customer who already reviewed) and nothing
  * else on this router writes a rating. The score / submit / AI-writer routes
  * are gone and so are the low-score office alerts that only fired from them.
  */
@@ -68,21 +67,15 @@ const post = (path, body = {}) => fetch(`${base}/api/rate/${TOKEN}${path}`, {
 });
 
 describe('GET /:token — thank-you data and the one Google URL', () => {
-  test('gate on: reviewUrl is the tracked /go link; no rating fields', async () => {
-    isEnabled.mockImplementation((k) => k === 'reviewDirectLink');
+  test.each([true, false])('gate %s: reviewUrl is ALWAYS the tracked /go link; no rating fields', async (on) => {
+    isEnabled.mockImplementation((k) => (k === 'reviewDirectLink' ? on : k === 'reviewSequences'));
     const body = await (await getPage()).json();
     expect(body.reviewUrl).toBe(`${publicPortalUrl()}/api/rate/${TOKEN}/go`);
     expect(body).not.toHaveProperty('googleReviewUrl');
     expect(body).not.toHaveProperty('serviceType');
   });
 
-  test('gate off: /go would only bounce back here, so reviewUrl is the office Google review URL', async () => {
-    const body = await (await getPage()).json();
-    expect(body.reviewUrl).toBe(loc.googleReviewUrl);
-  });
-
   test('a customer already marked as a reviewer gets no button (reviewUrl null)', async () => {
-    isEnabled.mockImplementation((k) => k === 'reviewDirectLink');
     db.state.customer.has_left_google_review = true;
     const res = await getPage();
     expect(res.status).toBe(200);
