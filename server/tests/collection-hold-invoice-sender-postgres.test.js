@@ -456,4 +456,54 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(await alertsFor(noLink)).toHaveLength(0);
     });
   });
+
+  describe('a deferred decline notice that dies terminally (completion text disabled or already handled)', () => {
+    const { onTerminalDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+    const meta = (inv, c) => ({ entry_point: 'autopay_completion_decline_deferred', invoice_id: inv, customer_id: c, pay_url: 'https://pay.example.test/i/x' });
+    const alertsFor = (inv) => db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' }).whereRaw("payload->>'invoiceId' = ?", [String(inv)]);
+
+    test('the terminal hook hands the invoice to the sender; with the hold standing the sender holds it, then sends it after the release', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c); // the notice was its only pay-link delivery: still a draft
+      expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta(inv, c))).toMatchObject({ ok: true });
+      expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      await makeDueNow(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv);
+      await releaseViaOpsScript(c);
+      await Invoices.processScheduledSends();
+      expect(sentIds().filter((x) => x === inv)).toHaveLength(1);
+    });
+
+    test('without a hold it queues too (the notice never delivered); a paid, sent or payer-billed invoice is left alone', async () => {
+      const c = await newCustomer();
+      const draft = await newInvoice(c);
+      const paid = await newInvoice(c, { status: 'paid', paid_at: db.fn.now() });
+      const payer = await newInvoice(c, { scheduled_send_error: 'payer_billed:7' });
+      for (const inv of [draft, paid, payer]) await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta(inv, c));
+      expect((await invoice(draft)).status).toBe('scheduled');
+      expect((await invoice(paid)).status).toBe('paid');
+      expect(await invoice(payer)).toMatchObject({ status: 'draft', scheduled_send_error: 'payer_billed:7' });
+    });
+
+    test('a queue write failure raises the office alert once, is reported as a failed hook (so the sweep retries), and a retry queues it', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c);
+      await db.raw(`CREATE OR REPLACE FUNCTION b10_fail_queue3() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'queue down (synthetic)'; END $$ LANGUAGE plpgsql`);
+      await db.raw(`CREATE TRIGGER b10_fail_queue3_trg BEFORE UPDATE ON invoices FOR EACH ROW WHEN (OLD.id = '${inv}' AND OLD.status = 'draft' AND NEW.status = 'scheduled') EXECUTE FUNCTION b10_fail_queue3()`);
+      try {
+        expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta(inv, c))).toMatchObject({ ok: false });
+        expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta(inv, c))).toMatchObject({ ok: false });
+      } finally {
+        await db.raw('DROP TRIGGER IF EXISTS b10_fail_queue3_trg ON invoices');
+        await db.raw('DROP FUNCTION IF EXISTS b10_fail_queue3()');
+      }
+      expect(await alertsFor(inv)).toHaveLength(1);
+      expect((await invoice(inv)).status).toBe('draft');
+      expect(await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta(inv, c))).toMatchObject({ ok: true });
+      expect((await invoice(inv)).status).toBe('scheduled');
+    });
+  });
 });

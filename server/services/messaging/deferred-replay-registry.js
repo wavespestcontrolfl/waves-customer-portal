@@ -241,6 +241,32 @@ async function alertHeldInvoiceNeverQueued(meta) {
   }
 }
 
+// A deferred decline notice that died terminally (attempt cap after failed hold
+// lookups, or any terminal block): when the completion text was disabled or
+// already handled it was the invoice's ONLY pay-link delivery, and
+// terminalDeferredDeclineNotice only resets the record's notice status, so the
+// invoice would stay an unqueued draft forever. Hand it to the scheduled-invoice
+// sender (queueHeldInvoiceForSender is guarded to an unpaid, unsent, self-pay
+// draft; the sender then applies its own live dispute-hold check, consent and
+// suppression rules, so this is safe with a hold standing). A queue failure
+// raises the collection_hold_invoice_queue_failed office alert (once per
+// invoice) and rethrows so the terminal sweep retries the hook.
+async function queueInvoiceOfDeadDeclineNotice(meta) {
+  if (!meta.invoice_id) return;
+  try {
+    await require('../collections/collection-hold').queueHeldInvoiceForSender(meta.invoice_id);
+  } catch (err) {
+    try {
+      const open = await db('dispatch_alerts').where({ type: 'collection_hold_invoice_queue_failed' })
+        .whereNull('resolved_at').whereRaw("payload->>'invoiceId' = ?", [String(meta.invoice_id)]).first('id');
+      if (!open) await raiseHeldInvoiceQueueAlert({ invoiceId: meta.invoice_id, customerId: meta.customer_id, error: err });
+    } catch (alertErr) {
+      logger.error(`[deferred-replay] could not check/raise the queue-failure alert for invoice ${meta.invoice_id}: ${alertErr.message}`);
+    }
+    throw err;
+  }
+}
+
 const REGISTRY = {
   billing_retry_email_deferred: {
     // Email-only replay: the row is queued without a phone on purpose, so
@@ -689,7 +715,17 @@ const REGISTRY = {
     },
     async onTerminal(meta) {
       const { terminalDeferredDeclineNotice } = require('../dispatch-completion-deferred');
-      await terminalDeferredDeclineNotice(meta);
+      // Restore the record's status FIRST, then hand the invoice to the sender;
+      // whichever fails is rethrown after the other ran so the terminal sweep
+      // retries the hook without losing either half.
+      let restoreErr = null;
+      try {
+        await terminalDeferredDeclineNotice(meta);
+      } catch (err) {
+        restoreErr = err;
+      }
+      await queueInvoiceOfDeadDeclineNotice(meta);
+      if (restoreErr) throw restoreErr;
     },
     durableFinalize: true,
   },
