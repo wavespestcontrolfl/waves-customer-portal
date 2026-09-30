@@ -13,15 +13,18 @@ jest.mock('../models/db', () => {
   const windowRows = [1, 2, 3, 4, 5].map((n) => ({
     id: `p${n}`, amount: 40 + n, status: 'paid', payment_date: `2026-09-2${n}`, payer_id: null, metadata: null,
   }));
-  const rowsFor = (table, q) => (q && q._linkage ? ((db.__rows && db.__rows.payerInvoices) || []) : ((db.__rows && db.__rows[table]) || (table === 'payments' ? windowRows : [])));
+  const rowsFor = (table, q) => (q && q._failed ? ((db.__rows && db.__rows.failedPayments) || []) : q && q._linkage ? ((db.__rows && db.__rows.payerInvoices) || []) : ((db.__rows && db.__rows[table]) || (table === 'payments' ? windowRows : [])));
   const mk = (table) => {
     const q = {};
-    for (const m of ['where', 'whereNull', 'whereNot', 'whereNotNull', 'whereIn', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
+    // the aggregator's failed / pending / overdue ledger query (services/failed-payments.js) is the only payments read filtered on status
+    q.where = jest.fn(() => q);
+    q.whereIn = jest.fn((col, vals) => { if (col === 'status' && Array.isArray(vals) && vals.includes('failed')) q._failed = true; return q; });
+    for (const m of ['whereNull', 'whereNot', 'whereNotNull', 'whereRaw', 'orWhere', 'orderBy', 'limit', 'leftJoin', 'join', 'count', 'andWhere', 'whereNotIn', 'modify', 'groupBy', 'distinct']) q[m] = jest.fn(() => q);
     // the shared payer-linkage lookup (services/payer-linkage.js) is the only invoices query that selects stripe_charge_id
     q.select = jest.fn((...cols) => { if (cols.includes('stripe_charge_id')) q._linkage = true; return q; });
     q.first = jest.fn(async () => (table === 'customers' ? { id: 'c1' } : undefined));
     q.catch = jest.fn(() => Promise.resolve(rowsFor(table, q)));
-    q.then = (res, rej) => Promise.resolve(rowsFor(table, q)).then(res, rej);
+    q.then = (res, rej) => { const r = rowsFor(table, q); return (r instanceof Error ? Promise.reject(r) : Promise.resolve(r)).then(res, rej); };
     return q;
   };
   const queries = [];
@@ -203,5 +206,57 @@ describe('openInvoices is not silently capped at 10', () => {
     const billing = await build();
     expect(billing.openInvoices).toHaveLength(100);
     expect(billing.openInvoicesTruncated).toBe(true);
+  });
+});
+
+
+// Codex round-35 P1: the grounding balance sums EVERY unsuperseded failed payment (the canonical /api/billing/balance
+// query, services/failed-payments.js) — not the 5-row display slice.
+describe('standalone failed payments behind the display window still count as owed', () => {
+  const db = require('../models/db');
+  afterEach(() => { delete db.__rows; });
+  const failed = (id, amount, over = {}) => ({ id, amount, status: 'failed', payment_date: '2026-06-01', metadata: null, stripe_payment_intent_id: 'pi_x', retry_count: 1, next_retry_at: null, ...over });
+  const billingFor = async (failedPayments, extra = {}) => {
+    db.__rows = { invoices: [], payments: undefined, failedPayments, ...extra };
+    hasInFlightMoney.mockResolvedValue(false);
+    return build();
+  };
+  test('an old failure behind 5 newer PAID rows is owed: balance > 0 and "your account is current" is ungrounded', async () => {
+    const billing = await billingFor([failed('old', 95)]);
+    expect(billing.recentPayments.every((p) => p.status === 'paid')).toBe(true); // the failure is NOT in the display window
+    expect(billing.outstandingBalance).toBe(95);
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    expect(replyQuotesUngroundedAmount('Your account is current.', { billing }, { byMeaning: true })).toBe(true);
+  });
+  // main's status set is kept (shared by the admin overdue flag, voice / email context and the "$X overdue" summary)
+  test('an old OVERDUE or PENDING payment behind 5 newer paid rows is still owed; the ledger query asks for failed / pending / overdue', async () => {
+    db.__queries.length = 0;
+    const overdue = await billingFor([failed('od', 60, { status: 'overdue', stripe_payment_intent_id: null })]);
+    expect(overdue.recentPayments.every((p) => p.status === 'paid')).toBe(true);
+    expect(overdue.outstandingBalance).toBe(60);
+    const ledger = db.__queries.map(([, q]) => q).find((q) => q._failed);
+    expect(ledger.whereIn).toHaveBeenCalledWith('status', ['failed', 'pending', 'overdue']);
+    const pending = await billingFor([failed('pd', 45, { status: 'pending', stripe_payment_intent_id: null })]);
+    expect(pending.outstandingBalance).toBe(45);
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    expect(replyQuotesUngroundedAmount("You're paid up.", { billing: overdue }, { byMeaning: true })).toBe(true);
+  });
+  test('no failure => zero owed and "your account is current" is grounded', async () => {
+    const billing = await billingFor([]);
+    expect(billing.outstandingBalance).toBe(0);
+    const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+    expect(replyQuotesUngroundedAmount('Your account is current.', { billing }, { byMeaning: true })).toBe(false);
+  });
+  test('the canonical exclusions hold: a never-attempted lock-contention deferral and a payer-linked failure are not owed', async () => {
+    const deferral = failed('def', 55, { stripe_payment_intent_id: null, retry_count: 0, next_retry_at: '2026-10-05', metadata: { deferred_reason: 'lock_contention' } });
+    expect((await billingFor([deferral])).outstandingBalance).toBe(0);
+    const payerInvoice = { id: 'payer-inv', stripe_payment_intent_id: null, stripe_charge_id: null, invoice_number: 'WPC-2026-0900' };
+    const linked = failed('lnk', 70, { metadata: { invoice_id: 'payer-inv' } });
+    expect((await billingFor([linked], { payerInvoices: [payerInvoice], invoices: [] })).outstandingBalance).toBe(0);
+  });
+  test('an unreadable failed-payment read makes billing UNAVAILABLE (never a silent zero)', async () => {
+    const billing = await billingFor(new Error('boom'));
+    expect(billing.unavailable).toBe(true);
+    expect(billing.invoiceStatuses).toBeNull();
   });
 });

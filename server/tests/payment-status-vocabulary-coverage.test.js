@@ -1441,3 +1441,114 @@ describe('round-34: tender-after-preposition keeps the invoice subject and binds
     expect(ungrounded('Your ACH payment is processing.', ctx([row('paid', TENDERS.ach)]), inbound)).toBe(true);
   });
 });
+
+// Codex round-35 P2: a clause whose subject is a REFUND is judged against refund_status / refund_amount, never the payment
+// attempt's status.
+describe('round-35: refund-subject clauses bind to the refund state', () => {
+  const base = { id: 'p1', amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const pending = { ...base, id: 'r-pend', status: 'refunded', refund_status: 'pending', refund_amount: 30 };
+  const partialDone = { ...base, id: 'r-part', refund_status: 'partial', refund_amount: 30 };
+  const failedRefund = { ...base, id: 'r-fail', refund_status: 'failed', refund_amount: 30 };
+  const fullRefund = { ...base, id: 'r-full', status: 'refunded', refund_status: 'full', refund_amount: 120 };
+  const succeeded = { ...base, id: 'r-ok', status: 'refunded', refund_status: 'succeeded', refund_amount: 120 };
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } });
+  const ung = (reply, rows, inbound = 'Where is my refund?') => replyQuotesUngroundedAmount(reply, ctx(rows), { byMeaning: true, inboundMessage: inbound });
+
+  test('pending: only a refund actually pending grounds it (the payment status is irrelevant)', () => {
+    expect(ung('Your $30 refund is pending.', [pending])).toBe(false);
+    expect(ung('Your refund is still processing.', [pending])).toBe(false);
+    expect(ung('Your $30 refund is pending.', [partialDone])).toBe(true); // completed, not pending
+    expect(ung('Your $30 refund is pending.', [failedRefund])).toBe(true);
+    expect(ung('Your $30 refund is pending.', [{ ...base }])).toBe(true); // no refund at all
+    // a PENDING payment attempt is not a pending refund
+    expect(ung('Your $30 refund is pending.', [{ ...base, status: 'pending' }])).toBe(true);
+  });
+  test('completed: a succeeded / full / partial refund grounds it; a pending or failed one does not', () => {
+    expect(ung('Your $30 refund was issued.', [partialDone])).toBe(false);
+    expect(ung('Your $120 refund was issued.', [succeeded])).toBe(false);
+    expect(ung('Your refund was issued.', [fullRefund])).toBe(false);
+    expect(ung('Your $30 refund was issued.', [pending])).toBe(true);
+    expect(ung('Your $30 refund was issued.', [failedRefund])).toBe(true);
+    expect(ung('Your $120 refund was issued.', [partialDone])).toBe(true); // that is not what was refunded
+  });
+  test('failed: only a failed / canceled refund grounds it', () => {
+    expect(ung('Your refund failed.', [failedRefund])).toBe(false);
+    expect(ung('Your refund failed.', [partialDone])).toBe(true);
+    expect(ung('Your refund failed.', [{ ...base, status: 'failed' }])).toBe(true); // a failed PAYMENT is not a failed refund
+  });
+  test('the named amount must be the refund: two refunds in different states => every matching refund must agree', () => {
+    expect(ung('Your $30 refund is pending.', [pending, { ...partialDone, id: 'r-other', refund_amount: 15 }])).toBe(false);
+    expect(ung('Your refund is pending.', [pending, partialDone])).toBe(true); // ambiguous without an amount
+  });
+  test('payment-subject wording is unchanged: "Your payment is pending" still binds to the payment status', () => {
+    expect(ung('Your payment is pending.', [{ ...base, status: 'pending' }], 'Is my payment pending?')).toBe(false);
+    expect(ung('Your payment was refunded.', [fullRefund], 'Was my payment refunded?')).toBe(false);
+  });
+});
+
+// Codex round-35 P1: every invoice number named must resolve and satisfy the claim.
+describe('round-35: several named invoices are each resolved and each must satisfy the claim', () => {
+  const invs = [
+    { id: 'i1', invoiceNumber: 'WPC-2026-0123', status: 'paid', total: 120, amountDue: 0 },
+    { id: 'i2', invoiceNumber: 'WPC-2026-0124', status: 'sent', total: 95, amountDue: 95 },
+  ];
+  const ctx = (list) => ({ billing: { outstandingBalance: 95, recentPayments: [], invoiceStatuses: list } });
+  const ung = (reply, inbound, list = invs) => replyQuotesUngroundedAmount(reply, ctx(list), { byMeaning: true, inboundMessage: inbound });
+
+  test('both named invoices satisfy => grounded; one does not => ungrounded', () => {
+    const allPaid = invs.map((i) => ({ ...i, status: 'paid', amountDue: 0 }));
+    expect(ung('Invoice #0123 is paid. Invoice #0124 is paid.', 'Are invoices 0123 and 0124 paid?', allPaid)).toBe(false);
+    expect(ung('Invoice #0123 is paid. Invoice #0124 is paid.', 'Are invoices 0123 and 0124 paid?')).toBe(true); // 0124 is open
+    expect(require('../services/zelle-target-invoice').invoiceNumbersNamed('Are invoices 0123, 0124 or 0125 paid?').tail).toEqual(['0123', '0124', '0125']);
+    expect(require('../services/zelle-target-invoice').invoiceNumbersNamed('I paid invoice 0123 and 50 dollars').tail).toEqual(['0123']);
+  });
+  test('a named number missing from the list is ungrounded — never silently dropped', () => {
+    expect(ung('Invoice #0123 is paid. Invoice #0999 is paid.', 'Are invoices 0123 and 0999 paid?')).toBe(true);
+    expect(ung('Your invoice is paid.', 'Are invoices 0123 and 0999 paid?', invs.map((i) => ({ ...i, status: 'paid', amountDue: 0 })))).toBe(true); // 0999 is not on the account
+    expect(ung('Invoice #0123 is paid.', 'Is invoice 0123 paid?')).toBe(false);
+  });
+  test('the customer\'s numbers decide when the reply names none: a generic "it is paid" covers every invoice they asked about', () => {
+    expect(ung('Your invoice is paid.', 'Are invoices 0123 and 0124 paid?')).toBe(true);
+    expect(ung('Your invoice is paid.', 'Is invoice 0123 paid?')).toBe(false);
+  });
+  test('a reply number the customer did not ask about is a different invoice => ungrounded', () => {
+    expect(ung('Invoice #0124 is paid.', 'Is invoice 0123 paid?', invs.map((i) => ({ ...i, status: 'paid', amountDue: 0 })))).toBe(true);
+  });
+});
+
+// Codex round-35 P1: several dates / amounts in the customer's message are several payments.
+describe('round-35: an inbound naming several payment dates or amounts has no single payment identity', () => {
+  const rowSep1 = { id: 'a', amount: 120, status: 'paid', payment_date: '2026-09-01', payment_method_type: 'card' };
+  const rowSep2 = { id: 'b', amount: 120, status: 'paid', payment_date: '2026-09-02', payment_method_type: 'card' };
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } });
+  const ung = (reply, rows, inbound) => replyQuotesUngroundedAmount(reply, ctx(rows), { byMeaning: true, inboundMessage: inbound });
+  const ask = 'Did my payment from Sep 1 or Sep 2 go through?';
+
+  test('a reply naming no date is ambiguous => ungrounded, even when only the FIRST date has a payment', () => {
+    expect(ung('We received your payment.', [rowSep1], ask)).toBe(true);
+    expect(ung('Your payment is paid.', [rowSep1, rowSep2], ask)).toBe(true);
+  });
+  test('a reply that explicitly names one of the dates binds to it', () => {
+    expect(ung('We received your $120 payment from Sep 1.', [rowSep1], ask)).toBe(false);
+    expect(ung('We received your $120 payment from Sep 2.', [rowSep1], ask)).toBe(true); // nothing on Sep 2
+    expect(ung('We received your $120 payment from Sep 3.', [rowSep1], ask)).toBe(true); // not one of the dates asked about
+  });
+  test('one date stays exactly as before', () => {
+    expect(ung('We received your $120 payment from Sep 1.', [rowSep1], 'Did my Sep 1 payment go through?')).toBe(false);
+  });
+  test('several distinct amounts: a reply stating no amount is ambiguous; one stating an asked amount is explicit', () => {
+    const r120 = { ...rowSep1, amount: 120 };
+    const r95 = { ...rowSep1, id: 'c', amount: 95, payment_date: '2026-09-05' };
+    const inbound = 'Did you get my $120 or my $95 payment?';
+    expect(ung('Your payment is processing.', [{ ...r120, status: 'pending' }], inbound)).toBe(true);
+    expect(ung('We received your $120 payment from Sep 1.', [r120, r95], inbound)).toBe(false);
+  });
+  test('surfacing a referenced older payment matches ANY of the dates named', () => {
+    const { paymentIdentityFromText, paymentRowMatchesIdentity } = require('../services/sms-shadow-drafter');
+    const id = paymentIdentityFromText(ask);
+    expect(id.dates).toHaveLength(2);
+    expect(paymentRowMatchesIdentity(rowSep1, id)).toBe(true);
+    expect(paymentRowMatchesIdentity(rowSep2, id)).toBe(true);
+    expect(paymentRowMatchesIdentity({ ...rowSep1, payment_date: '2026-09-03' }, id)).toBe(false);
+  });
+});

@@ -10,6 +10,7 @@ const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
 const { logAutopay } = require('../services/autopay-log');
 const { isBankMethodType, isExpiredCardMethod, isPaused, getAutopaySelectedMethodIds } = require('../services/autopay-eligibility');
 const { invoiceAmountDue } = require('../services/invoice-helpers');
+const { loadFailedPaymentFacts, standaloneFailedTotal, isNeverAttemptedDeferral } = require('../services/failed-payments');
 const {
   loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf,
 } = require('../services/payer-linkage');
@@ -985,37 +986,11 @@ router.get('/balance', async (req, res, next) => {
     // without superseding (Auto Pay off, customer off the monthly lane —
     // next_retry_at cleared, retry_count still 0) no collector is coming
     // for it any more, and it is visible debt like any other disarmed row.
-    const isNeverAttemptedDeferral = (p) => {
-      if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
-      try {
-        const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return !!(m && m.deferred_reason === 'lock_contention');
-      } catch {
-        return false;
-      }
-    };
-    const failedRows = await db('payments')
-      .where({ customer_id: req.customerId, status: 'failed' })
-      .whereNull('superseded_by_payment_id')
-      .select('amount', 'metadata', 'stripe_payment_intent_id', 'retry_count', 'next_retry_at');
-    const failedInvoiceIds = [...new Set(failedRows.map(metadataInvoiceId).filter(Boolean))];
-    const balanceCarryingInvoiceIds = new Set(
-      failedInvoiceIds.length
-        ? (await db('invoices')
-            .whereIn('id', failedInvoiceIds)
-            .whereNot({ status: 'draft' })
-            .select('id')
-            .catch(() => [])).map((r) => String(r.id))
-        : [],
-    );
-    const failedTotal = failedRows
-      .filter((p) => !isPayerPayment(p))
-      .filter((p) => !isNeverAttemptedDeferral(p))
-      .filter((p) => {
-        const invId = metadataInvoiceId(p);
-        return !invId || !balanceCarryingInvoiceIds.has(invId);
-      })
-      .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+    // (isNeverAttemptedDeferral and the canonical unsuperseded-failed query live in services/failed-payments.js — the SMS
+    // grounding balance reads the same code; Codex round-35 P1.)
+    const failedFacts = await loadFailedPaymentFacts(req.customerId);
+    const { failedInvoiceIds, balanceCarryingInvoiceIds } = failedFacts;
+    const failedTotal = standaloneFailedTotal(failedFacts, isPayerPayment);
 
     // Upcoming (scheduled autopay) rows: exclude payer-linked ones too, so the
     // homeowner's upcomingCharges / nextCharge never show the payer's amount/date.

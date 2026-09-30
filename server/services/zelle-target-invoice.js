@@ -19,7 +19,10 @@ const centsOf = (raw) => Math.round(Number(String(raw).replace(/[^\d.]/g, '')) *
 function invoiceNumbersNamed(text) {
   const t = String(text || '');
   const full = [...t.matchAll(/\b([A-Z]{2,6})[-\s](\d{4})[-\s](\d{2,6})\b/gi)].map((m) => `${m[1]}-${m[2]}-${m[3]}`.toUpperCase());
-  const tail = [...t.matchAll(/\binvoice\s*(?:number|no\.?|#)?\s*#?\s*(\d{2,6})\b/gi)].map((m) => m[1]);
+  // A LIST of numbers after "invoice(s)" names each one ("invoices 0123 and 0124", "invoice #0123, #0124 or #0125") — Codex round-35 P1:
+  // only the first used to be read, so a later number was silently dropped.
+  const tail = [...t.matchAll(/\binvoices?\s*(?:numbers?|nos?\.?|#)?\s*#?\s*(\d{2,6}(?:\s*(?:,\s*(?:and\s+|or\s+)?|\band\s+|\bor\s+|&\s*|\/\s*)#?\s*\d{3,6})*)\b/gi)]
+    .flatMap((m) => m[1].match(/\d{2,6}/g) || []);
   return { full, tail };
 }
 const stripZeros = (s) => String(s).replace(/^0+/, '') || '0';

@@ -2,6 +2,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { loadPayerLinkage } = require('./payer-linkage');
+const { loadFailedPaymentFacts, standaloneFailedTotal } = require('./failed-payments');
 // the payments display read over-fetches so payer-linked rows can be dropped without starving the window
 const PAYMENT_OVERFETCH = 40;
 // how many open own invoices the SMS context lists (the target list for Zelle / invoice status); flagged when cut
@@ -551,7 +552,7 @@ class ContextAggregator {
     // never throws — null on failure) starts NOW so it overlaps the fetches below instead of
     // adding a serial round trip; it is awaited where hasProcessingPayment is derived.
     const inFlightMoneyPromise = require('./payment-history').hasInFlightMoney(customer.id);
-    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, payerLinkage] = await Promise.all([
+    const [smsHistory, serviceHistory, upcomingServices, propertyPrefs, payments, interactions, complaints, reschedules, pendingEstimate, activeCancelSave, compliance, recentCalls, allInvoices, lawnAssessments, cardOnFile, payerLinkage, failedFacts] = await Promise.all([
       // Unresolved review-ask reservations excluded BEFORE the limit (Codex
       // #4331 P2): an in-flight, unconfirmed placeholder must not read as a
       // message Waves definitely sent, nor displace a real row out of this
@@ -642,6 +643,10 @@ class ContextAggregator {
         .catch(() => 'unavailable'),
       // ONE shared payer-linkage predicate (services/payer-linkage.js, extracted from billing-v2) — Codex round-28 P1.
       loadPayerLinkage(customer.id),
+      // EVERY unsuperseded failed / pending / overdue payment (main's status set, over the complete ledger — services/failed-payments.js) — NOT the
+      // 5-row display slice: an older failure behind five newer paid rows is still owed (Codex round-35 P1).
+      // null = the read failed => the money picture is unknowable (billing unavailable).
+      loadFailedPaymentFacts(customer.id, undefined, { statuses: ['failed', 'pending', 'overdue'] }).catch((err) => { logger.warn(`[context-aggregator] failed-payment read failed for ${customer.id}: ${err.message}`); return null; }),
     ]);
 
     const lastService = serviceHistory[0] || null;
@@ -650,11 +655,10 @@ class ContextAggregator {
     // under the homeowner's customer_id — exclude those from both the
     // balance and the recent-payments facts.
     // payer ownership of the payment rows is UNKNOWN when the linkage lookup failed => the money picture is unknowable
-    const billingUnavailable = allInvoices === null || payerLinkage.failed === true;
+    const billingUnavailable = allInvoices === null || payerLinkage.failed === true || failedFacts === null;
     const invoiceRows = allInvoices || [];
     const VISIBLE_INVOICE_STATUSES = new Set(OWN_COLLECTIBLE_INVOICE_STATUSES);
     const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
-    const draftOwnInvoiceIds = new Set(invoiceRows.filter((r) => !r.payer_id && String(r.status) === 'draft').map((r) => String(r.id)));
     const paymentInvoiceId = (p) => {
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
@@ -680,16 +684,11 @@ class ContextAggregator {
     const ownInvoices = invoiceRows.filter(isCollectibleOwnInvoice);
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
-    const failedStandalone = ownPayments
-      .filter(p => ['failed', 'pending', 'overdue'].includes(p.status) && !p.superseded_by_payment_id)
-      // Invoice-linked failures are excluded (Codex r8, billing-v2 canon) —
-      // the invoice lifecycle owns that money — EXCEPT when the linked
-      // invoice is still a DRAFT (Codex r9, billing-v2:605-608): the visible
-      // allow-list never sums drafts, so dropping the failed
-      // completion-autopay row too would show $0 owed on a still-collectible
-      // debt.
-      .filter(p => { const invId = paymentInvoiceId(p); return !invId || draftOwnInvoiceIds.has(invId); })
-      .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+    // Standalone failed attempts: the canonical shared sum over ALL unsuperseded failures (not the display slice). Payer
+    // ownership goes through the same linkage the payments display read uses, plus the invoice-id set above.
+    const failedStandalone = failedFacts
+      ? standaloneFailedTotal(failedFacts, (p) => payerLinkage.isPayerLinked(p) || !!(paymentInvoiceId(p) && payerInvoiceIds.has(paymentInvoiceId(p))))
+      : 0;
     const balance = invoiceBalance + failedStandalone;
     // Newest own invoice with a POSITIVE due (Codex r8): a fully-credited
     // newest row must not present "$0.00 due" while an older invoice carries

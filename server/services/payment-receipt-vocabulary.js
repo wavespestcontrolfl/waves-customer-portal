@@ -506,11 +506,24 @@ function invoiceSubjectAt(text, index) {
   return !!range && invoiceSubjectClause(range.text);
 }
 
+// Codex round-35 P2: is the status phrase at `index` said of a REFUND ("Your $30 refund is pending", "The refund
+// failed", "Your refund was issued")? The refund NOUN (never the verb "refunded") sits in the same sub-clause at or
+// before the phrase. Such a claim is about the refund's own state (payments.refund_status / refund_amount), never the
+// payment attempt's status.
+const REFUND_NOUN_RE = /\brefunds?\b/i;
+function refundSubjectAt(text, index) {
+  const range = subclauseRanges(text).find((r) => index >= r.start && index <= r.end);
+  if (!range) return false;
+  const m = REFUND_NOUN_RE.exec(range.text);
+  return !!m && range.start + m.index <= index;
+}
+
 // Does any sub-clause open with a bare pronoun / "the payment" subject? (A cheap prescreen signal for the recheck gates:
 // such a clause is payment-scoped only when the surrounding environment is about a payment — Codex round-30 P1.)
 const hasPronounSubjectClause = (text) => String(text || '').split(SUBCLAUSE_SPLIT_RE).some((sub, i) => i % 2 === 0 && PRONOUN_SUBJECT_CLAUSE_RE.test(sub));
 
 module.exports = {
+  refundSubjectAt,
   isModalNonAssertive,
   recognizedMatchIsHypothetical,
   hasPronounSubjectClause,
