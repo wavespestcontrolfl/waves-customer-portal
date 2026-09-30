@@ -46,6 +46,9 @@ const HOLD_FLAG = 'collection_hold';
 const DISPUTE_REASON_PREFIX = 'dispute';
 const HOLD_ACTIVE_CODE = 'COLLECTION_HOLD_ACTIVE';
 const HOLD_CHECK_FAILED_CODE = 'COLLECTION_HOLD_CHECK_FAILED';
+// In-memory twin of activeDisputeHolds' reason predicate (case-insensitive
+// prefix; ILIKE in SQL).
+const isDisputeHoldReason = (reason) => String(reason || '').toLowerCase().startsWith(DISPUTE_REASON_PREFIX);
 const isCollectionHoldRefusal = (err) => err?.code === HOLD_ACTIVE_CODE || err?.code === HOLD_CHECK_FAILED_CODE;
 
 // Restrict a collections_flags query to ACTIVE DISPUTE holds.
@@ -198,6 +201,7 @@ module.exports = {
   HOLD_ACTIVE_CODE,
   HOLD_CHECK_FAILED_CODE,
   isCollectionHoldRefusal,
+  isDisputeHoldReason,
   customerHasActiveCollectionHold,
   customerHasActiveCollectionHoldChecked,
   assertNoCollectionHold,

@@ -76,6 +76,7 @@ describe('every failed-payment consumer applies the shared predicate', () => {
     ['services/bi-agent-tools.js', 'excludeNeverAttemptedHoldDeferrals'],
     ['routes/badges.js', 'isNeverAttemptedHoldDeferral'],
     ['services/context-aggregator.js', 'isNeverAttemptedHoldDeferral'],
+    ['services/context-aggregator.js', 'excludeNeverAttemptedHoldDeferrals'],
     ['services/customer-health.js', 'isNeverAttemptedHoldDeferral'],
     ['routes/billing-v2.js', 'isNeverAttemptedHoldDeferral'],
   ];
@@ -111,6 +112,57 @@ describe('every failed-payment consumer applies the shared predicate', () => {
     await scorer.calculateScore('c1');
     const paymentsHold = calls.filter((c) => c.table === 'payments' && c.m === 'whereRaw' && c.args[1]?.[0] === 'collection_hold');
     expect(paymentsHold).toHaveLength(1);
+  });
+});
+
+describe('payment health score leaves hold deferrals out of the whole sample (codex #5394)', () => {
+  test('total, recent and failed all exclude never-attempted hold deferrals; the SQL twin keeps them out of the 24-row fetch', async () => {
+    const db = require('../models/db');
+    const rawCalls = [];
+    let limitArg = null;
+    const paid = (i) => ({ id: `p${i}`, status: 'paid', metadata: null, stripe_payment_intent_id: `pi_${i}`, retry_count: 0, next_retry_at: null });
+    const deferral = (i) => ({ id: `d${i}`, status: 'failed', metadata: JSON.stringify({ deferred_reason: 'collection_hold' }), stripe_payment_intent_id: null, retry_count: 0, next_retry_at: new Date() });
+    // newest first: three held months on top of six real payments
+    const rows = [deferral(1), deferral(2), deferral(3), ...[1, 2, 3, 4, 5, 6].map(paid)];
+    db.schema = { hasTable: jest.fn(async (t) => t === 'payments') };
+    db.mockImplementation(() => {
+      const qb = {};
+      qb.where = () => qb;
+      qb.whereNotNull = () => qb;
+      qb.select = () => qb;
+      qb.whereRaw = (...a) => { rawCalls.push(a); return qb; };
+      qb.orderBy = () => qb;
+      // the fake ignores the SQL clause on purpose: the in-memory belt must hold on its own
+      qb.limit = (n) => { limitArg = n; return Promise.resolve(rows); };
+      return qb;
+    });
+    const { computePaymentScore } = require('../services/customer-health');
+    const { score, details } = await computePaymentScore('c1');
+    expect(rawCalls.some((a) => a[1]?.[0] === 'collection_hold')).toBe(true);
+    expect(limitArg).toBe(24);
+    expect(details.source).toBe('payments');
+    expect(details.onTimeRate).toBe(1); // 6 paid / 6 real, not 6 / 9
+    expect(details.failedCount).toBe(0);
+    expect(score).toBe(100); // 60 base + 30 on-time + 10 six-payment consistency bonus
+  });
+
+  test('a real failed payment still counts', async () => {
+    const db = require('../models/db');
+    const rows = [
+      { id: 'f1', status: 'failed', metadata: null, stripe_payment_intent_id: 'pi_f', retry_count: 1, next_retry_at: null },
+      { id: 'p1', status: 'paid', metadata: null },
+    ];
+    db.schema = { hasTable: jest.fn(async (t) => t === 'payments') };
+    db.mockImplementation(() => {
+      const qb = {};
+      for (const m of ['where', 'whereNotNull', 'select', 'whereRaw', 'orderBy']) qb[m] = () => qb;
+      qb.limit = () => Promise.resolve(rows);
+      return qb;
+    });
+    const { computePaymentScore } = require('../services/customer-health');
+    const { details } = await computePaymentScore('c2');
+    expect(details.failedCount).toBe(1);
+    expect(details.onTimeRate).toBe(0.5);
   });
 });
 

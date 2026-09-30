@@ -24,6 +24,7 @@
 const db = require('../models/db');
 const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
+const { HOLD_FLAG, isDisputeHoldReason } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 
@@ -939,11 +940,21 @@ async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loser
 // copy comes across RELEASED so the history (who flagged, when) survives
 // (codex r6: absent this, a shared do_not_text/collection_hold aborted the
 // whole merge).
+//
+// The one flag whose REASON matters is collection_hold: only a DISPUTE-reason
+// hold stops automatic card charges (collections/collection-hold.js). When the
+// winner already carries a fallback (wrong-number / wrong-party) hold and the
+// loser's colliding row is a dispute hold, releasing the loser's copy would
+// silently drop the dispute stop — so the winner's surviving row is promoted
+// to the dispute reason first (its who/when history stays; the prior reason is
+// appended for the record). The reverse (winner dispute, loser fallback) needs
+// nothing: the winner's dispute row survives.
 async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loserId) {
-  const rows = await trx(table).where(column, loserId).select('id');
+  const rows = await trx(table).where(column, loserId).select('id', 'flag', 'reason', 'released_at');
   let moved = 0;
   let released = 0;
-  for (const { id } of rows) {
+  let promoted = 0;
+  for (const { id, flag, reason, released_at: releasedAt } of rows) {
     try {
       await trx.transaction(async (sp) => {
         await sp(table).where({ id }).update({ [column]: winnerId });
@@ -951,11 +962,21 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
+      if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null && isDisputeHoldReason(reason)) {
+        const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').first('id', 'reason');
+        if (winnerRow && !isDisputeHoldReason(winnerRow.reason)) {
+          const prior = String(winnerRow.reason || '').trim();
+          await trx(table).where({ id: winnerRow.id }).update({
+            reason: prior ? `${String(reason).trim()} (merged; prior hold: ${prior})` : String(reason).trim(),
+          });
+          promoted += 1;
+        }
+      }
       await trx(table).where({ id }).update({ [column]: winnerId, released_at: trx.fn.now() });
       released += 1;
     }
   }
-  return `moved ${moved}, released ${released} (winner already carried the active flag)`;
+  return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}`;
 }
 
 const UNIQUE_COLLISION_HANDLERS = {
