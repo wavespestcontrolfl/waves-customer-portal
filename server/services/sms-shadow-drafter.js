@@ -660,20 +660,56 @@ function reserviceOfferSpans(text) {
   return RESERVICE_OFFER_SPAN_RES
     .flatMap((rx) => [...text.matchAll(rx)].filter((m) => m[0]).map((m) => [m.index, m.index + m[0].length]));
 }
-// The clause's AFFIRMATIVE promise text, or null when it holds no offer at all
-// or every offer in it is a denial. The GOVERNED (denied) spans are blanked
-// out of the returned text so lane derivation only ever sees what the clause
-// actually promises: in "We cannot offer a free lawn re-service and will send a
-// free pest re-service" the promised lane is pest, not lawn. Unsure -> a
-// promise (an ungoverned span is affirmative).
-function affirmativeReserviceOfferText(clause) {
+// The lane-bearing text of each AFFIRMATIVE offer in a clause — one string per
+// ungoverned (not denied) offer span, [] when the clause holds no offer or every
+// offer is a denial. Codex round-12 (PR #5336): lanes/specialties derive ONLY
+// from an offer span plus what is attached to it — up to 3 words before it (the
+// "pest" of "pest re-service") and up to 8 words after it within the same
+// segment (the purpose phrase, "to treat your lawn") — never from the rest of
+// the clause or sentence. "Your lawn treatment is scheduled, and I'll send your
+// free pest re-service link" therefore promises PEST only. Denied spans
+// contribute nothing ("We cannot offer a free lawn re-service and will send a
+// free pest re-service" → pest). A span whose two ends are unrelated words
+// ("treatment is scheduled, and I'll send your free": a noun far from a price
+// word with a verb between, or a wide cross-clause gap) is still an affirmative
+// offer for DETECTION (fail closed — an item is returned) but contributes an
+// empty string, so it can never lend a lane. Unsure -> a promise.
+const RESERVICE_SPAN_STRONG_BREAK_RE = /\b(?:send|sending|provide|providing|schedule|scheduled|book|booked|give|giving|arrange|happy|glad)\b/i;
+const RESERVICE_SPAN_CLAUSE_CROSS_RE = /[,;:–—]|\s-\s|\b(?:but|however|though|although|instead|whereas)\b/i;
+const RESERVICE_SPAN_UNIT_SOURCE = `(?:${FREE_OFFER_WORD_SOURCE}|(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?|link|covered|included)`;
+const RESERVICE_SPAN_LEAD_RE = new RegExp(`^${RESERVICE_SPAN_UNIT_SOURCE}`, 'i');
+const RESERVICE_SPAN_TAIL_RE = new RegExp(`${RESERVICE_SPAN_UNIT_SOURCE}$`, 'i');
+function reserviceSpanLaneText(text, [start, end], stops = []) {
+  const span = text.slice(start, end);
+  const lead = RESERVICE_SPAN_LEAD_RE.exec(span);
+  const tail = RESERVICE_SPAN_TAIL_RE.exec(span);
+  const gapStart = lead ? lead[0].length : 0;
+  const gapEnd = tail ? span.length - tail[0].length : span.length;
+  const gap = gapEnd > gapStart ? span.slice(gapStart, gapEnd) : '';
+  const gapWords = gap.split(/\s+/).filter((w) => /[A-Za-z0-9]/.test(w)).length;
+  if (RESERVICE_SPAN_STRONG_BREAK_RE.test(gap) || (RESERVICE_SPAN_CLAUSE_CROSS_RE.test(gap) && gapWords > 2)) return '';
+  const segmentBreak = /[,;:.!?–—]/;
+  // The attached text also stops at a contrastive conjunction and at the next offer
+  // span or negator ("...pest re-service but cannot offer a free lawn re-service").
+  const contrast = /\b(?:but|however|though|although|instead|whereas|yet)\b/i;
+  const nextStop = stops.filter((at) => at >= end).sort((x, y) => x - y)[0];
+  const afterRaw = text.slice(end, nextStop === undefined ? undefined : nextStop);
+  const beforeRaw = text.slice(0, start);
+  const prevStop = stops.filter((at) => at < start).sort((x, y) => y - x)[0];
+  const beforeText = prevStop === undefined ? beforeRaw : beforeRaw.slice(prevStop);
+  const before = beforeText.split(segmentBreak).pop().split(contrast).pop().trim().split(/\s+/).filter(Boolean).slice(-3).join(' ');
+  const after = afterRaw.split(segmentBreak)[0].split(contrast)[0].trim().split(/\s+/).filter(Boolean).slice(0, 8).join(' ');
+  return `${before} ${span} ${after}`.trim();
+}
+function affirmativeReserviceOfferTexts(clause) {
   const text = String(clause || '');
   const offers = reserviceOfferSpans(text);
-  if (!offers.length) return null;
+  if (!offers.length) return [];
   const negators = [...text.matchAll(RESERVICE_DENIAL_SCAN_RE)].map((m) => [m.index, m.index + m[0].length]);
-  const governed = offers.filter((o) => negators.some((n) => reserviceNegatorGoverns(n, o, text)));
-  if (governed.length === offers.length) return null;
-  return governed.reduce((acc, [start, end]) => acc.slice(0, start) + ' '.repeat(end - start) + acc.slice(end), text);
+  const stops = [...offers.flatMap(([a, b]) => [a, b]), ...negators.flatMap(([a, b]) => [a, b])];
+  return offers
+    .filter((o) => !negators.some((n) => reserviceNegatorGoverns(n, o, text)))
+    .map((o) => reserviceSpanLaneText(text, o, stops.filter((at) => at !== o[0] && at !== o[1])));
 }
 function rawReserviceOfferMatch(text) {
   return reserviceOfferSpans(String(text || '')).length > 0;
@@ -712,11 +748,10 @@ function affirmativeReservicePromiseClauses(text) {
     if (!rawReserviceOfferMatch(sentence)) continue;
     anySentenceHit = true;
     const clauses = sentence.split(clauseSplitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
-    out.push(...[...clauses, sentence].map(affirmativeReserviceOfferText).filter(Boolean));
+    out.push(...[...clauses, sentence].flatMap(affirmativeReserviceOfferTexts));
   }
   if (!anySentenceHit) {
-    const whole = affirmativeReserviceOfferText(t);
-    if (whole) out.push(whole);
+    out.push(...affirmativeReserviceOfferTexts(t));
   }
   return out;
 }

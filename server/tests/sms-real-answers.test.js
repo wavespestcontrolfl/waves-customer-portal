@@ -2492,6 +2492,26 @@ describe('free re-service is an entitlement resolved through the existing mechan
       });
     });
 
+    // Codex round-12 P1 (PR #5336): lanes derive only from the affirmative offer
+    // span + its attached modifier/purpose phrase, never from the rest of the sentence.
+    test.each([
+      "Your lawn treatment is scheduled, and I'll send your free pest re-service link.",
+      "Your lawn treatment is scheduled and I'll send your free pest re-service link.",
+    ])('%s → a pest-only customer is NOT rejected (lanes [pest])', (reply) => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const out = validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine(['pest'])}\nBILLING:`, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] });
+      expect(out.ok).toBe(true);
+      expect(out.promisedLanes).toEqual(['pest']);
+    });
+
+    test('an unrelated excluded-specialty word elsewhere in the sentence does not reject the promise; one attached to the offer does', async () => {
+      const { drafter } = loadWith({ lanes: ['pest'] });
+      const ok = "Sorry about the termites in the shed, your free pest re-service link is on the way.";
+      await expect(drafter.reservicePromiseStillEligible({ outgoingBody: ok, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toBeNull();
+      const bad = "We'll send your free re-service link for the termites.";
+      await expect(drafter.reservicePromiseStillEligible({ outgoingBody: bad, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/excluded specialty/);
+    });
+
     // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,
     // conjunctions, purpose clauses, new nouns, plurals, waive/comp wording), denials
     // and idioms. [sentence, isPromise, promisedLanes].
@@ -2558,6 +2578,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["We'll send your free pest re-service, and a lawn visit, free of charge.", true, ['pest', 'lawn']],
   ["We can't offer a free lawn re-service. Your free pest re-service link is on the way.", true, ['pest']],
   ["Your free pest re-service link is on the way. Sorry, we can't offer a free lawn re-service.", true, ['pest']],
+  ["Your lawn treatment is scheduled, and I'll send your free pest re-service link.", true, ['pest']],
+  ["Your lawn treatment is scheduled and I'll send your free pest re-service link.", true, ['pest']],
+  ["Your lawn is looking great. We'll send your free pest re-service link for the ants.", true, ['pest']],
+  ["Sorry about the termites in the shed, your free pest re-service link is on the way.", true, ['pest']],
+  ["Your pest re-service is covered; your lawn visit is Tuesday at 9.", true, ['pest']],
   ["We can't offer a free lawn re-service.", false, []],
   ["You're not eligible for a free re-service right now.", false, []],
   ["Unfortunately that isn't covered - the re-service is not free.", false, []],
