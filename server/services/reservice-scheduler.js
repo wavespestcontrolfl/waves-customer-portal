@@ -267,8 +267,8 @@ async function loadReserviceEligibility(customerId, dbh = db) {
  * inactive customer has no eligible lanes. Throws on a lookup error (callers
  * choose how to fail; the by-id loader below fails closed).
  */
-async function reserviceLaneAvailability(customer, dbh = db) {
-  const eligible = !customer || customer.active === false ? [] : await reserviceLanesForCustomer(customer, dbh);
+async function reserviceLaneAvailability(customer, dbh = db, { strict = false } = {}) {
+  const eligible = !customer || customer.active === false ? [] : await reserviceLanesForCustomer(customer, dbh, { strict });
   const open = eligible.length ? await openReserviceCallbacks(customer.id, dbh) : {};
   return { eligible, open, bookable: eligible.filter((lane) => !open[lane]) };
 }
@@ -280,12 +280,16 @@ async function reserviceLaneAvailability(customer, dbh = db) {
  * failure resolves to no eligible lane (fail-closed).
  */
 async function loadReserviceLaneAvailability(customerId, dbh = db) {
-  const none = { eligible: [], open: {}, bookable: [] };
+  // `verified` (Codex round-27 P1, PR #5336): true ONLY when the lookup ran to completion — the customer row
+  // loaded and the lane/callback reads all succeeded. "Could not check" (a lookup error, a missing / inactive /
+  // tokenless row) is verified:false, so a caller never mistakes an unavailable answer for a confirmed
+  // "no recurring plan".
+  const none = { eligible: [], open: {}, bookable: [], verified: false };
   if (!customerId) return none;
   try {
     const customer = await loadReserviceCustomerRow(customerId, dbh);
     if (!customer) return none;
-    return await reserviceLaneAvailability(customer, dbh);
+    return { ...(await reserviceLaneAvailability(customer, dbh, { strict: true })), verified: true };
   } catch (err) {
     logger.warn(`[reservice-scheduler] lane availability loader failed for customer ${customerId}: ${err.message}`);
     return none;

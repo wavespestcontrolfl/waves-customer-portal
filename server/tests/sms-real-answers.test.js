@@ -1794,7 +1794,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
     const loadEligibleReserviceLanes = jest.fn(async () => {
       if (throws) throw new Error('boom');
       const open = Object.fromEntries(booked.map((l) => [l, { date: '2026-10-05' }]));
-      return { eligible: lanes, open, bookable: lanes.filter((l) => !booked.includes(l)) };
+      return { eligible: lanes, open, bookable: lanes.filter((l) => !booked.includes(l)), verified: true };
     });
     // namedReserviceLanesInText (Codex round-6 P1) reads the real module's
     // RESERVICE_LANE_WORD_PATTERNS — pass the actual export through so this
@@ -1811,14 +1811,14 @@ describe('free re-service is an entitlement resolved through the existing mechan
 
   test('fetchReserviceFactState: bookable lanes come from the shared availability loader on the customer id', async () => {
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['pest', 'lawn'] });
-    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest', 'lawn'], booked: {} });
+    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest', 'lawn'], booked: {}, planState: 'unknown' });
     expect(loadEligibleReserviceLanes).toHaveBeenCalledWith('cust-1');
   });
 
   test('fetchReserviceFactState fails closed: self-serve off, no id, or a lookup error → no lanes', async () => {
-    await expect(loadWith({ selfServe: false }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: {} });
-    await expect(loadWith({}).drafter.fetchReserviceFactState({ customerId: null })).resolves.toEqual({ lanes: [], booked: {} });
-    await expect(loadWith({ throws: true }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: {} });
+    await expect(loadWith({ selfServe: false }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: {}, planState: 'unknown' });
+    await expect(loadWith({}).drafter.fetchReserviceFactState({ customerId: null })).resolves.toEqual({ lanes: [], booked: {}, planState: 'none' });
+    await expect(loadWith({ throws: true }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: {}, planState: 'unknown' });
   });
 
   test('fetchReserviceFactState: real-answers gate off → null (no fact rendered, mechanism never consulted)', async () => {
@@ -1831,7 +1831,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
   test('fetchReserviceFactState: complaints gate off (its default in prod) still consults the mechanism — decoupled 2026-09-29', async () => {
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['lawn'] });
-    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: {} });
+    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: {}, planState: 'unknown' });
     expect(loadEligibleReserviceLanes).toHaveBeenCalled();
   });
 
@@ -1843,14 +1843,14 @@ describe('free re-service is an entitlement resolved through the existing mechan
   test('liveReserviceLaneState: consults the mechanism even with GATE_SMS_REAL_ANSWERS off', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['pest'] });
-    await expect(drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: ['pest'] });
+    await expect(drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: ['pest'], verified: true });
     expect(loadEligibleReserviceLanes).toHaveBeenCalledWith('cust-1');
   });
 
   test('liveReserviceLaneState fails closed the same way fetchReserviceFactState does', async () => {
-    await expect(loadWith({ selfServe: false }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: [], open: {}, bookable: [] });
-    await expect(loadWith({}).drafter.liveReserviceLaneState(null)).resolves.toEqual({ eligible: [], open: {}, bookable: [] });
-    await expect(loadWith({ throws: true }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: [], open: {}, bookable: [] });
+    await expect(loadWith({ selfServe: false }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: [], open: {}, bookable: [], verified: false });
+    await expect(loadWith({}).drafter.liveReserviceLaneState(null)).resolves.toEqual({ eligible: [], open: {}, bookable: [], verified: true });
+    await expect(loadWith({ throws: true }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: [], open: {}, bookable: [], verified: false });
   });
 
   // Codex round-3 P2: send-time revalidation of an already-reviewed/queued
@@ -2488,7 +2488,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
       test('draft time: the FREE RE-SERVICE fact lists only bookable lanes, so an already-booked lane is not offered', async () => {
         const { drafter } = loadWith({ lanes: ['pest', 'lawn'], booked: ['pest'] });
         process.env.GATE_SMS_REAL_ANSWERS = 'true';
-        await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: { pest: { date: '2026-10-05' } } });
+        await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: { pest: { date: '2026-10-05' } }, planState: 'unknown' });
         const facts = `X\n${drafter.reserviceFactLine(['lawn'])}\nBILLING:`;
         expect(drafter.validateReserviceOffer({ reply: pestPromise, factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(false);
         expect(drafter.validateReserviceOffer({ reply: lawnPromise, factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(true);
@@ -2540,9 +2540,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
       test('fetchReserviceFactState: bookable lanes + booked lanes with the open callback; gate off → null', async () => {
         process.env.GATE_SMS_REAL_ANSWERS = 'true';
         const { drafter } = loadWith({ lanes: ['pest'], booked: ['pest'] });
-        await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: { pest: { date: '2026-10-05' } } });
+        await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: { pest: { date: '2026-10-05' } }, planState: 'unknown' });
         const both = loadWith({ lanes: ['pest', 'lawn'], booked: ['pest'] });
-        await expect(both.drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: { pest: { date: '2026-10-05' } } });
+        await expect(both.drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: { pest: { date: '2026-10-05' } }, planState: 'unknown' });
         delete process.env.GATE_SMS_REAL_ANSWERS;
         await expect(loadWith({ lanes: ['pest'], booked: ['pest'] }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toBeNull();
       });
@@ -2939,7 +2939,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
           const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed } = jest.requireActual('../services/reservice-scheduler');
           jest.doMock('../services/reservice-scheduler', () => ({
             reserviceSelfServeEnabled: () => true,
-            loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: openMap, bookable: openMap.pest ? [] : ['pest'] }),
+            loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: openMap, bookable: openMap.pest ? [] : ['pest'], verified: true }),
             RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed,
           }));
           return { drafter: require('../services/sms-shadow-drafter') };
@@ -3163,7 +3163,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // lane snapshot or a send_reservice_link action.
     test('a reply offering the free Waves Assessment / an already-scheduled inspection converges for a prospect (no re-service requirements)', async () => {
       const { validateReserviceOffer, isReserviceOfferPromise, reserviceFactLine } = require('../services/sms-shadow-drafter');
-      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      const notEligible = `X\n${reserviceFactLine([], {}, 'none')}\nBILLING:`;
       for (const reply of ['We can schedule a free Waves Assessment this week.', 'Your free inspection is Tuesday at 9.', 'We offer a free estimate and a free quote.']) {
         expect(isReserviceOfferPromise(reply)).toBe(false);
         expect(validateReserviceOffer({ reply, factsBlock: notEligible, intendedActions: [], inboundMessage: 'do you do free inspections?' })).toMatchObject({ ok: true });
@@ -3186,7 +3186,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
 
       test('prospect (FREE RE-SERVICE: not eligible): replies converge without any re-service requirements', () => {
         const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
-        const prospect = `X\n${reserviceFactLine([])}\nBILLING:`;
+        const prospect = `X\n${reserviceFactLine([], {}, 'none')}\nBILLING:`;
         for (const reply of GENERIC) {
           expect(validateReserviceOffer({ reply, factsBlock: prospect, intendedActions: [], inboundMessage: 'do you do inspections?' })).toMatchObject({ ok: true });
         }
@@ -3203,6 +3203,50 @@ describe('free re-service is an entitlement resolved through the existing mechan
           expect(out.ok).toBe(false); // demands the link action / eligibility like any re-service offer
         }
         expect(validateReserviceOffer({ reply: "We'll do a free pest inspection and send your free pest re-service link.", factsBlock: eligible, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage: 'ants are back' }).ok).toBe(true);
+      });
+
+      // Codex round-27 P1: only an AFFIRMATIVE prospect signal relaxes the wording; a failed lookup is a plan customer.
+      test('the fact renderer emits DISTINCT not-eligible states: confirmed no plan vs eligibility unavailable', async () => {
+        const { reserviceFactLine, fetchReserviceFactState } = require('../services/sms-shadow-drafter');
+        expect(reserviceFactLine([], {}, 'none')).toBe('FREE RE-SERVICE: not eligible (no recurring plan on file)');
+        expect(reserviceFactLine([], {})).toBe('FREE RE-SERVICE: not eligible (eligibility unavailable)');
+        expect(reserviceFactLine(null, undefined, 'unknown')).toBe('FREE RE-SERVICE: not eligible (eligibility unavailable)');
+        process.env.GATE_SMS_REAL_ANSWERS = 'true';
+        // a completed lookup with no lane → confirmed no plan; no customer at all → a prospect
+        let f = loadWith({ lanes: [] }).drafter;
+        await expect(f.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toMatchObject({ lanes: [], planState: 'none' });
+        await expect(f.fetchReserviceFactState({ customerId: null })).resolves.toMatchObject({ planState: 'none' });
+        // a lookup that THROWS, or self-serve off, is "unavailable" — never a confirmed prospect
+        f = loadWith({ lanes: [], throws: true }).drafter;
+        await expect(f.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toMatchObject({ lanes: [], planState: 'unknown' });
+        f = loadWith({ lanes: [], selfServe: false }).drafter;
+        await expect(f.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toMatchObject({ planState: 'unknown' });
+      });
+
+      test('lookup unavailable / legacy plain "not eligible" / no fact line: generic "free inspection" still needs the link action (fail closed)', () => {
+        const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+        const unavailable = `X\n${reserviceFactLine([])}\nBILLING:`;
+        const legacy = 'X\nFREE RE-SERVICE: not eligible\nBILLING:';
+        const noLine = 'X\nBILLING:';
+        for (const factsBlock of [unavailable, legacy, noLine]) {
+          for (const reply of ['We can do a free assessment of your home.', "We'll do a free pest inspection."]) {
+            expect(validateReserviceOffer({ reply, factsBlock, intendedActions: [], inboundMessage: 'hi' }).ok).toBe(false);
+          }
+        }
+        // ...and the CONFIRMED prospect converges
+        expect(validateReserviceOffer({ reply: 'We can do a free assessment of your home.', factsBlock: `X\n${reserviceFactLine([], {}, 'none')}\nBILLING:`, intendedActions: [], inboundMessage: 'hi' }).ok).toBe(true);
+      });
+
+      test('send-time: a lookup that fails or is unverified keeps a generic-inspection body a promise (held); a completed no-plan lookup releases it', async () => {
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        const decision = { id: 'd1', customer_id: 'cust-1', suggested_message: 'x', input_snapshot: JSON.stringify({ intended_actions: [] }), prompt_version: 'house_voice_v12_real_answers2_cf' };
+        const body = 'We can do a free assessment of your home.';
+        loadWith({ lanes: [], throws: true });
+        await expect(agentDecisionSendBlockReason({ decision, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable/);
+        loadWith({ lanes: [], selfServe: false });
+        await expect(agentDecisionSendBlockReason({ decision, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable/);
+        loadWith({ lanes: [] });
+        await expect(agentDecisionSendBlockReason({ decision, outgoingBody: body })).resolves.toBeNull();
       });
 
       test('send-time: a prospect\'s generic-inspection body is not held; a plan customer\'s is', async () => {

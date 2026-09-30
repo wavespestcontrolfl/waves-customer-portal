@@ -598,7 +598,7 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     jest.doMock('../services/reservice-scheduler', () => ({
       ...jest.requireActual('../services/reservice-scheduler'),
       reserviceSelfServeEnabled: () => true,
-      loadReserviceLaneAvailability: jest.fn(async () => ({ eligible: lanes, open: {}, bookable: lanes })),
+      loadReserviceLaneAvailability: jest.fn(async () => ({ eligible: lanes, open: {}, bookable: lanes, verified: true })),
     }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
     const drafter = require('../services/sms-shadow-drafter');

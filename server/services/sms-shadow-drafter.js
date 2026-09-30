@@ -580,8 +580,11 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
 // FREE RE-SERVICE fact lists only bookable lanes) or at send time. Returns
 // { eligible, open, bookable }; fail-closed to all-empty.
 async function liveReserviceLaneState(customerId) {
-  const none = { eligible: [], open: {}, bookable: [] };
-  if (!customerId) return none;
+  // verified (Codex round-27 P1): true only for a COMPLETED lookup (or no customer at all, i.e. a prospect with
+  // no row to have a plan). A lookup error / timeout / self-serve off / unusable customer row is verified:false —
+  // "could not check", never a confirmed no-plan prospect.
+  const none = { eligible: [], open: {}, bookable: [], verified: false };
+  if (!customerId) return { ...none, verified: true };
   let timer = null;
   try {
     const { reserviceSelfServeEnabled, loadReserviceLaneAvailability } = require('./reservice-scheduler');
@@ -591,7 +594,7 @@ async function liveReserviceLaneState(customerId) {
     });
     const state = await Promise.race([loadReserviceLaneAvailability(customerId), timeout]);
     const only = (lanes) => (Array.isArray(lanes) ? lanes.filter((l) => l === 'pest' || l === 'lawn') : []);
-    return { eligible: only(state?.eligible), open: state?.open || {}, bookable: only(state?.bookable) };
+    return { eligible: only(state?.eligible), open: state?.open || {}, bookable: only(state?.bookable), verified: state?.verified === true };
   } catch (err) {
     logger.warn(`[sms-shadow] re-service eligibility lookup failed (${err.message}); treating as not eligible`);
     return none;
@@ -614,7 +617,7 @@ function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
 // The rendered fact line, and its reader. One line, fixed wording, so the
 // deterministic check below and a frozen replay read the same thing.
 const RESERVICE_FACT_LABEL = 'FREE RE-SERVICE:';
-function reserviceFactLine(lanes, booked = {}) {
+function reserviceFactLine(lanes, booked = {}, planState = 'unknown') {
   const list = Array.isArray(lanes) ? lanes : [];
   // Codex round-13 P2 (PR #5336): a covered lane that already holds an open
   // re-service callback is NOT "not eligible" — that wording steered the model
@@ -638,7 +641,12 @@ function reserviceFactLine(lanes, booked = {}) {
   }
   return bookedText
     ? `${RESERVICE_FACT_LABEL} ${bookedText} — their free re-service for that line is already on the schedule`
-    : `${RESERVICE_FACT_LABEL} not eligible`;
+    // Codex round-27 P1: two DISTINCT not-eligible states. Only a lookup that COMPLETED and found no recurring plan
+    // renders "(no recurring plan on file)" — the affirmative prospect signal that relaxes generic
+    // inspection/assessment wording (validateReserviceOffer). An unavailable / errored / unrequested lookup
+    // renders "(eligibility unavailable)" and is treated as a plan customer (fail closed). Gate-on only (the
+    // fact is never rendered gate-off).
+    : `${RESERVICE_FACT_LABEL} not eligible (${planState === 'none' ? 'no recurring plan on file' : 'eligibility unavailable'})`;
 }
 
 // Fact-block state for a live draft (Codex round-13 P2): the bookable lanes plus
@@ -651,7 +659,7 @@ async function fetchReserviceFactState({ customerId } = {}) {
   for (const lane of state.eligible) {
     if (!state.bookable.includes(lane)) booked[lane] = state.open?.[lane] || {};
   }
-  return { lanes: state.bookable, booked };
+  return { lanes: state.bookable, booked, planState: state.verified && !state.eligible.length ? 'none' : 'unknown' };
 }
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
@@ -896,11 +904,13 @@ const RESERVICE_GENERIC_INSPECTION_RE = /\b(?:inspections?|inspect|assessments?)
 function withoutGenericInspections(text) {
   return String(text || '').replace(RESERVICE_GENERIC_INSPECTION_RE, (m) => ' '.repeat(m.length));
 }
-// Does the facts block show ANY re-service lane state (eligible, or covered-but-booked)? "not eligible" (and no
-// line) is a prospect or a customer with no plan lane.
-function reserviceFactShowsPlan(factsBlock) {
+// Only an AFFIRMATIVE prospect signal relaxes generic inspection/assessment wording: the fact line a COMPLETED lookup
+// renders for a customer with no recurring plan ("not eligible (no recurring plan on file)"). Every other state —
+// eligible, booked, "eligibility unavailable", a legacy plain "not eligible", a missing line — is a plan customer
+// (fail closed, Codex round-27 P1).
+function reserviceFactShowsNoPlan(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL));
-  return !!line && !/^FREE RE-SERVICE:\s*not eligible\s*$/.test(line.trim());
+  return !!line && /^FREE RE-SERVICE:\s*not eligible \(no recurring plan on file\)\s*$/.test(line.trim());
 }
 function reserviceOfferSpans(rawText) {
   const text = rawText.replace(RESERVICE_OTHER_PRODUCT_RE, (m) => ' '.repeat(m.length));
@@ -1250,7 +1260,7 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // while the customer is eligible. Such a draft derives its lane below (named → reported → the single
   // bookable lane) or is rejected. Its body is classified over the WHOLE text for lanes/specialties
   // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
-  const planCustomer = reserviceFactShowsPlan(factsBlock);
+  const planCustomer = !reserviceFactShowsNoPlan(factsBlock);
   const promise = isReserviceOfferPromise(planCustomer ? text : withoutGenericInspections(text));
   // Codex round-26 P2: a pest report whose lane the facts mark ALREADY BOOKED is answered from the appointment on the
   // schedule — the prompt forbids OPEN TIMES and a paid visit for it, so a reply that offers slots is rejected.
@@ -1496,7 +1506,7 @@ async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedL
   // only in that ambiguous case.
   if (promise && customerId && !isReserviceOfferPromise(withoutGenericInspections(body))) {
     const live = await liveReserviceLaneState(customerId);
-    if (!live.eligible.length) promise = false;
+    if (live.verified && !live.eligible.length) promise = false; // an unverified lookup stays a plan customer's promise
   }
   if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
   const fault = reserviceBodyLaneFault(body, promise, promisedLanes);
@@ -2498,7 +2508,7 @@ function buildFactsBlock(context, extras = {}) {
   // lanes renders "not eligible" (fail closed). Resolved upstream
   // (fetchReserviceFactState).
   const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? `${reserviceFactLine(extras.reserviceLanes, extras.reserviceBooked)}\n`
+    ? `${reserviceFactLine(extras.reserviceLanes, extras.reserviceBooked, extras.reservicePlanState)}\n`
     : '';
   // COMPANY FACTS (owner rulings 2026-09-29/30): owner-approved company
   // knowledge, gate-on only, ordinary per-draft facts the verifier grounds
@@ -3186,7 +3196,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, reserviceBooked: reserviceState?.booked, reservicePlanState: reserviceState?.planState, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
