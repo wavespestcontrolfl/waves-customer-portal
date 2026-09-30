@@ -1290,10 +1290,11 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 //      outside the served set, vetoes — except a Hillsborough county whose
 //      city is a served south-Hillsborough town (config/locations.js), which
 //      stays bookable exactly as before.
-//   4. when the call states NO locality at all (a known customer confirming a
-//      time without repeating the address), the booking uses the on-file
-//      address, so its city/ZIP — and stored coordinates that sit in the
-//      DeSoto rectangle with no served ZIP — are judged the same way. If that
+//   4. the on-file address (city, ZIP, and stored coordinates in the DeSoto
+//      rectangle with no served ZIP) is ALWAYS checked for DeSoto evidence —
+//      the booking keeps a populated stored address even when the call names
+//      a served town. When the call states NO locality at all, the on-file
+//      city/ZIP also stand in for the stated ones. If that
 //      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
 //      review (reason on_file_address_unavailable) instead of passing on no
 //      evidence.
@@ -1305,29 +1306,35 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   const statedCities = [extracted?.city, svc?.city, av?.normalized?.city].map(lower).filter(Boolean);
   const statedZips = [extracted?.zip, svc?.postal_code, av?.normalized?.postal_code].map(zip5).filter(Boolean);
   const statedCounty = av?.county || svc?.county || extracted?.county || null;
-  let cities = statedCities;
-  let zips = statedZips;
-  let coordsInDesoto = false;
-  // Stated locality wins; the on-file address stands in only when the call
-  // gave none.
-  if (!cities.length && !zips.length && !statedCounty && onFile?.lookupFailed) {
+  const statedNothing = !statedCities.length && !statedZips.length && !statedCounty;
+  if (statedNothing && onFile?.lookupFailed) {
     return { reason: 'on_file_address_unavailable', county: null };
   }
-  if (!cities.length && !zips.length && !statedCounty && onFile) {
-    cities = [lower(onFile.city)].filter(Boolean);
-    zips = [zip5(onFile.zip)].filter(Boolean);
+  // The on-file address is ALWAYS checked for DeSoto evidence, stated
+  // locality or not: backfillCustomerFromAppointmentContact keeps a
+  // populated stored address, so a returning Arcadia customer who mentions
+  // a served town is still booked at the stored DeSoto address. A customer
+  // who genuinely moved is held for review, never auto-booked. When the call
+  // stated nothing, the on-file city also drives the checks below.
+  const onFileCities = onFile && !onFile.lookupFailed ? [lower(onFile.city)].filter(Boolean) : [];
+  const onFileZips = onFile && !onFile.lookupFailed ? [zip5(onFile.zip)].filter(Boolean) : [];
+  const cities = statedNothing ? onFileCities : statedCities;
+  const zips = statedNothing ? onFileZips : statedZips;
+  let coordsInDesoto = false;
+  if (onFile && !onFile.lookupFailed) {
     const lat = Number(onFile.latitude);
     const lng = Number(onFile.longitude);
     coordsInDesoto = Number.isFinite(lat) && Number.isFinite(lng)
-      && isInDesotoExclusion(lat, lng) && !zips.some((z) => zipToCity(z));
+      && isInDesotoExclusion(lat, lng) && !onFileZips.some((z) => zipToCity(z));
   }
+  const onFileDesoto = onFileCities.some(isDesotoLocality) || onFileZips.some(isDesotoZip) || coordsInDesoto;
   // A DeSoto city / ZIP / on-file pin vetoes BEFORE a positive AV verdict:
   // in V2 shadow the AV may describe V2's served address while the legacy
   // branch books V1's DeSoto one (the bridge refuses a disagreeing V2
   // street), so an AV "in area" cannot clear locality evidence it may not
   // describe. It still outranks a model-stated county NAME below.
   const countyKey = normalizeCounty(statedCounty);
-  if (cities.some(isDesotoLocality) || zips.some(isDesotoZip) || coordsInDesoto) {
+  if (cities.some(isDesotoLocality) || zips.some(isDesotoZip) || onFileDesoto) {
     return { reason: 'desoto_locality', county: 'DeSoto' };
   }
   if (av && av.inServiceArea === true) return null;

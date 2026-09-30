@@ -156,10 +156,24 @@ describe('legacyGeographicVeto: conflicting evidence and on-file address (Codex 
     })).not.toBeNull();
   });
 
-  test('on-file address is ignored when the call states its own locality, and served on-file profiles pass', () => {
+  test('a stated served locality does not clear an on-file DeSoto address (pre-push audit P1)', () => {
+    // The booking keeps the populated stored address, so a returning Arcadia
+    // customer who mentions a served town is still held for review.
     expect(legacyGeographicVeto({
       extracted: { city: 'Bradenton', zip: '34209' },
       onFile: { city: 'Arcadia', zip: '34266' },
+    })).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'validated_accept', inServiceArea: true, county: 'Sarasota County' },
+      extracted: { city: 'Venice' },
+      onFile: { city: null, zip: null, latitude: 27.2159, longitude: -81.8584 },
+    })).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
+  });
+
+  test('served on-file profiles pass', () => {
+    expect(legacyGeographicVeto({
+      extracted: { city: 'Bradenton', zip: '34209' },
+      onFile: { city: 'Bradenton', zip: '34209' },
     })).toBeNull();
     expect(legacyGeographicVeto({
       extracted: {},
