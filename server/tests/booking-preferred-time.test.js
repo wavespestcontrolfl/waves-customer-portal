@@ -448,6 +448,41 @@ describe('abandoned-booking recovery re-checks at send time', () => {
   });
 });
 
+describe('a refreshed request keeps suppressing recovery (recency is the LAST refresh)', () => {
+  const HOUR = 3600000;
+  // In-memory leads table that honours only the timestamp comparisons — the
+  // part under test — so a query on the wrong column reads as "no request".
+  function fakeDb(row) {
+    const conds = [];
+    const chain = {
+      where: (a, op, val) => { if (typeof a === 'string' && op === '>') conds.push([a, val]); else if (typeof a === 'function') a(chain); return chain; },
+      whereNull: () => chain, whereRaw: () => chain, orWhereRaw: () => chain,
+      first: async () => (conds.every(([col, val]) => new Date(row[col]).getTime() > new Date(val).getTime()) ? { id: row.id } : undefined),
+    };
+    return () => chain;
+  }
+
+  test('created 25h ago, refreshed 1h ago: still blocks an intent captured 2h ago (created_at alone would miss it)', async () => {
+    const row = { id: 'lead-1', created_at: new Date(Date.now() - 25 * HOUR), updated_at: new Date(Date.now() - 1 * HOUR) };
+    const db = fakeDb(row);
+    expect(await hasRecentPreferredTimeRequest(db, '9415550100', { since: new Date(Date.now() - 2 * HOUR) })).toBe(true);
+    // capture-intent's default 24h window sees it too
+    expect(await hasRecentPreferredTimeRequest(db, '9415550100')).toBe(true);
+  });
+
+  test('never refreshed and older than the window: does not block a fresh abandonment', async () => {
+    const row = { id: 'lead-1', created_at: new Date(Date.now() - 30 * HOUR), updated_at: new Date(Date.now() - 30 * HOUR) };
+    expect(await hasRecentPreferredTimeRequest(fakeDb(row), '9415550100')).toBe(false);
+  });
+
+  test('the dedupe refresh stamps updated_at with now', async () => {
+    mockExistingLead = { id: 'lead-existing' };
+    await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value, { notify: false });
+    const upd = mockOps.find((o) => o.table === 'leads' && o.op === 'update');
+    expect(upd.arg.updated_at).toBe('NOW');
+  });
+});
+
 describe('recordPreferredTimeRequest (service)', () => {
   test('notify:false files the lead without ringing anyone', async () => {
     const v = validatePreferredTimeRequest(validBody()).value;

@@ -160,7 +160,9 @@ async function hasRecentPreferredTimeRequest(db, phone, { sessionId = null, sinc
   const q = db('leads')
     .where({ lead_type: LEAD_TYPE })
     .whereNull('deleted_at')
-    .where('created_at', '>', floor)
+    // updated_at, not created_at: a resubmit refreshes the one lead in place
+    // (updated_at = now), and the request is as recent as its LAST refresh.
+    .where('updated_at', '>', floor)
     .where((w) => {
       tenMatch(w, phone);
       if (sessionId) w.orWhereRaw("extracted_data->>'session_id' = ?", [sessionId]);
@@ -217,9 +219,10 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
       trx('leads')
         .where({ lead_type: LEAD_TYPE })
         .whereNull('deleted_at')
-        .where('created_at', '>', new Date(Date.now() - DEDUPE_WINDOW_MS)),
+        // Sliding window on the last refresh (see hasRecentPreferredTimeRequest).
+        .where('updated_at', '>', new Date(Date.now() - DEDUPE_WINDOW_MS)),
       value.phone,
-    ).orderBy('created_at', 'desc').first('id');
+    ).orderBy('updated_at', 'desc').first('id');
 
     if (existing) {
       await trx('leads').where({ id: existing.id }).update({
