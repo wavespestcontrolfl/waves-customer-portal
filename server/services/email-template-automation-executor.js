@@ -13,7 +13,7 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
 const {
   hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
-  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, onceScopeFor,
+  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, onceScopeFor, anyRivalAtSameProperty,
 } = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
@@ -1705,7 +1705,11 @@ async function finalizeShadowOnce(run, scope, wouldSendMetadata) {
       .whereRaw(SHADOW_ORIGIN_SQL);
     if (scope === 'estimate') rivals.where({ entity_type: 'estimate', entity_id: String(run.entity_id) });
     else rivals.where({ recipient_id: String(run.recipient_id) });
-    if (await rivals.first('id')) {
+    // 'property' (B1): a rival counts only at the same property.
+    const hasRival = scope === 'property'
+      ? await anyRivalAtSameProperty(trx, run, await rivals.select('entity_id'))
+      : Boolean(await rivals.first('id'));
+    if (hasRival) {
       const reason = 'an earlier shadow run already counts for this customer (or estimate): live sends it once';
       const [blocked] = await trx('email_template_automation_runs').where({ id: run.id }).update({
         status: 'skipped', exit_reason: reason, last_error: null, completed_at: new Date(), updated_at: new Date(),

@@ -127,6 +127,10 @@ function defaultDeps() {
     normalizeRecurringPattern: (...args) => require('../recurring-appointment-seeder').normalizeRecurringPattern(...args),
     parseEstimateAddress: (...args) => require('../estimate-property-linkage').parseEstimateAddress(...args),
     isCommercialServiceRow: (...args) => require('../self-booking-plan-sync').isCommercialServiceRow(...args),
+    isCommercialAccount: (...args) => require('../self-booking-plan-sync').isCommercialAccount(...args),
+    get commercialPropertyTypes() { return require('../self-booking-plan-sync').COMMERCIAL_PROPERTY_TYPES; },
+    addressKey: (...args) => require('../customer-properties').addressKey(...args),
+    findActiveRecurringSeries: (...args) => require('../recurring-appointment-seeder').findActiveRecurringSeries(...args),
     treatmentTargetKey: (...args) => require('./visit-products').treatmentTargetKey(...args),
     targetForSentence: (...args) => require('./area-intel').targetForSentence(...args),
     detectServiceLine: (...args) => require('../service-report/service-line-configs').detectServiceLine(...args),
@@ -237,13 +241,39 @@ async function rainSinceVisitSentence({ coordinates, visitYmd, deps, mode }) {
 // reader's next-visit lookup excludes).
 const CLOSED_VISIT_STATUSES = ['cancelled', 'rescheduled', 'completed', 'skipped', 'no_show'];
 
-// A row's property, as a comparable key: its property record, else its service
-// address (line 1 + zip). '' = not recorded.
-function propertyKeyOf(row) {
-  if (!row) return '';
-  if (row.property_id) return `p:${row.property_id}`;
-  const line1 = clean(row.service_address_line1).toLowerCase();
-  return line1 ? `a:${line1}|${clean(row.service_address_zip)}` : '';
+// "Same property" is the repo's canonical rule, never a local key: the property
+// record's id when both rows carry one, else customer-properties' addressKey over
+// the FULL stamped service address (street, unit line 2, city, ZIP — "Apt 1" and
+// "Apt 2" at one street and ZIP are different properties). A row with neither
+// has no identity.
+const PROPERTY_COLUMNS = ['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip'];
+function propertyIdentity(row, deps) {
+  if (!row) return { id: '', address: '' };
+  return {
+    id: row.property_id ? String(row.property_id) : '',
+    address: deps.addressKey({
+      address_line1: row.service_address_line1,
+      address_line2: row.service_address_line2,
+      city: row.service_address_city,
+      zip: row.service_address_zip,
+    }),
+  };
+}
+function hasPropertyIdentity(row, deps) {
+  const identity = propertyIdentity(row, deps);
+  return Boolean(identity.id || identity.address);
+}
+function sameProperty(a, b, deps) {
+  const x = propertyIdentity(a, deps);
+  const y = propertyIdentity(b, deps);
+  if (x.id && y.id) return x.id === y.id;
+  if (x.address && y.address) return x.address === y.address;
+  return false;
+}
+// Compatible = provably the same property, or an identity is missing on a side
+// (not recorded is not "a different property").
+function propertyCompatible(a, b, deps) {
+  return !hasPropertyIdentity(a, deps) || !hasPropertyIdentity(b, deps) || sameProperty(a, b, deps);
 }
 
 // The customer's next upcoming PEST appointment AT THE VISIT'S PROPERTY, as
@@ -261,39 +291,40 @@ async function nextPestVisit({
   const today = etDateString(deps.now());
   const lowerBound = serviceYmd && serviceYmd > today ? serviceYmd : today;
   const linked = record.scheduled_service_id
-    ? await conn('scheduled_services').where({ id: record.scheduled_service_id })
-      .first('property_id', 'service_address_line1', 'service_address_zip')
+    ? await conn('scheduled_services').where({ id: record.scheduled_service_id }).first(...PROPERTY_COLUMNS)
     : null;
-  const visitKey = propertyKeyOf(linked);
   const upcoming = await conn('scheduled_services')
     .where({ customer_id: record.customer_id })
     .whereNotIn('status', CLOSED_VISIT_STATUSES)
     .where('scheduled_date', '>=', lowerBound)
     .orderBy('scheduled_date', 'asc')
-    .select('scheduled_date', 'service_type', 'property_id', 'service_address_line1', 'service_address_zip');
+    .select('scheduled_date', 'service_type', ...PROPERTY_COLUMNS);
   const pest = upcoming.filter((row) => deps.detectServiceLine(row.service_type) === 'pest');
-  if (visitKey) {
-    const next = pest.find((row) => propertyKeyOf(row) === visitKey);
+  if (hasPropertyIdentity(linked, deps)) {
+    const next = pest.find((row) => sameProperty(linked, row, deps));
     return { ymd: next ? dateOnlyString(next.scheduled_date) : '' };
   }
-  if (new Set(pest.map(propertyKeyOf)).size > 1) return { ambiguous: true };
+  if (pest.some((row) => !sameProperty(pest[0], row, deps))) return { ambiguous: true };
   return { ymd: pest[0] ? dateOnlyString(pest[0].scheduled_date) : '' };
 }
 
 // Commercial plans are not this email's audience: commercial copy stays
 // terms-neutral (AGENTS.md: estimate follow-up truth scope), and both templates
 // promise a free re-service between visits. detectServiceLine calls a
-// "Commercial Quarterly Pest Control" plan 'pest', so the visit's own service
-// type, its appointment and series root, and its property are read with the
-// repo's canonical commercial classifier (isCommercialServiceRow, the same one the
-// WaveGuard plan sync uses to keep commercial rows out of residential plans) and
-// the property's recorded type.
+// "Commercial Quarterly Pest Control" plan 'pest', so the FULL canonical rule
+// from self-booking-plan-sync is applied — the account ('commercial' tier
+// sentinel, or customers.property_type commercial/business:
+// isCommercialAccount), the service text (isCommercialServiceRow) of the record,
+// the appointment and its series root, and the linked property's type
+// (commercial/business). The account check runs for EVERY record, linked or not.
 async function isCommercialPlan({ conn, deps, record }) {
   const asRow = (row) => ({ service_type: row?.service_type, service_key: row?.service_key_snapshot });
   if (deps.isCommercialServiceRow({ service_type: record.service_type })) return true;
+  const customer = await conn('customers').where({ id: record.customer_id }).first('waveguard_tier', 'property_type');
+  if (deps.isCommercialAccount(customer)) return true;
   if (!record.scheduled_service_id) return false;
-  const columns = ['service_type', 'service_key_snapshot', 'recurring_parent_id', 'property_id'];
-  const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id }).first(...columns);
+  const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id })
+    .first('service_type', 'service_key_snapshot', 'recurring_parent_id', 'property_id');
   if (!visit) return false;
   if (deps.isCommercialServiceRow(asRow(visit))) return true;
   if (visit.recurring_parent_id) {
@@ -302,29 +333,31 @@ async function isCommercialPlan({ conn, deps, record }) {
   }
   if (visit.property_id) {
     const property = await conn('customer_properties').where({ id: visit.property_id }).first('property_type');
-    if (/commercial/i.test(clean(property?.property_type))) return true;
+    if (deps.commercialPropertyTypes.includes(clean(property?.property_type).toLowerCase())) return true;
   }
   return false;
 }
 
-// Is the visit part of an active recurring pest plan at its property? Either its
-// own appointment is a series member (it has a recurring parent, or carries a
-// recurring cadence of its own), or the customer has an open recurring pest
-// appointment at the same property. When the visit's property cannot be
-// established, only a single property's recurring series counts.
-async function hasRecurringPestPlan({ conn, deps, record }) {
-  const columns = ['recurring_parent_id', 'recurring_pattern', 'service_type', 'property_id', 'service_address_line1', 'service_address_zip'];
-  const isRecurringPest = (row) => deps.detectServiceLine(row.service_type) === 'pest'
-    && Boolean(row.recurring_parent_id || deps.normalizeRecurringPattern(row.recurring_pattern));
+// Is the visit part of an ACTIVE recurring pest plan? Series membership in the
+// past is not a plan: the canonical active-series source
+// (recurring-appointment-seeder findActiveRecurringSeries — the root is not
+// cancelled, and it is flagged ongoing or has a live future member) decides, and
+// the visit's own series root must be one of its active pest series. An unlinked
+// record cannot be tied to a series, so it counts only when the customer's active
+// pest series are all at ONE property.
+async function activeRecurringPestPlan({ conn, deps, record }) {
   const linked = record.scheduled_service_id
-    ? await conn('scheduled_services').where({ id: record.scheduled_service_id }).first(...columns)
+    ? await conn('scheduled_services').where({ id: record.scheduled_service_id }).first('id', 'service_type', 'recurring_parent_id')
     : null;
-  if (linked && isRecurringPest(linked)) return true;
-  const visitKey = propertyKeyOf(linked);
-  const open = (await conn('scheduled_services').where({ customer_id: record.customer_id })
-    .whereNotIn('status', CLOSED_VISIT_STATUSES).select(...columns)).filter(isRecurringPest);
-  if (visitKey) return open.some((row) => propertyKeyOf(row) === visitKey);
-  return new Set(open.map(propertyKeyOf)).size === 1;
+  const serviceType = clean(linked?.service_type) || clean(record.service_type);
+  if (!serviceType) return false;
+  const active = (await deps.findActiveRecurringSeries(conn, { customerId: record.customer_id, serviceType }))
+    .filter((parent) => deps.detectServiceLine(parent.service_type) === 'pest');
+  if (linked) {
+    const rootId = String(linked.recurring_parent_id || linked.id);
+    return active.some((parent) => String(parent.id) === rootId);
+  }
+  return active.length > 0 && active.every((parent) => sameProperty(active[0], parent, deps));
 }
 
 // Every condition that makes this THE customer's first performed pest visit
@@ -343,17 +376,21 @@ async function firstVisitGate({
 
   // First performed visit on the line, judged against records that existed
   // BEFORE this one (a delayed run must not read a later visit as "prior").
+  // Ordered by (created_at, id): two records created at the same instant tie-break
+  // on id, so exactly one of them is "first".
   const earlier = conn('service_records').where('service_records.customer_id', customerId)
     .whereNot('service_records.id', record.id)
-    .where('service_records.created_at', '<', record.created_at);
+    .where((qb) => qb.where('service_records.created_at', '<', record.created_at)
+      .orWhere((tie) => tie.where('service_records.created_at', record.created_at).where('service_records.id', '<', record.id)));
   deps.applyPerformedVisitHistoryFilter(earlier, { serviceLine: 'pest' });
   if (await earlier.first('service_records.id')) return skip('not the customer\'s first performed pest visit', 'not_first_visit');
 
   // The email promises a re-service "between visits" and names a next visit: that
-  // only holds on an active RECURRING pest plan. A one-time first visit that
-  // happens to have a separately booked future pest appointment is not one.
-  if (!(await hasRecurringPestPlan({ conn, deps, record }))) {
-    return skip('the visit does not belong to an active recurring pest plan at its property', 'not_recurring_plan');
+  // only holds on an ACTIVE recurring pest plan. A one-time first visit with a
+  // separately booked future pest appointment, or a cancelled / lapsed series, is
+  // not one.
+  if (!(await activeRecurringPestPlan({ conn, deps, record }))) {
+    return skip('the visit does not belong to an active recurring pest plan', 'not_recurring_plan');
   }
   const customer = await loadCustomer(conn, customerId);
   if (!customer) return skip('customer not found', 'customer_missing');
@@ -406,6 +443,11 @@ async function buildFirstVisitPest({
   const gate = await firstVisitGate({ run, conn, deps });
   if (gate.skip) return gate;
   const { record, customer } = gate;
+  if ((await priorSends({
+    conn, run, customerId: customer.id, byProperty: true,
+  })) === 'sent') {
+    return skip('this customer already has a sent first-visit email for this property', 'already_delivered');
+  }
 
   const { primary, secondary, products } = await deps.readVisitProducts(record.id, { conn });
   if (!primary) return skip('no customer-visible primary product recorded for the visit', 'no_primary_product');
@@ -456,7 +498,7 @@ async function planService(conn, deps, record) {
   const none = { pattern: '', city: '' };
   if (!record.scheduled_service_id) return none;
   const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id })
-    .first('recurring_pattern', 'recurring_parent_id', 'service_type', 'service_address_city', 'property_id');
+    .first('recurring_pattern', 'recurring_parent_id', 'service_type', ...PROPERTY_COLUMNS);
   // The plan is the PEST series: a visit that is not a pest appointment says
   // nothing about the pest plan's cadence.
   if (!visit || deps.detectServiceLine(visit.service_type) !== 'pest') return none;
@@ -465,7 +507,7 @@ async function planService(conn, deps, record) {
   const identity = {
     city: clean(visit.service_address_city),
     rootId: visit.recurring_parent_id || record.scheduled_service_id,
-    propertyId: visit.property_id || null,
+    visitRow: visit,
   };
   const own = deps.normalizeRecurringPattern(visit.recurring_pattern);
   if (own) return { pattern: own, ...identity };
@@ -497,16 +539,28 @@ async function planService(conn, deps, record) {
 const ONCE_ALREADY_DELIVERED = 'ONCE_ALREADY_DELIVERED';
 const ONCE_IN_FLIGHT = 'ONCE_IN_FLIGHT';
 
+// The appointment identity (property columns) behind a service record, or null.
+async function recordPropertyRow(conn, recordId) {
+  if (!recordId) return null;
+  const row = await conn('service_records as sr')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+    .where('sr.id', recordId)
+    .first(...PROPERTY_COLUMNS.map((column) => `ss.${column} as ${column}`));
+  return row || null;
+}
+
+// `byProperty`: the once-rule is per customer AND PROPERTY (B1): a sibling counts
+// only when its record's appointment is at a compatible property (an unrecorded
+// identity is conservatively the same property).
 async function priorSends({
-  conn, run, customerId = null, estimateId = null,
+  conn, run, customerId = null, estimateId = null, byProperty = false,
 }) {
+  const deps = defaultDeps();
   const others = (query, column) => (run.idempotency_key ? query.whereNot(column, run.idempotency_key) : query);
   const sentRuns = conn('email_template_automation_runs').where({ template_key: run.template_key, status: 'sent' });
   if (run.id) sentRuns.whereNot({ id: run.id });
   if (estimateId) sentRuns.where({ entity_type: 'estimate', entity_id: String(estimateId) });
   else sentRuns.where({ recipient_id: String(customerId) });
-  if (await sentRuns.first('id')) return 'sent';
-
   // The ledger, by the other operation's own reservation key.
   const ledger = others(conn('marketing_email_ledger as l')
     .where('l.email_key', run.template_key)
@@ -517,9 +571,26 @@ async function priorSends({
   } else {
     ledger.where('l.customer_id', customerId);
   }
-  const rows = await ledger.select('l.status');
-  if (rows.some((row) => row.status === 'sent')) return 'sent';
-  return rows.length ? 'in_flight' : null;
+  if (!byProperty) {
+    if (await sentRuns.first('id')) return 'sent';
+    const rows = await ledger.select('l.status');
+    if (rows.some((row) => row.status === 'sent')) return 'sent';
+    return rows.length ? 'in_flight' : null;
+  }
+  const mine = await recordPropertyRow(conn, run.entity_id);
+  const sameScope = async (entityId) => propertyCompatible(mine, await recordPropertyRow(conn, entityId), deps);
+  for (const row of await sentRuns.select('entity_id')) {
+    if (await sameScope(row.entity_id)) return 'sent';
+  }
+  const rows = await ledger.leftJoin('email_template_automation_runs as lr', 'lr.idempotency_key', 'l.idempotency_key')
+    .select('l.status', 'lr.entity_id');
+  let inFlight = false;
+  for (const row of rows) {
+    if (row.entity_id && !(await sameScope(row.entity_id))) continue;
+    if (row.status === 'sent') return 'sent';
+    inFlight = true;
+  }
+  return inFlight ? 'in_flight' : null;
 }
 
 const ESTIMATE_RECIPIENT_CHANGED = 'ESTIMATE_RECIPIENT_CHANGED';
@@ -549,9 +620,21 @@ function runExpiresOn(run) {
 //                   re-read with a share lock that lasts to the end of that
 //                   transaction, so an ownership or email update cannot land
 //                   between the check and the request.
-// Which once-rule (if any) a template has: per customer (B5) or per estimate (C1).
+// Shadow's once-rule for B1 (per customer AND property): does any rival run's record
+// sit at a compatible property?
+async function anyRivalAtSameProperty(conn, run, rivals) {
+  const deps = defaultDeps();
+  const mine = await recordPropertyRow(conn, run.entity_id);
+  for (const rival of rivals) {
+    if (propertyCompatible(mine, await recordPropertyRow(conn, rival.entity_id), deps)) return true;
+  }
+  return false;
+}
+
+// Which once-rule (if any) a template has: per customer (B5), per customer and
+// property (B1), or per estimate (C1).
 function onceScopeFor(run) {
-  return { 'lc.why_91_days': 'customer', 'nurture.expired_1': 'estimate' }[run.template_key] || null;
+  return { 'lc.why_91_days': 'customer', 'lc.first_visit_pest': 'property', 'nurture.expired_1': 'estimate' }[run.template_key] || null;
 }
 
 function ledgerGuardsFor(run) {
@@ -562,8 +645,9 @@ function ledgerGuardsFor(run) {
     const state = await priorSends({
       conn: trx,
       run,
-      customerId: scope === 'customer' ? run.recipient_id : null,
+      customerId: scope === 'estimate' ? null : run.recipient_id,
       estimateId: scope === 'estimate' ? run.entity_id : null,
+      byProperty: scope === 'property',
     });
     if (state === 'sent') return { reason: ONCE_ALREADY_DELIVERED };
     return state ? { reason: ONCE_IN_FLIGHT } : null;
@@ -613,6 +697,9 @@ async function whyPlanGate({
   // and "second visit" averages).
   const memberIds = await planSeriesMemberIds({ conn, deps, record, series: plan });
   if (!memberIds) return skip('the visit is not part of a recurring pest series at its property', 'plan_series_unknown');
+  if (!(await activeRecurringPestPlan({ conn, deps, record }))) {
+    return skip('the visit does not belong to an active recurring pest plan', 'not_recurring_plan');
+  }
   const planRecordIds = await performedSeriesRecordIds({ conn, deps, record, memberIds });
   if (planRecordIds.indexOf(record.id) !== 1) return skip('not the plan\'s second performed pest visit', 'not_second_visit');
   const planName = clean(record.service_type);
@@ -634,10 +721,11 @@ async function planSeriesMemberIds({
   if (!series?.rootId) return null;
   const members = await conn('scheduled_services').where('customer_id', record.customer_id)
     .where((qb) => qb.where('id', series.rootId).orWhere('recurring_parent_id', series.rootId))
-    .select('id', 'property_id', 'service_type');
+    .select('id', 'service_type', ...PROPERTY_COLUMNS);
   const memberIds = members
     .filter((row) => deps.detectServiceLine(row.service_type) === 'pest')
-    .filter((row) => !series.propertyId || !row.property_id || String(row.property_id) === String(series.propertyId))
+    // The canonical same-property rule (an unrecorded identity is compatible).
+    .filter((row) => propertyCompatible(series.visitRow, row, deps))
     .map((row) => row.id);
   return memberIds.includes(record.scheduled_service_id) ? memberIds : null;
 }
@@ -960,6 +1048,7 @@ module.exports = {
   REQUIRED,
   ledgerGuardsFor,
   onceScopeFor,
+  anyRivalAtSameProperty,
   positiveText,
   ONCE_ALREADY_DELIVERED,
   ONCE_IN_FLIGHT,

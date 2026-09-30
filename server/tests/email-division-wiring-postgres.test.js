@@ -178,7 +178,10 @@ describeOrSkip('email division wiring (Postgres)', () => {
   async function makeNextVisit(customerId, pattern = 'quarterly', date = '2099-12-24', extra = {}) {
     const [row] = await db('scheduled_services').insert({
       customer_id: customerId, scheduled_date: date, service_type: 'Quarterly Pest Control Service',
-      status: 'confirmed', recurring_pattern: pattern, service_address_city: 'Parrish', ...extra,
+      status: 'confirmed', recurring_pattern: pattern, service_address_city: 'Parrish',
+      // A live recurring series root (the canonical active-series source reads these flags).
+      is_recurring: Boolean(pattern) && pattern !== 'one_time', recurring_ongoing: Boolean(pattern) && pattern !== 'one_time',
+      ...extra,
     }).returning('id');
     return row.id;
   }
@@ -187,7 +190,8 @@ describeOrSkip('email division wiring (Postgres)', () => {
   async function makeDoneRecurring(customerId, extra = {}) {
     const [row] = await db('scheduled_services').insert({
       customer_id: customerId, scheduled_date: '2026-09-20', service_type: 'Quarterly Pest Control Service',
-      status: 'completed', recurring_pattern: 'quarterly', service_address_city: 'Parrish', ...extra,
+      status: 'completed', recurring_pattern: 'quarterly', service_address_city: 'Parrish',
+      is_recurring: true, recurring_ongoing: true, ...extra,
     }).returning('id');
     return row.id;
   }
@@ -696,6 +700,63 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(await db('marketing_email_ledger').where({ customer_id: customer.id })).toHaveLength(0);
     });
 
+    test('B1: two first-visit records created at the same instant give exactly ONE send (tie-break + the once-per-customer-and-property ledger guard)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      await makeNextVisit(customer.id);
+      const at = new Date('2026-09-20T15:00:00Z');
+      const a = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: series, createdAt: at, products: ['taurus'] });
+      const b = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: series, createdAt: at, products: ['taurus'] });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike());
+      const fireFor = (recordId) => Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      }).then((out) => out.results[0].run);
+      const runs = await Promise.all([fireFor(a), fireFor(b)]);
+      expect(runs.map((r) => r.status).sort()).toEqual(['sent', 'skipped']);
+      expect(await db('email_messages').whereIn('idempotency_key', runs.map((r) => r.idempotency_key))).toHaveLength(1);
+    });
+
+    test('the B1 once-guard is per customer AND PROPERTY: a sent first-visit email at property A blocks a sibling at A but not one at property B', async () => {
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const [propA] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Parrish' }).returning('id');
+      const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
+      const rootA = await makeDoneRecurring(customer.id, { property_id: propA.id });
+      const rootB = await makeDoneRecurring(customer.id, { property_id: propB.id });
+      const sentA = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: rootA });
+      const siblingA = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: rootA, createdAt: new Date('2026-09-21T15:00:00Z') });
+      const atB = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: rootB, createdAt: new Date('2026-09-22T15:00:00Z') });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: 'unused:{service_record_id}',
+      });
+      // A SENT run for the record at property A (the delivery authority the guard reads).
+      await db('email_template_automation_runs').insert({
+        automation_id: automation.id, automation_key: automation.automation_key, trigger_event_key: 'visit.completed_first', entity_type: 'service_record',
+        entity_id: sentA, template_key: 'lc.first_visit_pest', recipient_type: 'customer', recipient_id: customer.id,
+        recipient_email: customer.email, idempotency_key: `sent-${randomUUID()}`, status: 'sent',
+      });
+      const runFor2 = (entityId) => ({
+        id: randomUUID(), template_key: 'lc.first_visit_pest', entity_id: entityId, recipient_id: customer.id, recipient_email: customer.email, idempotency_key: `probe-${randomUUID()}`,
+      });
+      const guard = (entityId) => Builders.ledgerGuardsFor(runFor2(entityId)).guard(db);
+      expect(await guard(siblingA)).toEqual({ reason: 'ONCE_ALREADY_DELIVERED' });
+      expect(await guard(atB)).toBeNull();
+    });
+
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
@@ -1066,7 +1127,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const [propB] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Venice' }).returning('id');
         // This first visit happened at property A (its appointment, now completed).
         const [done] = await db('scheduled_services').insert({
-          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: propA.id, recurring_pattern: 'quarterly',
+          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: propA.id, recurring_pattern: 'quarterly', is_recurring: true, recurring_ongoing: true,
         }).returning('id');
         // Property B's pest visit comes SOONER than property A's next one.
         await makeNextVisit(customer.id, 'quarterly', '2098-01-05', { property_id: propB.id });
@@ -1154,12 +1215,89 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(r2.payload.pests_named_list).toBe('fire ants'); // the structured target wins; the notes never add termites
       });
 
+      test('the FULL commercial rule: a commercial/business ACCOUNT (customers.property_type, the commercial tier sentinel) or a business property is skipped — for a linked or an UNLINKED record', async () => {
+        const techId = await makeTech();
+        const cases = {
+          'account property_type commercial (unlinked record)': async () => {
+            const customer = await makeCustomer({ property_type: 'commercial' });
+            await makeNextVisit(customer.id);
+            return { customer, recordId: await makeVisit({ customerId: customer.id, technicianId: techId }) };
+          },
+          'account property_type business': async () => {
+            const customer = await makeCustomer({ property_type: 'business' });
+            return { customer, recordId: await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: await makeDoneRecurring(customer.id) }) };
+          },
+          'commercial tier sentinel': async () => {
+            const customer = await makeCustomer({ waveguard_tier: 'Commercial' });
+            return { customer, recordId: await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: await makeDoneRecurring(customer.id) }) };
+          },
+          'linked property of type business': async () => {
+            const customer = await makeCustomer();
+            const [property] = await db('customer_properties').insert({ customer_id: customer.id, property_type: 'business' }).returning('id');
+            return { customer, recordId: await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: await makeDoneRecurring(customer.id, { property_id: property.id }) }) };
+          },
+        };
+        for (const [label, build] of Object.entries(cases)) {
+          const { customer, recordId } = await build();
+          const result = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+          expect({ label, code: result.code }).toEqual({ label, code: 'not_residential_plan' });
+        }
+      });
+
+      test('"same property" is the canonical full-address key: Apt 1 and Apt 2 at one street and ZIP are different properties', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const address = (unit) => ({ service_address_line1: '100 Beach Rd', service_address_line2: unit, service_address_city: 'Parrish', service_address_zip: '34219' });
+        const done = await makeDoneRecurring(customer.id, address('Apt 1'));
+        await makeNextVisit(customer.id, 'quarterly', '2098-01-05', address('Apt 2')); // sooner, but another unit
+        await makeNextVisit(customer.id, 'quarterly', '2099-12-24', address('Apt 1'));
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: done });
+        const result = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+        expect(result.payload.next_visit_date).toBe('December 24, 2099');
+        // The same unit written two ways is ONE property (the canonical key folds the designator).
+        const other = await makeCustomer();
+        const doneOther = await makeDoneRecurring(other.id, address('Apt 4'));
+        await makeNextVisit(other.id, 'quarterly', '2099-12-24', address('Unit 4'));
+        const recordOther = await makeVisit({ customerId: other.id, technicianId: techId, scheduledServiceId: doneOther });
+        const same = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordOther, other), mode: 'live', deps: baseDeps() });
+        expect(same.payload.next_visit_date).toBe('December 24, 2099');
+      });
+
+      test('a cancelled (or lapsed) series is not an ACTIVE plan: a cancelled recurring root plus a separately booked future pest visit is no B1', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const cancelledRoot = await makeDoneRecurring(customer.id, { status: 'cancelled', recurring_ongoing: false });
+        await makeNextVisit(customer.id, 'one_time', '2099-12-24'); // separately booked one-off
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: cancelledRoot });
+        const cancelled = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+        expect(cancelled).toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
+        // A lapsed series (not ongoing, no live future member) is not active either.
+        const lapsed = await makeCustomer();
+        const lapsedRoot = await makeDoneRecurring(lapsed.id, { recurring_ongoing: false });
+        const lapsedRecord = await makeVisit({ customerId: lapsed.id, technicianId: techId, scheduledServiceId: lapsedRoot });
+        const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', lapsedRecord, lapsed), mode: 'live', deps: baseDeps() });
+        expect(r2).toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
+      });
+
+      test('first-visit ties: two performed records created at the SAME instant — exactly one qualifies (created_at, then id)', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const series = await makeDoneRecurring(customer.id);
+        await makeNextVisit(customer.id);
+        const at = new Date('2026-09-20T15:00:00Z');
+        const a = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: series, createdAt: at });
+        const b = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: series, createdAt: at });
+        const results = await Promise.all([a, b].map((id) => Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', id, customer), mode: 'live', deps: baseDeps() })));
+        expect(results.filter((r) => r.ok)).toHaveLength(1);
+        expect(results.filter((r) => r.skip).map((r) => r.code)).toEqual(['not_first_visit']);
+      });
+
       test('the rain sentence: coordinates come from the VISITED property, a complete radar read over whole days after the visit; shadow makes no external call', async () => {
         const customer = await makeCustomer({ latitude: 10, longitude: 10 }); // the customer record's coordinates belong to ANOTHER property
         const techId = await makeTech();
         const [property] = await db('customer_properties').insert({ customer_id: customer.id, latitude: 27.5, longitude: -82.4 }).returning('id');
         const [done] = await db('scheduled_services').insert({
-          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: property.id,
+          customer_id: customer.id, scheduled_date: '2026-09-20', service_type: 'Pest Control Service', status: 'completed', property_id: property.id, recurring_pattern: 'quarterly', is_recurring: true, recurring_ongoing: true,
         }).returning('id');
         await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: property.id });
         const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: done.id });
@@ -1368,6 +1506,24 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const secondAtB = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 9, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: seriesB });
         const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', secondAtB, customer), deps });
         expect(r2.ok).toBe(true);
+      });
+
+      test('B5: a commercial ACCOUNT and a cancelled series are skipped too', async () => {
+        const techId = await makeTech();
+        const commercial = await makeCustomer({ property_type: 'commercial' });
+        const scheduledId = await makeNextVisit(commercial.id);
+        await makeVisit({ customerId: commercial.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
+        const commercialRecord = await makeVisit({ customerId: commercial.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
+        const deps = baseDeps({ getActivityRatingAverages: async () => cohort });
+        expect(await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', commercialRecord, commercial), deps }))
+          .toEqual(expect.objectContaining({ skip: true, code: 'not_residential_plan' }));
+
+        const customer = await makeCustomer();
+        const cancelled = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { status: 'cancelled', recurring_ongoing: false });
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: cancelled, createdAt: new Date('2026-06-20T15:00:00Z') });
+        const record = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: cancelled });
+        expect(await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', record, customer), deps }))
+          .toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
       });
 
       test('a COMMERCIAL quarterly plan is skipped for B5 too', async () => {
