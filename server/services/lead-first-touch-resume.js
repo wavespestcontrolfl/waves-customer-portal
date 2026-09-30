@@ -83,10 +83,12 @@ async function customerCallDoNotContact(customerId, dbh) {
 // Canonical suppression semantics: only a suppression the automation lane
 // itself would honor blocks the release — a group-scoped suppression for an
 // unrelated stream (e.g. service_operational) must not bury it.
+// A Google address also matches a suppression stored under any spelling of
+// the same mailbox (suppressionCoversEmail; codex #5323 r2 P1).
 async function emailSuppressedForNewLead(email, dbh) {
   if (!(await dbh.schema.hasTable('email_suppressions'))) return false;
   const rows = await dbh('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
     .where({ status: 'active' });
   if (!rows.length) return false;
   const { automationSuppressionMatches } = require('./automation-runner');
