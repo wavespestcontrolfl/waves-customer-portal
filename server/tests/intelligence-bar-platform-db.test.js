@@ -12,7 +12,7 @@ const databaseUrl = process.env.IB_TEST_DATABASE_URL;
 const suite = databaseUrl ? describe : describe.skip;
 
 suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
-  let db, server, origin, token, actor, customerA, customerB, nameA, firstName;
+  let db, server, origin, token, actor, customerA, customerB, nameA, firstName, suiteStartedAt;
   const sessionId = crypto.randomUUID();
   const originalEnv = { ...process.env };
   const tools = (name, input, id) => ({ content: [{ type: 'tool_use', name, input, id }], usage: {} });
@@ -45,6 +45,7 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
     process.env.GATE_IB_WRITES_DISABLED = 'false';
     process.env.GATE_EDIT_APPT_ADDRESS = 'true';
     db = require('../models/db');
+    suiteStartedAt = (await db.raw('SELECT now() AS t')).rows[0].t;
     if (!(await db.schema.hasTable('ib_tasks'))) throw new Error('Apply the IB task migration to the isolated database first');
     actor = crypto.randomUUID(); customerA = crypto.randomUUID(); customerB = crypto.randomUUID();
     // A per-run first name: the shared isolated database accumulates fixtures, and a
@@ -67,6 +68,17 @@ suite('platform IB outcomes against isolated Postgres (scripted model)', () => {
   beforeEach(() => mockModel.mockReset());
   afterAll(async () => {
     if (server) await new Promise(resolve => server.close(resolve));
+    // Every gap this suite records (the gap-report cases, or any scripted
+    // reply that declines) writes an `agents` admin bell in the gap's own
+    // transaction; remove them so CI's shared database carries no unread
+    // bells into later suites.
+    if (db && suiteStartedAt) {
+      await db('notifications')
+        .where('category', 'agents')
+        .where('created_at', '>=', suiteStartedAt)
+        .whereRaw("metadata->>'gapId' IS NOT NULL")
+        .del();
+    }
     if (db) await db.destroy();
     for (const key of Object.keys(process.env)) if (!(key in originalEnv)) delete process.env[key];
     Object.assign(process.env, originalEnv);

@@ -483,8 +483,8 @@ suite('email division against real Postgres', () => {
   });
 
   // Four cities, one recompute: Ellenton (4 visits, below the 5-visit floor
-  // -> no rows), Parrish (54 visits, 35 (~65%) target big-headed ants -> the
-  // worked-example sentence), Nocatee (10 visits, 100% flea targets but
+  // -> no rows), Parrish (54 visits, 35 (~65%) target big-headed ants, counted
+  // as the ants family -> the worked-example sentence), Nocatee (10 visits, 100% flea targets but
   // below minVisits -> null), Bradenton (25 visits, only 1 (4%) targets a
   // pest, below the 10% floor -> null).
   test('computeAreaIntel + getAreaIntelSentence: 5-customer floor, minVisits, 10% floor, exact wording', async () => {
@@ -503,10 +503,10 @@ suite('email division against real Postgres', () => {
     expect(result.citiesProcessed).toBe(3); // Ellenton never gets a row
     expect(await trx('email_area_intel_monthly').where({ city: 'ellenton' })).toHaveLength(0);
     const parrishRows = await trx('email_area_intel_monthly').where({ city: 'parrish' });
-    expect(parrishRows.find((r) => r.pest_key === 'big-headed ants').visits_with_pest).toBe(35);
+    expect(parrishRows.find((r) => r.pest_key === 'ants').visits_with_pest).toBe(35);
     expect(parrishRows[0].visits).toBe(54);
     await expect(getAreaIntelSentence({ city: 'Parrish', month: sentenceMonth, conn: trx })).resolves
-      .toBe('In September our technicians treated big-headed ants at 65% of our 54 visits in Parrish.');
+      .toBe('In September our technicians treated ants at 65% of our 54 visits in Parrish.');
     await expect(getAreaIntelSentence({ city: 'Nocatee', month: sentenceMonth, minVisits: 20, conn: trx })).resolves.toBeNull();
     await expect(getAreaIntelSentence({ city: 'Bradenton', month: sentenceMonth, conn: trx })).resolves.toBeNull();
   });
@@ -534,8 +534,8 @@ suite('email division against real Postgres', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ visits: 5, pest_key: 'fleas', visits_with_pest: 5 });
     expect(rows.find((r) => r.pest_key === 'ticks')).toBeUndefined();
-    expect(rows.find((r) => r.pest_key === 'paper wasps')).toBeUndefined();
-    expect(rows.find((r) => r.pest_key === 'wolf spiders')).toBeUndefined();
+    expect(rows.find((r) => r.pest_key === 'wasps')).toBeUndefined();
+    expect(rows.find((r) => r.pest_key === 'spiders')).toBeUndefined();
   });
 
   test('computeAreaIntel: one customer with 5+ completed visits never alone clears the privacy floor', async () => {
@@ -566,8 +566,27 @@ suite('email division against real Postgres', () => {
     await computeAreaIntel({ month, conn: trx });
     const rows = await trx('email_area_intel_monthly').where({ city: 'ruskin' }).orderBy('pest_key');
     expect(rows).toMatchObject([
+      { visits: 6, pest_key: 'ants', visits_with_pest: 2 },
       { visits: 6, pest_key: 'bed bugs', visits_with_pest: 1 },
-      { visits: 6, pest_key: 'fire ants', visits_with_pest: 2 },
+    ]);
+  });
+
+  // Owner ruling 2026-09-30: species chips count toward their family, one
+  // count per visit per family however many species it treated. A hand-typed
+  // chip outside the vocabulary never rolls up into a family.
+  test('computeAreaIntel: species chips roll up to their family, once per visit', async () => {
+    const month = new Date('2026-09-15T12:00:00Z');
+    await makeCityVisits('Palmetto', 2, { service_date: '2026-09-05', targets: ['Wolf spiders'] });
+    await makeCityVisits('Palmetto', 1, { service_date: '2026-09-05', targets: ['Widow spiders', 'Jumping spiders'] });
+    await makeCityVisits('Palmetto', 1, { service_date: '2026-09-05', targets: ['German cockroaches', 'Smokybrown cockroaches'] });
+    await makeCityVisits('Palmetto', 1, { service_date: '2026-09-05', targets: ['Roof rats', 'house mice'] });
+    await makeCityVisits('Palmetto', 1, { service_date: '2026-09-05', targets: ['sugar ants seen near the door'] });
+    await computeAreaIntel({ month, conn: trx });
+    const rows = await trx('email_area_intel_monthly').where({ city: 'palmetto' }).orderBy('pest_key');
+    expect(rows.map((r) => [r.pest_key, r.visits_with_pest])).toEqual([
+      ['rats and mice', 1],
+      ['roaches', 1],
+      ['spiders', 3],
     ]);
   });
 
@@ -652,9 +671,9 @@ suite('email division against real Postgres', () => {
     const rows = await trx('email_area_intel_monthly').where({ city: 'duette' });
     // The free-text chip never reaches the table at all — only the
     // canonical target does, even though it tied the chip's own count.
-    expect(rows).toMatchObject([{ visits: 50, pest_key: 'fire ants', visits_with_pest: 25 }]);
+    expect(rows).toMatchObject([{ visits: 50, pest_key: 'ants', visits_with_pest: 25 }]);
     await expect(getAreaIntelSentence({ city: 'Duette', month: sentenceMonth, conn: trx })).resolves
-      .toBe('In September our technicians treated fire ants at 50% of our 50 visits in Duette.');
+      .toBe('In September our technicians treated ants at 50% of our 50 visits in Duette.');
   });
 
   test('computeAreaIntel: a catalogued herbicide caught only by category (round 8 P2) still counts its canonical weed targets (round 9 P2) — exact Stonewall row', async () => {
