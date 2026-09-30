@@ -1854,6 +1854,8 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
     spaces: ' '.repeat(N), 'a ': rep('a '), digits: rep('1'), 'digit spaces': rep('1 '), 'number words': rep('one two three four five six seven eight nine ten '), 'hyphenated number words': rep('twenty-one-'),
     'and a half': rep('one and a half '), 'keep off': rep('keep off '), 'keep the dogs': rep('keep the dogs '), 'wait for': rep('wait for '), 'give it a': rep('give it a '), 'let the dog': rep('let the dog '),
     'dry and': rep('dry and '), 'trigger words': rep('rain pets dogs kids lawn stay off until dry '), 'for 2 hours or': rep('for 2 hours or '), dashes: rep('- '), dots: rep('. '), commas: rep(', '), 'question marks': rep('? '),
+    'let the cat': rep('let the cat '), 'go back in': rep('go back in '), 'come back inside': rep('come back inside '), 'sleep in the': rep('sleep in the '), 'use the kitchen': rep('use the kitchen '),
+    'inside house home': rep('inside house home '), 'we my kids': rep('we my kids '), 'you can come': rep('you can come '),
     'zero width': rep('\u200b '), apostrophes: rep("don't "), 'may in': rep('may in '), 'next fri': rep('next fri '), years: rep('in 2025 '), 'am pm': rep('9 am '), clocks: rep('9:00 '), 'by 5': rep('by 5 '), colons: rep('a: '),
   };
   const SECTION = 'LABEL FACTS (Jun 5):\n- For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas for 4 hours.\n';
@@ -1964,6 +1966,32 @@ describe('r29 item 4: a thread that cannot be read for this sender is logged onc
     expect(after).toHaveLength(1);
     expect(after[0]).toContain('no_same_sender_rows');
     warn.mockRestore();
+  });
+});
+
+describe('r30: indoor re-entry is a structural re-entry question', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', asked(inbound));
+  test('someone + an entry verb, someone + an indoor place with a question / ok word, or an indoor place with ok and a question', () => {
+    for (const text of [
+      'Can we go back inside?', 'Can I enter the house now?', 'ok to come back in?', 'when can the kids go in their room', 'is the kitchen safe', 'can we sleep in the bedroom tonight', 'can I let the cat back in',
+      'can the baby use the living room', 'is the garage ok now', 'can we stay in the house tonight', 'when can we re-enter', 'ok to walk back inside', 'can my kids go inside now', 'are the bedrooms safe for the baby',
+      'when can the dog come back in', 'is the attic fine to go into', 'can I use the bathroom now',
+    ]) expect([text, asked(text).includes('reentry')]).toEqual([text, true]);
+  });
+  test('pre-visit access, staff going in, service-scope questions and ordinary statements are not re-entry questions', () => {
+    for (const text of [
+      'should we be inside when you arrive', 'can you come inside to spray', 'the tech will come inside', 'Can the technician come inside the house?', 'can someone come inside and check the attic', 'do you spray inside the house',
+      'do you spray for roaches inside the house', 'can you spray the garage', 'are you able to treat the attic', 'do your techs enter the house', "I'm not home but the side gate is open", 'we will be home Tuesday',
+      'we have ants in the kitchen again, can someone come thursday', 'What time are you coming Thursday?', 'Please send my invoice', 'how much for a one time spray?',
+    ]) expect([text, asked(text).includes('reentry')]).toEqual([text, false]);
+  });
+  test('a bare "yes" to an indoor re-entry question is held; a hand-off passes', () => {
+    for (const inbound of ['Can we go back inside?', 'is the kitchen safe', 'can we sleep in the bedroom tonight', 'can I let the cat back in']) {
+      expect([inbound, guard('Yes, you can.', inbound), guard("It's fine.", inbound), guard('Sure, go ahead!', inbound)]).toEqual([inbound, true, true, true]);
+      expect([inbound, guard("I'll have the office confirm within the hour.", inbound)]).toEqual([inbound, false]);
+    }
+    expect(guard('Yes, we do spray inside the house.', 'do you spray inside the house')).toBe(false);
   });
 });
 

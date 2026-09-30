@@ -943,7 +943,21 @@ const ASKED_REENTRY_RE = new RegExp([BEING_RE.source, ACTIVITY_RE.source, REENTR
 const OUTDOOR_PLACE_RE = /\b(?:yard|backyard|front\s+yard|lawn|grass|patio|pool(?:\s+deck)?|deck|porch|lanai|garden|driveway|outside|outdoors?|treated\s+areas?|play\s+area|playset|sod|turf)\b/;
 const OUTDOOR_ACTIVITY_RE = /\b(?:use|using|go|going|play|playing|sit|sitting|walk|walking|let\s+\w+\s+out|mow|mowing|water|watering|garden|gardening|grill|grilling|swim|swimming|barbecue|bbq)\b/;
 const ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|you|us|our|my|me|they|them|he|she|kids?|family)\\b");
-const asksReentryStructurally = (text) => (ASKER_RE.test(text) && OUTDOOR_PLACE_RE.test(text)) || (OUTDOOR_ACTIVITY_RE.test(text) && (OUTDOOR_PLACE_RE.test(text) || BEING_RE.test(text)))
+// Indoor re-entry ("can we go back inside?", "ok to come back in?", "is the kitchen safe", "can we sleep in the bedroom tonight",
+// "can I let the cat back in"): someone + an entry verb, or someone + an indoor place with a question / ok / entry word, or an
+// indoor place with a question / ok word. Staff going in ("can you come inside to spray", "the tech will come inside") is access,
+// not re-entry. Every alternative is a plain word list with bounded gaps.
+const INDOOR_PLACE_RE = /\b(?:inside|indoors?|house|home|rooms?|bedrooms?|kitchen|living\s+room|garage|attic|crawlspace|basement|bathroom|closet|cabinets?|pantry|baseboards?|floors?|carpets?|couch|furniture|nursery)\b/;
+const ENTRY_RE = /\b(?:re-?enter|enter|(?:go|come|get|walk|move)\s+(?:back\s+)?(?:in|inside|indoors)|let\s+(?:\w+\s+){0,2}?(?:back\s+)?(?:in|inside|indoors)|sleep(?:ing)?\s+in|stay(?:ing)?\s+in|use\s+the\s+(?:kitchen|bathroom|bedroom|room|garage|basement|attic))\b/;
+const STAFF_ENTRY_RE = /\b(?:you|(?:the|our|your)\s+(?:tech|technician|guy|team|crew)|tech|technician|someone)\s+(?:will\s+|can\s+|could\s+|should\s+|would\s+|need\s+to\s+|have\s+to\s+|to\s+)?(?:come|go|get|enter|walk)\s+(?:in|inside|indoors|into)\b/;
+const OK_WORD_RE = /\b(?:safe|ok|okay|fine|ready|usable|clear|allowed)\b/;
+// ("you" is not the one going in: "do you spray inside the house?" is a question about the service)
+const INDOOR_ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|us|our|my|me|they|them|he|she|kids?|family)\\b");
+const asksIndoorReentry = (text) => !STAFF_ENTRY_RE.test(text) && (
+  (ENTRY_RE.test(text) && (INDOOR_ASKER_RE.test(text) || OK_WORD_RE.test(text)))
+  || (INDOOR_PLACE_RE.test(text) && INDOOR_ASKER_RE.test(text) && (ASKED_QUESTION_RE.test(text) || OK_WORD_RE.test(text)))
+  || (INDOOR_PLACE_RE.test(text) && OK_WORD_RE.test(text) && ASKED_QUESTION_RE.test(text)));
+const asksReentryStructurally = (text) => asksIndoorReentry(text) || (ASKER_RE.test(text) && OUTDOOR_PLACE_RE.test(text)) || (OUTDOOR_ACTIVITY_RE.test(text) && (OUTDOOR_PLACE_RE.test(text) || BEING_RE.test(text)))
   || (OUTDOOR_PLACE_RE.test(text) && (ASKED_QUESTION_RE.test(text) || /\b(?:safe|ok|okay|fine|ready|usable|clear)\b/.test(text)));
 // Weather-only wording ("will this weather affect the treatment?", "the wet grass ok?", "humid today, will it still work?")
 // asks the rain kind when it has a question shape or a treatment / spray / application / work / effect context.
