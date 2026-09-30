@@ -20268,6 +20268,14 @@ const CallRecordingProcessor = {
       }).catch((e) => logger.warn(`[call-proc] late-scheduling-hold lead-activity refresh failed for ${maskSid(callSid)}: ${e.message}`));
     }
 
+    // The street-level review reason was raised when the hold was DECIDED; if the
+    // booking never became that hold (the on-file authority did not bind, or the
+    // booking was skipped or failed) no card carries it, so it must not keep the
+    // call's review state open.
+    if (!pendingOfficeReview) {
+      const staleAt = bridgeNeedsConfirmation.indexOf('street_level_address_review');
+      if (staleAt !== -1) bridgeNeedsConfirmation.splice(staleAt, 1);
+    }
     const liveLeadConversation = isLiveLeadConversation({
       call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription,
     });

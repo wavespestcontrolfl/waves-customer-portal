@@ -682,6 +682,10 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(push).toBeLessThan(s.indexOf("triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH:"));
     // And it reads as a plain instruction on the lead's activity.
     expect(s).toMatch(/street_level_address_review: 'web-form address: Google matched only the street/);
+    // ...and dropped again before finalization when the booking never became the hold (no card carries it).
+    const drop = s.indexOf("if (!pendingOfficeReview) {\n      const staleAt = bridgeNeedsConfirmation.indexOf('street_level_address_review');");
+    expect(drop).toBeGreaterThan(push);
+    expect(drop).toBeLessThan(s.indexOf('const liveLeadConversation = isLiveLeadConversation({', drop));
     // Gate off: buildStreetLevelHold is null (no knownCaller.onFileStreetLevel), so nothing is pushed.
     expect(buildStreetLevelHold({ knownCaller: { addressLine1: '1 X St' }, routingResult: { usesOnFileAddress: true } })).toBeNull();
   });
