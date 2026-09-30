@@ -1000,6 +1000,7 @@ router.get('/lawn-outline-facts', async (req, res, next) => {
             'label_source_url',
             'label_verified_at',
             'label_version',
+            'post_application_watering',
             'approved_for_public_page',
             'approved_for_estimate_packet',
             'approved_for_service_report',

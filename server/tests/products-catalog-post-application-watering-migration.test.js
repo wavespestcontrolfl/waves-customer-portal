@@ -5,6 +5,7 @@ const describeDb = SKIP ? describe.skip : describe;
 const { randomUUID } = require('crypto');
 const knexFactory = require('knex');
 const migration = require('../models/migrations/20260930000001_products_catalog_post_application_watering');
+const verifiedAtFix = require('../models/migrations/20260930000002_watering_rule_seed_verified_at');
 const correction = require('../models/migrations/20260930000003_watering_rule_celsius_until_dry_audit');
 
 describeDb('products_catalog.post_application_watering migration', () => {
@@ -123,6 +124,7 @@ describeDb('20260930000003 Celsius until-dry correction + audit', () => {
     await knex('products_catalog').where({ id: celsius }).update({ post_application_watering: null });
     await knex('products_catalog').where({ id: owned }).update({ post_application_watering: JSON.stringify({ mode: 'hold', hold_hours: 8, source: 'owner', verified_by: 'label-check-2026-09-29' }) });
     await migration.up(knex); // re-seed the cleared Celsius row (fill-only-empty)
+    await verifiedAtFix.up(knex); // production order: 000001 → 000002 → 000003
     expect(await rule(celsius)).toMatchObject({ mode: 'hold', hold_hours: 6, source: 'label' });
     await correction.up(knex);
     expect(await rule(celsius)).toMatchObject({ mode: 'hold', hold_until: 'dry', hold_hours: null, source: 'label', label_note: 'Do not irrigate until the spray has dried.' });

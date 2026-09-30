@@ -228,3 +228,13 @@ describe('codex #5389 r2', () => {
     expect(validateRule({ mode: 'hold', hold_until: 'dry', hold_hours: 4, source: 'label' }).rule).toMatchObject({ hold_until: 'dry', hold_hours: 4 });
   });
 });
+
+describe('codex #5389 r3', () => {
+  const { deriveDefaultRule } = require('../services/service-report/lawn-watering-rule');
+  test('an explicit irrigation_required flag outranks the post-emergent spray hold', () => {
+    expect(deriveDefaultRule({ name: 'Some Post-Emergent', category: 'herbicide', formulation: 'SC', irrigation_required: true }))
+      .toMatchObject({ mode: 'water_in' });
+    expect(deriveDefaultRule({ name: 'Some Post-Emergent', category: 'herbicide', formulation: 'SC', irrigation_required: null }))
+      .toMatchObject({ mode: 'hold' });
+  });
+});

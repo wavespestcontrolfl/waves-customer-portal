@@ -169,6 +169,10 @@ function deriveDefaultRule(row) {
   const preEmergent = isPreEmergent(row);
   const herbicide = category.includes('herbicide') || preEmergent;
 
+  // An affirmative catalog flag is label-derived and outranks the generic
+  // post-emergent spray default (codex P2 #5389 r3).
+  if (row.irrigation_required === true) return defaultRule({ mode: 'water_in' });
+
   if (herbicide && !preEmergent && form === 'spray') {
     const rainfastMinutes = Number(row.rainfast_minutes);
     const rainfastHours = Number.isFinite(rainfastMinutes) && rainfastMinutes > 0
