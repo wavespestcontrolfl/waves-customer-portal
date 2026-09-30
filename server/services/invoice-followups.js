@@ -1266,17 +1266,22 @@ async function holdTouchUntilNextDay(row, claimStamp, why, { operatorInitiated =
   }
   const guard = { id: row.id, status: 'active', step_index: row.step_index };
   if (claimStamp) guard.touch_claimed_at = claimStamp;
-  // A send-now that rewrote next_touch_at meanwhile must not be overwritten
-  // (Codex #5404 r1 P2).
-  if (row.next_touch_at) guard.next_touch_at = row.next_touch_at;
   try {
-    const updated = await db('invoice_followup_sequences').where(guard)
-      .update({ updated_at: db.fn.now(), next_touch_at: floor });
+    let query = db('invoice_followup_sequences').where(guard);
+    // A send-now that rewrote next_touch_at meanwhile must not be overwritten
+    // (Codex #5404 r1 P2). Compared at millisecond precision: some writers
+    // stamp it with the DB clock (microseconds, e.g. visit-completion-packets'
+    // trx.fn.now()) while pg hands JS a millisecond Date, so plain equality
+    // would never match and every hold would silently no-op.
+    if (row.next_touch_at) {
+      query = query.whereRaw("date_trunc('milliseconds', next_touch_at) = ?", [new Date(row.next_touch_at)]);
+    }
+    const updated = await query.update({ updated_at: db.fn.now(), next_touch_at: floor });
     if (Number(updated) > 0) {
       logger.info(`[invoice-followups] sequence ${row.id} step ${row.step_index} held (${why}) — retimed to ${floor.toISOString()}`);
       return true;
     }
-    logger.info(`[invoice-followups] hold retime no-op for sequence ${row.id} (${why}) — sequence changed since the claim`);
+    logger.warn(`[invoice-followups] hold retime no-op for sequence ${row.id} (${why}) — sequence changed since the claim`);
   } catch (err) {
     logger.warn(`[invoice-followups] hold retime failed for sequence ${row.id} (${why}): ${err.message}`);
   }
@@ -2839,5 +2844,5 @@ module.exports = {
   latePaymentCheckerRetiredLive,
   adoptOrphanInvoicesLive,
   // Pure predicates, exported for tests only.
-  _test: { canSystemResume, isSystemStopStamp },
+  _test: { canSystemResume, isSystemStopStamp, holdTouchUntilNextDay },
 };

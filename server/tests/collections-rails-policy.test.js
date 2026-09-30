@@ -606,8 +606,12 @@ function expectHeldRetime(update, { at = HELD_FLOOR, stepIndex = 0, dueAt = FU_D
   // unchanged (a send-now rewrite in between makes it a 0-row no-op).
   expect(update.where).toHaveBeenCalledWith({
     id: 'seq-1', status: 'active', step_index: stepIndex, touch_claimed_at: expect.any(Date),
-    next_touch_at: dueAt,
   });
+  // Compared at millisecond precision: a writer that stamps the DB clock
+  // (now(), microseconds) must still match the ms Date pg handed back.
+  expect(update.whereRaw).toHaveBeenCalledWith(
+    "date_trunc('milliseconds', next_touch_at) = ?", [new Date(dueAt)],
+  );
   expect(update.update).toHaveBeenCalledTimes(1);
   const [patch] = update.update.mock.calls[0];
   expect(patch).toEqual({ updated_at: 'CURRENT_TIMESTAMP', next_touch_at: at });
