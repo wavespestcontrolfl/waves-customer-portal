@@ -2279,6 +2279,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
       "A free re-service isn't covered under your plan.",
       "Your plan doesn't include a free re-service.",
       'We are not able to offer a complimentary visit.',
+      'We are not yet eligible for a free re-service.',
     ];
     test.each(DENIALS)('%s → a denial, NOT a promise', (text) => {
       expect(isReserviceOfferPromise(text)).toBe(false);
@@ -2289,7 +2290,13 @@ describe('free re-service is an entitlement resolved through the existing mechan
       'No charge for the visit.',
       'Sorry, you are not eligible for a free re-service, but your free lawn re-service is covered.',
       'You are not eligible for a free pest re-service. However, a complimentary visit is on us.',
-    ])('%s → still a promise (price-word negation / separate affirmative clause)', (text) => {
+      // PR #5336 pre-push audit P1 (denial scoping): an unrelated denial in the
+      // same clause never suppresses a real offer; contrastive conjunctions split.
+      'We cannot offer a refund but we can provide a free pest re-service.',
+      "we can't offer a refund, however a complimentary visit is on us",
+      'We cannot offer a refund and will send a free re-service.',
+      'We cannot offer a refund and a free re-service is on us.',
+    ])('%s → still a promise (price-word negation / separate affirmative clause / unrelated denial)', (text) => {
       expect(isReserviceOfferPromise(text)).toBe(true);
     });
 
@@ -2313,6 +2320,18 @@ describe('free re-service is an entitlement resolved through the existing mechan
         outgoingBody,
       })).resolves.toBeNull();
       expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
+    });
+
+    // The unrelated-denial promises are checked (not skipped) for an ineligible customer at draft time and send time.
+    test.each([
+      'We cannot offer a refund but we can provide a free pest re-service.',
+      "we can't offer a refund, however a complimentary visit is on us",
+    ])('%s → an ineligible customer is NOT waved through (draft + send)', async (reply) => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage: 'still have ants', intendedActions: [] }).ok).toBe(false);
+      const { drafter } = loadWith({ lanes: [] });
+      await expect(drafter.reservicePromiseStillEligible({ outgoingBody: reply, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/no longer eligible/);
     });
 
     test("\"We won't charge you for the visit.\" is still blocked for an ineligible customer (both send paths)", async () => {

@@ -579,7 +579,7 @@ const RESERVICE_COVERAGE_RE = new RegExp(
 // pairs the negator with the offer/eligibility verb it governs.
 const RESERVICE_DENIAL_RE = new RegExp(
   '\\b(?:'
-  + 'not\\s+(?:currently\\s+|presently\\s+)?(?:eligible|covered|included|qualified|able\\s+to)'
+  + 'not\\s+(?:currently\\s+|presently\\s+|yet\\s+)?(?:eligible|covered|included|qualified)'
   + "|(?:isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+)?(?:covered|included|eligible)"
   + "|(?:can['’]?t|cannot|can\\s+not|won['’]?t\\s+be\\s+able\\s+to|will\\s+not\\s+be\\s+able\\s+to|unable\\s+to|not\\s+able\\s+to)\\s+(?:to\\s+)?(?:offer|send|schedule|provide|book|give|do|arrange)"
   + '|no\\s+longer\\s+(?:eligible|qualif(?:y|ies|ied)|covered|included)'
@@ -587,8 +587,34 @@ const RESERVICE_DENIAL_RE = new RegExp(
   + ')',
   'i',
 );
+// PR #5336 pre-push audit P1 (denial scoping): a negator only makes a clause a
+// denial when it GOVERNS the promise phrase itself. "We cannot offer a refund
+// but we can provide a free pest re-service" holds an unrelated denial ("cannot
+// offer a refund") beside a real offer, and used to read as no promise at all
+// — skipping every eligibility/action check on a genuine offer. Structural
+// rule, failing CLOSED (blocking a truthful denial is acceptable; skipping a
+// real promise is not): the negator's span must touch/overlap the matched
+// offer span or sit within a few words of it (either order: "cannot offer a
+// free re-service", "a free re-service isn't covered"), with no affirmative
+// verb or conjunction in the words between ("...can provide", "and send").
+// Contrastive conjunctions are also clause breaks (see
+// affirmativeReservicePromiseClauses) so each side is judged alone.
+const RESERVICE_DENIAL_GAP_MAX_WORDS = 6;
+const RESERVICE_DENIAL_GAP_BREAK_RE = /\b(?:can|could|will|would|we['’]ll|i['’]ll|send|sending|provide|providing|schedule|give|giving|book|arrange|happy|glad|and|plus|also|then|instead|but|however|though|although|yet|whereas)\b/i;
+function reserviceNegatorGoverns([ns, ne], [os, oe], text) {
+  if (ns < oe && os < ne) return true; // overlapping spans ("re-service isn't covered")
+  const gap = ne <= os ? text.slice(ne, os) : text.slice(oe, ns);
+  const words = gap.trim().split(/\s+/).filter(Boolean).length;
+  return words <= RESERVICE_DENIAL_GAP_MAX_WORDS && !RESERVICE_DENIAL_GAP_BREAK_RE.test(gap);
+}
 function isReserviceDenialClause(clause) {
-  return RESERVICE_DENIAL_RE.test(String(clause || ''));
+  const text = String(clause || '');
+  const offers = [FREE_RESERVICE_OFFER_RE, RESERVICE_COVERAGE_RE].map((rx) => rx.exec(text)).filter(Boolean)
+    .map((m) => [m.index, m.index + m[0].length]);
+  if (!offers.length) return false;
+  const negators = [...text.matchAll(new RegExp(RESERVICE_DENIAL_RE.source, 'gi'))].map((m) => [m.index, m.index + m[0].length]);
+  // Unsure -> a promise: EVERY offer span in the clause must be governed by some negator.
+  return offers.every((o) => negators.some((n) => reserviceNegatorGoverns(n, o, text)));
 }
 function rawReserviceOfferMatch(text) {
   const t = String(text || '');
@@ -598,7 +624,10 @@ function rawReserviceOfferMatch(text) {
 // detectors above match that are not eligibility denials. Granularity narrows
 // only as far as it must: clause (split on , ; : and dashes) first, then
 // sentence, then — when the promise straddles those breaks — the whole body.
-// The first granularity that finds any detector hit decides: hits that are all
+// Contrastive conjunctions (but, however, though, although, yet, instead,
+// whereas) are clause breaks too, so each side of "we can't offer a refund
+// but we can provide a free re-service" is judged alone. The first
+// granularity that finds any detector hit decides: hits that are all
 // denials mean NO promise ("You are not eligible for a free re-service"),
 // while a denial clause beside a separate affirmative promise clause
 // ("...not eligible for a free re-service, but your free lawn re-service is
@@ -607,7 +636,7 @@ function rawReserviceOfferMatch(text) {
 // derivation can never disagree about which text is the promise.
 function affirmativeReservicePromiseClauses(text) {
   const t = String(text || '');
-  const splitters = [/[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]/, /[.?!\n]+/];
+  const splitters = [/[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]|\b(?:but|however|though|although|instead|whereas)\b|(?<!\bnot\s)\byet\b/i, /[.?!\n]+/];
   for (const splitter of splitters) {
     const hits = t.split(splitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
     if (hits.length) return hits.filter((c) => !isReserviceDenialClause(c));
