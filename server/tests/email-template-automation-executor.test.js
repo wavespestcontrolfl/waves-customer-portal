@@ -1876,6 +1876,133 @@ describe('email template automation executor', () => {
     });
   });
 
+  describe('idempotency: a corrected shadow would_block run goes live (pre-live fix)', () => {
+    const payload = {
+      estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com',
+      first_name: 'Sam', new_expires_at: '2026-06-01', renewal_count: 1, status: 'sent',
+    };
+    const replay = () => AutomationExecutor.processTrigger({
+      triggerEventKey: 'estimate.auto_renewed',
+      triggerEventId: 'estimate_auto_renew:est-1',
+      payload,
+      now: new Date('2026-05-18T12:00:00.000Z'),
+    });
+
+    test('a skipped row whose latest ledger event is would_block is promoted in place, guarded by the status AND the would_block fact', async () => {
+      const blockedRun = run({ status: 'skipped', exit_reason: 'template disabled', context: JSON.stringify({ origin_mode: 'shadow' }) });
+      const existingRunQuery = chain({ first: blockedRun });
+      const promotedRunQuery = chain({ returning: [{ ...blockedRun, status: 'scheduled' }] });
+      const latestEventQuery = chain({ first: { event_type: 'would_block' } });
+      const promotedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, promotedRunQuery],
+        email_template_automation_run_events: [latestEventQuery, promotedLogQuery],
+      });
+
+      const result = await replay();
+
+      expect(result.results[0].deduped).toBe(false);
+      expect(promotedRunQuery.insert).not.toHaveBeenCalled();
+      expect(promotedRunQuery.where).toHaveBeenCalledWith({ id: 'run-1', status: 'skipped' });
+      expect(promotedRunQuery.whereRaw).toHaveBeenCalledWith(expect.stringContaining("= 'would_block'"));
+      expect(promotedRunQuery.update).toHaveBeenCalledWith(expect.objectContaining({
+        status: 'scheduled', attempts: 0, last_error: null, exit_reason: null, completed_at: null,
+      }));
+      expect(promotedLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        event_type: 'promoted_from_shadow',
+        metadata: expect.stringContaining('"from_status":"skipped"'),
+      }));
+    });
+
+    test.each([
+      ['a genuine condition/exit skip (latest event is skipped)', { event_type: 'skipped' }],
+      ['a skipped row with no ledger events at all', undefined],
+      ['a LIVE block after an earlier would_block (latest event is a later skip)', { event_type: 'skipped' }],
+    ])('%s is NOT promoted: it dedupes as before', async (_label, latestEvent) => {
+      const skippedRun = run({ status: 'skipped', exit_reason: 'estimate accepted' });
+      const existingRunQuery = chain({ first: skippedRun });
+      const latestEventQuery = chain({ first: latestEvent });
+      const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery],
+        email_template_automation_run_events: [latestEventQuery, dedupeLogQuery],
+      });
+
+      const result = await replay();
+
+      expect(result.results[0].deduped).toBe(true);
+      expect(result.results[0].run.status).toBe('skipped');
+      expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+    });
+
+    test('a shadow replay (mode still shadow) never promotes a would_block row', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      try {
+        const blockedRun = run({ status: 'skipped', exit_reason: 'template disabled' });
+        const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+        setDbQueues({
+          'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+          customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+          email_template_automation_runs: [chain({ first: blockedRun })],
+          // No latest-event lookup queued: shadow mode must not even ask.
+          email_template_automation_run_events: [dedupeLogQuery],
+        });
+
+        const result = await replay();
+
+        expect(result.results[0].deduped).toBe(true);
+      } finally {
+        delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+      }
+    });
+  });
+
+  describe('per-automation isolation (pre-live fix)', () => {
+    test('one misconfigured automation does not stop the later automations on the same trigger; the first failure is rethrown with per-automation detail', async () => {
+      const queuedRun = run({ automation_key: 'estimate.second', idempotency_key: 'estimate.second:est-1' });
+      const existingRunQuery = chain({ first: null });
+      const insertRunQuery = chain({ returning: [queuedRun] });
+      const queuedLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [
+          automation({ automation_key: 'estimate.broken', idempotency_key_template: '' }),
+          automation({ automation_key: 'estimate.second', idempotency_key_template: 'estimate.second:{estimate_id}', delay_minutes: 60 }),
+        ] })],
+        customers: [chain({ first: { id: 'cust-1', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery, insertRunQuery],
+        email_template_automation_run_events: [queuedLogQuery],
+      });
+
+      let thrown;
+      try {
+        await AutomationExecutor.processTrigger({
+          triggerEventKey: 'estimate.auto_renewed',
+          triggerEventId: 'estimate_auto_renew:est-1',
+          payload: { estimate_id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com', renewal_count: 1, status: 'sent' },
+          now: new Date('2026-05-18T12:00:00.000Z'),
+        });
+      } catch (err) { thrown = err; }
+
+      expect(thrown).toBeDefined();
+      expect(thrown.status).toBe(400);
+      expect(thrown.message).toMatch(/estimate\.broken does not define an idempotency key template/);
+      expect(thrown.automationFailures).toEqual([
+        expect.objectContaining({ automation_key: 'estimate.broken', status: 400 }),
+      ]);
+      // The healthy automation AFTER the broken one still got its run.
+      expect(insertRunQuery.insert).toHaveBeenCalledWith(expect.objectContaining({
+        automation_key: 'estimate.second',
+        idempotency_key: 'estimate.second:est-1',
+      }));
+      expect(thrown.partialResults).toHaveLength(1);
+      expect(thrown.partialResults[0].automation_key).toBe('estimate.second');
+    });
+  });
+
   describe('off mode (GATE_EMAIL_TEMPLATE_AUTOMATIONS unset/false — fail closed)', () => {
     test('processTrigger is a pure no-op: no automations query, no run created', async () => {
       const savedNodeEnv = process.env.NODE_ENV;

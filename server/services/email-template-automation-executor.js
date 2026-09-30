@@ -769,6 +769,32 @@ function automationRunFields({ automation, triggerEventKey, triggerEventId, enti
   };
 }
 
+// SQL twin of promotableShadowStatus's would-block test, used inside the
+// promotion UPDATE so the fact is re-checked atomically with the write.
+const LATEST_EVENT_IS_WOULD_BLOCK_SQL = `(
+  SELECT e.event_type FROM email_template_automation_run_events e
+  WHERE e.run_id = email_template_automation_runs.id
+    AND e.event_type <> 'deduped'
+  ORDER BY e.created_at DESC LIMIT 1
+) = 'would_block'`;
+
+// Which prior-run status (if any) a live attempt may promote in place:
+// 'shadow' (a would-send) always; 'skipped' only when the run's LATEST
+// lifecycle event (a replay's own 'deduped' audit row never counts) is the
+// shadow preflight's 'would_block' — never a genuine
+// condition/exit skip, and never a live block (markRunSkipped logs its own
+// later event). Any other status is not promotable.
+async function promotableShadowStatus(conn, existing) {
+  if (existing.status === 'shadow') return 'shadow';
+  if (existing.status !== 'skipped') return null;
+  const latest = await conn('email_template_automation_run_events')
+    .where({ run_id: existing.id })
+    .whereNot({ event_type: 'deduped' })
+    .orderBy('created_at', 'desc')
+    .first();
+  return latest && latest.event_type === 'would_block' ? 'skipped' : null;
+}
+
 async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEventId, entityType, entityId, recipient, payload, context, idempotencyKey, runAfter, status, exitReason, retryPolicy, mode }) {
   const existing = await conn('email_template_automation_runs').where({ idempotency_key: idempotencyKey }).first();
   if (existing) {
@@ -783,17 +809,32 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
     // (mode still 'shadow') and an off-mode replay (mode 'off': nothing
     // should be created or dispatched at all) keep the ordinary dedupe path
     // below, same as any replay of an already-live/terminal row.
-    if (existing.status === 'shadow' && mode === 'live') {
-      // The UPDATE's WHERE also re-checks status='shadow' (codex P1): two
-      // concurrent replays can both read this same 'shadow' row before
+    //
+    // A shadow WOULD-BLOCK row promotes too (pre-live fix): finalizeShadowRun
+    // settles a blocked shadow attempt as status 'skipped' (a disabled
+    // template, missing unsubscribe configuration, a withheld annual
+    // offer...), and the operator fixing exactly that before flipping the
+    // gate must let the SAME trigger go out live instead of staying a
+    // terminal would_block. A genuine condition/exit skip is NOT promotable:
+    // it never logs a 'would_block' event.
+    const promotableFrom = mode === 'live' ? await promotableShadowStatus(conn, existing) : null;
+    if (promotableFrom) {
+      // The UPDATE's WHERE also re-checks the status (codex P1): two
+      // concurrent replays can both read this same shadow row before
       // either writes. An unconditional update here would let the SECOND
       // replay blindly overwrite whatever the FIRST one already advanced
       // the row to (running/sent) and re-arm it for a duplicate send.
       // Zero rows back means this replay lost that race — fall through to
       // an ordinary dedupe against the row as it now stands, never a
       // fabricated runnable row.
-      const promotedRows = await conn('email_template_automation_runs')
-        .where({ id: existing.id, status: 'shadow' })
+      let promoteQuery = conn('email_template_automation_runs').where({ id: existing.id, status: promotableFrom });
+      if (promotableFrom === 'skipped') {
+        // Re-check the would-block fact in the statement itself: the row is
+        // still promotable only while its latest ledger event is the shadow
+        // would_block (a live skip since then logs its own event).
+        promoteQuery = promoteQuery.whereRaw(LATEST_EVENT_IS_WOULD_BLOCK_SQL);
+      }
+      const promotedRows = await promoteQuery
         .update({
           // Built from the SAME field set the fresh insert below uses
           // (codex P1) — template_key/template_version_id/automation_id/
@@ -812,6 +853,7 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
         await logRunEvent(existing.id, 'promoted_from_shadow', 'Prior shadow run promoted to a live attempt on the same idempotency key', {
           trigger_event_key: triggerEventKey,
           trigger_event_id: triggerEventId || null,
+          from_status: promotableFrom,
         }, conn);
         return { run: promotedRows[0], deduped: false };
       }
@@ -916,62 +958,90 @@ async function processTrigger({
     payload = await resolveEmailForTrigger(eventKey, payload, recipient);
   }
 
+  // Per-automation isolation (pre-live fix): one automation's failure — a
+  // blank idempotency template, a key variable the payload never provides, a
+  // DB hiccup on its run — must not stop the LATER automations on the same
+  // trigger from being visited, or a shared pending intent marker could never
+  // reach them. Every automation is attempted; failures are collected and the
+  // FIRST one is rethrown after the loop (so direct callers keep the same
+  // throw/status contract), carrying the per-automation detail on
+  // err.automationFailures so the lifecycle emitters can tell a fixable
+  // automation-configuration failure from a permanent recipient one.
+  const failures = [];
   for (const automation of automations) {
-    const resolvedRecipient = recipientFor(eventKey, { payload, recipient }, automation);
-    const entity = entityFor(eventKey, {
-      payload,
-      entityType: entityType || snakeEntityType,
-      entityId: entityId || snakeEntityId,
-    });
-    const retryPolicy = retryPolicyFor(automation);
-    const context = contextFor({
-      triggerEventKey: eventKey,
-      triggerEventId: eventId,
-      entityType: entity.entityType,
-      entityId: entity.entityId,
-      payload,
-      recipient: resolvedRecipient,
-      automation,
-      mode,
-    });
-    const idempotencyTemplate = cleanString(automation.idempotency_key_template);
-    if (!idempotencyTemplate) {
-      const err = new Error(`automation ${automation.automation_key} does not define an idempotency key template`);
-      err.status = 400;
-      throw err;
-    }
-    const idempotencyKey = renderIdempotencyKey(idempotencyTemplate, context);
-    const conditions = asObject(automation.conditions);
-    const exitConditions = asObject(automation.exit_conditions);
-    const conditionFailure = conditionFailureFor(conditions, payload, now);
-    const exitReason = conditionFailure || exitReasonFor(exitConditions, payload);
-    const delayMs = Math.max(0, Number(automation.delay_minutes || 0)) * 60 * 1000;
-    const runAfter = new Date(now.getTime() + delayMs);
-    const status = exitReason ? 'skipped' : (runAfter > now ? 'scheduled' : 'queued');
-    const created = await createRun({
-      automation,
-      triggerEventKey: eventKey,
-      triggerEventId: eventId,
-      entityType: entity.entityType,
-      entityId: entity.entityId,
-      recipient: resolvedRecipient,
-      payload,
-      context,
-      idempotencyKey,
-      runAfter,
-      status,
-      exitReason,
-      retryPolicy,
-      mode,
-    });
+    try {
+      const resolvedRecipient = recipientFor(eventKey, { payload, recipient }, automation);
+      const entity = entityFor(eventKey, {
+        payload,
+        entityType: entityType || snakeEntityType,
+        entityId: entityId || snakeEntityId,
+      });
+      const retryPolicy = retryPolicyFor(automation);
+      const context = contextFor({
+        triggerEventKey: eventKey,
+        triggerEventId: eventId,
+        entityType: entity.entityType,
+        entityId: entity.entityId,
+        payload,
+        recipient: resolvedRecipient,
+        automation,
+        mode,
+      });
+      const idempotencyTemplate = cleanString(automation.idempotency_key_template);
+      if (!idempotencyTemplate) {
+        const err = new Error(`automation ${automation.automation_key} does not define an idempotency key template`);
+        err.status = 400;
+        throw err;
+      }
+      const idempotencyKey = renderIdempotencyKey(idempotencyTemplate, context);
+      const conditions = asObject(automation.conditions);
+      const exitConditions = asObject(automation.exit_conditions);
+      const conditionFailure = conditionFailureFor(conditions, payload, now);
+      const exitReason = conditionFailure || exitReasonFor(exitConditions, payload);
+      const delayMs = Math.max(0, Number(automation.delay_minutes || 0)) * 60 * 1000;
+      const runAfter = new Date(now.getTime() + delayMs);
+      const status = exitReason ? 'skipped' : (runAfter > now ? 'scheduled' : 'queued');
+      const created = await createRun({
+        automation,
+        triggerEventKey: eventKey,
+        triggerEventId: eventId,
+        entityType: entity.entityType,
+        entityId: entity.entityId,
+        recipient: resolvedRecipient,
+        payload,
+        context,
+        idempotencyKey,
+        runAfter,
+        status,
+        exitReason,
+        retryPolicy,
+        mode,
+      });
 
-    if (created.deduped || status === 'skipped' || status === 'scheduled' || !executeImmediately) {
-      results.push({ automation_key: automation.automation_key, run: created.run, deduped: created.deduped });
-      continue;
-    }
+      if (created.deduped || status === 'skipped' || status === 'scheduled' || !executeImmediately) {
+        results.push({ automation_key: automation.automation_key, run: created.run, deduped: created.deduped });
+        continue;
+      }
 
-    const executed = await executeRun(created.run, { automation });
-    results.push({ automation_key: automation.automation_key, run: executed, deduped: false });
+      const executed = await executeRun(created.run, { automation });
+      results.push({ automation_key: automation.automation_key, run: executed, deduped: false });
+    } catch (err) {
+      failures.push({ automation_key: automation.automation_key, error: err });
+      logger.warn(`[email-template-automation] ${eventKey}/${automation.automation_key} failed, continuing with remaining automations: ${scrubSentryText(err && err.message ? err.message : err)}`);
+    }
+  }
+
+  if (failures.length) {
+    const first = failures[0].error;
+    const thrown = first instanceof Error ? first : new Error(String(first));
+    thrown.automationFailures = failures.map(({ automation_key: automationKey, error }) => ({
+      automation_key: automationKey,
+      status: error && error.status ? Number(error.status) : null,
+      code: (error && error.code) || null,
+      message: error && error.message ? error.message : String(error),
+    }));
+    thrown.partialResults = results;
+    throw thrown;
   }
 
   return {
