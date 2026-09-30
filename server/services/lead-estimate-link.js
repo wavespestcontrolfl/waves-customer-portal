@@ -1736,7 +1736,12 @@ async function convertLeadFromEvent({
       // stub covers it (r18 P1). A claim lost to a concurrent relabel of the
       // root follows the new marker one hop (convertCustomerLinkRow, r34 P1).
       if (resolution !== 'customer_link') {
-        await leadAttributionService.markConverted(lead.id, conversion);
+        // markConverted answers false when its conditional write lost (lead
+        // missing/deleted, or — for an explicit lead — no longer in the open
+        // state it was read in): this event then converted NOTHING, and must
+        // not report a conversion (the booking path keys attributeSelfBooking
+        // on it). Strict false: a stub that answers nothing is not a loss.
+        if ((await leadAttributionService.markConverted(lead.id, conversion)) === false) continue;
         convertedIds.push(lead.id);
         continue;
       }
@@ -1745,6 +1750,7 @@ async function convertLeadFromEvent({
       if (!wonId) return { converted: false, reason: 'customer_link_claim_lost' };
       convertedIds.push(wonId);
     }
+    if (!convertedIds.length) return { converted: false, reason: 'claim_lost' };
     return { converted: true, count: convertedIds.length, leadIds: convertedIds };
   } catch (err) {
     logger.error(`[lead-trigger] convertLeadFromEvent failed (${source || 'unknown'}): ${err.message}`);

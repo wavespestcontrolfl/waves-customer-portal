@@ -6518,7 +6518,10 @@ router.post('/capture-intent', captureIntentLimiter, captureIntentHourlyLimiter,
     // text/email) for the same phone afterwards. Gate-off: untouched.
     if (bookPreferredTimeLive()) {
       try {
-        if (await hasRecentPreferredTimeRequest(db, ten)) return accepted('preferred_time_request');
+        // Session too: a visitor who filed under one phone and then retyped another
+        // in the same funnel session is still the person who asked for a call back.
+        const captureSession = String(b.session_id == null ? '' : b.session_id).trim().slice(0, 80) || null;
+        if (await hasRecentPreferredTimeRequest(db, ten, { sessionId: captureSession })) return accepted('preferred_time_request');
       } catch (ptErr) {
         // Fail closed: a lookup error must not risk an automated send.
         logger.warn(`[booking:capture-intent] preferred-time check failed — skipping capture: ${ptErr.message}`);

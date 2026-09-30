@@ -15,6 +15,9 @@ const mockOps = [];            // { table, op, arg }
 let mockExistingLead = null;   // what a phone lookup on leads returns
 let mockCustomer = null;       // what customers .first() returns
 let mockOpenLeads = [];        // what an awaited leads select() resolves to
+let mockLeadUpdateRows = 1;    // rows a conditional leads UPDATE matches (0 = staff closed it since the lookup)
+let mockRetireError = null;    // makes the booking_intents suppression UPDATE throw
+const mockOrder = [];          // op order inside/after the transaction
 
 function builder(table) {
   const b = {
@@ -33,11 +36,14 @@ function builder(table) {
     first: () => Promise.resolve(table === 'leads' ? mockExistingLead : (table === 'customers' ? mockCustomer : null)),
     insert: (row) => {
       mockOps.push({ table, op: 'insert', arg: row });
+      mockOrder.push(`insert:${table}`);
       return { returning: () => Promise.resolve([{ id: 'lead-1', ...row }]) };
     },
     update: (patch) => {
       mockOps.push({ table, op: 'update', arg: patch });
-      return Promise.resolve(1);
+      mockOrder.push(`update:${table}`);
+      if (table === 'booking_intents' && mockRetireError) return Promise.reject(mockRetireError);
+      return Promise.resolve(table === 'leads' ? mockLeadUpdateRows : 1);
     },
   };
   return b;
@@ -48,6 +54,7 @@ mockDb.raw = jest.fn((s) => s);
 const mockLocks = [];
 mockDb.transaction = jest.fn(async (cb) => {
   const trx = (table) => builder(table);
+  trx.isTrx = true;
   trx.fn = mockDb.fn;
   trx.raw = jest.fn(async (sql, bindings) => { mockLocks.push({ sql, bindings }); return { rows: [] }; });
   return cb(trx);
@@ -75,7 +82,7 @@ jest.mock('../services/sendgrid-mail', () => ({
 }));
 const mockMarkConverted = jest.fn(async () => true);
 jest.mock('../services/lead-attribution', () => ({ markConverted: (...a) => mockMarkConverted(...a) }));
-const mockStampFunnel = jest.fn(async () => 'funnel-1');
+const mockStampFunnel = jest.fn(async () => { mockOrder.push('stamp'); return 'funnel-1'; });
 jest.mock('../services/lead-funnel-bridge', () => {
   const actual = jest.requireActual('../services/lead-funnel-bridge');
   return { ...actual, stampLeadFunnelRow: (...a) => mockStampFunnel(...a) };
@@ -141,7 +148,11 @@ beforeEach(() => {
   mockExistingLead = null;
   mockCustomer = null;
   mockOpenLeads = [];
+  mockLeadUpdateRows = 1;
+  mockRetireError = null;
+  mockOrder.length = 0;
   mockMarkConverted.mockClear();
+  mockMarkConverted.mockResolvedValue(true);
   mockStampFunnel.mockClear();
   mockTriggerNotification.mockClear();
   mockSendCustomerMessage.mockClear();
@@ -375,6 +386,53 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(mockTriggerNotification).not.toHaveBeenCalled();
   });
 
+  test('refresh is conditional on the lead STILL being open: staff closed it since the lookup -> a NEW lead + bell, no write onto the closed one', async () => {
+    mockExistingLead = { id: 'lead-existing' };
+    mockLeadUpdateRows = 0;
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'insert')).toHaveLength(1);
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+    expect(mockStampFunnel).toHaveBeenCalledTimes(1);
+  });
+
+  test('the refresh source: the id-only UPDATE also carries the open-status / unconverted / not-deleted predicates', () => {
+    const svc = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    const refresh = svc.slice(svc.indexOf("const refreshed = await trx('leads')"), svc.indexOf('if (refreshed)'));
+    expect(refresh).toMatch(/whereIn\('status', OPEN_LEAD_STATUSES\)/);
+    expect(refresh).toMatch(/whereNull\('converted_at'\)/);
+    expect(refresh).toMatch(/whereNull\('deleted_at'\)/);
+  });
+
+  test('the funnel row is stamped INSIDE the lead transaction (on the trx handle, before it commits), so no lead is visible without its row', async () => {
+    let inTx = false;
+    mockStampFunnel.mockImplementationOnce(async (handle, lead, opts) => {
+      inTx = handle.isTrx === true && opts && opts.rethrow === true;
+      mockOrder.push('stamp');
+      return 'funnel-1';
+    });
+    await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value, { notify: false });
+    expect(inTx).toBe(true);
+    expect(mockOrder.indexOf('insert:leads')).toBeLessThan(mockOrder.indexOf('stamp'));
+  });
+
+  test('a stamp failure aborts the request: no lead is committed without its row, no bell', async () => {
+    mockStampFunnel.mockRejectedValueOnce(new Error('funnel insert failed'));
+    await expect(recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value)).rejects.toThrow('funnel insert failed');
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('recovery intents are suppressed INSIDE the same transaction, before the lead is written; a failure there fails the request (no lead, no bell)', async () => {
+    await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody({ session_id: 'sess-1' })).value, { notify: false });
+    expect(mockOrder.indexOf('update:booking_intents')).toBeGreaterThan(-1);
+    expect(mockOrder.indexOf('update:booking_intents')).toBeLessThan(mockOrder.indexOf('insert:leads'));
+    mockOrder.length = 0; mockOps.length = 0;
+    mockRetireError = new Error('intent update failed');
+    await expect(recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value)).rejects.toThrow('intent update failed');
+    expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'insert')).toHaveLength(0);
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
   test('a failing admin bell never fails the visitor and still sends nothing to them', async () => {
     mockTriggerNotification.mockRejectedValueOnce(new Error('bell down'));
     const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
@@ -436,6 +494,13 @@ describe('capture-intent never stages recovery for a phone that asked for a time
     // Proves the skip ran (not an earlier gate): the leads lookup happened.
     expect(mockDb).toHaveBeenCalledWith('leads');
     expect(mockOps.filter((o) => o.table === 'booking_intents' && o.op === 'insert')).toHaveLength(0);
+  });
+});
+
+describe('capture-intent looks the funnel session up too', () => {
+  test('the skip passes the visitor\'s session id, so a phone retyped after the request is still recognised', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
+    expect(src).toMatch(/hasRecentPreferredTimeRequest\(db, ten, \{ sessionId: captureSession \}\)/);
   });
 });
 
@@ -538,6 +603,26 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
     expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'update')).toHaveLength(0);
     expect(mockSendCustomerMessage).not.toHaveBeenCalled();
     expect(mockSendSMS).not.toHaveBeenCalled();
+  });
+
+  test('two or more open preferred leads on the phone (asks >24h apart / shared household number): NONE is converted — one booking proves only one of them', async () => {
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }];
+    mockExistingLead = openLead;
+    const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' });
+    expect(out).toEqual({ converted: 0, ambiguous: true });
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+    // and nothing is retired without a win either
+    expect(mockOps.filter((o) => o.table === 'leads')).toHaveLength(0);
+  });
+
+  test('converted is reported only when markConverted actually won its conditional write (a lost claim is 0, so attributeSelfBooking is not skipped)', async () => {
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    mockExistingLead = openLead;
+    mockMarkConverted.mockResolvedValue(false); // staff closed it between the read and the write
+    expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).toEqual({ converted: 0 });
+    expect(mockMarkConverted).toHaveBeenCalledTimes(1);
   });
 
   test('idempotent: a second run (or the replay path) finds nothing open and converts nothing', async () => {

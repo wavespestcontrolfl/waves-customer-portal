@@ -961,6 +961,42 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     });
   });
 
+  test('a lost conditional claim (markConverted false) converts NOTHING and reports it — explicit lead, contact match, estimate link', async () => {
+    const markConverted = jest.fn().mockResolvedValue(false);
+    // explicit lead (the /book preferred-time booking): staff transitioned it after the read
+    let out = await convertLeadFromEvent({
+      source: 'preferred_time_booked', customerId: 'c1', leadId: 'Lx',
+      database: makeConvertDb({ leadsById: { Lx: { id: 'Lx', status: 'new', converted_at: null } } }),
+      leadAttributionService: { markConverted },
+    });
+    expect(out).toEqual({ converted: false, reason: 'claim_lost' });
+    expect(markConverted).toHaveBeenCalledWith('Lx', expect.objectContaining({ onlyIfStatusIn: expect.arrayContaining(['new']) }));
+    // contact fallback
+    out = await convertLeadFromEvent({
+      source: 'backfill', customerId: 'c1',
+      database: makeConvertDb({ customer: { id: 'c1', phone: '+19412269100' }, contactLeads: [{ id: 'L3', status: 'new', customer_id: null }] }),
+      leadAttributionService: { markConverted },
+    });
+    expect(out).toEqual({ converted: false, reason: 'claim_lost' });
+    // estimate link
+    out = await convertLeadFromEvent({
+      source: 'backfill', estimateId: 'e1',
+      database: makeConvertDb({ estimate: { id: 'e1', customer_id: 'c1' }, leadsByEstimate: [{ id: 'L1', status: 'estimate_sent' }] }),
+      leadAttributionService: { markConverted },
+    });
+    expect(out).toEqual({ converted: false, reason: 'claim_lost' });
+  });
+
+  test('an explicit lead that wins its claim reports the conversion', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    const out = await convertLeadFromEvent({
+      source: 'preferred_time_booked', customerId: 'c1', leadId: 'Lx',
+      database: makeConvertDb({ leadsById: { Lx: { id: 'Lx', status: 'new', converted_at: null } } }),
+      leadAttributionService: { markConverted },
+    });
+    expect(out).toMatchObject({ converted: true, count: 1, leadIds: ['Lx'] });
+  });
+
   test('matches the unconverted originating lead by contact, preserves values', async () => {
     const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({

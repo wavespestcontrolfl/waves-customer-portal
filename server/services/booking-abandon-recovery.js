@@ -27,7 +27,6 @@ const { isEnabled } = require('../config/feature-gates');
 const { establishedContactLinkedDraft } = require('./booking-contact-linked-handoff');
 const { etDateString } = require('../utils/datetime-et');
 const Experiments = require('./experimentation/growthbook');
-const { withPreferredTimePhoneLock } = require('./booking-preferred-time');
 
 // Touch windows (hours from captured_at). The cron runs every 30 min, so the
 // SMS fires ~1–1.5h after abandon. Max-age caps how stale a lead we'll chase.
@@ -146,8 +145,51 @@ async function blockedByPreferredTimeRequest(intent, conn = db) {
     return true;
   }
   logger.info(`[booking-recovery] skip ${intent.id}: visitor asked the office for a preferred time`);
-  await db('booking_intents').where({ id: intent.id }).update({ suppressed: true, updated_at: db.fn.now() }).catch(() => {});
+  // On `conn`: inside withLockedRecoveryIntent the row is locked by that
+  // transaction, and a write on any other connection would wait on it forever.
+  await conn('booking_intents').where({ id: intent.id }).update({ suppressed: true, updated_at: conn.fn.now() }).catch(() => {});
   return true;
+}
+
+// The ONE serialization point with a preferred-time submit
+// (booking-preferred-time.js): the FINAL check and the dispatch run holding a
+// row lock (SELECT ... FOR UPDATE) on the intent row itself. A submit suppresses
+// the same row in its own transaction before it commits the lead, so
+//   - submit first: this SELECT waits for its commit, re-reads the row as
+//     suppressed (or sees the committed lead) and sends nothing;
+//   - worker first: the submit's UPDATE waits until the send is done, so the
+//     send counts as already happened.
+// It keys on the ROW, not the phone: a visitor who corrects their phone
+// mid-session (one intent row per session) cannot slip past a lock keyed on the
+// old number. Fail closed — a lock/lookup/transaction error propagates (caller:
+// nothing sent, claim released, retried next tick). `fn` runs INSIDE the
+// transaction and must not write booking_intents on another connection; do the
+// post-send bookkeeping after this returns. Returns { skipped: <reason> } when
+// nothing may be sent, else { skipped: null, value: fn()'s result }.
+async function withLockedRecoveryIntent(database, intent, fn) {
+  let dispatched = null;
+  try {
+    return await database.transaction(async (trx) => {
+      const row = await trx('booking_intents').where({ id: intent.id }).forUpdate()
+        .first('id', 'phone', 'session_id', 'captured_at', 'suppressed', 'converted_at');
+      if (!row || row.suppressed || row.converted_at) return { skipped: 'closed' };
+      // Contact edited since the candidate read: the message would go to a number
+      // the visitor already replaced. Skip; the next tick reads the fresh row.
+      if (last10(row.phone) !== last10(intent.phone)) return { skipped: 'contact_changed' };
+      if (await blockedByPreferredTimeRequest({ ...intent, ...row }, trx)) return { skipped: 'preferred_time' };
+      dispatched = { skipped: null, value: await fn() };
+      return dispatched;
+    });
+  } catch (err) {
+    // The send already happened and only the COMMIT failed (nothing was written
+    // in the transaction that matters): report it as sent, or the released
+    // claim would double-send next tick.
+    if (dispatched) {
+      logger.warn(`[booking-recovery] intent ${intent.id}: send done but the row-lock transaction failed to close: ${err.message}`);
+      return dispatched;
+    }
+    throw err;
+  }
 }
 
 // Honor an existing customer's email opt-out (notification_prefs.email_enabled).
@@ -420,53 +462,52 @@ async function runSmsStage(now, sentPhones) {
       // the claim and a hit is already marked suppressed.
       if (await blockedByContactLinkedHandoff(intent)) continue;
 
-      // The preferred-time last look AND the dispatch run under the per-phone
-      // lock a preferred-time submit takes (booking-preferred-time.js): a
-      // submit cannot land between this check and the send. A lock or lookup
-      // failure throws/blocks → nothing sent, claim released, retried next tick.
-      const dispatched = await withPreferredTimePhoneLock(db, intent.phone, async (conn) => {
-        if (await blockedByPreferredTimeRequest(intent, conn)) return false;
+      // The preferred-time last look AND the send run holding the intent row's
+      // lock (withLockedRecoveryIntent): a preferred-time submit cannot land
+      // between the check and the send. A lock or lookup failure throws/blocks
+      // → nothing sent, claim released, retried next tick.
+      const dispatch = await withLockedRecoveryIntent(db, intent, () => sendCustomerMessage({
+        to: intent.phone,
+        body,
+        channel: 'sms',
+        audience: intent.customer_id ? 'customer' : 'lead',
+        purpose: 'booking_abandonment_followup',
+        customerId: intent.customer_id || undefined,
+        identityTrustLevel: intent.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
+        consentBasis: intent.customer_id ? undefined : {
+          status: 'transactional_allowed',
+          source: 'booking_abandon_recovery',
+          capturedAt: intent.captured_at || new Date().toISOString(),
+        },
+        entryPoint: 'booking_abandon_recovery_cron',
+        metadata: { original_message_type: 'booking_abandon_recovery', booking_intent_id: intent.id },
+      }));
+      if (dispatch.skipped) {
+        logger.info(`[booking-recovery] SMS skip ${intent.id}: ${dispatch.skipped} (final check under the row lock)`);
+        continue;
+      }
+      const result = dispatch.value;
 
-        const result = await sendCustomerMessage({
-          to: intent.phone,
-          body,
-          channel: 'sms',
-          audience: intent.customer_id ? 'customer' : 'lead',
-          purpose: 'booking_abandonment_followup',
-          customerId: intent.customer_id || undefined,
-          identityTrustLevel: intent.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-          consentBasis: intent.customer_id ? undefined : {
-            status: 'transactional_allowed',
-            source: 'booking_abandon_recovery',
-            capturedAt: intent.captured_at || new Date().toISOString(),
-          },
-          entryPoint: 'booking_abandon_recovery_cron',
-          metadata: { original_message_type: 'booking_abandon_recovery', booking_intent_id: intent.id },
-        });
-
-        if (result && result.sent !== false && !result.blocked) {
-          sent++;
+      if (result && result.sent !== false && !result.blocked) {
+        sent++;
+        claimed = false;
+        if (ten) sentPhones.add(ten);
+        // Stamp when the SMS actually went out so the 24h email is held to ~23h
+        // AFTER it, even if the SMS itself fired late (gate/outage).
+        await db('booking_intents').where({ id: intent.id })
+          .update({ followup_sms_sent_at: db.fn.now() }).catch(() => {});
+        await markSiblingsSent(intent.phone, 'followup_sms_sent', intent.id);
+      } else {
+        logger.warn(`[booking-recovery] SMS blocked for intent ${intent.id}: ${result?.code || 'unknown'} ${result?.reason || ''}`);
+        // Keep the claim ONLY for a genuine TERMINAL suppression (opt-out /
+        // landline / DNC), so we never re-attempt a dead number. Operational
+        // blocks (CONSENT_LOOKUP_FAILED, CONTRACT_VIOLATION, …) and any retryable
+        // hold sent nothing → leave the claim set → released in `finally` →
+        // retried next tick. A provider-terminal failure also keeps the claim.
+        if (result && ((result.code && TERMINAL_SMS_CODES.has(result.code)) || result.terminal === true)) {
           claimed = false;
-          if (ten) sentPhones.add(ten);
-          // Stamp when the SMS actually went out so the 24h email is held to ~23h
-          // AFTER it, even if the SMS itself fired late (gate/outage).
-          await db('booking_intents').where({ id: intent.id })
-            .update({ followup_sms_sent_at: db.fn.now() }).catch(() => {});
-          await markSiblingsSent(intent.phone, 'followup_sms_sent', intent.id);
-        } else {
-          logger.warn(`[booking-recovery] SMS blocked for intent ${intent.id}: ${result?.code || 'unknown'} ${result?.reason || ''}`);
-          // Keep the claim ONLY for a genuine TERMINAL suppression (opt-out /
-          // landline / DNC), so we never re-attempt a dead number. Operational
-          // blocks (CONSENT_LOOKUP_FAILED, CONTRACT_VIOLATION, …) and any retryable
-          // hold sent nothing → leave the claim set → released in `finally` →
-          // retried next tick. A provider-terminal failure also keeps the claim.
-          if (result && ((result.code && TERMINAL_SMS_CODES.has(result.code)) || result.terminal === true)) {
-            claimed = false;
-          }
         }
-        return true;
-      });
-      if (!dispatched) continue;
+      }
     } catch (e) {
       logger.error(`[booking-recovery] SMS send failed for intent ${intent.id}: ${e.message}`);
     } finally {
@@ -537,39 +578,39 @@ async function runEmailStage(now, sentPhones) {
       // B11 last look, AFTER the claim and right before dispatch (see the SMS
       // stage): blocked or lookup error → no send, claim released.
       if (await blockedByContactLinkedHandoff(intent)) continue;
-      // Preferred-time last look + dispatch under the per-phone lock (see the
+      // Preferred-time last look + send under the intent row's lock (see the
       // SMS stage): a submit cannot land between the check and the send.
-      const dispatched = await withPreferredTimePhoneLock(db, intent.phone, async (conn) => {
-        if (await blockedByPreferredTimeRequest(intent, conn)) return false;
-        const result = await EmailTemplateLibrary.sendTemplate({
-          templateKey: 'booking.abandonment_recovery',
-          to: intent.email,
-          payload: {
-            first_name: firstNameOf(intent),
-            service_type: serviceLabelOf(intent),
-            booking_url: bookingUrl,
-          },
-          recipientType: intent.customer_id ? 'customer' : 'lead',
-          recipientId: intent.customer_id || null,
-          triggerEventId: `booking_recovery:${intent.id}`,
-          idempotencyKey: `booking_recovery_email:${intent.id}`,
-          // Provenance only: the quote the caller was pricing, so a later customer sees this mail.
-          linkEstimateId: intent.pricing_estimate_id || null,
-          categories: ['booking_recovery'],
-        });
-        if (result && result.blocked) {
-          logger.warn(`[booking-recovery] email suppressed for intent ${intent.id}: ${result.reason || 'blocked'}`);
-          // suppressed is terminal for this address — keep the claim (no retry).
-          claimed = false;
-        } else {
-          sent++;
-          claimed = false;
-          if (emailKey) sentPhones.add(`email:${emailKey}`);
-          await markSiblingsSent(intent.phone, 'followup_email_sent', intent.id);
-        }
-        return true;
-      });
-      if (!dispatched) continue;
+      const dispatch = await withLockedRecoveryIntent(db, intent, () => EmailTemplateLibrary.sendTemplate({
+        templateKey: 'booking.abandonment_recovery',
+        to: intent.email,
+        payload: {
+          first_name: firstNameOf(intent),
+          service_type: serviceLabelOf(intent),
+          booking_url: bookingUrl,
+        },
+        recipientType: intent.customer_id ? 'customer' : 'lead',
+        recipientId: intent.customer_id || null,
+        triggerEventId: `booking_recovery:${intent.id}`,
+        idempotencyKey: `booking_recovery_email:${intent.id}`,
+        // Provenance only: the quote the caller was pricing, so a later customer sees this mail.
+        linkEstimateId: intent.pricing_estimate_id || null,
+        categories: ['booking_recovery'],
+      }));
+      if (dispatch.skipped) {
+        logger.info(`[booking-recovery] email skip ${intent.id}: ${dispatch.skipped} (final check under the row lock)`);
+        continue;
+      }
+      const result = dispatch.value;
+      if (result && result.blocked) {
+        logger.warn(`[booking-recovery] email suppressed for intent ${intent.id}: ${result.reason || 'blocked'}`);
+        // suppressed is terminal for this address — keep the claim (no retry).
+        claimed = false;
+      } else {
+        sent++;
+        claimed = false;
+        if (emailKey) sentPhones.add(`email:${emailKey}`);
+        await markSiblingsSent(intent.phone, 'followup_email_sent', intent.id);
+      }
     } catch (e) {
       logger.error(`[booking-recovery] email send failed for intent ${intent.id}: ${e.message}`);
     } finally {
@@ -588,5 +629,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { blockedByContactLinkedHandoff, blockedByPreferredTimeRequest, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
+  _internals: { blockedByContactLinkedHandoff, blockedByPreferredTimeRequest, withLockedRecoveryIntent, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
 };

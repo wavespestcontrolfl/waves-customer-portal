@@ -14,8 +14,12 @@
  * The only outbound side effect is the internal new_lead admin bell. To keep
  * the abandoned-booking recovery worker from texting the same person about the
  * slot they walked away from, every OPEN booking_intent for the same phone or
- * session is retired (suppressed) in the same call, and capture-intent skips a
- * phone that filed a request in the last day (see hasRecentPreferredTimeRequest).
+ * session is retired (suppressed) INSIDE the submit's own transaction, and
+ * capture-intent skips a phone that filed a request in the last day (see
+ * hasRecentPreferredTimeRequest). The booking_intents ROW is the chokepoint with
+ * the recovery worker: the submit's UPDATE and the worker's SELECT ... FOR
+ * UPDATE contend on the same row, so exactly one of them goes first (see
+ * withLockedRecoveryIntent in booking-abandon-recovery.js).
  *
  * Pure validation is separate from persistence so both are unit-testable.
  */
@@ -142,7 +146,13 @@ const tenMatch = (q, ten) => q.whereRaw("RIGHT(regexp_replace(COALESCE(phone, ''
 
 /**
  * Retire every open abandoned-booking intent for this phone or session so the
- * recovery worker sends nothing about the slot they walked away from.
+ * recovery worker sends nothing about the slot they walked away from. Runs on
+ * the submit's transaction handle: the UPDATE takes a row lock on each matching
+ * intent, so it waits out a recovery worker that holds the row for a send, and
+ * a worker that arrives afterwards waits for the submit's commit and then reads
+ * the row as suppressed. Matches by phone OR funnel session, so a visitor who
+ * corrected their phone mid-session (the intent row keeps ONE row per session)
+ * is still found.
  */
 async function retireOpenBookingIntents(db, { phone, sessionId }) {
   await db('booking_intents')
@@ -174,31 +184,11 @@ async function hasRecentPreferredTimeRequest(db, phone, { sessionId = null, sinc
   return !!(await q.first('id'));
 }
 
-// ONE per-phone chokepoint (transaction-scoped advisory lock) shared by the
-// submit path and the abandoned-booking recovery worker. A submit holds it
-// while it looks up + writes the lead; the worker holds it across its final
-// preferred-time re-check AND the send, so a submit can never commit between
-// the worker's last look and its dispatch: either the submit finishes first
-// (the worker then sees the lead and sends nothing) or the send finishes
-// first (the submit waits, and the send counts as already happened).
+// Per-phone transaction-scoped advisory lock: serializes two SUBMITS for the
+// same phone so the lookup-then-write below cannot create two leads. It is NOT
+// what fences the recovery worker (that is the booking_intents row lock).
 async function lockPhone(trx, phone) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_time:${phone}`]);
-}
-
-/**
- * Run `fn(trx)` holding the per-phone preferred-time lock. The lock is held
- * only for the duration of `fn` (one provider call for the worker) and only
- * ever contends with a submit for the SAME phone. A phone that cannot be
- * normalized has nothing to serialize and runs `fn` on the plain handle. Any
- * lock/transaction failure propagates — callers treat it as "do not send".
- */
-async function withPreferredTimePhoneLock(db, phone, fn) {
-  const ten = tenDigitPhone(phone);
-  if (!ten) return fn(db);
-  return db.transaction(async (trx) => {
-    await lockPhone(trx, ten);
-    return fn(trx);
-  });
 }
 
 /**
@@ -242,8 +232,15 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     fbp: clickId(attr?.fbp),
   };
 
-  const { leadId, created, leadRow } = await db.transaction(async (trx) => {
+  // ONE transaction: suppress the open recovery intents, then refresh-or-create
+  // the lead and its funnel row. The intent UPDATE comes first because it is the
+  // serialization point with the recovery worker (row locks on booking_intents);
+  // any failure here fails the request — nothing is left half-written and no
+  // lead is ever visible without its funnel row.
+  const { leadId, created } = await db.transaction(async (trx) => {
     await lockPhone(trx, value.phone);
+    await retireOpenBookingIntents(trx, { phone: value.phone, sessionId: value.sessionId });
+
     const existing = await tenMatch(
       trx('leads')
         .where({ lead_type: LEAD_TYPE })
@@ -258,19 +255,28 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     ).orderBy('created_at', 'desc').first('id');
 
     if (existing) {
-      await trx('leads').where({ id: existing.id }).update({
-        first_name: value.firstName,
-        last_name: value.lastName,
-        email: value.email,
-        address: value.addressLine1 || '',
-        city: value.city,
-        zip: value.zip,
-        service_interest: serviceLabel,
-        transcript_summary: summary,
-        extracted_data: JSON.stringify(extracted),
-        updated_at: trx.fn.now(),
-      });
-      return { leadId: existing.id, created: false };
+      // The staff writers do not take the phone lock, so the refresh is
+      // conditional on the lead STILL being open and unconverted: a lead staff
+      // closed/converted since the lookup updates 0 rows and this request
+      // becomes a new lead (with its bell) instead of writing onto a closed one.
+      const refreshed = await trx('leads')
+        .where({ id: existing.id })
+        .whereNull('deleted_at')
+        .whereIn('status', OPEN_LEAD_STATUSES)
+        .whereNull('converted_at')
+        .update({
+          first_name: value.firstName,
+          last_name: value.lastName,
+          email: value.email,
+          address: value.addressLine1 || '',
+          city: value.city,
+          zip: value.zip,
+          service_interest: serviceLabel,
+          transcript_summary: summary,
+          extracted_data: JSON.stringify(extracted),
+          updated_at: trx.fn.now(),
+        });
+      if (refreshed) return { leadId: existing.id, created: false };
     }
     const [row] = await trx('leads').insert({
       first_name: value.firstName,
@@ -290,32 +296,17 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
       extracted_data: JSON.stringify(extracted),
       ...attribution,
     }).returning('*');
-    return { leadId: row.id, created: true, leadRow: row };
+
+    // The ONE ad_service_attribution funnel row a lead's own intake stamps,
+    // rebuilt from what the lead stored (its snapshot + click ids), written in
+    // the SAME transaction as the lead so a booking that converts it the instant
+    // it is visible always finds the row to advance to 'booked'. Idempotent on
+    // the unique lead_id. rethrow: a failed statement must abort this
+    // transaction rather than be swallowed against an aborted handle.
+    const { stampLeadFunnelRow } = require('./lead-funnel-bridge');
+    await stampLeadFunnelRow(trx, row, { rethrow: true });
+    return { leadId: row.id, created: true };
   });
-
-  // File the ONE ad_service_attribution funnel row a lead's own intake stamps,
-  // rebuilt from what the lead stored (its snapshot + click ids), so the later
-  // booking conversion has a row to advance to 'booked' and the request counts
-  // in channel reporting like every other public lead. Idempotent on the unique
-  // lead_id; best-effort like the other creators.
-  if (created) {
-    try {
-      const { stampLeadFunnelRow } = require('./lead-funnel-bridge');
-      await stampLeadFunnelRow(db, leadRow);
-    } catch (err) {
-      logger.warn(`[booking:preferred-time] funnel row stamp failed for lead ${leadId}: ${err.message}`);
-    }
-  }
-
-  // Best effort from here: the lead is saved, so a failure below must not
-  // become an error the visitor sees. The recovery worker re-checks for this
-  // lead at send time (booking-abandon-recovery.js), so a failed suppression
-  // here can never lead to a message.
-  try {
-    await retireOpenBookingIntents(db, { phone: value.phone, sessionId: value.sessionId });
-  } catch (err) {
-    logger.warn(`[booking:preferred-time] intent retire failed: ${err.message}`);
-  }
 
   if (created && notify) {
     try {
@@ -340,17 +331,27 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
 
 /**
  * A customer who just completed a booking no longer needs the office to chase
- * their preferred-time request: convert every OPEN preferred-time lead for the
+ * their preferred-time request: convert THE open preferred-time lead for the
  * booked customer's verified phone through the EXISTING lead lifecycle —
  * convertLeadFromEvent (an explicit lead id) → markConverted → the funnel
  * settlement that advances the lead's ad_service_attribution row to 'booked'.
  * No raw status write. The lead is linked to the customer by markConverted, so
  * the new_lead bell's relevance sweep retires the bell. A Waves Assessment
  * booking is not a win (convertLeadFromEvent's own rule) and leaves the lead
- * open. Idempotent: a converted lead is no longer open, so the normal commit
- * path and the txResult.existing replay path can both call it. Never throws
- * into the booking. Returns { converted } — the number of leads converted — so
- * the caller can tell attributeSelfBooking that the funnel entry is the lead's.
+ * open.
+ *
+ * Converts exactly ONE lead, and only when that is unambiguous: a phone with
+ * two or more open preferred-time requests (asks more than a day apart, or a
+ * shared household number) could be two different people, and one booking
+ * proves only one of them — the same rule convertLeadFromEvent applies to a
+ * phone-matched lead ('ambiguous_contact'). Those stay open for staff. Nothing
+ * is retired without a win.
+ *
+ * Idempotent (a converted lead is no longer open) so the normal commit path and
+ * the txResult.existing replay path can both call it. Never throws into the
+ * booking. Returns { converted, ambiguous } — converted is 1 only when
+ * markConverted actually won its conditional write, so the caller can tell
+ * attributeSelfBooking that the funnel entry is the lead's.
  */
 async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null } = {}) {
   if (!customerId) return { converted: 0 };
@@ -363,20 +364,21 @@ async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = nu
       .whereNull('deleted_at')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .whereNull('converted_at');
-    const open = await tenMatch(q, ten).select('id');
-    const { convertLeadFromEvent } = require('./lead-estimate-link');
-    let converted = 0;
-    for (const lead of open || []) {
-      const result = await convertLeadFromEvent({
-        source: 'preferred_time_booked',
-        customerId,
-        leadId: lead.id,
-        booking,
-        database: db,
-      });
-      if (result && result.converted) converted += result.count || 1;
+    const open = (await tenMatch(q, ten).select('id')) || [];
+    if (!open.length) return { converted: 0 };
+    if (open.length > 1) {
+      logger.warn(`[booking:preferred-time] ${open.length} open preferred-time leads for customer=${customerId}'s phone — not converting any (ambiguous); staff resolve`);
+      return { converted: 0, ambiguous: true };
     }
-    return { converted };
+    const { convertLeadFromEvent } = require('./lead-estimate-link');
+    const result = await convertLeadFromEvent({
+      source: 'preferred_time_booked',
+      customerId,
+      leadId: open[0].id,
+      booking,
+      database: db,
+    });
+    return { converted: result && result.converted ? 1 : 0 };
   } catch (err) {
     logger.warn(`[booking:preferred-time] converting preferred-time lead on booking failed for customer=${customerId}: ${err.message}`);
     return { converted: 0 };
@@ -385,7 +387,6 @@ async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = nu
 
 module.exports = {
   convertPreferredTimeLeadsOnBooking,
-  withPreferredTimePhoneLock,
   LEAD_TYPE,
   TIME_OF_DAY_LABELS,
   validatePreferredTimeRequest,
