@@ -5994,6 +5994,12 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
       // is about to MINT — priced by the same completionInvoiceAmount
       // precedence the prediction reports (the setup-fee allowance rides
       // the cap verdict, so a first-visit fee line cannot push it over).
+      // Active collections collection_hold (dispute on a collections call,
+      // B10): the shared Stripe primitives refuse EVERY off-session charge for
+      // the customer, so no lane (per-application, appointment-card,
+      // estimate-card-hold, extended, pending-mint) is a forthcoming charge -
+      // exempt before any lane-specific / reused-invoice branch.
+      if (await collectionHoldStopsExtendedLane(reused?.customer_id || v.customer_id, conn)) continue;
       const perApplicationBilling = v.billing_mode === 'per_application';
       const annualPrepayBilling = v.billing_mode === 'annual_prepay';
       const explicitMembershipLane = v.billing_mode === 'monthly_membership';
@@ -6070,9 +6076,6 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         else if (reused) {
           const seq = await conn('invoice_followup_sequences').where({ invoice_id: reused.id }).first('status');
           if (seq && String(seq.status || '').toLowerCase() === 'stopped') autopayLaneCharges = false;
-          // Active collections collection_hold (dispute on a collections
-          // call, B10) — same refusal the charge boundary asserts.
-          else if (await collectionHoldStopsExtendedLane(reused.customer_id || v.customer_id, conn)) autopayLaneCharges = false;
           else if (await conn('payment_plans').where({ invoice_id: reused.id, status: 'active' }).first('id')) autopayLaneCharges = false;
         }
       }

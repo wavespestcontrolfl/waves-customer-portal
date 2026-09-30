@@ -1,5 +1,5 @@
 const db = require('../models/db');
-const { isNeverAttemptedHoldDeferral } = require('./collections/collection-hold');
+const { isNeverAttemptedHoldDeferral, excludeNeverAttemptedHoldDeferrals } = require('./collections/collection-hold');
 const logger = require('./logger');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { SIGNAL_TYPES } = require('./customer-intelligence/signal-detector');
@@ -92,8 +92,15 @@ async function computePaymentScore(customerId) {
     try {
       // Over-fetch then drop payer-billed rows so a customer with payer history
       // still gets a representative self-pay sample.
-      const fetched = await db(tbl).where('customer_id', customerId).orderBy('created_at', 'desc').limit(payerInvoiceIds.size ? 48 : 24);
-      const rows = fetched.filter(r => !isPayerRow(tbl, r)).slice(0, 24);
+      // A never-attempted dispute-hold deferral (a payments row Stripe never
+      // saw) is not payment history at all: it is left out of the fetch itself
+      // (so it cannot displace a real payment from the 24-row sample) and, as
+      // a belt for any row the SQL twin could not see, out of the sample
+      // before total / recent / failed are derived from it.
+      let q = db(tbl).where('customer_id', customerId);
+      if (tbl === 'payments') q = excludeNeverAttemptedHoldDeferrals(q, 'payments');
+      const fetched = await q.orderBy('created_at', 'desc').limit(payerInvoiceIds.size ? 48 : 24);
+      const rows = fetched.filter(r => !isPayerRow(tbl, r) && !(tbl === 'payments' && isNeverAttemptedHoldDeferral(r))).slice(0, 24);
       if (rows.length === 0) continue;
 
       details.source = tbl;
@@ -898,4 +905,6 @@ module.exports = {
   // Exported for focused unit coverage of the outbound-count signal (Codex
   // #4331 P2) — not part of the scoreCustomer public surface otherwise.
   computeEngagementScore,
+  // Exported for the never-attempted hold-deferral sample coverage (codex #5394).
+  computePaymentScore,
 };

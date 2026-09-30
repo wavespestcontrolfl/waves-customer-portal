@@ -2834,7 +2834,11 @@ async function payLinkRefusal(successor, conn, context) {
 //   refused  successorRecoveryRefusal (a deleted account, the parent no
 //            longer authorizing it, the grace window closed) — durable
 //            withdraws, transient bells and rotates
-async function payLinkVerdict(successor, conn) {
+// `ignoreCollectionHold` is for the CUSTOMER's own payment eligibility
+// (renewalPaymentRefusal): a collections dispute hold defers only the
+// AUTOMATED pay-link delivery / charge legs, it never blocks the customer
+// paying a renewal voluntarily (B10, customer-initiated is exempt).
+async function payLinkVerdict(successor, conn, { ignoreCollectionHold = false } = {}) {
   const stillPending = await conn('annual_prepay_terms').where({ id: successor.id, status: PAYMENT_PENDING_STATUS }).first();
   if (!stillPending) return { kind: 'handled', durable: true, reason: 'the renewal is no longer payment_pending' };
   if (successorDisputeSuspended(stillPending)) return { kind: 'dispute', durable: false, reason: 'the renewal payment is under dispute' };
@@ -2843,7 +2847,7 @@ async function payLinkVerdict(successor, conn) {
   // annual-prepay edit that won the gate first (a moved successor
   // term_start, say) is visible only in the fresh row, and the stale one
   // would still read as aligned with the parent.
-  const refusal = await successorRecoveryRefusal(stillPending, conn);
+  const refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold });
   return refusal ? { kind: 'refused', durable: Boolean(refusal.retire), reason: refusal.reason, refusal, fresh: stillPending } : null;
 }
 
@@ -2871,7 +2875,7 @@ const RENEWAL_NOT_PAYABLE_MESSAGE = 'This renewal can no longer be paid online. 
 async function renewalPaymentRefusal(invoice, conn = db) {
   const successor = await renewalSuccessorForPayment(invoice, conn);
   if (!successor) return null;
-  const verdict = await payLinkVerdict(successor, conn);
+  const verdict = await payLinkVerdict(successor, conn, { ignoreCollectionHold: true });
   if (!verdict || verdict.kind === 'handled') return null;
   return { reason: verdict.reason, message: RENEWAL_NOT_PAYABLE_MESSAGE };
 }
@@ -3943,7 +3947,7 @@ async function customerDeletedRefusal(conn, successor) {
   return customer?.deleted_at ? { reason: 'the customer deleted their account', retire: true } : null;
 }
 
-async function successorRecoveryRefusal(successor, conn) {
+async function successorRecoveryRefusal(successor, conn, { ignoreCollectionHold = false } = {}) {
   // Codex #4971 r10 P1: an account deleted after the mint (routes/auth.js
   // DELETE /account stamps customers.deleted_at and leaves Auto Pay armed)
   // is never renewed — no charge (stripe.js refuses it under the customer
@@ -3960,7 +3964,7 @@ async function successorRecoveryRefusal(successor, conn) {
   }
   // A collections dispute hold defers (no pay link, no withdrawal, even past
   // grace) — covers crash / failed-fence-release cases in leg 7b (B10).
-  if (await collectionsDisputeHoldBlocks(conn, successor.customer_id)) return { reason: HOLD_DEFER_REASON, retire: false };
+  if (!ignoreCollectionHold && await collectionsDisputeHoldBlocks(conn, successor.customer_id)) return { reason: HOLD_DEFER_REASON, retire: false };
   return graceWindowRefusal(successor);
 }
 

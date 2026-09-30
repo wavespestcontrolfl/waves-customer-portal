@@ -620,7 +620,11 @@ async function autoApplyAccountCreditIfEnabled(invoiceId, { createdBy = 'system'
   try {
      
     if (!require('../config/feature-gates').gates.autoApplyAccountCredit) return null;
-    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy }, trx);
+    // Every seam here is AUTOMATIC (pay-link send, dun, Terminal handoff), so an
+    // active collections DISPUTE hold refuses it (B10) whatever the
+    // GATE_COLLECTIONS_POLICY rail guard says; customer-requested and admin
+    // applies do not come through this wrapper and stay exempt.
+    const result = await applyAccountCreditToInvoice({ invoiceId, createdBy, refuseWhenCollectionHold: true }, trx);
     // When a seam-time apply FULLY covers the invoice (now prepaid / paid_at), run
     // the same post-payment side effects the manual apply-credit + record-payment
     // paths run — otherwise a credit-covered invoice keeps dunning followups armed

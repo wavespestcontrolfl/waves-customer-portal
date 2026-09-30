@@ -491,6 +491,44 @@ describe('applyAccountCreditToInvoice refuseWhenCollectionHold', () => {
   });
 });
 
+describe('autoApplyAccountCreditIfEnabled (the automatic seam wrapper) refuses on a dispute hold', () => {
+  const load = (flags) => {
+    jest.resetModules();
+    const fake = makeFakeDb({
+      invoices: [{ id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '50.00', credit_applied: '0' }],
+      invoice_followup_sequences: [],
+      collections_flags: flags,
+    });
+    fake.transaction = jest.fn(async (fn) => fn(fake));
+    jest.doMock('../models/db', () => fake);
+    // credit gate ON, collections-policy rail guard OFF: the hold refusal must
+    // not depend on GATE_COLLECTIONS_POLICY
+    jest.doMock('../config/feature-gates', () => ({ gates: { autoApplyAccountCredit: true, collectionsPolicy: false } }));
+    delete process.env.GATE_COLLECTIONS_POLICY;
+    return { credit: require('../services/customer-credit'), fake };
+  };
+
+  test('an active dispute hold stops the automatic apply before the customer opt-in read or any balance movement', async () => {
+    const { credit, fake } = load([{ ...HOLD }]);
+    await expect(credit.autoApplyAccountCreditIfEnabled('inv-1')).resolves.toEqual({ applied: 0, skipped: 'dunning_stopped' });
+    expect(fake.mock.calls.map((c) => c[0])).not.toContain('customers');
+  });
+
+  test('no hold, or a fallback (non-dispute) hold, is not refused for the hold', async () => {
+    for (const flags of [[], [FALLBACK_WRONG_NUMBER]]) {
+      const { credit } = load(flags);
+      const out = await credit.autoApplyAccountCreditIfEnabled('inv-1');
+      expect(out).not.toEqual({ applied: 0, skipped: 'dunning_stopped' });
+    }
+  });
+
+  test('a customer-requested apply is not made by this wrapper and stays exempt from the hold', async () => {
+    const { credit, fake } = load([{ ...HOLD }]);
+    const out = await credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true }, fake);
+    expect(out).not.toEqual({ applied: 0, skipped: 'dunning_stopped' });
+  });
+});
+
 describe('completion route wiring (complete-scheduled-service.js)', () => {
   // The completion handler is too large to drive in a unit test; pin its two
   // automatic money calls: the credit apply asks for the hold guard, and the

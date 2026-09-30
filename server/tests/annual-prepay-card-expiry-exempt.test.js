@@ -419,7 +419,7 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
     expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
   });
 
-  test('B10: an active collections dispute hold means the extended lane will not charge → stays exempt; other lanes keep the (conservative) warning', async () => {
+  test('B10: an active collections dispute hold means the extended lane will not charge → stays exempt', async () => {
     route({
       terms: coveredAlways(['c-prepaid']),
       visits: [baseVisit({})],
@@ -427,6 +427,25 @@ describe('getCardExpiryExemptCustomerIds — visits judged by predictCompletionB
       collectionFlags: [{ id: 'f1', flag: 'collection_hold' }],
     });
     expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+  });
+
+  test('B10 (codex #5394): the hold exemption is customer-level - per-application, pending-mint and estimate-card-hold charges are exempt too', async () => {
+    const holdFlag = [{ id: 'f1', flag: 'collection_hold' }];
+    const scenarios = [
+      // per-application (reused open invoice)
+      { visits: [baseVisit({ billing_mode: 'per_application', per_application_fee: '120.00' })], invoices: [{ id: 'inv-1', scheduled_service_id: 'v1', status: 'sent', subtotal: '120.00' }] },
+      // pending-mint (no invoice yet)
+      { visits: [baseVisit({})], invoices: [] },
+      // estimate card hold rail
+      { visits: [baseVisit({ is_recurring: false, customer_autopay_paused_until: HORIZON })], invoices: [], cardHolds: [{ id: 'hold-1', status: 'held', accepted_amount: '120.00' }] },
+    ];
+    for (const sc of scenarios) {
+      // control: with no hold the warning stays
+      route({ terms: coveredAlways(['c-prepaid']), ...sc });
+      expect((await getCardExpiryExemptCustomerIds(HORIZON)).size).toBe(0);
+      route({ terms: coveredAlways(['c-prepaid']), ...sc, collectionFlags: holdFlag });
+      expect([...(await getCardExpiryExemptCustomerIds(HORIZON))]).toEqual(['c-prepaid']);
+    }
   });
 
   test('B10: a hold-lookup FAILURE never rejects the exemption pass - the warning stays (not exempt)', async () => {

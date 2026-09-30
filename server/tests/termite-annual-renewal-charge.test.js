@@ -1997,6 +1997,30 @@ describe('termite annual renewal charge', () => {
         expect(await p.successorActionBlocker(conn, successor.id)).toMatchObject({ defer: true, reason: expect.stringContaining('collections dispute hold') });
       });
 
+      test('a customer\'s own renewal payment (renewalPaymentRefusal) is NOT blocked by the hold, while the automated recovery leg still defers (pre-push P1)', async () => {
+        const p = loadWithHold(true);
+        const today = new Date().toISOString().slice(0, 10);
+        const successor = baseSuccessor({ renewed_from_term_id: null, term_start: today, created_at: `${today}T00:00:00Z`, annual_plan_version: 'v3', dispute_suspended_at: null });
+        const termsChain = () => {
+          const q = {};
+          q.where = jest.fn(() => q);
+          q.whereNotNull = jest.fn(() => q);
+          q.first = jest.fn(async () => successor);
+          return q;
+        };
+        const conn = jest.fn((table) => {
+          if (table === 'customers') return liveCustomerQuery();
+          if (table === 'annual_prepay_terms') return termsChain();
+          throw new Error(`unexpected ${table}`);
+        });
+        const invoice = { id: 'succ-invoice-1', annual_prepay_term_id: successor.id };
+        const Charge = require('../services/termite-annual-renewal-charge');
+        await expect(Charge.renewalPaymentRefusal(invoice, conn)).resolves.toBeNull();
+        // the automated legs still read the hold
+        await expect(p.successorRecoveryRefusal(successor, conn)).resolves.toMatchObject({ retire: false, reason: expect.stringContaining('collections dispute hold') });
+        await expect(p.payLinkVerdict(successor, conn)).resolves.toMatchObject({ kind: 'refused', durable: false });
+      });
+
       test('without a hold the same past-grace successor retires (rule unchanged)', async () => {
         const p = loadWithHold(false);
         const successor = pastGraceSuccessor();

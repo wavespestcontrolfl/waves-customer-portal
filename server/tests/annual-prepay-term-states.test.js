@@ -518,7 +518,10 @@ describe('annual-prepay term states — CHECK ↔ code ↔ doc', () => {
     // is a ratchet: ANY new dynamic mutation in the file (which could carry
     // `payload.status` or `column === 'status'` invisibly to a textual scan)
     // fails until the file is re-audited and the count updated.
-    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 9 };
+    // Re-audited 2026-09-30 (B10): +1 = the dispute-hold promotion in
+    // repointFlagsReleaseCollisions, which runs only for collections_flags and
+    // writes `reason` — never this table.
+    const AUDITED_DYNAMIC_WRITERS = { 'server/services/customer-dedupe.js': 10 };
 
     const writes = [];
     const unscannable = [];
