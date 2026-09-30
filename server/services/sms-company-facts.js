@@ -19,6 +19,11 @@ const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly
 // held as "an amount the facts do not show".
 const REFERRAL_CREDIT_CENTS = 2500;
 
+// A customer-referral phrase: "referral(s)", "refer a friend/neighbor/someone",
+// "friends you refer", "referring". NOT the staff verb in "refer this to the
+// office" / "referring you to".
+const REFERRAL_PHRASE_RE = /\breferrals?\b|\brefer(?:s|red|ring)?\s+(?:a\s+|an\s+|your\s+|any\s+|another\s+)?(?:friends?|neighbou?rs?|someone|somebody|anyone|family|others?)\b|\b(?:friends?|neighbou?rs?)\s+(?:you|who)\s+refer\b|\breferring\b(?!\s+(?:this|that|it|you|them)\b)/i;
+
 const COMPANY_FACTS = Object.freeze([
   'Recurring, one-time and re-service pest visits include an interior spray as well as the exterior. The only exception is a customer who does not want the inside done.',
   'The customer does not need to be home for the exterior treatment. For the inside spray, someone needs to be home, or the customer leaves us access.',
@@ -43,5 +48,6 @@ module.exports = {
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
   REFERRAL_CREDIT_CENTS,
+  REFERRAL_PHRASE_RE,
   renderCompanyFactsSection,
 };

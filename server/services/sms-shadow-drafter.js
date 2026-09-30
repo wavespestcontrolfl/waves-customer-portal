@@ -28,7 +28,7 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
-const { renderCompanyFactsSection, REFERRAL_CREDIT_CENTS } = require('./sms-company-facts');
+const { renderCompanyFactsSection, REFERRAL_CREDIT_CENTS, REFERRAL_PHRASE_RE } = require('./sms-company-facts');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -1050,11 +1050,12 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     const owed = AMOUNT_OWED_RE.test(masked);
     const ack = PAYMENT_ACK_RE.test(masked);
     // COMPANY FACTS referral credit: the one owner-approved company figure.
-    // Authorized only as a "credit" clause in a reply that is about a
-    // referral, and only at exactly that amount — never as an owed/paid
+    // Authorized only when the SAME clause carries the credit AND a customer-
+    // referral phrase (never the verb "refer this to the office" elsewhere in
+    // the reply), and only at exactly that amount — never as an owed/paid
     // figure (a clause that also reads as owed or an acknowledgement falls
     // through to the ordinary binding below).
-    if (!owed && !ack && /\bcredit\b/i.test(masked) && /\brefer/i.test(String(reply || ''))
+    if (!owed && !ack && /\bcredit\b/i.test(masked) && REFERRAL_PHRASE_RE.test(masked)
         && amounts.every((a) => a === REFERRAL_CREDIT_CENTS)) continue;
     if (owed === ack) return true;
     const allowed = owed ? owedCents : paidCents;
@@ -2071,7 +2072,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
           model: verifier.VERIFIER_MODEL,
           max_tokens: 4096, // DEEP: thinking spends from max_tokens — keep headroom for the verdict JSON
           effort: 'medium', // a yes/no supported-check needs no high-effort reasoning; caps Opus 5.5 spend on a short verdict
-          system: verifier.buildVerifierSystemPrompt(),
+          system: verifier.buildVerifierSystemPrompt({ generalPestKnowledge: realAnswersApplied === true }),
           messages: [{ role: 'user', content: verifier.buildVerifierUserPrompt(factsBlock, inboundMessage, parsed.reply, parsed.offered_times) }],
         });
         // createDeepMessage can transparently cross providers. Preserve the

@@ -16,6 +16,7 @@ const {
   REAL_ANSWERS_PROMPT_VERSION,
   REAL_ANSWERS_HANDOFF_CATEGORIES,
 } = require('../services/sms-shadow-drafter');
+const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 const {
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
@@ -42,6 +43,28 @@ describe('gate off — byte-identical to before COMPANY FACTS', () => {
     expect(sha(buildSystemPromptWithProfile('Warm and brief.').system)).toBe('7e35da9035dd011a3f0b6ab8596b9876926956fbaf1ca05139d59f4ef8248a9b');
     expect(buildSystemPrompt()).not.toContain('COMPANY FACTS');
     expect(currentPromptVersion()).toBe(PROMPT_VERSION);
+  });
+
+  test('verifier system prompt is byte-identical without the opt-in', () => {
+    const orig = '362e4cac5fd3f73afa1208eb6bfe550ae7de823281731cefb1bcf89c1a2384e8';
+    expect(sha(buildVerifierSystemPrompt())).toBe(orig);
+    expect(sha(buildVerifierSystemPrompt({}))).toBe(orig);
+    expect(sha(buildVerifierSystemPrompt({ generalPestKnowledge: false }))).toBe(orig);
+    expect(buildVerifierSystemPrompt()).not.toContain('GENERAL PEST KNOWLEDGE');
+  });
+});
+
+describe('verifier — general pest knowledge exception (gate-on opt-in)', () => {
+  test('opt-in adds a narrow exception and leaves strict grounding in place', () => {
+    const off = buildVerifierSystemPrompt();
+    const on = buildVerifierSystemPrompt({ generalPestKnowledge: true });
+    expect(on).not.toBe(off);
+    expect(on.startsWith(off.slice(0, 200))).toBe(true);
+    expect(on).toContain('GENERAL PEST KNOWLEDGE EXCEPTION');
+    expect(on).toContain('NOT about this customer');
+    expect(on).toMatch(/treatments applied or planned, timing, prices, appointments, or company policy stays strictly grounded/);
+    expect(on).toContain('DEFAULT TO FLAGGING'); // the strict default is untouched
+    expect(on).toContain('A product brand name is always a VIOLATION');
   });
 });
 
@@ -108,20 +131,30 @@ describe('fact lines pass the drafter\'s own compliance screens', () => {
 describe('referral credit amount', () => {
   const ctx = { billing: { outstandingBalance: 0, recentPayments: [] } };
   beforeEach(() => { process.env[GATE] = 'true'; });
+  const held = (reply, opts) => replyQuotesUngroundedAmount(reply, ctx, opts);
 
-  test('the $25 referral credit is not held as an ungrounded amount', () => {
-    expect(replyQuotesUngroundedAmount('Refer a friend and you both get a $25 credit!', ctx)).toBe(false);
-    expect(replyQuotesUngroundedAmount('Referrals earn you and the new customer a $25 credit each.', ctx, { byMeaning: true })).toBe(false);
+  test('allowed only when the SAME clause has the credit and a customer-referral phrase', () => {
+    expect(held('You both get a $25 credit when you refer a friend.')).toBe(false);
+    expect(held('You get a $25 credit when you refer a neighbor', { byMeaning: true })).toBe(false);
+    expect(held('Each referral earns a $25 credit for both of you.')).toBe(false);
+    expect(held('The $25 credit is for referring someone new.')).toBe(false);
   });
 
-  test('other figures and non-referral credits are still held', () => {
-    expect(replyQuotesUngroundedAmount('Refer a friend and you both get a $30 credit!', ctx)).toBe(true);
-    expect(replyQuotesUngroundedAmount('We can take a $25 credit off your bill.', ctx)).toBe(true);
-    expect(replyQuotesUngroundedAmount('Refer a friend. Your balance is $25.', ctx)).toBe(true);
+  test('the staff verb "refer this to the office" never authorizes the credit', () => {
+    expect(held('I will refer this to the office. You get a $25 credit.')).toBe(true);
+    expect(held('I will refer this to the office, you get a $25 credit.')).toBe(true);
+    expect(held('Referring you to the office for a $25 credit.')).toBe(true);
+  });
+
+  test('a credit alone, a wrong amount, or a non-referral credit is held', () => {
+    expect(held('You get a $25 credit.')).toBe(true);
+    expect(held('You get a $30 credit for referrals.')).toBe(true);
+    expect(held('We can take a $25 credit off your bill.')).toBe(true);
+    expect(held('Referral question. Your balance is $25.')).toBe(true);
   });
 
   test('gate off keeps the pooled rule (no allowance)', () => {
     delete process.env[GATE];
-    expect(replyQuotesUngroundedAmount('Refer a friend and you both get a $25 credit!', ctx)).toBe(true);
+    expect(held('You both get a $25 credit when you refer a friend.')).toBe(true);
   });
 });
