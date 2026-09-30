@@ -111,7 +111,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, serviceMayForceAssessment, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -5794,7 +5794,10 @@ function v2BookingServiceView(extracted = {}, v2Extraction = null) {
 // BEFORE V2-primary adoption (`preAdoptionExtracted`), the merged fields at the
 // gate, and the V2-overridden view the approved booking will book. Returns the
 // SAME verdict object unless the waiver applies.
-function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null } = {}) {
+function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, preAdoptionExtracted = null, transcription = '', services = [], property = null, v2Extraction = null, unclearServiceAssessment = false } = {}) {
+  // Both gates on and the call carries the unclear-service signal: routing may
+  // force the Waves Assessment row, which is not a whole-structure service.
+  if (unclearServiceAssessment && serviceMayForceAssessment(v2Extraction)) return addressValidation;
   const prop = property || v2Extraction?.property || {};
   const views = [];
   if (preAdoptionExtracted) views.push(preAdoptionExtracted);
@@ -9929,6 +9932,7 @@ const CallRecordingProcessor = {
             services: bookableCallServices,
             property: v2Result?.extraction?.property,
             v2Extraction: v2Result?.extraction,
+            unclearServiceAssessment: isEnabled('callUnclearServiceAssessment') === true,
           });
           if (wsAv !== v2AddressValidation) {
             // Stamp the pass's waiver on the PERSISTED verdict (status stays

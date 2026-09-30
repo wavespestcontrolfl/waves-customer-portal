@@ -1959,6 +1959,19 @@ function lowConfidenceServiceAddressOnly(confidence, threshold) {
   ));
 }
 
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT x GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: true
+// when the extraction carries the service-unclear signal the Assessment gate
+// demotes (the model's ambiguous_pest_or_service flag, or a low overall score
+// whose only low sub-score is service_address). With the Assessment gate on,
+// such a call books the Waves Assessment row — a service OFF the whole-
+// structure allowlist — so the unit waiver must not be what makes its address
+// "trusted". Conservative on purpose: read from the raw extraction.
+function serviceMayForceAssessment(extraction, threshold = DEFAULT_CONFIDENCE_THRESHOLD) {
+  if (!extraction) return false;
+  if (Array.isArray(extraction.triage_flags) && extraction.triage_flags.includes('ambiguous_pest_or_service')) return true;
+  return lowConfidenceServiceAddressOnly(extraction.confidence, threshold);
+}
+
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the booking-shape half. Gate on (and
 // the fail-open booking it rides on), a CONFIRMED status with a start, an
 // on-the-hour start, and a trusted address (positively validated, or dispatched
@@ -2941,6 +2954,7 @@ module.exports = {
   isMissingUnitNumber,
   applyWholeStructureUnitWaiver,
   reconstructWaivedAddressValidation,
+  serviceMayForceAssessment,
   isWholeStructureService,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,

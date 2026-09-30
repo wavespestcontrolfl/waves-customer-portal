@@ -8,6 +8,7 @@
 const {
   applyWholeStructureUnitWaiver,
   reconstructWaivedAddressValidation,
+  serviceMayForceAssessment,
   isWholeStructureService,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   canAutoRoute,
@@ -208,6 +209,32 @@ describe('call-level waiver (service resolved the way the booking resolves it)',
     expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeGreaterThan(0);
     expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeLessThan(src.indexOf('const adoption = adoptV2PrimaryFields('));
     expect(src).toContain('preAdoptionExtracted,\n            transcription,');
+  });
+
+  test('both gates on: a call the Assessment gate may force to Waves Assessment is not waived (pre-push P1)', () => {
+    const v2 = (patch) => ({
+      meta: { schema_version: '1.20.0' },
+      property: { property_type: 'multi_family' },
+      service_request: { primary_service_category: 'wdo', specific_service_name: 'WDO Inspection (Termite Letter)' },
+      triage_flags: [],
+      confidence: { overall: 0.9, service_address: 0.9 },
+      ...patch,
+    });
+    const extracted = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection' };
+    const run = (v2Extraction, unclear) => wholeStructureUnitWaiverForCall({
+      addressValidation: AV_UNIT_MISSING, extracted, services: CATALOG, v2Extraction, unclearServiceAssessment: unclear,
+    });
+    const ambiguous = v2({ triage_flags: ['ambiguous_pest_or_service'] });
+    const lowAddrOnly = v2({ confidence: { overall: 0.4, service_address: 0.3, urgency: 0.9 } });
+    expect(serviceMayForceAssessment(ambiguous)).toBe(true);
+    expect(serviceMayForceAssessment(lowAddrOnly)).toBe(true);
+    expect(serviceMayForceAssessment(v2({}))).toBe(false);
+    // Assessment gate on + service unclear: the hold stands.
+    expect(run(ambiguous, true)).toBe(AV_UNIT_MISSING);
+    expect(run(lowAddrOnly, true)).toBe(AV_UNIT_MISSING);
+    // Assessment gate off: unchanged (waived). Clear service, gate on: waived.
+    expect(run(ambiguous, false).status).toBe('validated_accept');
+    expect(run(v2({}), true).status).toBe('validated_accept');
   });
 
   test('an allowlisted service with another address problem stays held', () => {
