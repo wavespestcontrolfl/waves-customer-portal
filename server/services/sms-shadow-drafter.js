@@ -28,7 +28,9 @@ const { CUSTOMER_SMS_HOUSE_VOICE } = require('./ai-assistant/managed-agent-confi
 const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
-const { renderCompanyFactsSection, REFERRAL_CREDIT_CENTS, REFERRAL_PHRASE_RE } = require('./sms-company-facts');
+const {
+  renderCompanyFactsSection, referralFactLine, referralCreditCents, reserviceBookingLine, REFERRAL_TERM_RE,
+} = require('./sms-company-facts');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -392,6 +394,56 @@ function reserviceFactLine(lanes) {
   return list.length
     ? `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
     : `${RESERVICE_FACT_LABEL} not eligible`;
+}
+
+// LIVE referral-program settings for the COMPANY FACTS referral line, through
+// referral-engine.getLiveSettings (the strict reader: the live row or null,
+// never the advertise-an-active-$25 defaults). Gate-on only, best-effort with
+// the same timeout as the other per-draft reads. Returns the four fields the
+// fact and the amount guard use, or null (failure, timeout, no row, gate off)
+// — null renders no referral line and authorizes no amount.
+async function fetchReferralSettings() {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
+  let timer = null;
+  try {
+    const { getLiveSettings } = require('./referral-engine');
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('referral settings timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    const row = await Promise.race([getLiveSettings(), timeout]);
+    if (!row) return null;
+    return {
+      program_active: row.program_active === true,
+      referrer_reward_cents: row.referrer_reward_cents,
+      referee_discount_cents: row.referee_discount_cents,
+      require_service_completion: row.require_service_completion === true,
+    };
+  } catch (err) {
+    logger.warn(`[sms-shadow] referral settings lookup failed (${err.message}); omitting the referral fact`);
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+// The referral-credit cents a reply may quote RIGHT NOW (fresh read, like
+// billing at send time): used by the draft-time amount guard and by
+// sms-amount-recheck. [] on any failure or an inactive program, so nothing is
+// authorized. Not gate-checked here — callers pass byMeaning explicitly.
+async function fetchReferralCreditCents() {
+  let timer = null;
+  try {
+    const { getLiveSettings } = require('./referral-engine');
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('referral settings timeout')), OPEN_TIMES_TIMEOUT_MS);
+    });
+    return referralCreditCents(await Promise.race([getLiveSettings(), timeout]));
+  } catch (err) {
+    logger.warn(`[sms-shadow] referral credit lookup failed (${err.message}); authorizing no referral amount`);
+    return [];
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 // The shared compliance predicate (AGENTS.md "Compliance language on any
@@ -1007,6 +1059,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
   const text = String(reply || '');
   // Gate on: only payments that actually went through back an acknowledgement.
   const realAnswers = typeof opts.byMeaning === 'boolean' ? opts.byMeaning : gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  const referralCents = Array.isArray(opts.referralCents) ? opts.referralCents : [];
   const { owed: owedCents, paid: paidCents } = billingAmountCents(context, { settledOnly: realAnswers });
   const amountsIn = (t) => (t.match(AMOUNT_MASK_RE) || []).map((a) => centsOf(a.replace(/[^\d.]/g, '')));
   // FAIL CLOSED on grammar the numeric extractor can't verify (Codex r8):
@@ -1049,14 +1102,15 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     if (!amounts.length) continue;
     const owed = AMOUNT_OWED_RE.test(masked);
     const ack = PAYMENT_ACK_RE.test(masked);
-    // COMPANY FACTS referral credit: the one owner-approved company figure.
-    // Authorized only when the SAME clause carries the credit AND a customer-
-    // referral phrase (never the verb "refer this to the office" elsewhere in
-    // the reply), and only at exactly that amount — never as an owed/paid
-    // figure (a clause that also reads as owed or an acknowledgement falls
-    // through to the ordinary binding below).
-    if (!owed && !ack && /\bcredit\b/i.test(masked) && REFERRAL_PHRASE_RE.test(masked)
-        && amounts.every((a) => a === REFERRAL_CREDIT_CENTS)) continue;
+    // COMPANY FACTS referral credit: the LIVE referral-program amounts
+    // (opts.referralCents, from referral_program_settings; empty when the
+    // program is inactive or the read failed, so nothing is authorized) are
+    // allowed ONLY in a clause that carries the literal term "referral
+    // credit" — never on a bare "credit" or on the word "referral" alone.
+    // Never as an owed/paid figure either: a clause that also reads as owed
+    // or an acknowledgement falls through to the ordinary binding below.
+    if (!owed && !ack && REFERRAL_TERM_RE.test(masked)
+        && referralCents.length && amounts.every((a) => referralCents.includes(a))) continue;
     if (owed === ack) return true;
     const allowed = owed ? owedCents : paidCents;
     if (amounts.some((a) => !allowed.has(a))) return true;
@@ -1191,7 +1245,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const companyFactsRules = realAnswersOn
     ? `
 GENERAL PEST KNOWLEDGE & COMPANY FACTS:
-- For general pest questions (what a pest is, why you're seeing earwigs, prevention tips) you MAY answer from general pest knowledge, briefly and in plain words — that is not a claim about this customer's home. Treatment decisions for THIS customer's home (what was or will be applied, what a re-treatment needs, timing) still follow the facts or go to a person. Never name a product brand.
+- For general pest questions (what a pest is, why you're seeing earwigs, prevention tips) you MAY answer from general pest knowledge, briefly and in plain words — that is not a claim about this customer's home. Treatment decisions for THIS customer's home (what was or will be applied, what a re-treatment needs, timing) still follow the facts or go to a person. This NEVER covers health, illness, symptoms, the effects of stings or bites on people or pets, exposure, or safety (whether something is dangerous, toxic or harmful): those are not general pest knowledge, so follow the facts and the hand-off rules below only. Never name a product brand.
 - The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
 `
     : '';
@@ -1382,8 +1436,15 @@ function buildFactsBlock(context, extras = {}) {
   // COMPANY FACTS (owner rulings 2026-09-29/30): owner-approved company
   // knowledge, gate-on only, ordinary per-draft facts the verifier grounds
   // against like any other section. '' gate-off (byte-identical).
+  // The per-draft lines follow the static section: the LIVE referral program
+  // (extras.referralSettings — fetchReferralSettings; absent/inactive renders
+  // nothing) and the re-service app-booking line, only while the FREE
+  // RE-SERVICE fact above is positive AND self-serve booking is on.
+  const reserviceBookable = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS')
+    && Array.isArray(extras.reserviceLanes) && extras.reserviceLanes.length > 0
+    && require('../config/feature-gates').isEnabled('reserviceSelfServe');
   const companyFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
-    ? renderCompanyFactsSection()
+    ? `${renderCompanyFactsSection()}${[referralFactLine(extras.referralSettings), reserviceBookable ? reserviceBookingLine() : ''].filter(Boolean).map((l) => `${l}\n`).join('')}`
     : '';
   // Shared compliance guard (Codex r5): banned customer-copy claims
   // ("pet-safe", "EPA-approved", fixed re-entry/drying times) must not enter
@@ -1937,6 +1998,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
+  const referralSettings = presetFactsBlock ? null : await fetchReferralSettings();
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -1949,7 +2011,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // frozen replay (presetFactsBlock) never calls buildFactsBlock and has no
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, now: factsAt });
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, referralSettings, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.
@@ -2369,7 +2431,10 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // The whitelist itself (authoritative values only, never the thread text
     // the facts block also carries; dues included) is replyQuotesUngroundedAmount
     // above — shared with the estimate-review lane since Codex r3.
-    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context);
+    // Live referral-credit amounts (fresh read, same as the send-time recheck).
+    const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context, {
+      referralCents: gateEnvValue('GATE_SMS_REAL_ANSWERS') ? await fetchReferralCreditCents() : [],
+    });
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);
     }
@@ -2579,6 +2644,8 @@ module.exports = {
   liveServiceType,
   serviceIdentityFor,
   fetchReserviceLanes,
+  fetchReferralSettings,
+  fetchReferralCreditCents,
   reserviceFactLine,
   validateReserviceOffer,
   validateComplianceCopy,

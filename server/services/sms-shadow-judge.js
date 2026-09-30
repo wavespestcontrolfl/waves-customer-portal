@@ -62,7 +62,7 @@ const VERDICTS = ['draft_better', 'equivalent', 'human_better', 'draft_unsafe', 
 const COMPANY_FACTS_JUDGE_CAP = 3000;
 function sanitizeFactsForJudge(block) {
   const { EXEMPLAR_INJECTION_RE } = require('./sms-shadow-drafter');
-  const { COMPANY_FACTS_HEADER } = require('./sms-company-facts');
+  const { renderCompanyFactsSection, REFERRAL_FACT_LABEL, RESERVICE_BOOKING_LABEL } = require('./sms-company-facts');
   const lines = String(block || '')
     .split('\n')
     .filter((line) => !EXEMPLAR_INJECTION_RE.test(line));
@@ -72,19 +72,31 @@ function sanitizeFactsForJudge(block) {
   // past the budget and the judge would grade a draft against facts it never
   // saw. Take the section out of the size budget: cap the REST exactly as
   // before (a block without the section is unchanged), then put the section
-  // back at its original position. The section is the header line plus the
-  // "- " lines directly under it (customer thread lines are always
-  // "[CUSTOMER]/[WAVES]"-prefixed, so no customer text can open one), and is
-  // itself capped so it can never become an unbounded bypass.
-  const start = lines.indexOf(COMPANY_FACTS_HEADER);
+  // back at its original position.
+  //
+  // The exemption is EXACT (Codex #5392 r2 P2): it applies only when the
+  // block carries the current static render byte-for-byte, immediately
+  // before the FIRST "BILLING:" line (where buildFactsBlock puts it), plus
+  // the known per-draft lines (REFERRAL PROGRAM / RE-SERVICE BOOKING, each
+  // one bounded line) between it and BILLING:. A header typed into a
+  // multi-line SMS sits in the thread, AFTER the real BILLING: line and never
+  // in that spot, so it is ordinary text under the cap.
+  const staticLines = renderCompanyFactsSection().replace(/\n$/, '').split('\n');
+  const perDraftLine = (l) => (l.startsWith(`${REFERRAL_FACT_LABEL} `) || l.startsWith(`${RESERVICE_BOOKING_LABEL} `)) && l.length <= 600;
+  const billing = lines.indexOf('BILLING:');
+  let start = -1;
+  if (billing > 0) {
+    let k = billing;
+    while (k > 0 && perDraftLine(lines[k - 1])) k -= 1;
+    const s0 = k - staticLines.length;
+    if (s0 >= 0 && staticLines.every((l, n) => lines[s0 + n] === l)) start = s0;
+  }
   let section = '';
   let rest = lines;
   let insertAt = 0;
   if (start !== -1) {
-    let end = start + 1;
-    while (end < lines.length && lines[end].startsWith('- ')) end += 1;
-    section = lines.slice(start, end).join('\n').slice(0, COMPANY_FACTS_JUDGE_CAP);
-    rest = [...lines.slice(0, start), ...lines.slice(end)];
+    section = lines.slice(start, billing).join('\n').slice(0, COMPANY_FACTS_JUDGE_CAP);
+    rest = [...lines.slice(0, start), ...lines.slice(billing)];
     insertAt = rest.slice(0, start).join('\n').length + (start > 0 ? 1 : 0);
   }
   const capped = rest.join('\n').slice(0, 6000);

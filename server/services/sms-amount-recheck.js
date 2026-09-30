@@ -9,6 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const drafter = require('./sms-shadow-drafter');
+const { REFERRAL_TERM_RE } = require('./sms-company-facts');
 
 // The amount forms and the payment-acknowledgement grammar are the
 // draft-time guard's own (one definition for both amount guards): every
@@ -68,8 +69,13 @@ async function outgoingAmountsStale({ customerId, body, promptVersion = null, db
     // stops at a period, and "$95.50" must not end the clause).
     const { owed, paid } = drafter.billingAmountCents(ctx);
     const ack = PAYMENT_ACK_RE.test(text.replace(AMOUNT_FORMS_RE, ' AMT '));
+    // The LIVE referral-program amounts, re-read fresh at send (like billing
+    // above — a settings change between draft and send must not authorize a
+    // stale figure). Only read when the body actually says "referral credit";
+    // [] on any failure or an inactive program, so nothing is authorized.
+    const referralCents = strict && REFERRAL_TERM_RE.test(text) ? await drafter.fetchReferralCreditCents() : [];
     const stale = strict
-      ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true })
+      ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, referralCents })
       : amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {

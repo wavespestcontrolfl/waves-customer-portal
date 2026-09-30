@@ -11,20 +11,9 @@
 // sms-company-facts.test.js asserts that for every line, so an edit that
 // would make a plain restatement unpublishable fails in CI.
 
+const { WAVES_BRAND_NAME, WAVES_ADDRESS_LINE } = require('../constants/business');
+
 const COMPANY_FACTS_HEADER = 'COMPANY FACTS (owner-approved; state these plainly):';
-
-// The referral credit, in cents. The drafter's amount guard
-// (replyQuotesUngroundedAmount) authorizes exactly this figure, and only in a
-// referral-credit clause, so a reply that restates the referral offer is not
-// held as "an amount the facts do not show".
-const REFERRAL_CREDIT_CENTS = 2500;
-
-// A customer-referral phrase, POSITIVE forms only: "referral(s)", "refer a
-// friend/neighbor/family member/someone/people", "friends/people you refer",
-// "when you refer". Never the bare verb: staff "referring your squirrel
-// problem to a wildlife company" / "refer this to the office" must not
-// authorize the credit.
-const REFERRAL_PHRASE_RE = /\breferrals?\b|\brefer(?:s|red|ring)?\s+(?:a\s+|an\s+|your\s+|any\s+|another\s+)?(?:friends?|neighbou?rs?|famil(?:y|ies)|family\s+members?|someone|somebody|anyone|people)\b|\b(?:friends?|neighbou?rs?|people|famil(?:y|ies)|family\s+members?)\s+(?:that\s+|who\s+)?you\s+refer\b|\bwhen\s+you\s+refer\b(?!\s+(?:this|that|it)\b)/i;
 
 const COMPANY_FACTS = Object.freeze([
   'Recurring, one-time and re-service pest visits include an interior spray as well as the exterior. The only exception is a customer who does not want the inside done.',
@@ -37,19 +26,78 @@ const COMPANY_FACTS = Object.freeze([
   'Rain: a treatment needs to dry and bond to surfaces; after that it holds up to weather.',
   'Lawn program: fertilizer, weed control and insect control only. No mowing. Treatments follow a seasonal rotation. Never name product brands.',
   'Watering advice you may give: follow the county\'s watering days, water early in the morning, and water deeply and less often.',
-  'Paying: technicians accept cards at the visit, never cash. Checks are mailed to Waves Pest Control, 13649 Luxe Ave #110, Bradenton, FL 34211.',
-  'Referral credit: $25 referral credit for each person (the customer who refers and the new customer).',
-  'Pest seen again after a visit: offer the free re-service when the FREE RE-SERVICE fact says they are eligible, and mention they can book re-services in the Waves app. Do not explain why pests are still showing.',
+  `Paying: technicians accept cards at the visit, never cash. Checks are mailed to ${WAVES_BRAND_NAME}, ${WAVES_ADDRESS_LINE}.`,
 ]);
 
+// The static section: fixed owner-approved policy, identical on every draft
+// (the judge's sanitizer exempts exactly this text from its size budget).
 function renderCompanyFactsSection() {
   return `${COMPANY_FACTS_HEADER}\n${COMPANY_FACTS.map((f) => `- ${f}`).join('\n')}\n`;
+}
+
+// ---- Per-draft lines (rendered right after the static section) ----------
+//
+// REFERRAL PROGRAM comes from the LIVE referral_program_settings row
+// (referral-engine.getLiveSettings) — never hardcoded. program_active must be
+// exactly true; otherwise no line is rendered and NO amount is authorized.
+// The fixed term is "referral credit": the drafter's amount guard authorizes
+// the live referrer/referee amounts ONLY in a clause that contains that literal
+// term (see referralCreditCents + replyQuotesUngroundedAmount). Each amount
+// sits in a clause that carries the term, so a plain restatement passes.
+const REFERRAL_FACT_LABEL = 'REFERRAL PROGRAM:';
+const RESERVICE_BOOKING_LABEL = 'RE-SERVICE BOOKING:';
+const REFERRAL_TERM_RE = /\breferral\s+credit\b/i;
+
+function dollars(cents) {
+  const n = Number(cents) / 100;
+  return Number.isInteger(n) ? `$${n}` : `$${n.toFixed(2)}`;
+}
+function referralProgramLive(settings) {
+  return Boolean(settings) && settings.program_active === true;
+}
+// The cents a reply may quote as a referral credit, or [] (fail closed).
+function referralCreditCents(settings) {
+  if (!referralProgramLive(settings)) return [];
+  return [settings.referrer_reward_cents, settings.referee_discount_cents]
+    .map((c) => Math.round(Number(c)))
+    .filter((c) => Number.isFinite(c) && c > 0);
+}
+function referralFactLine(settings) {
+  if (!referralProgramLive(settings)) return '';
+  const referrer = Math.round(Number(settings.referrer_reward_cents));
+  const referee = Math.round(Number(settings.referee_discount_cents));
+  const hasReferrer = Number.isFinite(referrer) && referrer > 0;
+  const hasReferee = Number.isFinite(referee) && referee > 0;
+  if (!hasReferrer && !hasReferee) return '';
+  const timing = settings.require_service_completion === true
+    ? " It applies after the new customer's first service is completed."
+    : '';
+  let body;
+  if (hasReferrer && hasReferee && referrer === referee) {
+    body = `${dollars(referrer)} referral credit for each person, the customer who refers and the new customer.`;
+  } else {
+    body = [
+      hasReferrer ? `${dollars(referrer)} referral credit for the customer who refers.` : null,
+      hasReferee ? `${dollars(referee)} referral credit for the new customer.` : null,
+    ].filter(Boolean).join(' ');
+  }
+  return `${REFERRAL_FACT_LABEL} ${body}${timing} Quote it only as a "referral credit".`;
+}
+
+// Only when the FREE RE-SERVICE fact is positive AND self-serve booking is on
+// (the caller checks both); otherwise nothing about booking in the app.
+function reserviceBookingLine() {
+  return `${RESERVICE_BOOKING_LABEL} when the customer sees pests again after a visit and FREE RE-SERVICE above says they are eligible, offer the free re-service and mention they can book it in the Waves app. Do not explain why pests are still showing.`;
 }
 
 module.exports = {
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
-  REFERRAL_CREDIT_CENTS,
-  REFERRAL_PHRASE_RE,
+  REFERRAL_FACT_LABEL,
+  RESERVICE_BOOKING_LABEL,
+  REFERRAL_TERM_RE,
   renderCompanyFactsSection,
+  referralFactLine,
+  referralCreditCents,
+  reserviceBookingLine,
 };
