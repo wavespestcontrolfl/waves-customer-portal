@@ -1302,6 +1302,9 @@ function findEtaMinutesClaims(text) {
       // ONE window predicate for EVERY token kind (Codex round-19 P2): "Your
       // 120-minute arrival window" is a scheduling span whatever its unit.
       if (isWindowQuantity(str, m.index, m[0].length)) continue;
+      // Round-23 P2: a bare figure that was a written number word with no unit or
+      // arrival cue beside it is a count ("we sprayed two"), not an ETA.
+      if (token.judge === 'bare' && numberWordOriginIndexes(text, str).has(m.index) && isPlainWordCount(str, m.index, m[0].length)) continue;
       if (!ETA_CLAIM_JUDGES[token.judge](str, m, sentenceAt(str, spans, m.index))) continue;
       for (const g of token.groups) claims.push({ minutes: Number(m[g]), index: m.index });
       consumed.push(...figureSpans);
@@ -1336,9 +1339,36 @@ function findEtaMinutesClaims(text) {
 // bare-integer pass and classifyBareEtaNumber below, which tell an unclaimed
 // bare number apart from a time of day, money, an address/phone-like token,
 // a date, a count of something that isn't time, an ordinal, or a percentage.
+// Which figures in the normalized string came from a written NUMBER WORD
+// ("one", "two", ...) rather than digits the author typed (Codex round-23 P2):
+// "Yes, we completed one." reads as "…completed 1." after normalization, and the
+// bare pass must not take that count for an ETA. Marks each conversion with a
+// private control character, runs the SAME time normalization, and maps the
+// marks back to indexes in `str`; if stripping the marks does not reproduce
+// `str` exactly the mapping is untrustworthy and NO figure is treated as
+// number-word origin (default-deny stays).
+const NUMBER_WORD_MARK = '\u0001';
+function numberWordOriginIndexes(text, str) {
+  const marked = normalizeTimeQuantities(String(text || '').replace(NUMBER_WORD_RE, (m, ...groups) => NUMBER_WORD_MARK + String(numberWordValue(m, ...groups.slice(0, 7)))));
+  let plain = '';
+  const origins = new Set();
+  for (const ch of marked) {
+    if (ch === NUMBER_WORD_MARK) origins.add(plain.length);
+    else plain += ch;
+  }
+  return plain === str ? origins : new Set();
+}
+// A number-word figure is still an ETA next to an arrival cue: "five out",
+// "one away", "in five", "within ten", "ETA five".
+const WORD_FIGURE_CUE_AFTER_RE = /^\s*(?:away|out|from|until|early|late|behind|to\s+go)\b/i;
+const WORD_FIGURE_CUE_BEFORE_RE = /\b(?:in|within|eta\s*:?)\s*(?:about\s+|around\s+|roughly\s+)?$/i;
+function isPlainWordCount(str, index, length) {
+  return !WORD_FIGURE_CUE_AFTER_RE.test(str.slice(index + length)) && !WORD_FIGURE_CUE_BEFORE_RE.test(str.slice(Math.max(0, index - 20), index));
+}
 function findGroundedMinutesFigures(text) {
   const claims = [];
   const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  const wordOrigins = numberWordOriginIndexes(text, str);
   const spans = sentenceSpans(str);
   const sentenceFor = (index) => {
     const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
@@ -1396,6 +1426,9 @@ function findGroundedMinutesFigures(text) {
     if (claims.some((c) => c.index === bm2.index)) continue;
     const minutes = Number(bm2[1]);
     if (minutes < 1 || minutes > 180) continue;
+    // Round-23 P2: a bare figure that was a written number word with no time unit
+    // or arrival cue beside it is a count ("we completed one"), not an ETA.
+    if (wordOrigins.has(bm2.index) && isPlainWordCount(str, bm2.index, bm2[0].length)) continue;
     if (!isWindowQuantity(str, bm2.index, bm2[0].length) && classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
       claims.push({ minutes, index: bm2.index });
     }

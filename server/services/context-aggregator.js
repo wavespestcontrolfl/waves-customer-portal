@@ -599,7 +599,15 @@ function customerFacingTrackState(row) {
 function liveEtaDedupeKey(row, customer) {
   if (!row?.technician_id) return null;
   const dest = liveEtaDestination(row, customer);
-  return dest ? `${row.technician_id}:${dest.lat}:${dest.lng}` : null;
+  return dest ? liveEtaIdentityKey(row, dest) : null;
+}
+// The ONE identity tuple an ETA is about: technician + tracker device
+// (fingerprint) + resolved destination (Codex round-23 P2). It keys grouped-stop
+// dedupe AND the cross-request memo, and mirrors what the send-time snapshot
+// records (technicianId / deviceImei / destinations), so a device repointed
+// inside the memo window can never reuse the old vehicle's minutes.
+function liveEtaIdentityKey(row, dest) {
+  return `${row.technician_id}:${dest.lat}:${dest.lng}:${deviceFingerprint(row.tech_bouncie_imei) || ''}`;
 }
 
 // LIVE ETA (GATE_SMS_REAL_ANSWERS, owner ruling 2026-09-29): a TODAY
@@ -727,7 +735,7 @@ async function resolveLiveEtaFact(row, customer) {
   const dest = liveEtaDestination(row, customer);
   if (!dest) return null;
 
-  const memoKey = `${row.technician_id}:${dest.lat}:${dest.lng}`;
+  const memoKey = liveEtaIdentityKey(row, dest);
   const now = Date.now();
   const cached = liveEtaMemo.get(memoKey);
   let minutesPromise;

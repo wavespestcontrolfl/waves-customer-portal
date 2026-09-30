@@ -289,6 +289,27 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
   });
 
+  // Codex round-23 P2: the memo key is the SAME identity tuple the snapshot
+  // records (technician + tracker device + destination).
+  test('a technician repointed to another tracker device inside the memo window gets a fresh lookup, not the old vehicle\'s minutes', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
+    calculateBoundedTrackingEta.mockResolvedValueOnce({ ...ETA_RESULT, minutes: 7 }).mockResolvedValueOnce({ ...ETA_RESULT, minutes: 19 });
+    const before = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: '356938035643809' }), baseCustomer());
+    const same = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: '356938035643809' }), baseCustomer());
+    const after = await resolveLiveEtaFact(baseRow({ tech_bouncie_imei: '999999999999999' }), baseCustomer());
+    expect(same.minutes).toBe(before.minutes);
+    expect(after.minutes).toBe(19);
+    expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    expect(resolveFreshTechPosition.mock.calls[1][0].bouncieImei).toBe('999999999999999');
+  });
+  test('the dedupe key carries the device fingerprint: same tech + destination + different device never merge', () => {
+    const customer = baseCustomer();
+    expect(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1' }), customer)).not.toBe(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'B2' }), customer));
+    expect(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: 'A1' }), customer)).toBe(liveEtaDedupeKey(baseRow({ id: 'svc-2', tech_bouncie_imei: 'A1' }), customer));
+    expect(JSON.stringify(liveEtaDedupeKey(baseRow({ tech_bouncie_imei: '356938035643809' }), customer))).not.toContain('356938035643809');
+  });
+
   test('a different technician never shares the memo — its own lookup runs', async () => {
     process.env[GATE] = 'true';
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
@@ -1839,6 +1860,25 @@ describe('round 22 P2s: service durations, expired links, tracker device', () =>
     expect(JSON.stringify(g)).not.toContain('356938035643809');
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [g] }).entries[0].deviceImei).toBe(g.deviceImei);
     expect(deviceFingerprint('  ')).toBeNull();
+  });
+});
+
+// Codex round-23 P2 (PR #5334): a count that was a written number word.
+describe('round 23 P2: number-word counts are not bare ETA figures', () => {
+  test.each(['Yes, we completed one.', 'We sprayed two areas.', 'We treated three.', 'Yes, we finished one of them.', 'Your tech is on the way and we sprayed two.'])('%p is a count, not an ETA', (reply) => {
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ["He's one minute away.", 1], ['The tech is about five out.', 5], ['The tech will be there in five', 5], ['The tech is five minutes away', 5],
+  ])('%p is still an ETA claim', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+  test('genuine typed bare digits stay default-deny: "Yes, we completed 1." is still read', () => {
+    expect(findGroundedMinutesFigures('Yes, we completed 1.').map((c) => c.minutes)).toEqual([1]);
   });
 });
 
