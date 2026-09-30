@@ -779,19 +779,18 @@ async function deliverRestartText(hold, customer, next, nextOn) {
     const { gsmSafeName } = require('../messaging/gsm-normalize');
     const { familyLabel } = require('./templates');
     const visitDate = displayDate(nextOn);
-    const body = await renderRequiredSmsTemplate('plan_hold_resume_reminder', {
+    // Its own key (20260930030000): the old plan_hold_resume_reminder is
+    // deactivated so a pre-#5354 sender can never text a skip-style pause
+    // its return date.
+    const body = await renderRequiredSmsTemplate('plan_hold_restart_first_visit', {
       first_name: gsmSafeName(customer.first_name),
       service: familyLabel(hold.family_key) || hold.family_key,
-      // The date the text promises is the first visit back; the body's
-      // token is {resume_date} (20260930020000), visit_date for any body
-      // still carrying 20260930010000's token.
-      resume_date: visitDate,
       visit_date: visitDate,
-    }, { workflow: 'plan_hold_resume_reminder', entity_type: 'plan_hold', entity_id: hold.id });
+    }, { workflow: 'plan_hold_restart_first_visit', entity_type: 'plan_hold', entity_id: hold.id });
     const smsResult = await sendCustomerMessage({
       to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
       customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
-      metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id, visit_id: next.id },
+      metadata: { original_message_type: 'plan_hold_restart_first_visit', plan_hold_id: hold.id, visit_id: next.id },
     });
     return !!smsResult.sent;
   } catch (err) {

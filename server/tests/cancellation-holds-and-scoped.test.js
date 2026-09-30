@@ -416,8 +416,8 @@ describe('runPlanHoldLifecycle', () => {
     expect(first.reminded).toBe(1);
     expect(first.resumed).toBe(1);
     expect(mockSms).toHaveBeenCalledTimes(1);
-    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder',
-      expect.objectContaining({ visit_date: displayOf(daysOut(27)), resume_date: displayOf(daysOut(27)) }), expect.anything());
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit',
+      expect.objectContaining({ visit_date: displayOf(daysOut(27)) }), expect.anything());
     expect(mockSms.mock.calls[0][0]).toMatchObject({ metadata: expect.objectContaining({ plan_hold_id: 'h1', visit_id: 'back' }) });
 
     expect((await runPlanHoldLifecycle({ today: daysOut(21) })).reminded).toBe(0); // stamped, never re-sent
@@ -550,7 +550,7 @@ describe('runPlanHoldLifecycle', () => {
   test('a resumed hold whose first visit back is months after the return date still gets its text a week before it', async () => {
     holdSeed({ status: 'resumed', resume_on: daysOut(-120) }, [lawnVisit('back', daysOut(5))]);
     expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(1);
-    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(5)) }), expect.anything());
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(5)) }), expect.anything());
   });
 
   test('a send that does not go through gives its claim back for tomorrow; a claim whose send never confirmed rings the office once', async () => {
@@ -597,7 +597,7 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockSms).not.toHaveBeenCalled();
     expect(mockState.tables.plan_holds[0].reminder_sent_at).toBe(null);
     await sendDueRestartTexts(['h1']);
-    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(6)) }), expect.anything());
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(6)) }), expect.anything());
   });
 
   test('marking an accept fails when one of its holds was undone meanwhile — nothing gets marked', async () => {
@@ -630,7 +630,7 @@ describe('runPlanHoldLifecycle', () => {
 
     holdSeed({ resume_on: daysOut(2) }, [lawnVisit('req', daysOut(3), review), lawnVisit('back', daysOut(6))]);
     await runPlanHoldLifecycle({ today: TODAY });
-    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(6)) }), expect.anything());
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(6)) }), expect.anything());
   });
 
   test('the restart text retires once its moment has passed or the office owns the restart: no daily re-asking, one bell', async () => {
@@ -674,7 +674,7 @@ describe('runPlanHoldLifecycle', () => {
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {
     holdSeed({}, [lawnVisit('placeholder', daysOut(22), { status: 'rescheduled' }), lawnVisit('back', daysOut(25))]);
     expect((await runPlanHoldLifecycle({ today: daysOut(20) })).reminded).toBe(1);
-    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ visit_date: displayOf(daysOut(25)) }), expect.anything());
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(25)) }), expect.anything());
     expect(mockSms.mock.calls[0][0].metadata).toMatchObject({ visit_id: 'back' });
   });
 
@@ -696,7 +696,7 @@ describe('runPlanHoldLifecycle', () => {
   test('a short pause texts at once (first visit back under 7 days out); a RESUMED hold whose first visit back comes later still gets its text', async () => {
     holdSeed({ resume_on: daysOut(3), tier_protected_until: daysOut(3) }, [lawnVisit('back', daysOut(3))]);
     expect((await runPlanHoldLifecycle({ today: TODAY })).reminded).toBe(1);
-    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ visit_date: displayOf(daysOut(3)) }), expect.anything());
+    expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_restart_first_visit', expect.objectContaining({ visit_date: displayOf(daysOut(3)) }), expect.anything());
 
     // Dues came back on the return date (3 days ago); the first visit back is in 4 days.
     mockSms.mockClear();

@@ -124,8 +124,8 @@ maybeDescribe('plan holds read DATE columns as dates (live Postgres)', () => {
     const { hold, visit } = await heldWithVisitBack(3, 5);
     sendCustomerMessage.mockResolvedValue({ sent: true });
     await holds.runPlanHoldLifecycle({ today: day(0) });
-    expect(renderRequiredSmsTemplate).toHaveBeenCalledWith('plan_hold_resume_reminder',
-      expect.objectContaining({ visit_date: display(day(5)), resume_date: display(day(5)) }), expect.anything());
+    expect(renderRequiredSmsTemplate).toHaveBeenCalledWith('plan_hold_restart_first_visit',
+      expect.objectContaining({ visit_date: display(day(5)) }), expect.anything());
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ plan_hold_id: hold.id, visit_id: visit.id }) }));
     expect((await holdRow(hold.id)).reminder_sent_at).toBeTruthy();
     expect(rebooker.reschedule).not.toHaveBeenCalled();
