@@ -338,3 +338,16 @@ it.each([['old-address', 600], ['new-address-only', 1200]])('restored visit cove
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(shown));
 });
+
+it.each([['property-1|old-address', 2000], ['property-1|new-address', 4200]])('a restored lawn override is applied only to the property and address it was entered for (%s)', async (savedFor, shownBefore) => {
+  // savedFor matching the loaded identity keeps the override; the shown value
+  // is the override when bound here, else the reviewed lawn of the new address.
+  measurements = { ...measurements, addressKey: 'old-address', areas: { ...measurements.areas, lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' } } };
+  localStorage.setItem('waves_completion_draft_visit-1', JSON.stringify({
+    serviceId: 'visit-1', savedAt: Date.now(), notes: 'Fixture notes', selectedProducts: [],
+    lawnAreaOverride: '2000', lawnAreaOverrideFor: savedFor,
+  }));
+  mount('Lawn Care');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(shownBefore));
+});

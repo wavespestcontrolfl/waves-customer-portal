@@ -12358,6 +12358,9 @@ export function CompletionPanel({
   const [lawnCompletionDefaults, setLawnCompletionDefaults] = useState(null);
   const [lawnPlanReady, setLawnPlanReady] = useState(false);
   const [lawnAreaOverride, setLawnAreaOverride] = useState(undefined);
+  // The property (row|address) the lawn override was entered against once
+  // shared areas loaded; null = entered with none loaded (adopted on load).
+  const [lawnAreaOverrideFor, setLawnAreaOverrideFor] = useState(null);
   const [lawnRemovedDefaultIds, setLawnRemovedDefaultIds] = useState([]);
   // Names of the removed defaults, keyed by catalog id, saved with the draft:
   // a default removed, then hard-deleted from the catalog before the draft is
@@ -12369,8 +12372,14 @@ export function CompletionPanel({
   const lawnDefaultsEnabled = completionImprovements && lawnCompletionDefaults?.enabled === true && lawnCompletionDefaults.serviceId === service.id;
   const currentLawnPlanReady = lawnPlanReady === service.id;
   const reviewedLawnArea = currentPropertyAreas?.areas.lawn?.reviewedAt ? currentPropertyAreas.areas.lawn.sqft : undefined;
-  const lawnPlanArea = lawnDefaultsEnabled ? lawnAreaOverride ?? (currentPropertyAreas ? reviewedLawnArea ?? null : undefined) : undefined;
-  const lawnVisitArea = lawnAreaOverride !== undefined ? lawnAreaOverride
+  const propertyAreasIdentity = currentPropertyAreas ? `${currentPropertyAreas.propertyId}|${currentPropertyAreas.addressKey ?? ""}` : null;
+  // A lawn area entered for one property (e.g. restored from a draft) never
+  // applies to another, including the same row at a new address.
+  const effectiveLawnAreaOverride = lawnAreaOverride !== undefined
+    && (!propertyAreasIdentity || lawnAreaOverrideFor === null || lawnAreaOverrideFor === propertyAreasIdentity)
+    ? lawnAreaOverride : undefined;
+  const lawnPlanArea = lawnDefaultsEnabled ? effectiveLawnAreaOverride ?? (currentPropertyAreas ? reviewedLawnArea ?? null : undefined) : undefined;
+  const lawnVisitArea = effectiveLawnAreaOverride !== undefined ? effectiveLawnAreaOverride
     : currentPropertyAreas ? reviewedLawnArea ?? "" : lawnCompletionDefaults?.lawnSqft ?? "";
   useEffect(() => {
     let live = true;
@@ -13882,6 +13891,7 @@ export function CompletionPanel({
     if (!previousVisitState) return;
     setSelectedProducts([]);
     setLawnAreaOverride(undefined);
+    setLawnAreaOverrideFor(null);
     setLawnRemovedDefaultIds([]);
     lawnRemovedDefaultNamesRef.current = {};
     setLawnDefaultsSeedSuppressed(false);
@@ -13928,6 +13938,7 @@ export function CompletionPanel({
       // A subset of zones has no known square footage. Do not silently count
       // the entire saved lawn as treated after a zone is removed.
       setLawnAreaOverride("");
+      setLawnAreaOverrideFor(propertyAreasIdentity);
     }
   }, [lawnDefaultsEnabled, lawnAreaOverride, areasServiced]);
   useEffect(() => {
@@ -15078,6 +15089,7 @@ export function CompletionPanel({
         // tech-authored rows (pre-push audit on #5049).
         protocolCompletionDefaultsSnapshot: protocolCompletionDefaultsSnapshotRef.current,
         lawnAreaOverride,
+        lawnAreaOverrideFor,
         propertyVisitArea,
         // Which bed coverage was the reviewed default (not typed by the
         // tech): a restored draft promotes only a value beyond this.
@@ -15259,6 +15271,7 @@ export function CompletionPanel({
     // outage (Codex #4365 r2 P2). Re-evaluate on the flag itself.
     completionImprovements,
     lawnAreaOverride,
+    lawnAreaOverrideFor,
     propertyVisitArea,
     lawnRemovedDefaultIds,
     protocolCompletionDefaultsRemovedIds,
@@ -15339,6 +15352,7 @@ export function CompletionPanel({
       protocolCompletionDefaultsSnapshotRef.current = savedDraft.protocolCompletionDefaultsSnapshot;
     }
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
+    setLawnAreaOverrideFor(typeof savedDraft.lawnAreaOverrideFor === "string" ? savedDraft.lawnAreaOverrideFor : null);
     // A draft that never recorded it (older) is read as default-derived.
     bedCoverageSeenRef.current = Object.hasOwn(savedDraft, "bedCoverageSeen") ? savedDraft.bedCoverageSeen
       : savedDraft.findingsValues?.bed_sqft_serviced != null ? String(savedDraft.findingsValues.bed_sqft_serviced) : null;
@@ -17748,7 +17762,7 @@ export function CompletionPanel({
         ...(currentPropertyAreas && propertyAreaKey && propertyTreatedArea !== "" && propertyTreatedArea != null
           ? { propertyServiceArea: { propertyId: currentPropertyAreas.propertyId, version: currentPropertyAreas.version, kind: propertyAreaKey, treatedSqft: Number(propertyTreatedArea),
             // The tech set this visit's coverage; absent means the reviewed property default.
-            ...((propertyAreaLine === "lawn" ? lawnAreaOverride !== undefined : propertyVisitOverride !== undefined) ? { explicitVisitArea: true } : {}) } } : {}),
+            ...((propertyAreaLine === "lawn" ? effectiveLawnAreaOverride !== undefined : propertyVisitOverride !== undefined) ? { explicitVisitArea: true } : {}) } } : {}),
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
@@ -18703,7 +18717,7 @@ export function CompletionPanel({
   // ────────────────────────────────────────────────────────────────────
   const propertyAreaPanel = propertyAreaKey && <PropertyServiceAreas key={service.id} serviceId={service.id}
     serviceLine={propertyAreaLine} disabled={submitting || generating}
-    visitArea={propertyAreaLine === "lawn" ? lawnAreaOverride : propertyVisitOverride}
+    visitArea={propertyAreaLine === "lawn" ? effectiveLawnAreaOverride : propertyVisitOverride}
     refreshToken={propertyAreasRefreshToken}
     onMeasurements={data => { setPropertyAreas(data ? { ...data, serviceId: service.id } : null); if (data) { setPropertyAreasRefreshing(false); setPropertyAreasSettledFor(service.id); } }}
     // A failed load after a stale-version 409 keeps completion blocked (the
@@ -18713,7 +18727,7 @@ export function CompletionPanel({
     onUnavailable={({ failed = false } = {}) => { propertyAreasUnavailableRef.current = service.id; setPropertyAreasSettledFor(service.id); if (!failed) setPropertyAreasRefreshing(false); }}
     onVisitAreaChange={area => {
       invalidateGeneratedReportOnTypedEdit();
-      if (propertyAreaLine === "lawn") setLawnAreaOverride(area === null ? undefined : area);
+      if (propertyAreaLine === "lawn") { setLawnAreaOverride(area === null ? undefined : area); setLawnAreaOverrideFor(propertyAreasIdentity); }
       else setPropertyVisitArea(area === null ? null : { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId, addressKey: currentPropertyAreas?.addressKey ?? null, kind: propertyAreaKey, area });
     }} />;
   const lawnProgressPanel = completionImprovements && isLawn && (
@@ -18722,7 +18736,7 @@ export function CompletionPanel({
         <button type="button" onClick={() => setLawnPlanReloadKey(key => key + 1)} style={{ marginLeft: 12, padding: 8, fontSize: 14 }}>Retry plan</button></div>
       : lawnDefaultsEnabled ? <LawnVisitPlanSummary defaults={lawnCompletionDefaults} protocol={treatmentPlanStructuredProtocol}
         hideArea={!!currentPropertyAreas} areaValue={lawnVisitArea} loading={treatmentPlanLoading} error={treatmentPlanError} disabled={submitting || generating}
-        onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); }}
+        onAreaChange={value => { invalidateGeneratedReportOnTypedEdit(); setLawnAreaOverride(value); setLawnAreaOverrideFor(propertyAreasIdentity); }}
         onReload={() => setLawnPlanReloadKey(key => key + 1)} />
         : <LawnPreviousVisitCard service={service} />
   );
