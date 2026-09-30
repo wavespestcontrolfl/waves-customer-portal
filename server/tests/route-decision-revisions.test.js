@@ -1,16 +1,18 @@
-// A REVIEWED route_decisions row is never refreshed (route_feedback links to it
-// by id), so a force-reprocess that decides DIFFERENTLY — a dark gate flipped,
-// a rule changed — records a '+r<n>' REVISION row under a distinct audit key
-// instead of leaving the booking standing beside a decision row that still
-// says "held" (codex #5377 r4 P1). Gate-agnostic: it lives in the write
-// chokepoint. The PostgreSQL behavior is in route-decision-upsert-postgres.test.js
-// (CI); this file pins the statement shapes and the wiring without a database.
+// A REVIEWED route_decisions row is never mutated (route_feedback links to it
+// by id), yet every pass needs ONE writable row for its decision and its later
+// outcome (codex #5377 r4 / r7 / r8 P1). A decision's family is its base row plus
+// a '+r1' revision; the pass always writes the family's UNREVIEWED member,
+// whatever its verdict, and readers attach a verdict to an identical sibling
+// through one shared join. Gate-agnostic: it lives in the write chokepoint. The
+// PostgreSQL behavior is in route-decision-upsert-postgres.test.js; this file pins
+// the statement shapes and the wiring without a database.
 const fs = require('fs');
 const path = require('path');
 const knex = require('knex')({ client: 'pg' });
 const {
   buildRouteDecision, upsertRouteDecision, V2_DECISION_VERSION, V2_DECISION_VERSIONS,
   V2_DECISION_VERSIONS_WITH_REVISIONS, ROUTE_DECISION_MAX_REVISIONS, routeDecisionRevisionVersion, routeDecisionFamilyVersions,
+  routeFeedbackJoinCondition, leftJoinRouteFeedback, innerJoinRouteFeedback,
 } = require('../services/call-routing-gates');
 
 const extraction = { scheduling: { status: 'confirmed' }, confidence: { overall: 0.9 }, meta: {} };
@@ -103,29 +105,22 @@ describe('the family rule (codex #5377 r4 + r7 P1): read base + +r1 FOR UPDATE, 
     expect(r.upd[0].bindings).toContain(`id-${REV}`);
   });
 
-  test('reviewed BASE, the SAME verdict: nothing is written and the pass reports no row', async () => {
+  test('reviewed BASE, the SAME verdict: the pass STILL writes its own row (+r1), so it has a row for its outcome', async () => {
     const r = await run(family({ members: { [V2_DECISION_VERSION]: row(booked, V2_DECISION_VERSION) }, reviewed: V2_DECISION_VERSION }), booked);
-    expect(r).toMatchObject({ n: 0, out: { decisionVersion: null } });
-    expect(r.ins).toHaveLength(1); // only the plain (conflicting) insert
-    expect(r.upd).toHaveLength(0);
+    expect(r).toMatchObject({ n: 1, out: { decisionVersion: REV } });
+    expect(r.ins).toHaveLength(2);
+    expect(r.ins[1].bindings).toContain(REV);
+    expect(r.upd).toHaveLength(0); // the reviewed base is never touched
   });
 
-  test('reviewed +r1 (a re-review repointed the verdict), the SAME verdict: nothing written, the unreviewed base is NOT refreshed (codex r7 P1)', async () => {
-    const members = { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION, { created_at: '2026-01-01T00:00:00Z' }), [REV]: row(booked, REV, { created_at: '2026-01-02T00:00:00Z' }) };
+  test('reviewed +r1 (a re-review repointed the verdict), the SAME verdict: the unreviewed BASE is refreshed (the pass\'s writable row); the reviewed +r1 is never touched (codex r8 P1)', async () => {
+    const members = { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION), [REV]: row(booked, REV) };
     const r = await run(family({ members, reviewed: REV }), booked);
-    expect(r).toMatchObject({ n: 0, out: { decisionVersion: null } });
-    expect(r.upd).toHaveLength(0); // reviewed +r1 is already the newest: no write at all
-    expect(r.ins).toHaveLength(1);
-  });
-
-  test('reviewed +r1, the SAME verdict, but the stale base is the NEWER row: only the reviewed row\'s created_at moves up, its verdict columns are untouched', async () => {
-    const members = { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION, { created_at: '2026-01-03T00:00:00Z' }), [REV]: row(booked, REV, { created_at: '2026-01-02T00:00:00Z' }) };
-    const r = await run(family({ members, reviewed: REV }), booked);
-    expect(r.n).toBe(0);
+    expect(r).toMatchObject({ n: 1, out: { decisionVersion: V2_DECISION_VERSION } });
     expect(r.upd).toHaveLength(1);
-    expect(r.upd[0].sql).toMatch(/^update "route_decisions" set "created_at" = \? where "id" = \?/i);
-    expect(r.upd[0].bindings).toContain(`id-${REV}`);
-    expect(r.upd[0].bindings).not.toContain('id-v2-1.50.0');
+    expect(r.upd[0].bindings).toContain('id-v2-1.50.0');
+    for (const q of [...r.upd, ...r.ins]) expect(q.bindings).not.toContain(`id-${REV}`);
+    expect(r.ins).toHaveLength(1);
   });
 
   test('reviewed +r1, a DIFFERENT verdict: the (unreviewed) BASE is refreshed', async () => {
@@ -143,6 +138,16 @@ describe('the family rule (codex #5377 r4 + r7 P1): read base + +r1 FOR UPDATE, 
     const at = (re) => fam.sqls.findIndex((q) => re.test(q.sql));
     expect(at(/^select \* from "route_decisions".* for update/i)).toBeGreaterThan(at(/^insert/i));
     expect(at(/^select "route_decision_id" from "route_feedback"/i)).toBeGreaterThan(at(/for update/i));
+  });
+
+  test('decisionVersion is ALWAYS the row written; null only on a lost fence', async () => {
+    for (const reviewed of [null, V2_DECISION_VERSION, REV]) {
+      const members = { [V2_DECISION_VERSION]: row(held, V2_DECISION_VERSION), [REV]: row(booked, REV) };
+      for (const d of [held, booked]) {
+        const { out } = await run(family({ members, reviewed }), d);
+        expect(out.decisionVersion).toBe(reviewed === V2_DECISION_VERSION ? REV : V2_DECISION_VERSION);
+      }
+    }
   });
 
   test('a lost claim writes nothing at all and reports no row', async () => {
@@ -177,9 +182,40 @@ describe('wiring', () => {
     expect(sqls[0].bindings).toEqual(['c1', 'v2-1.50.0', 'v2-1.50.0+r1', 'enforce']);
   });
 
-  test('the auto-routed queue lists every revision version and joins a verdict only to the decision it judged', () => {
+  test('the auto-routed queue lists every revision version and joins a verdict through the ONE shared family-aware join', () => {
     const src = read('../routes/admin-triage.js');
     expect(src).toMatch(/whereIn\('decision_version', V2_DECISION_VERSIONS_WITH_REVISIONS\)/);
-    expect(src).toMatch(/onNull\('route_feedback\.route_decision_id'\)\.orOn\('route_feedback\.route_decision_id', 'route_decisions\.id'\)/);
+    expect(src).toMatch(/leftJoinRouteFeedback\(db\('route_decisions'\)/);
+    expect(src).not.toMatch(/route_feedback\.route_decision_id', 'route_decisions\.id'/);
+  });
+
+  test('the calls list (ai-assistant) uses the same join for the verdict beside the chosen decision', () => {
+    const src = read('../routes/ai-assistant.js');
+    expect(src).toMatch(/innerJoinRouteFeedback\(db\('route_decisions'\)\.whereIn\('route_decisions\.id', chosenIds\)\)/);
+  });
+
+  test('no reader joins route_feedback to route_decisions by hand: calibration keys on the pointed-at row, everything else uses the shared join', () => {
+    const glob = (dir) => fs.readdirSync(path.join(__dirname, dir)).filter((f) => f.endsWith('.js')).map((f) => path.join(__dirname, dir, f));
+    const offenders = [...glob('../routes'), ...glob('../services'), ...glob('../scripts')]
+      .filter((f) => !/call-routing-gates\.js$/.test(f))
+      .filter((f) => /route_feedback/.test(fs.readFileSync(f, 'utf8')) && /route_decisions/.test(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.basename(f));
+    // admin-triage (auto-routed queue: shared join; upsertFeedback: writer),
+    // ai-assistant (calls list: shared join; route-calibration: by pointed-at id; writer)
+    expect(offenders.sort()).toEqual(['admin-triage.js', 'ai-assistant.js']);
+  });
+
+  test('the shared join compares the exact columns that define the decision the reviewer saw, within one call/mode/recording/base version', () => {
+    const sql = routeFeedbackJoinCondition();
+    for (const col of ['validator_recommendation', 'final_action_taken', 'blocked_reasons', 'allowed_reasons']) {
+      expect(sql).toContain(`reviewed_rd.${col} IS NOT DISTINCT FROM route_decisions.${col}`);
+    }
+    expect(sql).toContain("split_part(reviewed_rd.decision_version, '+', 1) = split_part(route_decisions.decision_version, '+', 1)");
+    for (const col of ['call_log_id', 'mode', 'recording_sid']) expect(sql).toContain(`reviewed_rd.${col} = route_decisions.${col}`);
+    expect(sql).toContain('route_feedback.route_decision_id IS NULL');
+    expect(sql).toContain('route_feedback.route_decision_id = route_decisions.id');
+    const q = leftJoinRouteFeedback(knex('route_decisions').leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')).toSQL().sql;
+    expect(q).toMatch(/left join "call_log".* LEFT JOIN route_feedback ON route_feedback\.call_log_id = route_decisions\.call_log_id/s);
+    expect(innerJoinRouteFeedback(knex('route_decisions')).toSQL().sql).toMatch(/ JOIN route_feedback ON /);
   });
 });

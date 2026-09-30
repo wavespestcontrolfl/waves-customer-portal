@@ -406,42 +406,64 @@ const ROUTE_DECISION_REFRESH_COLUMNS = [
 ];
 
 // REVISIONS of a reviewed decision. A row a human has reviewed is never
-// refreshed (below), but a later pass that decides DIFFERENTLY (a dark gate
-// flipped, a rule changed) must still leave its verdict as the newest decision
-// for the call — with the reviewed row alone the booking would stand while the
-// only decision row still recorded the earlier hold (codex #5377 r4 P1). That
-// pass writes a NEW row under a distinct audit key: the base version plus
-// '+r<n>' (varchar(30) safe). The reviewed rows stay exactly as judged; the
-// verdict attaches to whichever row is newest, as before. Bounded so every
+// mutated, but every later pass must still have ONE writable row that records
+// its decision AND its later outcome (codex #5377 r4 / r7 / r8 P1). A decision's
+// FAMILY is its base version row plus one '+r1' revision (distinct audit key,
+// varchar(30) safe): the pass writes the family's UNREVIEWED member — the base
+// when nothing is reviewed, else the other member — whatever its verdict, and
+// the same-run outcome update lands on that row. route_feedback is unique per
+// call (one current verdict, re-review repoints it), so at most ONE member is
+// reviewed at a time and base + one revision always suffice. Bounded so every
 // revision version is enumerable for the history-spanning readers
-// (V2_DECISION_VERSIONS_WITH_REVISIONS); a pass beyond the cap leaves the
-// reviewed history standing. route_feedback is unique per call (one current
-// verdict, re-review repoints it), so at most ONE row of a decision's family is
-// reviewed at a time and the base row plus one revision always suffice: when
-// the verdict sits on the base row the revision is the one refreshed, and when
-// a re-review repoints it to the revision the (now unreviewed) base row is.
-// Independent of any one gate.
+// (V2_DECISION_VERSIONS_WITH_REVISIONS). Independent of any one gate.
 const ROUTE_DECISION_MAX_REVISIONS = 1;
 const routeDecisionRevisionVersion = (baseVersion, n) => `${baseVersion}+r${n}`;
 const routeDecisionRevisionVersions = (baseVersion) => Array.from(
   { length: ROUTE_DECISION_MAX_REVISIONS }, (_, i) => routeDecisionRevisionVersion(baseVersion, i + 1),
 );
-// A decision version and every revision of it (the processor's same-run outcome
-// update: only the pass's own unreviewed row in the family is ever updated).
+// A decision version and every revision of it.
 const routeDecisionFamilyVersions = (baseVersion) => [baseVersion, ...routeDecisionRevisionVersions(baseVersion)];
 const V2_DECISION_VERSIONS_WITH_REVISIONS = V2_DECISION_VERSIONS.flatMap(routeDecisionFamilyVersions);
 
-// Do two decision rows record the same verdict? (jsonb columns come back
-// parsed from the database and as strings from buildRouteDecision.)
-const routeVerdictJson = (v) => {
-  try { return JSON.stringify(typeof v === 'string' ? JSON.parse(v) : (v ?? null)); } catch { return String(v); }
-};
-function sameRouteVerdict(a, b) {
-  return !!a && !!b
-    && a.validator_recommendation === b.validator_recommendation
-    && a.final_action_taken === b.final_action_taken
-    && routeVerdictJson(a.blocked_reasons) === routeVerdictJson(b.blocked_reasons)
-    && routeVerdictJson(a.allowed_reasons) === routeVerdictJson(b.allowed_reasons);
+// THE join every reader uses to attach a route_feedback verdict to a
+// route_decisions row (codex #5377 r8 P1). A verdict counts for a decision when
+// it is on a call's decision that is:
+//   - the very row it points at, or
+//   - a FAMILY sibling (same call, mode, recording and base version, the row and
+//     its '+r1') recording the SAME decision — validator_recommendation,
+//     final_action_taken, blocked_reasons and allowed_reasons are the columns
+//     that define "the decision the reviewer saw" — so a pass identical to an
+//     already-judged one does not show as unreviewed, while a DIFFERENT newest
+//     decision (nobody judged it) does; or
+//   - a legacy verdict with no decision link.
+// Pure SQL text (no bindings) over the aliases given, so it drops into a knex
+// joinRaw. Nothing here writes: reviewed rows are never mutated.
+function routeFeedbackJoinCondition(decisionAlias = 'route_decisions', feedbackAlias = 'route_feedback') {
+  const d = decisionAlias;
+  const f = feedbackAlias;
+  return `${f}.call_log_id = ${d}.call_log_id AND (
+    ${f}.route_decision_id IS NULL
+    OR ${f}.route_decision_id = ${d}.id
+    OR EXISTS (
+      SELECT 1 FROM route_decisions AS reviewed_rd
+      WHERE reviewed_rd.id = ${f}.route_decision_id
+        AND reviewed_rd.call_log_id = ${d}.call_log_id
+        AND reviewed_rd.mode = ${d}.mode
+        AND reviewed_rd.recording_sid = ${d}.recording_sid
+        AND split_part(reviewed_rd.decision_version, '+', 1) = split_part(${d}.decision_version, '+', 1)
+        AND reviewed_rd.validator_recommendation IS NOT DISTINCT FROM ${d}.validator_recommendation
+        AND reviewed_rd.final_action_taken IS NOT DISTINCT FROM ${d}.final_action_taken
+        AND reviewed_rd.blocked_reasons IS NOT DISTINCT FROM ${d}.blocked_reasons
+        AND reviewed_rd.allowed_reasons IS NOT DISTINCT FROM ${d}.allowed_reasons
+    )
+  )`;
+}
+// `query` already selects FROM route_decisions (alias `decisionAlias`).
+function leftJoinRouteFeedback(query, decisionAlias = 'route_decisions') {
+  return query.joinRaw(`LEFT JOIN route_feedback ON ${routeFeedbackJoinCondition(decisionAlias, 'route_feedback')}`);
+}
+function innerJoinRouteFeedback(query, decisionAlias = 'route_decisions') {
+  return query.joinRaw(`JOIN route_feedback ON ${routeFeedbackJoinCondition(decisionAlias, 'route_feedback')}`);
 }
 
 // Every write to an existing route_decisions row (the refresh above and the
@@ -505,22 +527,15 @@ async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mo
 // names no constraint: tolerant of BOTH the legacy three-column constraint and
 // the recording-keyed index during a rolling deploy, Codex #3736 r9 P1 —
 // Postgres cannot do a targetless DO UPDATE). Everything after it is ONE
-// FAMILY RULE under the row lock (codex #5377 r4 + r7 P1). The decision's
-// FAMILY is its base version row plus its '+r1' revision. Read the whole family
-// FOR UPDATE (every route_feedback writer takes the same row lock, so a verdict
-// cannot land mid-write), find the REVIEWED member (route_feedback is one
-// verdict per call: at most one), then:
-//   - none reviewed: refresh the base row (insert it, first pass);
-//   - the new verdict EQUALS the reviewed member's: nothing to record — the
-//     reviewed row already says it. Its decision columns are never touched; if
-//     the other member is the newer row (a stale, differing one), only the
-//     reviewed row's created_at moves up so the reviewed member stays the
-//     newest decision and keeps its verdict (a re-review repoints the verdict
-//     to the revision, leaving the base unreviewed, so refreshing the base
-//     here would have shown a judged decision as unreviewed);
-//   - the verdict DIFFERS: refresh-or-insert the OTHER member (base <-> +r1).
-// So the newest member of a family is always the one that represents the
-// latest pass, and a reviewed row's decision columns are never mutated.
+// FAMILY RULE under the row lock (codex #5377 r4 / r7 / r8 P1): read the
+// decision's family (base + '+r1') FOR UPDATE — every route_feedback writer
+// takes the same row lock, so a verdict cannot land mid-write — find the
+// REVIEWED member (route_feedback is one verdict per call: at most one), and
+// write the OTHER one: the base when nothing (or the revision) is reviewed, else
+// the revision, insert-or-refresh, WHATEVER the pass's verdict. A reviewed row
+// is never touched. So every pass has exactly one writable row that records its
+// decision and, later, its outcome; readers attach a verdict to an identical
+// unreviewed sibling with routeFeedbackJoinCondition.
 // `fence` ({ callLogId, processingToken }) makes ALL of it conditional on this
 // pass still owning the call's processing_token: the ownership row is locked FOR
 // UPDATE and re-read in the same transaction as the writes (the processor's own
@@ -528,9 +543,9 @@ async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mo
 // overwrite a newer pass's (codex #5371 r8 P1). A fence that was ASKED FOR but is
 // incomplete fails closed: nothing is written. The unfenced path runs in a
 // transaction too: the row lock needs one.
-// Returns 1 (written) / 0 (nothing to write) / null (fence not held). `out`,
-// when given, receives `decisionVersion`: the version of the row this pass
-// wrote, or null when it wrote none (the same-run outcome update targets it).
+// Returns 1 (written) / null (fence not held: nothing written). `out`, when
+// given, receives `decisionVersion`: the version of the row this pass wrote (null
+// only on a lost fence) — the same-run outcome update targets it.
 async function upsertRouteDecision(conn, decision, fence = null, out = null) {
   const report = (version) => { if (out) out.decisionVersion = version; };
   const write = async (c) => {
@@ -544,19 +559,7 @@ async function upsertRouteDecision(conn, decision, fence = null, out = null) {
       ? (await c('route_feedback').whereIn('route_decision_id', ids).select('route_decision_id')).map((r) => r.route_decision_id)
       : []);
     const reviewed = family.find((r) => reviewedIds.has(r.id)) || null;
-    const revision = routeDecisionRevisionVersion(base, 1);
-    let target = base;
-    if (reviewed) {
-      if (sameRouteVerdict(reviewed, decision)) {
-        const other = family.find((r) => r.id !== reviewed.id);
-        if (other && new Date(other.created_at).getTime() > new Date(reviewed.created_at).getTime()) {
-          await c('route_decisions').where({ id: reviewed.id }).update({ created_at: decision.created_at });
-        }
-        report(null);
-        return 0;
-      }
-      target = reviewed.decision_version === base ? revision : base;
-    }
+    const target = reviewed && reviewed.decision_version === base ? routeDecisionRevisionVersion(base, 1) : base;
     const existing = family.find((r) => r.decision_version === target);
     if (existing) {
       const refresh = {};
@@ -1055,4 +1058,7 @@ module.exports = {
   ROUTE_DECISION_MAX_REVISIONS,
   routeDecisionRevisionVersion,
   routeDecisionFamilyVersions,
+  routeFeedbackJoinCondition,
+  leftJoinRouteFeedback,
+  innerJoinRouteFeedback,
 };

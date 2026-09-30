@@ -19353,12 +19353,12 @@ const CallRecordingProcessor = {
         // Row-locked like every write to an existing decision (codex #5371 r9 P1):
         // a verdict landing concurrently serializes on the route_decisions row.
         // Same-run outcome update: targets the row THIS pass wrote moments ago
-        // (upsertRouteDecision reports its version: the base row or its '+r1'
-        // revision, codex #5377 r4 + r7 P1). It wrote NONE when the pass's
-        // verdict equals the reviewed member's — that row keeps the outcome the
-        // review judged, so nothing is updated. A pass that never reached the
-        // write (report absent) keeps the old family-wide scope. A reviewed row
-        // is never updated either way.
+        // (upsertRouteDecision reports its version: the family's unreviewed
+        // member, the base or its '+r1' — every pass has exactly one writable
+        // row, whatever its verdict; codex #5377 r4 / r7 / r8 P1). Null only when
+        // the pass lost its claim and wrote nothing. A pass that never reached the
+        // write (report absent) keeps the old family-wide scope. A reviewed row is
+        // never updated either way.
         const outcomeVersion = routeDecisionWrite.decisionVersion === undefined
           ? routeDecisionFamilyVersions(V2_DECISION_VERSION)
           : routeDecisionWrite.decisionVersion;
