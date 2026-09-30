@@ -7,6 +7,7 @@
  *
  * Set these as environment variables on Railway:
  *   GATE_CUSTOMER_APP_NOTIFICATIONS=true (customer App first preferences, account device resolution; strict opt-in via gateEnvValue)
+ *   GATE_PORTAL_ACTIVITY=true (customer activity in the logged-in portal and mobile app — strict opt-in, read at call time via portalActivityLive(), dark in dev AND prod: stamps customers.last_seen_at (throttled, 5 min) ONLY from the three foreground beacons — never from ordinary authenticated API traffic or background polling — and accepts POST /api/customer/activity/page-view + /push-open beacons that record portal tab views (`portal:<tab>`) and app opens from a push notification (`push:open`) into customer_page_views, plus POST /heartbeat (visible + recently-interacted sessions, at most every 5 minutes) which only stamps last_seen_at and writes no row. Staff browsers and bots are never recorded. Off = no stamp, no row, and the endpoints answer {enabled:false} so the client stops beaconing for the session. Sends nothing to a customer.)
  *   GATE_BILLING_NOTIFICATION_CHANNELS=true (portal Email/Text/App billing-channel arrays; strict opt-in, stored choices remain enforced while dark)
  *   GATE_TWILIO_SMS=true        (enable real SMS sending)
  *   GATE_TECH_ARRIVED_SMS=true  (enable customer "tech has arrived" SMS)
@@ -212,6 +213,10 @@ const gates = {
   // logGateStatus only; services/outlink-tracking.js reads
   // outlinkTrackingLive() at call time below.
   outlinkTracking: process.env.GATE_OUTLINK_TRACKING === 'true',
+  // Portal / app activity (last_seen_at stamp + page-view and push-open beacons).
+  // Registered for logGateStatus only; consumers read portalActivityLive() at
+  // call time below so a flip needs no redeploy.
+  portalActivity: process.env.GATE_PORTAL_ACTIVITY === 'true',
   // Complete Service: job-matched estimate evidence and reviewed discounts.
   completionServicePricing: process.env.GATE_COMPLETION_SERVICE_PRICING === 'true',
   // Customer selects one available visit; later cadence dates await auto-dispatch ±3 days.
@@ -3595,6 +3600,15 @@ function gateEnvValue(envName) {
 // (newsletter-sender.js processScheduledSends). Off = draft-only, which is
 // what "kill switch" has to mean: a proof that went out while the gate was
 // on cannot be approved or dispatched after it is turned off.
+// GATE_PORTAL_ACTIVITY read at CALL time — strict `=== 'true'`. The one
+// canonical reader for the customer-activity beacon routes (which also stamp
+// last_seen_at), so a flip or an unset kill needs no restart. Kept up here,
+// not at the end of the file, so concurrent gate PRs appending readers at the
+// bottom never conflict with it.
+function portalActivityLive() {
+  return process.env.GATE_PORTAL_ACTIVITY === 'true';
+}
+
 function pestInsiderProofLive() {
   return process.env.GATE_PEST_INSIDER_PROOF === 'true';
 }
@@ -4101,6 +4115,9 @@ module.exports.bookArrivalGraceLive = bookArrivalGraceLive;
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
+// Exported on its own line (not in the shared list above) so concurrent
+// gate PRs appending to that one-line list never conflict with this one.
+module.exports.portalActivityLive = portalActivityLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
