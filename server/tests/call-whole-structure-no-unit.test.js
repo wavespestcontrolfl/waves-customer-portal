@@ -160,6 +160,29 @@ describe('call-level waiver (service resolved the way the booking resolves it)',
     expect(call(extracted, { property: { hoa_common_area_service: true } })).toBe(AV_UNIT_MISSING);
   });
 
+  test('a V1 allowlisted pick that the V2-approved booking replaces stays held (V1/V2 service disagreement)', () => {
+    const v1Wdo = { matched_service: 'WDO Inspection', requested_service: 'WDO inspection' };
+    const v2 = (svc) => ({
+      meta: { schema_version: '1.20.0' },
+      property: { property_type: 'multi_family' },
+      service_request: svc,
+    });
+    const run = (extracted, v2Extraction) => wholeStructureUnitWaiverForCall({
+      addressValidation: AV_UNIT_MISSING, extracted, services: CATALOG, v2Extraction,
+    });
+    // V2 says bed bugs (category maps one-to-one, so it overrides V1 at booking).
+    expect(run(v1Wdo, v2({ primary_service_category: 'bed_bug', specific_service_name: null }))).toBe(AV_UNIT_MISSING);
+    // V2 names a catalog service that is not whole-structure.
+    expect(run(v1Wdo, v2({ primary_service_category: 'pest_general', specific_service_name: 'Bed Bug Treatment' }))).toBe(AV_UNIT_MISSING);
+    expect(run(v1Wdo, v2({ primary_service_category: 'termite', specific_service_name: 'Termite Foam Drill Service' }))).toBe(AV_UNIT_MISSING);
+    // The reverse: V1 interior pest, V2 WDO. V1's own pick still governs the gate view.
+    expect(run({ matched_service: 'General Pest Control', requested_service: 'pest control' },
+      v2({ primary_service_category: 'wdo', specific_service_name: null }))).toBe(AV_UNIT_MISSING);
+    // Both views on the list: waived.
+    expect(run(v1Wdo, v2({ primary_service_category: 'wdo', specific_service_name: 'WDO Inspection (Termite Letter)' })).status)
+      .toBe('validated_accept');
+  });
+
   test('an allowlisted service with another address problem stays held', () => {
     const extracted = { matched_service: 'WDO Inspection', requested_service: 'WDO inspection' };
     const out = wholeStructureUnitWaiverForCall({

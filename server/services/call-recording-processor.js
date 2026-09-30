@@ -5719,30 +5719,61 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   return { ok: true, reason: null, service };
 }
 
+// The service fields the V2-approved booking will actually book from: the same
+// overrides the approved-extraction merge applies to `extracted` further down
+// (matched_service under its adoption rule, requested_service, and
+// specific_service_name INCLUDING a null clear). The waiver is judged on this
+// view as well as on the fields as they stand at the gate, so a V1 pick that
+// V2 replaces at booking cannot carry a waiver onto a different service.
+function v2BookingServiceView(extracted = {}, v2Extraction = null) {
+  if (!v2Extraction || !isV2Extraction(v2Extraction)) return null;
+  const v2Flat = flatView(v2Extraction);
+  const view = { ...extracted };
+  const v2Category = v2Flat.primary_service_category
+    || v2Extraction?.service_request?.primary_service_category || null;
+  const preciseV2Category = v2Category === 'bed_bug' || v2Category === 'wdo';
+  if (v2Flat.matched_service && (v2Flat.specific_service_name || !extracted.matched_service || preciseV2Category)) {
+    view.matched_service = v2Flat.specific_service_name || v2Flat.matched_service;
+  }
+  if (v2Flat.requested_service) view.requested_service = v2Flat.requested_service;
+  view.specific_service_name = v2Flat.specific_service_name || null;
+  return view;
+}
+
 // Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
 // caller checks the gate). Resolves the call's service the way the booking
 // resolves it — catalog row first, the coarse label only when no catalog row
 // matched — and hands the verdict to the pure waiver in call-triage-flags.js.
-// Returns the SAME verdict object unless the waiver applies.
-function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, transcription = '', services = [], property = null } = {}) {
-  const coarse = resolveSchedulableCallService(extracted, { transcription });
-  const row = resolveCallBookingCatalogService({
-    extracted,
-    transcription,
-    services,
-    coarseServiceLabel: coarse.ok ? coarse.service : null,
+// Every view of the call's service (as extracted now, and as the V2-approved
+// booking will book it) must be on the allowlist. Returns the SAME verdict
+// object unless the waiver applies.
+function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, transcription = '', services = [], property = null, v2Extraction = null } = {}) {
+  const prop = property || v2Extraction?.property || {};
+  const views = [extracted];
+  const finalView = v2BookingServiceView(extracted, v2Extraction);
+  if (finalView) views.push(finalView);
+  const results = views.map((view) => {
+    const coarse = resolveSchedulableCallService(view, { transcription });
+    const row = resolveCallBookingCatalogService({
+      extracted: view,
+      transcription,
+      services,
+      coarseServiceLabel: coarse.ok ? coarse.service : null,
+    });
+    const waived = applyWholeStructureUnitWaiver(addressValidation, {
+      enabled: true,
+      serviceKey: row?.service_key || null,
+      coarseLabel: row ? null : (coarse.ok ? coarse.service : null),
+      propertyType: prop.property_type,
+      commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
+      text: [transcription, view.call_summary, view.requested_service].filter(Boolean).join(' '),
+    });
+    return { waived, service: row?.service_key || coarse.service };
   });
-  const prop = property || {};
-  const waived = applyWholeStructureUnitWaiver(addressValidation, {
-    enabled: true,
-    serviceKey: row?.service_key || null,
-    coarseLabel: row ? null : (coarse.ok ? coarse.service : null),
-    propertyType: prop.property_type,
-    commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
-    text: [transcription, extracted.call_summary, extracted.requested_service].filter(Boolean).join(' '),
-  });
-  if (waived !== addressValidation) waived.wholeStructureUnitWaived.service = row?.service_key || coarse.service;
-  return waived;
+  if (results.some((r) => r.waived === addressValidation)) return addressValidation;
+  const out = results[0].waived;
+  out.wholeStructureUnitWaived.service = results[0].service;
+  return out;
 }
 
 async function resolveDefaultCallBookingTechnician(conn = db) {
@@ -9826,6 +9857,7 @@ const CallRecordingProcessor = {
           transcription,
           services: bookableCallServices,
           property: v2Result?.extraction?.property,
+          v2Extraction: v2Result?.extraction,
         });
         if (wsAv !== v2AddressValidation) {
           logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
