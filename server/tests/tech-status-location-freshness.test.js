@@ -202,7 +202,7 @@ describe('tech_status GPS freshness writes', () => {
     db.transaction = jest.fn(async (cb) => cb({ raw }));
     await techStatus.pingTechLocation({ tech_id: 'tech-1', lat: 27.1, lng: -82.2, reported_at: '2026-05-05T11:58:00.000Z', requireBouncieImei: ' 356938035643809 ' });
     const [sql, values] = raw.mock.calls[0];
-    expect(sql).toContain('WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ?)');
+    expect(sql).toContain('WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ? FOR SHARE)');
     expect(sql).not.toContain('VALUES (?, ?, ?, ?, NOW(), ?)');
     expect(sql).toContain('ON CONFLICT (tech_id) DO UPDATE SET');
     expect(values).toHaveLength(7);

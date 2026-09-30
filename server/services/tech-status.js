@@ -241,10 +241,14 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
     // statement, so a fetch that started before an admin remap can never write the
     // old vehicle's point (with a provider timestamp newer than the remap) into the
     // tech-keyed row. Without the option the statement is exactly the plain upsert.
+    // FOR SHARE (Codex round-39 P2): the mapping row is locked for this transaction, so
+    // a concurrent admin remap either commits first (the re-checked predicate then fails
+    // and nothing is written) or waits until this write commits (its remap stamp is then
+    // later than this point, so the new cutoff excludes it).
     const guarded = requireBouncieImei != null && String(requireBouncieImei).trim() !== '';
     const insertSource = guarded
       ? `SELECT ?::uuid, ?::text, ?::numeric, ?::numeric, NOW(), ?::timestamptz
-      WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ?)`
+      WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ? FOR SHARE)`
       : 'VALUES (?, ?, ?, ?, NOW(), ?)';
     const [committed] = await trx.raw(
       `
