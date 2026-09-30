@@ -117,6 +117,11 @@ function uniqueCategories(values = []) {
 
 // Atomically merge keys into the row's jsonb metadata without read-modify-write,
 // so we never clobber concurrent writes (e.g. a delivery webhook racing a send).
+// A recovery parked behind a collections dispute hold (status only; ledger.metadata.hold_retry_at is
+// its next look). The unique original_message_id keeps the webhook from opening a second recovery, so
+// the held row itself is what the sweep resumes.
+const HELD_RECOVERY_STATUS = 'held_dispute';
+
 function jsonbMerge(extra) {
   return db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(extra)]);
 }
@@ -519,6 +524,9 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     // is the SAME function either way.
     let annualWithheld = false;
     let authorityRefusal = null;
+    // Set when a collections dispute hold refuses the recovery re-send (up front, or at
+    // sendOne's FINAL boundary check): a WAIT, never a settled block - see attemptRecovery.
+    let heldRecovery = null;
     const dispatchToProvider = async (database, providerBoundaryCheck) => {
       // Bounce recovery re-sends the SAME stored html/text to a CORRECTED
       // address, straight through sendgrid.sendOne — its own content
@@ -570,6 +578,7 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
           annualWithheld = true;
           return;
         }
+        if (err && err.providerBoundaryBlocked && heldRecovery) return;
         // SendGrid's response body can echo a recipient. Keep only its status
         // before the recovery result reaches persistence or the failure log.
         if (Number.isInteger(err?.status)) throw new Error(`SendGrid bounce recovery failed (${err.status})`);
@@ -633,11 +642,26 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
       // Collections DISPUTE hold (owner ruling 2026-09-30): a stored payment.failed /
       // payment.retry_notice / payment.method_expiring copy carries a pay or update-card link, so
       // recovery must not re-send it to the corrected address while the hold stands (or cannot be
-      // verified - fail closed). Recovery is one-shot: the copy settles as blocked, exactly like
-      // the fresh-send guard's suppression (dunning after the release covers the customer).
-      authorityRefusal = 'collection_hold';
+      // verified - fail closed). A hold is a WAIT, never terminal (round-11 P2): the recovery is
+      // NOT settled - the caller parks it retryable with the corrected address staged and the
+      // held-recovery sweep re-drives it after the release.
+      heldRecovery = { held: true, reason: 'hold' };
     } else {
-      await dispatchToProvider();
+      // The hold is read again as sendOne's FINAL boundary check (after SendGrid's own request
+      // preparation, right before the fetch). Non-gated templates answer "not held".
+      await dispatchToProvider(undefined, async () => {
+        const heldNow = await require('./collections/collection-hold').storedLifecycleEmailHeld(bouncedMessage);
+        if (heldNow.held) {
+          heldRecovery = heldNow;
+          throw Object.assign(new Error('collections dispute hold'), { code: 'COLLECTION_HOLD_DEFER', retryable: true, providerBoundaryBlocked: true });
+        }
+        return { ok: true };
+      });
+    }
+    if (!result && heldRecovery) {
+      // Leave the queued recovery row untouched (no provider request existed) so the sweep
+      // reuses it on the release.
+      return { ok: false, held: true, reason: 'collection_hold', holdReason: heldRecovery.reason };
     }
     if (!result) {
       const reason = annualWithheld ? 'annual_offer_withheld' : (authorityRefusal || 'provider_dispatch_unavailable');
@@ -694,6 +718,200 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
 }
 
 /**
+ * Everything after the one-shot ledger row exists: decide, stage the recovery row, send. Shared by
+ * the bounce webhook (attemptRecovery) and the held-recovery sweep (retryHeldRecoveries), so a
+ * recovery parked behind a collections dispute hold is re-judged from current data - address
+ * ownership, suppression, the on-file check - when it resumes. Throws to the caller's catch,
+ * which settles a still-pending row as an errored recovery.
+ */
+async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resumed = false } = {}) {
+  const candidate = correctEmailDomain(bouncedEmail);
+  const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
+  const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
+  const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
+  // For no-customer (prospect) recoveries, scope the on-file gate to the actual
+  // source estimate (from the send's trigger_event_id) so an unrelated prospect
+  // sharing the typo can't keep this recovery alive.
+  const sourceEstimateId = match?.customerId ? null : sourceEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
+  const sourceLeadId = match?.customerId ? null : sourceLeadIdFromMessage(bouncedMessage);
+  const addressOnFile = candidate ? await bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId, sourceLeadId) : true;
+  // Fail closed: the stored flag OR a known attachment-bearing template (covers
+  // pre-flag rows and any direct inserter that didn't stamp has_attachments).
+  const hasAttachments = !!bouncedMessage.has_attachments
+    || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
+  const decision = decideRecoveryAction({
+    candidate, suppressed, ownedByOther, hasAttachments, addressOnFile,
+    senderRendered: isSenderRenderedEmail(bouncedMessage),
+    min: minConfidence(),
+  });
+
+  const baseUpdate = {
+    corrected_email: candidate?.corrected || null,
+    correction_rule: candidate?.rule || null,
+    confidence: candidate?.confidence || null,
+    customer_id: match?.customerId || null,
+    customer_email_field: match?.field || null,
+    updated_at: new Date(),
+  };
+
+  if (decision.action === 'skip') {
+    await db('email_bounce_recoveries').where({ id: recoveryId }).update({ ...baseUpdate, status: decision.status });
+    // A recovery resumed from a dispute-hold park already owns a queued (never-sent) recovery
+    // message; a skip on the fresh judgment settles it instead of leaving it queued forever.
+    if (resumed) {
+      await db('email_messages').where({ idempotency_key: `bounce_recovery:${bouncedMessage.id}`, status: 'queued' })
+        .update({ status: 'blocked', error_message: decision.status, updated_at: new Date() }).catch(() => {});
+    }
+    // Every skip means a service/transactional email did NOT reach the
+    // customer — nudge a human to fix the address (and show the suggestion
+    // when we have one, e.g. a medium-confidence typo below the auto-send bar).
+    if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
+      'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required',
+      'sender_rendered_not_replayed'].includes(decision.status)) {
+      await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
+      // Audio re-verification lane (gated, best-effort): the domain
+      // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
+      // "P-I-T-T-S"), but the source recording can settle them. ONLY when
+      // the corrector had NO candidate: the lane anchors its candidates to
+      // the bounced address's own domain, so running it while a domain
+      // correction exists (has_attachments, suppressed, low-confidence…)
+      // could card variants of the KNOWN-SUSPECT domain for read-back while
+      // the alert above already carries the real suggestion. Deliberately
+      // NOT awaited — re-transcription takes tens of seconds and this runs
+      // off the bounce webhook; the result is a Needs-Review card, nothing
+      // time-coupled to this handler.
+      if (!candidate) {
+        try {
+          const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
+          reverifyBouncedEmailFromCall({ bouncedEmail, customerId: match?.customerId || null })
+            .catch((e) => logger.warn(`[bounce-recovery] reverify lane failed open: ${e.message}`));
+        } catch (e) { logger.warn(`[bounce-recovery] reverify lane unavailable: ${e.message}`); }
+      }
+    }
+    logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
+    return { skipped: decision.status };
+  }
+
+  // Build the queued recovery row first (no provider id yet).
+  let built;
+  try {
+    built = await insertRecoveryMessage(bouncedMessage, candidate.corrected, recoveryId);
+  } catch (err) {
+    await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+      ...baseUpdate,
+      status: 'send_failed',
+      metadata: jsonbMerge({ send_error: String(err.message || err) }),
+    });
+    await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
+    logger.warn(`[bounce-recovery] could not stage resend for ${redactEmail(candidate.corrected)}: ${err.message}`);
+    return { error: String(err.message || err) };
+  }
+
+  // Link the ledger to the recovery message BEFORE its provider id is
+  // published, so a fast delivery webhook can always resolve the ledger.
+  await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+    ...baseUpdate,
+    status: 'resent',
+    recovery_message_id: built.message.id,
+  });
+
+  const sendResult = await dispatchRecoveryMessage({
+    message: built.message,
+    categories: built.categories,
+    bouncedMessage,
+    correctedEmail: candidate.corrected,
+    ownCustomerId: match?.customerId || null,
+  });
+  if (sendResult.held) {
+    // A collections dispute hold is a WAIT (round-11 P2): the recovery is parked retryable, never
+    // settled as blocked / recipient_unauthorized. The corrected address stays staged on the ledger
+    // row (corrected_email above) and the queued recovery message is kept; the held-recovery
+    // sweep re-runs the whole flow once the hold is released.
+    await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+      status: HELD_RECOVERY_STATUS,
+      updated_at: new Date(),
+      metadata: jsonbMerge({
+        hold_deferred_at: new Date().toISOString(),
+        hold_retry_at: new Date(Date.now() + require('./collections/collection-hold').HOLD_DEFER_MS).toISOString(),
+        hold_reason: sendResult.holdReason || 'hold',
+      }),
+    });
+    logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} deferred: collections dispute hold`);
+    return { deferred: 'collection_hold', corrected: candidate.corrected };
+  }
+  if (sendResult.suppressed) {
+    await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+      status: sendResult.reason === 'corrected_owned_by_other' ? 'corrected_owned_by_other' : 'recipient_unauthorized',
+      updated_at: new Date(),
+      metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
+    });
+    if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
+      await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId,
+        status: sendResult.reason === 'corrected_owned_by_other'
+          ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });
+    }
+    logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} suppressed: ${sendResult.reason}`);
+    return { skipped: sendResult.reason };
+  }
+  if (!sendResult.ok) {
+    await db('email_bounce_recoveries').where({ id: recoveryId }).update({
+      status: 'send_failed',
+      updated_at: new Date(),
+      metadata: jsonbMerge({ send_error: sendResult.error }),
+    });
+    await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
+    logger.warn(`[bounce-recovery] resend failed for ${redactEmail(candidate.corrected)}: ${sendResult.error}`);
+    return { error: sendResult.error };
+  }
+
+  logger.info(`[bounce-recovery] re-sent ${bouncedMessage.template_key || 'email'} ${redactEmail(bouncedEmail)} → ${redactEmail(candidate.corrected)} (${candidate.rule}/${candidate.confidence})`);
+  return { resent: true, corrected: candidate.corrected, rule: candidate.rule };
+}
+
+/**
+ * Sweep: resume recoveries parked behind a collections dispute hold. Each due row is claimed
+ * atomically (held_dispute -> pending, so a second worker skips it) and the whole flow re-runs from
+ * current data; if the hold still stands the flow parks it again one interval out, and once it is
+ * released the corrected address is re-sent to and committed on delivery as usual. A row that
+ * throws settles as an errored recovery with the office alert, like any other one-shot failure.
+ */
+async function retryHeldRecoveries({ limit = 25 } = {}) {
+  if (!recoveryEnabled()) return { claimed: 0 };
+  const due = await db('email_bounce_recoveries')
+    .where({ status: HELD_RECOVERY_STATUS })
+    .whereRaw("COALESCE((metadata->>'hold_retry_at')::timestamptz, now()) <= now()")
+    .orderBy('updated_at', 'asc')
+    .limit(limit)
+    .select('id', 'original_message_id', 'bounced_email');
+  let claimed = 0;
+  for (const row of due) {
+    const won = await db('email_bounce_recoveries')
+      .where({ id: row.id, status: HELD_RECOVERY_STATUS })
+      .update({ status: 'pending', updated_at: new Date() });
+    if (!Number(won)) continue;
+    claimed += 1;
+    let bouncedMessage = null;
+    try {
+      bouncedMessage = await db('email_messages').where({ id: row.original_message_id }).first();
+      if (!bouncedMessage) throw new Error('original bounced message no longer exists');
+      await runRecoveryFlow(bouncedMessage, String(row.bounced_email || '').trim().toLowerCase(), row.id, { resumed: true });
+    } catch (err) {
+      logger.error(`[bounce-recovery] held recovery ${row.id} failed: ${err.message}`);
+      try {
+        const stuck = await db('email_bounce_recoveries').where({ id: row.id, status: 'pending' })
+          .update({ status: 'error', updated_at: new Date(), metadata: jsonbMerge({ recovery_error: String(err.message || err) }) });
+        if (Number(stuck) > 0 && bouncedMessage) {
+          await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail: bouncedMessage.recipient_email_snapshot, customerId: null, status: 'recovery_error' });
+        }
+      } catch (cleanupErr) {
+        logger.error(`[bounce-recovery] failed to clear stuck held recovery ${row.id}: ${cleanupErr.message}`);
+      }
+    }
+  }
+  return { claimed };
+}
+
+/**
  * Entry point for a hard-bounce event on a tracked email_messages row.
  * Best-effort; never throws.
  */
@@ -745,124 +963,7 @@ async function attemptRecovery(bouncedMessage, ev = {}) {
     if (!inserted.length) return { skipped: 'already_attempted' };
     const recoveryId = inserted[0].id || inserted[0];
 
-    const candidate = correctEmailDomain(bouncedEmail);
-    const match = await resolveCustomerEmailField(bouncedMessage, bouncedEmail);
-    const suppressed = candidate ? await correctedAddressSuppressed(bouncedMessage, candidate.corrected) : false;
-    const ownedByOther = candidate ? await correctedAddressOwnedByOther(candidate.corrected, match?.customerId) : false;
-    // For no-customer (prospect) recoveries, scope the on-file gate to the actual
-    // source estimate (from the send's trigger_event_id) so an unrelated prospect
-    // sharing the typo can't keep this recovery alive.
-    const sourceEstimateId = match?.customerId ? null : sourceEstimateIdFromTriggerEvent(bouncedMessage.trigger_event_id);
-    const sourceLeadId = match?.customerId ? null : sourceLeadIdFromMessage(bouncedMessage);
-    const addressOnFile = candidate ? await bouncedAddressStillOnFile(bouncedEmail, match, sourceEstimateId, sourceLeadId) : true;
-    // Fail closed: the stored flag OR a known attachment-bearing template (covers
-    // pre-flag rows and any direct inserter that didn't stamp has_attachments).
-    const hasAttachments = !!bouncedMessage.has_attachments
-      || ATTACHMENT_TEMPLATE_KEYS.has(String(bouncedMessage.template_key || ''));
-    const decision = decideRecoveryAction({
-      candidate, suppressed, ownedByOther, hasAttachments, addressOnFile,
-      senderRendered: isSenderRenderedEmail(bouncedMessage),
-      min: minConfidence(),
-    });
-
-    const baseUpdate = {
-      corrected_email: candidate?.corrected || null,
-      correction_rule: candidate?.rule || null,
-      confidence: candidate?.confidence || null,
-      customer_id: match?.customerId || null,
-      customer_email_field: match?.field || null,
-      updated_at: new Date(),
-    };
-
-    if (decision.action === 'skip') {
-      await db('email_bounce_recoveries').where({ id: recoveryId }).update({ ...baseUpdate, status: decision.status });
-      // Every skip means a service/transactional email did NOT reach the
-      // customer — nudge a human to fix the address (and show the suggestion
-      // when we have one, e.g. a medium-confidence typo below the auto-send bar).
-      if (['no_candidate', 'corrected_suppressed', 'skipped_low_confidence', 'corrected_owned_by_other',
-        'has_attachments', 'address_no_longer_on_file', 'billing_replay_reauthorization_required',
-        'sender_rendered_not_replayed'].includes(decision.status)) {
-        await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: decision.status, candidate });
-        // Audio re-verification lane (gated, best-effort): the domain
-        // corrector can't touch LOCAL-PART errors ("apitz" vs the spelled
-        // "P-I-T-T-S"), but the source recording can settle them. ONLY when
-        // the corrector had NO candidate: the lane anchors its candidates to
-        // the bounced address's own domain, so running it while a domain
-        // correction exists (has_attachments, suppressed, low-confidence…)
-        // could card variants of the KNOWN-SUSPECT domain for read-back while
-        // the alert above already carries the real suggestion. Deliberately
-        // NOT awaited — re-transcription takes tens of seconds and this runs
-        // off the bounce webhook; the result is a Needs-Review card, nothing
-        // time-coupled to this handler.
-        if (!candidate) {
-          try {
-            const { reverifyBouncedEmailFromCall } = require('./email-bounce-reverify');
-            reverifyBouncedEmailFromCall({ bouncedEmail, customerId: match?.customerId || null })
-              .catch((e) => logger.warn(`[bounce-recovery] reverify lane failed open: ${e.message}`));
-          } catch (e) { logger.warn(`[bounce-recovery] reverify lane unavailable: ${e.message}`); }
-        }
-      }
-      logger.info(`[bounce-recovery] ${decision.status} for ${redactEmail(bouncedEmail)} (${bouncedMessage.template_key || 'email'})`);
-      return { skipped: decision.status };
-    }
-
-    // Build the queued recovery row first (no provider id yet).
-    let built;
-    try {
-      built = await insertRecoveryMessage(bouncedMessage, candidate.corrected, recoveryId);
-    } catch (err) {
-      await db('email_bounce_recoveries').where({ id: recoveryId }).update({
-        ...baseUpdate,
-        status: 'send_failed',
-        metadata: jsonbMerge({ send_error: String(err.message || err) }),
-      });
-      await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
-      logger.warn(`[bounce-recovery] could not stage resend for ${redactEmail(candidate.corrected)}: ${err.message}`);
-      return { error: String(err.message || err) };
-    }
-
-    // Link the ledger to the recovery message BEFORE its provider id is
-    // published, so a fast delivery webhook can always resolve the ledger.
-    await db('email_bounce_recoveries').where({ id: recoveryId }).update({
-      ...baseUpdate,
-      status: 'resent',
-      recovery_message_id: built.message.id,
-    });
-
-    const sendResult = await dispatchRecoveryMessage({
-      message: built.message,
-      categories: built.categories,
-      bouncedMessage,
-      correctedEmail: candidate.corrected,
-      ownCustomerId: match?.customerId || null,
-    });
-    if (sendResult.suppressed) {
-      await db('email_bounce_recoveries').where({ id: recoveryId }).update({
-        status: sendResult.reason === 'corrected_owned_by_other' ? 'corrected_owned_by_other' : 'recipient_unauthorized',
-        updated_at: new Date(),
-        metadata: jsonbMerge({ suppression_reason: sendResult.reason }),
-      });
-      if (billingReplay.isBillingEmailTemplateRetry(bouncedMessage)) {
-        await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId,
-          status: sendResult.reason === 'corrected_owned_by_other'
-            ? 'corrected_owned_by_other' : 'billing_replay_reauthorization_required', candidate });
-      }
-      logger.info(`[bounce-recovery] resend to ${redactEmail(candidate.corrected)} suppressed: ${sendResult.reason}`);
-      return { skipped: sendResult.reason };
-    }
-    if (!sendResult.ok) {
-      await db('email_bounce_recoveries').where({ id: recoveryId }).update({
-        status: 'send_failed',
-        updated_at: new Date(),
-        metadata: jsonbMerge({ send_error: sendResult.error }),
-      });
-      await alertUnrecoverableBounce({ bouncedMessage, bouncedEmail, customerId: match?.customerId, status: 'send_failed', candidate });
-      logger.warn(`[bounce-recovery] resend failed for ${redactEmail(candidate.corrected)}: ${sendResult.error}`);
-      return { error: sendResult.error };
-    }
-
-    logger.info(`[bounce-recovery] re-sent ${bouncedMessage.template_key || 'email'} ${redactEmail(bouncedEmail)} → ${redactEmail(candidate.corrected)} (${candidate.rule}/${candidate.confidence})`);
-    return { resent: true, corrected: candidate.corrected, rule: candidate.rule };
+    return await runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId);
   } catch (err) {
     logger.error(`[bounce-recovery] attemptRecovery failed: ${err.message}`);
     // Don't leave the ledger stuck 'pending': the bounce event is already marked
@@ -1337,6 +1438,8 @@ module.exports = {
   decideRecoveryAction,
   asmGroupIdForStream,
   attemptRecovery,
+  retryHeldRecoveries,
+  HELD_RECOVERY_STATUS,
   alertBouncedContactAddress,
   commitRecoveryOnDelivery,
   handleRecoveryBounce,

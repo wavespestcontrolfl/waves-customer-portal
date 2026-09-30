@@ -276,7 +276,7 @@ async function loadEligibleInvoices(customerId, { onIncomplete = null, database 
   return eligible;
 }
 
-async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db, source = null, spacingExcludeKey = null, spacingExcludeEventKey = null } = {}) {
+async function evaluate(customerId, { channel, purpose, now = new Date(), offLedgerBalanceCents = 0, excludeCollectionCaseId = null, excludeLedgerIds = [], supervisedDial = false, database = db, source = null, spacingExcludeKey = null, spacingExcludeEventKey = null, ignoreDisputeHold = false } = {}) {
   const result = {
     allowed: false,
     denialReasons: [],
@@ -383,6 +383,15 @@ async function evaluate(customerId, { channel, purpose, now = new Date(), offLed
       .select('*');
     result.activeHolds = flags;
     for (const row of flags) {
+      // A trusted hold exemption (rail-guard holdExempt 'customer' / 'operator': a link the
+      // customer asked for, the office "send now") sets ignoreDisputeHold: ONLY an active DISPUTE
+      // collection_hold row is skipped. A dispute row that still carries an embedded fallback
+      // hold (wrong-number / wrong-party, the "[earlier hold: ...]" trailer) keeps blocking, as do
+      // every other flag and every fallback hold.
+      if (ignoreDisputeHold && row.flag === 'collection_hold') {
+        const collectionHold = require('./collection-hold');
+        if (collectionHold.isDisputeHoldReason(row.reason) && !collectionHold.priorHoldReasonOf(row.reason)) continue;
+      }
       const blocked = FLAG_BLOCKED_CHANNELS[row.flag];
       // Unknown flag string = fail closed on every channel.
       if (!blocked || blocked.includes(channel)) {

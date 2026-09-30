@@ -104,7 +104,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       expect(out).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
     } finally { lookup.mockRestore(); }
     const src = fs.readFileSync(path.join(__dirname, '../services/messaging/send-customer-message.js'), 'utf8');
-    expect(src).toMatch(/isHoldGatedBillingMessage\(input\) && input\.customerInitiated !== true && !holdExempt/);
+    expect(src).toMatch(/if \(!isHoldGatedBillingMessage\(input\)\) return null;\s*if \(input\.customerInitiated === true \|\| collectionHold\.holdExemptionApplies\(input\.holdExempt\)\) return null;/);
     expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES = Object\.freeze\(\['payment_failure', 'autopay'\]\)/);
   });
 
@@ -276,9 +276,12 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       const holdId = await placeHold(c);
       const out = await dispatchRecoveryMessage({ message: recovery, categories: ['bounce_recovery'], bouncedMessage: bounced,
         correctedEmail: `${randomUUID()}@example.invalid`, ownCustomerId: c });
-      expect(out).toMatchObject({ ok: false, suppressed: true, reason: 'collection_hold' });
+      // A hold is a WAIT (round-11 P2): reported as held, never as a suppression, and the queued
+      // recovery message is left untouched (not settled as blocked) for the sweep to re-drive.
+      expect(out).toMatchObject({ ok: false, held: true, reason: 'collection_hold' });
+      expect(out.suppressed).toBeUndefined();
       expect(sendgrid.sendOne).not.toHaveBeenCalled();
-      expect(await reload(recovery.id)).toMatchObject({ status: 'blocked', error_message: 'collection_hold' });
+      expect(await reload(recovery.id)).toMatchObject({ status: 'queued', error_message: null });
       await release(holdId);
     });
 
@@ -346,6 +349,187 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       await release(holdId);
       await Runner.processDueSteps();
       expect((await stepSends(heldEnrollment.id)).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('the hold is the FINAL provider-boundary check on every email path that sends a gated template (round 11)', () => {
+    const boundaryError = { code: 'COLLECTION_HOLD_DEFER', retryable: true, providerBoundaryBlocked: true };
+
+    async function expiringMethod2(c) {
+      const now = new Date();
+      const [row] = await db('payment_methods').insert({
+        customer_id: c, method_type: 'card', processor: 'stripe', card_brand: 'visa', last_four: '4242',
+        exp_month: ((now.getUTCMonth() + 1) % 12) + 1, exp_year: now.getUTCFullYear() + 1, is_default: true,
+      }).returning('id');
+      return row.id;
+    }
+
+    test('lifecycle email: dispatch carries a hold-aware providerBoundaryCheck; a hold committed after the up-front read is the coded retryable COLLECTION_HOLD_DEFER', async () => {
+      const c = await newCustomer();
+      const methodId = await expiringMethod2(c);
+      let holdId;
+      // The library stub runs the caller's handoff the way the real library does, with the hold
+      // committing AFTER the up-front check and before the request.
+      EmailTemplateLibrary.sendTemplate.mockImplementationOnce(async (args) => {
+        expect(typeof args.withProviderHandoff).toBe('function');
+        try {
+          // the hold commits inside the handoff, after its pre-dispatch read, right before the request
+          await args.withProviderHandoff(async (_database, boundaryCheck) => {
+            holdId = await placeHold(c);
+            await boundaryCheck({});
+          });
+        } catch (err) {
+          if (!err.providerBoundaryBlocked) throw err;
+          return { sent: false, aborted: true, boundaryBlocked: true, reason: 'provider_boundary_blocked' };
+        }
+        return { sent: true, message: { provider_message_id: 'm-late' } };
+      });
+      const out = await Lifecycle.sendPaymentMethodExpiring({ customerId: c, paymentMethodId: methodId, reminderStage: '30_day' });
+      expect(out).toMatchObject({ ok: false, blocked: true, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+      await release(holdId);
+    });
+
+    test('lifecycle email: the boundary check passes with no hold, throws the boundary-blocked sentinel with one', async () => {
+      const c = await newCustomer();
+      const methodId = await expiringMethod2(c);
+      await Lifecycle.sendPaymentMethodExpiring({ customerId: c, paymentMethodId: methodId, reminderStage: '30_day' });
+      const args = EmailTemplateLibrary.sendTemplate.mock.calls[0][0];
+      const dispatch = jest.fn(async () => {});
+      await args.withProviderHandoff(dispatch);
+      const boundary = dispatch.mock.calls[0][1];
+      await expect(boundary({})).resolves.toEqual({ ok: true });
+      const holdId = await placeHold(c);
+      await expect(boundary({})).rejects.toMatchObject(boundaryError);
+      await release(holdId);
+    });
+
+    test('lifecycle email: a customer-initiated notice carries no hold boundary (exempt), a confirmation carries none (not gated)', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const boundaryOf = async (call) => {
+        const dispatch = jest.fn(async () => {});
+        if (call.withProviderHandoff) await call.withProviderHandoff(dispatch);
+        else await dispatch();
+        return dispatch.mock.calls[0]?.[1];
+      };
+      await Lifecycle.sendPaymentFailed({ customerId: c, paymentIntentId: `pi_synthetic_${randomUUID()}`, attemptId: 'a3', customerInitiated: true });
+      expect(await boundaryOf(EmailTemplateLibrary.sendTemplate.mock.calls[0][0])).toBeUndefined();
+      EmailTemplateLibrary.sendTemplate.mockClear();
+      await Lifecycle.sendAutopayEnabled({ customerId: c, paymentMethodId: null });
+      expect(await boundaryOf(EmailTemplateLibrary.sendTemplate.mock.calls[0][0])).toBeUndefined();
+    });
+
+    test('provider-retry rail: a hold committed after the retry gate still stops the stored copy at sendOne\'s final boundary; the attempt is refunded and the row waits', async () => {
+      const sendgrid = require('../services/sendgrid-mail');
+      const Retry = require('../services/transactional-email-provider-retry');
+      const c = await newCustomer();
+      const [row] = await db('email_messages').insert({
+        recipient_type: 'customer', recipient_id: c, recipient_email_snapshot: `${randomUUID()}@example.invalid`,
+        subject_snapshot: 'Synthetic payment notice', html_snapshot: '<p>Update your card</p>', text_snapshot: 'Update your card',
+        template_key: 'payment.retry_notice', suppression_group_key_snapshot: 'transactional_required',
+        categories: JSON.stringify(['payment']), status: 'failed', has_attachments: false, provider_retry_count: 0,
+        provider_retry_next_at: new Date(Date.now() - 1000), provider_handoff_phase: 'rejected',
+        send_attempt_token: 'tok-r11', provider_handoff_attempt_token: 'tok-r11',
+      }).returning('*');
+      let holdId;
+      sendgrid.sendOne.mockImplementationOnce(async (args) => {
+        holdId = await placeHold(c);
+        await args.providerBoundaryCheck({});
+        return { messageId: 'sg-should-not-send' };
+      });
+      const claimed = (await Retry.claimDueRetries(50)).find((m) => m.id === row.id);
+      expect(await Retry.retryOne(claimed)).toMatchObject({ sent: false, held: true });
+      const after = await db('email_messages').where({ id: row.id }).first();
+      expect(after).toMatchObject({ status: 'failed', provider_retry_count: 0, provider_retry_exhausted_at: null, provider_message_id: null });
+      expect(new Date(after.provider_retry_next_at).getTime()).toBeGreaterThan(Date.now());
+      expect(after.error_message).toMatch(/dispute hold/i);
+      await release(holdId);
+      await db('email_messages').where({ id: row.id }).del();
+    });
+
+    test('every email dispatch path that sends a gated template re-reads the hold in its FINAL boundary check (source contract)', () => {
+      const read = (f) => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+      // billing-channel-email-authority (sender-rendered dunning + billing replay): dunningHoldBlock in providerBoundaryCheck
+      const authority = read('services/billing-channel-email-authority.js');
+      const pbc = authority.slice(authority.indexOf('const providerBoundaryCheck = async'), authority.indexOf('await dispatch(trx, providerBoundaryCheck)'));
+      expect(pbc).toMatch(/dunningHoldBlock\(/);
+      // automation-runner payment_failed: the hold rides the authority's preSendCheck, re-run at that same final boundary
+      expect(authority).toMatch(/preSendBlock\(preSendCheck, database \|\| trx, true\)/);
+      // lifecycle + transactional retry + bounce recovery: their own providerBoundaryCheck
+      expect(read('services/payment-lifecycle-email.js')).toMatch(/dispatch\(undefined, holdBoundaryCheck/);
+      expect(read('services/transactional-email-provider-retry.js')).toMatch(/state\.holdBoundaryCheck = async/);
+      expect(read('services/email-bounce-recovery.js')).toMatch(/storedLifecycleEmailHeld\(bouncedMessage\);\s*if \(heldNow\.held\)/);
+    });
+  });
+
+  describe('a held bounce recovery waits, never settles (round 11 P2)', () => {
+    async function bouncedPair(c, typoEmail) {
+      const [bounced] = await db('email_messages').insert({
+        recipient_type: 'customer', recipient_id: c, recipient_email_snapshot: typoEmail,
+        subject_snapshot: 'Synthetic card expiring', html_snapshot: '<p>Update your card</p>', text_snapshot: 'Update your card',
+        template_key: 'payment.method_expiring', suppression_group_key_snapshot: 'transactional_required',
+        categories: JSON.stringify(['payment']), status: 'bounced', has_attachments: false, send_attempt_token: randomUUID(),
+      }).returning('*');
+      return bounced;
+    }
+
+    test('during a hold the recovery parks (corrected address staged, recovery message kept queued); after the release the sweep re-sends it and the ledger reaches resent', async () => {
+      const sendgrid = require('../services/sendgrid-mail');
+      const Recovery = require('../services/email-bounce-recovery');
+      const local = randomUUID();
+      const typo = `${local}@gmial.com`;
+      const c = await newCustomer();
+      await db('customers').where({ id: c }).update({ email: typo });
+      const bounced = await bouncedPair(c, typo);
+      const holdId = await placeHold(c);
+      const res = await Recovery.attemptRecovery(bounced, { sg_event_id: 'ev-1' });
+      expect(res).toMatchObject({ deferred: 'collection_hold', corrected: `${local}@gmail.com` });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      let rec = await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first();
+      expect(rec).toMatchObject({ status: Recovery.HELD_RECOVERY_STATUS, corrected_email: `${local}@gmail.com`, record_updated: false });
+      expect(rec.metadata.hold_retry_at).toBeTruthy();
+      const queued = await db('email_messages').where({ id: rec.recovery_message_id }).first();
+      expect(queued).toMatchObject({ status: 'queued', provider_message_id: null });
+      // the webhook cannot open a second recovery for the same bounce (unique original_message_id)
+      expect(await Recovery.attemptRecovery(bounced, {})).toMatchObject({ skipped: 'already_attempted' });
+      // still held, but due: the sweep parks it again one interval out, sends nothing
+      await db('email_bounce_recoveries').where({ id: rec.id }).update({ metadata: db.raw("metadata || '{\"hold_retry_at\":\"2020-01-01T00:00:00Z\"}'::jsonb") });
+      await Recovery.retryHeldRecoveries();
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      rec = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+      expect(rec.status).toBe(Recovery.HELD_RECOVERY_STATUS);
+      expect(new Date(rec.metadata.hold_retry_at).getTime()).toBeGreaterThan(Date.now());
+      // released: the next sweep past its retry time re-sends to the corrected address
+      await release(holdId);
+      await db('email_bounce_recoveries').where({ id: rec.id }).update({ metadata: db.raw("metadata || '{\"hold_retry_at\":\"2020-01-01T00:00:00Z\"}'::jsonb") });
+      await Recovery.retryHeldRecoveries();
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(sendgrid.sendOne.mock.calls[0][0].to).toBe(`${local}@gmail.com`);
+      rec = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+      expect(rec.status).toBe('resent');
+      expect(await db('email_messages').where({ id: rec.recovery_message_id }).first()).toMatchObject({ status: 'sent', provider_message_id: 'sg-synthetic-1' });
+    });
+
+    test('the FINAL sendOne boundary check parks the recovery too (a hold committed after the up-front read)', async () => {
+      const sendgrid = require('../services/sendgrid-mail');
+      const Recovery = require('../services/email-bounce-recovery');
+      const local = randomUUID();
+      const typo = `${local}@gmial.com`;
+      const c = await newCustomer();
+      await db('customers').where({ id: c }).update({ email: typo });
+      const bounced = await bouncedPair(c, typo);
+      let holdId;
+      sendgrid.sendOne.mockImplementationOnce(async (args) => {
+        holdId = await placeHold(c);
+        await args.providerBoundaryCheck({});
+        return { messageId: 'sg-should-not-send' };
+      });
+      const res = await Recovery.attemptRecovery(bounced, {});
+      expect(res).toMatchObject({ deferred: 'collection_hold' });
+      const rec = await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first();
+      expect(rec.status).toBe(Recovery.HELD_RECOVERY_STATUS);
+      expect(await db('email_messages').where({ id: rec.recovery_message_id }).first()).toMatchObject({ status: 'queued', provider_message_id: null });
+      await release(holdId);
     });
   });
 

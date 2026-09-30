@@ -45,8 +45,13 @@ describe('customer-message purposes gated by the dispute hold at the send bounda
     expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES = Object\.freeze\(\['payment_failure', 'autopay'\]\)/);
     expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES\.includes\(input\.purpose\)\) return true/);
     expect(src).toMatch(/HOLD_GATED_DUNNING_ENTRY_POINTS\.has\(String\(input\.entryPoint/);
-    expect(src).toMatch(/isHoldGatedBillingMessage\(input\) && input\.customerInitiated !== true && !holdExempt/);
-    expect(src).toMatch(/holdExemptionApplies\(input\.holdExempt\)/);
+    // ONE predicate (billingHoldBlock) carries the gate + both exemptions, and runs twice: step 1.5
+    // and again inside providerPreparationCheck, the last pre-provider callback (round-11 P1).
+    expect(src).toMatch(/if \(!isHoldGatedBillingMessage\(input\)\) return null;\s*if \(input\.customerInitiated === true \|\| collectionHold\.holdExemptionApplies\(input\.holdExempt\)\) return null;/);
+    expect(src.match(/await billingHoldBlock\(/g) || []).toHaveLength(2);
+    const prep = src.slice(src.indexOf('const providerPreparationCheck'), src.indexOf('providerPreparationCheck.isStillValid'));
+    expect(prep).toMatch(/await billingHoldBlock\(sendInput\)/);
+    expect(prep).toMatch(/'collection_hold_boundary'/);
   });
 
   test('only the Stripe webhook (from the PaymentIntent\'s own markers) and the payment-failed email assert customerInitiated on these notices', () => {

@@ -3534,6 +3534,18 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // EVERY 5 MIN — resume bounce recoveries parked behind a collections dispute hold: the corrected
+  // address stays staged, and the re-send goes out on the first tick after the hold is released.
+  cron.schedule('*/5 * * * *', async () => {
+    try {
+      await runExclusive('email-bounce-recovery-held', async () => {
+        await require('./email-bounce-recovery').retryHeldRecoveries();
+      });
+    } catch (err) {
+      logger.error(`[bounce-recovery] held-recovery tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // =========================================================================
   // EVERY MIN — Email template automation executor. Sends due delayed/retry
   // runs created by trigger-mapped email template automations. Runs in

@@ -227,6 +227,58 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
     });
   });
 
+  describe('termite renewal invoices reach the live Bill-To fence before the sender\'s hold check (#5424 round 11)', () => {
+    async function renewalInvoice(customerId) {
+      const inv = await newInvoice(customerId);
+      const [parent] = await db('annual_prepay_terms').insert({
+        customer_id: customerId, term_start: '2039-01-01', term_end: '2039-12-31', status: 'renewed',
+      }).returning('id');
+      const [successor] = await db('annual_prepay_terms').insert({
+        customer_id: customerId, term_start: '2040-01-01', term_end: '2040-12-31', status: 'payment_pending',
+        renewed_from_term_id: parent.id, annual_plan_version: 'v3', prepay_invoice_id: inv,
+      }).returning('id');
+      await db('invoices').where({ id: inv }).update({ annual_prepay_term_id: successor.id });
+      return { inv, parent: parent.id, successor: successor.id };
+    }
+    afterEach(async () => {
+      await db('annual_prepay_terms').whereIn('customer_id', customers).update({ prepay_invoice_id: null, renewed_from_term_id: null });
+      await db('annual_prepay_terms').whereIn('customer_id', customers).del();
+      await db('customers').whereIn('id', customers).update({ payer_id: null });
+    });
+
+    test('a held homeowner whose renewal invoice belongs to the customer default payer is withdrawn to that payer (payer_billed), never parked behind the dispute, never sent to the homeowner', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const [payer] = await db('payers').insert({ display_name: 'Synthetic Bill-To', ap_email: 'ap@example.invalid' }).returning('id');
+      packetFixtures.payers.push(payer.id);
+      await db('customers').where({ id: c }).update({ payer_id: payer.id });
+      const { inv } = await renewalInvoice(c);
+      await queueDue(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv);
+      const row = await invoice(inv);
+      expect(row).toMatchObject({ status: 'draft', scheduled_send_at: null, send_claim_token: null });
+      expect(row.scheduled_send_error).toBe(`payer_billed:${payer.id}`);
+    });
+
+    test('a truly self-pay renewal invoice for a held homeowner still waits (deferred, no attempt spent) and sends after the release', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const { inv } = await renewalInvoice(c);
+      await queueDue(inv);
+      const before = Date.now();
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv);
+      const row = await invoice(inv);
+      expect(row).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+      expect(row.scheduled_send_at.getTime()).toBeGreaterThan(before + 3 * 60 * 1000);
+      await releaseViaOpsScript(c);
+      await makeDueNow(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).toContain(inv);
+    });
+  });
+
   describe('the sender under a hold', () => {
     test('a hold that lands between the due read and the send is caught at the delivery boundary: still scheduled, pushed a tick out, NO attempt spent, claim released, nothing sent', async () => {
       const c = await newCustomer();

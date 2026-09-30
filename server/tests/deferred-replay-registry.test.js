@@ -337,6 +337,28 @@ describe('deferred-replay registry', () => {
     });
   });
 
+  // Round-11 P2: the dispute-hold recheck must not delay a notice the customer's OWN action produced
+  // (meta.customer_initiated === true, the marker the scheduler forwards as customerInitiated).
+  test('billing failure replay: a held customer waits with a named retry time, but customer_initiated skips the hold recheck', async () => {
+    const Hold = require('../services/collections/collection-hold');
+    const run = async (extra) => {
+      db.mockReturnValueOnce(firstChain({ status: 'failed', retry_count: 1 }));
+      db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
+      return recheckDeferredReplay('billing_failure_deferred', { payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1, ...extra });
+    };
+    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: true, reason: 'hold' });
+    try {
+      expect(await run({})).toMatchObject({ eligible: false, reason: 'collection-hold', retryable: true });
+      Hold.dueInvoiceHeldByDisputeHold.mockClear();
+      expect(await run({ customer_initiated: true })).toEqual({ eligible: true });
+      expect(Hold.dueInvoiceHeldByDisputeHold).not.toHaveBeenCalled();
+      // only the boolean true exempts (a stringy marker does not)
+      expect(await run({ customer_initiated: 'true' })).toMatchObject({ eligible: false, reason: 'collection-hold' });
+    } finally {
+      Hold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: false });
+    }
+  });
+
   test('billing failure replay retains its retry on a database outage', async () => {
     db.mockReturnValueOnce(throwChain());
     expect(await recheckDeferredReplay('billing_failure_deferred', {

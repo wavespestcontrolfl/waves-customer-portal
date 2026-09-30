@@ -3812,6 +3812,27 @@ async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaim
   });
 }
 
+// The scheduled sender's dispute-hold check runs BEFORE sendViaSMSAndEmail's own renewal Bill-To fence,
+// so a HELD homeowner whose termite renewal invoice belongs to a third-party payer (resolved from the
+// customer default, not yet stamped on the invoice) would be parked behind the homeowner's dispute
+// instead of reaching its payer. For a worker-preclaimed renewal invoice, this runs the SAME fence
+// (renewal gate + customer/payer rows FOR SHARE) and the SAME withdrawal claimRenewalInvoiceUnderFence
+// does - a draft stamped payer_billed:<payer>, never retried to the homeowner - and returns
+// { payerBilled: true, payerId }. Null = no renewal link or no payer: the hold defers it as usual.
+async function withdrawHeldRenewalInvoiceToPayer(claimed) {
+  if (!claimed || claimed.payer_id || claimed.visit_completion_packet_id || !claimed.annual_prepay_term_id) return null;
+  const renewal = await termiteRenewalTermForInvoice(claimed.id, claimed.annual_prepay_term_id);
+  if (!renewal) return null;
+  return withRenewalSendGate(claimed, () => db.transaction(async (trx) => {
+    const payerId = await customerDefaultPayerLocked(renewal.customer_id, trx);
+    if (!payerId) return null;
+    const moved = await trx("invoices").where({ id: claimed.id, status: "sending", send_claim_token: claimed.send_claim_token }).update({
+      status: "draft", send_claim_token: null, scheduled_send_at: null, scheduled_send_error: `payer_billed:${payerId}`, updated_at: new Date(),
+    });
+    return moved ? { payerBilled: true, payerId } : null;
+  }));
+}
+
 async function customerDefaultPayerLocked(customerId, trx) {
   const customer = await trx("customers").where({ id: customerId }).forShare().first("id", "payer_id");
   if (customer?.payer_id) await trx("payers").where({ id: customer.payer_id }).forShare().first("id");
@@ -7594,10 +7615,21 @@ const InvoiceService = {
       // The delivery-boundary check below stays AFTER that fence: it is the
       // authoritative answer for a truly self-pay invoice and for a hold that
       // lands between this read and the send.
+      // A termite renewal successor's prepay invoice (annual_prepay_terms.prepay_invoice_id with a
+      // renewed_from link) is in the same position (round 11): its payer is the customer DEFAULT,
+      // resolved live by the renewal Bill-To fence, so a held homeowner's renewal must reach that
+      // fence (withdrawHeldRenewalInvoiceToPayer, run before the hold deferral below) instead of
+      // being hidden behind the homeowner's dispute.
       .where((q) =>
-        q.whereNotNull("payer_id").orWhereNotNull("visit_completion_packet_id").orWhereNotExists(function noActiveDisputeHold() {
-          require("./collections/collection-hold").disputeHoldExistsSql(this, "invoices.customer_id");
-        }),
+        q.whereNotNull("payer_id").orWhereNotNull("visit_completion_packet_id")
+          .orWhereExists(function renewalSuccessorInvoice() {
+            this.select(1).from("annual_prepay_terms as apt")
+              .whereRaw("apt.prepay_invoice_id = invoices.id")
+              .whereNotNull("apt.renewed_from_term_id").whereNotNull("apt.annual_plan_version");
+          })
+          .orWhereNotExists(function noActiveDisputeHold() {
+            require("./collections/collection-hold").disputeHoldExistsSql(this, "invoices.customer_id");
+          }),
       )
       .orderBy("scheduled_send_at", "asc")
       .limit(limit)
@@ -7836,6 +7868,20 @@ const InvoiceService = {
         const holdBlock = await require("./collections/collection-hold")
           .dueInvoiceHeldByDisputeHold(claimed.customer_id);
         if (holdBlock.held) {
+          // A renewal invoice owned by a third-party payer is not the homeowner's pay link: run the
+          // Bill-To fence FIRST so it reaches its payer even while the homeowner's dispute stands.
+          // A fence that cannot be judged falls through to the deferral (fail closed toward waiting).
+          let renewalFence = null;
+          try {
+            renewalFence = await withdrawHeldRenewalInvoiceToPayer(claimed);
+          } catch (fenceErr) {
+            logger.warn(`[invoice] Held renewal invoice ${inv.invoice_number}: Bill-To fence failed (${fenceErr.message}) - deferring behind the dispute hold`);
+          }
+          if (renewalFence?.payerBilled) {
+            held += 1;
+            logger.info(`[invoice] Scheduled send for ${inv.invoice_number} withdrawn - the renewal is billed to payer ${renewalFence.payerId} (homeowner dispute hold does not apply)`);
+            continue;
+          }
           const deferUntil = new Date(Date.now() + require("./collections/collection-hold").HOLD_DEFER_MS);
           const deferredRows = await restoreClaimedInvoice({
             status: "scheduled", scheduled_send_at: deferUntil, updated_at: new Date(),

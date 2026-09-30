@@ -273,7 +273,12 @@ async function queueInvoiceOfDeadDeclineNotice(meta) {
 // reschedules to it and REFUNDS the claimed attempt, so a hold that outlasts the
 // bounded ladder never terminates the row - it sends after the release. Fail
 // closed: an unanswerable lookup waits the same way. Null = no hold.
-async function disputeHoldRecheck(customerId) {
+//
+// A row queued for a notice the customer's OWN action produced (meta.customer_initiated === true,
+// the marker the scheduler forwards to sendCustomerMessage as customerInitiated) is exempt, the
+// same way the live send boundary exempts it: the recheck must not delay it for the whole dispute.
+async function disputeHoldRecheck(customerId, meta = null) {
+  if (meta && meta.customer_initiated === true) return null;
   const held = await require('../collections/collection-hold').dueInvoiceHeldByDisputeHold(customerId);
   if (!held.held) return null;
   return {
@@ -428,7 +433,7 @@ const REGISTRY = {
       let followupCustomerId;
       try {
         followupCustomerId = await resolveFollowupCustomerId(meta);
-        const holdWait = followupCustomerId ? await disputeHoldRecheck(followupCustomerId) : null;
+        const holdWait = followupCustomerId ? await disputeHoldRecheck(followupCustomerId, meta) : null;
         if (holdWait) return holdWait;
       } catch (err) {
         return failClosed('invoice-followup-hold', meta.invoice_id, err);
@@ -903,7 +908,7 @@ const REGISTRY = {
           return { eligible: false, reason: resolution.reason };
         }
         // The failure notice carries the pay link: wait out a dispute hold.
-        const holdWait = await disputeHoldRecheck(meta.customer_id);
+        const holdWait = await disputeHoldRecheck(meta.customer_id, meta);
         if (holdWait) return holdWait;
         return { eligible: true };
       } catch (err) {
@@ -1061,7 +1066,7 @@ const REGISTRY = {
         if (collectibleVerdict?.eligible === false) return collectibleVerdict;
         // An ACH failure / action-required notice for this invoice points the
         // customer at paying it: wait out a collections dispute hold.
-        const holdWait = await disputeHoldRecheck(meta.customer_id);
+        const holdWait = await disputeHoldRecheck(meta.customer_id, meta);
         return holdWait || collectibleVerdict;
       } catch (err) {
         return failClosed('stripe-billing', meta.stripe_payment_intent_id || meta.invoice_id, err);

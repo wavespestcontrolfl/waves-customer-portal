@@ -83,7 +83,9 @@ describe('direct invoice sender callers are all classified for the dispute-hold 
 
   test('the automated callers treat the retryable refusal as a wait, never a failure', () => {
     const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
-    expect(read('services/termite-annual-activation.js')).toMatch(/COLLECTION_HOLD_DEFER[\s\S]{0,400}held: true/);
+    expect(read('services/termite-annual-activation.js')).toMatch(/COLLECTION_HOLD_DEFER[\s\S]{0,1500}held: true/);
+    // Round-11 P2: the held annual invoice is queued on the hold-aware scheduled sender.
+    expect(read('services/termite-annual-activation.js')).toMatch(/COLLECTION_HOLD_DEFER[\s\S]{0,1500}requeueHeldInvoice/);
     expect(read('services/termite-annual-renewal-charge.js')).toMatch(/COLLECTION_HOLD_DEFER/);
     expect(read('services/recurring-card-on-file.js')).toMatch(/result\?\.code === 'COLLECTION_HOLD_DEFER'[\s\S]{0,400}continue;/);
   });

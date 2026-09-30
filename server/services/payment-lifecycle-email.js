@@ -286,6 +286,24 @@ async function sendLifecycleTemplate({
   // as the coded retryable COLLECTION_HOLD_DEFER (never a bare not-sent, which the retry
   // obligation would turn into a terminal block).
   let handoffHold = null;
+  // The FINAL hold check (round-11 P1), handed to SendGrid as sendOne's providerBoundaryCheck: it
+  // runs after every await above and after the provider's own request preparation, immediately
+  // before the fetch, so a dispute committed after the up-front read still stops the notice. A
+  // refusal throws the boundary-blocked sentinel the library turns into a definite non-send, and
+  // the coded retryable COLLECTION_HOLD_DEFER is returned below. Only the gated pay-link templates
+  // carry it; customerInitiated (holdApplies false) is exempt.
+  const holdBoundaryCheck = holdApplies ? async () => {
+    const heldNow = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id);
+    if (heldNow.held) {
+      handoffHold = heldNow;
+      throw Object.assign(new Error('Customer has an active collections dispute hold'), {
+        code: require('./collections/collection-hold').HOLD_DEFER_CODE,
+        retryable: true,
+        providerBoundaryBlocked: true,
+      });
+    }
+    return { ok: true };
+  } : null;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -335,12 +353,19 @@ async function sendLifecycleTemplate({
               if (guard === false || guard?.ok === false) throw new Error('Delivery handoff was not acquired');
             }
             providerStarted = true;
-            await dispatch();
+            await dispatch(undefined, holdBoundaryCheck || undefined);
             return { ok: true };
           } catch (err) {
             if (!providerStarted) handoffGuardFailed = true;
             throw err;
           }
+        },
+      } : holdBoundaryCheck ? {
+        // No billing-delivery ownership to hold, but the hold-gated notice still needs the
+        // final SendGrid boundary check.
+        withProviderHandoff: async (dispatch) => {
+          await dispatch(undefined, holdBoundaryCheck);
+          return { ok: true };
         },
       } : {}),
     });

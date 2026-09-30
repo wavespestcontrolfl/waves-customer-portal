@@ -275,6 +275,27 @@ function isHoldGatedBillingMessage(input = {}) {
   return require('../collections/collection-hold').HOLD_GATED_DUNNING_ENTRY_POINTS.has(String(input.entryPoint || ''));
 }
 
+// The ONE gated hold predicate (round-11 P1, structural): run at step 1.5 AND again inside
+// providerPreparationCheck, the last pre-provider callback, so a dispute committed during the
+// policy / contact / consent / caller-check awaits (or any pre-work added later) still stops the
+// send. Returns null (send may proceed) or the coded WAIT verdict. Exemptions live here, once: a
+// customer's own action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+// (holdExempt 'operator'); a lookup failure answers held (fail closed).
+async function billingHoldBlock(input = {}) {
+  const collectionHold = require('../collections/collection-hold');
+  if (!isHoldGatedBillingMessage(input)) return null;
+  if (input.customerInitiated === true || collectionHold.holdExemptionApplies(input.holdExempt)) return null;
+  const held = await collectionHold.dueInvoiceHeldByDisputeHold(input.customerId);
+  if (!held.held) return null;
+  logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+  return {
+    ok: false,
+    code: 'COLLECTION_HOLD_SUPPRESSED',
+    reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed',
+    retryable: true,
+  };
+}
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -377,14 +398,9 @@ async function sendCustomerMessageCore(input) {
   // action (customerInitiated / holdExempt 'customer') and a deliberate operator send
   // (holdExempt 'operator', e.g. the office "send now" button); payer-billed invoices never reach
   // these senders (they pause or skip before sending).
-  const holdExempt = require('../collections/collection-hold').holdExemptionApplies(input.holdExempt);
-  if (isHoldGatedBillingMessage(input) && input.customerInitiated !== true && !holdExempt) {
-    const held = await require('../collections/collection-hold').dueInvoiceHeldByDisputeHold(input.customerId);
-    if (held.held) {
-      logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
-      return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
-        reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed' };
-    }
+  const heldBlock = await billingHoldBlock(input);
+  if (heldBlock) {
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: heldBlock.code, reason: heldBlock.reason };
   }
 
   // 2. Resolve policy
@@ -1061,6 +1077,11 @@ async function sendCustomerMessageCore(input) {
     if (!providerVerdict.ok) return rememberBoundaryBlock(providerVerdict, 'pre_provider_check_boundary');
     const annualVerdict = await annualOfferGuardVerdict(sendInput, handoffDb);
     if (!annualVerdict.ok) return rememberBoundaryBlock(annualVerdict, 'annual_offer_guard_boundary');
+    // Dispute-hold boundary re-check (round-11 P1): the step-1.5 read ran before policy, contact,
+    // suppression, consent and caller checks; a hold committed since must still stop a gated
+    // billing notice here. Same coded WAIT outcome; exemptions live in billingHoldBlock.
+    const holdBlock = await billingHoldBlock(sendInput);
+    if (holdBlock) return rememberBoundaryBlock(holdBlock, 'collection_hold_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.
     const finalWindowVerdict = checkSendWindow(sendInput, policy, contactState);

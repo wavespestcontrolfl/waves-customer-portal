@@ -663,7 +663,10 @@ async function retryOne(message) {
         suppressErrorLog: true,
         templateKey: message.template_key,
         database,
-        ...(providerBoundaryCheck ? { providerBoundaryCheck } : {}),
+        // A billing replay's authority boundary wins; a plain stored pay-link lifecycle notice
+        // carries the hold recheck as its own FINAL boundary (state.holdBoundaryCheck below).
+        ...((providerBoundaryCheck || state.holdBoundaryCheck)
+          ? { providerBoundaryCheck: providerBoundaryCheck || state.holdBoundaryCheck } : {}),
       });
       if (providerBoundaryCheck) {
         state.acceptedMessage = await settleRetrySend(
@@ -754,7 +757,27 @@ async function retryOne(message) {
       // SendGrid, exactly as a fresh send does (payment-lifecycle-email.js): the retry waits.
       const holdOutcome = await holdGateLifecycleRetry(message);
       if (holdOutcome) return holdOutcome;
+      // The same hold, read again as sendOne's FINAL boundary check (after the block-clear and
+      // marker awaits and SendGrid's own request preparation, right before the fetch): a dispute
+      // committed since the read above still stops the stored copy. A WAIT, never a spent retry.
+      const collectionHold = require('./collections/collection-hold');
+      if (collectionHold.HOLD_GATED_EMAIL_TEMPLATES.has(String(message.template_key || '').trim())) {
+        state.holdBoundaryCheck = async () => {
+          const heldNow = await collectionHold.storedLifecycleEmailHeld(message);
+          if (heldNow.held) {
+            state.holdRefusal = heldNow;
+            throw Object.assign(new Error('Customer has an active collections dispute hold'), {
+              code: collectionHold.HOLD_DEFER_CODE, retryable: true, providerBoundaryBlocked: true,
+            });
+          }
+          return { ok: true };
+        };
+      }
       await dispatchToProvider();
+      if (state.holdRefusal) {
+        await markRetryHeld(message, collectionHold.holdDeferOutcome(state.holdRefusal).reason, new Date(), { rejectedAfterStart: true });
+        return { sent: false, held: true };
+      }
     }
     if (state.blocked) {
       return await stopRetry(message, { status: 'blocked', reason: 'annual_offer_withheld', rejectedAfterStart: true });

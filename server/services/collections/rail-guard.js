@@ -101,6 +101,9 @@ async function collectionsChannelVerdict({
     const ContactPolicy = require('./contact-policy');
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      // The precheck above skipped the dispute hold for a trusted exemption; the policy must too,
+      // or its own collection_hold denial would still block that send (dispute rows only).
+      ...(require('./collection-hold').holdExemptionApplies(holdExempt) ? { ignoreDisputeHold: true } : {}),
       ...(database ? { database } : {}),
       ...shadowSpacingArgs(source, spacingExcludeKey, spacingExcludeEventKey),
     });
@@ -164,6 +167,9 @@ async function collectionsChannelPermitted({
     const ContactPolicy = require('./contact-policy');
     verdict = await ContactPolicy.evaluate(customerId, {
       channel, purpose, now, offLedgerBalanceCents, excludeCollectionCaseId, excludeLedgerIds,
+      // The precheck above skipped the dispute hold for a trusted exemption; the policy must too,
+      // or its own collection_hold denial would still block that send (dispute rows only).
+      ...(require('./collection-hold').holdExemptionApplies(holdExempt) ? { ignoreDisputeHold: true } : {}),
       ...(database ? { database } : {}),
       ...shadowSpacingArgs(source, spacingExcludeKey, spacingExcludeEventKey),
     });

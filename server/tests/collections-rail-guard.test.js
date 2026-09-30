@@ -236,6 +236,24 @@ describe('collections dispute hold (owner ruling 2026-09-30)', () => {
     }
   });
 
+  test('a trusted exemption tells the policy to ignore ONLY the dispute hold (ignoreDisputeHold); an automated consult never does (round 11 P2)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    for (const holdExempt of ['customer', 'operator']) {
+      ContactPolicy.evaluate.mockClear();
+      await collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt });
+      expect(ContactPolicy.evaluate.mock.calls[0][1]).toMatchObject({ ignoreDisputeHold: true });
+      ContactPolicy.evaluate.mockClear();
+      await collectionsChannelVerdict({ ...BASE, holdExempt });
+      expect(ContactPolicy.evaluate.mock.calls[0][1]).toMatchObject({ ignoreDisputeHold: true });
+    }
+    for (const holdExempt of [null, undefined, 'system', true, 'Customer']) {
+      ContactPolicy.evaluate.mockClear();
+      await collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt });
+      expect(ContactPolicy.evaluate.mock.calls[0]?.[1] || {}).not.toHaveProperty('ignoreDisputeHold');
+    }
+  });
+
   test('the customer exemption does not lift a policy denial', async () => {
     held();
     ContactPolicy.evaluate.mockResolvedValue({ allowed: false, eligibleInvoiceIds: [], denialReasons: ['flag_do_not_collect'] });
