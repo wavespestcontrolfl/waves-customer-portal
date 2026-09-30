@@ -297,6 +297,73 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     }
   });
 
+  test('a technician already booked over the moved window (another customer) refuses the pair; a NULL-technician row does too', async () => {
+    const pair = await buildPair();
+    const approved = await approvedFor(pair);
+    const target = approved.results[0].move[0].to;
+    const otherCustomer = randomUUID();
+    await trx('customers').insert({
+      id: otherCustomer, first_name: 'Other', last_name: 'Fixture', email: `${otherCustomer}@example.invalid`,
+      phone: `+1941555${String(Math.floor(Math.random() * 10000)).padStart(4, '0')}`,
+      address_line1: '200 Test Lane', city: 'Test City', zip: '00000', active: true, pipeline_stage: 'active_customer',
+    });
+    // Same technician, overlapping the pest window (09:00 + pest duration).
+    const booked = await row({
+      customer_id: otherCustomer, is_recurring: false, service_type: 'Lawn Care Visit', scheduled_date: target,
+      status: 'confirmed', window_start: '09:30', window_end: '10:30', technician_id: techId,
+    });
+    const before = await snapshot();
+    let res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'technician_booked_in_window' });
+    expect(await snapshot()).toBe(before);
+
+    // Mirror guard: a technician-NULL row collides with any technician.
+    await trx('scheduled_services').where({ id: booked.id }).update({ technician_id: null });
+    res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'technician_booked_in_window' });
+    expect(await snapshot()).toContain(booked.id);
+
+    // A different technician's booking in the same window does not block.
+    const otherTech = randomUUID();
+    await trx('technicians').insert({
+      id: otherTech, name: 'Other synthetic tech', employment_status: 'active', field_dispatchable: true,
+    });
+    await trx('scheduled_services').where({ id: booked.id }).update({ technician_id: otherTech });
+    res = await applyApproved(trx, approved, { apply: false });
+    expect(res.pairs[0]).toMatchObject({ status: 'would_apply' });
+  });
+
+  test('rollback refuses a row that gained an invoice, a customer confirmation, or whose original date is now near-term', async () => {
+    const pair = await buildPair();
+    const approved = await approvedFor(pair);
+    const out = rollbackPath();
+    await applyApproved(trx, approved, { apply: true, rollbackOut: out });
+    const doc = JSON.parse(fs.readFileSync(out, 'utf8'));
+    const [invoiced, confirmed] = doc.moves;
+
+    await trx('invoices').insert({
+      id: randomUUID(), customer_id: customerId, scheduled_service_id: invoiced.id, status: 'sent',
+      invoice_number: `TEST-${Date.now()}`, total: 100, subtotal: 100, token: randomUUID().replaceAll('-', ''),
+    });
+    await trx('scheduled_services').where({ id: confirmed.id }).update({ customer_confirmed: true });
+    const before = await snapshot();
+
+    const res = await rollbackApplied(trx, doc, { apply: true });
+    expect(res.results.find((r) => r.id === invoiced.id)).toMatchObject({ status: 'skipped', reason: 'row_no_longer_movable', detail: 'invoice' });
+    expect(res.results.find((r) => r.id === confirmed.id)).toMatchObject({ status: 'skipped', reason: 'row_no_longer_movable', detail: 'customer_confirmed' });
+    expect(await snapshot()).toBe(before);
+
+    // A recorded original date that is already inside the near-term window is never restored.
+    await trx('scheduled_services').where({ id: confirmed.id }).update({ customer_confirmed: false });
+    const settled = await snapshot();
+    const nearTerm = await rollbackApplied(trx, {
+      ...doc,
+      moves: [{ ...confirmed, before: { ...confirmed.before, scheduled_date: etDateString() } }],
+    }, { apply: true });
+    expect(nearTerm.results[0]).toMatchObject({ status: 'skipped', reason: 'restore_date_not_beyond_near_term' });
+    expect(await snapshot()).toBe(settled);
+  });
+
   test('rollback restores every moved row, and refuses a row that changed since the apply', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);

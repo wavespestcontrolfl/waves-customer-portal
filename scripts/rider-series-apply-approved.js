@@ -56,8 +56,19 @@
  *     rows (this covers occurrence-only add-ons: the row is refused rather
  *     than guessed at)
  *   - seriesExtensionUnbillable says the visit would be unbillable
+ *   - the resolved technician (or any technician-NULL row, or any row at all
+ *     when the moved visit ends up unassigned) already has a booking over the
+ *     moved window (host window start + the pest duration) on the target date;
+ *     the host lawn row itself is exempt
  *   - any lock not free: customer comms, host or pest series maintenance lock
  *     (all try-locks), or the pest series rows (FOR UPDATE NOWAIT)
+ *
+ * ROLLBACK refuses (skips and reports, never forces) any row whose current
+ * values differ from what the apply wrote, that is no longer pending/confirmed
+ * and ungrouped, that the preview's own classification (own fields plus durable
+ * records: reminded/confirmed, invoice, card hold or request, closeout packet,
+ * completion claim, prepaid, in progress, near-term) no longer calls movable,
+ * or whose original date is now past or inside the near-term window.
  *
  * ---------------------------------------------------------------------------
  * SIDE EFFECTS CHECKED (owner ruling: NO customer communication of any kind)
@@ -269,6 +280,30 @@ async function resolveHostJoin(sp, ctx, hostRow, to) {
   };
 }
 
+// The moved visit will occupy [host window start, start + the pest duration] on
+// the target date for the RESOLVED technician. Reuses the shared conflict reader
+// (scheduling/occupancy.js, the one the admin schedule writers use, with the
+// same non-occupying statuses); that reader is tech-blind, so the technician
+// scope is applied here with the mirror guard AGENTS.md requires for booking
+// conflict checks: a technician-NULL row collides with any technician, and an
+// unassigned visit collides with every row in its window. The intended host lawn
+// row and the rows of this pair's own move set are exempt.
+async function assertNoTechnicianConflict(sp, { row, hostRow, join, to, moveIds }) {
+  const { findConflictingVisits } = require('../server/services/scheduling/occupancy');
+  const { ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../server/services/scheduling/window-rules');
+  const clashes = await findConflictingVisits({
+    db: sp,
+    date: to,
+    windowStart: join.windowStart,
+    windowEnd: join.windowEnd,
+    excludeServiceIds: [row.id, hostRow.id, ...moveIds],
+    excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
+  });
+  const clash = clashes.find((c) => !c.technician_id || !join.technicianId
+    || String(c.technician_id) === String(join.technicianId));
+  if (clash) throw new PairSkip('technician_booked_in_window', `${row.id}->${clash.id}`);
+}
+
 async function planMove(sp, ctx, move) {
   const { recurringDispatchDuePatch } = require('../server/services/scheduling/recurring-dispatch-due');
   const { cols } = ctx;
@@ -289,6 +324,9 @@ async function planMove(sp, ctx, move) {
 
   await assertAddonsAndBillable(sp, ctx, row, to);
   const join = await resolveHostJoin(sp, ctx, hostRow, to);
+  await assertNoTechnicianConflict(sp, {
+    row, hostRow, join, to, moveIds: [...ctx.moveIds],
+  });
 
   const changes = {
     scheduled_date: to, window_start: join.windowStart, window_end: join.windowEnd, technician_id: join.technicianId,
@@ -494,6 +532,27 @@ function assertUnchangedSinceApply(row, entry) {
   }
 }
 
+// The visit may have picked up a customer commitment since the apply without
+// any moved column changing (a reminder or confirmation sent, an invoice, a card
+// hold or request, a closeout packet, a completion claim, prepaid, in progress).
+// Re-runs the preview's own classification (classifyRiderRow: own fields plus
+// durable records, under the caller's row lock) and refuses anything that is not
+// still plainly movable. Also refuses to restore onto a past date or a date
+// inside the near-term window, which the preview treats as immovable.
+async function assertStillRestorable(sp, row, entry) {
+  const { etDateString } = require('../server/utils/datetime-et');
+  const {
+    NEAR_TERM_DAYS, _internals: { attributeReasonMap, classifyRiderRow, addDaysStr },
+  } = require('../server/services/rider-series-preview');
+  const todayStr = etDateString();
+  const nearTermCutoff = addDaysStr(todayStr, NEAR_TERM_DAYS);
+  const restoreTo = entry.before.scheduled_date;
+  if (!restoreTo || restoreTo <= nearTermCutoff) throw new PairSkip('restore_date_not_beyond_near_term', restoreTo);
+  const reasonMap = await attributeReasonMap(sp, [row.id]);
+  const verdict = classifyRiderRow(row, reasonMap, nearTermCutoff, todayStr);
+  if (!verdict.movable) throw new PairSkip('row_no_longer_movable', verdict.why || (verdict.terminal ? 'terminal' : 'booster'));
+}
+
 // Reverts one recorded move (verify-then-restore; a changed row is skipped).
 async function revertEntry(sp, entry, { apply, cols }) {
   if (apply) await lockRollbackEntry(sp, entry);
@@ -506,6 +565,7 @@ async function revertEntry(sp, entry, { apply, cols }) {
     throw err;
   }
   assertUnchangedSinceApply(row, entry);
+  await assertStillRestorable(sp, row, entry);
   if (!apply) return;
   const n = await sp('scheduled_services').where({ id: entry.id, scheduled_date: entry.after.scheduled_date })
     .whereIn('status', PENDING_STATUSES).whereNull('visit_id')
