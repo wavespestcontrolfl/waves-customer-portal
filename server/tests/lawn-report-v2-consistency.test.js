@@ -884,6 +884,15 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(later.aftercare.wateringHold).toBe(true);
   });
 
+  test('post-hold water-in is credited against the plan like a standalone one when deep enough', () => {
+    const { buildWateringInstruction: build2 } = require('../services/service-report/lawn-watering-instruction');
+    const deep = build2({ rules: [HOLD_RULE, { ...LATE_WATER_IN_RULE, water_in_inches: 0.5 }], completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
+    const after = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: deep, nowMs: Date.parse('2026-10-01T19:00:00Z') });
+    expect(after.aftercare).toMatchObject({ wateringHold: false, creditableWaterIn: true });
+    expect(after.aftercare).not.toHaveProperty('waterInTask');
+    expect(renderedWeekPlan(after.aftercare, after.water.weekPlan)).toBe(RUN_PLAN.afterTreatment);
+  });
+
   test('mixed hold + water-in resolves to hold; the water-in is banner text only', () => {
     const { instruction, report } = build([HOLD_RULE, LATE_WATER_IN_RULE]);
     expect(instruction.state).toBe('hold_then_water_in');

@@ -414,6 +414,24 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(first).not.toBe(await signatureFor(record(), 24));
     });
 
+    test('a failed base catalog enrichment is a non-reusable stamp too', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const failedFor = async () => {
+        const row = record();
+        const knex = makeKnex({ ...fixtures(), products_catalog: FAIL, service_records: [row] });
+        return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
+      };
+      expect(await failedFor()).not.toBe(await failedFor());
+    });
+
+    test('a frozen visit re-keys when its instruction changes phase (a cached PDF never outlives the deadline)', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const timed = { lawnWateringFreeze: { wateringInstruction: { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: '2026-10-01T19:00:00.000Z', expiresAt: '2026-10-01T19:00:00.000Z' } } };
+      const before = await signatureFor(record(timed), 24);
+      nowSpy.mockReturnValue(Date.parse('2026-10-01T19:00:01Z'));
+      expect(await signatureFor(record(timed), 24)).not.toBe(before);
+    });
+
     test('gate off: no stamp at all, so the signature ignores the rule', async () => {
       delete process.env.GATE_LAWN_WATERING_RULE;
       expect(await signatureFor(record(), 24)).toBe(await signatureFor(record(), 48));

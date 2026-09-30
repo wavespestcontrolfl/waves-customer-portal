@@ -494,20 +494,6 @@ function buildAftercare(applications, opts = {}) {
       wateringEnded: true,
     });
   }
-  // A timed hold that has elapsed on a hold-then-water-in visit: the water-in
-  // is what is due now. It becomes the task (never credited: the plan keeps
-  // its not-before overlay for the rest of the week).
-  if (phase === 'water_in' && instruction.state === 'hold_then_water_in') {
-    return normalizeLawnAftercare({
-      ...recorded,
-      watering: instruction.lines.join(' '),
-      waterInRequired: true,
-      wateringHold: false,
-      creditableWaterIn: false,
-      // The banner's own water-in line, verbatim (the PDF strips banner lines).
-      waterInTask: instruction.lines[1],
-    });
-  }
   if (phase) {
     const holds = phase === 'hold';
     // A water-in credits a full weekly run only when it is at least as deep as
@@ -518,6 +504,19 @@ function buildAftercare(applications, opts = {}) {
     const runDepth = plan?.depthInches == null || plan.depthInches === '' ? NaN : Number(plan.depthInches);
     const creditsRun = !plan?.title || plan.prescribesRun !== true
       || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
+    // A timed hold-then-water-in whose hold has elapsed: the water-in is what
+    // is due now, credited against the plan exactly like a standalone one;
+    // uncredited, its own banner line (verbatim, so the PDF strips it) is the task.
+    if (phase === 'water_in' && instruction.state === 'hold_then_water_in') {
+      return normalizeLawnAftercare({
+        ...recorded,
+        watering: instruction.lines.join(' '),
+        waterInRequired: true,
+        wateringHold: false,
+        creditableWaterIn: creditsRun,
+        ...(creditsRun ? {} : { waterInTask: instruction.lines[1] }),
+      });
+    }
     return normalizeLawnAftercare({
       ...recorded,
       // Every treatment sentence: the PDF and Ask Waves read only this field.

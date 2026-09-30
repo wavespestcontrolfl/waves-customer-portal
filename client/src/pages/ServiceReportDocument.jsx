@@ -779,12 +779,17 @@ export default function ServiceReportDocument({ data, token }) {
   // insight actions restate banner lines verbatim (a hold-then-water-in hero
   // carries both steps, and the water-in step alone once the hold ends), so
   // every banner line is stripped from them (any other advice stays).
-  const bannerLines = hasActualTreatment
+  // Stripped sentence by sentence: the banner composes a plan sentence onto a
+  // frozen line (partial credit), so the frozen sentence alone must go too.
+  const bannerSentences = hasActualTreatment
     && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
-    ? (data.reportV2.banner.lines || []).filter((line) => typeof line === 'string' && line) : [];
+    ? (data.reportV2.banner.lines || [])
+      .filter((line) => typeof line === 'string' && line)
+      .flatMap((line) => [line, ...line.split(/(?<=[.!?])\s+/)])
+      .sort((a, b) => b.length - a.length) : [];
   const pushAction = (text) => {
-    if (!bannerLines.length) { pushRec(text); return; }
-    pushRec(bannerLines.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' '));
+    if (!bannerSentences.length) { pushRec(text); return; }
+    pushRec(bannerSentences.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' '));
   };
   pushRec(v2NextMove);
   pushRec(termiteNextMove);

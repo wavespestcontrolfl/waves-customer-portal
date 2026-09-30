@@ -1435,14 +1435,15 @@ hold, water-in or hold-then-water-in: `reportV2.banner`
 finished customer sentences with absolute Eastern clock times; `holdUntil`,
 `waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
 has dried" hold has no printed duration and `expiresAt: null` (dryness is a
-condition, so neither it nor a timed hold that also waits for drying ever ends by
-the clock; the plan-week scope bounds it), and an until-dry-only hold also has
+condition, so no instruction that waits for drying, including one followed by a
+water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
 `holdUntil: null`; the key is absent when there is no claim); `reportV2.aftercare`
 gains `evidenceSource: 'product_instruction'`, `wateringHold` (while a hold is
 live), `creditableWaterIn` (water-in only; a mixed visit is a hold), `holdTask`
 (the banner's first line verbatim, or its first two lines for hold-then-water-in),
 `waterInTask` (a banner line verbatim: an uncredited water-in, or the water-in
-step once a timed hold-then-water-in hold has ended), `wateringEnded: true` past
+step once a timed hold-then-water-in hold has ended; that step is credited
+against the plan like a standalone water-in), `wateringEnded: true` past
 `expiresAt` (the wording stays as a record, nothing is restricted, credited or
 promoted), `ruleSource`, `holdUntil` and `waterInBy`; and
 `reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
@@ -1451,9 +1452,9 @@ end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
 never reaches the payload). Provenance: `ruleSource` is `label`, `owner` or
 `default`, the weakest source among the rules that drive the instruction; state
 `none` is asserted only when every applied product resolved to a rule and at
-least one is label- or owner-sourced, and a product with no rule contributes
-nothing (with nothing else forcing a hold or water-in the state is no claim and
-the existing fail-closed aftercare stays). The rule itself
+least one is label- or owner-sourced; any applied product with no rule makes
+the whole visit no claim (no banner, no product_instruction aftercare, the
+existing fail-closed aftercare stays), whatever the other products say. The rule itself
 (`wateringRule` / `post_application_watering`) never appears on
 `applications[].product` or anywhere else in the public payload. The complete
 instruction is frozen at completion under `structured_notes.lawnWateringFreeze`

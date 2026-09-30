@@ -222,10 +222,9 @@ function emptyInstruction() {
  * (Times are always America/New_York; see utils/datetime-et.js.)
  * @param {object|null} [input.runtime] { runMinutes, wateringDays, headTypes,
  *                                    explicitInchesPerWeek, unconfirmed }
- * @param {null} [input.forecast]     reserved (forecast-aware water-in is a later PR)
  * @returns {object}
  */
-function buildWateringInstruction({ rules, completedAt, runtime = null, forecast = null } = {}) {  
+function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
   const resolved = list.map(ruleOf);
@@ -311,11 +310,14 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, forecast
   } else {
     out.holdUntilLabel = DRY_LABEL;
     out.holdUntilPlanLabel = DRY_PLAN_LABEL;
+    out.holdUntilDry = true;
     holdLabel = DRY_LABEL;
   }
   if (waterInDetail) {
     out.state = 'hold_then_water_in';
-    out.expiresAt = out.waterInBy;
+    // A hold that waits for drying keeps the whole note live past the water-in
+    // deadline: the drying condition never ends by the clock.
+    out.expiresAt = dryHolds.length ? null : out.waterInBy;
     out.lines = [
       `Skip your turf watering until ${holdLabel}.`,
       `After that, water in today’s treatment by ${out.waterInByLabel}: run ${waterInDetail.clause}.`,

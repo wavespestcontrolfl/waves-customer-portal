@@ -612,9 +612,19 @@ const BANNER_HOLD_STATES = ['hold', 'hold_then_water_in'];
 export function LawnWateringBanner({ banner }) {
   const print = usePrint();
   const printing = usePrintRequested();
+  const expiresMs = banner?.expiresAt ? Date.parse(banner.expiresAt) : NaN;
+  // An open tab crosses the deadline too: re-render once when it passes
+  // (setTimeout's ceiling is ~24.8 days; a later expiry re-arms on reload).
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    if (!Number.isFinite(expiresMs)) return undefined;
+    const wait = expiresMs - Date.now() + 1000;
+    if (wait <= 0 || wait > 2147483647) return undefined;
+    const timer = setTimeout(() => setTick((n) => n + 1), wait);
+    return () => clearTimeout(timer);
+  }, [expiresMs]);
   if (!banner || !Array.isArray(banner.lines) || !banner.lines.length) return null;
   const [heading, ...rest] = banner.lines;
-  const expiresMs = banner.expiresAt ? Date.parse(banner.expiresAt) : NaN;
   const ended = !(print || printing) && Number.isFinite(expiresMs) && Date.now() > expiresMs;
   const hold = BANNER_HOLD_STATES.includes(banner.state);
   return (

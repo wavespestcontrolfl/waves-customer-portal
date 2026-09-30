@@ -27,7 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule } = require('./lawn-watering-rule');
-const { buildWateringInstruction, composeBannerLines } = require('./lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines, instructionPhaseAt } = require('./lawn-watering-instruction');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -2552,7 +2552,7 @@ class PinnedAssessmentUnavailable extends Error {
 // overlay; PDFs rendered before the watering instruction existed must re-key.
 const LAWN_RENDER_STRATEGY = 'p7-watering-instruction-20260929';
 
-// ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
+// ':wr=1:<phase>' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a
 // cache-lookup caller stamps the same as the full one. A failed read stamps
 // random (fail-open to a re-render, like the prefs read above).
@@ -2560,14 +2560,17 @@ async function lawnWateringRuleStamp(service, knex) {
   if (!service?.id) return ':wr=1';
   try {
     const row = await knex('service_records').where({ id: service.id }).first('structured_notes', 'service_data');
-    if (readFrozenWateringInstruction(parseJsonObject(row?.structured_notes))) return ':wr=1';
+    // A frozen visit's payload changes only when its instruction changes phase
+    // (hold -> water-in -> ended), so the phase is the stamp.
+    const frozenInstruction = readFrozenWateringInstruction(parseJsonObject(row?.structured_notes));
+    if (frozenInstruction) return `:wr=1:${instructionPhaseAt(frozenInstruction) || 'none'}`;
     const rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
     const products = await attachApprovedReportProductFacts(knex, rawProducts, {
       frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
     });
     // A failed live rule lookup leaves rules UNKNOWN, not absent: hashing them
     // as null would match a PDF cached before the rule existed.
-    if (products?.wateringRuleLookupFailed) return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
+    if (products?.wateringRuleLookupFailed || products?.catalogEnrichmentFailed) return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
     const pairs = (products || []).map((p) => `${canonicalProductId(p.product_id) || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}`).sort();
     return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
   } catch {

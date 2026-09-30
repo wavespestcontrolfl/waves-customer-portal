@@ -420,7 +420,7 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     ]);
     expect(composeBannerLines(r, WITH_PLAN)[2]).toBe('Then follow this week’s plan below.');
     expect(r.expiresAt).toBeNull();
-    expect(r.holdUntilDry).toBe(false);
+    expect(r.holdUntilDry).toBe(true);
     expect(r.waterInBy).toBeNull();
     expect(r.ruleSource).toBe('label');
     expectCleanCopy(r);
@@ -455,7 +455,9 @@ describe('hold until the treatment has dried (no invented duration)', () => {
       'Run it even if it is not your usual day.',
     ]);
     expect(r.waterInBy).toBe('2026-10-01T18:00:00.000Z');
-    expect(r.expiresAt).toBe(r.waterInBy);
+    // The drying condition keeps the note live past the water-in deadline.
+    expect(r.expiresAt).toBeNull();
+    expect(instructionPhaseAt(r, Date.parse('2026-10-05T00:00:00Z'))).toBe('hold');
     expect(r.lines.join(' ')).not.toMatch(/\b6\b|six/i);
     expectCleanCopy(r);
     noDryFigure(r);

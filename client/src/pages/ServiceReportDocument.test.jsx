@@ -397,6 +397,24 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text.split(line2)).toHaveLength(2);
   });
 
+  it('partial credit: the frozen any-day sentence inside an action is stripped even though the banner composed a longer line', () => {
+    const line1 = 'Water in today’s treatment by Thu 2 PM.';
+    const line2 = 'Run each zone about 40 minutes.';
+    const frozen3 = 'Run it even if it is not your usual day.';
+    const composed3 = `${frozen3} That counts toward this week’s watering.`;
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'water_in', lines: [line1, line2, composed3], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2} ${frozen3}`, waterInTask: line1, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2} ${frozen3}` },
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    expect(container.textContent.split(frozen3)).toHaveLength(2);
+  });
+
   it('without a banner the recommendations list is unchanged', () => {
     const line1 = 'Skip your turf watering until Thu 3 PM.';
     const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { aftercare: { watering: line1 }, snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: 'Water the front strip by hand.' } } };

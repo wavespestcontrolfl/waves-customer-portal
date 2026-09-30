@@ -5,7 +5,7 @@
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LawnTrends, ScoreRing as LawnScoreRing, WaterIntakeBar } from './LawnReportV2';
 import LawnReportV2Section from './LawnReportV2Section';
 import { ScoreRing as TreeShrubScoreRing } from '../treeShrubV2/TreeShrubReportV2';
@@ -396,6 +396,19 @@ describe('LawnReportV2Section watering banner', () => {
     expect(screen.getByTestId('lawn-watering-banner-ended')).toHaveTextContent('This watering note was for the day of your visit.');
     expect(screen.queryByTestId('lawn-watering-banner-heading')).toBeNull();
     expect(screen.queryByText(/Skip your turf watering/)).toBeNull();
+  });
+
+  it('an open tab switches to the ended note when expiresAt passes, with no other re-render', () => {
+    vi.useFakeTimers();
+    try {
+      const expiresAt = new Date(Date.now() + 60 * 1000).toISOString();
+      render(<LawnReportV2Section data={{ snapshot: SNAPSHOT, banner: { ...BANNERS.hold, expiresAt } }} />);
+      expect(screen.queryByTestId('lawn-watering-banner-ended')).toBeNull();
+      act(() => { vi.advanceTimersByTime(62 * 1000); });
+      expect(screen.getByTestId('lawn-watering-banner-ended')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('print / PDF keeps the lines even past expiry, in the same block', () => {
