@@ -224,11 +224,6 @@ async function publishPlan(knex, plan) {
   const optional = unique([...json(template.optional_variables, []), ...plan.variables]
     .filter((v) => !json(template.required_variables, []).includes(v)));
   const now = new Date();
-  await knex('email_templates').where({ id: template.id }).update({
-    allowed_variables: JSON.stringify(allowed),
-    optional_variables: JSON.stringify(optional),
-    updated_at: now,
-  });
 
   const { validationFor } = require('../../services/email-template-library');
   const validation = validationFor({ ...template, allowed_variables: allowed }, { ...prior, blocks: nextBlocks });
@@ -262,7 +257,14 @@ async function publishPlan(knex, plan) {
   }
   const moved = await knex('email_templates')
     .where({ id: template.id, active_version_id: prior.id })
-    .update({ active_version_id: created.id, last_published_at: now, updated_at: now });
+    .update({
+      active_version_id: created.id,
+      // Widened only together with the swap, so a skipped or raced template is untouched.
+      allowed_variables: JSON.stringify(allowed),
+      optional_variables: JSON.stringify(optional),
+      last_published_at: now,
+      updated_at: now,
+    });
   if (!moved) {
     await knex('email_template_versions').where({ id: created.id }).update({ status: 'archived', updated_at: now });
     return 'raced';

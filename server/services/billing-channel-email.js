@@ -9,6 +9,7 @@ const {
 const { buildBillingReplayContext, isBillingReplaySource } = require('./billing-email-replay-context');
 const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
 const BillingEmailDetails = require('./billing-email-details');
+const logger = require('./logger');
 
 function clean(value) {
   return String(value || '').trim();
@@ -202,6 +203,7 @@ async function sendBillingChannelEmailOnce(input, { preSendCheck } = {}) {
   } catch (err) {
     // Details are additive: a lookup that fails sends the notice without them.
     detailPayload = {};
+    logger.warn(`[billing-channel-email] invoice detail lookup failed for invoice ${context.invoice?.id || 'unknown'}: ${err.message}`);
   }
   const replayContext = buildBillingReplayContext(input, context, notificationEventKey);
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
