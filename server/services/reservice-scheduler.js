@@ -535,6 +535,14 @@ const RESERVICE_PEST_NOUN_UNBOUND_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}
 function activePestClauses(kept) {
   return kept.filter((clause) => RESERVICE_ACTIVITY_BOUND_RES.some((re) => re.test(clause)));
 }
+// Does the message name ANOTHER service than `lane` (the other self-bookable lane, or an excluded specialty)?
+// Location phrases ("on the lawn") are not a service. Used to keep the re-service the sole need (round-29 P1).
+function namesOtherService(text, lane) {
+  const s = String(text || '');
+  if (reportedReserviceExcludedSpecialty(s)) return true;
+  const located = s.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
+  return RESERVICE_LANE_WORD_PATTERNS.some(([other, rx]) => other !== lane && rx.test(located));
+}
 function isActivePestReport(text) {
   const { kept, asserted } = reservicePestReportFacts(text);
   if (activePestClauses(asserted).length) return true;
@@ -724,6 +732,7 @@ module.exports = {
   reportedReserviceLane,
   reportedReserviceExcludedSpecialty,
   isActivePestReport,
+  namesOtherService,
   mentionsAffirmed,
   openReserviceCallbacks,
   openCallbackExistsForLane,

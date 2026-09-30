@@ -1059,7 +1059,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       jest.dontMock('../services/reservice-scheduler'); // doMock registrations outlive resetModules
       jest.resetModules();
     });
-    const run = async ({ availability, inboundMessage = 'the ants are back', context, schedulingIntent = true }) => {
+    const run = async ({ availability, inboundMessage = 'the ants are back', context, schedulingIntent = false, intent = 'general_customer_sms_needs_review' }) => {
       process.env[GATE] = 'true';
       const getAvailableSlots = jest.fn(async () => ({ zone: 'Venice Zone', days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] }));
       mockDraftDeps({ getAvailableSlots });
@@ -1071,7 +1071,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       const drafter = require('../services/sms-shadow-drafter');
       const result = await drafter.generateGroundedDraft({
         client: {}, context: context || { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], serviceHistory: [{ type: 'General Pest Control' }] },
-        inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent, city: 'Venice', voiceProfile: null,
+        inboundMessage, intent: { intent }, schedulingIntent, city: 'Venice', voiceProfile: null,
       });
       return { result, getAvailableSlots, loadBookableCallServices };
     };
@@ -1093,12 +1093,44 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       expect(out.getAvailableSlots).not.toHaveBeenCalled();
     });
 
+    // Codex round-29 P1: the shortcut applies only when the re-service is the customer's SOLE need.
+    test('mixed / cancel requests keep the normal OPEN TIMES lookup: "ants are back, cancel my plan", "ants are back. Can I move my lawn visit to Friday?"', async () => {
+      const eligible = { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true };
+      for (const inboundMessage of [
+        'The ants are back, cancel my plan',
+        'The ants are back. Can I move my lawn visit to Friday?',
+        'the ants are back and I want to reschedule my visit',
+        'the ants are back, I want a refund',
+        'ants are back and my lawn looks bad',
+      ]) {
+        const out = await run({ availability: eligible, inboundMessage });
+        expect(out.getAvailableSlots).toHaveBeenCalled();
+        expect(out.result.factsBlock).toContain('OPEN TIMES');
+      }
+      // an upstream scheduling-intent flag or a cancel-classified intent also keeps the lookup
+      expect((await run({ availability: eligible, schedulingIntent: true })).getAvailableSlots).toHaveBeenCalled();
+      expect((await run({ availability: eligible, intent: 'CANCEL_REQUEST' })).getAvailableSlots).toHaveBeenCalled();
+      // ...while plain reports (persistence wording, a customer_issue intent, a location) still skip it
+      for (const [inboundMessage, intent] of [['the ants are back', 'general_customer_sms_needs_review'], ['the ants came back', 'customer_issue_needs_review'], ['ants are back on the lawn', 'COMPLAINT'], ["they're back", 'general_customer_sms_needs_review']]) {
+        const out = await run({ availability: eligible, inboundMessage, intent });
+        expect(out.getAvailableSlots).not.toHaveBeenCalled();
+      }
+    });
+
+    test('reserviceIsOnlySchedulingNeed: the sole-need rule, unit rows', () => {
+      const { reserviceIsOnlySchedulingNeed } = require('../services/sms-shadow-drafter');
+      const only = (inboundMessage, extra = {}) => reserviceIsOnlySchedulingNeed({ inboundMessage, intent: { intent: 'customer_issue_needs_review' }, schedulingIntent: false, ...extra });
+      for (const m of ['the ants are back', 'the ants came back', 'I keep seeing roaches', 'ants are back on the lawn', 'the ants are back, whats my balance']) expect(only(m)).toBe(true);
+      for (const m of ['the ants are back, cancel my plan', 'ants are back. can I move my lawn visit to Friday?', 'ants are back, any availability next week?', 'ants are back and the lawn has weeds', 'the termites and ants are back', 'ants are back, I want to book a mosquito treatment']) expect(only(m)).toBe(false);
+      expect(only('the ants are back', { schedulingIntent: true })).toBe(false);
+    });
+
     test('behavior otherwise identical: not eligible, a non-pest question, or a termite report still gets the normal-slot work', async () => {
       const none = { eligible: [], open: {}, bookable: [], verified: true };
       let out = await run({ availability: none });
       expect(out.getAvailableSlots).toHaveBeenCalled();
       expect(out.result.factsBlock).toContain('OPEN TIMES');
-      out = await run({ availability: { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true }, inboundMessage: 'can I move my visit to Friday?' });
+      out = await run({ availability: { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true }, inboundMessage: 'can I move my visit to Friday?', schedulingIntent: true });
       expect(out.getAvailableSlots).toHaveBeenCalled();
       out = await run({ availability: { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true }, inboundMessage: 'the termites are back' });
       expect(out.getAvailableSlots).toHaveBeenCalled();

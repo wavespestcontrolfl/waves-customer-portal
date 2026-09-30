@@ -1260,8 +1260,19 @@ function reserviceReplyHasOfferWording(text) {
 }
 // Does the re-service lane decide the reply (an active pest report on a bookable or already-booked lane)? Then normal
 // OPEN TIMES work is skipped (Codex round-28 P2).
-function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
+// Codex round-29 P1: the shortcut applies ONLY when the re-service is the customer's sole need. A pest report that also
+// cancels / complains, asks to move or book another visit, or names another service ("The ants are back, cancel my
+// plan"; "The ants are back. Can I move my lawn visit to Friday?") still needs the normal OPEN TIMES lookup.
+const RESERVICE_OTHER_REQUEST_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|push|pushing|change|changing|switch|swap|skip|postpone|delay|cancel\w*|book|booking|another\s+(?:day|time)|different\s+(?:day|time)|what\s+times?|which\s+times?|any\s+(?:openings?|availability)|availab\w+|openings?|earlier|later\s+(?:date|time|day)|next\s+(?:week|available)|appointment)\b/i;
+function reserviceIsOnlySchedulingNeed({ inboundMessage, intent, schedulingIntent }) {
+  const text = String(inboundMessage || '');
+  if (schedulingIntent || /cancel/i.test(String(intent?.intent || ''))) return false;
+  if (SAVE_SALE_NON_PEST_TEXT_RE.test(text) || RESERVICE_OTHER_REQUEST_RE.test(text)) return false;
+  return !require('./reservice-scheduler').namesOtherService(text, 'pest');
+}
+function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context, intent, schedulingIntent }) {
   if (!reserviceState || !gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context)) return false;
+  if (!reserviceIsOnlySchedulingNeed({ inboundMessage, intent, schedulingIntent })) return false;
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const lane = reportedReserviceLane(inboundMessage) || pronounOnlyReportLane(inboundMessage, context);
   return Boolean(lane) && (reserviceState.lanes.includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
@@ -1485,13 +1496,6 @@ function reserviceBookedClaims(body, info, lane) {
     if (relative) claims.relative.add(relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today');
   }
   return claims;
-}
-// Codex round-22 P2 (PR #5336): a sentence refers to the booked callback only when it (a) carries an
-// existing-appointment marker, a relative day, or the callback's stored day/date/time AND (b) has RE-SERVICE
-// context in the same sentence that does not name only ANOTHER lane. "Your regular lawn treatment is already
-// scheduled for Thursday" is an ordinary visit, not the callback — a moved pest callback must not block it.
-function reserviceBodyRefersToBooked(body, info, lane) {
-  return reserviceBookedClaims(body, info, lane).refers;
 }
 async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
   const entries = Object.entries(reserviceBookedSnapshot(booked))
@@ -2979,7 +2983,11 @@ const MAX_REVISIONS = (() => {
 const SAVE_SALE_INTENT_RE = /cancel|complaint|customer_issue/i;
 // The persistence constructions ("still seeing/have/getting", "came back", "keep coming") come from the ONE shared
 // source the scheduler's pest-report classifier also reads (Codex round-24 P2).
-const SAVE_SALE_TEXT_RE = new RegExp(String.raw`\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|${PEST_PERSISTENCE_PHRASES_SOURCE}|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b`, 'i');
+const SAVE_SALE_TEXT_ALTS = String.raw`cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|${PEST_PERSISTENCE_PHRASES_SOURCE}|what happened|went wrong|refund|upset|missed|no.?show|never showed`;
+const SAVE_SALE_TEXT_RE = new RegExp(String.raw`\b(${SAVE_SALE_TEXT_ALTS})\b`, 'i');
+// The same save-the-sale / cancel wording WITHOUT the pest-persistence constructions ("came back", "still seeing"):
+// those ARE the pest report, so they cannot count as a second need (Codex round-29 P1).
+const SAVE_SALE_NON_PEST_TEXT_RE = new RegExp(String.raw`\b(${SAVE_SALE_TEXT_ALTS.replace(`|${PEST_PERSISTENCE_PHRASES_SOURCE}`, '')})\b`, 'i');
 
 // Pest-report text signal for the OPEN TIMES availability fetch below
 // (Codex round-1 P2 (b), widened Codex round 2): mirrors the PEST REPORTS
@@ -3225,7 +3233,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live draft resolves eligibility through the
   // existing re-service mechanism.
   const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
-  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage, context });
+  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage, context, intent, schedulingIntent });
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
@@ -3962,5 +3970,7 @@ module.exports = {
   PRONOUN_RETURN_TEXT_RE,
   customerHasPestRelationship,
   pestReportSignal,
+  reserviceLaneDecidesReply,
+  reserviceIsOnlySchedulingNeed,
   reportedPestLane,
 };
