@@ -28,7 +28,7 @@ const { subscribeOrResubscribe, EMAIL_RE } = require('./newsletter-subscribers')
 const { sendConfirmationEmail } = require('./newsletter-confirm');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { isLikelyE164 } = require('../utils/phone');
-const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
+const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation } = require('../config/locations');
 const { safeErrorToken } = require('../utils/sentry-scrub');
@@ -133,7 +133,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 
@@ -2072,7 +2072,7 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
 const { VOICE_AGENT_BOOKING_SOURCE_ACTION, isPendingOutboundReviewBooking } = require('./call-booking-source-actions');
-const { findStreetLevelHoldCard } = require('./street-level-hold');
+const { findStreetLevelHoldCard, isStreetLevelHoldVisit } = require('./street-level-hold');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -9264,6 +9264,9 @@ const CallRecordingProcessor = {
           return trx('triage_items')
             .where({ call_log_id: call.id })
             .whereIn('status', ['open', 'in_progress'])
+            // A street-level address hold's card belongs to its VISIT, not to the
+            // transcript: it stays until the office confirms, corrects or cancels it.
+            .whereRaw(SUPERSEDE_KEPT_CARD_SQL)
             .update({ status: 'dismissed', resolution_note: 'Transcript rejected as an implausible hallucination.', resolved_at: new Date(), updated_at: new Date() });
         });
         if (dismissed > 0) logger.info(`[call-proc] Dismissed ${dismissed} stale triage card(s) for ${maskSid(callSid)} after transcript rejection`);
@@ -20246,6 +20249,14 @@ const CallRecordingProcessor = {
       // — each transaction sees the other's card as still open and both skip
       // clearing review_status, stranding it 'open' on a fully-terminal call.
       await lockTriageCall(trx, call.id);
+      // A street-level hold's review reason counts only while its visit is still
+      // an unconfirmed hold: staff may have confirmed (the confirm hook already
+      // resolved the card and closed review_status) since the booking pass pushed
+      // it, and a stale reason must not reopen a call with no open card.
+      const streetLevelStillHeld = !bridgeNeedsConfirmation.includes('street_level_address_review')
+        || (!!appointmentResult?.scheduledServiceId && await isStreetLevelHoldVisit(appointmentResult.scheduledServiceId, trx));
+      const reviewReasonCount = bridgeNeedsConfirmation
+        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;
       // Keep the established leads -> call_log lock order. The transition
       // below must commit only with this processing token's final verdict.
       if (liveLeadConversation) await trx('leads').where({ id: leadId }).forUpdate().first('id');
@@ -20262,7 +20273,7 @@ const CallRecordingProcessor = {
           // a terminal status with a log line and nothing else — no review
           // flag, no card, no sweep — the one honest-failure state nobody
           // could see.
-          ...(bridgeNeedsConfirmation.length || schedulingChangeHeld || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
+          ...(reviewReasonCount || schedulingChangeHeld || finalStatus === 'lead_creation_failed' || finalStatus === 'customer_creation_failed'
             ? { review_status: 'open' } : {}),
           metadata: db.raw(
             "jsonb_set(COALESCE(metadata, '{}'::jsonb), '{processing_timings}', ?::jsonb, true)",

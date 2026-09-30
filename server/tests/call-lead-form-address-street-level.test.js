@@ -683,7 +683,7 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(push - branch).toBeLessThan(900);
     // No lead artifact is written with it before the booking: the only writer is that push, and the
     // lead's ai_triage activity is refreshed by the existing late-hold path (a length comparison).
-    expect(s.split("'street_level_address_review'").length - 1).toBeLessThanOrEqual(3);
+    expect(s.split("'street_level_address_review'").length - 1).toBeLessThanOrEqual(6);
     expect(push).toBeGreaterThan(s.indexOf('bridgeConfirmationsAtTriageWrite = [...bridgeNeedsConfirmation];'));
     expect(push).toBeLessThan(s.indexOf('bridgeNeedsConfirmation.length > bridgeConfirmationsAtTriageWrite.length'));
     // It reads as a plain instruction on the lead's activity.
@@ -703,5 +703,27 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     }
     const proc = src();
     expect(proc).not.toContain('refileStreetLevelReviewCard');
+  });
+
+  test('r12 transcript-rejection cleanup keeps the hold card too (same predicate)', () => {
+    const proc = src();
+    const at = proc.indexOf("'Transcript rejected as an implausible hallucination.'");
+    expect(at).toBeGreaterThan(0);
+    const block = proc.slice(at - 700, at);
+    expect(block).toContain('.whereRaw(SUPERSEDE_KEPT_CARD_SQL)');
+    expect(proc).toMatch(/V2_DECISION_VERSION, SUPERSEDE_KEPT_CARD_SQL \} = require\('\.\/call-routing-gates'\)/);
+  });
+
+  test('r12 the finalizer rechecks the hold under the per-call lock: a visit confirmed since the booking pass no longer reopens review_status', () => {
+    const proc = src();
+    const lock = proc.indexOf('const finalized = await db.transaction(async (trx) => {');
+    const recheck = proc.indexOf("isStreetLevelHoldVisit(appointmentResult.scheduledServiceId, trx)", lock);
+    const write = proc.indexOf('...(reviewReasonCount || schedulingChangeHeld', lock);
+    expect(lock).toBeGreaterThan(0);
+    expect(recheck).toBeGreaterThan(proc.indexOf('await lockTriageCall(trx, call.id);', lock));
+    expect(write).toBeGreaterThan(recheck);
+    expect(proc).toContain("bridgeNeedsConfirmation\n        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;");
+    // Every other reason still opens review as before.
+    expect(proc).not.toContain('...(bridgeNeedsConfirmation.length || schedulingChangeHeld ||');
   });
 });
