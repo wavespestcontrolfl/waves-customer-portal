@@ -61,4 +61,13 @@ pg('subscriberRowsForBounce on Postgres', () => {
     await seed(['johndoe@gmail.com']);
     expect(await bounce(1, 'jonhdoe@gmail.com')).toBe(0);
   });
+
+  test.each(['.johndoe@gmail.com', 'johndoe.@gmail.com', 'john..doe@gmail.com'])(
+    'a malformed Gmail spelling (%s) keeps the exact fence and never bounce-counts the valid mailbox',
+    async (mailed) => {
+      await seed(['johndoe@gmail.com']);
+      expect(await bounce(1, mailed)).toBe(0);
+      expect(await counts()).toEqual({ 'johndoe@gmail.com': 0 });
+    },
+  );
 });

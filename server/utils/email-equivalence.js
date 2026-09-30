@@ -105,6 +105,8 @@ function suppressionCoversColumnSql(suppressionColumn, recipientColumn) {
  *   what bounced, so every subscriber row for it takes the bounce, and a late
  *   bounce for one spelling still lands when the row was stored under another.
  *   An address on another mailbox (a merged-away typo) still does not match.
+ * - A Google address with invalid dot placement: treated like any other
+ *   address (exact fence), never widened to the valid mailbox.
  * - Any other address: the delivery's row, fenced to the exact LOWER/TRIM
  *   address, as before (dots and +tags are significant off Google).
  *
@@ -113,7 +115,10 @@ function suppressionCoversColumnSql(suppressionColumn, recipientColumn) {
 function subscriberRowsForBounce(query, subscriberId, mailedEmail) {
   const mailed = String(mailedEmail || '').trim().toLowerCase();
   const { googleMailboxIdentity, GOOGLE_MAILBOX_SQL } = require('./customer-comms-lock');
-  const mailbox = mailed ? googleMailboxIdentity(mailed) : null;
+  // A malformed Gmail local part (.john@, john.@, jo..hn@) is not an alias
+  // of the valid mailbox; Gmail rejects it, which is often why it bounced.
+  // It keeps the exact-address fence below.
+  const mailbox = mailed && validDotPlacement(mailed) ? googleMailboxIdentity(mailed) : null;
   if (mailbox) {
     const column = 'TRIM(email)';
     return query.whereRaw(
