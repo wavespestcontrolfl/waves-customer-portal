@@ -403,6 +403,20 @@ describe('a new booking whose final time turn omits the day', () => {
     expect(route(ex, { transcript }).allowed).toBe(true);
   });
 
+  test('a full calendar date is one date, not its fragments (codex #5377 pre-push P1)', () => {
+    // Call Wed Sep 23: Sat Oct 24 2026.
+    const saturday = (dayLine) => {
+      const c = dayOmittedCase({ dayLine });
+      c.ex.scheduling.confirmed_start_at = '2026-10-24T14:00:00-04:00';
+      return grounded(c.ex, c.transcript);
+    };
+    expect(saturday('Caller: October 24th works.').ok).toBe(true);
+    expect(saturday('Caller: Saturday October 24 works.').ok).toBe(true);
+    expect(saturday('Caller: Saturday works.').ok).toBe(false); // the nearest Saturday is Sep 26, not Oct 24
+    expect(saturday('Caller: Saturday October 25 works.').ok).toBe(false); // Oct 25 is a Sunday
+    expect(saturday('Caller: October 25th works.').ok).toBe(false);
+  });
+
   test('fails closed when the earlier day is missing, another date, several, relative or hedged', () => {
     const notOk = (c) => expect(grounded(c.ex, c.transcript).ok).toBe(false);
     notOk(dayOmittedCase({ dayLine: 'Caller: Friday works.' }));

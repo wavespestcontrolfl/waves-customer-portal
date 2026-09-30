@@ -902,14 +902,22 @@ function datesNamedIn(text, started) {
   const toks = normalize(text).split(' ').filter(Boolean);
   const dates = new Set();
   let unresolved = false;
-  for (let i = 0; i < toks.length; i += 1) {
-    for (let n = 1; n <= 4 && i + n <= toks.length; n += 1) {
+  // Complete date expressions, longest first, left to right and never
+  // overlapping: "Saturday October 24" is ONE date, not also "October 24",
+  // "24" and "Saturday".
+  for (let i = 0; i < toks.length;) {
+    let took = 0;
+    for (let n = Math.min(4, toks.length - i); n >= 1 && !took; n -= 1) {
       const span = toks.slice(i, i + n).join(' ');
       const said = statedDateComponents(TODAY_WORDS.test(span) ? 'today' : span, started);
       if (!said) continue;
+      took = n;
       const date = nearestDate(said, started);
-      if (date) dates.add(date); else unresolved = true;
+      // A weekday said with a date must be that date's weekday.
+      const weekdayAgrees = !date || said.weekday === undefined || new Date(`${date}T12:00:00Z`).getUTCDay() === said.weekday;
+      if (date && weekdayAgrees) dates.add(date); else unresolved = true;
     }
+    i += took || 1;
   }
   return { dates, unresolved };
 }
