@@ -29,6 +29,7 @@ const { createDeepMessage } = require('./llm/deep');
 const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratitudeReply } = require('./sms-gratitude');
 const { gateEnvValue } = require('../config/feature-gates');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
+const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -1190,7 +1191,9 @@ const RESERVICE_HANDOFF_TEXT_RE = reserviceHandoffRe(false); // complaints answe
 const RESERVICE_HANDOFF_WITH_ANGER_RE = reserviceHandoffRe(true); // complaints held (gate off): the prompt's whole tie-break
 function reserviceOfferOwed({ inboundMessage, lanes, context }) {
   const handoffRe = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS') ? RESERVICE_HANDOFF_TEXT_RE : RESERVICE_HANDOFF_WITH_ANGER_RE;
-  if (handoffRe.test(String(inboundMessage || ''))) return false;
+  // Codex round-24 P2: only an AFFIRMED hand-off clause suppresses the offer — "I don't need a refund" or
+  // "I don't want to cancel" mentions the term to negate it (the scheduler's clause-level negation rule).
+  if (require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe)) return false;
   return reportedPestLane({ inboundMessage, context, lanes }) === 'pest';
 }
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
@@ -2840,7 +2843,9 @@ const MAX_REVISIONS = (() => {
 //   here labeled service_scheduling_window_reply — the intent string alone
 //   would misroute exactly the retention-critical class to the mini lane.
 const SAVE_SALE_INTENT_RE = /cancel|complaint|customer_issue/i;
-const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|still (?:seeing|have|having|getting|finding)|came back|come back|keep (?:seeing|coming)|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b/i;
+// The persistence constructions ("still seeing/have/getting", "came back", "keep coming") come from the ONE shared
+// source the scheduler's pest-report classifier also reads (Codex round-24 P2).
+const SAVE_SALE_TEXT_RE = new RegExp(String.raw`\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|ing)?|unhappy|frustrated|disappointed|not working|${PEST_PERSISTENCE_PHRASES_SOURCE}|what happened|went wrong|refund|upset|missed|no.?show|never showed)\b`, 'i');
 
 // Pest-report text signal for the OPEN TIMES availability fetch below
 // (Codex round-1 P2 (b), widened Codex round 2): mirrors the PEST REPORTS

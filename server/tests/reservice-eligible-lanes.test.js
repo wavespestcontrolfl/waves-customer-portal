@@ -347,6 +347,14 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['the ants are gone', false, null, false],
     ['the ants stopped', false, null, false],
     ['Why are the ants back?', true, 'pest', false],
+    // round-24 P2: the lane comes from the ACTIVE clause; possession / persistence constructions are sightings
+    ['My lawn service is Tuesday, and the ants are back', true, 'pest', false],
+    ["my lawn treatment was skipped but I don't see ants anymore", false, 'lawn', false],
+    ['I still have ants', true, 'pest', false],
+    ["I'm still getting ants", true, 'pest', false],
+    ['we have so many ants in here', true, 'pest', false],
+    ['I keep seeing roaches', true, 'pest', false],
+    ['weeds are taking over the lawn and the roaches are back', true, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],
@@ -367,5 +375,25 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
   test('the drafter\'s PEST_REPORT_TEXT_RE is that same classifier', () => {
     const { PEST_REPORT_TEXT_RE } = require('../services/sms-shadow-drafter');
     for (const [text, active] of ROWS) expect(PEST_REPORT_TEXT_RE.test(text)).toBe(active);
+  });
+});
+
+
+// Codex round-24 P2: the persistence constructions have ONE source (services/pest-persistence-phrases), read by both
+// SAVE_SALE_TEXT_RE (routing + OPEN TIMES) and this classifier.
+describe('persistence constructions share one source', () => {
+  const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('../services/pest-persistence-phrases');
+  const { SAVE_SALE_TEXT_RE } = require('../services/sms-shadow-drafter');
+  const { isActivePestReport, mentionsAffirmed } = require('../services/reservice-scheduler');
+  test.each(['still seeing', 'still have', 'still having', 'still getting', 'still got', 'still finding', 'keep seeing', 'keep coming'])('"%s"', (phrase) => {
+    expect(new RegExp(`\\b(?:${PEST_PERSISTENCE_PHRASES_SOURCE})\\b`, 'i').test(phrase)).toBe(true);
+    expect(SAVE_SALE_TEXT_RE.test(`I ${phrase} ants`)).toBe(true);
+    expect(isActivePestReport(`I ${phrase} ants`)).toBe(true);
+  });
+
+  test('mentionsAffirmed: a negated hand-off term does not count, an affirmed one does', () => {
+    const re = /\b(?:cancel\w*|refund\w*)\b/i;
+    for (const t of ["I don't need a refund, the ants are back", "I don't want to cancel; ants are back", 'do not cancel my plan', 'no need to cancel']) expect(mentionsAffirmed(t, re)).toBe(false);
+    for (const t of ['I want a refund', 'the ants are back, cancel my service', 'I am going to cancel']) expect(mentionsAffirmed(t, re)).toBe(true);
   });
 });

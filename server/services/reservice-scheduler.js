@@ -20,6 +20,7 @@ const logger = require('./logger');
 const { etDateString } = require('../utils/datetime-et');
 const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
+const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentBooking, scopeToAssessmentBookings } = require('./assessment-booking');
 
 // The two self-bookable callback lanes. serviceKey resolves the catalog row
@@ -429,6 +430,11 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
   // sighting verb … noun ("still see ants", "found roaches"); "more/another/new" must sit right next to the noun
   new RegExp(`\\b(?:see|saw|seeing|seen|found|find|finding|spot(?:ted|ting)?|notic\\w*)\\b(?:\\W+(?!about\\b|regarding\\b|for\\b|with\\b)[\\w'’-]+){0,3}?\\W+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
   new RegExp(`\\b(?:more|another|new)\\s+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
+  // possession / persistence ("I still have ants", "I'm still getting ants", "keep seeing roaches"): the SAME
+  // persistence constructions SAVE_SALE_TEXT_RE reads (pest-persistence-phrases — one source)
+  new RegExp(`\\b(?:${PEST_PERSISTENCE_PHRASES_SOURCE})\\b(?:\\W+(?!about\\b|regarding\\b|for\\b|with\\b)[\\w'’-]+){0,3}?\\W+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
+  // "have / got / getting" with a quantity right before the noun ("we have so many ants", "getting more roaches")
+  new RegExp(`\\b(?:have|having|got|getting)\\s+(?:more|new|another|so\\s+many|a\\s+lot\\s+of|lots\\s+of|tons\\s+of|a\\s+bunch\\s+of)\\s+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
 ];
 
 function reserviceClauseDropped(clause) {
@@ -438,10 +444,12 @@ function reserviceClauseDropped(clause) {
 function reservicePestReportFacts(text) {
   const s = String(text || '');
   const kept = [];
+  const clauses = [];
   let surviving = '';
   let cursor = 0;
   const flush = (end, delimiter) => {
     const clause = s.slice(cursor, end);
+    if (clause.trim()) clauses.push(clause);
     if (clause.trim() && !reserviceClauseDropped(clause)) { kept.push(clause); surviving += clause; } else surviving += ' '.repeat(clause.length);
     surviving += delimiter;
   };
@@ -450,22 +458,46 @@ function reservicePestReportFacts(text) {
     cursor = m.index + m[0].length;
   }
   flush(s.length, '');
-  return { kept, survivingText: surviving };
+  return { kept, clauses, survivingText: surviving };
 }
 // A pronoun return ("they're back", "it is coming back") in a clause that still counts, with a pest noun
 // (not a service name) anywhere in another surviving clause: "the roach poison is not working, they are back".
 const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|was|keep|keeps))?\s+(?:(?:coming|showing)\s+(?:back|up)|back|everywhere|returned|returning)\b/i;
 const RESERVICE_PEST_NOUN_UNBOUND_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i');
+function activePestClauses(kept) {
+  return kept.filter((clause) => RESERVICE_ACTIVITY_BOUND_RES.some((re) => re.test(clause)));
+}
 function isActivePestReport(text) {
   const { kept } = reservicePestReportFacts(text);
-  if (kept.some((clause) => RESERVICE_ACTIVITY_BOUND_RES.some((re) => re.test(clause)))) return true;
+  if (activePestClauses(kept).length) return true;
   return kept.some((clause) => RESERVICE_PRONOUN_RETURN_RE.test(clause)) && kept.some((clause) => RESERVICE_PEST_NOUN_UNBOUND_RE.test(clause));
 }
 
+// Codex round-24 P2: does the message AFFIRM a term (a hand-off word, an anger word)? A clause that mentions
+// it behind a negator ("I don't need a refund", "I don't want to cancel", "not angry") does not count.
+function mentionsAffirmed(text, termRe) {
+  const s = String(text || '');
+  const re = new RegExp(termRe.source, termRe.flags.includes('g') ? termRe.flags : `${termRe.flags}g`);
+  const negatorBefore = new RegExp(`\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,4}\\W*$`, 'i');
+  // match on the WHOLE text (a phrase like "sick and tired" spans a clause delimiter), then judge negation
+  // only within the match's own clause
+  const boundaries = [...s.matchAll(RESERVICE_CLAUSE_DELIMITER_RE)].map((d) => d.index + d[0].length);
+  for (const m of s.matchAll(re)) {
+    const clauseStart = boundaries.filter((at) => at <= m.index).pop() || 0;
+    if (!negatorBefore.test(s.slice(clauseStart, m.index))) return true;
+  }
+  return false;
+}
+
+// The lane is derived from the clause(s) carrying the ACTIVE report (Codex round-24 P2): "My lawn service is
+// Tuesday, and the ants are back" is a pest report even though another clause names the lawn service. With no
+// active clause (a bare lawn complaint, "tell me more about ants") every surviving clause is read.
 function reportedReserviceLane(text) {
-  const s = reservicePestReportFacts(text).survivingText;
-  if (!s.trim() || reportedReserviceExcludedSpecialty(text)) return null;
-  const located = s.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
+  const facts = reservicePestReportFacts(text);
+  if (!facts.survivingText.trim() || reportedReserviceExcludedSpecialty(text)) return null;
+  const active = activePestClauses(facts.kept);
+  const basis = active.length ? active.join(' , ') : facts.survivingText;
+  const located = basis.replace(RESERVICE_LOCATION_PHRASE_RE, ' ');
   const hasLawn = RESERVICE_LAWN_WORDS_RE.test(located);
   const hasPest = RESERVICE_PEST_WORDS_RE.test(located);
   if (hasLawn && hasPest) return null; // ambiguous — let the reply itself name the lane
@@ -619,6 +651,7 @@ module.exports = {
   reportedReserviceLane,
   reportedReserviceExcludedSpecialty,
   isActivePestReport,
+  mentionsAffirmed,
   openReserviceCallbacks,
   openCallbackExistsForLane,
 };

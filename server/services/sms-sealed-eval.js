@@ -194,12 +194,26 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
-// Does a frozen facts block carry this marker? The COMPANY FACTS marker is
-// TRUSTED only by an exact render before the first BILLING: line (a header
-// typed into a multi-line SMS proves nothing — Codex #5392 r3 P2); every other
-// marker is a server-rendered line and stays a substring check.
+// Does a frozen facts block carry this marker? COMPANY FACTS and FREE RE-SERVICE are TRUSTED only at their
+// fixed rendered position (Codex #5392 r3 P2; #5336 round-24 P2): buildFactsBlock renders
+// "...FOLLOW-UP SLA RIGHT NOW: <phrase>\nFREE RE-SERVICE: <fact>\n[COMPANY FACTS section]BILLING:", so the text
+// before the FIRST "BILLING:" line must end with the exact company render (when that section is claimed) and,
+// beneath it, the SLA line followed directly by the re-service line. A header or marker typed into a
+// multi-line SMS (the thread rides later in the block, verbatim) proves nothing. Every other marker is a
+// server-rendered line and stays a substring check.
+const RESERVICE_SECTION_RE = /(?:^|\n)FOLLOW-UP SLA RIGHT NOW:[^\n]*\nFREE RE-SERVICE:[^\n]*$/;
+function hasRenderedReserviceFact(factsBlock) {
+  const facts = String(factsBlock || '');
+  const at = facts.indexOf(BILLING_DELIMITER);
+  if (at < 0) return false;
+  const before = facts.slice(0, at);
+  const exact = exactSectionSuffix();
+  return RESERVICE_SECTION_RE.test(before.endsWith(exact) ? before.slice(0, -exact.length) : before);
+}
 function factPresent(facts, marker) {
-  return marker === COMPANY_FACTS_HEADER ? hasExactCompanyFacts(facts) : facts.includes(marker);
+  if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
+  if (marker === RESERVICE_FACTS_MARKER) return hasRenderedReserviceFact(facts);
+  return facts.includes(marker);
 }
 function itemCompatibleWith(factsBlock, promptVersion) {
   const facts = String(factsBlock || '');
@@ -220,6 +234,13 @@ function compatibleWhereRaw(markers, forbidden = []) {
       const exact = exactSectionSuffix();
       clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
       bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);
+    } else if (marker === RESERVICE_FACTS_MARKER) {
+      // the twin of hasRenderedReserviceFact: text before the first BILLING: line, minus the exact company
+      // render when it ends with it, must end with the SLA line + the re-service line
+      const exact = exactSectionSuffix();
+      const head = `split_part(${col}, ?::text, 1)`;
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND (CASE WHEN right(${head}, ?::int) = ?::text THEN left(${head}, length(${head}) - ?::int) ELSE ${head} END) ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact, BILLING_DELIMITER, BILLING_DELIMITER, exact.length, BILLING_DELIMITER, RESERVICE_SECTION_RE.source);
     } else {
       clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
       bindings.push(`%${marker}%`);
@@ -1436,6 +1457,8 @@ module.exports = {
   requiredFactMarkers,
   forbiddenFactMarkers,
   itemCompatibleWith,
+  hasRenderedReserviceFact,
+  RESERVICE_SECTION_RE,
   sealEvalItems,
   createExamRun,
   runSealedExam,

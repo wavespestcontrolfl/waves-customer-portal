@@ -1802,9 +1802,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // doesn't itself stub out.
     // Codex round-7 (PR #5336): reserviceExcludedSpecialtyInPromise reads the
     // real reportedReserviceExcludedSpecialty the same way.
-    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport } = jest.requireActual('../services/reservice-scheduler');
+    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed } = jest.requireActual('../services/reservice-scheduler');
     jest.doMock('../services/reservice-scheduler', () => ({
-      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport,
+      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed,
     }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
@@ -2850,6 +2850,27 @@ describe('free re-service is an entitlement resolved through the existing mechan
         delete process.env.GATE_SMS_AGENT_COMPLAINTS;
       });
 
+      // Codex round-24 P2: only an AFFIRMED hand-off clause suppresses the owed offer.
+      test('a NEGATED hand-off term does not suppress the offer; an affirmed one does', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const owed = (m) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: m }).ok === false;
+        for (const m of ["I don't need a refund, the ants are back", "I don't want to cancel; ants are back", 'not asking for a refund, the ants are back', 'no need to cancel, the roaches are back']) expect(owed(m)).toBe(true);
+        for (const m of ['the ants are back, I want a refund', 'ants are back and I am going to cancel']) expect(owed(m)).toBe(false);
+        // anger behind a negator (complaints held, gate off): "I'm not angry" is not a held complaint
+        delete process.env.GATE_SMS_AGENT_COMPLAINTS;
+        expect(owed("I'm not angry, the ants are back")).toBe(true);
+        expect(owed("I'm angry, the ants are back")).toBe(false);
+      });
+
+      test('the lane comes from the active clause: another lane\'s service in the same message does not hide the pest report', () => {
+        const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        const out = validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts(['pest', 'lawn']), intendedActions: [], inboundMessage: 'My lawn service is Tuesday, and the ants are back' });
+        expect(out.ok).toBe(false);
+        expect(out.violations[0]).toMatch(/offer the covered free re-service/);
+        expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'I still have ants' }).ok).toBe(false);
+        expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: "I'm still getting ants" }).ok).toBe(false);
+      });
+
       // Codex round-19 P2: a pronoun-only report ("they're back") from a customer with a pest relationship
       // is a pest report when the facts list the pest lane — the same signal needsOpenTimes uses.
       test('pronoun-only report + pest relationship + pest lane in the facts → offer owed; without either, not', () => {
@@ -2912,11 +2933,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
         jest.resetModules();
         const mk = (openMap) => {
           jest.resetModules();
-          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport } = jest.requireActual('../services/reservice-scheduler');
+          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed } = jest.requireActual('../services/reservice-scheduler');
           jest.doMock('../services/reservice-scheduler', () => ({
             reserviceSelfServeEnabled: () => true,
             loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: openMap, bookable: openMap.pest ? [] : ['pest'] }),
-            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport,
+            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed,
           }));
           return { drafter: require('../services/sms-shadow-drafter') };
         };

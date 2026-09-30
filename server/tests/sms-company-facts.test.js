@@ -159,6 +159,7 @@ describe('sealed-eval fact contract for the _cf version', () => {
   const OLD = 'house_voice_v12_real_answers';
   const withCf = `X\n${SLA}\n${renderCompanyFactsSection()}BILLING:\n- b\n`;
   const noCf = `X\n${SLA}\nBILLING:\n- b\n`;
+  const withCfRs = `X\n${SLA}\nFREE RE-SERVICE: not eligible\n${renderCompanyFactsSection()}BILLING:\n- b\n`;
 
   test('_cf requires COMPANY FACTS; the older identity and v11 forbid it', () => {
     expect(requiredFactMarkers(CF)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER]);
@@ -175,8 +176,9 @@ describe('sealed-eval fact contract for the _cf version', () => {
     expect(itemCompatibleWith(withCf, OLD)).toBe(false);
     expect(itemCompatibleWith(noCf, OLD)).toBe(true);
     expect(itemCompatibleWith(withCf, 'house_voice_v11')).toBe(false);
-    expect(itemCompatibleWith(`${withCf}FREE RE-SERVICE: not eligible\n`, `${CF}+c`)).toBe(true);
-    expect(itemCompatibleWith(`${noCf}FREE RE-SERVICE: not eligible\n`, `${CF}+c`)).toBe(false);
+    expect(itemCompatibleWith(withCfRs, `${CF}+c`)).toBe(true);
+    expect(itemCompatibleWith(noCf, `${CF}+c`)).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}\nFREE RE-SERVICE: not eligible\nBILLING:\n- b\n`, `${CF}+c`)).toBe(false); // re-service line but no company section
   });
 
   test('a real gate-on facts block satisfies the live _cf contract', () => {
