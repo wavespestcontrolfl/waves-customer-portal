@@ -21,7 +21,8 @@ const logger = require('./logger');
 const TwilioService = require('./twilio');
 const { getIo } = require('../sockets');
 const { setTechJobStatus, clearTechCurrentJob } = require('./tech-status');
-const { calculateBoundedTrackingEta, finiteNumber, isFreshTimestamp } = require('./customer-tracking-eta');
+const { calculateBoundedTrackingEta, finiteNumber, techMappingCutoff } = require('./customer-tracking-eta');
+const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
 const { ensureCustomerGeocoded } = require('./geocoder');
 const { stampedAddressDiverges } = require('./stamped-address');
 const {
@@ -252,10 +253,13 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
     return null;
   }
   try {
-    const [ts, dest] = await Promise.all([
-      db('tech_status')
-        .where({ tech_id: technicianId })
-        .first('lat', 'lng', 'location_updated_at'),
+    // The tech's position comes from the SHARED remap-aware lookup (Codex round-40 P2)
+    // — the same one the public tracker and the AI ETA use — so a technician just
+    // pointed at a different vehicle never gets an ETA from the OLD vehicle's cached
+    // point: a tech_status fix older than the mapping change is bypassed for the
+    // configured device's own position, and an unverifiable one yields no ETA.
+    const [tech, dest] = await Promise.all([
+      db('technicians').where({ id: technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at'),
       serviceId
         ? db('scheduled_services as s')
           .leftJoin('customers as c', 's.customer_id', 'c.id')
@@ -276,6 +280,12 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
           .where({ id: customerId })
           .first('latitude', 'longitude'),
     ]);
+    const ts = await resolveFreshTechPosition({
+      techId: technicianId,
+      bouncieImei: tech?.bouncie_imei,
+      cachedNotBefore: techMappingCutoff(tech?.bouncie_imei_changed_at),
+      logPrefix: 'track-transitions',
+    });
     const techLat = finiteNumber(ts?.lat);
     const techLng = finiteNumber(ts?.lng);
     // A divergent stamp makes the primary coords the WRONG destination —
@@ -284,11 +294,7 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
     let custLat = finiteNumber(dest?.service_lat) ?? (diverges ? null : finiteNumber(dest?.latitude));
     let custLng = finiteNumber(dest?.service_lng) ?? (diverges ? null : finiteNumber(dest?.longitude));
     if (techLat == null || techLng == null) {
-      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no GPS in tech_status`);
-      return null;
-    }
-    if (!isFreshTimestamp(ts.location_updated_at)) {
-      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} GPS stale (updated ${ts.location_updated_at})`);
+      logger.info(`[track-transitions] en-route ETA skipped: tech ${technicianId} has no fresh GPS position`);
       return null;
     }
     if (custLat == null || custLng == null) {
@@ -314,7 +320,7 @@ async function resolveEnRouteEtaMinutes({ technicianId, customerId, serviceId })
       techLng,
       customerLat: custLat,
       customerLng: custLng,
-      techUpdatedAt: ts.location_updated_at,
+      techUpdatedAt: ts.lastReportedAt,
       logPrefix: 'track-transitions',
     });
     if (!eta?.minutes) {
@@ -1598,5 +1604,6 @@ module.exports = {
   _test: {
     operationalStatusForTrackState,
     classifyArrivalSend,
+    resolveEnRouteEtaMinutes,
   },
 };

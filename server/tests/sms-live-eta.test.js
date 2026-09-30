@@ -1943,6 +1943,28 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-40 P2 (PR #5334): a retrospective exclusion needs an elapsed relation ON the figure.
+describe('round 40 P2: retrospective durations need an elapsed relation on the figure', () => {
+  test.each([
+    'We confirmed your technician is 20 minutes away.', 'I checked and the tech is 15 minutes out.', 'We texted the tech and he is 12 minutes away.',
+    'I emailed you earlier; your tech is 10 minutes away now.', 'Someone called him, and he is 25 minutes away.',
+  ])('%p is a CURRENT ETA (a past-tense office verb alone does not exclude it)', (reply) => {
+    const minutes = [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes);
+    expect(minutes.length).toBeGreaterThan(0);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    'I emailed it 10 minutes ago.', 'We sent the invoice 20 minutes ago.', 'I called about it for the last 20 minutes.', 'No news in the past 30 minutes.',
+    'I sent the invoice 20 minutes after we spoke.', 'We texted you 5 minutes after you called.',
+  ])('%p has an elapsed relation on the figure: not an ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+  });
+});
+
 // Codex round-39 P2s (PR #5334): smart punctuation is classified as the customer receives it;
 // "is there" is a completed arrival.
 describe('round 39 P2s: normalized punctuation; technician "is there"', () => {
@@ -2010,7 +2032,7 @@ describe('round 38 P2s: first-person on-site claims; elapsed-time durations', ()
   });
   test.each([
     'I emailed it 10 minutes ago.', 'We sent the invoice 20 minutes ago.', 'I called about it for the last 20 minutes.', 'No news in the past 30 minutes.',
-    'We texted you 5 minutes ago.', 'Someone from the office called 15 minutes ago.', 'We updated your account 15 minutes before the visit.',
+    'We texted you 5 minutes ago.', 'Someone from the office called 15 minutes ago.'
   ])('%p is a retrospective duration, never an ETA', (reply) => {
     expect(findEtaMinutesClaims(reply)).toEqual([]);
     expect(findGroundedMinutesFigures(reply)).toEqual([]);

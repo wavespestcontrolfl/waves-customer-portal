@@ -919,21 +919,20 @@ function isServiceDurationQuantity(str, index, length) {
 // The ONE shared "this figure is a scheduling/duration span, not an arrival
 // time" predicate every token kind consults: a scheduling window or a
 // service/treatment duration.
-// RETROSPECTIVE durations (Codex round-37 P2): "I emailed it 10 minutes ago", "We
-// sent the invoice 20 minutes ago", "for the last 20 minutes", "in the past hour"
-// look BACK; they are never a technician's arrival time. "N units ago", a "the
-// last/past/previous" lead-in, or a past-tense office action earlier in the SAME
-// clause (I / we / the office + emailed, sent, texted, called, charged, ...).
+// RETROSPECTIVE durations (Codex round-37/40 P2): "I emailed it 10 minutes ago", "We
+// sent the invoice 20 minutes ago", "for the last 20 minutes", "in the past hour",
+// "10 minutes after we spoke" look BACK; they are never a technician's arrival time.
+// The exclusion needs an actual ELAPSED relation ON THE FIGURE — "N units ago", a
+// "for/over/in/during the last/past/previous" lead-in, or "N units after|since
+// <someone> <past-tense verb>". A past-tense office verb elsewhere in the clause is
+// NOT enough: "We confirmed your technician is 20 minutes away" is a current ETA.
 const AGO_AFTER_RE = /^\s*(?:(?:min(?:ute)?s?|hours?|hrs?|seconds?|secs?|days?|weeks?)\s+)?ago\b/i;
 const RETRO_LEADIN_BEFORE_RE = /\b(?:for|over|in|during|within|throughout)\s+the\s+(?:last|past|previous)\s+(?:about\s+|roughly\s+)?$/i;
-const PAST_OFFICE_ACTION_RE = /\b(?:i|we|someone|somebody|(?:our|the)\s+office|(?:our|the)\s+team)\s+(?:just\s+|already\s+|both\s+)?(?:sent|emailed|e-mailed|texted|called|phoned|messaged|mailed|posted|charged|refunded|credited|billed|invoiced|submitted|processed|updated|confirmed|scheduled|rescheduled|issued|received|paid|approved|resent|forwarded|replied|responded|left)\b/i;
+const ELAPSED_AFTER_RE = /^\s*(?:(?:min(?:ute)?s?|hours?|hrs?|seconds?|secs?|days?|weeks?)\s+)?(?:after|since)\s+(?:i|we|you|someone|somebody|it|(?:the|our)\s+(?:office|team|tech\w*))\s+(?:was\s+|were\s+|had\s+|have\s+)?(?:\w+ed|sent|left|got|went|came|ran|began|took|made|saw|paid|spoke|met|heard|said|wrote|called)\b/i;
 function isRetrospectiveDuration(str, index, length) {
-  if (AGO_AFTER_RE.test(str.slice(index + length))) return true;
-  const before = str.slice(Math.max(0, index - 80), index);
-  if (RETRO_LEADIN_BEFORE_RE.test(before)) return true;
-  let last = 0;
-  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) last = m.index + m[0].length;
-  return PAST_OFFICE_ACTION_RE.test(before.slice(last));
+  const after = str.slice(index + length);
+  if (AGO_AFTER_RE.test(after) || ELAPSED_AFTER_RE.test(after)) return true;
+  return RETRO_LEADIN_BEFORE_RE.test(str.slice(Math.max(0, index - 80), index));
 }
 function isWindowQuantity(str, index, length) {
   return WINDOW_AFTER_RE.test(str.slice(index + length))

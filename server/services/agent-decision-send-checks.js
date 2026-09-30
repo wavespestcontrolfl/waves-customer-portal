@@ -105,6 +105,44 @@ async function scheduledEtaBlockReason({ decisionId, outgoingBody, skip = false 
   }
 }
 
+// The same ETA revalidation as a PROVIDER-BOUNDARY predicate (Codex round-40 P2):
+// twilio.js runs a registered `providerPreSendCheck` after every other await (the
+// executor's recipient lookup, the pipeline's policy work) immediately before its
+// request, so a visit that changes state during those awaits still stops the send.
+// The scheduler keeps its earlier scheduledEtaBlockReason (fail-fast, and it retires
+// the decision with a customer-safe note); this closes the remaining window.
+// Refusal is terminal (the visit is provably stale) except an unreadable recheck,
+// which rides the bounded retry rail — never sent unverified.
+function etaProviderPreSendCheck({ decisionId, getBody }) {
+  return async () => {
+    const outgoingBody = typeof getBody === 'function' ? getBody() : getBody;
+    const reason = await scheduledEtaBlockReason({ decisionId, outgoingBody });
+    if (reason == null) return { ok: true };
+    const retryable = reason === 'eta_recheck_failed';
+    return {
+      ok: false,
+      code: retryable ? 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY' : 'LIVE_ETA_STALE_AT_BOUNDARY',
+      reason: `live ETA unsendable (${reason})`,
+      ...(retryable ? { retryable: true } : {}),
+    };
+  };
+}
+
+// Run several provider-boundary predicates in order; the first refusal wins.
+// undefined entries are skipped; returns undefined when there is nothing to run.
+function composeProviderPreSendChecks(...checks) {
+  const active = checks.filter((c) => typeof c === 'function');
+  if (!active.length) return undefined;
+  if (active.length === 1) return active[0];
+  return async (ctx) => {
+    for (const check of active) {
+      const verdict = await check(ctx);
+      if (!verdict || verdict.ok !== true) return verdict;
+    }
+    return { ok: true };
+  };
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -116,4 +154,4 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await etaBlock({ decision, outgoingBody }));
 }
 
-module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason };
+module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, composeProviderPreSendChecks };

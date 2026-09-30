@@ -23,7 +23,7 @@ const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
 const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
-const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason } = require('../services/agent-decision-send-checks');
+const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason, etaProviderPreSendCheck, composeProviderPreSendChecks } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
 const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
@@ -179,5 +179,53 @@ describe('scheduledEtaBlockReason — the scheduler seam over the same ETA check
   test('fails CLOSED when the row read throws', async () => {
     db.mockImplementation(() => { throw new Error('db down'); });
     await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'x' })).resolves.toBe('eta_recheck_failed');
+  });
+});
+
+// Codex round-40 P2 (PR #5334): the same ETA check at the TRUE provider boundary.
+describe('etaProviderPreSendCheck / composeProviderPreSendChecks — the provider-boundary predicate', () => {
+  const rowFor = (row) => { db.mockImplementation(() => ({ where: () => ({ first: async () => row }) })); };
+
+  test('a clean recheck lets the send through; the body is read lazily at call time', async () => {
+    rowFor({ input_snapshot: { facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    let body = 'Thanks!';
+    const check = etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => body });
+    body = 'The tech is 9 minutes away.'; // rewritten after the check was built (spacing guard)
+    await expect(check({ channel: 'sms' })).resolves.toEqual({ ok: true });
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({ outgoingBody: 'The tech is 9 minutes away.' }));
+  });
+
+  test('a stale ETA at the boundary is a TERMINAL refusal', async () => {
+    rowFor({ input_snapshot: { facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    etaClaimBlockReason.mockResolvedValue('eta_claim_no_longer_en_route');
+    const verdict = await etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'The tech is 9 minutes away.' })();
+    expect(verdict).toEqual({ ok: false, code: 'LIVE_ETA_STALE_AT_BOUNDARY', reason: 'live ETA unsendable (eta_claim_no_longer_en_route)' });
+  });
+
+  test('an unreadable recheck is RETRYABLE (never sent unverified, never terminal)', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    const verdict = await etaProviderPreSendCheck({ decisionId: 'd1', getBody: () => 'x' })();
+    expect(verdict).toMatchObject({ ok: false, code: 'LIVE_ETA_CHECK_FAILED_AT_BOUNDARY', retryable: true });
+  });
+
+  test('compose: undefined entries are skipped; nothing to run -> undefined; the first refusal wins and later checks do not run', async () => {
+    expect(composeProviderPreSendChecks(undefined, undefined)).toBeUndefined();
+    const only = jest.fn(async () => ({ ok: true }));
+    expect(composeProviderPreSendChecks(undefined, only)).toBe(only);
+    const first = jest.fn(async () => ({ ok: false, code: 'FIRST' }));
+    const second = jest.fn(async () => ({ ok: true }));
+    const both = composeProviderPreSendChecks(first, second);
+    await expect(both({ dbi: 'trx' })).resolves.toEqual({ ok: false, code: 'FIRST' });
+    expect(second).not.toHaveBeenCalled();
+    const ok1 = jest.fn(async () => ({ ok: true }));
+    const bad2 = jest.fn(async () => ({ ok: false, code: 'SECOND', retryable: true }));
+    await expect(composeProviderPreSendChecks(ok1, bad2)({ dbi: 'trx' })).resolves.toEqual({ ok: false, code: 'SECOND', retryable: true });
+    expect(ok1).toHaveBeenCalledWith({ dbi: 'trx' });
+  });
+
+  test('the scheduler composes it AFTER the entry point\'s own predicate, for decision-linked sends only', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(src).toContain('if (claimMeta.agent_decision_id) {\n            const { etaProviderPreSendCheck, composeProviderPreSendChecks }');
+    expect(src).toContain('replayInput.providerPreSendCheck,\n              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),');
   });
 });

@@ -4753,6 +4753,18 @@ function initScheduledJobs() {
                 : undefined,
             },
           };
+          // LIVE ETA at the TRUE provider boundary (Codex round-40 P2): the recheck above ran
+          // before the recipient lookup and messaging-policy awaits, so a visit that changes
+          // state during them could still get "9 minutes away" delivered. The same shared
+          // check also runs as the replay's providerPreSendCheck (twilio.js, immediately before
+          // its request), composed AFTER any predicate the entry point registered.
+          if (claimMeta.agent_decision_id) {
+            const { etaProviderPreSendCheck, composeProviderPreSendChecks } = require('./agent-decision-send-checks');
+            replayInput.providerPreSendCheck = composeProviderPreSendChecks(
+              replayInput.providerPreSendCheck,
+              etaProviderPreSendCheck({ decisionId: claimMeta.agent_decision_id, getBody: () => replayInput.body }),
+            );
+          }
           return require('./messaging/deferred-replay-registry')
             .dispatchDeferredReplay(claimMeta.entry_point, replayDispatchMeta, () => sendCustomerMessage(replayInput));
           };
