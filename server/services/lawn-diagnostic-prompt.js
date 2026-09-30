@@ -36,7 +36,7 @@ const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 let Anthropic;
 try { Anthropic = require('@anthropic-ai/sdk'); } catch { Anthropic = null; }
 
-const PROMPT_VERSION = 'lawn-diagnostic-v0.5';
+const PROMPT_VERSION = 'lawn-diagnostic-v0.6';
 const MAX_PROMPT_IMAGES = 5;
 
 // ── Multi-model pipeline config (env-overridable, no new SDK deps) ─────────────
@@ -139,7 +139,7 @@ const FALSE_PRECISION_RULE = `## FALSE-PRECISION (hard)
 
 // ── PASS A: diagnosis system prompt ───────────────────────────────────────────
 const DIAGNOSIS_SYSTEM_PROMPT = `# ROLE
-You are a Southwest Florida lawn diagnostician for Waves Pest Control & Lawn Care.
+You are a Southwest Florida lawn diagnostician for Waves Pest Control.
 You SELECT and ASSEMBLE approved agronomy for what the photo evidence supports.
 You do NOT invent agronomy, products, label timing, or numbers. Your output feeds a
 deterministic reconciliation + QA layer and may be shown to a prospective customer.
@@ -314,7 +314,7 @@ Return ONLY this JSON, no markdown, no backticks, no preamble:
 
 // ── PASS B: narrative (customer summary) system prompt ────────────────────────
 const NARRATIVE_SYSTEM_PROMPT = `# ROLE
-You write the single customer_summary paragraph for a Waves Pest Control & Lawn Care
+You write the single customer_summary paragraph for a Waves Pest Control
 lawn report shown to a prospective customer. You are given the already-reconciled
 diagnostic contract. Write the summary LAST — synthesize the visit; do not repeat
 internal fields.

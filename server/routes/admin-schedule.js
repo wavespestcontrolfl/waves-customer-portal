@@ -23937,7 +23937,7 @@ router.post('/generate-report', async (req, res) => {
 
 ## CONTEXT
 
-This prompt generates copy for two sections of a branded, customer-facing service report PDF for **Waves Pest Control & Lawn Care** — a premium home services provider in Southwest Florida. The sections appear inside a formal document alongside customer info, property details, product tables, and safety guidance.
+This prompt generates copy for two sections of a branded, customer-facing service report PDF for **Waves Pest Control** — a premium home services provider in Southwest Florida. The sections appear inside a formal document alongside customer info, property details, product tables, and safety guidance.
 
 The two sections are:
 
