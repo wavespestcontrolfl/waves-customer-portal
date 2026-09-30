@@ -1291,7 +1291,7 @@ function reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, o
     ? `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`
     : null;
 }
-function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
+function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context, intent, schedulingIntent }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
   const actions = [].concat(intendedActions || []);
@@ -1306,7 +1306,12 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   const promise = isReserviceOfferPromise(planCustomer ? text : withoutGenericInspections(text));
   // Codex round-26 P2: a pest report whose lane the facts mark ALREADY BOOKED is answered from the appointment on the
   // schedule — the prompt forbids OPEN TIMES and a paid visit for it, so a reply that offers slots is rejected.
-  const bookedLaneBlock = reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions });
+  // Codex round-30 P1: offered_times / book_appointment are rejected only when the re-service is the customer's SOLE
+  // scheduling need. A mixed inbound ("The ants are back. Can I move my lawn visit to Friday?") legitimately
+  // carries times for the OTHER need. (offered_times entries are { date, window } only — they carry no service
+  // identity to compare against the reported pest lane.)
+  const soleSchedulingNeed = reserviceIsOnlySchedulingNeed({ inboundMessage, intent, schedulingIntent });
+  const bookedLaneBlock = soleSchedulingNeed ? reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions }) : null;
   if (bookedLaneBlock) return { ok: false, violations: [bookedLaneBlock] };
   if (!promise) {
     // Codex round-27 P2: when the offer is OWED, the link ACTION alone is not the customer-facing offer — a
@@ -1343,8 +1348,8 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     // Codex round-5 P2 (finding #3): the re-service link page shows the customer its OWN real
     // availability — a promise that ALSO offers or books a specific slot right here is a second,
     // conflicting offer (and a book_appointment has no eligibility/pricing checks of its own).
-    [[].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
-    [actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
+    [soleSchedulingNeed && [].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
+    [soleSchedulingNeed && actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
     [!lanes.length, 'the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'],
     [reportedReserviceExcludedSpecialty(inboundMessage), 'the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'],
     [reserviceExcludedSpecialtyInPromise(text), 'the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'],
@@ -3347,7 +3352,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
     }
-    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage, offeredTimes: parsed?.offered_times, context });
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage, offeredTimes: parsed?.offered_times, context, intent, schedulingIntent });
     if (!singlePassReservice.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
@@ -3377,7 +3382,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // Codex round-19 P2: unless a covered re-service offer is OWED (an eligible pest report) — then the
     // empty reply is checked like any other and revised.
     if (!parsed.reply) {
-      const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
+      const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context, intent, schedulingIntent });
       if (owed.ok) { converged = true; break; }
     }
 
@@ -3387,7 +3392,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
-    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context, intent, schedulingIntent });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
     for (const check of [reserviceCheck, complianceCheck]) {
       if (!check.ok) {
@@ -3737,7 +3742,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // escalate action makes autoSendActionsSafe return false, so these
     // drafts never reach the auto-send claim/executor path at all.
     const reserviceLanesSnapshot = validateReserviceOffer({
-      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context,
+      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context, intent, schedulingIntent,
     }).promisedLanes || null;
 
     // Only verified-clean drafts (verify loop converged) may leave the silent

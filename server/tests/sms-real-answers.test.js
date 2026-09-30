@@ -1887,9 +1887,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // doesn't itself stub out.
     // Codex round-7 (PR #5336): reserviceExcludedSpecialtyInPromise reads the
     // real reportedReserviceExcludedSpecialty the same way.
-    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed } = jest.requireActual('../services/reservice-scheduler');
+    const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService } = jest.requireActual('../services/reservice-scheduler');
     jest.doMock('../services/reservice-scheduler', () => ({
-      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed,
+      reserviceSelfServeEnabled: () => selfServe, loadReserviceLaneAvailability: loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService,
     }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
@@ -3021,11 +3021,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
         jest.resetModules();
         const mk = (openMap) => {
           jest.resetModules();
-          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed } = jest.requireActual('../services/reservice-scheduler');
+          const { RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService } = jest.requireActual('../services/reservice-scheduler');
           jest.doMock('../services/reservice-scheduler', () => ({
             reserviceSelfServeEnabled: () => true,
             loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: openMap, bookable: openMap.pest ? [] : ['pest'], verified: true }),
-            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed,
+            RESERVICE_LANE_WORD_PATTERNS, RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceExcludedSpecialty, reportedReserviceLane, isActivePestReport, mentionsAffirmed, namesOtherService,
           }));
           return { drafter: require('../services/sms-shadow-drafter') };
         };
@@ -3479,6 +3479,42 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(check('We will have someone stop by again for the ants, no cost to you.').ok).toBe(true);
       expect(check("I'm sending your booking link now.").ok).toBe(true);
       expect(check("Sorry about that! I'm sending your free pest re-service link now.")).toMatchObject({ ok: true, promisedLanes: ['pest'] });
+    });
+
+    // Codex round-30 P1 (PR #5336): times for a SEPARATE scheduling need are allowed on a mixed inbound.
+    test('mixed inbound: offered_times / book_appointment for the OTHER need converge (pest booked, or pest bookable with the re-service offer)', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const mixed = 'The ants are back. Can I move my lawn visit to Friday?';
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      // pest booked: refer to the appointment, offer lawn times
+      const booked = validateReserviceOffer({ reply: 'Your free re-service is already on the schedule for Thursday. I can move your lawn visit to Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: mixed, offeredTimes: slot });
+      expect(booked).toMatchObject({ ok: true });
+      expect(validateReserviceOffer({ reply: 'Your free re-service is on the schedule for Thursday. Booking your lawn visit for Friday.', factsBlock: bookedFacts, intendedActions: [{ type: 'book_appointment' }], inboundMessage: mixed }).ok).toBe(true);
+      // pest bookable: the re-service offer AND the lawn times
+      const both = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. For your lawn visit I can do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage: mixed, offeredTimes: slot });
+      expect(both).toMatchObject({ ok: true, promisedLanes: ['pest'] });
+      // the upstream scheduling flag / a cancel intent also mean a separate need
+      expect(validateReserviceOffer({ reply: 'Your free re-service is on the schedule for Thursday. I can do Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: 'the ants are back', offeredTimes: slot, schedulingIntent: true }).ok).toBe(true);
+    });
+
+    test('plain pest report + times is still rejected (the re-service is the ONLY scheduling need), booked or bookable', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const booked = validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: 'the ants are back', offeredTimes: slot });
+      expect(booked.ok).toBe(false);
+      expect(booked.violations[0]).toMatch(/ALREADY BOOKED/);
+      const bookable = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. I can also do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage: 'the ants are back', offeredTimes: slot });
+      expect(bookable.ok).toBe(false);
+      expect(bookable.violations[0]).toMatch(/offered_times/);
+      const book = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: bookableFacts, intendedActions: [...sendLink, { type: 'book_appointment' }], inboundMessage: 'the ants are back' });
+      expect(book.ok).toBe(false);
+      expect(book.violations[0]).toMatch(/book_appointment/);
     });
 
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {
