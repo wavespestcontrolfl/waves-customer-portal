@@ -501,4 +501,50 @@ describe('extra match keys', () => {
     expect(r).toMatchObject({ toAdd: 1, toRemove: 0, retained: 1 });
     expect(calls('DELETE')).toEqual([]);
   });
+
+  test('source fields cleared after enrichment: nothing is sent, the uploaded extras stay remembered, and removal deletes them', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: null }]; // name/ZIP wiped, no external id in the way
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }] };
+    const r = await MetaAudiences.syncAudience('customers', {});
+    // the external id is re-derived (same id), so this row still matches the stored latest variant → nothing to send
+    expect(r).toMatchObject({ toAdd: 0, toRemove: 0 });
+    const kept = savedState();
+    expect(kept).toEqual([expect.objectContaining({ d: ['h:a@x.com', ''], e: jo })]);
+    // later the member is removed (gone from source) → the uploaded full row is deleted too
+    stateRow = { meta_audience_id: 'AUDX', member_keys: kept };
+    global.fetch = okFetch({});
+    tableData.customers = [];
+    await MetaAudiences.syncAudience('customers', {});
+    expect(calls('DELETE').map((p) => p.schema)).toEqual([['EMAIL', 'PHONE'], FULL_SCHEMA]);
+    expect(calls('DELETE')[1].data).toEqual([['h:a@x.com', '', 'h:joann', 'h:oneil', 'h:34221', 'h:palmetto', 'h:fl', 'h:us', 'h:c1']]);
+  });
+  test('address change: the new row is sent, the old variant is remembered, and removal deletes BOTH full rows', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: null, ...JO, zip: '34222' }];
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }] };
+    const r = await MetaAudiences.syncAudience('customers', {});
+    expect(r).toMatchObject({ toEnrich: 1, toRemove: 0 });
+    expect(calls('POST')[0].data).toHaveLength(1);
+    const saved = savedState();
+    expect(saved[0].e.zp).toBe('h:34222');
+    expect(saved[0].o).toEqual([jo]);
+    // member leaves → both variants deleted
+    stateRow = { meta_audience_id: 'AUDX', member_keys: saved };
+    global.fetch = okFetch({});
+    tableData.customers = [];
+    await MetaAudiences.syncAudience('customers', {});
+    const full = calls('DELETE').find((p) => p.schema.length === 9);
+    expect(full.data.map((row) => row[4]).sort()).toEqual(['h:34221', 'h:34222']);
+  });
+  test('shared-handle guards consider EARLIER variants too (a stale row is retained when an old variant shares a handle)', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ id: 'AUDX' });
+    tableData.customers = [{ id: 'c1', email: 'new@x.com', phone: null, ...JO }];
+    const older = { ...jo, xid: 'h:other' };
+    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:old@x.com', ''], e: { fn: 'h:zz', ln: 'h:zz', zp: 'h:zz' }, o: [older] }] };
+    expect(await MetaAudiences.syncAudience('customers', {})).toMatchObject({ toAdd: 1, toRemove: 0, retained: 1 });
+  });
 });

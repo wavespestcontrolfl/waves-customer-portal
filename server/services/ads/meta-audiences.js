@@ -298,6 +298,13 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     // if ANY identifier in the row matches, so a stale row that still shares a current
     // identifier must NOT be deleted (it would drop a person we keep) — we retain it
     // and retry once that identifier leaves the audience.
+    // A member uploaded before keeps EVERY extras variant that went up (latest
+    // in e, earlier ones in o), even if its source fields changed or vanished.
+    for (const [h, cur] of currentByHash) {
+      const before = priorByHash.get(h);
+      if (before) currentByHash.set(h, matchFields.carryVariants(before, cur));
+    }
+
     // Handles = email/phone hashes plus the external id and the name+ZIP
     // triple of rows uploaded with extras (entryHandles). Legacy rows carry
     // only email/phone handles, so their decisions are exactly as before.
@@ -416,10 +423,11 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     const added = upserts.length ? await pushUsers(audienceId, upserts, 'POST', ADD_SCHEMA) : 0;
     // Meta matches a DELETE row by ALL of its keys, so removal sends BOTH the
     // legacy email/phone row (how every member was first uploaded) and, for
-    // rows uploaded with extras, the exact full row. Legacy rows: email/phone only.
+    // rows uploaded with extras, the exact full row of EVERY variant that was
+    // uploaded. Legacy rows: email/phone only.
     const removed = removeRows.length ? await pushUsers(audienceId, removeRows.map((e) => e.d), 'DELETE', BASE_SCHEMA) : 0;
-    const removeFull = removeRows.filter((e) => e.e);
-    if (removeFull.length) await pushUsers(audienceId, removeFull.map((e) => fullRow(e.d, e.e)), 'DELETE', ADD_SCHEMA);
+    const removeFull = removeRows.flatMap((e) => matchFields.entryVariants(e).map((v) => fullRow(e.d, v)));
+    if (removeFull.length) await pushUsers(audienceId, removeFull, 'DELETE', ADD_SCHEMA);
 
     await saveState(audienceKey, {
       meta_audience_id: audienceId,

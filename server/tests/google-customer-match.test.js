@@ -572,4 +572,58 @@ describe('address identifier (name + ZIP)', () => {
     // the household twin is dropped from state so it re-adds next run (one-cycle flicker, guaranteed removal)
     expect(r.deferredReAdds).toBe(1);
   });
+
+  test('an enrichment is held while an EARLIER ingest of the member is still pending; a later FAILURE of it re-adds the member', async () => {
+    configure({ allow: true });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: null, ...person }]);
+    const initial = { k: 'customer:c1', d: ['h:a@x.com', ''] };
+    const pendingOp = { requestId: 'init', op: 'ingest', at: recentIso(), members: [initial] };
+    // run 2: initial ingest still PROCESSING and the address just appeared → no second ingest, state untouched
+    stateRow = { member_keys: [initial], pending: [pendingOp] };
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'PROCESSING' }] } });
+    await GCM.syncAudience('customers', {});
+    expect(ingests()).toEqual([]);
+    const row = inserts.filter((i) => i.table === 'ad_audience_syncs').pop().row;
+    expect(JSON.parse(row.member_keys)).toEqual([initial]);
+    expect(JSON.parse(row.pending)).toHaveLength(1);
+    // run 3: the initial ingest FAILED → member reverts to absent and is re-added WITH its address (never an empty state)
+    stateRow = { member_keys: JSON.parse(row.member_keys), pending: JSON.parse(row.pending), destination_sig: row.destination_sig };
+    global.fetch = routedFetch({ 'requestStatus:retrieve': { requestStatusPerDestination: [{ requestStatus: 'FAILED' }] }, 'audienceMembers:ingest': { requestId: 'again' } });
+    const r = await GCM.syncAudience('customers', {});
+    expect(r.toAdd).toBe(1);
+    expect(ingests()[0].audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:a@x.com' }, addressOf(jo)]);
+    expect(JSON.parse(inserts.filter((i) => i.table === 'ad_audience_syncs').pop().row.member_keys)).toHaveLength(1);
+  });
+  test('source fields cleared after enrichment: nothing is sent, the uploaded address stays remembered, removal deletes it', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'x' });
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: null }]); // names/ZIP wiped
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }], pending: [] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toAdd: 0, toRemove: 0, toEnrich: 0 });
+    const kept = savedMembers();
+    expect(kept).toEqual([expect.objectContaining({ e: jo })]);
+    stateRow = { member_keys: kept, pending: [] };
+    global.fetch = okFetch({ requestId: 'rm' });
+    mockCollectCustomers.mockResolvedValue([]);
+    await GCM.syncAudience('customers', {});
+    expect(removes()[0].audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:a@x.com' }, addressOf(jo)]);
+  });
+  test('address change: only the new address is ingested, the old variant is remembered, removal deletes BOTH', async () => {
+    configure({ allow: true });
+    global.fetch = okFetch({ requestId: 'x' });
+    const jo2 = { ...jo, zp: '34222' };
+    mockCollectCustomers.mockResolvedValue([{ key: 'customer:c1', email: 'a@x.com', phone: null, ...person, zip: '34222' }]);
+    stateRow = { member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }], pending: [] };
+    const r = await GCM.syncAudience('customers', {});
+    expect(r).toMatchObject({ toEnrich: 1, toRemove: 0 });
+    expect(ingests()[0].audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:a@x.com' }, addressOf(jo2)]);
+    const saved = savedMembers();
+    expect(saved[0]).toMatchObject({ e: jo2, o: [jo] });
+    stateRow = { member_keys: saved, pending: [] };
+    global.fetch = okFetch({ requestId: 'rm' });
+    mockCollectCustomers.mockResolvedValue([]);
+    await GCM.syncAudience('customers', {});
+    expect(removes()[0].audienceMembers[0].userData.userIdentifiers).toEqual([{ emailAddress: 'h:a@x.com' }, addressOf(jo2), addressOf(jo)]);
+  });
 });

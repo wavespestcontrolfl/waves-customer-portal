@@ -151,15 +151,22 @@ function hashExtras(member) {
 }
 
 // A state entry's hashed parts ([emailSha256, phoneSha256] + optional address
-// extras) -> Data Manager UserData.
-function toUserData(d, e) {
+// extras) -> Data Manager UserData. `older` = earlier uploaded address
+// variants; a removal passes them so every address that went up is deleted.
+// Data Manager allows at most 10 identifiers per user.
+function toUserData(d, e, older = []) {
   const userIdentifiers = [];
   if (d[0]) userIdentifiers.push({ emailAddress: d[0] });
   if (d[1]) userIdentifiers.push({ phoneNumber: d[1] });
-  if (e && e.fn && e.ln && e.zp) {
-    userIdentifiers.push({ address: { givenName: e.fn, familyName: e.ln, regionCode: 'US', postalCode: e.zp } });
+  const seen = new Set();
+  for (const v of [e, ...(older || [])]) {
+    if (!(v && v.fn && v.ln && v.zp)) continue;
+    const sig = `${v.fn}|${v.ln}|${v.zp}`;
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    userIdentifiers.push({ address: { givenName: v.fn, familyName: v.ln, regionCode: 'US', postalCode: v.zp } });
   }
-  return { userIdentifiers };
+  return { userIdentifiers: userIdentifiers.slice(0, 10) };
 }
 
 function batchSize() {
@@ -183,7 +190,7 @@ async function pushMembers(listId, entries, op, { fetchImpl = global.fetch, toke
     const batch = entries.slice(i, i + size);
     const body = {
       destinations: [dest],
-      audienceMembers: batch.map((e) => ({ userData: toUserData(e.d, e.e) })),
+      audienceMembers: batch.map((e) => ({ userData: toUserData(e.d, e.e, op === 'remove' ? e.o : null) })),
       validateOnly: false,
       encoding: 'HEX',
     };
@@ -365,6 +372,13 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
 
     // Never remove a row whose email/phone is still held by a current member (a remove
     // matches by any identifier, so it would drop a person we keep) — retain + retry.
+    // A member uploaded before keeps EVERY address variant that went up (latest
+    // in e, earlier ones in o), even if its source fields changed or vanished.
+    for (const [h, cur] of currentByHash) {
+      const before = priorByHash.get(h);
+      if (before) currentByHash.set(h, matchFields.carryVariants(before, cur));
+    }
+
     // Handles = email/phone hashes plus the name+ZIP address of rows uploaded
     // with one (entryHandles); legacy rows only have email/phone handles, so
     // their decisions are exactly as before.
@@ -438,8 +452,11 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     let deferredReAdds = 0;
     // A member already in Google whose address extras are new or changed is
     // re-ingested with the full identifier set (ingest is an idempotent
-    // upsert — no removal, so no churn). Held while a remove sharing one of
-    // its handles is in flight; persisted with its OLD extras until it sends.
+    // upsert — no removal, so no churn). Held while ANY pending op touches one
+    // of its handles: a remove would race it, and an earlier ingest that later
+    // FAILS would drop the member while this one's success is never reconciled
+    // back (empty state despite a live upload). Persisted with its OLD entry
+    // until it sends.
     const enrichEntries = [];
     const persistedCurrent = [];
     for (const e of currentByHash.values()) {
@@ -448,7 +465,7 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       if (matchFields.entryHandles(e).some((x) => removedSuppressedIds.has(x))) { deferredReAdds += 1; continue; }
       const before = priorByHash.get(h);
       if (before && e.e && matchFields.extrasSig(e.e) !== matchFields.extrasSig(before.e)) {
-        if (hasPendingRemove(e)) { persistedCurrent.push(before); continue; }
+        if (hasPendingRemove(e) || hasPendingIngest(e)) { persistedCurrent.push(before); continue; }
         enrichEntries.push({ ...e, prev: before }); // prev: restored if the ingest fails
       }
       persistedCurrent.push(e);

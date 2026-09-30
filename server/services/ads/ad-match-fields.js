@@ -166,22 +166,54 @@ function externalIdFor({ customerId, leadId }) {
 }
 
 // ── audience state helpers ──────────────────────────────────────────
-// A persisted audience entry is { k, d:[emailHash, phoneHash], c?, e? } where
-// `e` (added by this lane) holds the hashed extra keys that were uploaded
-// alongside. d stays the row IDENTITY, unchanged, so rows uploaded before the
-// extras existed keep matching and nothing churns.
+// A persisted audience entry is { k, d:[emailHash, phoneHash], c?, e?, o? }.
+// d is the row IDENTITY, unchanged, so rows uploaded before extras existed keep
+// matching. `e` is the LATEST hashed extras uploaded with the row; `o` is a
+// small bounded list (newest first) of EARLIER variants that were also
+// uploaded. Every variant that ever went up must stay known: removal has to
+// delete each one (Meta matches a multi-key DELETE by all keys) and the
+// shared-handle guards must see them, even after the source fields change or
+// disappear. Variants leave state only with the entry, once removal is confirmed.
 const EXTRA_ORDER = ['fn', 'ln', 'zp', 'ct', 'st', 'co', 'xid'];
+const MAX_OLDER_VARIANTS = 4;
 function extrasSig(e) {
   return e ? EXTRA_ORDER.map((k) => e[k] || '').join('|') : '';
 }
-// Every key an audience DELETE for this entry could match on. Removal must
-// never knock out a current member that shares any of them.
+// Every extras variant uploaded for this entry, newest first.
+function entryVariants(entry) {
+  return [entry.e, ...(Array.isArray(entry.o) ? entry.o : [])].filter(Boolean);
+}
+// The entry to persist for a member that was uploaded before: the current
+// identity with `e` = latest extras (the freshly computed ones, or — when the
+// source fields shrank/vanished so there is nothing new to send — the
+// previously uploaded ones) and `o` = every other variant still out there.
+function carryVariants(before, current) {
+  const prior = entryVariants(before);
+  if (!prior.length) return current;
+  const out = { ...current };
+  let older;
+  // Nothing new to say (source fields vanished or shrank, e.g. only the id is
+  // left): keep what was uploaded, send nothing.
+  const subsetOfLatest = current.e && Object.keys(current.e).every((k) => current.e[k] === prior[0][k]);
+  if (current.e && !subsetOfLatest) {
+    const sig = extrasSig(current.e);
+    older = prior.filter((v) => extrasSig(v) !== sig);
+  } else {
+    out.e = prior[0];
+    older = prior.slice(1);
+  }
+  older = older.slice(0, MAX_OLDER_VARIANTS);
+  if (older.length) out.o = older; else delete out.o;
+  return out;
+}
+// Every key an audience DELETE for this entry could match on, across all
+// uploaded variants. Removal must never knock out a current member that
+// shares any of them.
 function entryHandles(entry) {
   const out = [];
   if (entry.d[0]) out.push(entry.d[0]);
   if (entry.d[1]) out.push(entry.d[1]);
-  const e = entry.e;
-  if (e) {
+  for (const e of entryVariants(entry)) {
     if (e.xid) out.push(`x:${e.xid}`);
     if (e.fn && e.ln && e.zp) out.push(`n:${e.fn}|${e.ln}|${e.zp}`);
   }
@@ -202,5 +234,7 @@ module.exports = {
   IDENTITY_FIELDS,
   nullIdentityFields,
   extrasSig,
+  entryVariants,
+  carryVariants,
   entryHandles,
 };
