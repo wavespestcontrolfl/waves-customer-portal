@@ -42,6 +42,7 @@ const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-w
 const { parseETDateTime, etDateString, etParts, addETDays } = require('../utils/datetime-et');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { promiseEvidenceCloseLive } = require('../config/feature-gates');
+const { STAFF_CALL_SOURCES, STAFF_APPROVED_SMS_TYPES, operatorReply, personCallBack, smsDelivered, operatorSentSql, smsContactSelects, callContactSelects, operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 
 // A due time typed by the office arrives either as an ISO instant (the
 // panel converts its datetime-local value with the ET helper) or, from any
@@ -1546,9 +1547,12 @@ async function slotBookingProof(conn, slot, customerId, after) {
 // exactly like a direct one (refreshFulfillment), so each kind below also
 // looks for the later follow-up the portal can see: a visit booked or done,
 // an estimate sent, a service report delivered. Contact records — a staff
-// call or text, the caller phoning in — are not closing evidence: the portal
-// cannot yet prove who placed them, that they were delivered, or that they
-// still belong to this customer after a relink. Every lookup takes the same context — the call, the
+// call or text, the caller phoning in — are not closing evidence, with one
+// exception: a CALLBACK promise is kept by the customer phoning in and
+// talking with a person (inboundConversation, fenced to the customer; the
+// lapse scan re-judges it after a relink). A callback's own direct proof, a
+// staff call back or a person's text, reads the texting lane's provenance and
+// delivery rules (staff-contact.js). Every lookup takes the same context — the call, the
 // caller's phone and customer, the evidence boundary (`after`, the end of the
 // call or the latest renewal) and the window's end — and answers { id, at }.
 const WITHIN = `within_${ASSOCIATION_WINDOW_DAYS}_days`;
@@ -1557,42 +1561,130 @@ const WITHIN = `within_${ASSOCIATION_WINDOW_DAYS}_days`;
 const PROVIDER_ACCEPTED = ["sent", "delivered"];
 const sameCustomerWhere = (b, column, customerId) => { if (customerId) b.where(column, customerId); };
 
-// The callback promise's own direct completion rules: a CONNECTED outbound call to the caller (>= 60 s; the stored duration is
-// the parent leg, so a pickup-and-abandon is short) that no card policy
-// judged, and a HUMAN-authored text that went out (never the assistant's
-// automatic reply, and not a proactive draft with no inbound anchor).
+// The callback promise's own direct completion rules, on the texting lane's
+// reviewed provenance (staff-contact.js, owner ruling 2026-09-29): a call a
+// PERSON placed through the staff bridge that reached the customer
+// (personCallBack: the staff-bridge source allowlist, a valid extraction that
+// heard a live conversation, not voicemail, and the customer leg completed
+// >= 60 s when one was recorded; the stored duration is the parent leg, so
+// a pickup-and-abandon is short) that no card policy judged, and a text a
+// PERSON wrote that went out (operatorReply + smsDelivered: the composer's
+// stamp, the sending admin or the staff draft queue — never the assistant's
+// automatic reply, never a bare 'manual' type an automation reuses — and not
+// a proactive draft with no inbound anchor). Before this, any >= 60 s
+// outbound call (an automated collections call included: that duration is
+// the staff leg) and any queued 'manual' text counted.
 // `until` is the window's end for evidence that has one; a callback returned
-// late was still returned, so the callback case passes none.
+// late was still returned, so the callback case passes none. The SQL narrows
+// to candidates; the shared predicates judge them, earliest first, page by
+// page (firstContactMatch), so a long run of candidates the predicate
+// refuses never hides the valid one behind it.
+const CONTACT_PAGE = 200;
+// Keyset pages over (created_at, id), earliest first: `page(cursor, size)`
+// answers the rows after the cursor, each carrying `cursor_at` (the exact
+// created_at as text — a JS Date would drop the microseconds and re-read the
+// row it stopped on) and `id`.
+async function firstContactMatch(page, accept) {
+  let cursor = null;
+  for (;;) {
+    const rows = await page(cursor, CONTACT_PAGE);
+    const hit = rows.find(accept);
+    if (hit) return hit;
+    if (rows.length < CONTACT_PAGE) return null;
+    const last = rows[rows.length - 1];
+    cursor = { at: last.cursor_at, id: last.id };
+  }
+}
+const afterCursor = (b, table, cursor) => { if (cursor) b.whereRaw(`(${table}.created_at, ${table}.id) > (?::timestamptz, ?::uuid)`, [cursor.at, cursor.id]); };
+
 async function returnedOutboundCall(conn, { after, until = null, phone, customerId }) {
-  const row = await conn("call_log")
+  const row = await firstContactMatch((cursor, size) => conn("call_log")
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .where("direction", "outbound")
+    .whereIn("source", STAFF_CALL_SOURCES)
     .where("created_at", ">", after)
     .modify((b) => { if (until) b.where("created_at", "<=", until); })
     .whereRaw("metadata->>'relatedCommitmentId' IS NULL AND COALESCE(metadata->>'callback_policy', '') <> 'card'")
     .whereRaw("COALESCE(duration_seconds, 0) >= 60")
-    .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomerWhere(b, "customer_id", customerId); })
-    .orderBy("created_at", "asc")
-    .first("id", "created_at");
+    .modify((b) => { phoneWhere(b, "to_phone", phone); sameCustomerWhere(b, "customer_id", customerId); afterCursor(b, "call_log", cursor); })
+    .orderBy([{ column: "created_at", order: "asc" }, { column: "id", order: "asc" }])
+    .limit(size)
+    .select("call_log.id", "call_log.created_at", conn.raw("call_log.created_at::text as cursor_at"), ...callContactSelects(conn)), personCallBack);
   return row ? { id: row.id, at: row.created_at } : null;
 }
 
+// Not a proactive draft: a text sent from a draft with no inbound anchor
+// (message_drafts.sms_log_id unset, sent within two minutes of this row) is
+// not a reply. Over the sms_log alias `os`; the callback proof's fence
+// (humanTextTo) and the contact check's witness loader share it.
+function withoutProactiveDraft(builder) {
+  builder.whereNotExists(function proactiveDraft() {
+    this.select(1).from("message_drafts as mdx")
+      .whereNull("mdx.sms_log_id")
+      .whereRaw("(mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))")
+      .whereRaw("mdx.sent_at BETWEEN os.created_at - interval '2 minutes' AND os.created_at + interval '2 minutes'");
+  });
+}
+
 async function humanTextTo(conn, { after, until = null, phone, customerId }) {
-  const row = await conn("sms_log as os")
+  const row = await firstContactMatch((cursor, size) => conn("sms_log as os")
     .where("os.direction", "outbound")
-    .whereIn("os.message_type", ["manual", "ai_approved", "ai_revised"])
-    .whereIn("os.status", ["queued", "sent", "delivered"])
+    .whereIn("os.status", ["sent", "delivered"])
+    .where(function personSent() {
+      this.whereRaw(operatorSentSql("os")).orWhereIn("os.message_type", STAFF_APPROVED_SMS_TYPES);
+    })
     .where("os.created_at", ">", after)
     .modify((b) => { if (until) b.where("os.created_at", "<=", until); })
-    .whereNotExists(function proactiveDraft() {
-      this.select(1).from("message_drafts as mdx")
-        .whereNull("mdx.sms_log_id")
-        .whereRaw("(mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))")
-        .whereRaw("mdx.sent_at BETWEEN os.created_at - interval '2 minutes' AND os.created_at + interval '2 minutes'");
-    })
-    .modify((b) => { phoneWhere(b, "os.to_phone", phone); sameCustomerWhere(b, "os.customer_id", customerId); })
-    .orderBy("os.created_at", "asc")
-    .first("os.id", "os.created_at");
+    .modify(withoutProactiveDraft)
+    .modify((b) => { phoneWhere(b, "os.to_phone", phone); sameCustomerWhere(b, "os.customer_id", customerId); afterCursor(b, "os", cursor); })
+    .orderBy([{ column: "os.created_at", order: "asc" }, { column: "os.id", order: "asc" }])
+    .limit(size)
+    .select("os.id", "os.created_at", conn.raw("os.created_at::text as cursor_at"), "os.status", "os.message_type", "os.from_phone", ...smsContactSelects(conn, "os")),
+  (r) => operatorReply(r) && smsDelivered(r));
+  return row ? { id: row.id, at: row.created_at } : null;
+}
+
+// Whether an inbound call row is the customer talking with a person, as one
+// SQL condition over the call_log alias `t`: the ONE definition, read
+// positively by inboundConversation and negated by the lapse scan, so a
+// forced reprocess that changes the call's classification takes the proof
+// away exactly as it would have refused it. A valid extraction that heard a
+// live conversation — not voicemail, not spam (the extraction's own verdict
+// AND the processor's terminal spam / voicemail status: a spam call
+// leaves call_outcome unset), and no other non-conversation nature or
+// disposition (a wrong number, dead air, a vendor or job applicant) — that
+// no assistant handled alone (ai_transferred counts: a person took it), and
+// not a sandbox bake-off call. Strict on the extraction flags: an absent
+// stamp is not a conversation.
+const NOT_A_CONVERSATION_NATURES = ['spam_solicitation', 'robocall', 'wrong_number', 'voicemail_message', 'silent_or_noise', 'vendor_or_partner', 'job_applicant'];
+const NOT_A_CONVERSATION_DISPOSITIONS = ['spam_discarded', 'wrong_number_closed', 'no_action_needed', 'voicemail_processed', 'vendor_logged'];
+const sqlList = (values) => values.map((v) => `'${v}'`).join(', ');
+const inboundConversationSql = (t) => `(${t}.direction = 'inbound' AND ${t}.v2_extraction_status = 'valid'
+  AND COALESCE(${t}.source, '') <> '${require('./voice-agent/relay-protocol').VOICE_RELAY_SANDBOX_SOURCE}'
+  AND ${t}.ai_extraction_enriched->'meta'->>'is_voicemail' = 'false'
+  AND ${t}.ai_extraction_enriched->'meta'->>'is_spam' = 'false'
+  AND COALESCE(${t}.processing_status, '') NOT IN ('spam', 'voicemail')
+  AND COALESCE(${t}.call_outcome, '') NOT IN ('voicemail', 'ai_handled')
+  AND COALESCE(${t}.answered_by, '') <> 'voicemail'
+  AND COALESCE(${t}.disposition, '') NOT IN (${sqlList(NOT_A_CONVERSATION_DISPOSITIONS)})
+  AND COALESCE(${t}.ai_extraction_enriched->>'call_nature', '') NOT IN (${sqlList(NOT_A_CONVERSATION_NATURES)}))`;
+
+// The customer phoned in and a person talked with them: an inbound call
+// fenced to the promise call's CUSTOMER (never a phone-only match — a shared
+// household number), that is not the promise's own call, and is a
+// conversation (inboundConversationSql). A callback promise only
+// (EVIDENCE_BY_KIND): the customer reaching Waves is what a "we'll call you
+// back" was for.
+async function inboundConversation(conn, { callId, after, until, customerId }) {
+  if (!customerId) return null;
+  const row = await conn("call_log")
+    .where({ customer_id: customerId })
+    .whereRaw(inboundConversationSql("call_log"))
+    .whereNot("id", callId)
+    .where("created_at", ">", after)
+    .where("created_at", "<=", until)
+    .orderBy("created_at", "asc")
+    .first("id", "created_at");
   return row ? { id: row.id, at: row.created_at } : null;
 }
 
@@ -1684,13 +1776,16 @@ const EVIDENCE = {
   estimate: { find: (conn, x) => (x.customerId ? estimateSentTo(conn, x) : null), kind: "estimate_sent", type: "estimate", basis: `estimate_sent_to_same_customer_${WITHIN}` },
   report_text: { find: reportTextTo, kind: "sms_sent", type: "sms_log", basis: `service_report_text_to_caller_${WITHIN}` },
   report_email: { find: reportEmailTo, kind: "email_sent", type: "email_message", basis: `service_report_email_to_customer_${WITHIN}` },
+  caller_called_in: { find: inboundConversation, kind: "inbound_call", type: "call_log", basis: `caller_called_in_and_talked_with_staff_${WITHIN}` },
 };
 // Kind → the follow-up evidence beyond what its own case already looks for.
 const EVIDENCE_BY_KIND = {
   other: ["visit_booked", "visit_done", "estimate"],
   // A callback exists to reach a decision: once the visit it was about is
   // booked, or the quote went out, the call back is moot.
-  callback: ["visit_booked", "estimate"],
+  // The customer phoning in and talking with a person is the call back it
+  // was owed, from their side.
+  callback: ["visit_booked", "estimate", "caller_called_in"],
   send_estimate: ["visit_booked", "visit_done"],
   schedule_visit: ["visit_done"],
   send_report: ["report_text", "report_email"],
@@ -1760,8 +1855,11 @@ async function associationProof(ctx, tries) {
 // before is not proof it was kept again. Claiming, snoozing or confirming
 // does not move the boundary, so a call returned before that action still
 // counts.
-async function evidenceBoundary(conn, commitment, call) {
-  const ended = callEndedAt(call);
+// `endOf` picks how the call's end is read (default callEndedAt, the
+// ledger's own); the model-judged contact check passes the booking lane's
+// exact end (call-booking-link-text.js callEndFor).
+async function evidenceBoundary(conn, commitment, call, { endOf = callEndedAt } = {}) {
+  const ended = endOf(call);
   const renewed = ended ? await obligationRenewedAt(conn, commitment) : null;
   return renewed && renewed.getTime() > ended.getTime() ? renewed : ended;
 }
@@ -1877,7 +1975,10 @@ async function resolveAppointmentConfirmation({ conn, commitment, phone, custome
 
 async function resolveCallback(ctx) {
   const { conn, commitment, after, phone, customerId, evidence } = ctx;
-  if (!phone) return null;
+  // A call with no usable contact phone (blocked caller ID) has no
+  // phone-based direct proof to look for, but a customer linked to it can
+  // still keep the promise by phoning in (the association lookups below are
+  // customer-scoped): skip only the phone-based lookups.
   // Each attempt is judged under the policy it was placed under. An
   // attempt under the CARD policy — the card's commitment link, or the
   // Call Log action's policy-stamped source-call link — needs a
@@ -1897,7 +1998,7 @@ async function resolveCallback(ctx) {
   const policyLink = "(metadata->>'relatedCommitmentId' = ? OR (metadata->>'relatedCommitmentId' IS NULL AND metadata->>'relatedCallId' = ? AND metadata->>'callback_policy' = 'card'))";
   const policyBindings = [commitment.id, commitment.call_log_id];
   const sameCustomer = (b, column) => { if (customerId) b.where(column, customerId); };
-  const connected = await conn('call_log').where('direction', 'outbound')
+  const connected = phone && await conn('call_log').where('direction', 'outbound')
     .modify((b) => require('./voice-agent/relay-protocol').whereNotSandboxCall(b))
     .where('created_at', '>', after).where('v2_extraction_status', 'valid')
     .whereRaw(policyLink, policyBindings)
@@ -1929,11 +2030,11 @@ async function resolveCallback(ctx) {
   // nothing about the customer leg — is ever judged by this rule, and
   // once one exists for this promise a text no longer stands in for the
   // conversation it promised.
-  const outbound = await returnedOutboundCall(conn, { ...evidence, until: null });
+  const outbound = phone ? await returnedOutboundCall(conn, { ...evidence, until: null }) : null;
   if (outbound) return { kind: "outbound_call", record_type: "call_log", record_id: outbound.id, matched_at: outbound.at, strength: "direct", basis: "callback_returned_connected_outbound_call" };
   const cardAttempt = await conn('call_log').whereRaw(policyLink, policyBindings).first('id');
   if (cardAttempt) return null;
-  const text = await humanTextTo(conn, { ...evidence, until: null });
+  const text = phone ? await humanTextTo(conn, { ...evidence, until: null }) : null;
   // No local catch: a failed lookup must reach refreshFulfillment's
   // `failed` accounting so the watchdog leaves this call out of the bell.
   if (text) return { kind: "sms_sent", record_type: "sms_log", record_id: text.id, matched_at: text.at, strength: "direct", basis: "callback_returned_by_human_text" };
@@ -2238,6 +2339,16 @@ async function judgeOpenRow(conn, commitment, call) {
 const CLOSED_BY_EVIDENCE = "promise_evidence";
 const storedProof = (proof, customerId, closedAt = new Date().toISOString()) => (proof.strength === "direct" ? proof
   : { ...proof, closed_by: CLOSED_BY_EVIDENCE, judged_customer_id: customerId || null, closed_at: closedAt });
+// A close a MODEL judged (call-commitment-contact-check.js, PROMISE_CONTACT_CHECK):
+// a person's later delivered text or call back to the call's customer that
+// delivered what an "other" promise said it would. It rests on that one
+// record, so the re-judge below keeps it while the record still stands
+// (contactCloseStands, no model call) and the lapse scan lists it when the
+// record goes.
+const PERSON_CONTACT_KIND = "person_contact";
+// What makes an automatic close the SAME close when it is judged again.
+const SAME_CLOSE_KEYS = ["basis", "record_id", "judged_customer_id"];
+const PERSON_CONTACT_BASIS = "model_judged_person_contact";
 // The same instant as SQL over a call_commitments alias: the stored ISO-Z
 // text, whose text order is time order (compared with ISO strings), so the
 // partial index call_commitments_evidence_closed_idx can serve it.
@@ -2378,18 +2489,29 @@ async function rejudgeAutoClosed(conn, kept, row, callLogId) {
   let failed = 0;
   let reopened = 0;
   for (const c of kept) {
+    const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
+    // A close a model judged from one person's text or call back stays while
+    // that record stands — read again here, deterministically, whether or not
+    // PROMISE_CONTACT_CHECK is on (the switch only stops NEW checks). Anything
+    // else falls through to the ordinary re-judge below, which reopens it.
+    if (prior?.basis === PERSON_CONTACT_BASIS) {
+      const stands = await require("./call-commitment-contact-check").contactCloseStands(conn, c, row, prior).catch((err) => {
+        logger.warn(`[call-commitments] contact-close lookup failed for ${c.id}: ${err.message}`);
+        return LOOKUP_FAILED;
+      });
+      if (stands === LOOKUP_FAILED) { failed += 1; continue; }
+      if (stands) continue;
+    }
     const proof = await judgeOpenRow(conn, c, row).catch((err) => {
       logger.warn(`[call-commitments] fulfillment lookup failed for ${c.id}: ${err.message}`);
       return LOOKUP_FAILED;
     });
     if (proof === LOOKUP_FAILED) { failed += 1; continue; }
-    const prior = typeof c.fulfillment === "string" ? JSON.parse(c.fulfillment) : c.fulfillment;
     const keeps = proofThatKeeps(c, proof, prior);
     // A row still closed keeps the time it first closed.
     const stored = keeps ? storedProof(keeps, row.customer_id, prior?.closed_at) : null;
     // Same record, judged for the same customer: nothing to write.
-    if (stored && stored.basis === prior?.basis && stored.record_id === prior?.record_id
-      && (stored.judged_customer_id ?? null) === (prior?.judged_customer_id ?? null)) continue;
+    if (stored && SAME_CLOSE_KEYS.every((k) => (stored[k] ?? null) === (prior?.[k] ?? null))) continue;
     const unchanged = (q) => q
       .where({ id: c.id, status: c.status })
       .whereNull("human_state")
@@ -2471,7 +2593,8 @@ async function listSlotKeptCallIds(conn) {
 // the proof was judged for (a relink, whenever it happened and whatever
 // kind of evidence closed it — the gate off at the time, or the refresh
 // after it failed), a visit booked or done that is now gone or off the
-// books, a customer-left dismissal whose customer is no longer churned
+// books, an inbound call that kept a callback promise and was since relinked
+// to another customer, a customer-left dismissal whose customer is no longer churned
 // (the live stage), or an association proof from no later than the stated
 // time a reprocess has since given the promise (associationFrom: the
 // association no longer counts).
@@ -2505,9 +2628,37 @@ async function listLapsedEvidenceClosedCallIds(conn) {
        JOIN call_log cl ON cl.id = cc.call_log_id
        LEFT JOIN scheduled_services ss ON ss.id = CASE WHEN (cc.fulfillment ->> 'record_type') = 'scheduled_service' THEN (cc.fulfillment ->> 'record_id')::uuid END
        LEFT JOIN customers cu ON cu.id = CASE WHEN (cc.fulfillment ->> 'kind') = ? THEN (cc.fulfillment ->> 'record_id')::uuid END
+       -- Keyed by the proof's own record id: no evidence finder ever records a sandbox call.
+       LEFT JOIN call_log ev ON ev.id = (CASE WHEN (cc.fulfillment ->> 'record_type') = 'call_log' THEN (cc.fulfillment ->> 'record_id')::uuid END)
+       -- A person's text that a model judged kept the promise: the same, by id.
+       LEFT JOIN sms_log sw ON sw.id = (CASE WHEN (cc.fulfillment ->> 'record_type') = 'sms_log' AND (cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' THEN (cc.fulfillment ->> 'record_id')::uuid END)
       WHERE ((cc.fulfillment ->> 'judged_customer_id') IS DISTINCT FROM cl.customer_id::text
           OR ((cc.fulfillment ->> 'record_type') = 'scheduled_service'
               AND (ss.id IS NULL OR ss.status = ANY(?) OR ss.customer_id IS DISTINCT FROM cl.customer_id))
+          -- A close resting on a call (the customer phoning in): the evidence
+          -- call was relinked to another customer (or is gone), so it no
+          -- longer proves this customer's promise. Only closes the portal made
+          -- on association reach this scan (closes, closed_by above): a
+          -- callback's DIRECT call proof carries no marker and never does.
+          OR ((cc.fulfillment ->> 'record_type') = 'call_log'
+              AND (ev.id IS NULL OR ev.customer_id::text IS DISTINCT FROM (cc.fulfillment ->> 'judged_customer_id')
+                -- A reprocess can also change what the call was: it must
+                -- still be the conversation inboundConversation accepts.
+                OR ((cc.fulfillment ->> 'kind') = 'inbound_call' AND (${inboundConversationSql('ev')}) IS NOT TRUE)
+                -- A model-judged close on a person's call back: it must still
+                -- be a call a person placed that reached the customer
+                -- (personCallBack, read from the same extraction fields).
+                OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}'
+                  AND (ev.direction IS DISTINCT FROM 'outbound' OR (${personCallBackSql('ev')}) IS NOT TRUE
+                    -- ... and still say what the model read (a reprocess re-transcribes).
+                    OR md5(COALESCE(ev.transcription, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))))
+          -- ... or on a person's delivered text: gone, relinked to another
+          -- customer, or no longer a text a person sent that was delivered.
+          OR ((cc.fulfillment ->> 'kind') = '${PERSON_CONTACT_KIND}' AND (cc.fulfillment ->> 'record_type') = 'sms_log'
+              AND (sw.id IS NULL OR sw.customer_id::text IS DISTINCT FROM (cc.fulfillment ->> 'judged_customer_id')
+                OR sw.direction IS DISTINCT FROM 'outbound'
+                OR (${operatorReplySql('sw')} AND ${smsDeliveredSql('sw')}) IS NOT TRUE
+                OR md5(COALESCE(sw.message_body, '')) IS DISTINCT FROM (cc.fulfillment ->> 'witness_md5')))
           OR ((cc.fulfillment ->> 'kind') = ?
               AND (cu.id IS NULL OR cu.pipeline_stage IS DISTINCT FROM 'churned' OR cu.churned_at IS NULL OR cu.id IS DISTINCT FROM cl.customer_id))
           -- ISO-Z text both sides (the stored proof's matched_at), so a
@@ -3395,6 +3546,14 @@ module.exports = {
   refreshFulfillment,
   listSlotKeptCallIds,
   listLapsedEvidenceClosedCallIds,
+  storedProof,
+  associationFrom,
+  evidenceBoundary,
+  windowEnd,
+  refreshableVerdictSql,
+  withoutProactiveDraft,
+  PERSON_CONTACT_KIND,
+  PERSON_CONTACT_BASIS,
   applyHumanUpdate,
   editRestatesRow,
   callbackEditEventMetadata,

@@ -1253,7 +1253,7 @@
               "minLength": 1
             }
           },
-          "description": "Set ONLY when confirmed_start_at is set: the agreed START time's words, copied VERBATIM (exact characters as they appear in the transcript) from the /scheduling/confirmed_start_at evidence quote, which must contain every non-null value here. hour: the word(s) naming the agreed START hour exactly as spoken (\"two\", \"2\", \"10\", \"noon\", \"midnight\") — only the hour, no minutes, no AM/PM; for an arrival window, the window's start (\"between two and four\" -> \"two\"). period: the words stating AM/PM for THAT hour (\"pm\", \"p.m.\", \"in the afternoon\", \"this evening\", \"tonight\") — null when nobody said AM/PM or a part of day for that time (never inferred from business hours, and never a part of day describing the OLD appointment, e.g. \"your morning appointment\"); null for noon/midnight. day: the words naming the agreed day (\"Thursday\", \"tomorrow\", \"tonight\", \"November 9th\", \"the 9th\") — null when the day was not said because only the time of the same-day appointment changes. Set the whole object null (and do not confirm) when the agreed time is not ONE exact on-the-hour start: approximate (\"two-ish\", \"around noonish\"), a bound (\"before noon\", \"by two\", \"two or later\"), alternatives (\"two or four\"), or has minutes (\"two thirty\"). When a speaker corrected the time, use the FINAL corrected words only (\"at two, actually three\" -> hour \"three\")."
+          "description": "Set ONLY when confirmed_start_at is set: the agreed START time's words, copied VERBATIM (exact characters as they appear in the transcript) from the /scheduling/confirmed_start_at evidence quote, which must contain every non-null value here. hour: the word(s) naming the agreed START hour exactly as spoken (\"two\", \"2\", \"10\", \"noon\", \"midnight\") — only the hour, no minutes, no AM/PM; for an arrival window, the window's start (\"between two and four\" -> \"two\"). period: the words stating AM/PM for THAT hour (\"pm\", \"p.m.\", \"in the afternoon\", \"this evening\", \"tonight\") — null when nobody said AM/PM or a part of day for that time (never write a period nobody said: an hour said without AM/PM is read as business hours by the prompt rule — 7-11 morning, 12 and 1-6 afternoon — for a new booking or a reschedule, with period null; and never a part of day describing the OLD appointment, e.g. \"your morning appointment\"); null for noon/midnight. day: the words naming the agreed day (\"Thursday\", \"tomorrow\", \"tonight\", \"November 9th\", \"the 9th\") — null when the day was not said because only the time of the same-day appointment changes (or, for a new booking, because the turn holding the agreed hour does not repeat the day). Set the whole object null (and do not confirm) when the agreed time is not ONE exact on-the-hour start: approximate (\"two-ish\", \"around noonish\"), a bound (\"before noon\", \"by two\", \"two or later\"), alternatives (\"two or four\"), or has minutes (\"two thirty\"). When a speaker corrected the time, use the FINAL corrected words only (\"at two, actually three\" -> hour \"three\")."
         },
         "moved_appointment_words": {
           "type": [
@@ -1262,6 +1262,27 @@
           ],
           "minLength": 1,
           "description": "For status \"reschedule_requested\" ONLY: the verbatim words from the /scheduling/moved_appointment_date evidence quote that name that date (\"the 24th\", \"September 24th\", \"Thursday\") — that quote must contain them exactly. null whenever moved_appointment_date is null."
+        },
+        "definite_commitment": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.20.0, additive/optional (never `required`): the extraction's judgement of the agent's promise for the agreed slot. true when the agent's own words firmly commit to that day and time. false ONLY when a hedge or condition applies to WHETHER or WHEN the appointment happens: could/might/can-try/probably/possibly/tentatively/hopefully/perhaps, a condition on the slot (\"if ...\", \"once ...\", \"upon ...\", \"pending ...\", \"after the rain\", \"weather permitting\"), or a plan still to be checked. A courtesy or contingency line about a LATER follow-up (\"if anything comes up I'll let you know\", \"we'll text you a confirmation\", \"that should be fine\" said after a firm slot) does not make it false. Prefer false when genuinely unsure. The agent's commitment quote (/scheduling/agent_committed_booking) must be the WHOLE clause holding the day, date and time INCLUDING every qualifier around them. null when no slot was agreed."
+        },
+        "relative_date_used": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.20.0, additive/optional (never `required`): true when the agreed slot's day was expressed relative to the call or to another date rather than as a plain weekday, calendar date, today, tomorrow or \"this <weekday>\": next week, the following Thursday, the Thursday after this one, a week from Thursday, eight days from now / away / out, in two weeks. Resolve it against the call date so confirmed_start_at carries the true absolute date, record only the bare weekday in agreed_slot_words.day when a weekday was said (otherwise the exact relative phrase, verbatim; the verifier computes only tomorrow, the day after tomorrow, in N days/weeks and N days/weeks from now/today, N = digits, \"a\"/\"one\", or two to eight, and sends any other weekday-less relative date to the office), and pin the whole clause holding the relative expression to /scheduling/relative_date_used. Prefer true when unsure. false when the day was a plain weekday/date/today/tomorrow. null when no slot was agreed."
+        },
+        "moved_appointment_relative_date_used": {
+          "type": [
+            "boolean",
+            "null"
+          ],
+          "description": "1.20.0, additive/optional (never `required`): true when the EXISTING appointment's day (moved_appointment_date) was expressed relative to the call or to another date rather than as a plain weekday, calendar date, today, tomorrow or \"this <weekday>\": next week, the following Thursday, the Thursday after this one, a week from Thursday, eight days from now / away / out, in two weeks. Resolve it against the call date so moved_appointment_date carries the true absolute date, record only the bare weekday in moved_appointment_words when a weekday was said (otherwise the exact relative phrase, same closed forms), and pin the whole clause holding the relative expression to /scheduling/moved_appointment_relative_date_used. Prefer true when unsure. false when the day was a plain weekday/date/today/tomorrow. null when no slot was agreed."
         },
         "requested_date_range_start": {
           "type": [
@@ -1436,7 +1457,7 @@
     },
     "evidence": {
       "type": "array",
-      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it).",
+      "description": "Verbatim transcript spans for routing-critical fields. Pin evidence for: address, urgency, on_site_authorization, hoa_common_area_service, sms_consent_given, scheduling.status=confirmed, scheduling.agent_committed_booking=true (AGENT-spoken quote), scheduling.caller_accepted_slot=true (CALLER-spoken quote), scheduling.moved_appointment_date (the utterance naming it), scheduling.relative_date_used=true and scheduling.moved_appointment_relative_date_used=true (the whole clause holding the relative expression).",
       "items": {
         "type": "object",
         "additionalProperties": false,

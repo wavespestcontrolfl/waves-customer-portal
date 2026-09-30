@@ -21,6 +21,31 @@
  * row's to_phone on a phone edit without touching status or scheduled_for
  * — Codex round 3 on #5224, P2). Omitted (undefined), the admin-inbox
  * route's original unconditional-on-status behavior is preserved exactly.
+ *
+ * `refuseWorkflowOwned` (found during #5224, pre-push audit on the inbox
+ * delete route): this writer reconciles recruiting texts, review-ask
+ * reservations and parked Agent Review decisions, but it does NOT run any
+ * other workflow's cleanup — the deferred-replay registry's onTerminal/
+ * finalize handling only runs inside the scheduled-sms executor
+ * (scheduler.js), and many producers (deposit receipts, referral nudges,
+ * invoice follow-ups, review asks, ...) keep obligations elsewhere. Deleting
+ * such a row would strand that workflow (an invoice_send_deferred row keeps
+ * its invoice's send claim; an onTerminal hook never releases a claim / arms
+ * a fallback sender). No shared cleanup hook clearly handles a STAFF cancel
+ * for every workflow, so the inbox refuses instead (rule: cleanup only if
+ * every hook handles it, otherwise refuse). Ownership is any of:
+ * metadata.entry_point (any value, registry-owned or not — several
+ * non-registry producers such as estimate_deposit_receipt_requeue and
+ * referral_nudge_deferred also park scheduled rows), metadata.replay_purpose,
+ * or metadata.bundled_review_request_id. Exemptions: a never-attempted
+ * `recruiting_comms_deferred` row, which this writer already reconciles
+ * inline (reconcileCancelledRecruitingText) to the SAME 'blocked' outcome
+ * that entry point's onTerminal would produce, and STATELESS_ENTRY_POINTS,
+ * which hold nothing outside the row. The Intelligence Bar's
+ * cancel_queued_message reaches the same refusal via `simpleOnly`.
+ * Enforced in the SAME statement that cancels (both the DELETE and the
+ * fallback UPDATE), so a row that becomes workflow-owned between read and
+ * write is never deleted or cancelled.
  */
 const db = require('../models/db');
 const { isRecruitingMessageType } = require('../utils/recruiting-thread-scope');
@@ -31,6 +56,44 @@ const {
   lockSuggestThread,
 } = require('./sms-suggest-mode');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+
+// The one deferred-replay entry point this writer already reconciles
+// inline (see reconcileCancelledRecruitingText below) — exempt from the
+// refuseWorkflowOwned predicate, but ONLY while the row was never attempted:
+// the inline reconcile maps just 'deferred' → 'blocked', so a finalize_only
+// or provider-retry row (ledger entry at 'handoff') would strand the ledger.
+const RECRUITING_COMMS_DEFERRED_ENTRY_POINT = 'recruiting_comms_deferred';
+// Entry points that hold no state outside the row itself (no registry hooks,
+// nothing to strand): deleting them is always safe, and refusing them would
+// leave no cancel path at all (the IB tool refuses them as non-simple).
+// twilio-webhook.js queues the AI auto-reply provider retry under this one.
+const STATELESS_ENTRY_POINTS = new Set(['twilio_inbound_ai_assistant_retry']);
+
+function metaText(value) {
+  return value == null ? '' : String(value);
+}
+
+function priorAttemptOf(m) {
+  const finalizeOnly = metaText(m.finalize_only);
+  if (finalizeOnly !== '' && finalizeOnly !== 'false') return true;
+  return Object.keys(m).some((k) => PRIOR_ATTEMPT_KEY_RE.test(k));
+}
+
+// Non-null (a human-readable owner name) only when this row's metadata marks
+// it as owned by an automated workflow this writer does not clean up after.
+// MUST stay in lockstep with workflowOwnedWhere's SQL below.
+function workflowOwnerOf(meta) {
+  const m = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const entryPoint = metaText(m.entry_point);
+  if (STATELESS_ENTRY_POINTS.has(entryPoint)) return null;
+  if (entryPoint === RECRUITING_COMMS_DEFERRED_ENTRY_POINT) {
+    return priorAttemptOf(m) ? entryPoint : null;
+  }
+  if (entryPoint) return entryPoint;
+  if (metaText(m.replay_purpose) !== '') return metaText(m.replay_purpose);
+  if (metaText(m.bundled_review_request_id) !== '') return 'review request';
+  return null;
+}
 
 function phoneDigits(value) {
   return String(value || '').replace(/\D/g, '');
@@ -130,28 +193,56 @@ function pinnedCustomer(query, expectedCustomerId) {
   return expectedCustomerId === undefined ? query : query.where({ customer_id: expectedCustomerId });
 }
 
-function pinned(query, { expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly }) {
+// SQL twin of workflowOwnerOf: the row is matchable only when it is a
+// stateless entry point, a never-attempted recruiting row, or carries none of
+// the workflow-ownership markers.
+function workflowOwnedWhere(query, refuseWorkflowOwned) {
+  if (!refuseWorkflowOwned) return query;
+  return query.whereRaw(
+    `(COALESCE(metadata->>'entry_point', '') = ANY(?::text[])
+      OR (COALESCE(metadata->>'entry_point', '') = ?
+          AND COALESCE(metadata->>'finalize_only', '') IN ('', 'false')
+          AND NOT EXISTS (SELECT 1 FROM jsonb_object_keys(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END) AS k WHERE k ~ ?))
+      OR (COALESCE(metadata->>'entry_point', '') = ''
+          AND COALESCE(metadata->>'replay_purpose', '') = ''
+          AND COALESCE(metadata->>'bundled_review_request_id', '') = ''))`,
+    [[...STATELESS_ENTRY_POINTS], RECRUITING_COMMS_DEFERRED_ENTRY_POINT, PRIOR_ATTEMPT_KEY_SQL],
+  );
+}
+
+function pinned(query, {
+  expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly, refuseWorkflowOwned,
+}) {
   return simpleOnlyWhere(
-    pinnedCustomer(
-      pinnedBodyDigest(pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone), expectedBodyDigest),
-      expectedCustomerId,
+    workflowOwnedWhere(
+      pinnedCustomer(
+        pinnedBodyDigest(pinnedToPhone(pinnedScheduledFor(query, expectedScheduledFor), expectedToPhone), expectedBodyDigest),
+        expectedCustomerId,
+      ),
+      refuseWorkflowOwned,
     ),
     simpleOnly,
   );
 }
 
 /**
- * @returns {Promise<{outcome: 'not_found'|'forbidden'|'ok', cancelled: boolean, row: object|null}>}
- *   `outcome` mirrors the admin-inbox route's three response branches
+ * @returns {Promise<{outcome: 'not_found'|'forbidden'|'workflow_owned'|'ok', cancelled: boolean, row: object|null, workflow?: string}>}
+ *   `outcome` mirrors the admin-inbox route's response branches
  *   ('not_found' and 'ok' both mean "200 success" to that route — it never
  *   distinguished a genuine cancel from a race that found nothing to do).
- *   `cancelled` is the precise signal a CAS-sensitive caller needs: true
- *   only when THIS call actually neutralized the row (deleted it, or
+ *   `workflow_owned` (only with `refuseWorkflowOwned: true`) means the row's
+ *   metadata marks it as owned by an automated workflow and this
+ *   writer refused to touch it; `workflow` names it for the caller's error
+ *   message. `cancelled` is the precise signal a CAS-sensitive caller needs:
+ *   true only when THIS call actually neutralized the row (deleted it, or
  *   flipped it to 'canceled' in place).
  */
-async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly = false } = {}) {
-  const pins = { expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly };
-  const peek = await db('sms_log').where({ id, status: 'scheduled' }).first('id', 'to_phone');
+async function cancelScheduledSmsRow({
+  id, techRole, technicianId, expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId,
+  simpleOnly = false, refuseWorkflowOwned = false,
+} = {}) {
+  const pins = { expectedScheduledFor, expectedToPhone, expectedBodyDigest, expectedCustomerId, simpleOnly, refuseWorkflowOwned };
+  const peek = await db('sms_log').where({ id, status: 'scheduled' }).first('id', 'to_phone', 'metadata');
   if (!peek) return { outcome: 'not_found', cancelled: false, row: null };
   if (techRole !== 'admin') {
     // Queued recruiting texts are owner-only (utils/recruiting-thread-scope.js).
@@ -160,9 +251,14 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
       return { outcome: 'forbidden', cancelled: false, row: null };
     }
   }
+  if (refuseWorkflowOwned) {
+    const owned = workflowOwnerOf(parseJson(peek.metadata, {}));
+    if (owned) return { outcome: 'workflow_owned', cancelled: false, row: null, workflow: owned };
+  }
   const threadLast10 = normalizePhoneLast10(peek.to_phone);
 
   let cancelledRow = null;
+  let workflowOwnedRace = null;
   // Lock the thread BEFORE deleting, and resolve the decisions before the
   // lock releases — see the original route's comment (admin-communications.js
   // history) for the full race this protects against.
@@ -211,7 +307,20 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
       )
         .update({ status: 'canceled', updated_at: new Date() }, ['id', 'metadata', 'created_at']))?.[0];
     }
-    if (!row) return;
+    if (!row) {
+      // Neither statement matched. With refuseWorkflowOwned, that can mean
+      // a concurrent writer stamped a workflow-ownership marker onto this row
+      // between the pre-check above and this transaction's own CAS
+      // exclusion — surface that distinctly rather than reading as an
+      // ordinary "nothing to do" race (the row is still left untouched
+      // either way).
+      if (refuseWorkflowOwned) {
+        const current = await trx('sms_log').where({ id, status: 'scheduled' }).first('metadata');
+        const owned = current && workflowOwnerOf(parseJson(current.metadata, {}));
+        if (owned) workflowOwnedRace = owned;
+      }
+      return;
+    }
     cancelledRow = row;
 
     const meta = parseJson(row.metadata, {});
@@ -280,7 +389,13 @@ async function cancelScheduledSmsRow({ id, techRole, technicianId, expectedSched
     });
   });
 
+  if (workflowOwnedRace) return { outcome: 'workflow_owned', cancelled: false, row: null, workflow: workflowOwnedRace };
   return { outcome: 'ok', cancelled: !!cancelledRow, row: cancelledRow };
 }
 
-module.exports = { cancelScheduledSmsRow, PRIOR_ATTEMPT_KEY_RE, SIMPLE_SMS_META_KEYS };
+module.exports = {
+  cancelScheduledSmsRow,
+  PRIOR_ATTEMPT_KEY_RE,
+  SIMPLE_SMS_META_KEYS,
+  workflowOwnerOf,
+};

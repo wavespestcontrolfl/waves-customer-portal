@@ -137,6 +137,12 @@ function flatView(extraction) {
     // checks against their evidence quotes instead of parsing speech.
     agreed_slot_words: sched.agreed_slot_words || null,
     moved_appointment_words: sched.moved_appointment_words || null,
+    // Language judgements (schema 1.20.0): tri-state, null = not judged, which
+    // the reschedule applier fails closed on.
+    definite_commitment: typeof sched.definite_commitment === 'boolean' ? sched.definite_commitment : null,
+    relative_date_used: typeof sched.relative_date_used === 'boolean' ? sched.relative_date_used : null,
+    moved_appointment_relative_date_used: typeof sched.moved_appointment_relative_date_used === 'boolean'
+      ? sched.moved_appointment_relative_date_used : null,
     follow_up_visit_mentioned: sched.follow_up_mentioned === true,
     follow_up_date_time: sched.follow_up_start_at || null,
 

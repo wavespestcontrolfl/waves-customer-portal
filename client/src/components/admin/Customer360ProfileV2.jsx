@@ -78,6 +78,7 @@ import {
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
+import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
@@ -9154,6 +9155,7 @@ function CustomerWorkspacePresentation({
             <>
               {/* Staff-wide, like the commitments API and its bells; only the history timeline stays admin-only. */}
               <OwedCommitmentsSummary customerId={customerId} source="sms" />
+              {sections.engagement}
               {isAdmin && sections.activity}
               {sections.services}
             </>
@@ -9209,6 +9211,7 @@ function CustomerOverlayPresentation({
           {activeTab === "overview" && sections.overview}
           {activeTab === "billing" && sections.billing}
           {activeTab === "comms" && sections.conversation}
+          {activeTab === "comms" && sections.engagement}
           {activeTab === "services" && sections.services}
           {activeTab === "property" && sections.property}
           {activeTab === "compliance" && sections.compliance}
@@ -10746,6 +10749,9 @@ export default function Customer360ProfileV2({
         onLoadOlder={history.loadOlder}
       />
     ),
+    // Read-only sent/engagement feed; the server answers { enabled: false }
+    // while GATE_CUSTOMER_ACTIVITY_TIMELINE is dark and it renders nothing.
+    engagement: <CustomerEngagementTimeline customerId={customerId} adminOnly={isAdmin} />,
     timeline: (
       <CustomerProfileTimeline
         isAdmin={isAdmin}

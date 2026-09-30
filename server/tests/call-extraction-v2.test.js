@@ -138,8 +138,8 @@ function validPersisted() {
 // ═══════════════════════════════════════════════════
 
 describe('schema validation', () => {
-  test('schema version is 1.19.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.19.0');
+  test('schema version is 1.20.0', () => {
+    expect(SCHEMA_VERSION).toBe('1.20.0');
   });
 
   describe('model-output schema', () => {
@@ -339,6 +339,32 @@ describe('schema validation', () => {
       const out = validModelOutput();
       out.consent.sms_declined = 'yes';
       expect(validateModelOutput(out).valid).toBe(false);
+    });
+
+    // scheduling.definite_commitment / relative_date_used /
+    // moved_appointment_relative_date_used (schema 1.20.0, owner direction
+    // 2026-09-30): the extraction judges the promise's language; additive
+    // and optional in BOTH schemas, so a pre-1.20 row still validates and
+    // the reschedule applier fails closed on the absent flag instead.
+    test('1.20.0: the language judgements are optional, nullable booleans; older rows without them still validate', () => {
+      const FIELDS = ['definite_commitment', 'relative_date_used', 'moved_appointment_relative_date_used'];
+      const out = validModelOutput();
+      for (const field of FIELDS) delete out.scheduling[field];
+      expect(validateModelOutput(out).valid).toBe(true);
+      for (const value of [true, false, null]) {
+        for (const field of FIELDS) out.scheduling[field] = value;
+        expect(validateModelOutput(out).valid).toBe(true);
+      }
+      out.scheduling.relative_date_used = 'yes';
+      expect(validateModelOutput(out).valid).toBe(false);
+      const old = validPersisted();
+      old.meta.schema_version = '1.19.0';
+      for (const field of FIELDS) delete old.scheduling[field];
+      expect(validatePersisted(old).valid).toBe(true);
+      const current = validPersisted();
+      current.scheduling.definite_commitment = true;
+      current.scheduling.relative_date_used = false;
+      expect(validatePersisted(current).valid).toBe(true);
     });
 
     test('an as-heard invalid caller email does not fail the whole extraction (server re-validates)', () => {
@@ -1305,6 +1331,16 @@ describe('extraction compat adapter', () => {
     expect(flatView(v2).sms_declined).toBe(false);
     delete v2.consent.sms_declined;
     expect(flatView(v2).sms_declined).toBeNull();
+  });
+
+  test('flatView maps the reschedule language judgements (schema 1.20.0), null when not judged', () => {
+    const v2 = validPersisted();
+    v2.scheduling.definite_commitment = true;
+    v2.scheduling.relative_date_used = false;
+    const flat = flatView(v2);
+    expect([flat.definite_commitment, flat.relative_date_used, flat.moved_appointment_relative_date_used]).toEqual([true, false, null]);
+    delete v2.scheduling.definite_commitment;
+    expect(flatView(v2).definite_commitment).toBeNull();
   });
 
   test('flatView preserves _v2 reference', () => {

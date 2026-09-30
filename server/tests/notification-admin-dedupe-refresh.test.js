@@ -13,10 +13,17 @@ let mockUpdates;
 jest.mock('../models/db', () => {
   const builder = (table) => {
     const conds = [];
+    let order = null;
     const b = {
       where(c) { Object.entries(c).forEach(([k, v]) => conds.push((r) => r[k] === v)); return b; },
       whereRaw(_sql, [key]) { conds.push((r) => (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata || {}).dedupeKey === key); return b; },
-      first: async () => (mockRows[table] || []).find((r) => conds.every((c) => c(r))) || null,
+      // The dedupe lookup reads the newest row first (orderBy created_at desc).
+      orderBy(col, dir) { order = { col, dir }; return b; },
+      first: async () => {
+        const hits = (mockRows[table] || []).filter((r) => conds.every((c) => c(r)));
+        if (order) hits.sort((x, y) => (new Date(y[order.col] || 0) - new Date(x[order.col] || 0)) * (order.dir === 'desc' ? 1 : -1));
+        return hits[0] || null;
+      },
       update: async (patch) => { const hit = (mockRows[table] || []).filter((r) => conds.every((c) => c(r))); hit.forEach((r) => Object.assign(r, patch)); mockUpdates.push(patch); return hit.length; },
       insert: (row) => ({ returning: async () => { const created = { id: `n-${(mockRows[table] ||= []).length + 1}`, ...row }; mockRows[table].push(created); return [created]; } }),
     };
@@ -347,4 +354,17 @@ describe('ring metadata (count/newCount/itemKeys) alone triggers a refresh', () 
     expect(repeat.refreshed).toBeUndefined();
     expect(mockRows.notifications[0].read_at).not.toBeNull(); // untouched — no refresh happened
   });
+});
+
+test('with several rows under one key the dedupe lookup refreshes the NEWEST one, never an older row', async () => {
+  const meta = (dedupeVersion) => JSON.stringify({ dedupeKey: 'k-multi', dedupeVersion });
+  mockRows.notifications = [
+    { id: 'n-old', recipient_type: 'admin', title: 'Alert', body: 'b', link: null, created_at: '2026-08-01T00:00:00Z', read_at: null, metadata: meta('v0') },
+    { id: 'n-new', recipient_type: 'admin', title: 'Alert', body: 'b', link: null, created_at: '2026-09-01T00:00:00Z', read_at: new Date('2026-09-02T00:00:00Z'), metadata: meta('v1') },
+  ];
+  const out = await NotificationService.notifyAdmin('alert', 'Alert', 'b', { dedupeKey: 'k-multi', dedupeVersion: 'v2', refreshOnDedupe: true });
+  expect(out).toMatchObject({ id: 'n-new', refreshed: true });
+  expect(mockRows.notifications[1].read_at).toBeNull();
+  expect(JSON.parse(mockRows.notifications[1].metadata).dedupeVersion).toBe('v2');
+  expect(JSON.parse(mockRows.notifications[0].metadata).dedupeVersion).toBe('v0');
 });

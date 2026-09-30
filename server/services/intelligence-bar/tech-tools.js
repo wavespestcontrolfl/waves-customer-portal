@@ -14,6 +14,7 @@ const { TERMINAL_APPOINTMENT_STATUSES } = require('./proposal-pins');
 const { formatAddress } = require('../../utils/address-normalizer');
 const { getProtocol: readProtocol } = require('../protocol-reader');
 const { openInvoiceFacts } = require('../visit-context/balance');
+const { baseQuantityUnit, normalizeInventoryUnit } = require('../inventory-units');
 
 const TECH_TOOLS = [
   {
@@ -177,14 +178,18 @@ async function resolveAuthorizedCustomer(input, techId) {
 async function executeTechTool(toolName, input, techContext) {
   try {
     const techId = techContext?.techId || null;
+    // A technician's request carries a tech context (techId, even when null);
+    // an admin workflow that borrows these reads (Agent Estimate) passes an
+    // empty one and keeps the catalog's exact label rates.
+    const forTech = Boolean(techContext) && 'techId' in techContext;
     switch (toolName) {
       case 'get_my_route': return await getMyRoute(techContext.techId, techContext.techName, input.date);
       case 'get_stop_details': return await getStopDetails(input, techId);
       case 'get_service_history': return await getServiceHistory(input, techId);
-      case 'get_product_info': return await getProductInfo(input.product_name);
+      case 'get_product_info': return await getProductInfo(input.product_name, { forTech });
       case 'get_protocol': return await getProtocol(input);
       case 'check_customer_status': return await checkCustomerStatus(input, techId);
-      case 'search_knowledge_base': return await searchKnowledgeBase(input.query);
+      case 'search_knowledge_base': return await searchKnowledgeBase(input.query, { forTech });
       case 'get_weather_conditions': return await getWeatherConditions();
       default: return { error: `Unknown tech tool: ${toolName}` };
     }
@@ -411,7 +416,10 @@ async function getServiceHistory(input, techId = null) {
 }
 
 
-async function getProductInfo(productName) {
+// A unit whose base is mL ("ml", "ml/gal", "ml/inch dbh").
+const isMlUnit = (unit) => normalizeInventoryUnit(baseQuantityUnit(unit)) === 'ml';
+
+async function getProductInfo(productName, { forTech = false } = {}) {
   const product = await db('products_catalog').whereILike('name', `%${productName}%`).first();
   if (!product) return { error: `Product "${productName}" not found` };
 
@@ -445,6 +453,12 @@ async function getProductInfo(productName) {
     sds_url: product.sds_url || undefined,
   };
 
+  // For a technician, a label rate the catalog keeps in mL is left out, so
+  // the tech is sent to the label (owner ruling: nothing a tech reads is in
+  // mL; the completion forms leave the same rates blank). Every other rate,
+  // and every rate for an admin workflow, reads as stored.
+  const mlLabelRate = forTech && isMlUnit(product.default_unit);
+
   return {
     name: product.name,
     category: product.category,
@@ -452,8 +466,8 @@ async function getProductInfo(productName) {
     moa_group: product.moa_group,
     formulation: product.formulation,
     container_size: product.container_size,
-    default_rate: product.default_rate,
-    default_unit: product.default_unit,
+    default_rate: mlLabelRate ? null : product.default_rate,
+    default_unit: mlLabelRate ? null : product.default_unit,
     sku: product.sku,
     safety,
   };
@@ -500,19 +514,33 @@ async function checkCustomerStatus(input, techId = null) {
 }
 
 
-async function searchKnowledgeBase(query) {
+// Every reader of a product page gets its label rate exactly as the catalog
+// states it ("Default Rate: 5-10 ml/gal", knowledge-base.js autoSync); a
+// technician's search leaves out one in mL (owner ruling: nothing a tech
+// reads is in mL), the same rate get_product_info leaves out for a tech.
+function withoutMlLabelRate(content) {
+  return String(content).split('\n').filter((line) => !(
+    line.startsWith('Default Rate: ') && line.slice('Default Rate: '.length).trim().split(/\s+/).some(isMlUnit)
+  )).join('\n');
+}
+
+async function searchKnowledgeBase(query, { forTech = false } = {}) {
   // Trusted knowledge only — same gate the admin field-intelligence tool
   // uses, so red wiki pages awaiting review never reach a tech answer.
   try {
     const KnowledgeBridge = require('../knowledge-bridge');
     const { claudeopedia, wiki } = await KnowledgeBridge.unifiedSearch(query, { limit: 5, trustedOnly: true });
 
-    // unifiedSearch returns metadata only — attach snippets.
+    // unifiedSearch returns metadata only — attach snippets: each page's first
+    // 300 characters, once an mL label rate is out of it for a technician.
     const kbIds = (claudeopedia || []).map((r) => r.id).filter(Boolean);
-    const kbSnippets = kbIds.length
-      ? await db('knowledge_base').whereIn('id', kbIds).select('id', db.raw('LEFT(content, 300) as snippet'))
+    const kbRows = kbIds.length
+      ? await db('knowledge_base').whereIn('id', kbIds).select('id', 'content')
       : [];
-    const kbSnippetById = Object.fromEntries(kbSnippets.map((r) => [r.id, r.snippet]));
+    const kbSnippetById = Object.fromEntries(kbRows.map((r) => [
+      r.id,
+      r.content == null ? null : Array.from(forTech ? withoutMlLabelRate(r.content) : r.content).slice(0, 300).join(''),
+    ]));
 
     const wikiIds = (wiki || []).map((r) => r.id).filter(Boolean);
     const wikiRows = wikiIds.length

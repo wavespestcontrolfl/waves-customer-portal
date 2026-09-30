@@ -143,6 +143,32 @@ describe('Tree/Shrub closeout validation', () => {
     ]));
   });
 
+  test('refuses an injection dose stated in mL; tsp and fl oz doses pass', () => {
+    // Owner ruling 2026-09-29: nothing a tech records is in mL.
+    const codes = (dose) => validate({
+      completion: {
+        injectionPerformed: true,
+        injectionRecord: {
+          plantSpecies: 'Sabal palm',
+          sizeClassOrDbh: '12 in DBH',
+          product: 'Palm-Jet Mg',
+          dose,
+          numberOfPorts: 4,
+          targetIssue: 'Magnesium deficiency',
+          followUpDate: '2026-10-15',
+        },
+      },
+    }).blocks.map((block) => block.code);
+
+    for (const dose of ['20 mL', '20ml', '5 cc', '2 milliliters', '10 mL per inch DBH']) {
+      expect(codes(dose)).toContain('tree_shrub_injection_dose_ml');
+    }
+    for (const dose of ['½ fl oz', '4 tsp', '1.5 oz', 'accurate to the label']) {
+      expect(codes(dose)).not.toContain('tree_shrub_injection_dose_ml');
+      expect(codes(dose)).not.toContain('tree_shrub_injection_dose_required');
+    }
+  });
+
   test('classifies fertilizer and blackout dates conservatively', () => {
     expect(productHasNpFertilizer({ name: '13-0-13 Ornamental Fertilizer' })).toBe(true);
     expect(productHasNpFertilizer({ name: '0-0-22 Potassium Magnesium Corrective', category: 'fertilizer' })).toBe(false);

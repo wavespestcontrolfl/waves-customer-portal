@@ -48,6 +48,28 @@ headers" = `Cache-Control: no-store`, `X-Robots-Tag: noindex`,
 
 ## Routes
 
+Customer page-view log (no payload, gate, or header change): the data GET of
+`/api/public/appointment/:token`, `/api/public/reschedule/:token`,
+`/api/public/reservice/:token`, `/api/public/secure-card/:token`, and
+`/api/public/inspection/:token` records one `customer_page_views` row once
+the token has resolved to a row (never for a malformed, unknown, or
+dark-gated token; a resolved-but-closed page such as a completed visit or a
+closed card request still counts as a view), through
+`server/services/customer-page-views.js`. Those GETs are not contractually
+read-only (their entries below describe POST writes and, for secure-card,
+render-time stamps), and none names a sole write companion, so the view write
+rides the GET. `/api/public/track/:token` is the exception: its GET stays
+strictly read-only (see its entry), so its view is recorded by the dedicated
+`POST /api/public/track/:token/view` companion instead. The log is
+fire-and-forget (never awaited, never throws, never alters the response),
+skips bot/preview user agents, staff browsers (`waves_admin` marker cookie),
+and `WAVES_ADMIN_IPS`, and stores only a sha256 of the IP and a 500-char user
+agent. The same page + subject + ip hash is deduped inside a fixed 10-minute
+lookback from its latest row, so a page left open past the window logs one
+more row per window. A failed insert or lookup logs only the page name,
+subject type and error code, never the error message (a Knex message carries
+SQL text and bound values, which can include a bearer token).
+
 Invoice/receipt address preservation: a saved `invoices.customer_address_snapshot`
 supplies the displayed customer address on `/api/pay/:token`, `/invoice.pdf`,
 `/api/receipt/:token` and its PDF. Legacy rows retain their existing address
@@ -483,9 +505,24 @@ a termite liquid/trench/bait visit), or by an explicit normalized-name alias
 list when no EPA reg is recorded at all (a hand-entered row with no catalog
 `product_id` still carries its snapshotted `product_name`) — gets
 `applications[N].product.report_copy: { how_it_works, also_labeled_for,
-pets_kids }`. `also_labeled_for` is OMITTED (never a null/empty string) for
-the one approved product with no such line (the LESCO 90/10 Nonionic
-Surfactant — it is an adjuvant, not a pesticide). Matching is exact only —
+pets_kids }`. Since owner ruling 2026-09-29, `also_labeled_for` is a single
+composed sentence — `Labeled for {N}+ {City} pests` (e.g. "Labeled for 75+
+Bradenton pests"), or `Labeled for {N}+ pests` when no usable city is
+available — never a named pest list. `N` is the product's raw label pest
+count (`alsoLabeledForPestCount` in `server/config/report-product-copy.js`,
+each with a source/date comment) floored to a multiple of 25
+(`floorToMultipleOf25`); `City` is the visit's own city — `service.city` as
+`buildReportV1Data` already resolves it (the visit's stamped service address
+city via `COALESCE(ss.service_address_city, customers.city)`, i.e. the
+property serviced, falling back to the customer's own city), normalized for
+display (`normalizeReportCity`: trimmed, internal whitespace collapsed, and
+title-cased when the raw value is entirely upper-case or entirely lower-case; mixed case is kept as entered — never invented)
+before it is composed into the sentence (`buildAlsoLabeledForText`); a
+blank/unusable city (or none at all) drops to the no-city wording rather
+than blocking the rest of the copy. `also_labeled_for` is OMITTED (never a
+null/empty string) for products with no `alsoLabeledForPestCount` at all —
+narrow products (gel baits, granular bait, IGRs) and the LESCO 90/10
+Nonionic Surfactant (an adjuvant, not a pesticide). Matching is exact only —
 never a substring/fuzzy match, same posture as
 `pest-report-expectations.js`'s `PRODUCT_EXPECTATION_CLASS` — so a product
 absent from the config (every catalog product not on the owner-approved
@@ -799,6 +836,45 @@ absent bearer also keeps public behavior. An expired
 access token gets the refreshable 401 only when the customers-only gate needs
 that identity. An estimate-linked request keeps the estimate account instead
 of inheriting an ambient portal session.
+Quote-wizard handoff identity at `/api/booking/confirm` (customers-only gate
+on): the wizard links its draft estimate to any existing customer matching
+the unverified phone/email the anonymous quoter typed, and hands the token
+back to that same caller, so a token-verified pricing handoff (`pricing_
+estimate_id` + `estimate_token`) whose draft is linked to an ESTABLISHED
+customer is not identity. The gate binds it exactly as before (same address
+fix-it when the street matches no account property), and the refusal — 409
+telling the customer to sign in with the portal code — is applied inside the
+booking transaction under the customer row lock, after the address bind and
+signed-slot validation and against the customer's CURRENT stage (a lead
+promoted meanwhile is caught), so it is not an early "is this contact a
+customer" probe and a typed phone plus a street match never books on someone
+else's account. Residual: a caller who already holds the phone, the street
+and a valid signed slot can still see the 409 for an established customer
+versus the normal flow for a lead. Preserved: a verified portal bearer still
+books (identity from the token, address-bound to the account); the
+staff/system accept link (`source_estimate_id` + namespaced `accept_token`)
+still books as the estimate's customer; a draft linked to a row still in a
+pre-customer pipeline stage (the quoter's own freshly minted lead) or to no
+customer keeps the quoter's own booking; an identical retry of a booking that
+already committed (same draft, slot and customer, and the typed phone — or the
+email that linked the draft — is the customer's) still reaches the idempotent
+replay. No message is sent on the refusal: the refusal retires the open
+abandoned-booking recovery intents carrying that HMAC-verified draft id (only the id — neither the typed nor the stored contact ever widens it), and
+`/api/booking/capture-intent` writes such a handoff's row already suppressed
+(and retires any staged for the draft). Every accepted capture-intent request
+answers one constant `200 {"ok": true}` — no `skipped`, `created`/`updated` or
+`intent_id` fields — whatever was staged, skipped, suppressed or errored (the
+clients are fire-and-forget and read no body), so it is no probe for whether a
+contact is a customer or has a recent booking; only the request-shape 400
+(`valid phone required`) differs. "Blocked" is judged account-wide by one
+shared classifier used by confirmation, capture-intent and the recovery worker:
+the draft-linked customer row or any sibling property row on its account being
+an established customer, ARCHIVED (archiving never re-opens the handoff), or the
+draft's customer row being missing (fail closed) blocks it. The
+suppression writes are best effort: the abandoned-booking recovery worker
+re-checks at send time (SMS and email) and skips, marking suppressed, any intent
+whose draft is so linked — a lookup error skips that tick — so a failed
+suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
@@ -1744,6 +1820,52 @@ builder is fail-closed, so a config where the rental cannot actually
 price 404s instead of rendering a one-column comparison; 60 req/min
 limit, `no-store`/`no-referrer` headers; no product-registry, vendor, or
 cost data — customer-priced figures only).
+`/api/estimates/:token/map/satellite` and `/api/estimates/:token/map/overlay`
+(read-only token-scoped satellite image proxy, B12; the ONLY way a customer
+surface gets a map image — /data, the SSR page, the PDF render pass and the
+show-your-work payload carry these paths and never a maps.googleapis.com URL,
+because that URL carried the server's Google Maps key, the same key Geocoding
+and Routes use, which cannot be referrer-restricted; `/data` and the SSR HTML
+also run a last-line scrub that strips any maps.googleapis.com `key=` (raw or
+HTML/JSON-escaped separators: `&amp;`, `&#38;`, `&#x26;`, `\u0026`), any
+`key=AIza...` token or bare Google-key shape (so a rotated or staff-pasted key
+that differs from the configured one is caught too) and blanks the literal key
+— the SSR path scrubs its SOURCE values before renderPage escapes them, then
+scrubs the finished HTML as a backstop, and stored `estimates.satellite_url` rows that already
+hold a keyed URL are redacted on output — no migration). A small guard (`mapImagePreGuard`) is mounted in
+`server/index.js` on `/api/estimates` BEFORE the global `/api/` limiter,
+scoped to exactly what Express routes to these two handlers (GET and HEAD,
+case-insensitive path, optional trailing slash): it stamps `Cache-Control: no-store`,
+`Referrer-Policy: no-referrer` and `Cross-Origin-Resource-Policy:
+cross-origin` first — so the router.param malformed-token 404 and the global
+and route limiters' 429s inherit them, and a successful image overwrites
+Cache-Control — and answers the dark overlay's generic 404 there, before the
+global limiter can turn it into a 429. Token format gate
+(router.param) + ONE generic 404 body (`Estimate not found`, `no-store`) for
+every refusal — malformed/unknown token, callSideBlock, a row that is not
+`isEstimateCustomerViewable` (drafts, expired, archived, send_failed 404; the
+group-link view bypass matches `/:token/data`; there is NO staff-preview or
+signed-pdf-pin bypass because an <img> carries neither), no usable stored map,
+and upstream failure — so the route is not an existence oracle. The route
+reads NOTHING from the caller's query string: `/map/satellite` rebuilds a
+keyless Static Maps URL from the estimate's OWN stored `satellite_url`
+(`estimate_data.satelliteUrl` fallback), keeping only allow-listed,
+range-checked params (center, zoom 1-22, size <=640x640, maptype
+satellite|hybrid, format, scale 1|2; markers/path/signature dropped) and
+refusing any non-`https://maps.googleapis.com/maps/api/staticmap` value, so it
+cannot become an open proxy or an SSRF vector; `/map/overlay` rebuilds the
+parcel-outline URL from the cached property_lookups row (dark while
+`estimateShowYourWork` is off: the gate check runs BEFORE the limiter and any
+DB work, so a dark route answers the generic 404, never 429). The server key
+is appended only inside the fetch (8 s timeout, image/* content-type and 4 MB
+cap enforced, nothing logged but a URL-free warn); a bounded in-memory cache
+(64 entries, 10 min) keeps one token from fanning out into unlimited Google
+fetches, and a 30 req/min per-IP limiter fronts it. Success streams the bytes
+with `Cache-Control: private, max-age=3600`, `Referrer-Policy: no-referrer`,
+`X-Content-Type-Options: nosniff`, and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img>
+when the SPA is built against a separate API origin via VITE_API_URL).
+Admin-only surfaces keep their direct URLs).
 `/api/estimates/:token/service-details/send` (write; emails or texts that
 same packet to the contact info ALREADY ON the estimate — the destination
 is NEVER caller-supplied (body carries only `service` + `channel`), so
@@ -1993,6 +2115,48 @@ Operational `meta.providerStatus` (credential configuration and attempted-provid
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
 `publicLookupErrors` removes provider failures and internal diagnostic messages.
+The response's `satellite.closeUrl` / `microCloseUrl` / `wideUrl` are ABSOLUTE
+short-lived signed proxy URLs (`https://<portal>/api/public/map-image/<token>`),
+never Google Static Maps URLs: the lookup builds keyed URLs internally (the
+server Maps key, which also serves Geocoding/Routes and so cannot be
+referrer-restricted), `publicSatellitePayload` re-signs only their
+center/zoom/size, and the whole success body also runs the shared Maps-key
+scrub (`scrubMapsKeysDeep`) as a last line. The marketing site's quote form
+renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
+`/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
+proxy; the ONLY way the public lookup, the customer service report
+(`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
+portal `/api/property/station-map` get a map image — none of those payloads
+carries a maps.googleapis.com URL or a key any more; staff-only surfaces such
+as admin dispatch keep direct URLs). The token is
+`v1.<base64url(lat|lng|zoom|WxH|scale|maptype|exp)>.<base64url(HMAC-SHA256)>`,
+keyed on `REPORT_PIN_SECRET` (falls back to `JWT_SECRET`) through a
+purpose-derived key, 2 h expiry for report/portal links (24 h for the lead-form lookup, whose marketing-site form cannot re-request; never more than 24 h), constant-time compare,
+fail-closed when no secret is configured (the map is omitted, never sent
+keyed). The route reads NOTHING but the path token — no query param — and
+rebuilds a keyless Static Maps URL only from the signed, range-checked values
+(lat +-90, lng +-180, zoom 1-22, size <=640x640, scale 1|2, maptype
+satellite|hybrid), appends the key inside the fetch (8 s timeout, image/*
+content-type, 4 MB cap; a dedicated `GOOGLE_STATIC_MAPS_API_KEY` is preferred,
+matching the basemap provider), and streams the bytes, so it cannot become an
+open proxy or SSRF vector. Every refusal (malformed/forged/expired token, no
+key, upstream failure) is ONE generic 404 body — including the empty token,
+`//x`, extra path segments and every non-GET/HEAD method, which a terminal
+catch-all in the router answers with the same 404 (the header stamp and the
+route limiter run router-wide, ahead of the route, so no request under the
+mount falls through to the global limiter or the app notFound; the mount is
+case-insensitive and ignores a trailing slash; a last error handler in the router answers any error raised under the mount, such as a malformed percent-encoding like `/%E0%A4%A`, with the same 404 instead of the global 500); every response including the
+404 and the 429 carries `Cache-Control: no-store` (success: `private,
+max-age=900`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
+nosniff`, `X-Robots-Tag: noindex` and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img> on
+the marketing site or a separate API origin). No server-side image cache
+(provider terms are display-only); a 60 req/min per-IP limiter (IPv6 /64
+collapsed) fronts the whole mount, which sits in `server/index.js` ABOVE the global `cors()` (it would otherwise answer an OPTIONS preflight with a bare 204 ahead of the router), the global `/api/` limiter and the body parsers.
+Regression guard: `server/tests/customer-map-no-key.test.js` fails if any
+server module outside an explicit server-only/staff-only allowlist references
+the Static Maps endpoint, and asserts the touched customer payloads carry no
+key).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,
@@ -2460,6 +2624,22 @@ target / 410 on expired / generic 404 with no enumeration leak; `noindex`;
 mounts OUTSIDE the global `/api/` limiter so it carries its own 120/min
 per-key limiter; new codes are 10 chars ≈ 49.5 bits since 2026-08-07,
 legacy 5-char codes still resolve).
+`/go/:code` (outside-link click redirect for prep-guide links to third-party
+sites — 302 to the registered destination / generic 404 with no enumeration
+leak; `noindex`, `no-store`, `Referrer-Policy: no-referrer` on EVERY status
+(302/404/429/500 — set before the limiter); mounts OUTSIDE
+the global `/api/` limiter so it carries its own 120/min per-key limiter (the
+`/l` budget). **Not an open redirect**: the destination is ONLY a
+pre-registered `outbound_links` row looked up by a 20-hex code that is the
+sha256 of the target URL (row must hash back to its code, http(s) only);
+nothing in the request names or changes the target. The query carries only an
+HMAC-signed attribution context (template key, customer id, visit or project
+id, surface — row ids only, NEVER the bearer prep token, which would land in
+the request log; it is resolved to ids at render time) — an invalid signature is ignored, never trusted. Human clicks log
+to `outbound_link_clicks` (sha256 ip hash; bot/preview UAs still redirect but
+log nothing). Codes are minted at render time only while `GATE_OUTLINK_TRACKING`
+is on, but the route stays live regardless of the gate so links already sent
+keep working. Destinations are never tagged or altered.)
 `/og/report/:token.jpg`, `/og/<kind>.jpg`, `/og/default.jpg`
 (`server/routes/og-preview.js`, link-preview images, owner 2026-09-27: the
 picture iMessage/SMS/email crawlers show under a texted or emailed customer
@@ -3012,11 +3192,26 @@ tokens — `serviceReportToken` (`report_view_token`), `invoiceToken`, a
 `/rate/:token` review URL, and TTL-presigned service-photo URLs — fanning out
 to the report / receipt / rate surfaces. Treat the track token and any change
 to its payload, in any state, as security-critical. The GET stays strictly
-read-only; `POST /api/public/track/:token/stops-ahead` is the ONE write
-companion — same token gate + rate limit, ignores its body, and only
-persists the stops-ahead display-clamp floor (monotone LEAST,
-skip-unchanged) via `computeStopsAhead` before returning the displayable
-count; it must never grow beyond that single bounded metadata write).
+read-only; it has exactly TWO write companions, both bounded.
+`POST /api/public/track/:token/stops-ahead` — same token gate + rate limit,
+ignores its body, and only persists the stops-ahead display-clamp floor
+(monotone LEAST, skip-unchanged) via `computeStopsAhead` before returning the
+displayable count. `POST /api/public/track/:token/view` — same token format
+gate, expiry fence (unknown / malformed / expired = the same generic 404, no
+write), privacy headers and router rate limit; ignores its body; records ONE
+`customer_page_views` row (`page: 'track'`, subject = the visit, bots / staff
+skipped, 10-minute dedupe) fire-and-forget and answers 204 with no body. The
+page calls it once per token on its first successful load, never on the 30 s
+poll. A lookup failure on `/view` is logged code-only (`logViewFailure`,
+never `err.message`, which can carry the bound token) and still answers 204;
+it is never forwarded to the global error handler. The privacy headers are
+also stamped by the `trackPublicPreparser` mount
+(`server/middleware/track-public-preparser.js`) in `server/index.js` AHEAD of
+the global `/api/` limiter and the shared body parsers, so a limiter 429 on the
+bearer URL carries them too. The same guard answers `/view`'s malformed-token
+404 before any body parsing and drops the request Content-Type so the ignored
+body is never parsed (a malformed / oversized body cannot become a 400/413). Neither companion may grow beyond its single
+bounded write).
 `/api/public/appointment/:token` (GET summary + `GET /:token/calendar.ics`
 + `POST /:token/confirm`; the destination the 24h reminder and booking
 confirmation texts link to. Gated by `scheduled_services.reschedule_token`

@@ -8,6 +8,7 @@ const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-
 const { billingEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure } = require('./billing-email-sender');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { formatDisplayDate } = require('../utils/date-only');
+const { propertyDisplayLabel } = require('../utils/property-display');
 const { currency } = require('./email-template');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 
@@ -104,11 +105,9 @@ async function loadCustomer(customerId) {
     .first();
 }
 
+// Street address first; profile_label is only a nickname ("Primary").
 function propertyLabel(customer = {}) {
-  const label = clean(customer.profile_label);
-  if (label) return label;
-  const address = [customer.address_line1, customer.city].filter(Boolean).join(', ');
-  return address || 'Service property';
+  return propertyDisplayLabel(customer);
 }
 
 async function logLifecycleEmailAttempt({
@@ -1103,6 +1102,7 @@ module.exports = {
     hashValue,
     itemSummary,
     membershipPayload,
+    propertyLabel,
     sendTemplate,
     stableEventKey,
   },

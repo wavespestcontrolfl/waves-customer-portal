@@ -75,6 +75,8 @@ const LANE_RUNTIME = {
   response_drafter_high_stakes: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'high_stakes_copy', maturity: 'M2' },
   estimate_followup: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'routine_copy', maturity: 'M0' },
   'sms-commitment-fulfillment': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'sms-commitment-fulfillment', ...LONG_BATCH },
+  // PROMISE_CONTACT_CHECK: a 15-minute tick reads open Waves "other" call promises and, on a grounded model verdict, closes one in the ledger (internal_write; no customer message). Cadence stays 'event': a tick with no candidate makes no call.
+  'call-commitment-contact-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'call-commitment-contact-check', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
   sms_intent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'classification' },
   // GATE_REVIEW_DAY0_CONTEXT: classifies a Day-0 review-ask topic from a
@@ -160,7 +162,17 @@ const LANE_RUNTIME = {
   // M3 (Codex r20): the public analyzer's fallback path converts analyzePhoto() into report findings it persists and teases without staff review.
   lawn_assess: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
   lawn_visit_assessment: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
+  // Owner ruling 2026-09-29: the gated Fable name tie-break (GATE_LAWN_ASSESSMENT_REFEREE, dark). One extra ledger row
+  // per call, inside the same technician-reviewed visit as lawn_visit_assessment; a miss leaves Gemini's read standing.
+  lawn_assessment_referee: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id', maturity: 'M2' },
   tree_shrub: { side_effect_class: 'customer_visible', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'vision_id', maturity: 'M3' },
+  // Plant photo ID (owner rulings 2026-09-28/29): the plant engine's Gemini -> Sol ladder and its gated
+  // Fable name tie-break, both through the llm adapters (one ledger row per call). No runtime caller until
+  // the L4 route ships; customer-visible once it does. The referee is dark (GATE_PLANT_ID_REFEREE).
+  // Both run in-request with a hard timeout and a deterministic result: Gemini -> Sol, and a referee
+  // that times out or fails leaves the Gemini/Sol answer standing (interactive, never queued).
+  plant_id: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
+  plant_id_referee: { side_effect_class: 'customer_visible', ledger: 'call', fallback_class: 'interactive', eval_family: 'vision_id' },
   treatment_zone: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'property_measurement' },
   // offline (Codex r18): the caption ladder passes no timeoutMs, so a stalled first Gemini rung never reaches either fallback.
   tech_caption_vision: { side_effect_class: 'draft_for_human', ledger: 'call', fallback_class: 'offline', eval_family: 'vision_id' },

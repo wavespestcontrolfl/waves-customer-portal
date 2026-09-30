@@ -1,6 +1,7 @@
 const { correctEmailDomain, meetsConfidence } = require('../utils/email-typo-correction');
 const { toE164, isLikelyE164 } = require('../utils/phone');
 const { looksGarbledTranscriptEmail } = require('../utils/intake-normalize');
+const { sameGmailInbox } = require('../utils/email-equivalence');
 const { parseRawAddress, splitStreetLineUnit, splitUnitFirstLine, normalizeStreetLine, normalizeState, normalizeUnitLine, unitLineValueKey, unitAnywhereOnLine, STREET_SUFFIX_ALIASES } = require('../utils/address-normalizer');
 
 const SERVICE_AREA_COUNTIES = new Set(['Manatee', 'Sarasota', 'Charlotte', 'DeSoto']);
@@ -2425,7 +2426,21 @@ function applyEmailDisagreementHold(extracted, dictationEmailPayload) {
   }
   payload.email_candidates = existing;
   if (!payload.email_as_heard) payload.email_as_heard = v1Email;
-  if (!payload.confirmation_question) {
+  // Gmail ignores dots in the mailbox name, so a pair that differs only by
+  // those dots is one inbox (owner ruling 2026-09-29): the card still asks
+  // for a human confirm — no address is saved automatically, since every
+  // send path matches suppressions by exact spelling — but it says so, and
+  // either spelling is right to confirm.
+  // Only when EVERY candidate on the card is that one inbox — a decoder
+  // candidate that genuinely differs keeps its own question (codex #5323 r4)
+  // — and no decoder/arbiter question is already there: that one carries
+  // the evidence-specific warning (a risk flag, a contradiction) and must
+  // not be traded for the generic wording (codex #5323 r6).
+  const oneInbox = !payload.confirmation_question && sameGmailInbox(existing.map((c) => c?.value));
+  if (oneInbox) {
+    payload.confirmation_question = `Both spellings are the same Gmail inbox (Gmail ignores dots) — confirm either one: "${v1Email}" or "${v2Email}".`;
+    payload.gmail_same_inbox = oneInbox;
+  } else if (!payload.confirmation_question) {
     payload.confirmation_question = `The call's two extraction passes heard different emails — read it back and confirm which is right: "${v1Email}" or "${v2Email}"?`;
   }
   payload.email_disagreement = { v1: v1Email, v2: v2Email };

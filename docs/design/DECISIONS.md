@@ -2662,3 +2662,129 @@ migration (`scheduled_services.rides_parent_id`, schema-only, already pushed
 and run on a preview database) is copied verbatim, unchanged, from the write
 engine's branch. The write engine itself resumes as PR #5268 once the
 office has reviewed the preview's output against real customers.
+
+## 2026-09-28 — Plant photo ID: GPT-6 Sol second opinion + Claude Fable referee
+
+Owner ruling 2026-09-28, plant engine ONLY — replaces the 2026-09-26 "Gemini
+→ GPT-6 Astra, no Claude" ruling for `plant-engine.js` (lawn/tree/shrub/palm
+photo ID). The pest engine's `pest-engine.js` / `TEXT_POLICIES.photoIdVision`
+/ `pest-identification.js` ladder is unchanged and keeps its own Astra second
+opinion.
+
+The plant engine's second opinion moves to `TEXT_POLICIES.plantIdVision`:
+Gemini 3.8 Flash first, GPT-6 Sol (`OPENAI_PLANT_ID`, `MODEL_OPENAI_PLANT_ID`
+override) when Gemini misses, scores below `PHOTO_ID_ESCALATE_BELOW`, or
+disagrees — same trigger shape as `photoIdVision`, sequential, no Claude leg
+at this stage. Beyond that: when a scope that TRIGGERED the escalation is
+still unsure after the second opinion (the providers disagreed, OpenAI never
+answered that scope, or the combined top confidence is still below the
+escalate threshold), Claude Fable 5.1 at effort `high`
+(`MODELS.ROUTES.plantIdReferee`, `MODEL_PLANT_ID_REFEREE` override) gets one
+more look at the same photos as a deciding vote. Ships DARK behind
+`GATE_PLANT_ID_REFEREE` (off unless exactly `'true'`, read at call time via
+`plantIdRefereeLive()`); off, the ladder is byte-identical to Gemini → Sol.
+
+One referee call covers every still-unsure scope at once (same photos, the
+same `ESCALATION_SCHEMA` output, with an appended "earlier reads" block). The
+merge is a deterministic 2-of-3 majority per scope: the referee siding with
+one of two disagreeing earlier reads settles the scope (wording capped at
+`likely`, never `pretty_sure`); siding with an undisputed-but-unsure top
+confirms it (same cap, the referee standing in for a missing second
+opinion); a genuine third answer leaves the scope exactly as unsure as it
+was and joins the candidate/possibility list. A missing, invalid, or
+timed-out referee leaves the escalation result unchanged. Diagnostics
+(`internal.models.referee`, `internal.referee: { triggered, scopes,
+outcome }`) are admin-only, never merged into `v2`. Full detail:
+`docs/photo-id/plant-engine.md`'s "Referee" section.
+
+## 2026-09-29 — Plant photo ID referee narrowed to name tie-breaks
+
+Owner narrowed the plant referee (`GATE_PLANT_ID_REFEREE`, dark, see the
+2026-09-28 entry above) to plant-NAME tie-breaks in identify mode.
+
+It now fires ONLY when the run is in `identify` mode and ONLY for an
+identity lane the subject actually uses (turf/weeds for a lawn, host for
+tree_shrub/palm) where Gemini and Sol's escalation DISAGREED
+(`identityFlags[slot].disagreed` with a `disagreementPair`). A workup
+(problem check), a missing second opinion, and a low-confidence AGREEMENT no
+longer draw a referee call at all — the removed 09-28 shape's "still unsure"
+trigger (disagreed, no second opinion, or still below
+`PHOTO_ID_ESCALATE_BELOW`) and its conditions-scope vote are gone.
+
+The merge is a tie-break only, never a 2-of-3 majority: the referee's own
+top for that slot either matches side A or side B of the disagreement
+(that side goes first, `disagreed: false`, `disagreementPair: null`,
+`blockPrettySure: true`, capped at `likely`, outcome `settled`) or it
+doesn't — a third name, no usable referee answer, or unusable referee
+photos leave the lane EXACTLY as the escalation left it, with no appended
+candidate and no partial credit (outcome `no_majority` or `unavailable`).
+An off-catalog match additionally requires the normalized `offCatalogName`
+to agree, not just the shared group id (`sameCandidateKey`, unchanged,
+still shared with the pest engine).
+
+Unchanged: `TEXT_POLICIES.plantIdVision` (Gemini → Sol), `ROUTES.plantIdReferee`
+(Fable 5.1, effort `high`), the gate, the referee prompt and "earlier reads"
+idea, the pre-referee `legFailureReason` short-circuit, the rule that the
+referee's own quality verdict joins `photoReadFor` and an unusable referee
+read merges nothing, and admin-only `internal.referee` diagnostics. Full
+detail: `docs/photo-id/plant-engine.md`'s "Referee" section.
+
+## 2026-09-29 — Lawn visit assessment backup: GPT-6 Sol replaces Astra
+
+Owner ruling 2026-09-29. The lawn visit assessment
+(`services/lawn-visit-assessment.js`, `TEXT_POLICIES.lawnVisitAssessment`,
+`GATE_LAWN_VISIT_ASSESSMENT`) keeps Gemini 3.8 Flash first; its backup leg
+moves from GPT-6 Astra (`OPENAI_FRONTIER`) to GPT-6 Sol on its own selector,
+`OPENAI_LAWN_ASSESSMENT` (`MODEL_OPENAI_LAWN_ASSESSMENT` override). Reason:
+the same evidence as the 2026-09-28 plant ruling — on the hardest photos Sol
+did no worse than Astra and was less often confidently wrong, at about a
+third of the cost (2.7¢ vs 7.6¢ per photo). Still sequential, still no
+Claude leg. The pest identifier's `photoIdVision` keeps Astra.
+
+Caveat recorded with the ruling: the assessment scores a visit (density,
+weeds, color, fungus, thatch, stress) rather than naming a plant, so the
+ranking carries over by assumption, not measurement. A Fable referee for
+this lane is not part of this change.
+
+## 2026-09-29 — Lawn visit assessment: Fable name referee (dark)
+
+Owner ruling 2026-09-29, following the Sol-backup entry above and mirroring the
+plant engine's narrowed referee. Ships dark behind
+`GATE_LAWN_ASSESSMENT_REFEREE` (off unless exactly `'true'`, read at call time
+via `lawnAssessmentRefereeLive()`); one gate covers both new calls.
+
+**Second opinion, "unsure or serious".** When Gemini answered (not the OpenAI
+fallback) and the gate is on, GPT-6 Sol re-reads the same visit (the policy's
+OpenAI leg called alone: same system prompt, photos, schema) ONLY if Gemini's
+read is unsure or serious: any finding with confidence low or unknown, any
+finding with severity moderate or severe, or `grass_type` `unknown`. Otherwise
+no extra call. The second opinion exists only to feed the referee.
+
+**Referee scope: names only.** Claude Fable 5.1 (`ROUTES.lawnAssessmentReferee`,
+effort `high`, `MODEL_LAWN_ASSESSMENT_REFEREE`, ~60 s cap) fires ONLY when
+Gemini and Sol disagreed on (a) the grass type (both definite, neither
+`unknown`/`mixed`) or (b) what a finding IS. Finding names are free text, so
+they are canonicalized through the production cause catalog
+(`safeConditionLabel`); Gemini's and Sol's findings pair by an overlapping
+photo (or the same known zone when a side cites none), and a dispute needs a
+unique pair with one conflicting cause each. Agreement (however scored), a
+missing or invalid Sol answer, a symptom-only / clean / negated / multi-cause
+name, or an ambiguous pairing never draws the call. Scores (turf_density,
+weed_coverage, color_health), `severities{}`, finding severity and urgency, and
+every other field always stay as Gemini read them.
+
+**Merge: tie-break only.** Fable answers a / b / neither per disputed item.
+Matching Sol's side replaces that name (the grass type, or the finding's name
+with Sol's own wording and confirmation step) and caps the finding's confidence
+at `moderate`, never above Sol's own rating of that cause; matching Gemini's side keeps Gemini's name and caps at
+`moderate` as well. A third answer, no usable answer, timeout, or error leaves
+that item, and on a failed call the whole result, exactly as Gemini read it. No
+partial credit. `analyzeVisit` never throws for any of it.
+
+Internal only: diagnostics are a `referee` object on `analyzeVisit`'s return,
+present only when the gate is on, never persisted as a column and never in
+customer copy; the extra calls' tokens are added to the run's token columns. No
+migration. Off, or unset: byte-identical to today. Cost shape: a confident read
+draws no extra call; an unsure-or-serious read draws one Sol re-read; only a
+name dispute also draws one Fable call. Full detail: `CLAUDE.md`'s "Lawn visit
+assessment name referee" paragraph and `server/services/lawn-visit-referee.js`.

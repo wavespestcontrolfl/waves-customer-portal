@@ -34,6 +34,7 @@ async function openTimesBlock({ decision, outgoingBody }) {
     customerId: snapshot.lookup?.customerId || null,
     estimateId: snapshot.lookup?.estimateId || null,
     ...(snapshot.lookup?.serviceType ? { serviceType: snapshot.lookup.serviceType } : {}),
+    ...(snapshot.lookup?.scheduledServiceId ? { scheduledServiceId: snapshot.lookup.scheduledServiceId } : {}),
     quotedWindows: plan.quotedWindows,
   });
   return recheck.ok ? null : `open-times stale (${recheck.reason})`;

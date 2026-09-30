@@ -189,7 +189,7 @@ function buildPrompt(input = {}) {
     ? input.pestActivityScale
     : DEFAULT_ACTIVITY_SCALE;
 
-  return `Write one customer-facing SMS recap for a Waves Pest Control & Lawn Care service visit.
+  return `Write one customer-facing SMS recap for a Waves Pest Control service visit.
 
 Rules:
 - 2 to 4 short sentences.

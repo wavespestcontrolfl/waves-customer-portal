@@ -1859,13 +1859,19 @@ function safeParseJsonPayload(payload) {
 // Two payloads with the same signature describe the identical question —
 // same candidates, same disagreement flag, same release target; anything
 // else means the office needs to see fresh evidence.
-function emailCardSignature(reasonCode, payload) {
+function emailCardSignature(reasonCode, payload, { wording = false } = {}) {
   const candidates = Array.isArray(payload?.email_candidates)
     ? payload.email_candidates.map((c) => String(c?.value || '').trim().toLowerCase()).filter(Boolean).sort()
     : [];
   const hasTarget = !!payload && Object.prototype.hasOwnProperty.call(payload, 'email_release_target');
   const target = hasTarget ? (payload.email_release_target || null) : 'no-opinion';
-  return JSON.stringify([reasonCode || null, !!payload?.email_disagreement, candidates, target]);
+  const key = [reasonCode || null, !!payload?.email_disagreement, candidates, target];
+  // gmail_same_inbox (2026-09-29) is card WORDING, not evidence: it counts
+  // only when comparing against a still-open card, so a card minted before
+  // the same-inbox wording refreshes on reprocess (codex #5323 r5) — never
+  // against a card a human already confirmed, which must stay satisfied.
+  if (wording) key.push(payload?.gmail_same_inbox || null);
+  return JSON.stringify(key);
 }
 
 // The single address (or blank) a card's evidence supports holding a
@@ -2018,8 +2024,8 @@ async function mintEmailReviewCardsFenced({
       for (const live of liveCards) {
         const desired = cards.find((c) => c.reason_code === live.reason_code);
         const same = !!desired
-          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload))
-            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload));
+          && emailCardSignature(live.reason_code, safeParseJsonPayload(live.payload), { wording: true })
+            === emailCardSignature(desired.reason_code, safeParseJsonPayload(desired.payload), { wording: true });
         if (same) {
           satisfiedReasonCodes.add(desired.reason_code);
           continue; // identical evidence — no-op, card untouched
@@ -7132,7 +7138,7 @@ Do not inflate quality: a caller who is still comparing companies or said they'd
 IMPORTANT — appointment_confirmed rules:
 - Only set appointment_confirmed to true if BOTH a specific DATE and a specific TIME were explicitly agreed to by the caller.
 - Vague references like "tomorrow", "next week", "noonish", "sometime Tuesday" do NOT count — the caller must confirm an actual time (e.g. "10 AM", "2:30 PM", "noon").
-- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — an explicit AM/PM stated on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon") — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range with NO explicit AM/PM, no "noon"/"midnight", and no day-part word — "Tuesday, 2 to 4", "between 2 and 4" — leaves the START's period unstated, so it does NOT count as confirmed (you would otherwise have to invent AM or PM). An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
+- ARRIVAL WINDOW EXCEPTION: an arrival window staff COMMITTED to and the caller ACCEPTED, on a specific day, with a clear start hour AND an UNAMBIGUOUS period for that start — STATED as an explicit AM/PM on either bound of the range, "noon"/"midnight" as either bound, or a day-part word that fixes the period ("tonight", "this evening", "in the morning", "this afternoon"), or, when none was said, READ from business hours by the BUSINESS-HOURS READING rule below — DOES count as confirmed; it is a specific time slot expressed as a range ("between 6 and 9 tonight", "we'll be there between noon and 1 today", "between 10 and noon tomorrow", "Tuesday, 2 to 4 PM"). Set appointment_confirmed true and preferred_date_time to the window's START. A relative day that resolves to one calendar date ("today", "tonight", "tomorrow", "this Tuesday") is a specific day here; the vague examples above are vague because they carry no time, not because of the period rule here. A committed window stays confirmed even when phrased loosely ("we'll be there sometime between 6 and 9 tonight") or paired with a courtesy heads-up ("the tech will call when he's on the way"). A range or hour with an explicit AM/PM, "noon"/"midnight" or a day-part word keeps that period. BUSINESS-HOURS READING (owner decision 2026-09-29, the same rule the owner approved for reschedules on 2026-09-28): when the agreed START hour — one time, or a range's start — was said with NO AM/PM, no day-part word and no "noon"/"midnight" ("can we plan on 2 o'clock?" answered "Sure."; "Tuesday, 2 to 4"; "between 2 and 4"; "we'll see you at 10"), read it as business hours: 7 to 11 is the morning, 12 and 1 to 6 the afternoon. When staff COMMITTED to that hour and the caller ACCEPTED it (a plain "Sure."/"Yes."/"That works." to the offered hour counts), on a specific day, it qualifies as confirmed (appointment_confirmed true, preferred_date_time set from that reading) from that reading. Only ONE exact on-the-hour start that BOTH sides settled qualifies: an approximation ("around two", "two-ish"), a bound ("by two", "before two"), alternatives ("two or three", "two or four"), minutes ("two thirty"), a correction still open, or an hour that is not one of 1 to 12 does NOT. If anyone on the call states an AM/PM or a part of the day for that time that conflicts with the business-hours reading ("two in the morning", or a caller who said they can only do mornings while the hour reads as 2 PM), do not confirm: the stated period governs and the time is contested, so appointment_confirmed stays false. An offer staff did not commit to ("we'll try to fit you in", "maybe", "I'll check the schedule and call you back with a time") stays NOT confirmed.
 - If the agent says "I'll text you" or "let me check" without the caller confirming a specific time slot, appointment_confirmed must be false.
 - preferred_date_time must include the confirmed time, not just a date.
 - Resolve relative dates against the call date above in Eastern Time. "Today" means ${callDateET}; do not invent a prior year or use the model's training/current date.

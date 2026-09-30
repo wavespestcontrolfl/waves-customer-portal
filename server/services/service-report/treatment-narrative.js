@@ -20,7 +20,7 @@ const { findBannedCustomerCopy } = require('./activity-indicators');
 // check rejected 100% of narratives for products named after their active,
 // permanently caching every such report as deterministic fallback — the bump
 // re-arms those cache keys so they regenerate on next read).
-const PROMPT_VERSION = 'treatment_narrative_v4';
+const PROMPT_VERSION = 'treatment_narrative_v5';
 
 // Request-path budget: a report read ships the deterministic sentence after
 // this long and lets generation finish in the background.
@@ -73,7 +73,7 @@ function productFactLines(products = []) {
 
 function buildTreatmentNarrativePrompt({ serviceLine, products, findingsText, photoSummary }) {
   const lineNoun = serviceLine === 'lawn' ? 'lawn' : serviceLine === 'tree_shrub' ? 'landscape plants (trees, shrubs, palms, and beds)' : 'property';
-  return `You are writing the "What we applied today" section of a customer-facing service report for Waves Pest Control & Lawn Care in Southwest Florida. The reader is the homeowner; the subject is their ${lineNoun}.
+  return `You are writing the "What we applied today" section of a customer-facing service report for Waves Pest Control in Southwest Florida. The reader is the homeowner; the subject is their ${lineNoun}.
 
 ${HUMAN_PROSE_RULES}
 

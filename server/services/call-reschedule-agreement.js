@@ -36,6 +36,26 @@
  * Day words name one date: the next that fits from the call's day ("the
  * 1st" said on September 30 is October 1, never December 1); "next
  * Thursday", which can mean two dates, names none.
+ * Language the code cannot judge is judged by the extraction (prompt v19,
+ * schema 1.20.0) and only VERIFIED here:
+ *   - scheduling.definite_commitment must be true: the agent's promise was
+ *     not could/might/probably/tentative/conditional ("upon clearance",
+ *     "once cleared", "if ..."). Missing or null fails closed.
+ *   - scheduling.relative_date_used (agreed slot) and
+ *     scheduling.moved_appointment_relative_date_used (moved appointment)
+ *     must each be a boolean. False: the day words name the date by the
+ *     nearest-date rule above, and any disagreement fails closed. True (a
+ *     pinned quote required): the resolved date is after the call's day and
+ *     within RELATIVE_DATE_HORIZON_DAYS, and agrees with the words. A bare
+ *     weekday must match the date's weekday; only a relative form WITHOUT an
+ *     exact computed offset ("next/this/the following Thursday") must also
+ *     not be the nearest such weekday. A pinned clause with an exact
+ *     closed-set offset (in N days/weeks, N days/weeks from now/today/away/
+ *     out, tomorrow, the day after tomorrow) is computed here and the date
+ *     must agree (a weekday: its first occurrence on or after the offset
+ *     date). Weekday-less phrases must be exactly one such form. Any
+ *     offset-shaped span the code cannot compute, and any bound or
+ *     alternative around an offset ("at least", "or three"), fails closed.
  * Which words are the final agreed ones (corrections, approximations,
  * ranges) is the extraction's judgement, as the owner ruled. A quote shorter
  * than three words must be the speaker's whole turn ("Yes."), never a
@@ -299,19 +319,160 @@ function namesDate(words, date, started) {
   return (said.weekday === undefined || said.weekday === weekday) && nearestDate(said, started) === date;
 }
 
+// The extraction resolved a relative date ("Thursday a week from now", "the
+// Thursday after this one", "Thursday eight days away") to `date` and said
+// so. The words recorded for it are the bare weekday; the code checks the
+// resolution is possible and never one the nearest-date rule would give.
+const RELATIVE_DATE_HORIZON_DAYS = 60;
+// Weekday-less relative dates are accepted only in this closed arithmetic set,
+// computed from the pinned verbatim relative quote and the call's day:
+// tomorrow, the day after tomorrow, in N days/weeks, N days/weeks from
+// now/today (N digits, "a"/"one", or a number word two to eight). Anything else
+// ("sometime next month", "a few days") stays manual.
+const OFFSET_NUMBER_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
+const isOffsetCount = (t) => /^\d+$/.test(t) || hourNumber(t) != null || Object.hasOwn(OFFSET_NUMBER_WORDS, t);
+const isNumberLike = (t) => /^\d+$/.test(t) || hourNumber(t) != null || (Object.hasOwn(OFFSET_NUMBER_WORDS, t) && t !== 'a');
+const closedOffsetCount = (t) => (/^\d{1,2}$/.test(t) && Number(t) > 0) || Object.hasOwn(OFFSET_NUMBER_WORDS, t);
+// THE detector of day/week counts ("in 3 weeks", "eight days from now",
+// "two weeks away", "three days later", "for two days"): it drives both the
+// hour scan (its numbers are date, never a clock hour) and the parser. A
+// span is computable only in the closed set: in N days/weeks, N days/weeks
+// from now/today, N days/weeks away/out (N digits, "a"/"one", or two to
+// eight); every other span (later, hence, a bare count, a larger word, half
+// a day) has days null and rejects wherever the parser meets it.
+function offsetSpans(toks) {
+  const spans = [];
+  toks.forEach((t, k) => {
+    if (!isOffsetCount(t) || !/^(?:days?|weeks?)$/.test(toks[k + 1] || '')) return;
+    const lead = toks[k - 1] === 'in';
+    let to = k + 2;
+    let tail = null;
+    if (toks[to] === 'from' && /^(?:now|today)$/.test(toks[to + 1] || '')) { tail = 'from'; to += 2; }
+    else if (/^(?:away|out)$/.test(toks[to] || '')) { tail = 'away'; to += 1; }
+    else if (/^(?:later|hence)$/.test(toks[to] || '')) { tail = 'later'; to += 1; }
+    const from = lead ? k - 1 : k;
+    const half = toks[from - 1] === 'half' || (toks[from - 1] === 'of' && toks[from - 2] === 'half');
+    const computable = closedOffsetCount(t) && !half && (tail === 'from' || tail === 'away' || (lead && !tail));
+    spans.push({ from, to, days: computable ? (OFFSET_NUMBER_WORDS[t] ?? Number(t)) * (toks[k + 1].startsWith('week') ? 7 : 1) : null });
+  });
+  return spans;
+}
+const DAY_OFFSET_FORMS = [
+  { src: '(?:the )?day after tomorrow', days: 2 },
+  { src: 'tomorrow', days: 1 },
+];
+// Quantity-bound modifiers around an offset phrase make it a range, not a
+// date ("at least two days from now", "within two days", "two or three days
+// from now", "two days from now or three"). Before it: a finite closed set of
+// bound words within three words, an "or" after a number, and (for the
+// counted forms) a number right before. After it: "or", and for the counted
+// forms "to"/"through" or a number right after.
+const BOUND_BEFORE = [
+  'at least', 'at most', 'more than', 'less than', 'fewer than', 'over', 'under', 'within', 'by', 'up to', 'about',
+  'around', 'roughly', 'approximately', 'no later than', 'no sooner than', 'before', 'after',
+];
+function boundedPhrase(quote, phrase) {
+  const toks = normalize(quote).split(' ');
+  const said = normalize(phrase).split(' ');
+  const counted = isOffsetCount(said[0]) || said[0] === 'in';
+  for (let i = 0; i + said.length <= toks.length; i += 1) {
+    if (said.every((w, k) => toks[i + k] === w)) {
+      const before = ` ${toks.slice(Math.max(0, i - 3), i).join(' ')} `;
+      const next = toks[i + said.length];
+      if (BOUND_BEFORE.some((m) => before.includes(` ${m} `))) return true;
+      if (toks[i - 1] === 'or' && isNumberLike(toks[i - 2] || '')) return true;
+      if (next === 'or') return true;
+      if (counted && (isNumberLike(toks[i - 1] || '') || next === 'to' || next === 'through' || isNumberLike(next || ''))) return true;
+    }
+  }
+  return false;
+}
+// The days an ENTIRE recorded phrase names: it must be exactly one form, so
+// "at least two days from now", "half of a day from now", "within two days"
+// or "by the day after tomorrow" name none.
+function phraseOffsetDays(phrase) {
+  const text = normalize(phrase);
+  const fixed = DAY_OFFSET_FORMS.find(({ src }) => new RegExp(`^${src}$`).test(text));
+  if (fixed) return fixed.days;
+  const toks = text.split(' ');
+  const [span, ...rest] = offsetSpans(toks);
+  return span && !rest.length && span.from === 0 && span.to === toks.length ? span.days : null;
+}
+// Every offset form the quote states, with the words that stated it, and
+// whether any offset-shaped span in it is one the parser cannot compute.
+function quoteOffsets(quote) {
+  const found = [];
+  let uncomputed = false;
+  let text = normalize(quote);
+  for (const { src, days } of DAY_OFFSET_FORMS) {
+    text = text.replace(new RegExp(String.raw`\b${src}\b`, 'g'), (m) => { found.push({ days, text: m }); return ' '; });
+  }
+  const toks = text.split(/\s+/).filter(Boolean);
+  offsetSpans(toks).forEach(({ from, to, days }) => {
+    if (days === null) uncomputed = true;
+    else found.push({ days, text: toks.slice(from, to).join(' ') });
+  });
+  return { found, uncomputed };
+}
+// One number when every form agrees, else null: a second, different form
+// anywhere in the quote, or a span the parser cannot compute, is ambiguity.
+function quoteOffsetDays(quote) {
+  const { found, uncomputed } = quoteOffsets(quote);
+  const offsets = found.map((o) => o.days);
+  return !uncomputed && offsets.length && offsets.every((o) => o === offsets[0]) ? offsets[0] : null;
+}
+function namesRelativeDate(words, date, started, relativeQuotes = []) {
+  const said = statedDateComponents(String(words).replace(NEAREST_LEAD, ''), started);
+  const today = etDateString(started);
+  const withinHorizon = date > today && date <= etDateString(addETDays(started, RELATIVE_DATE_HORIZON_DAYS));
+  if (said?.weekday === undefined) {
+    // Weekday-less: the whole recorded phrase must be one closed form, the
+    // pinned quote must hold it verbatim and state no other offset, and the
+    // date the code computes must equal the extraction's resolved date.
+    const days = phraseOffsetDays(words);
+    return withinHorizon && days !== null && etDateString(addETDays(started, days)) === date
+      && relativeQuotes.some((q) => holds(q, words) && quoteOffsetDays(q) === days && !boundedPhrase(q, words));
+  }
+  if (said.month !== undefined || said.day !== undefined || said.year !== undefined) return false;
+  if (new Date(`${date}T12:00:00Z`).getUTCDay() !== said.weekday) return false;
+  if (!withinHorizon) return false;
+  // A pinned clause with an exact closed-set offset ("Thursday three days
+  // from now", "Thursday a week from now") is computed: the resolved date is
+  // that weekday's first occurrence on or after the offset date, so it may
+  // be the nearest weekday, and a date any other week contradicts the
+  // offset. Only a clause with no offset falls back to "not the nearest":
+  // "next Thursday", "this Thursday", "the following Thursday" and looser
+  // counts are ambiguous. A bound modifier on any offset rejects.
+  return relativeQuotes.some((q) => {
+    const { found, uncomputed } = quoteOffsets(q);
+    if (uncomputed) return false;
+    if (!found.length) return nearestDate(said, started) !== date;
+    const days = quoteOffsetDays(q);
+    if (days === null || found.some((o) => boundedPhrase(q, o.text))) return false;
+    return date >= etDateString(addETDays(started, days)) && date < etDateString(addETDays(started, days + 7));
+  });
+}
+
 // Do the recorded slot words state exactly this slot? No day words only
 // when the slot keeps `movedDate`.
-function wordsStateSlot(words, slot, started, movedDate) {
+function wordsStateSlot(words, slot, started, movedDate, relative, relativeQuotes = []) {
   if (statedHour(words.hour, words.period) !== slot.hour24) return false;
-  return words.day ? namesDate(words.day, slot.date, started) : slot.date === movedDate;
+  if (!words.day) return !relative && slot.date === movedDate;
+  return relative ? namesRelativeDate(words.day, slot.date, started, relativeQuotes) : namesDate(words.day, slot.date, started);
 }
 
 // The moved appointment's recorded words name its date, and a grounded
 // moved-date quote holds them.
-function movedAppointmentGrounded(scheduling, quotes, started) {
+function movedAppointmentGrounded(scheduling, quotes, relativeQuotes, started) {
   const words = scheduling.moved_appointment_words;
-  return typeof words === 'string' && namesDate(words, scheduling.moved_appointment_date, started)
-    && quotes.some((q) => holds(q, words));
+  const relative = scheduling.moved_appointment_relative_date_used;
+  if (typeof words !== 'string' || typeof relative !== 'boolean') return false;
+  // A relative phrase is pinned by its own real quote.
+  if (relative && !relativeQuotes.length) return false;
+  const named = relative
+    ? namesRelativeDate(words, scheduling.moved_appointment_date, started, relativeQuotes)
+    : namesDate(words, scheduling.moved_appointment_date, started);
+  return named && quotes.some((q) => holds(q, words));
 }
 
 // Every quote the grounding uses is screened; a question fails the agent's
@@ -399,10 +560,10 @@ const EXACT_LEADS = new Set(['at', 'to', 'for', 'between']);
 const EXACT_TAILS = new Set(['o', 'oclock', 'on', 'then', 'this', 'next', 'please', 'sharp']);
 // Judged over the whole turns that hold the quote, and EVERY place a turn
 // says the hour must be exact: "at two" cut from "at two or four" fails.
-function saidExactly(quote, words, turns) {
+function saidExactly(quote, words, turns, relative = false) {
   const nq = padded(normalize(quote));
   const holding = turns.filter((t) => padded(t.ns).includes(nq));
-  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words, !t.agent));
+  return holding.length > 0 && holding.every((t) => hourExactIn(t.raw, words, !t.agent, relative));
 }
 
 // Days that may lead straight into an hour ("Tuesday, 2 to 4"). Never a
@@ -471,10 +632,14 @@ function exactHourAt(toks, [ha, end], dayIdx, explained, callerTurn) {
   return lead && tail && clean && (prev !== 'between' || rangeEnd);
 }
 
-function hourExactIn(text, words, callerTurn = false) {
+const ABBREVIATED_MONTH_PERIOD_RE = /\b(jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.(?=\s*\d)/g;
+function hourExactIn(text, words, callerTurn = false, relative = false) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
   // the hour at the comma.
-  const toks = joinMeridiem(text).toLowerCase().replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
+  // The period of an abbreviated month ("Oct. 10") belongs to the date, not
+  // to a clause boundary.
+  const toks = joinMeridiem(text).toLowerCase().replace(ABBREVIATED_MONTH_PERIOD_RE, '$1 ')
+    .replace(/[,.;!?]/g, ' , ').replace(/[^a-z0-9,]+/g, ' ').trim().split(/\s+/);
   if (toks.some((t) => ALTERNATIVE_WORDS.has(t))) return false;
   // Tokens of the recorded day words ("October 10") are the date, not an hour.
   // A day phrase describing an appointment ("your 10th appointment") is a
@@ -482,6 +647,9 @@ function hourExactIn(text, words, callerTurn = false) {
   const dayIdx = new Set((typeof words.day === 'string' ? spans(toks, words.day) : [])
     .filter(([, b]) => !/^(?:appointment|appointments|visit|visits|treatment|service|time)$/.test(toks[b] || ''))
     .flatMap(([a, b]) => Array.from({ length: b - a }, (_, k) => a + k)));
+  // A flagged relative date's offset ("eight days from now", "two weeks away")
+  // is date, not a second clock hour.
+  if (relative) offsetSpans(toks).forEach(({ from, to }) => { for (let k = from; k < to; k += 1) dayIdx.add(k); });
   const at = spans(toks, words.hour).filter(([a]) => !dayIdx.has(a));
   const explained = new Set(dayIdx);
   const exact = at.length > 0 && at.every((span) => exactHourAt(toks, span, dayIdx, explained, callerTurn));
@@ -489,12 +657,14 @@ function hourExactIn(text, words, callerTurn = false) {
   return exact && toks.every((t, k) => explained.has(k) || !(/^\d+$/.test(t) || hourNumber(t) != null || t === 'noon' || t === 'midnight'));
 }
 
-function statesSlotWords(quote, words, turns, agreementQuotes = []) {
+function statesSlotWords(quote, words, turns, agreementQuotes = [], relative = false) {
   return slotPhrases(words).every((w) => holds(quote, w)) && periodIsTheHours(quote, words) && twelveSaidTogether(quote, words)
     // "Next", "a week from now", "the following Thursday" near the slot name
-    // a later week than the recorded day words can: they never ground.
-    && !/ (?:next|week|weeks|following) /.test(padded(sentencesHolding(turns, quote)))
-    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns))
+    // a later week than the recorded day words can: they never ground —
+    // unless the extraction resolved that relative date itself and said so
+    // (relative_date_used), which grounds() and wordsStateSlot verify.
+    && (relative || !/ (?:next|week|weeks|following) /.test(padded(sentencesHolding(turns, quote))))
+    && (typeof words.period === 'string' || /^(?:noon|midnight)$/.test(normalize(words.hour)) || saidExactly(quote, words, turns, relative))
     // An hour read as business hours: the sentences the quote sits in must
     // state no half of the day and name no noon/midnight bound — "Thursday
     // at two" cut from "Thursday at two in the morning" never falls back.
@@ -528,7 +698,7 @@ function mayStatePeriod(text) {
 // the recorded hour, on the hour (periodIsTheHours's minute check), any day
 // words the slot records (none at all for a same-day change), and no am/pm
 // or part of the day but the slot's.
-function commitsToSlot(quote, words, hour24, turns) {
+function commitsToSlot(quote, words, hour24, turns, relative = false) {
   const withoutPeriod = { ...words, period: null };
   const around = sentencesHolding(turns, quote);
   const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
@@ -544,7 +714,7 @@ function commitsToSlot(quote, words, hour24, turns) {
     && (typeof words.day === 'string' ? holds(around, words.day) || plainCommitment(around, words) : !namesAnyDay(around))
     // An hour read as business hours must be said exactly by the agent too
     // ("we should arrive around two" fails).
-    && (!unstatedHour || saidExactly(quote, words, turns))
+    && (!unstatedHour || saidExactly(quote, words, turns, relative))
     // Read in the sentences it sits in: "at two" cut from "at two AM".
     && halvesSaid(sentencesHolding(turns, quote)).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
 }
@@ -626,11 +796,21 @@ function twelveSaidTogether(quote, words) {
 /**
  * Pure function. See file header for contract.
  */
+function languageJudgementFailure(scheduling) {
+  if (scheduling.definite_commitment !== true) return 'agent_commitment_not_definite';
+  return typeof scheduling.relative_date_used === 'boolean' ? null : 'relative_date_unjudged';
+}
+
 function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   const fail = (reason) => ({ ok: false, reason, movedDate: null });
   const scheduling = v2?.scheduling || {};
   if (scheduling.caller_accepted_slot !== true) return fail('caller_did_not_accept');
   if (scheduling.agent_committed_booking !== true) return fail('agent_did_not_commit');
+  // The extraction's own judgements of the language (prompt v19): a definite
+  // promise, and whether a relative date was used. Absent = unjudged = manual.
+  const unjudged = languageJudgementFailure(scheduling);
+  if (unjudged) return fail(unjudged);
+  const relative = scheduling.relative_date_used;
   const wall = etWallClockOfConfirmedStart(scheduling.confirmed_start_at);
   const started = new Date(String(callStartedAt || ''));
   if (!wall || Number.isNaN(started.getTime())) return fail('unparseable_slot');
@@ -650,17 +830,25 @@ function groundRescheduleAgreement({ v2, transcript, callStartedAt } = {}) {
   if (!commitments.length) return fail('agent_commitment_ungrounded');
   if (!grounded('/scheduling/caller_accepted_slot', 'caller').length) return fail('caller_acceptance_ungrounded');
   const movedDate = stringOrNull(scheduling.moved_appointment_date);
-  if (movedDate && !movedAppointmentGrounded(scheduling, grounded('/scheduling/moved_appointment_date'), started)) {
+  // A relative moved-appointment flag with no resolved date names a visit
+  // nobody resolved; the planner must not fall back to a lone candidate.
+  if (scheduling.moved_appointment_relative_date_used === true && !movedDate) return fail('moved_relative_without_date');
+  if (movedDate && !movedAppointmentGrounded(scheduling, grounded('/scheduling/moved_appointment_date'),
+    grounded('/scheduling/moved_appointment_relative_date_used'), started)) {
     return fail('moved_appointment_ungrounded');
   }
   const words = scheduling.agreed_slot_words;
   if (typeof words?.hour !== 'string') return fail('agreed_slot_words_missing');
-  if (!wordsStateSlot(words, slot, started, movedDate)) return fail('agreed_slot_words_mismatch');
+  // A relative date is pinned by its own real quote, which the slot words'
+  // quote need not repeat.
+  const relativeQuotes = relative ? grounded('/scheduling/relative_date_used') : [];
+  if (relative && !relativeQuotes.length) return fail('relative_date_ungrounded');
+  if (!wordsStateSlot(words, slot, started, movedDate, relative, relativeQuotes)) return fail('agreed_slot_words_mismatch');
   const agreementQuotes = [...commitments, ...grounded('/scheduling/caller_accepted_slot', 'caller')];
-  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes))) return fail('agreed_slot_ungrounded');
+  if (!grounded('/scheduling/confirmed_start_at').some((q) => statesSlotWords(q, words, turns, agreementQuotes, relative))) return fail('agreed_slot_ungrounded');
   // The agent committed to THIS slot: the commitment quote says its hour,
   // on the hour, and no day but the slot's.
-  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns))) return fail('agent_commitment_not_the_slot');
+  if (!commitments.some((q) => commitsToSlot(q, words, slot.hour24, turns, relative))) return fail('agent_commitment_not_the_slot');
   return { ok: true, reason: 'agreement_grounded', movedDate };
 }
 

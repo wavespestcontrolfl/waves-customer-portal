@@ -235,6 +235,42 @@ raised yet). Also report photo quality, shows, and up to 3 observed_terms
 from: ${OBSERVED_TERMS.join(', ')}.${identityBlocks}${conditionBlocks}`;
 }
 
+// ── Referee (Claude Fable, GATE_PLANT_ID_REFEREE) ─────────────────────────
+// Owner ruling 2026-09-28: when a scope is still unsure after the Gemini ->
+// OpenAI Sol escalation, Claude Fable gets one more look at the SAME photos
+// as a deciding vote. The referee reuses `buildEscalationPrompt`'s system
+// prompt verbatim (same identity/condition ask, same photos) with this block
+// appended — plant-engine.js's own merge decides what a match/third-answer
+// means; this file only describes the earlier reads.
+
+/** One earlier-reads line: "unknown (72%)" or "no second opinion". */
+function formatRefereeRead(read) {
+  if (!read) return 'no second opinion';
+  const name = read.slug || 'unknown';
+  const pct = Math.round((Number(read.confidence) || 0) * 100);
+  return `${name} (${pct}%)`;
+}
+
+/** `earlierReads`: `[{ scope, first: {slug,confidence}|null, second:
+ * {slug,confidence}|null }]` — one entry per scope still unsure after the
+ * escalation (an identity slot or 'conditions'), built by plant-engine.js's
+ * runReferee. */
+function buildRefereePrompt(earlierReads) {
+  const lines = earlierReads
+    .map((r) => `- ${r.scope}: first read ${formatRefereeRead(r.first)}; second opinion ${formatRefereeRead(r.second)}`)
+    .join('\n');
+  return `# EARLIER READS (still unsure)
+Two earlier passes over these SAME photos landed here, and neither settled
+it cleanly:
+${lines}
+
+You are a third, independent look — not a tiebreaker vote for its own sake.
+Look at the photos yourself first: both earlier reads may be wrong. Answer
+with what the photos actually show, even if that means a third answer that
+matches neither earlier read, or the same answer either of them gave.
+Prefer an honest lower confidence to a confident wrong answer.`;
+}
+
 module.exports = {
   QUALITY_ISSUES,
   SHOWS_VALUES,
@@ -250,4 +286,5 @@ module.exports = {
   buildConditionIndexLine,
   buildConditionSelectionPrompt,
   buildEscalationPrompt,
+  buildRefereePrompt,
 };

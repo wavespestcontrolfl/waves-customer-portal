@@ -120,6 +120,9 @@ jest.mock('../services/annual-prepay-renewals', () => ({
   recordDecision: (...args) => mockRecordDecision(...args),
   // ADMIN-BUG-R18: an already-decided term takes the run's disposition.
   recordCancelDisposition: jest.fn(async () => null),
+  // null = not a renewal successor (the real helper's answer for a term with
+  // no renewed_from_term_id); an untraceable one answers { resolved: false }.
+  _private: { successorCoverageScope: jest.fn(async () => null) },
 }));
 
 jest.mock('../models/db', () => {

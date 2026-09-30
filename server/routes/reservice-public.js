@@ -68,6 +68,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { capacityEnabled } = require('../services/scheduling/policy');
 const { noStore } = require('../middleware/no-store');
+const { recordPageView } = require('../services/customer-page-views');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   RESERVICE_LANES,
@@ -328,6 +329,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const customer = await loadByToken(req.params.token);
     if (!customer) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'reservice', customerId: customer.id, subjectType: 'customer', subjectId: customer.id });
 
     const laneCatalog = await loadLaneCatalog();
     const { lanes, bookableLanes } = await resolveLaneState(customer, laneCatalog);

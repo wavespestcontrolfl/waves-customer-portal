@@ -19,7 +19,7 @@
 
 const { COMPONENT_KEYS, snapshotConfig } = require('./config');
 const { resolveLabel } = require('./label');
-const { resolveTrend } = require('./trend');
+const { resolvePersistedTrend } = require('./trend');
 const { resolveCustomerSummary } = require('./explanation');
 
 const INPUT_KEY_TO_WEIGHT_KEY = Object.freeze({
@@ -255,7 +255,9 @@ function calculatePestPressureScore(input, config) {
     : blendedScore;
 
   const label = resolveLabel(score, config.labels);
-  const { trend, delta } = resolveTrend(score, input.previousScore ?? null, config.trendThresholds);
+  const { trend, delta } = resolvePersistedTrend(score, input.previousScore ?? null, config.trendThresholds, {
+    previousOnOtherScaleOnly: input.previousScoreOnOtherScaleOnly === true,
+  });
   const dataCompleteness = hasTechnicianDirectRating || present.length === allComponents.length ? 'complete' : 'partial';
   const summary = resolveCustomerSummary({ trend, label, dataCompleteness });
   // A direct tap is the whole score, so the audit says exactly that — one

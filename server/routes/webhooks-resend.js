@@ -131,7 +131,15 @@ async function handleEvent(ev) {
         });
         await db('newsletter_sends').where({ id: delivery.send_id }).increment('bounced_count', 1);
         if (delivery.subscriber_id) {
-          await db('newsletter_subscribers').where({ id: delivery.subscriber_id }).update({
+          // A delivery can be re-pointed at the surviving subscriber when a
+          // customer's email typo merges two subscriber rows
+          // (customer-email-fanout). Fence the BOUNCE to the address the
+          // delivery was mailed to, exactly as the SendGrid handler does: a
+          // late bounce from the dead old mailbox must not bounce-count the
+          // corrected address. The complaint (opt-out) below is never fenced.
+          const bouncedQ = db('newsletter_subscribers').where({ id: delivery.subscriber_id });
+          const mailed = String(delivery.email || '').trim().toLowerCase();
+          await (mailed ? bouncedQ.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : bouncedQ).update({
             bounce_count: db.raw('COALESCE(bounce_count,0) + 1'),
             last_bounced_at: now,
             updated_at: now,

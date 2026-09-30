@@ -163,6 +163,38 @@ async function resolveOpenEmailReviewCards({ customerId, email, source = 'custom
 }
 
 /**
+ * Merge helper: re-point a soon-to-be-deleted newsletter subscriber's delivery
+ * history at the surviving subscriber. newsletter_send_deliveries.subscriber_id
+ * is ON DELETE SET NULL, so without this the person's send history is orphaned
+ * (the activity timeline joins deliveries through the subscriber). Runs in the
+ * caller's transaction, BEFORE the old row's delete. Delivery rows carry their
+ * own email snapshot, so each keeps the address it was actually mailed at.
+ *  - Only onto a survivor that belongs to THIS customer (already linked, or
+ *    adopted just before): a row linked to ANOTHER customer must never inherit
+ *    this history (it would show on their timeline and take this customer's
+ *    bounce/unsubscribe events).
+ *  - SETTLED deliveries only. queued/failed/sending rows are still retryable
+ *    (newsletter-sender's Resume sends to the survivor's CURRENT address while
+ *    the SendGrid webhook matches events on the delivery's recipient snapshot),
+ *    so re-pointing them would mis-record the recipient and lose tracking; they
+ *    fall to SET NULL exactly as before.
+ *  - UNIQUE (send_id, subscriber_id): an issue the survivor already has its own
+ *    delivery for is skipped (re-pointing it would abort the whole edit); those
+ *    rows fall to SET NULL as before.
+ * @returns {Promise<number>} deliveries re-pointed
+ */
+async function repointNewsletterDeliveries(conn, { fromId, toId, customerId, now }) {
+  return conn('newsletter_send_deliveries')
+    .where({ subscriber_id: fromId })
+    .whereRaw("COALESCE(status, 'queued') NOT IN ('queued', 'failed', 'sending')")
+    .whereExists(conn('newsletter_subscribers')
+      .where({ id: toId, customer_id: customerId }).select(conn.raw('1')))
+    .whereNotIn('send_id', conn('newsletter_send_deliveries')
+      .where({ subscriber_id: toId }).select('send_id'))
+    .update({ subscriber_id: toId, updated_at: now });
+}
+
+/**
  * `reviewReasonCodes` narrows which review cards the fanout settles, exactly
  * as in resolveOpenEmailReviewCards. The CALL path passes
  * ['customer_email_missing'] when it REPLACES a garbled stored email with a
@@ -508,7 +540,11 @@ async function propagateCustomerEmailChange({
             .update({ customer_id: customerId, updated_at: now });
         }
         // Status CAS (r44): an unsubscribe committing after the snapshot
-        // wins — the opt-out record is never deleted.
+        // wins — the opt-out record is never deleted. oldSub is the FOR UPDATE
+        // re-read, so its status cannot change under us before the del below.
+        if (['pending', 'active'].includes(String(oldSub.status || ''))) {
+          await repointNewsletterDeliveries(conn, { fromId: oldSub.id, toId: targetSub.id, customerId, now });
+        }
         counts.newsletter += await conn('newsletter_subscribers')
           .where({ id: oldSub.id })
           .whereIn('status', ['pending', 'active'])
@@ -1746,4 +1782,5 @@ module.exports = {
   EMAIL_FANOUT_DISCLOSURE,
   applyCustomerUpdatesWithEmailClaimGuard,
   backfillCustomerEmailInTrx,
+  repointNewsletterDeliveries,
 };

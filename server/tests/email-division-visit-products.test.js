@@ -5,7 +5,7 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 const {
   PRODUCT_FAMILIES, PRODUCT_LABELS, PEST_KEYWORDS, classifyProduct, rankVisibleProducts, parsePestsNamed, treatmentTargets, nutrientsListed,
-  allCustomerFacingStrings, readVisitProducts,
+  allCustomerFacingStrings, readVisitProducts, FIRST_VISIT_DEFAULT_SHIPPED_AT,
 } = require('../services/email-division/visit-products');
 const { FACTS } = require('../services/email-division/fact-register-data');
 const { targetForSentence } = require('../services/email-division/area-intel');
@@ -430,5 +430,18 @@ describe('treatmentTargets (area-intel treatment evidence)', () => {
     expect(targetForSentence('german cockroaches')).toBe('German cockroaches');
     expect(targetForSentence('sri lanka weevil')).toBe('Sri Lanka weevil');
     expect(targetForSentence('big-headed ants')).toBe('big-headed ants');
+  });
+});
+
+// Owner ruling 2026-09-29: getActivityRatingAverages excludes a legacy
+// NULL-flag first-visit 5 only from this exact instant onward — the
+// first-visit default rating's own ship time (owner ruling 2026-09-24,
+// server/services/pest-pressure/first-visit.js, #4741 / #4767). Pinned here
+// so an accidental edit to the exported constant is caught immediately,
+// without needing Postgres.
+describe('FIRST_VISIT_DEFAULT_SHIPPED_AT (owner ruling 2026-09-29)', () => {
+  test('is the first-visit default rating\'s own ship instant', () => {
+    expect(FIRST_VISIT_DEFAULT_SHIPPED_AT).toBe('2026-09-24T10:21:12Z');
+    expect(new Date(FIRST_VISIT_DEFAULT_SHIPPED_AT).toISOString()).toBe('2026-09-24T10:21:12.000Z');
   });
 });

@@ -236,7 +236,7 @@ run('callback bridge on PostgreSQL', () => {
     expect((await conn('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
     expect((await conn('call_commitments').where({ id: sibling.id }).first()).status).toBe('open');
     // The sibling's text fallback is not suppressed by the other card's attempt either.
-    const [text] = await conn('sms_log').insert({ direction: 'outbound', message_type: 'manual', status: 'sent', customer_id: customerId, to_phone: phone, from_phone: from, created_at: new Date(Date.now() + 2000) }).returning('id');
+    const [text] = await conn('sms_log').insert({ direction: 'outbound', message_type: 'manual', status: 'delivered', metadata: { human_authored: true }, customer_id: customerId, to_phone: phone, from_phone: from, created_at: new Date(Date.now() + 2000) }).returning('id');
     try {
       expect(await ledger.refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
       expect((await conn('call_commitments').where({ id: sibling.id }).first()).status).toBe('fulfilled');
@@ -331,6 +331,7 @@ run('callback bridge on PostgreSQL', () => {
     const row = await seed();
     await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
       status: 'completed', duration_seconds: 120, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      source: 'admin-click',
       metadata: kind === 'policy'
         ? { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'no-answer', duration_seconds: 0 } }
         : { relatedCallId: row.call_log_id } });
@@ -361,7 +362,8 @@ run('callback bridge on PostgreSQL', () => {
   test('a successful pre-policy callback still counts after a failed card attempt', async () => {
     const row = await seed();
     const [legacy] = await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
-      status: 'completed', duration_seconds: 120, metadata: { relatedCallId: row.call_log_id } }).returning('id');
+      status: 'completed', duration_seconds: 120, source: 'admin-click', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
+      metadata: { relatedCallId: row.call_log_id } }).returning('id');
     await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone,
       status: 'completed', duration_seconds: 45, v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
       created_at: new Date(Date.now() + 1000),

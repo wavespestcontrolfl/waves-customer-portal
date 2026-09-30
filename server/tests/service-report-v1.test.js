@@ -1,6 +1,8 @@
 // Legacy pressureFromFindings + computePressureIndex have been replaced by
 // the pest-pressure engine. See server/tests/pest-pressure-*.test.js for
 // the equivalent coverage against the new 5-component weighted formula.
+// The customer map URL is HMAC-signed with the server secret (signed-map-image.js).
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret-for-signed-map-images';
 const { renderTreatmentMap } = require('../services/service-report/treatment-map');
 const { buildSatelliteTreatmentMapContext } = require('../services/service-report/satellite-treatment-map');
 const { detectServiceLine } = require('../services/service-report/service-line-configs');
@@ -128,6 +130,7 @@ describe('service report v1', () => {
         customer_id: 'customer-1',
         service_line: 'pest',
         service_type: 'Quarterly Pest Control Service',
+        service_date: '2026-05-01',
         pressure_index: 0,
       },
       knex,
@@ -1214,7 +1217,9 @@ describe('service report v1', () => {
 
       expect(enabled.available).toBe(true);
       expect(enabled.provider).toBe('google_maps');
-      expect(enabled.live.url).toContain('maps.googleapis.com/maps/api/staticmap');
+      // The customer payload carries a signed proxy path, never the keyed Google URL.
+      expect(enabled.live.url).toMatch(/^\/api\/public\/map-image\/v1\./);
+      expect(JSON.stringify(enabled)).not.toMatch(/maps\.googleapis\.com|key=/);
       expect(enabled.capabilities.canUseInPdf).toBe(false);
       expect(enabled.capabilities.canUseInSmsPreview).toBe(false);
       expect(enabled.overlay.zones[0].overlaySource).toBe('local_schematic');
@@ -3163,6 +3168,80 @@ describe('service report v1', () => {
     expect(email.html).toContain('30 min');
     expect(email.html).toContain('Ghost ant trail at front entry threshold');
     expect(email.text).toContain('The PDF service report is attached.');
+  });
+
+  describe('v1 email states each re-entry fact once and names the full service address', () => {
+    const baseData = {
+      serviceType: 'Residential Pest Control',
+      serviceDate: '2026-09-20',
+      customerName: 'Van Lee',
+      technicianName: 'Jose Alvarado',
+      cityState: 'Lakewood Ranch, FL',
+      serviceAddress: '123 Example Way, Lakewood Ranch, FL 34202',
+      applications: [{ id: 'app-1' }],
+      findings: [],
+      metrics: [],
+      advisory: { exterior_reentry_min: 60, interior_reentry_min: 150 },
+    };
+    const reentry = {
+      displayTimezone: 'America/New_York',
+      customerSummary: 'Exterior ready at 2:27 PM. Interior ready at 3:57 PM.',
+      targets: [
+        { key: 'exterior', label: 'Exterior', readyAt: '2026-09-20T18:27:00.000Z' },
+        { key: 'interior', label: 'Interior', readyAt: '2026-09-20T19:57:00.000Z' },
+      ],
+    };
+    const count = (haystack, needle) => haystack.split(needle).length - 1;
+
+    test('exterior + interior summary prints each ready time once in html and text', () => {
+      const email = buildServiceReportV1Email({
+        reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+        data: { ...baseData, dynamicContext: { reentry } },
+      });
+      expect(count(email.html, 'Exterior ready at 2:27 PM')).toBe(1);
+      expect(count(email.html, 'Interior ready at 3:57 PM')).toBe(1);
+      expect(count(email.text, 'Exterior ready at')).toBe(1);
+      expect(count(email.text, 'Interior ready at')).toBe(1);
+      expect(email.text).not.toMatch(/ready at: /);
+    });
+
+    test('when the hero is not the re-entry summary the detail row carries it once', () => {
+      const email = buildServiceReportV1Email({
+        reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+        data: {
+          ...baseData,
+          dynamicContext: { reentry, pressureTrend: { direction: 'down', customerSummary: 'Pest pressure is down over your recent visits.' } },
+        },
+      });
+      expect(count(email.html, 'Exterior ready at 2:27 PM')).toBe(1);
+      expect(count(email.html, 'Interior ready at 3:57 PM')).toBe(1);
+    });
+
+    test('without a summary, the per-area lines are the fallback (once each)', () => {
+      const email = buildServiceReportV1Email({
+        reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+        data: { ...baseData, dynamicContext: { reentry: { ...reentry, customerSummary: '' } } },
+      });
+      expect(count(email.html, 'Exterior ready at')).toBe(1);
+      expect(count(email.html, 'Interior ready at')).toBe(1);
+      expect(count(email.text, 'Exterior ready at: 2:27 PM')).toBe(1);
+      expect(count(email.text, 'Interior ready at: 3:57 PM')).toBe(1);
+    });
+
+    test('property line is the full service address, cityState only as a fallback', () => {
+      const full = buildServiceReportV1Email({
+        reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+        data: { ...baseData, dynamicContext: {} },
+      });
+      expect(full.html).toContain('at 123 Example Way, Lakewood Ranch, FL 34202');
+      expect(full.text).toContain('at 123 Example Way, Lakewood Ranch, FL 34202');
+
+      const fallback = buildServiceReportV1Email({
+        reportUrl: 'https://portal.wavespestcontrol.com/report/token-1',
+        data: { ...baseData, serviceAddress: '', dynamicContext: {} },
+      });
+      expect(fallback.text).toContain('at Lakewood Ranch, FL on');
+    });
   });
 
   test('v1 email carries the inspection-credit note in both arms, and omits it cleanly', () => {

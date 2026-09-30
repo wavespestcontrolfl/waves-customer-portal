@@ -17,6 +17,7 @@ const NotificationService = require('./notification-service');
 const { isInternalTestEmail } = require('./internal-test-customers');
 const { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_E164 } = require('../constants/business');
 const { sanitizeBillingReplayContext } = require('./billing-email-replay-context');
+const { withOutlinkTrackingForEmail } = require('./outlink-tracking');
 
 const VARIABLE_RE = /\{\{\s*([a-zA-Z][a-zA-Z0-9_]*)\s*\}\}/g;
 const ASM_UNSUBSCRIBE_URL = '<%asm_group_unsubscribe_raw_url%>';
@@ -657,7 +658,7 @@ async function activeSuppressionsFor(template, email, suppressionGroupKey, datab
   if (!email) return [];
   const groupKey = effectiveSuppressionGroupKeyFor(template, suppressionGroupKey);
   const rows = await database('email_suppressions')
-    .whereRaw('LOWER(email) = ?', [String(email).trim().toLowerCase()])
+    .where(require('../utils/email-equivalence').suppressionCoversEmail(email))
     .where({ status: 'active' });
   if (isTransactionalRequiredGroupKey(groupKey) && templateCanBypassSuppressions(template)) {
     return rows.filter((row) => GLOBAL_SUPPRESSION_TYPES.has(String(row.suppression_type || '').toLowerCase()));
@@ -1480,6 +1481,16 @@ async function sendTemplate({
       throw inFlightCollisionError(idempotencyKey);
     }
     retryMessage = existing || null;
+  }
+
+  // Outside links in prep guides route through /go/<code> for click logging
+  // (GATE_OUTLINK_TRACKING; no-op unless the gate is on and this is a prep.*
+  // send). Render-time only: the stored version is never edited, and the
+  // helper fails open to the original version.
+  if (!test) {
+    version = await withOutlinkTrackingForEmail({
+      template, version, payload, recipientType, recipientId,
+    });
   }
 
   let prepared;

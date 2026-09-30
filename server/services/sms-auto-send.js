@@ -822,6 +822,7 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
           estimateId: claim.openTimesSnapshot.lookup?.estimateId || null,
           // Same service identity the draft was priced with (Codex r3 / audit P1)
           ...(claim.openTimesSnapshot.lookup?.serviceType ? { serviceType: claim.openTimesSnapshot.lookup.serviceType } : {}),
+          ...(claim.openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: claim.openTimesSnapshot.lookup.scheduledServiceId } : {}),
           quotedWindows: stillQuoted,
         });
         if (!recheck.ok) {

@@ -1666,12 +1666,12 @@ function parseJsonObject(value) {
   return {};
 }
 
-function normalizeCompletionTextArray(value, limit = 20) {
+function normalizeCompletionTextArray(value, limit = COMPLETION_TEXT_MAX_ENTRIES) {
   if (!Array.isArray(value)) return [];
   const seen = new Set();
   const out = [];
   for (const item of value) {
-    const text = String(item || '').trim().replace(/\s+/g, ' ').slice(0, 240);
+    const text = String(item || '').trim().replace(COMPLETION_WHITESPACE, ' ').slice(0, COMPLETION_TEXT_MAX_LENGTH);
     if (!text) continue;
     const key = text.toLowerCase();
     if (seen.has(key)) continue;
@@ -1709,13 +1709,21 @@ function completedProtocolActionScopes(actions, scopeEntries, serviceLine) {
     .filter(Boolean);
 }
 
+// Marker-line grammar shared with the admin completion panel (SchedulePage.jsx)
+// so its active-marker detection and pruning match this parser exactly.
+const COMPLETION_MARKER_GRAMMAR = require('../../shared/completion-marker-grammar.json');
+const COMPLETION_MARKER_LINE = new RegExp(COMPLETION_MARKER_GRAMMAR.lineSource);
+const COMPLETION_WHITESPACE = new RegExp(COMPLETION_MARKER_GRAMMAR.whitespaceSource, 'g');
+const COMPLETION_TEXT_MAX_LENGTH = COMPLETION_MARKER_GRAMMAR.maxLength;
+const COMPLETION_TEXT_MAX_ENTRIES = COMPLETION_MARKER_GRAMMAR.maxEntries;
+
 function taggedCompletionNoteLines(notes, tags) {
   const tagSet = new Set(tags.map((tag) => tag.toLowerCase()));
   return String(notes || '')
     .split(/\r?\n/)
     .map((line) => line.trim())
     .map((line) => {
-      const match = line.match(/^\[([^\]]+)\]\s*(.+)$/);
+      const match = line.match(COMPLETION_MARKER_LINE);
       if (!match) return null;
       return { tag: match[1].toLowerCase(), text: match[2].trim() };
     })
@@ -6623,6 +6631,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
               recordInsert.client_pest_rating_source = 'technician';
               if (serviceRecordCols.client_pest_rating_at) {
                 recordInsert.client_pest_rating_at = trx.fn.now();
+              }
+              // Owner ruling 2026-09-29: mark whether this write IS the
+              // untouched first-visit default so email-division's activity
+              // averages can exclude it (a tech-chosen rating — including a
+              // deliberately re-entered 5 — still counts). By this point
+              // firstVisitDefaultApplied being true means the default
+              // survived confirmFirstVisitUnderLock above (otherwise
+              // effectiveClientPestRating was nulled out and this block
+              // never runs), so it is safe to use directly. Does not touch
+              // the Pest Pressure engine, the report score, or the recap.
+              if (serviceRecordCols.client_pest_rating_defaulted) {
+                recordInsert.client_pest_rating_defaulted = firstVisitDefaultApplied === true;
               }
             }
           }
