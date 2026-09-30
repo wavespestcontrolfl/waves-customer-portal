@@ -1045,25 +1045,33 @@ async function coverageSeedPropertyId(term, cols, conn) {
 // it is one, else the transaction opened here); its executionPromise
 // settles at COMMIT (resolves) or ROLLBACK (rejects — nothing is filed).
 // A bare connection (or a test double) files immediately.
-function fileCoverageExceptionAfterCommit(scope, term, reason, body) {
+function fileCoverageExceptionAfterCommit(scope, term, reason, body, options = undefined) {
   const done = scope && scope !== db && scope.executionPromise;
   if (done && typeof done.then === 'function') {
-    done.then(() => fileCoverageException(term, reason, body)).catch(() => {});
+    done.then(() => fileCoverageException(term, reason, body, options)).catch(() => {});
     return Promise.resolve();
   }
-  return fileCoverageException(term, reason, body);
+  return fileCoverageException(term, reason, body, options);
 }
 
-async function fileCoverageException(term, reason, body, { title = 'Annual prepay: promised first visit needs attention' } = {}) {
+// `dedupeDays` (default 7): how long an open alert for the same term+reason
+// suppresses a repeat. null = once ever (the price-drift hold keys its reason
+// on the visit id, so it files exactly once per term+visit).
+async function fileCoverageException(term, reason, body, {
+  title = 'Annual prepay: promised first visit needs attention', dedupeDays = 7,
+} = {}) {
   try {
     // notifyAdmin does not interpret dedupeKey — enforce it here (same
     // pattern as appointment-reminders): one open alert per term+reason per
     // 7 days, so a re-run refresh can't stack duplicates of the same problem.
     const dedupeKey = `annual-prepay-first-visit:${term?.id}:${reason}`;
-    const existing = await db('notifications')
+    let existingQuery = db('notifications')
       .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey])
-      .where('created_at', '>=', db.raw("now() - interval '7 days'"))
+      .whereRaw("metadata->>'dedupeKey' = ?", [dedupeKey]);
+    if (dedupeDays != null) {
+      existingQuery = existingQuery.where('created_at', '>=', db.raw(`now() - interval '${Number(dedupeDays) || 7} days'`));
+    }
+    const existing = await existingQuery
       .first('id')
       .catch(() => null);
     if (existing) return;
@@ -2401,6 +2409,126 @@ async function linkWindowVisitsWithoutCoverageConfig(term, conn) {
     .update({ annual_prepay_term_id: term.id, updated_at: new Date() });
 }
 
+// A row this term must not stamp: already prepaid by another term, or paid
+// out-of-band.
+function rowPrepaidElsewhere(term, row) {
+  return (
+    row.prepaid_amount != null
+    && Number(row.prepaid_amount) > 0
+    && (
+      // Already covered by a DIFFERENT annual-prepay term.
+      (row.annual_prepay_term_id && String(row.annual_prepay_term_id) !== String(term.id))
+      // OR independently prepaid (cash/Zelle/etc.) through the regular schedule
+      // route — attachScheduledServices may have linked it to this term, but its
+      // stamp is a real out-of-band payment. Don't overwrite the method, or the
+      // void/unflag cleanup (method-scoped) would later clear an already-collected
+      // visit and completion billing would re-invoice it.
+      || (row.prepaid_method && row.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD)
+    )
+  );
+}
+
+// ---------------------------------------------------------------------------
+// STAMP-TIME PRICE CHECK (owner ruling 2026-09-30, secure-prepay rail #5387).
+// The re-price guard in admin-schedule.js predicts, at SAVE time, which visits
+// a held /secure annual-prepay term will cover once paid — and nine review
+// rounds each found another timing gap in that prediction. This is the
+// structural backstop at the one place a term actually stamps visits
+// (attachScheduledServices / applyPrepaidCoverageForTerm, which every
+// activation, refresh, late-payment and end-at-term upkeep path runs): a
+// visit whose CURRENT price is not the price the term was sold at is never
+// linked or stamped. It stays uncovered (bills as normal) and the office is
+// told once per term+visit.
+//
+// Price-only, cents-compared on estimated_price: a service-only edit at an
+// unchanged price is never a reason to hold. A null price is unknown, not
+// changed. Visits ALREADY stamped by this term are never un-stamped or
+// re-judged (their stamp was legitimate when written; the save-time guard
+// owns edits to them). The held visit's sold slot stays UNUSED — the next
+// visit does not slide into it — because coverageRowsForTerm's canonical
+// selection is the single definition of "which visits this term covers", and
+// the save-time guard predicts exactly that selection.
+//
+// The sold per-visit price is what selectSecurePlan (secure-appointment-plans
+// .js) froze into the term's own mint record: the activity_log row it writes
+// in the mint transaction carries per_visit_amount, which selectSecurePlan
+// re-checked under the customer lock to equal the visit's live
+// estimated_price. Only secure-plan terms carry this baseline — every other
+// mint path (operator, estimate accept, on-site switch) records a discounted
+// slice, not a list price, so there is no per-visit price to compare and
+// those terms are left exactly as before.
+const SECURE_PLAN_MINT_SOURCE = 'secure_plan_choice';
+const PRICE_DRIFT_HELD_REASON = 'price_drift_held';
+
+function priceCents(value) {
+  if (value == null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.round(n * 100) : null;
+}
+
+async function securePlanSoldPerVisitCents(term, conn) {
+  if (!term?.id || !term.customer_id) return null;
+  try {
+    const row = await conn('activity_log')
+      .where({ customer_id: term.customer_id, action: 'annual_prepay_invoice_created' })
+      .whereRaw("metadata->>'annual_prepay_term_id' = ?", [String(term.id)])
+      .whereRaw("metadata->>'source' = ?", [SECURE_PLAN_MINT_SOURCE])
+      .orderBy('created_at', 'desc')
+      .first('metadata');
+    if (!row) return null;
+    let meta = row.metadata;
+    if (typeof meta === 'string') {
+      try { meta = JSON.parse(meta); } catch { return null; }
+    }
+    const sold = priceCents(meta?.per_visit_amount);
+    return sold != null && sold > 0 ? sold : null;
+  } catch (err) {
+    logger.warn(`[annual-prepay] sold per-visit price lookup skipped for term ${term.id}: ${err.message}`);
+    return null;
+  }
+}
+
+// Splits `rows` (coverage rows in canonical slot order) into the visits the
+// term may stamp and the ones held for a changed price.
+async function holdPriceDriftedRows(term, rows, conn, { skipRow = null } = {}) {
+  const held = [];
+  if (!rows.length) return { held, heldIds: new Set() };
+  const isLiveStampOfTerm = (row) => row.prepaid_method === ANNUAL_PREPAY_PREPAID_METHOD
+    && Number(row.prepaid_amount) > 0
+    && row.annual_prepay_term_id != null
+    && String(row.annual_prepay_term_id) === String(term.id);
+  // Terminal-status rows are never stamped (PREPAID_UPDATE_EXCLUDED_STATUSES),
+  // so there is nothing to hold; `skipRow` is the caller's own already-covered
+  // exemptions (foreign term / out-of-band payment).
+  const candidates = rows.filter((row) => !isLiveStampOfTerm(row)
+    && !PREPAID_UPDATE_EXCLUDED_STATUSES.has(String(row.status || '').toLowerCase())
+    && !(skipRow && skipRow(row))
+    && priceCents(row.estimated_price) != null);
+  if (!candidates.length) return { held, heldIds: new Set() };
+  const soldCents = await securePlanSoldPerVisitCents(term, conn);
+  if (soldCents == null) return { held, heldIds: new Set() };
+  // The term's own generated visits are priced at the per-visit slice of the
+  // discounted invoice (ensureCoverageRowsForTerm's seededVisitPrice) — that
+  // is the term's price for them, not a drift.
+  const allowed = new Set([soldCents]);
+  const visitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
+  for (const slice of splitCoverageAmount(Number(term.prepay_amount), visitCount)) allowed.add(priceCents(slice));
+  for (const row of candidates) {
+    if (!allowed.has(priceCents(row.estimated_price))) held.push({ row, soldCents });
+  }
+  return { held, heldIds: new Set(held.map(({ row }) => String(row.id))) };
+}
+
+async function fileHeldPriceDriftAlerts(term, held, notifyScope) {
+  for (const { row, soldCents } of held) {
+    const date = dateOnly(row.scheduled_date) || 'undated';
+    logger.warn(`[annual-prepay] term ${term.id}: visit ${row.id} (${date}) held out of coverage — repriced to $${(priceCents(row.estimated_price) / 100).toFixed(2)} after the term was sold at $${(soldCents / 100).toFixed(2)} per visit`);
+    await fileCoverageExceptionAfterCommit(notifyScope, term, `${PRICE_DRIFT_HELD_REASON}:${row.id}`,
+      `The ${date} ${row.service_type || 'service'} visit was repriced to $${(priceCents(row.estimated_price) / 100).toFixed(2)} after this annual prepay was sold at $${(soldCents / 100).toFixed(2)} per visit, so it was NOT marked as covered and will bill normally. The sold visit slot stays unused. Put the visit back to the sold price, or adjust the term.`,
+      { title: 'Annual prepay: repriced visit left uncovered', dedupeDays: null });
+  }
+}
+
 async function attachScheduledServices(term, conn = db) {
   const cols = await scheduledServiceColumns();
   if (!cols.annual_prepay_term_id || !term?.id) return;
@@ -2409,7 +2537,8 @@ async function attachScheduledServices(term, conn = db) {
     const coverageVisitCount = normalizeCoverageVisitCount(term.coverage_visit_count);
     if (coverageServiceType && coverageVisitCount) {
       const rows = await coverageRowsForTerm(term, conn);
-      const ids = rows.map((row) => row.id).filter(Boolean);
+      const { heldIds } = await holdPriceDriftedRows(term, rows, conn, { skipRow: (r) => rowPrepaidElsewhere(term, r) });
+      const ids = rows.filter((row) => !heldIds.has(String(row.id))).map((row) => row.id).filter(Boolean);
       if (!ids.length) return;
       await conn('scheduled_services')
         .whereIn('id', ids)
@@ -2470,6 +2599,10 @@ async function applyPrepaidCoverageForTerm(
   const slices = splitCoverageAmount(totalAmount, coverageVisitCount);
   const now = new Date();
   let stampedCount = 0;
+  // Stamp-time price check: see holdPriceDriftedRows. Only rows this pass
+  // would newly stamp are judged (foreign-term / out-of-band-paid rows are
+  // exempt, exactly as the loop below skips them).
+  const { held: priceHeld, heldIds: priceHeldIds } = await holdPriceDriftedRows(term, rows, conn, { skipRow: (r) => rowPrepaidElsewhere(term, r) });
   // Rows read as eligible whose stamp UPDATE then matched nothing — the
   // status moved in between (#3878 r5). Classified below by re-reading the
   // row: a never-ran status (cancelled / no_show / skipped) is a shortfall
@@ -2485,22 +2618,11 @@ async function applyPrepaidCoverageForTerm(
     const row = rows[index];
     const status = String(row.status || '').toLowerCase();
     if (PREPAID_UPDATE_EXCLUDED_STATUSES.has(status)) continue;
-    if (
-      row.prepaid_amount != null
-      && Number(row.prepaid_amount) > 0
-      && (
-        // Already covered by a DIFFERENT annual-prepay term.
-        (row.annual_prepay_term_id && String(row.annual_prepay_term_id) !== String(term.id))
-        // OR independently prepaid (cash/Zelle/etc.) through the regular schedule
-        // route — attachScheduledServices may have linked it to this term, but its
-        // stamp is a real out-of-band payment. Don't overwrite the method, or the
-        // void/unflag cleanup (method-scoped) would later clear an already-collected
-        // visit and completion billing would re-invoice it.
-        || (row.prepaid_method && row.prepaid_method !== ANNUAL_PREPAY_PREPAID_METHOD)
-      )
-    ) {
-      continue;
-    }
+    if (rowPrepaidElsewhere(term, row)) continue;
+
+    // Repriced since the term was sold: never covered at the old price. The
+    // slot stays unused (index still advances).
+    if (priceHeldIds.has(String(row.id))) continue;
 
     const visitAmount = slices[index] ?? slices[0] ?? 0;
     const updates = {
@@ -2525,6 +2647,8 @@ async function applyPrepaidCoverageForTerm(
     if (Array.isArray(updated) ? updated.length > 0 : updated) stampedCount++;
     else unmatchedRowIds.push(row.id);
   }
+
+  if (priceHeld.length > 0) await fileHeldPriceDriftAlerts(term, priceHeld, notifyScope);
 
   let racedRowIds = [];
   let completedRaceIds = [];
@@ -2557,6 +2681,7 @@ async function applyPrepaidCoverageForTerm(
     expectedVisitCount: coverageVisitCount,
     perVisitAmount: slices[0] || 0,
     racedRowIds,
+    priceHeldRowIds: priceHeld.map(({ row }) => row.id),
   };
 }
 
@@ -10357,6 +10482,7 @@ module.exports = {
     inferCoverageCadence,
     normalizeCoverageServiceType,
     normalizeCoverageVisitCount,
+    attachScheduledServices,
     ensureCoverageRowsForTerm,
     coverageRowsForTerm,
     detachCallbacksFromTerm,

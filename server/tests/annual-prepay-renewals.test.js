@@ -183,6 +183,10 @@ function setDbQueues(queues) {
       // Default = no accepted SMS on file, so send tests stay focused; the
       // recovery tests install an evidence ledger (auditLedger).
       if (table === 'messaging_audit_log') return auditLedgerQuery();
+      // Stamp-time price check (#5387): the secure-plan mint record lookup.
+      // Default = no record, so every term that is not a /secure pick keeps
+      // its exact prior stamping.
+      if (table === 'activity_log') return query({ first: undefined });
       throw new Error(`Unexpected db table ${table}`);
     }
     return queue.shift();
@@ -7331,5 +7335,190 @@ describe('billing_mode reset for decided-lapse terms on refund', () => {
     await expect(AnnualPrepayRenewals.syncTermForInvoicePayment(
       { id: 'inv-r', status: 'refunded', paid_at: null },
     )).resolves.toBeDefined();
+  });
+});
+
+describe('stamp-time price check (secure-prepay rail, #5387) — a repriced visit is never covered at the sold price', () => {
+  // A /secure annual prepay sold at $100 per visit x 4 with the 10% discount:
+  // the invoice (and prepay_amount) is $360, so each stamp slice is $90 and the
+  // term's own generated visits are priced $90. per_visit_amount ($100) is the
+  // list price selectSecurePlan re-checked under the customer lock at mint.
+  const TERM = {
+    id: 'term-1',
+    customer_id: 'customer-1',
+    prepay_amount: 360,
+    term_start: '2026-10-01',
+    term_end: '2027-09-30',
+    coverage_service_type: 'Quarterly Pest Control',
+    coverage_visit_count: 4,
+  };
+  const SECURE_MINT_RECORD = {
+    metadata: { source: 'secure_plan_choice', per_visit_amount: 100, annual_prepay_term_id: 'term-1' },
+  };
+  const COLUMNS = { prepaid_amount: {}, prepaid_method: {}, prepaid_at: {}, annual_prepay_term_id: {}, updated_at: {} };
+  const visit = (id, scheduled_date, estimated_price, extra = {}) => ({
+    id, customer_id: 'customer-1', scheduled_date, status: 'pending', service_type: 'Quarterly Pest Control',
+    estimated_price, prepaid_amount: null, prepaid_method: null, annual_prepay_term_id: null, ...extra,
+  });
+  const { notifyAdmin } = require('../services/notification-service');
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    db.schema = { hasTable: jest.fn().mockResolvedValue(true) };
+    db.raw = jest.fn().mockResolvedValue({ rows: [{ locked: true }] });
+    db.transaction = jest.fn(async (cb) => cb(db));
+    _private.resetCachesForTests();
+  });
+
+  function stampQueues({ rows, mintRecord = SECURE_MINT_RECORD, updates, notified }) {
+    const updateQueries = updates.map(() => query({ returning: [{ id: 'x' }] }));
+    const notifications = notified ? [notified] : [query({ first: undefined })];
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), ...updateQueries],
+      activity_log: [query({ first: mintRecord })],
+      notifications,
+    });
+    return updateQueries;
+  }
+
+  test('r9(a): a same-service sibling repriced after the /secure pick is held out of the stamp, flagged once, its slot left unused', async () => {
+    // Visit B (svc-2) was repriced $100 -> $125 while the selection only
+    // re-checked its own visit A. Activation must stamp A, C, D and hold B.
+    // Only three UPDATEs are queued: a stamp attempt on svc-2 would throw.
+    const rows = [
+      visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125),
+      visit('svc-3', '2027-04-15', 100), visit('svc-4', '2027-07-15', 100),
+    ];
+    const updateQueries = stampQueues({ rows, updates: [1, 2, 3] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(3);
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+    // C keeps ITS slot's slice: the held slot is not handed to the next visit.
+    expect(updateQueries.map((q) => q.where.mock.calls[0][0].id)).toEqual(['svc-1', 'svc-3', 'svc-4']);
+    expect(updateQueries[0].update).toHaveBeenCalledWith(expect.objectContaining({
+      prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1',
+    }));
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert',
+      'Annual prepay: repriced visit left uncovered',
+      expect.stringMatching(/2027-01-15.*repriced to \$125\.00.*sold at \$100\.00.*NOT marked as covered/),
+      expect.objectContaining({ metadata: expect.objectContaining({
+        reason: 'price_drift_held:svc-2', annual_prepay_term_id: 'term-1',
+        dedupeKey: 'annual-prepay-first-visit:term-1:price_drift_held:svc-2',
+      }) }),
+    );
+  });
+
+  test('r9(b): a repriced later visit that becomes the 4th slot when an earlier one is cancelled is held, not stamped at the old price', async () => {
+    // Visit 4 was cancelled by the same save that repriced visit 5; canonical
+    // selection now reaches visit 5 (status-excluded visit 4 is not a slot).
+    const rows = [
+      visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 100),
+      visit('svc-3', '2027-04-15', 100), visit('svc-4', '2027-07-15', 100, { status: 'cancelled' }),
+      visit('svc-5', '2027-09-15', 140),
+    ];
+    const updateQueries = stampQueues({ rows, updates: [1, 2, 3] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(3);
+    expect(result.priceHeldRowIds).toEqual(['svc-5']);
+    expect(updateQueries.map((q) => q.where.mock.calls[0][0].id)).toEqual(['svc-1', 'svc-2', 'svc-3']);
+    expect(notifyAdmin).toHaveBeenCalledTimes(1);
+    expect(notifyAdmin).toHaveBeenCalledWith(
+      'alert', expect.any(String), expect.any(String),
+      expect.objectContaining({ metadata: expect.objectContaining({ reason: 'price_drift_held:svc-5' }) }),
+    );
+  });
+
+  test('re-running the refresh does not re-flag: the dedupe is once per term+visit, with no 7-day expiry', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125)];
+    const alreadyFlagged = query({ first: { id: 'notif-existing' } });
+    stampQueues({ rows, updates: [1], notified: alreadyFlagged });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.priceHeldRowIds).toEqual(['svc-2']);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+    // A time-boxed dedupe would re-file the same visit every 7 days.
+    expect(alreadyFlagged.where.mock.calls.map((c) => c[0])).not.toContain('created_at');
+  });
+
+  test('unchanged prices stamp exactly as before — the list price and the term\'s own generated slice price both count as unchanged', async () => {
+    const rows = [
+      visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 90),
+      visit('svc-3', '2027-04-15', 100), visit('svc-4', '2027-07-15', 100),
+    ];
+    stampQueues({ rows, updates: [1, 2, 3, 4] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(4);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a service-only change at an unchanged price is never a reason to hold', async () => {
+    const rows = [
+      visit('svc-1', '2026-10-15', 100),
+      // Same family text, different catalog identity; price untouched.
+      visit('svc-2', '2027-01-15', '100.00', { service_id: 'other-service-id', service_type: 'Quarterly Pest Control Service' }),
+    ];
+    stampQueues({ rows, updates: [1, 2] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(2);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a visit this term already stamped is never un-stamped or re-judged by the price check', async () => {
+    const rows = [
+      visit('svc-1', '2026-10-15', 125, {
+        prepaid_amount: 90, prepaid_method: 'annual_prepay_invoice', annual_prepay_term_id: 'term-1',
+      }),
+    ];
+    stampQueues({ rows, updates: [1] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(result.stampedCount).toBe(1);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a term with no /secure mint record (operator, estimate-accept, on-site switch) has no per-visit baseline — stamping is unchanged', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125)];
+    stampQueues({ rows, mintRecord: null, updates: [1, 2] });
+    notifyAdmin.mockClear();
+
+    const result = await AnnualPrepayRenewals.applyPrepaidCoverageForTerm(TERM);
+
+    expect(result.stampedCount).toBe(2);
+    expect(result.priceHeldRowIds).toEqual([]);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('attachScheduledServices does not link a repriced visit to the term either', async () => {
+    const rows = [visit('svc-1', '2026-10-15', 100), visit('svc-2', '2027-01-15', 125), visit('svc-3', '2027-04-15', 100)];
+    const link = query({});
+    setDbQueues({
+      scheduled_services: [query({ columnInfo: COLUMNS }), query({ rows }), link],
+      activity_log: [query({ first: SECURE_MINT_RECORD })],
+    });
+
+    await _private.attachScheduledServices(TERM);
+
+    expect(link.whereIn).toHaveBeenCalledWith('id', ['svc-1', 'svc-3']);
   });
 });
