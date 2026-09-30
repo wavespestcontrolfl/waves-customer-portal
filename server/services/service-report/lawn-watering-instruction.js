@@ -108,15 +108,6 @@ function deadlineAfter(base, hours) {
   return floored.getTime() > base.getTime() ? floored : exact;
 }
 
-// The end of the visit's ET day (23:59:59). Walks hour boundaries, so a 23- or
-// 25-hour DST day is handled.
-function endOfDay(anchor) {
-  const day = etDateString(anchor);
-  let t = ceilToHour(anchor);
-  for (let i = 0; i < 26 && etDateString(t) === day; i += 1) t = new Date(t.getTime() + HOUR_MS);
-  return new Date(t.getTime() - 1000);
-}
-
 // "8 PM tonight" / "10 AM today" on the visit's own day, else "Wed 4 PM".
 // Anchored to the (frozen) visit day, never to "now", so a permanent report
 // link reads the same forever.
@@ -212,6 +203,7 @@ function emptyInstruction() {
     holdUntilLabel: null,
     holdUntilPlanLabel: null,
     expiresAt: null,
+    holdUntilDry: false,
     waterInBy: null,
     waterInByLabel: null,
     waterInInches: null,
@@ -315,6 +307,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, forecast
     out.holdUntilLabel = formatWhen(timedEnd, at);
     out.holdUntilPlanLabel = out.holdUntilLabel;
     holdLabel = dryHolds.length ? `${out.holdUntilLabel}, and not before ${DRY_LABEL}` : out.holdUntilLabel;
+    if (dryHolds.length) out.holdUntilDry = true;
   } else {
     out.holdUntilLabel = DRY_LABEL;
     out.holdUntilPlanLabel = DRY_PLAN_LABEL;
@@ -330,7 +323,10 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, forecast
     ];
   } else {
     out.state = 'hold';
-    out.expiresAt = (timedEnd || endOfDay(at)).toISOString();
+    // A hold that waits for the treatment to dry has no clock end: dryness is
+    // a condition, so it never expires on a synthetic clock (the plan-week
+    // scope bounds it). A purely timed hold ends at its clock time.
+    out.expiresAt = timedEnd && !dryHolds.length ? timedEnd.toISOString() : null;
     out.lines = [`Skip your turf watering until ${holdLabel}.`, HOLD_SECOND_LINE];
   }
   return out;
@@ -357,9 +353,31 @@ function composeBannerLines(instruction, { hasWeekPlan = false, planRunInches = 
   return lines;
 }
 
+const ACTIONABLE_STATES = ['hold', 'water_in', 'hold_then_water_in'];
+
+// The ONE clock reading of a frozen instruction, for every live consumer
+// (aftercare verdict, hero task, assistant): 'hold' | 'water_in' | 'ended',
+// or null when the instruction asks for nothing.
+//   - past expiresAt: 'ended' (history; wording kept as a record)
+//   - hold_then_water_in: 'hold' until a TIMED hold's clock end, then
+//     'water_in'; a hold that also waits for the treatment to dry (or waits
+//     only for that) has no clock release and stays 'hold' until expiry
+//   - an until-dry-only hold has no expiresAt and never ends by the clock
+function instructionPhaseAt(instruction, nowMs = Date.now()) {
+  if (!instruction || !ACTIONABLE_STATES.includes(instruction.state)) return null;
+  if (!Array.isArray(instruction.lines) || instruction.lines.length < 2) return null;
+  const expiresMs = instruction.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
+  if (Number.isFinite(expiresMs) && nowMs > expiresMs) return 'ended';
+  if (instruction.state !== 'hold_then_water_in') return instruction.state;
+  const holdEndMs = instruction.holdUntil ? Date.parse(instruction.holdUntil) : NaN;
+  if (instruction.holdUntilDry !== true && Number.isFinite(holdEndMs) && nowMs >= holdEndMs) return 'water_in';
+  return 'hold';
+}
+
 module.exports = {
   buildWateringInstruction,
+  instructionPhaseAt,
   composeBannerLines,
   GENERIC_MINUTES_PER_QUARTER_INCH,
-  _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter, endOfDay },
+  _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter },
 };

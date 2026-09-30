@@ -402,6 +402,18 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(await signatureFor(record(FROZEN), 24)).not.toBe(await signatureFor(record(), 24));
     });
 
+    test('a failed live rule lookup is a non-reusable stamp, never the null-rule hash', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const failedFor = async () => {
+        const row = record();
+        const knex = makeKnex({ ...fixtures(), products_catalog: FAIL, service_records: [row] });
+        return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
+      };
+      const first = await failedFor();
+      expect(await failedFor()).not.toBe(first);
+      expect(first).not.toBe(await signatureFor(record(), 24));
+    });
+
     test('gate off: no stamp at all, so the signature ignores the rule', async () => {
       delete process.env.GATE_LAWN_WATERING_RULE;
       expect(await signatureFor(record(), 24)).toBe(await signatureFor(record(), 48));

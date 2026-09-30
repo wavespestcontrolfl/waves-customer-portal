@@ -2565,6 +2565,9 @@ async function lawnWateringRuleStamp(service, knex) {
     const products = await attachApprovedReportProductFacts(knex, rawProducts, {
       frozenFacts: readReportIdentitySnapshot(row || {})?.productFacts || null,
     });
+    // A failed live rule lookup leaves rules UNKNOWN, not absent: hashing them
+    // as null would match a PDF cached before the rule existed.
+    if (products?.wateringRuleLookupFailed) return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
     const pairs = (products || []).map((p) => `${canonicalProductId(p.product_id) || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}`).sort();
     return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
   } catch {

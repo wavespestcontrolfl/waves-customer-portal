@@ -2,7 +2,7 @@
 // rules + completion time + the customer's runtime facts in, one instruction out.
 // Synthetic data only.
 
-const { buildWateringInstruction, composeBannerLines, _private } = require('../services/service-report/lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines, instructionPhaseAt, _private } = require('../services/service-report/lawn-watering-instruction');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
 
@@ -408,7 +408,7 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     }
   };
 
-  test('alone: hold, no clock time, expires at the end of the visit day', () => {
+  test('alone: hold, no clock time, no clock expiry (dryness is a condition, not a time)', () => {
     const r = build([DRY]);
     expect(r.state).toBe('hold');
     expect(r.holdUntil).toBeNull();
@@ -419,17 +419,19 @@ describe('hold until the treatment has dried (no invented duration)', () => {
       'That gives today’s treatment time to work.',
     ]);
     expect(composeBannerLines(r, WITH_PLAN)[2]).toBe('Then follow this week’s plan below.');
-    expect(r.expiresAt).toBe('2026-10-01T03:59:59.000Z'); // 11:59:59 PM ET, Sep 30
+    expect(r.expiresAt).toBeNull();
+    expect(r.holdUntilDry).toBe(false);
     expect(r.waterInBy).toBeNull();
     expect(r.ruleSource).toBe('label');
     expectCleanCopy(r);
     noDryFigure(r);
   });
 
-  test('end of the visit day follows the ET calendar across a 25-hour DST day', () => {
-    const r = buildWateringInstruction({ rules: [DRY], completedAt: '2026-11-01T15:00:00Z' }); // Sun Nov 1, 10 AM EST after fall back
-    expect(r.expiresAt).toBe('2026-11-02T04:59:59.000Z');
-    expect(_private.endOfDay(new Date('2026-11-01T05:30:00Z'), 'America/New_York').toISOString()).toBe('2026-11-02T04:59:59.000Z');
+  test('a late-evening until-dry visit is never released by a clock', () => {
+    const r = buildWateringInstruction({ rules: [DRY], completedAt: '2026-10-01T03:50:00Z' }); // 11:50 PM ET
+    expect(r.expiresAt).toBeNull();
+    expect(instructionPhaseAt(r, Date.parse('2026-10-01T04:10:00Z'))).toBe('hold');
+    expect(instructionPhaseAt(r, Date.parse('2026-10-05T04:10:00Z'))).toBe('hold');
   });
 
   test('a timed hold on the same visit outranks it: the concrete clock time is printed', () => {
@@ -438,7 +440,9 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
     expect(r.holdUntilLabel).toBe('Thu 3 PM');
     expect(r.lines[0]).toBe('Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.');
-    expect(r.expiresAt).toBe('2026-10-01T19:00:00.000Z');
+    // The clock time alone never releases a hold that also waits for drying.
+    expect(r.expiresAt).toBeNull();
+    expect(r.holdUntilDry).toBe(true);
   });
 
   test('until-dry + water-in (no floor): the deadline is completion + 24 h; the 6 h default floor is only a conflict check, never printed', () => {
@@ -464,7 +468,9 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     expect(r.holdUntilLabel).toBe('Thu 3 PM');
     expect(r.holdUntilPlanLabel).toBe('Thu 3 PM'); // the plan overlay names the clock time
     expect(r.lines[0]).toBe('Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.');
-    expect(r.expiresAt).toBe('2026-10-01T19:00:00.000Z');
+    // The clock time alone never releases a hold that also waits for drying.
+    expect(r.expiresAt).toBeNull();
+    expect(r.holdUntilDry).toBe(true);
     expectCleanCopy(r);
     noDryFigure(r);
     // The dry condition is never dropped, in either order.

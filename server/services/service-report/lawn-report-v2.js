@@ -16,6 +16,7 @@ const { buildVisualDiagnosisCategories, scoreStatus } = require('./lawn-visual-d
 const { buildLawnInsightCards, CREDITED_WATER_IN_PHRASE } = require('./lawn-report-insights');
 const { buildTreatmentSummary } = require('./treatment-summary');
 const { crossSeasonNote, crossSeasonNoteFromSeasons, dormancyLikely } = require('./lawn-seasonality');
+const { instructionPhaseAt } = require('./lawn-watering-instruction');
 const { photoZoneLabel } = require('../lawn-visit-input');
 const {
   LEGACY_WATER_IN_COPY,
@@ -467,32 +468,47 @@ function buildAftercare(applications, opts = {}) {
     if (!reentry) reentry = (p.reentry_text || p.reentry_summary || facts.reentrySummary || '').trim() || null;
   }
   const instruction = opts && opts.instruction;
-  const actionable = instruction && ['hold', 'water_in', 'hold_then_water_in'].includes(instruction.state)
-    && Array.isArray(instruction.lines) && instruction.lines.length >= 2;
-  // Past its expiresAt (the same clock the banner uses) the instruction is
-  // history: its wording stays as a record of this visit, but it restricts
-  // nothing, credits nothing and is never promoted into the hero task or read
-  // by the assistant as current guidance (verdict none).
-  const nowMs = Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
-  const expiresMs = actionable && instruction.expiresAt ? Date.parse(instruction.expiresAt) : NaN;
-  if (actionable && Number.isFinite(expiresMs) && nowMs > expiresMs) {
+  // The instruction's live phase at render time (instructionPhaseAt is the one
+  // clock reading every consumer shares).
+  const phase = instructionPhaseAt(instruction, Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now());
+  const recorded = {
+    reentry,
+    needsReview: false,
+    neutral: false,
+    evidenceSource: 'product_instruction',
+    ruleSource: instruction?.ruleSource || null,
+    holdUntil: instruction?.holdUntil || null,
+    waterInBy: instruction?.waterInBy || null,
+  };
+  // Past its expiresAt the instruction is history: its wording stays as a
+  // record of this visit, but it restricts nothing, credits nothing and is
+  // never promoted into the hero task or read by the assistant as current
+  // guidance (verdict none).
+  if (phase === 'ended') {
     return normalizeLawnAftercare({
+      ...recorded,
       watering: `${ENDED_WATERING_PREFIX} ${instruction.lines.join(' ')}`,
-      reentry,
       waterInRequired: false,
       wateringHold: false,
       creditableWaterIn: false,
-      needsReview: false,
-      neutral: false,
       wateringEnded: true,
-      evidenceSource: 'product_instruction',
-      ruleSource: instruction.ruleSource || null,
-      holdUntil: instruction.holdUntil || null,
-      waterInBy: instruction.waterInBy || null,
     });
   }
-  if (actionable) {
-    const holds = instruction.state !== 'water_in';
+  // A timed hold that has elapsed on a hold-then-water-in visit: the water-in
+  // is what is due now. It becomes the task (never credited: the plan keeps
+  // its not-before overlay for the rest of the week).
+  if (phase === 'water_in' && instruction.state === 'hold_then_water_in') {
+    return normalizeLawnAftercare({
+      ...recorded,
+      watering: instruction.lines.join(' '),
+      waterInRequired: true,
+      wateringHold: false,
+      creditableWaterIn: false,
+      waterInTask: instruction.lines[1].replace(/^After that, water in/, 'Water in'),
+    });
+  }
+  if (phase) {
+    const holds = phase === 'hold';
     // A water-in credits a full weekly run only when it is at least as deep as
     // the plan's per-run depth. Shallower, it counts toward the week but the
     // plan stays whole (no creditableWaterIn). No plan run to reduce: as before.
@@ -502,22 +518,22 @@ function buildAftercare(applications, opts = {}) {
     const creditsRun = !plan?.title || plan.prescribesRun !== true
       || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
     return normalizeLawnAftercare({
+      ...recorded,
       // Every treatment sentence: the PDF and Ask Waves read only this field.
       watering: instruction.lines.join(' '),
-      reentry,
       waterInRequired: instruction.state !== 'hold',
       wateringHold: holds,
       creditableWaterIn: instruction.state === 'water_in' && creditsRun,
       // The task line when the water-in is real but earns no plan credit.
       ...(instruction.state === 'water_in' && !creditsRun ? { waterInTask: instruction.lines[0] } : {}),
-      needsReview: false,
-      neutral: false,
-      evidenceSource: 'product_instruction',
-      ruleSource: instruction.ruleSource || null,
-      // The hero task and the PDF list carry the banner's first line verbatim.
-      ...(holds ? { holdTask: instruction.lines[0] } : {}),
-      holdUntil: instruction.holdUntil || null,
-      waterInBy: instruction.waterInBy || null,
+      // The hero task carries the banner's first line verbatim; a hold that is
+      // followed by a water-in carries both steps, so the water-in is never
+      // missing from the hero while the hold is live.
+      ...(holds ? {
+        holdTask: instruction.state === 'hold_then_water_in'
+          ? `${instruction.lines[0]} ${instruction.lines[1]}`
+          : instruction.lines[0],
+      } : {}),
     });
   }
   if (instruction && instruction.state === 'none') {

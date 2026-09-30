@@ -861,13 +861,36 @@ describe('watering instruction drives the aftercare through the existing verdict
     }
   });
 
+  test('a timed hold-then-water-in advances to the water-in task once the hold has elapsed', () => {
+    const { buildWateringInstruction: build2 } = require('../services/service-report/lawn-watering-instruction');
+    const instruction = build2({ rules: [HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
+    const at = (iso) => buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction, nowMs: Date.parse(iso) });
+    const during = at('2026-10-01T18:00:00Z');
+    expect(resolveLawnAftercare(during.aftercare, during.water.weekPlan).verdict).toBe('hold');
+    const after = at('2026-10-01T19:00:00Z'); // hold end, Thu 3 PM
+    expect(after.aftercare).toMatchObject({ wateringHold: false, creditableWaterIn: false, waterInRequired: true });
+    expect(after.aftercare.waterInTask).toBe('Water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.');
+    expect(resolveLawnAftercare(after.aftercare, after.water.weekPlan).verdict).toBe('none');
+    expect(after.snapshot.customerAction).toContain(after.aftercare.waterInTask);
+    expect(after.snapshot.customerAction).not.toContain('Skip your turf watering');
+    expect(banned(after.aftercare.waterInTask)).toEqual([]);
+    // Past the water-in deadline: history.
+    expect(at('2026-10-03T18:00:01Z').aftercare.wateringEnded).toBe(true);
+    // A hold that also waits for drying never advances by the clock.
+    const dry = { mode: 'hold', hold_hours: null, hold_until: 'dry', source: 'label' };
+    const both = build2({ rules: [dry, HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED });
+    const later = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: both, nowMs: Date.parse('2026-10-02T12:00:00Z') });
+    expect(later.aftercare.wateringHold).toBe(true);
+  });
+
   test('mixed hold + water-in resolves to hold; the water-in is banner text only', () => {
     const { instruction, report } = build([HOLD_RULE, LATE_WATER_IN_RULE]);
     expect(instruction.state).toBe('hold_then_water_in');
     expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: true, creditableWaterIn: false });
     expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan).verdict).toBe('hold');
-    expect(report.aftercare.holdTask).toBe('Skip your turf watering until Thu 3 PM.');
-    expect(report.aftercare.watering).toContain('After that, water in today’s treatment by Sat 2 PM');
+    // While the hold is live the hero carries both steps, so the water-in is never missing.
+    expect(report.aftercare.holdTask).toBe(`${instruction.lines[0]} ${instruction.lines[1]}`);
+    expect(report.aftercare.holdTask).toContain('After that, water in today’s treatment by Sat 2 PM');
     expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterHold);
   });
 
@@ -1025,9 +1048,9 @@ describe('watering instruction drives the aftercare through the existing verdict
       expect(banned(text)).toEqual([]);
       expect(reentrySafetyClaimFinding(text)).toBeFalsy();
     }
-    // Banner: no clock time, expires at the end of the visit day (ET).
+    // Banner: no clock time and no clock expiry (dryness is a condition).
     expect(buildWateringBanner(instruction)).toEqual({
-      state: 'hold', lines: instruction.lines, holdUntil: null, waterInBy: null, expiresAt: '2026-10-01T03:59:59.000Z', ruleSource: 'label',
+      state: 'hold', lines: instruction.lines, holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: 'label',
     });
     // The plan sentence names the dry state, never a time.
     const tokenPlan = { ...RUN_PLAN, afterHold: { title: RUN_PLAN.afterHold.title, detail: 'Not before {holdUntil}: skip that run.' } };
