@@ -435,6 +435,17 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(await failedFor()).not.toBe(await failedFor());
     });
 
+    test('an A -> B -> A catalog edit re-keys by the row revision, not only the final value', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const at = async (updatedAt) => {
+        const row = record();
+        const knex = makeKnex({ ...fixtures(), products_catalog: [{ ...CATALOG(24), updated_at: updatedAt }], service_records: [row] });
+        return (await resolveCanonicalLawnRender({ id: row.id, customer_id: row.customer_id, service_line: 'lawn' }, knex)).signature;
+      };
+      expect(await at('2026-09-30T10:00:00Z')).toBe(await at('2026-09-30T10:00:00Z'));
+      expect(await at('2026-09-30T10:05:00Z')).not.toBe(await at('2026-09-30T10:00:00Z'));
+    });
+
     test('gate off: no stamp at all, so the signature ignores the rule', async () => {
       delete process.env.GATE_LAWN_WATERING_RULE;
       expect(await signatureFor(record(), 24)).toBe(await signatureFor(record(), 48));

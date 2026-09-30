@@ -2570,7 +2570,18 @@ async function lawnWateringRuleStamp(service, knex) {
     // A failed live rule lookup leaves rules UNKNOWN, not absent: hashing them
     // as null would match a PDF cached before the rule existed.
     if (products?.wateringRuleLookupFailed || products?.catalogEnrichmentFailed) return `:wr=err${crypto.randomBytes(4).toString('hex')}`;
-    const pairs = (products || []).map((p) => `${canonicalProductId(p.product_id) || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}`).sort();
+    // Each catalog row's revision too: a rule edited A -> B -> A during a
+    // render ends on the same value, but not the same updated_at, so the
+    // post-render stability check sees it.
+    const ids = [...new Set((products || []).map((p) => canonicalProductId(p.product_id)).filter(Boolean))];
+    const revisions = ids.length
+      ? await knex('products_catalog').whereIn('id', ids).select('id', 'updated_at')
+      : [];
+    const revisionOf = new Map(revisions.map((r) => [String(r.id), r.updated_at ? new Date(r.updated_at).toISOString() : '']));
+    const pairs = (products || []).map((p) => {
+      const id = canonicalProductId(p.product_id);
+      return `${id || p.product_name || ''}=${JSON.stringify(p.approved_report_product_facts?.wateringRule ?? null)}@${id ? (revisionOf.get(String(id)) || '') : ''}`;
+    }).sort();
     return `:wr=1:${crypto.createHash('sha1').update(pairs.join('|')).digest('hex').slice(0, 8)}`;
   } catch {
     return `:wr=err${crypto.randomBytes(4).toString('hex')}`;

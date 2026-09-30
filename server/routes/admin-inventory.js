@@ -3340,7 +3340,10 @@ async function auditWateringRuleChange(req, product, wateringPatch, trx = null) 
   if (!wateringPatch || wateringPatch.skip) return;
   const before = product?.post_application_watering ?? null;
   const beforeText = before == null ? null : (typeof before === 'string' ? before : JSON.stringify(before));
-  if (beforeText === (wateringPatch.value ?? null)) return;
+  // Compare VALUES: Postgres returns JSONB with its own key order, so a
+  // resubmitted identical rule must not read as a change.
+  const parse = (text) => { try { return text == null ? null : JSON.parse(text); } catch { return text; } };
+  if (require('util').isDeepStrictEqual(parse(beforeText), parse(wateringPatch.value ?? null))) return;
   // Inside a transaction the audit row is critical: a swallowed insert
   // failure would abort the Postgres transaction and lose the catalog save
   // while the route still returned 200, so the audit and the update commit

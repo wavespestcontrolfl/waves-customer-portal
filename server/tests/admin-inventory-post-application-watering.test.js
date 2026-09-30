@@ -50,12 +50,15 @@ async function withServer(fn) {
 }
 
 // Returns the update bodies written to products_catalog.
-function wire() {
+function wire(existingRule = undefined) {
   const updates = [];
   const resolve = (q) => {
     const update = q._calls.find(([name]) => name === 'update');
     if (update) { updates.push(update[1][0]); return { id: PRODUCT, name: 'Celsius WG', category: 'herbicide', post_application_watering: null }; }
-    return { id: PRODUCT, name: 'Celsius WG', category: 'herbicide', epa_reg_number: '432-1507', active_ingredient: 'x' };
+    return {
+      id: PRODUCT, name: 'Celsius WG', category: 'herbicide', epa_reg_number: '432-1507', active_ingredient: 'x',
+      ...(existingRule !== undefined ? { post_application_watering: existingRule } : {}),
+    };
   };
   const trx = jest.fn((table) => makeChain(table, resolve));
   trx.raw = jest.fn(async () => ({}));
@@ -218,6 +221,20 @@ describe('audit trail (local audit P1 on #5393)', () => {
       expect(res.status).toBe(422);
     });
     expect(updates).toEqual([]);
+  });
+
+  test('resubmitting the same rule in JSONB key order records nothing', async () => {
+    const rule = {
+      mode: 'hold', hold_hours: 12, source: 'label', label_note: null, verified_at: '2026-09-01T00:00:00.000Z', verified_by: 'Owner',
+    };
+    // Postgres hands JSONB back with its own key order.
+    const reordered = Object.fromEntries(Object.entries(rule).reverse());
+    wire(reordered);
+    await withServer(async (base) => {
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { postApplicationWatering: rule });
+      expect(res.status).toBe(200);
+    });
+    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 
   test('a save that does not mention the field records nothing', async () => {

@@ -464,7 +464,9 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     expect(r.state).toBe('hold');
     expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
     expect(r.holdUntilLabel).toBe('Thu 3 PM');
-    expect(r.holdUntilPlanLabel).toBe('Thu 3 PM'); // the plan overlay names the clock time
+    // The plan overlay keeps both conditions (the clock time and the drying).
+    expect(r.holdUntilPlanLabel).toBe('Thu 3 PM and the spray has dried');
+    expect(build([HOLD(24)]).holdUntilPlanLabel).toBe('Thu 3 PM');
     expect(r.lines[0]).toBe('Skip your turf watering until Thu 3 PM, and not before today’s treatment has dried.');
     // The clock time alone never releases a hold that also waits for drying.
     expect(r.expiresAt).toBeNull();

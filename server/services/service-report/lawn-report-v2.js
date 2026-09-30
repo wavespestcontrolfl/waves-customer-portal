@@ -779,7 +779,9 @@ function buildLawnReportV2({ lawnAssessment, mowingHeight = null, applications =
   // SURPLUS only: an overwatering photo signal can coexist with a deficit weekly
   // balance, where the insight says to ADD water — "return to the reduced
   // schedule" would reintroduce the contradiction (codex P1 #3038).
-  if (hasCreditableWaterIn(aftercare) && effectiveWaterStatus === 'surplus') {
+  // Scoped to the visit's plan week: a reopened report's water-in never
+  // refers to an unrelated current plan.
+  if (hasCreditableWaterIn(aftercare, water ? water.weekPlan : null) && effectiveWaterStatus === 'surplus') {
     // Beside a plan the wording stays action-neutral — a hot week's RUN plan
     // can follow a historical surplus, and "exception to easing back" would
     // contradict the card (codex gh-r47).

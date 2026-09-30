@@ -303,7 +303,9 @@ function buildWateringInstruction({ rules, completedAt, runtime = null } = {}) {
   if (timedEnd) {
     out.holdUntil = timedEnd.toISOString();
     out.holdUntilLabel = formatWhen(timedEnd, at);
-    out.holdUntilPlanLabel = out.holdUntilLabel;
+    // The plan overlay ("Not before …:") keeps the drying condition too, or
+    // the plan card would release a run at the clock time on a wet treatment.
+    out.holdUntilPlanLabel = dryHolds.length ? `${out.holdUntilLabel} and ${DRY_PLAN_LABEL}` : out.holdUntilLabel;
     holdLabel = dryHolds.length ? `${out.holdUntilLabel}, and not before ${DRY_LABEL}` : out.holdUntilLabel;
   } else {
     out.holdUntilLabel = DRY_LABEL;

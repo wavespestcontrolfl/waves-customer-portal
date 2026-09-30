@@ -1025,6 +1025,9 @@ describe('watering instruction drives the aftercare through the existing verdict
     const timedDry = buildWateringInstruction({ rules: [dry, HOLD_RULE], completedAt: COMPLETED });
     expect(timedDry.holdUntil).toBe('2026-10-01T19:00:00.000Z');
     expect(buildWateringBanner(timedDry).expiresAt).toBeNull();
+    // ...and its weekly-plan overlay keeps the drying condition beside the clock time.
+    const overlay = applyAfterHoldOverlay({ weekPlan: { ...RUN_PLAN, afterHold: { title: 'x', detail: 'Not before {holdUntil}: skip that run.' } } }, timedDry);
+    expect(overlay.weekPlan.afterHold.detail).toBe('Not before Thu 3 PM and the spray has dried: skip that run.');
     // Banner: no clock time and no clock expiry (dryness is a condition).
     expect(buildWateringBanner(instruction)).toEqual({
       state: 'hold', lines: instruction.lines, holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: 'label',
