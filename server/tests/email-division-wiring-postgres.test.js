@@ -1442,6 +1442,33 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(ok.ok).toBe(true);
       });
 
+      test('an UNLINKED record is judged on the active pest series the fallback accepts: a residential account whose one generic pest series sits at a business property is skipped; the same at a residential property sends', async () => {
+        const techId = await makeTech();
+        const build = async (propertyType) => {
+          const customer = await makeCustomer();
+          const [property] = await db('customer_properties').insert({ customer_id: customer.id, city: 'Parrish', property_type: propertyType }).returning('id');
+          await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { property_id: property.id });
+          const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'] });
+          return Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+        };
+        for (const type of ['business', 'commercial']) {
+          expect(await build(type)).toEqual(expect.objectContaining({ skip: true, code: 'not_residential_plan' }));
+        }
+        expect((await build('residential')).ok).toBe(true);
+      });
+
+      test('an UNLINKED record: the inferred series\' own commercial label or bundle label is skipped too', async () => {
+        const techId = await makeTech();
+        const build = async (label) => {
+          const customer = await makeCustomer();
+          await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { service_type: label });
+          const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'] });
+          return Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+        };
+        expect(await build('Commercial Quarterly Pest Control')).toEqual(expect.objectContaining({ skip: true, code: 'not_residential_plan' }));
+        expect(await build('Quarterly Pest + Termite Bait Station')).toEqual(expect.objectContaining({ skip: true, code: 'not_single_pest_lane' }));
+      });
+
       test('a cancelled (or lapsed) series is not an ACTIVE plan: a cancelled recurring root plus a separately booked future pest visit is no B1', async () => {
         const customer = await makeCustomer();
         const techId = await makeTech();

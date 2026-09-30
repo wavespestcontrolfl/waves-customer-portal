@@ -343,7 +343,26 @@ async function isCommercialPlan({
   if (deps.isCommercialServiceRow({ service_type: record.service_type })) return true;
   const customer = await shared(conn('customers').where({ id: record.customer_id }), lock).first('waveguard_tier', 'property_type');
   if (deps.isCommercialAccount(customer)) return true;
-  if (!record.scheduled_service_id) return false;
+  const atCommercialProperty = async (propertyId) => {
+    if (!propertyId) return false;
+    const property = await shared(conn('customer_properties').where({ id: propertyId }), lock).first('property_type');
+    return deps.commercialPropertyTypes.includes(clean(property?.property_type).toLowerCase());
+  };
+  if (!record.scheduled_service_id) {
+    // An unlinked record is tied to no series, so the plan it is judged on is the
+    // active pest series the fallback accepts (activeRecurringPestPlan): each of
+    // them gets the same service-text and property-type checks a linked visit's own
+    // series does.
+    const { active } = await activePestSeries({
+      conn, deps, record, lock,
+    });
+    for (const series of active) {
+      const row = await shared(conn('scheduled_services').where({ id: series.id }), lock).first('service_type', 'service_key_snapshot', 'property_id');
+      if (row && deps.isCommercialServiceRow(asRow(row))) return true;
+      if (await atCommercialProperty(row?.property_id ?? series.property_id)) return true;
+    }
+    return false;
+  }
   const visit = await shared(conn('scheduled_services').where({ id: record.scheduled_service_id }), lock)
     .first('service_type', 'service_key_snapshot', 'recurring_parent_id', 'property_id');
   if (!visit) return false;
@@ -352,11 +371,7 @@ async function isCommercialPlan({
     const parent = await shared(conn('scheduled_services').where({ id: visit.recurring_parent_id }), lock).first('service_type', 'service_key_snapshot');
     if (parent && deps.isCommercialServiceRow(asRow(parent))) return true;
   }
-  if (visit.property_id) {
-    const property = await shared(conn('customer_properties').where({ id: visit.property_id }), lock).first('property_type');
-    if (deps.commercialPropertyTypes.includes(clean(property?.property_type).toLowerCase())) return true;
-  }
-  return false;
+  return atCommercialProperty(visit.property_id);
 }
 
 // Is the visit part of an ACTIVE recurring pest plan? Series membership in the
@@ -366,14 +381,16 @@ async function isCommercialPlan({
 // the visit's own series root must be one of its active pest series. An unlinked
 // record cannot be tied to a series, so it counts only when the customer's active
 // pest series are all at ONE property.
-async function activeRecurringPestPlan({
+// The customer's active pest series for this record (and the linked appointment, when
+// there is one): { linked, active }. `lock` share-locks what "active" decides on.
+async function activePestSeries({
   conn, deps, record, lock = false,
 }) {
   const linked = record.scheduled_service_id
     ? await shared(conn('scheduled_services').where({ id: record.scheduled_service_id }), lock).first('id', 'service_type', 'recurring_parent_id')
     : null;
   const serviceType = clean(linked?.service_type) || clean(record.service_type);
-  if (!serviceType) return false;
+  if (!serviceType) return { linked, active: [] };
   if (lock) {
     // What "active" decides on: the customer's series roots (status, ongoing flag,
     // template) and the members of the visit's own series (a live future member).
@@ -388,6 +405,15 @@ async function activeRecurringPestPlan({
   }
   const active = (await deps.findActiveRecurringSeries(conn, { customerId: record.customer_id, serviceType }))
     .filter((parent) => deps.detectServiceLine(parent.service_type) === 'pest');
+  return { linked, active };
+}
+
+async function activeRecurringPestPlan({
+  conn, deps, record, lock = false,
+}) {
+  const { linked, active } = await activePestSeries({
+    conn, deps, record, lock,
+  });
   if (linked) {
     const rootId = String(linked.recurring_parent_id || linked.id);
     return active.some((parent) => String(parent.id) === rootId);
@@ -420,6 +446,13 @@ async function freeReserviceEligible({
     if (visit?.recurring_parent_id) {
       labels.push((await shared(conn('scheduled_services').where({ id: visit.recurring_parent_id }), lock).first('service_type'))?.service_type);
     }
+  }
+  if (!record.scheduled_service_id) {
+    // The inferred series' own labels are the plan's labels too.
+    const { active } = await activePestSeries({
+      conn, deps, record, lock,
+    });
+    labels.push(...active.map((series) => series.service_type));
   }
   const named = labels.map(clean).filter(Boolean);
   if (!named.length || named.some((label) => deps.copyCategoryForEstimate({ service_interest: label }) !== 'pest')) {
