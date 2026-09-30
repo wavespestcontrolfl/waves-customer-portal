@@ -750,13 +750,31 @@ describe('the audits derive the commercial context the way the processor does (c
     const { routeForV2, defaultReplayHelpers } = require('../scripts/replay-call-extraction-variance');
     const helpers = defaultReplayHelpers();
     const ctx = build(inbound, gatesOf(), { bookableServices: [ONE_TIME_ROW, RECURRING_ROW], extracted: { requested_service: ONE_TIME_ROW.name, matched_service: ONE_TIME_ROW.name } });
-    const route = (extra) => routeForV2(extraction(), '+19415550100', helpers, AV_CLEAN, ctx, { demote: (r) => r, transcription: TRANSCRIPT, ...extra });
+    const route = (extra, context = ctx) => routeForV2(extraction(), '+19415550100', helpers, AV_CLEAN, context, { demote: (r) => r, transcription: TRANSCRIPT, ...extra });
     expect(route().allowed).toBe(true);
-    // a fresh extraction from a different (re-)transcription is judged against THAT text
+    // a fresh extraction from a different (re-)transcription is judged against THAT text:
+    // the context is REBUILT from it (transcript AND the catalog quote checker)
     const other = TRANSCRIPT.replace(COMMIT, 'We will be there sometime.');
-    expect(route({ transcription: other }).allowed).toBe(false);
+    const rebuilt = build(inbound, gatesOf(), { bookableServices: [ONE_TIME_ROW, RECURRING_ROW], extracted: { requested_service: ONE_TIME_ROW.name, matched_service: ONE_TIME_ROW.name }, transcript: other });
+    expect(route({ transcription: other }, rebuilt).allowed).toBe(false);
     // gate off: the shared context is unchanged and the replay holds the call
     expect(routeForV2(extraction(), '+19415550100', helpers, AV_CLEAN, build(inbound, gatesOf({ commercial: false })), { demote: (r) => r, transcription: TRANSCRIPT }).allowed).toBe(false);
+  });
+
+  test('a re-transcription rebuilds the quote checker: it resolves the catalog row from the text it is handed (codex #5377 r10 P2)', () => {
+    const services = [ONE_TIME_ROW, RECURRING_ROW];
+    const oneTimeTalk = `Caller: we have a roach problem and need cockroach control\n${TRANSCRIPT}`;
+    const recurringTalk = `Caller: we want general pest control quarterly service\n${TRANSCRIPT}`;
+    const ctxFor = (transcript) => build(inbound, gatesOf(), { bookableServices: services, extracted: {}, transcript });
+    expect(ctxFor(oneTimeTalk).commercialQuoteBookable(150, null)).toBe(true);
+    expect(ctxFor(recurringTalk).commercialQuoteBookable(150, null)).toBe(false);
+    // the persisted transcript's checker does NOT follow a re-transcription: the replay must rebuild it
+    const persisted = ctxFor(oneTimeTalk);
+    expect(persisted.transcript).toBe(oneTimeTalk);
+    const src = fs.readFileSync(path.join(__dirname, '../scripts/replay-call-extraction-variance.js'), 'utf8');
+    expect(src).toMatch(/transcriptForExtraction === call\.transcription \? failOpenContext : contextFor\(transcriptForExtraction\)\.options/);
+    expect(src).toMatch(/const contextFor = \(transcript\) => CRP\.buildFailOpenRoutingContext\(/);
+    expect(src).not.toMatch(/\.\.\.routeContext/);
   });
 
   test('every audit caller already carries the fields the builder reads (no silent no-op)', () => {
@@ -833,7 +851,39 @@ describe('the quote must survive the catalog-aware price resolver (codex #5377 r
     expect(src('../scripts/v2-promotion-readiness.js')).toMatch(/bookableServices: bookableCallServices,/);
     expect(src('../scripts/verify-v2-shadow-path.js')).toMatch(/bookableServices: Array\.isArray\(r\.bookable_services\)/);
     expect(src('../scripts/verify-v2-shadow-path.js')).toMatch(/row\.bookable_services = bookableServices/);
-    expect(src('../scripts/replay-call-extraction-variance.js')).toMatch(/bookableServices: await require\('\.\.\/services\/call-booking-catalog'\)\.loadBookableCallServices\(db\)/);
+    expect(src('../scripts/replay-call-extraction-variance.js')).toMatch(/const bookableServices = await require\('\.\.\/services\/call-booking-catalog'\)\.loadBookableCallServices\(db\)[\s\S]*?\n    bookableServices,/);
     expect(src('../services/call-triage-flags.js')).toMatch(/quoteBookable: opts\.commercialQuoteBookable,/);
+  });
+});
+
+// Both gates on (codex #5377 r10 P1): GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT waives
+// ambiguous_pest_or_service and FORCES the Waves Assessment row, whose booking clears
+// the treatment price — so a quote validated against the originally resolved service
+// must not clear commercial_requires_quote. The call holds for the office.
+describe('both gates on: a forced Assessment never clears the commercial hold (codex #5377 r10 P1)', () => {
+  const BOTH = { failOpen: true, unclearServiceAssessment: true, callerAni: '+19415550100' };
+
+  test('ambiguous service alone (unclear gate on) is waived and forces the Assessment', () => {
+    const r = route(extraction({ flags: ['ambiguous_pest_or_service'] }), BOTH);
+    expect(r).toMatchObject({ allowed: true, forceAssessmentService: true, gateDemotedFlags: ['ambiguous_pest_or_service'] });
+  });
+
+  test('commercial_requires_quote + ambiguous_pest_or_service: the commercial hold STANDS (fail closed)', () => {
+    const r = route(extraction({ flags: ['commercial_requires_quote', 'ambiguous_pest_or_service'] }), BOTH);
+    expect(r).toMatchObject({ allowed: false, reason: 'triage_flags', appointmentBlockingFlags: ['commercial_requires_quote'] });
+    // the ambiguity waiver rides along for the advisory card, the commercial flag does not
+    expect(r.failedOpenFlags).toEqual(['ambiguous_pest_or_service']);
+    expect(r.forceAssessmentService).toBeUndefined();
+  });
+
+  test('commercial alone, unclear gate on: books as before (the force only applies to an ambiguous demotion)', () => {
+    const r = route(extraction(), BOTH);
+    expect(r).toMatchObject({ allowed: true, gateDemotedFlags: ['commercial_requires_quote'] });
+    expect(r.forceAssessmentService).toBeUndefined();
+  });
+
+  test('unclear gate OFF, commercial gate on: the ambiguous flag itself still holds', () => {
+    const r = route(extraction({ flags: ['commercial_requires_quote', 'ambiguous_pest_or_service'] }), { failOpen: true, callerAni: '+19415550100' });
+    expect(r.allowed).toBe(false);
   });
 });

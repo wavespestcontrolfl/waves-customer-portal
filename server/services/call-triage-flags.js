@@ -2186,6 +2186,13 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       && confirmedWithStart
       && commitStartOnTheHour
       && appointmentBlockingFlags.includes('commercial_requires_quote')
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT waived ambiguous_pest_or_service
+      // above, so the booking is FORCED to the Waves Assessment row and its
+      // treatment price is cleared (forcedAssessmentBooking): a quote validated
+      // against the originally resolved service would never reach the visit.
+      // Fail closed — the call holds on commercial_requires_quote for the office
+      // (codex #5377 r10 P1).
+      && !unclearServiceDemotedFlags.includes('ambiguous_pest_or_service')
       && require('./call-commercial-dictated-booking').commercialDictatedBookingGrounded({
         v2: extraction, transcript: opts.transcript, callStartedAt: opts.callStartedAt,
         quoteBookable: opts.commercialQuoteBookable,

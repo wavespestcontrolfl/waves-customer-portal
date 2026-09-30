@@ -1018,13 +1018,7 @@ function routeForV2(extraction, contactPhone, helpers, addressValidation = null,
   const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], addressValidation);
   const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation });
   const flags = helpers.mergeTriageFlags(modelFlags, deterministicFlags);
-  // A commercial dictated-booking context (GATE_CALL_COMMERCIAL_DICTATED_BOOKING)
-  // is grounded in the transcript the extraction was made from: a fresh
-  // extraction from a re-transcription must not be judged against the old text.
-  const routeContext = ('transcript' in failOpenContext && conflictCheck?.transcription)
-    ? { ...failOpenContext, transcript: conflictCheck.transcription }
-    : failOpenContext;
-  let route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...routeContext });
+  let route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...failOpenContext });
   // The live path never stops at canAutoRoute: a fail-open allow whose V1
   // address conflicts with the on-file one is a NEW address and is demoted
   // back to review. Replaying without it over-counts auto-routes.
@@ -1340,7 +1334,12 @@ async function replayCall(call, context) {
   // unlink is no known caller — never read straight off call.customer_id,
   // which can disagree with the live selection (carried from #4933 r3).
   const linkedCustomer = await CRP.resolveKnownCallerCustomer(call, contactPhone, { db }).catch(() => null);
-  const { knownCaller, options: failOpenContext } = CRP.buildFailOpenRoutingContext({
+  // `transcript` is the text the extraction being routed was made from: the
+  // persisted one for the prior route, the RE-transcription under --retranscribe for
+  // the fresh one (the commercial context and its catalog quote checker are grounded
+  // in it; codex #5377 r10 P2).
+  const bookableServices = await require('../services/call-booking-catalog').loadBookableCallServices(db).catch(() => null);
+  const contextFor = (transcript) => CRP.buildFailOpenRoutingContext({
     call,
     customer: linkedCustomer,
     contactPhone,
@@ -1349,8 +1348,10 @@ async function replayCall(call, context) {
     unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
     // GATE_CALL_COMMERCIAL_DICTATED_BOOKING's catalog-aware quote check reads the
     // bookable catalog (absent = the replay holds the call).
-    bookableServices: await require('../services/call-booking-catalog').loadBookableCallServices(db).catch(() => null),
+    bookableServices,
+    ...(transcript !== undefined ? { transcript } : {}),
   });
+  const { knownCaller, options: failOpenContext } = contextFor(undefined);
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.
   const conflictCheck = {
@@ -1420,7 +1421,10 @@ async function replayCall(call, context) {
   const currentRoute = currentExtraction
     ? routeForV2(currentExtraction, contactPhone, helpers,
       avVerdictForExtraction(storedAvForCurrent, priorV2Valid ? priorV2 : null, currentExtraction, helpers),
-      failOpenContext, { ...conflictCheck, transcription: transcriptForExtraction })
+      // A re-transcription rebuilds the WHOLE context (transcript and the commercial
+      // quote checker grounded in it), never just the text.
+      transcriptForExtraction === call.transcription ? failOpenContext : contextFor(transcriptForExtraction).options,
+      { ...conflictCheck, transcription: transcriptForExtraction })
     : { allowed: false, reason: current.status, flags: [] };
 
   const legacyFieldVariances = currentFlat ? compareFlatFields(legacyFlat, currentFlat, includeValues) : [];
