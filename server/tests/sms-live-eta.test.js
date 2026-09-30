@@ -401,6 +401,27 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     }
   });
 
+  // Codex round-16 P1 (PR #5334): a failed / no-fix lookup is cached ~10 s, not 60 s.
+  test('a failed/null lookup is cached only ~10s: reused at 9s, retried at 11s (a good result still lasts 60s)', async () => {
+    process.env[GATE] = 'true';
+    resolveFreshTechPosition.mockResolvedValue(null);
+    let now = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      const row = baseRow();
+      const t0 = now;
+      await resolveLiveEtaFact(row, baseCustomer());
+      now = t0 + 9 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(1);
+      now = t0 + 11 * 1000;
+      await resolveLiveEtaFact(row, baseCustomer());
+      expect(resolveFreshTechPosition).toHaveBeenCalledTimes(2);
+    } finally {
+      Date.now.mockRestore();
+    }
+  });
+
   test('the memo is bounded — many distinct keys never grow it past the cap', async () => {
     process.env[GATE] = 'true';
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);

@@ -229,9 +229,13 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries }) {
   // mentions minutes at all.
   const mentionsMinutes = snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || ''));
   const unparsedStatusClaim = !claims.length && !timedArrivalClaim && !arrivedClaim && drafter.bodyMentionsArrival(outgoingBody) && mentionsMinutes;
+  const classified = claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim;
+  // Round-16 structural backstop: nothing above read a claim, yet a number sits
+  // beside a time unit / arrival word — hold it to the status-claim checks.
+  const unclassifiedClaim = liveContext && !classified && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unclassifiedSignalOnly: true });
   return {
-    claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim,
-    hasClaim: claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim,
+    claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim, unclassifiedClaim,
+    hasClaim: classified || unclassifiedClaim,
   };
 }
 
@@ -296,6 +300,19 @@ function bindEtaClaim(claim, entries, freshness) {
   return bindTimedOrMinutesClaim(claim, entries, freshness);
 }
 
+// Round-16 structural backstop: a body with a number beside a time unit or
+// arrival word that no parser classified. Bound like a status claim (token
+// selects among several live entries), then held to the SAME draft/GPS
+// freshness window a stated figure gets AND the bound visit(s) still being en
+// route — every failure is 'eta_claim_unclassified'.
+async function unclassifiedClaimReason({ claim, entries, factsGeneratedAt, now, dbh }) {
+  const bound = bindStatusClaim(claim, entries);
+  if (bound.reason) return 'eta_claim_unclassified';
+  if (bound.entries.some((entry) => draftFreshnessReason(factsGeneratedAt, now, entry))) return 'eta_claim_unclassified';
+  const live = await checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
+  return live ? 'eta_claim_unclassified' : null;
+}
+
 /**
  * null when the outgoing body may go out, else a short reason string the
  * caller logs before blocking/superseding. `liveEtaSnapshot` and
@@ -324,6 +341,7 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
     return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh, trackTokensToVerify: claim.trackTokens });
   }
 
+  if (claim.unclassifiedClaim) return unclassifiedClaimReason({ claim, entries, factsGeneratedAt, now, dbh });
   const bound = bindEtaClaim(claim, entries, { factsGeneratedAt, now });
   if (bound.reason) return bound.reason;
   // A minutes/arrival claim that ALSO carries a track link must have that

@@ -749,20 +749,27 @@ const WORD_AFTER_RE = /^(?:\s*|-(?!ish\b))[A-Za-z]+\b/i;
 // most", "20 give or take", "20 approx". Only when the qualifier ends the
 // phrase, so "20 or so visits" still reads as a count.
 const ETA_QUALIFIER_AFTER_RE = /^\s*(?:max(?:imum)?|tops|or\s+so|or\s+less|or\s+more|or\s+thereabouts|at\s+(?:most|least)|give\s+or\s+take|approx(?:\.|imately)?|roughly|min(?:imum)?)(?=\s*(?:[.,;:!?)\u2014]|$|\s(?:away|out|from)\b))/i;
-function classifyBareEtaNumber(str, index, length) {
+// A number that is plainly NOT a duration/ETA figure: ordinal, percentage,
+// money, time of day / address / phone token, or a date. Shared by
+// classifyBareEtaNumber and the unclassified-ETA backstop.
+function isNonDurationNumber(str, index, length) {
   const before = str.slice(Math.max(0, index - 15), index);
   const after = str.slice(index + length, index + length + 24);
   // Ordinal ("the 20th") / percentage ("100%") checked first — both would
-  // otherwise also match the generic trailing-word check below.
-  if (ORDINAL_SUFFIX_AFTER_RE.test(after)) return 'excluded';
-  if (PERCENT_SIGN_AFTER_RE.test(after)) return 'excluded';
+  // otherwise also match the generic trailing-word check.
+  if (ORDINAL_SUFFIX_AFTER_RE.test(after)) return true;
+  if (PERCENT_SIGN_AFTER_RE.test(after)) return true;
   // Money ("$20", "20 dollars").
-  if (MONEY_SIGN_BEFORE_RE.test(before) || MONEY_WORD_AFTER_RE.test(after)) return 'excluded';
+  if (MONEY_SIGN_BEFORE_RE.test(before) || MONEY_WORD_AFTER_RE.test(after)) return true;
   // Time of day / address / phone-like token — the shared helper above.
-  if (looksLikeTimeAddressOrPhone(str, index, length)) return 'excluded';
+  if (looksLikeTimeAddressOrPhone(str, index, length)) return true;
   // Date: a month name nearby, or an N/N slash date.
-  if (MONTH_NAME_RE.test(before) || MONTH_NAME_RE.test(after)) return 'excluded';
-  if (DATE_SLASH_AFTER_RE.test(after) || DATE_SLASH_BEFORE_RE.test(before)) return 'excluded';
+  if (MONTH_NAME_RE.test(before) || MONTH_NAME_RE.test(after)) return true;
+  return DATE_SLASH_AFTER_RE.test(after) || DATE_SLASH_BEFORE_RE.test(before);
+}
+function classifyBareEtaNumber(str, index, length) {
+  if (isNonDurationNumber(str, index, length)) return 'excluded';
+  const after = str.slice(index + length, index + length + 24);
   // A count with a non-time noun directly after it ("3 bugs", "2 visits",
   // "4 traps", "12 months", "30 days") — any other word sitting right after
   // the number reads as its unit/noun, so it is never a bare arrival figure.
@@ -989,6 +996,34 @@ function bodyHasUnnormalizedHourWord(text) {
 function bodyHasUnconvertedNumberWord(text) {
   return unreadDurationInArrivalSentence(normalizeNumberWords(text), UNCONVERTED_NUMBER_WORD_RE);
 }
+// STRUCTURAL BACKSTOP (Codex pre-push P1, round 16, PR #5334): every round of
+// this PR found one more ETA phrasing the claim parsers do not read ("ur tech
+// ≈ 15m out 🚚", "tech: 15 min"). Once there is a live snapshot/link to hold a
+// body to, ANY number (digits, "15m" shorthand, or a number word) sitting
+// within 3 tokens of a time unit or an arrival/status word is treated as a
+// possible ETA — after the window / office follow-up / duration exclusions and
+// the not-a-duration number kinds (money, time of day, date, ordinal, percent)
+// are removed — so the caller can require the bound visit to still be en
+// route and fresh instead of waving the body through as non-ETA copy.
+const ETA_SIGNAL_WORD_RE = /^(?:m|mins?|minutes?|hrs?|hours?|h|s|secs?|seconds?|away|out|arriv\w*|there|here|eta|close|closer|coming|heading|headed|nearby|route|way)$/i;
+const NUMBER_TOKEN_RE = /\d+(?:\.\d+)?/g;
+function tokensAround(str, index, length) {
+  const wordsOf = (t) => t.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+  const before = wordsOf(str.slice(Math.max(0, index - 40), index)).slice(-3);
+  const after = wordsOf(str.slice(index + length, index + length + 40)).slice(0, 3);
+  return [...before, ...after];
+}
+function bodyHasUnclassifiedEtaSignal(text) {
+  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+  for (const m of str.matchAll(NUMBER_TOKEN_RE)) {
+    if (isNonDurationNumber(str, m.index, m[0].length)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    if (durationExcluded(str, m.index, m[0].length) && !STRONG_ARRIVAL_TRIGGER_RE.test(sentenceAt(str, sentenceSpans(str), m.index))) continue;
+    const words = tokensAround(str, m.index, m[0].length);
+    if (words.some((w) => ETA_SIGNAL_WORD_RE.test(w))) return true;
+  }
+  return false;
+}
 // A COMPLETED arrival (Codex round-13 P2, PR #5334): "has arrived", "just
 // arrived", "arrived at your home", "the tech is here / outside / at your
 // door", "pulled up" state the tech IS on site — a different fact from "on
@@ -1062,7 +1097,8 @@ const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of
 // could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
 // Routed through this one already-shared entry point so every send seam's
 // existing import of the drafter keeps working unchanged.
-function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false } = {}) {
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false } = {}) {
+  if (unclassifiedSignalOnly) return bodyHasUnclassifiedEtaSignal(text);
   if (completedArrivalOnly) return bodyClaimsCompletedArrival(text);
   if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text);
   if (unconvertedNumbersOnly) return bodyHasUnconvertedNumberWord(text);

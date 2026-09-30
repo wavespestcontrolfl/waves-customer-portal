@@ -1237,3 +1237,57 @@ describe('round 15: corrections pass on done visits, coming/headed still recheck
     expect(await run('ETA is 20 or so.', rowsBy.en_route)).toBe('eta_claim_unbound');
   });
 });
+
+// Codex pre-push P1 (round 16, PR #5334): structural backstop for ETA phrasing
+// no parser reads.
+describe('round 16 P1: unclassified ETA backstop', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const snapshot = { entries: [{ minutes: 15, scheduledServiceIds: ['svc-1'] }] };
+  const rowsBy = {
+    en_route: [{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }],
+    on_site: [{ id: 'svc-1', status: 'on_site', track_state: 'on_property' }],
+    completed: [{ id: 'svc-1', status: 'completed', track_state: 'complete' }],
+  };
+  const STALE = new Date(NOW.getTime() - 30 * 60 * 1000).toISOString();
+  const run = (outgoingBody, rows, factsGeneratedAt = FRESH, liveEtaSnapshot = snapshot) => etaClaimBlockReason({ liveEtaSnapshot, factsGeneratedAt, outgoingBody, now: NOW, dbh: fakeDb(rows) });
+
+  // "15m out" reads no claim at all, so the backstop is what holds it; "tech: 15
+  // min" is read as an ordinary minutes claim (blocked by that path instead).
+  test('"ur tech ≈ 15m out 🚚" is held to the status checks: passes fresh+en_route, blocked when terminal, on site, stale, or GPS-expired', async () => {
+    const body = 'ur tech ≈ 15m out 🚚';
+    expect(await run(body, rowsBy.en_route)).toBeNull();
+    expect(await run(body, rowsBy.completed)).toBe('eta_claim_unclassified');
+    expect(await run(body, rowsBy.on_site)).toBe('eta_claim_unclassified');
+    expect(await run(body, rowsBy.en_route, STALE)).toBe('eta_claim_unclassified');
+    expect(await run(body, rowsBy.en_route, FRESH, { entries: [{ ...snapshot.entries[0], fixExpiresAtMs: NOW.getTime() - 1000 }] })).toBe('eta_claim_unclassified');
+  });
+
+  test('"tech: 15 min" with a terminal or stale entry is blocked', async () => {
+    expect(await run('tech: 15 min', rowsBy.en_route)).toBeNull();
+    expect(await run('tech: 15 min', rowsBy.completed)).not.toBeNull();
+    expect(await run('tech: 15 min', rowsBy.en_route, STALE)).not.toBeNull();
+  });
+
+  test.each([
+    'Your 2 visits left this year.', 'Your arrival window 9-11.', 'Your arrival window is 2 hours.',
+    '$20 is due at the visit.', 'Your renewal lands on the 20th.', 'Thanks, 5 stars!',
+  ])('normal non-ETA copy %p with a snapshot is untouched even on terminal or stale rows', async (body) => {
+    for (const rows of Object.values(rowsBy)) expect(await run(body, rows)).toBeNull();
+    expect(await run(body, rowsBy.en_route, STALE)).toBeNull();
+  });
+
+  test('with no snapshot and no link the backstop never fires', async () => {
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'tech: 15 min', now: NOW })).toBeNull();
+  });
+
+  test('with two live entries and no token to select one it is refused', async () => {
+    const two = { entries: [{ minutes: 15, scheduledServiceIds: ['svc-1'] }, { minutes: 9, scheduledServiceIds: ['svc-2'] }] };
+    expect(await run('ur tech ≈ 15m out', [...rowsBy.en_route, { id: 'svc-2', status: 'en_route', track_state: 'en_route' }], FRESH, two)).toBe('eta_claim_unclassified');
+  });
+});

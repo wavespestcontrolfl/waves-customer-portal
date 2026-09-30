@@ -663,6 +663,9 @@ function liveEtaDedupeKey(row, customer) {
 // across concurrent callers for the same stop, but no customer- or
 // visit-specific data (the tracking token) ever lives in the shared cache.
 const LIVE_ETA_MEMO_TTL_MS = 60 * 1000;
+// A failed / no-fix (null) lookup is cached only briefly (Codex round-16 P1):
+// one GPS or Distance Matrix hiccup must not blank the fact for a whole minute.
+const LIVE_ETA_NULL_MEMO_TTL_MS = 10 * 1000;
 const LIVE_ETA_MEMO_MAX_ENTRIES = 200;
 const liveEtaMemo = new Map(); // key -> { expiresAt, promise }
 
@@ -748,6 +751,7 @@ async function resolveLiveEtaFact(row, customer) {
     // the plain insert-time TTL). Tightened BEFORE the promise resolves to
     // any caller, so a follow-up caller can never observe the looser expiry.
     minutesPromise = resolveLiveEtaMinutesUncached(row, dest).then((fact) => {
+      if (!fact) entry.expiresAt = Math.min(entry.expiresAt, now + LIVE_ETA_NULL_MEMO_TTL_MS);
       if (fact && Number.isFinite(fact.fixAtMs)) {
         entry.expiresAt = Math.min(entry.expiresAt, fact.fixAtMs + STALE_TECH_STATUS_MS);
       }
