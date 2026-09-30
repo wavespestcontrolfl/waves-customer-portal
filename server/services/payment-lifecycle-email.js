@@ -773,8 +773,9 @@ async function sendPaymentFailed({
           const savedParts = saved ? methodParts(saved) : null;
           if (savedParts?.last4) payload.payment_method_label = savedParts.label;
         }
-        if (intentLabel && payload.payment_method_label
-          && !payload.payment_method_label.endsWith(` ${clean(paymentIntent.last_payment_error.payment_method.card.last4)}`)) {
+        // Brand AND last four must match the card Stripe reports for this
+        // attempt (a Visa 4242 is not a Mastercard 4242); any difference blanks.
+        if (intentLabel && payload.payment_method_label && payload.payment_method_label !== intentLabel) {
           payload.payment_method_label = '';
         }
       }

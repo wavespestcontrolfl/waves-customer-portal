@@ -466,5 +466,8 @@ describe('round 10: customerless intent ownership and reused-intent staleness', 
     // Unconfirmed but the same card as the row: the row's own label stands.
     mockQueues(build({ payment: owned({ card_brand: 'Visa', card_last_four: '4242' }) }));
     expect((await sendFailed({ paymentIntent: customerless(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 4242');
+    // Round 11: same last four, different brand is a different card: blank.
+    mockQueues(build({ payment: owned({ card_brand: 'Visa', card_last_four: '4242' }) }));
+    expect((await sendFailed({ paymentIntent: customerless(undefined, { brand: 'mastercard', last4: '4242' }), failedAt: FAILED_AT })).payment_method_label).toBe('');
   });
 });

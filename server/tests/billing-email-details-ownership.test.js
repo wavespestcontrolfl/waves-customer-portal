@@ -414,6 +414,24 @@ describe('round 5: combined-packet labels are verified against customer, invoice
       });
     });
 
+    // Round 11: packet creation stamps a generic label and a date, so a packet
+    // invoice is always checked as a set, never short-circuited by its columns.
+    describe('round 11: a stamped packet invoice is still checked as a set', () => {
+      const stampedPacket = { ...adopted, service_type: 'Combined service visit', service_date: '2026-09-03' };
+
+      test('verified members replace the generic label; the stamped date stands', async () => {
+        mockTables(tables([member(), member({ service_type: 'Pest Control' })]));
+        expect(await Details.invoiceServiceDetails(stampedPacket)).toEqual({ label: 'Lawn Care, Pest Control', date: 'September 3, 2026' });
+      });
+
+      test('a rejected member drops the stamped label and date', async () => {
+        mockTables(tables([member(), member({ member_customer_id: 'someone-else' })]));
+        const out = await Details.invoiceServiceDetails(stampedPacket);
+        expect(out.date).toBe('');
+        expect(out.label).not.toBe('Combined service visit');
+      });
+    });
+
     test('the service label comes from the packet members, not the owner visit alone', async () => {
       mockTables(tables([member(), member({ service_type: 'Pest Control' })]));
       expect((await Details.invoiceServiceDetails(adopted)).label).toBe('Lawn Care, Pest Control');

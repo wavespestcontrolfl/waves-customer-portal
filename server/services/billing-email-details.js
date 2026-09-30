@@ -333,21 +333,28 @@ const MONTH_TITLE_SUFFIX = /\s+[—–-]\s+(January|February|March|April|May|Jun
 async function invoiceServiceDetails(invoice) {
   const fromInvoice = clean(invoice?.service_type);
   const invoiceDate = invoice?.service_date ? formatDateOnly(invoice.service_date) : '';
-  if (fromInvoice && invoiceDate) return { label: fromInvoice, date: invoiceDate };
+  const isPacket = !!invoice?.visit_completion_packet_id;
+  // A packet invoice is always checked as a set, even when its own columns are
+  // stamped (packet creation stamps "Combined service visit" and a date): the
+  // member list replaces the generic label, and a rejected set drops the
+  // stamped label and date too.
+  if (!isPacket && fromInvoice && invoiceDate) return { label: fromInvoice, date: invoiceDate };
 
   let label = fromInvoice;
   let date = invoiceDate;
   try {
-    const isPacket = !!invoice?.visit_completion_packet_id;
     let packetOk = true;
-    if (isPacket && (!label || !date)) {
+    if (isPacket) {
       // Verified as a set against the customer, the invoice and the packet's
       // own visit (ownedPacketVisits): one rejected member drops the whole list.
       // A packet invoice's packet verdict governs EVERYTHING derived below: a
       // rejected packet also suppresses the direct-link date fallback.
       const { ok, members } = await ownedPacketVisits(invoice, ['s.service_type']);
       packetOk = ok && members.length > 0;
-      if (!label) {
+      if (!packetOk) {
+        label = '';
+        date = '';
+      } else {
         const names = [...new Set(members.map((m) => clean(m.service_type)).filter(Boolean))];
         if (names.length) label = names.join(', ');
       }
