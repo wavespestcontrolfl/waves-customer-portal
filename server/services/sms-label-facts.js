@@ -818,6 +818,13 @@ const isVerifiablyEnglish = (text) => !hasUnsupportedLanguage(text);
 // sentence types answer), and 'unverified_language' recorded in the snapshot's asked list. The REPLY check stays
 // evidence-based so terse English is never held.
 const ALLOWED_DIACRITICS = 'áàâãçéèêëíîïñóôõœæùúûüÿ';
+// An inbound is handled as English only when nothing says otherwise: the topic matchers and the reply guards are English,
+// so a Spanish / Portuguese / French inbound ("\u00bfPueden salir los perros ahora?") or an unverified / unsupported one takes the
+// same fail-closed path as Polish (label facts none on file, both kinds asked, only allowlisted sentence types answer).
+function isEnglishInbound(inbound) {
+  const current = Array.isArray(inbound) ? inbound[0] : inbound;
+  return !(isUnverifiedLanguageInbound(inbound) || looksNonEnglish(current) || hasUnsupportedLanguage(current));
+}
 const SMS_CORE_WORDS = wordList('when can is are ok okay thanks thank yes no dog dogs cat cats pet pets kid kids child children baby lawn yard grass rain rains outside inside out in spray sprayed spraying treatment treated visit service technician tech now today tomorrow tonight yesterday safe dry wet wash washed water watering mow mowing sprinkler sprinklers walk play swim hours hour minutes minute days day week home appointment schedule reschedule pest bugs ants roaches termites weeds fertilizer wait yet still again back go going please hi hello hey good morning afternoon evening price cost pay paid invoice bill estimate quote question help need want know tell time late early soon sure done finished complete works work fine great perfect sounds see then monday tuesday wednesday thursday friday saturday sunday okay yep yeah nope pool patio deck garage gate fence bee bees wasp wasps mice rats rat mouse any update updates pls plz thx ty call text email send sent whats hows wheres coming come came leave left open closed confirm confirmed cancel free busy available options option name address phone number');
 function isUnverifiedLanguageInbound(inbound) {
   const text = canonText(Array.isArray(inbound) ? inbound[0] : inbound).toLowerCase();
@@ -896,7 +903,7 @@ function askedKindsOf(inboundText) {
  * message with nothing classifiable anywhere in the thread asks both.
  */
 function askedLabelKinds(inbound) {
-  if (isUnverifiedLanguageInbound(inbound)) return ['reentry', 'rain', 'unverified_language'];
+  if (!isEnglishInbound(inbound)) return ['reentry', 'rain', 'unverified_language'];
   const reads = (Array.isArray(inbound) ? inbound : [inbound]).map(askedKindsOf);
   const sources = reads[0]?.elliptical ? reads : reads.slice(0, 1);
   const kinds = ['reentry', 'rain'].filter((k) => sources.some((r) => r.kinds.includes(k)));
@@ -913,7 +920,10 @@ const ANSWER_BODY_RE = new RegExp([
   /\b(?:go\s+ahead|you'?re\s+good|you\s+are\s+good|not\s+yet|(?:they|you|he|she|everyone|everybody|it)\s+(?:can|could|may)|(?:it'?s|it\s+is|that'?s|that\s+is|is|are|be)\s+(?:safe|ok|okay|fine|good|alright)|hold\s+off|wait|all\s+clear|good\s+to\s+go)\b/.source,
   PRONOUN_CLEARANCE_RE.source, PLACE_CLEARANCE_RE.source, DAY_CLEARANCE_RE.source,
 ].join('|'));
-const hasAnswerForce = (text) => ANSWER_LEAD_RE.test(text) || ANSWER_BODY_RE.test(text);
+// Short Spanish / Portuguese / French answer words (accents removed before matching) count as answer force too, so a send
+// with no stored inbound still holds "S\u00ed, claro." / "Oui." / "Ainda n\u00e3o." like "Yes, sure."
+const FOREIGN_ANSWER_RE = /^(?:si|claro|vale|por\s+supuesto|adelante|listo|no\s+todavia|sim|pode|oui|bien\s+sur|d'accord|allez-y|pas\s+encore|ainda\s+nao|nao|non(?=[\s,.!?]|$))\b|\b(?:por\s+supuesto|adelante|bien\s+sur|d'accord|allez-y|pas\s+encore|ainda\s+nao|no\s+todavia)\b/;
+const hasAnswerForce = (text) => ANSWER_LEAD_RE.test(text) || ANSWER_BODY_RE.test(text) || FOREIGN_ANSWER_RE.test(stripMarks(text));
 
 // ALLOWLIST: once a label question was asked, EVERY non-question sentence of the reply (copy or no copy) must be
 // one of these types; anything else - "Go for it!", "Feel free", "Absolutely", "No worries, let them out" -
@@ -1270,6 +1280,7 @@ module.exports = {
   hasUnsupportedLanguage,
   isVerifiablyEnglish,
   isUnverifiedLanguageInbound,
+  isEnglishInbound,
   nonEnglishTimingWords,
   labelFactsForInbound,
 };

@@ -1468,7 +1468,8 @@ describe('r22: lowercase "may" as a month; an unverified inbound language', () =
   test('Spanish and French inbounds keep their existing handling (none on file, es / fr vocabulary held)', () => {
     const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
     expect(labelFactsLib.labelFactsForInbound(facts, ['Hola, tengo una pregunta sobre mi cita'], '2026-09-30')).toBeNull();
-    expect(labelFactsLib.askedLabelKinds('Quand les chiens peuvent-ils sortir ?')).not.toContain('unverified_language');
+    // (r24: a Spanish / Portuguese / French inbound now takes the same fail-closed path as any unverified language)
+    expect(labelFactsLib.askedLabelKinds('Quand les chiens peuvent-ils sortir ?')).toContain('unverified_language');
   });
 });
 
@@ -1552,6 +1553,42 @@ describe('r23: past-qualified weekdays, additive timing in the visit aggregate, 
       'A treatment needs to dry and bond to surfaces; after that it holds up to weather.', 'Rain after the treatment has dried and bonded is not a concern; it holds up to weather.',
       'We sealed the gaps around the garage door.', 'Entry points are sealed.', 'The office is set for Tuesday.', 'Your appointment is set for Tuesday at 9.',
     ]) expect([reply, claims(reply)]).toEqual([reply, false]);
+  });
+});
+
+describe('r24: a Spanish / Portuguese / French inbound takes the fail-closed path in any language', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', asked(inbound));
+  const send = (body, inbound) => labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body, inbound, conn: () => { throw new Error('must not read'); } });
+  const ES = '\u00bfPueden salir los perros ahora?';
+  const FR = 'Les chiens peuvent-ils sortir maintenant ?';
+  const PT = 'Os c\u00e3es podem sair agora?';
+  test('the inbound asks both kinds plus unverified_language, and bare answers in any language are held at draft and send time', async () => {
+    for (const inbound of [ES, FR, PT, 'Hola, \u00bfcu\u00e1nto tiempo hasta que llueva?']) expect([inbound, asked(inbound)]).toEqual([inbound, ['reentry', 'rain', 'unverified_language']]);
+    const cases = [[ES, ['S\u00ed, claro.', 'Claro.', 'Vale.', 'Por supuesto.', 'Adelante.', 'S\u00ed, pueden.', 'No todav\u00eda.', 'Yes, they can.']], [FR, ['Oui.', 'Oui, bien s\u00fbr.', "D'accord.", 'Allez-y.', 'Pas encore.', 'Non.']], [PT, ['Sim, pode.', 'Claro.', 'Ainda n\u00e3o.', 'N\u00e3o.']]];
+    for (const [inbound, replies] of cases) {
+      for (const reply of replies) {
+        expect([reply, guard(reply, inbound)]).toEqual([reply, true]);
+        await expect(send(reply, inbound)).resolves.toBe('label_facts_unauthorized_claim');
+      }
+    }
+  });
+  test('a Spanish hand-off is held too (the hand-off detection is English-only: fail closed, a person answers); an English hand-off or greeting passes', () => {
+    expect(guard('Le pedir\u00e9 a la oficina que confirme.', ES)).toBe(true);
+    expect(guard('Hola, gracias por escribir.', ES)).toBe(true);
+    expect(guard("I'll have the office confirm and get back to you.", ES)).toBe(false);
+    expect(guard('Hi, thanks for reaching out!', FR)).toBe(false);
+  });
+  test('with NO stored inbound, the unknown-question fallback still holds short Spanish / Portuguese / French answers', async () => {
+    for (const body of ['S\u00ed, claro.', 'Oui.', 'Bien s\u00fbr.', "D'accord.", 'Allez-y.', 'Pas encore.', 'Ainda n\u00e3o.', 'Sim.', 'Vale, adelante.', 'Listo.']) {
+      await expect(send(body, undefined)).resolves.toBe('label_facts_unauthorized_claim');
+    }
+    await expect(send('Sounds good, see you Thursday.', undefined)).resolves.toBeNull();
+  });
+  test('English inbounds are unaffected', () => {
+    for (const inbound of ['Can the dogs go out now?', 'dogs out?', 'pets ok now', 'lawn safe yet', 'What time are you coming Thursday?']) {
+      expect([inbound, asked(inbound).includes('unverified_language')]).toEqual([inbound, false]);
+    }
   });
 });
 
@@ -2172,9 +2209,12 @@ describe('C: the section is for the latest visit only - a text about another vis
       const en = await run('How long until the dogs can go out?', [spanish, spanish, spanish]);
       expect(en.factsBlock).toContain(`- ${RE}`);
       expect(en.converged).toBe(false);
-      // a benign Spanish reply with no timing converges
+      // a Spanish inbound takes the fail-closed path (r24): the reply guards and the hand-off / greeting allowlist are English, so even a
+      // benign Spanish reply is held for a person - by design. An English reply to it that is a hand-off still converges.
       const ok = await run('Hola, tengo una pregunta sobre mi cita', [draft('Hola, gracias por escribir. Un compañero le confirmará su cita.')]);
-      expect(ok.converged).toBe(true);
+      expect(ok.converged).toBe(false);
+      const handoff = await run('Hola, tengo una pregunta sobre mi cita', [draft("Hi, thanks for reaching out. I'll have the office confirm and get back to you.")]);
+      expect(handoff.converged).toBe(true);
     });
 
     test('a reply that copies no label sentence carries no snapshot', async () => {
