@@ -8,7 +8,11 @@ const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { formatDisplayDate, dateOnlyString } = require('../utils/date-only');
 const { etDateString } = require('../utils/datetime-et');
 const { emailTemplateAutomationsMode } = require('../config/feature-gates');
+// Light at load (the readers behind each builder are required lazily); the
+// key set below decides WHICH runs ever touch the email division.
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
+const { hasPayloadBuilder, buildEmailDivisionPayload } = require('./email-division/payload-builders');
+
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
 // appointment in any of these states is no longer an upcoming visit.
 const APPOINTMENT_CLOSED_STATUSES = ['cancelled', 'completed', 'rescheduled', 'skipped', 'no_show'];
@@ -110,6 +114,17 @@ const TRIGGER_MAPPINGS = {
     entityIdKeys: ['estimate_id', 'id'],
     recipientType: 'lead',
     recipientIdKeys: ['customer_id', 'lead_id'],
+    emailKeys: ['customer_email', 'email'],
+  },
+  // A customer's first performed visit on a service line. Mapped for the
+  // email division's lc.first_visit_pest; the producer call (an emitter at
+  // the completion site) is a separate step — see
+  // email-template-automation-emitters.js emitVisitCompletedFirst.
+  'visit.completed_first': {
+    entityType: 'service_record',
+    entityIdKeys: ['service_record_id', 'id'],
+    recipientType: 'customer',
+    recipientIdKeys: ['customer_id'],
     emailKeys: ['customer_email', 'email'],
   },
   'review.linked_5star': {
@@ -1591,8 +1606,11 @@ async function shadowPreflight(run, executionPayload, automation) {
     return { ok: true };
   }
 }
-async function finalizeShadowRun(run, automation, executionPayload = {}) {
-  const preflight = await shadowPreflight(run, executionPayload, automation);
+// `refusal` is a verdict the caller already reached (a payload builder's
+// skip): it settles exactly like a preflight refusal — would_block evidence,
+// promotable in place once whatever blocked it is fixed (#5418).
+async function finalizeShadowRun(run, automation, executionPayload = {}, refusal = null) {
+  const preflight = refusal || await shadowPreflight(run, executionPayload, automation);
   const wouldSendMetadata = {
     automation_key: automation.automation_key,
     template_key: run.template_key,
@@ -1889,6 +1907,34 @@ async function loadRunAndAutomation(runOrId, automation) {
   return { run, resolvedAutomation };
 }
 
+// origin_mode (stamped at creation) OUTRANKS the current gate read for
+// 'shadow' — see the long note at its call site in executeRun.
+function dispatchModeFor(run) {
+  const dispatchMode = emailTemplateAutomationsMode();
+  return { dispatchMode, shadowRun: asObject(run.context).origin_mode === 'shadow' || dispatchMode === 'shadow' };
+}
+
+// The email division's payload builders (nurture.* / lc.* templates with a
+// real trigger): the run carries ids, the builder reads Waves' own data into
+// the template's payload and SKIPS — never retried — when a required
+// condition is not met. Runs on the shadow path too (read-only: shadow never
+// mints or calls out), so shadow reports exactly what live would do: a live
+// skip settles 'skipped' (guard payload_builder), a shadow skip is would_block
+// evidence, promotable once the data supports the send. No builder for the
+// key -> payload untouched. Returns { payload } to continue, or { settled }
+// (the finalized run row).
+async function applyPayloadBuilder(run, automation, payload, shadowRun, attemptNumber) {
+  if (!hasPayloadBuilder(run.template_key)) return { payload };
+  const built = await buildEmailDivisionPayload({ run, payload, mode: shadowRun ? 'shadow' : 'live' });
+  if (!built.skip) return { payload: built.payload };
+  if (shadowRun) {
+    return { settled: await finalizeShadowRun(run, automation, payload, { ok: false, reason: built.reason, code: 'payload_builder' }) };
+  }
+  return {
+    settled: await markRunSkipped(run, built.reason, { guard: 'payload_builder', code: built.code, attempt: attemptNumber }),
+  };
+}
+
 const GATE_OFF_REASON = 'email template automations gate is off';
 
 async function executeRun(runOrId, { automation, now = new Date() } = {}) {
@@ -1954,7 +2000,7 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
         attempt: attemptNumber,
       });
     }
-    const executionPayload = { ...storedPayload, ...livePayload };
+    let executionPayload = { ...storedPayload, ...livePayload };
     const exitReason = exitReasonFor(asObject(resolvedAutomation.exit_conditions), executionPayload);
     if (exitReason) {
       return markRunSkipped(claimedRun, exitReason, { guard: 'exit_conditions', attempt: attemptNumber });
@@ -1983,9 +2029,11 @@ async function executeRun(runOrId, { automation, now = new Date() } = {}) {
     // is dropped, not deferred — its trigger's intent marker was settled
     // 'processed' when the run was created, so nothing replays it; a later
     // re-flip to live sends only events from then on.
-    const originMode = asObject(claimedRun.context).origin_mode;
-    const dispatchMode = emailTemplateAutomationsMode();
-    if (originMode === 'shadow' || dispatchMode === 'shadow') {
+    const { dispatchMode, shadowRun } = dispatchModeFor(claimedRun);
+    const built = await applyPayloadBuilder(claimedRun, resolvedAutomation, executionPayload, shadowRun, attemptNumber);
+    if (built.settled) return built.settled;
+    executionPayload = built.payload;
+    if (shadowRun) {
       return finalizeShadowRun(claimedRun, resolvedAutomation, executionPayload);
     }
     // Fail-closed (codex P1): a run already sitting in the queue (created

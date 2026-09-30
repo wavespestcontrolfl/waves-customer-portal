@@ -19,7 +19,7 @@ const db = require('../models/db');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const AutomationExecutor = require('../services/email-template-automation-executor');
 const {
-  INTENT_MAX_AGE_MS, MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
+  INTENT_MAX_AGE_MS, MAX_INTENT_ATTEMPTS, emitEstimateExpired, emitReviewLinked5Star, emitVisitCompletedFirst, recordAutomationIntent, recordAutomationIntents, sweepMissedLifecycleEvents,
 } = require('../services/email-template-automation-emitters');
 
 beforeEach(() => {
@@ -129,6 +129,29 @@ describe('emitReviewLinked5Star', () => {
   });
 });
 
+describe('emitVisitCompletedFirst (the email division\'s lc.first_visit_pest; no caller wired yet)', () => {
+  test('hands the executor ids only, keyed per service record, for the customer recipient', async () => {
+    await emitVisitCompletedFirst({ serviceRecordId: 'rec-1', customerId: 'cust-1' });
+    expect(AutomationExecutor.processTrigger).toHaveBeenCalledWith({
+      triggerEventKey: 'visit.completed_first',
+      executeImmediately: true,
+      triggerEventId: 'visit_completed_first:rec-1',
+      entityType: 'service_record',
+      entityId: 'rec-1',
+      recipient: { type: 'customer', id: 'cust-1' },
+      payload: { service_record_id: 'rec-1', customer_id: 'cust-1' },
+    });
+  });
+
+  test('no record or no customer -> nothing emitted; gate off -> a no-op', async () => {
+    expect(await emitVisitCompletedFirst({ serviceRecordId: 'rec-1' })).toBeNull();
+    expect(await emitVisitCompletedFirst({ customerId: 'cust-1' })).toBeNull();
+    isEnabled.mockReturnValue(false);
+    expect(await emitVisitCompletedFirst({ serviceRecordId: 'rec-1', customerId: 'cust-1' })).toBeNull();
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+  });
+});
+
 describe('emitEstimateExpired', () => {
   test('no-op without an id', async () => {
     const result = await emitEstimateExpired({});
@@ -147,6 +170,16 @@ describe('emitEstimateExpired', () => {
       entityId: 'est-1',
       payload: expect.objectContaining({ estimate_id: 'est-1', category: 'RESIDENTIAL', service_interest: 'Pest Control' }),
     }));
+  });
+});
+
+describe('emitEstimateExpired expires_on (the per-expiry idempotency input)', () => {
+  test('is the expiry\'s ET date, identical on a direct emit and on a marker replay', async () => {
+    const row = { id: 'est-1', customer_id: 'cust-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T02:00:00.000Z' };
+    await emitEstimateExpired(row);
+    await emitEstimateExpired({ ...row, expires_at: new Date(row.expires_at) });
+    const payloads = AutomationExecutor.processTrigger.mock.calls.map(([args]) => args.payload.expires_on);
+    expect(payloads).toEqual(['2026-09-20', '2026-09-20']); // 10 PM ET the evening before, not the UTC date
   });
 });
 

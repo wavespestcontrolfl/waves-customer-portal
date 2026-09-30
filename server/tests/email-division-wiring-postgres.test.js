@@ -1,0 +1,814 @@
+/**
+ * Email division wiring on real PostgreSQL (the wiring PR): the executor's
+ * ledger-routed dispatch, the payload builders' skip rules, and the
+ * automation seed's insert-once behaviour.
+ *
+ * Only the provider edge is mocked: sendTemplate (a stand-in that runs the
+ * ledger's locked handoff the way the library does), the shadow preflight's
+ * library call, the estimate short-link mint, and the external radar / slot
+ * probes (injected as builder deps). Everything else — the ledger, the
+ * eligibility reads, the executor's run rows, the builders' queries — is real.
+ *
+ * Self-skips without DATABASE_URL (run after `knex migrate:latest`).
+ */
+const { randomUUID } = require('node:crypto');
+
+jest.mock('../services/logger', () => ({
+  info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
+}));
+jest.mock('../services/email-template-library', () => ({
+  ...jest.requireActual('../services/email-template-library'),
+  sendTemplate: jest.fn(),
+  preflightTemplateSend: jest.fn(async () => ({ ok: true })),
+}));
+// The >= 20 cohort reader, defaulted to a cohort that clears the floor for the
+// executor-level tests (builder-level tests inject their own through deps).
+const mockCohort = { value: { byVisit: { pest: { 1: 3.1, 2: 1.2 } }, counts: {} } };
+jest.mock('../services/email-division/visit-products', () => ({
+  ...jest.requireActual('../services/email-division/visit-products'),
+  getActivityRatingAverages: jest.fn(async () => mockCohort.value),
+}));
+jest.mock('../services/estimate-follow-up', () => ({
+  _private: { mintStageLinks: jest.fn(async () => ({ emailUrl: 'https://example.test/l/minted' })) },
+}));
+
+const SKIP = !process.env.DATABASE_URL;
+if (!SKIP) {
+  // Writes synthetic rows and edits (then restores) a seeded automation row:
+  // only ever against a local QA database or CI's.
+  const url = new URL(process.env.DATABASE_URL);
+  if (!['localhost', '127.0.0.1'].includes(url.hostname) || !/^\/(waves_test|(waves_)?qa_[a-z0-9_]+)$/.test(url.pathname)) {
+    throw new Error('Email division wiring tests need a local QA database (qa_* / waves_qa_*) or waves_test.');
+  }
+}
+const describeOrSkip = SKIP ? describe.skip : describe;
+
+// The library's locked handoff, as the stand-in sendTemplate runs it: the
+// boundary check is awaited inside `dispatch`; its veto is a definite non-send.
+function libraryLike({ result } = {}) {
+  return async (args) => {
+    let dispatched = false;
+    let vetoed = false;
+    const verdict = await args.withProviderHandoff(async (database, boundaryCheck) => {
+      try {
+        await boundaryCheck({ database });
+      } catch (err) {
+        if (!err.providerBoundaryBlocked) throw err;
+        vetoed = true;
+        return;
+      }
+      dispatched = true;
+    });
+    if (verdict?.ok !== true || vetoed) return { sent: false, aborted: true, reason: 'aborted_by_caller_before_dispatch' };
+    if (!dispatched) throw new Error('handoff returned without dispatching');
+    if (args.onQueued) args.onQueued();
+    if (result) return result;
+    // A real delivery-authority row (the run and ledger rows FK to it).
+    const db = require('../models/db');
+    const [message] = await db('email_messages').insert({
+      recipient_email_snapshot: args.to, template_key: args.templateKey, idempotency_key: args.idempotencyKey,
+      status: 'sent', sent_at: new Date(), provider_message_id: 'sg-synthetic',
+    }).returning('*');
+    return { sent: true, providerAccepted: true, message };
+  };
+}
+
+describeOrSkip('email division wiring (Postgres)', () => {
+  jest.setTimeout(60000);
+  let db;
+  let Executor;
+  let Builders;
+  let sendTemplate;
+  let preflightTemplateSend;
+  const created = {
+    customers: [], estimates: [], automations: [], technicians: [], visits: [],
+  };
+  let customerEmails = [];
+
+  beforeAll(() => {
+    db = require('../models/db');
+    Executor = require('../services/email-template-automation-executor');
+    Builders = require('../services/email-division/payload-builders');
+    ({ sendTemplate, preflightTemplateSend } = require('../services/email-template-library'));
+  });
+
+  afterEach(async () => {
+    delete process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS;
+    sendTemplate.mockReset();
+    preflightTemplateSend.mockReset();
+    require('../services/estimate-follow-up')._private.mintStageLinks.mockClear();
+    preflightTemplateSend.mockImplementation(async () => ({ ok: true }));
+    const { customers, estimates, automations, technicians, visits } = created;
+    if (automations.length) {
+      const runs = await db('email_template_automation_runs').whereIn('automation_key', automations).select('id');
+      await db('email_template_automation_run_events').whereIn('run_id', runs.map((r) => r.id)).del();
+      await db('email_template_automation_runs').whereIn('automation_key', automations).del();
+      await db('email_template_automations').whereIn('automation_key', automations).del();
+    }
+    if (customers.length) await db('marketing_email_ledger').whereIn('customer_id', customers).del();
+    await db('email_messages').whereIn('recipient_email_snapshot', customerEmails).del();
+    if (visits.length) {
+      await db('service_products').whereIn('service_record_id', visits).del();
+      await db('service_records').whereIn('id', visits).del();
+    }
+    if (customers.length) await db('scheduled_services').whereIn('customer_id', customers).del();
+    if (estimates.length) await db('estimates').whereIn('id', estimates).del();
+    if (customers.length) {
+      await db('notification_prefs').whereIn('customer_id', customers).del();
+      await db('customers').whereIn('id', customers).del();
+    }
+    if (technicians.length) await db('technicians').whereIn('id', technicians).del();
+    Object.keys(created).forEach((k) => { created[k] = []; });
+    customerEmails = [];
+  });
+
+  afterAll(async () => {
+    await db.destroy();
+  });
+
+  // ---- fixtures ----------------------------------------------------------
+
+  async function makeCustomer(overrides = {}) {
+    const id = randomUUID();
+    const email = `${id}@example.invalid`;
+    await db('customers').insert({
+      id, first_name: 'Jordan', last_name: 'Sample', phone: `+1941555${String(Math.floor(Math.random() * 9000) + 1000)}`,
+      email, active: true, pipeline_stage: 'active_customer', city: 'Parrish', ...overrides,
+    });
+    await db('notification_prefs').insert({ customer_id: id, email_enabled: true, marketing_offers: true });
+    created.customers.push(id);
+    customerEmails.push(email);
+    return { id, email };
+  }
+
+  async function makeTech() {
+    const id = randomUUID();
+    await db('technicians').insert({ id, name: 'Marco Example' });
+    created.technicians.push(id);
+    return id;
+  }
+
+  const PRODUCTS = {
+    taurus: { product_name: 'Taurus SC', active_ingredient: 'fipronil', product_category: 'Insecticide' },
+    talak: { product_name: 'Talak 7.9% F', active_ingredient: 'bifenthrin', product_category: 'Insecticide' },
+    alpine: { product_name: 'Alpine WSG', active_ingredient: 'dinotefuran', product_category: 'Insecticide' },
+  };
+
+  async function makeVisit({
+    customerId, technicianId = null, visitNumber = 1, serviceLine = 'pest', date = '2026-09-20', products = ['taurus'],
+    rating = null, ratingSource = null, defaulted = null, createdAt = new Date('2026-09-20T15:00:00Z'),
+    notes = 'Treated ghost ants along the foundation.', scheduledServiceId = null, serviceType = 'Quarterly Pest Control Service',
+  }) {
+    const id = randomUUID();
+    await db('service_records').insert({
+      id, customer_id: customerId, technician_id: technicianId, service_date: date, service_type: serviceType,
+      service_line: serviceLine, visit_number: visitNumber, status: 'completed', technician_notes: notes,
+      areas_serviced: JSON.stringify(['the foundation perimeter', 'garage entry']),
+      client_pest_rating: rating, client_pest_rating_source: ratingSource, client_pest_rating_defaulted: defaulted,
+      scheduled_service_id: scheduledServiceId, created_at: createdAt,
+    });
+    for (const key of products) await db('service_products').insert({ service_record_id: id, ...PRODUCTS[key] });
+    created.visits.push(id);
+    return id;
+  }
+
+  async function makeNextVisit(customerId, pattern = 'quarterly', date = '2099-12-24') {
+    const [row] = await db('scheduled_services').insert({
+      customer_id: customerId, scheduled_date: date, service_type: 'Quarterly Pest Control Service',
+      status: 'confirmed', recurring_pattern: pattern,
+    }).returning('id');
+    return row.id;
+  }
+
+  async function makeEstimate(customerId, email, overrides = {}) {
+    const id = randomUUID();
+    await db('estimates').insert({
+      id, customer_id: customerId, status: 'expired', token: `qa-${randomUUID()}`, address: '123 Example St, Parrish, FL 34219',
+      customer_name: 'Jordan Sample', customer_email: email, expires_at: new Date('2026-09-21T16:00:00Z'),
+      service_interest: 'Quarterly pest control', estimate_data: JSON.stringify({}), ...overrides,
+    });
+    created.estimates.push(id);
+    return id;
+  }
+
+  async function makeAutomation(overrides) {
+    const key = `qa_wiring_${randomUUID().slice(0, 8)}`;
+    const [row] = await db('email_template_automations').insert({
+      automation_key: key, name: key, delay_minutes: 0, audience: 'customer', status: 'active',
+      retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15, 60] }),
+      conditions: JSON.stringify({}), exit_conditions: JSON.stringify({}),
+      ...overrides,
+    }).returning('*');
+    created.automations.push(row.automation_key);
+    return row;
+  }
+
+  const nurtureAutomation = () => makeAutomation({
+    trigger_event_key: 'estimate.expired', template_key: 'nurture.expired_1', suppression_group_key: 'marketing_nurture',
+    audience: 'lead', legal_classification: 'commercial_marketing',
+    idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{estimate_id}:{expires_on}`,
+  });
+
+  const fire = (automation, {
+    estimateId, customerId, email, expiresOn = '2026-09-20',
+  }) => Executor.processTrigger({
+    triggerEventKey: 'estimate.expired',
+    triggerEventId: `estimate_expired:${estimateId}`,
+    automationKey: automation.automation_key,
+    entityType: 'estimate',
+    entityId: estimateId,
+    recipient: { type: 'customer', id: customerId, email },
+    payload: {
+      estimate_id: estimateId, customer_id: customerId, customer_email: email, expires_on: expiresOn,
+    },
+    executeImmediately: true,
+  });
+
+  const events = async (runId) => db('email_template_automation_run_events').where({ run_id: runId }).orderBy('created_at', 'asc');
+
+  // ---- executor: the ledger path -----------------------------------------
+
+  describe('executor dispatch for a marketing-stream email-division template', () => {
+    test('live: sends ONLY through the ledger — fence lifted for this path, reservation key = run key, ledger row settled sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike());
+
+      const out = await fire(automation, { estimateId, customerId: customer.id, email: customer.email });
+      const run = out.results[0].run;
+
+      expect({ status: run.status, err: run.last_error }).toEqual(expect.objectContaining({ status: 'sent' }));
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      const args = sendTemplate.mock.calls[0][0];
+      // The ledger path lifts the library fence and carries the ledger's own identity.
+      expect(args.marketingRequiresLedger).toBeUndefined();
+      expect(args.templateKey).toBe('nurture.expired_1');
+      expect(args.idempotencyKey).toBe(run.idempotency_key);
+      expect(args.suppressionGroupKey).toBe('marketing_nurture');
+      expect(args.to).toBe(customer.email);
+      expect(args.automationRunId).toBe(run.id);
+      // The builder's payload reached the library (estimate link minted, no price, blank consultation url).
+      expect(args.payload).toEqual(expect.objectContaining({
+        first_name: 'Jordan', address_short: '123 Example St', expired_date_short: 'Sep 21',
+        estimate_link: 'https://example.test/l/minted', consultation_url: '',
+      }));
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0]).toEqual(expect.objectContaining({
+        status: 'sent', stream: 'nurture', marketing_class: 'marketing', email_key: 'nurture.expired_1', idempotency_key: run.idempotency_key,
+      }));
+    });
+
+    test('a builder skip settles the run skipped with guard payload_builder — terminal, nothing reserved', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email, { address: '' });
+      const automation = await nurtureAutomation();
+
+      const out = await fire(automation, { estimateId, customerId: customer.id, email: customer.email });
+      const run = out.results[0].run;
+
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('address_short');
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'payload_builder', code: 'missing_required' }));
+      expect(sendTemplate).not.toHaveBeenCalled();
+      expect(await db('marketing_email_ledger').where({ customer_id: customer.id })).toHaveLength(0);
+    });
+
+    test('shadow NEVER dispatches: no provider call, no ledger reservation, run settles shadow', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+
+      const out = await fire(automation, { estimateId, customerId: customer.id, email: customer.email });
+      const run = out.results[0].run;
+
+      expect(run.status).toBe('shadow');
+      expect(sendTemplate).not.toHaveBeenCalled();
+      expect(await db('marketing_email_ledger').where({ customer_id: customer.id })).toHaveLength(0);
+      // The preflight ran WITHOUT the fence (the ledger path is live-capable) and under the ledger's group.
+      expect(preflightTemplateSend).toHaveBeenCalledWith(expect.objectContaining({
+        templateKey: 'nurture.expired_1', suppressionGroupKey: 'marketing_nurture',
+      }));
+      expect(preflightTemplateSend.mock.calls[0][0].marketingRequiresLedger).toBeUndefined();
+      // Shadow's payload never minted a link (no write): the long estimate URL.
+      expect(preflightTemplateSend.mock.calls[0][0].payload.estimate_link).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/estimate\/qa-/);
+      expect(require('../services/estimate-follow-up')._private.mintStageLinks).not.toHaveBeenCalled();
+    });
+
+    test('a shadow builder skip is would_block evidence (guard payload_builder); once the data is fixed the live replay promotes the SAME run and sends through the ledger', async () => {
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email, { address: '' });
+      const automation = await nurtureAutomation();
+
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'shadow';
+      const shadow = await fire(automation, { estimateId, customerId: customer.id, email: customer.email });
+      const shadowRun = shadow.results[0].run;
+      expect(shadowRun.status).toBe('skipped');
+      const wouldBlock = (await events(shadowRun.id)).find((e) => e.event_type === 'would_block');
+      expect(wouldBlock.metadata).toEqual(expect.objectContaining({ guard: 'payload_builder' }));
+
+      await db('estimates').where({ id: estimateId }).update({ address: '123 Example St, Parrish, FL 34219' });
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      sendTemplate.mockImplementation(libraryLike());
+      const live = await fire(automation, { estimateId, customerId: customer.id, email: customer.email });
+
+      expect(live.results[0].run.id).toBe(shadowRun.id);
+      expect(live.results[0].run.status).toBe('sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('nurture.expired_1 is once per EXPIRY, once per estimate at send time: a run skipped because the estimate was extended never swallows the next expiry, and a second expiry after a send is skipped as already delivered', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email, { status: 'sent' }); // extended: not expired
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike());
+
+      const first = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-09-20' })).results[0].run;
+      expect(first.status).toBe('skipped');
+      expect(first.exit_reason).toContain('no longer expired');
+
+      await db('estimates').where({ id: estimateId }).update({ status: 'expired' });
+      const second = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-10-20' })).results[0].run;
+      expect(second.id).not.toBe(first.id);
+      expect(second.idempotency_key).not.toBe(first.idempotency_key);
+      expect(second.status).toBe('sent');
+
+      // Same expiry again: the key dedupes. A LATER expiry of the same estimate: skipped at send time.
+      const third = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email, expiresOn: '2026-11-20' })).results[0].run;
+      expect(third.status).toBe('skipped');
+      expect(third.exit_reason).toContain('already has a sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('lc.why_91_days is per report, once per customer at send time: the first visit\'s report is skipped and does NOT consume the key, the second visit\'s report sends, a third report is skipped as already delivered', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const scheduledId = await makeNextVisit(customer.id);
+      const visit1 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
+      const visit2 = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-20', products: ['taurus', 'talak'], scheduledServiceId: scheduledId });
+      const visit2b = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, date: '2026-09-21', products: ['taurus', 'talak'], scheduledServiceId: scheduledId, createdAt: new Date('2026-09-21T15:00:00Z') });
+      const automation = await makeAutomation({
+        trigger_event_key: 'service_report.ready', template_key: 'lc.why_91_days', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike());
+      const report = (recordId) => Executor.processTrigger({
+        triggerEventKey: 'service_report.ready',
+        triggerEventId: `service_report_ready:${recordId}:customer`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      }).then((out) => out.results[0].run);
+
+      const first = await report(visit1);
+      expect(first.status).toBe('skipped');
+      expect(first.exit_reason).toContain('second pest visit');
+      const second = await report(visit2);
+      expect(second.status).toBe('sent');
+      expect(second.idempotency_key).not.toBe(first.idempotency_key);
+      const third = await report(visit2b);
+      expect(third.status).toBe('skipped');
+      expect(third.exit_reason).toContain('already has a sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      expect(sendTemplate.mock.calls[0][0].payload).toEqual(expect.objectContaining({
+        plan_interval_days: '91', activity_avg_first_visit: '3.1', activity_avg_second_visit: '1.2',
+      }));
+    });
+
+    test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'] });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike());
+
+      const out = await Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      });
+      const run = out.results[0].run;
+
+      expect(run.status).toBe('sent');
+      const args = sendTemplate.mock.calls[0][0];
+      expect(args.marketingRequiresLedger).toBeUndefined();
+      expect(args.suppressionGroupKey).toBe('service_operational');
+      expect(args.payload.primary_product_name).toBe('Taurus SC');
+      expect(args.payload.nonrepellent_band_note).toContain('non-repellent insecticide');
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger[0]).toEqual(expect.objectContaining({ stream: 'lifecycle', marketing_class: 'relationship', status: 'sent' }));
+    });
+  });
+
+  // ---- payload builders ---------------------------------------------------
+
+  describe('payload builders', () => {
+    const baseDeps = (overrides = {}) => ({
+      getActivityRatingAverages: async () => ({ byVisit: {}, counts: {} }),
+      getAreaIntelSentence: async () => null,
+      fetchMrmsDailyRain: async () => null,
+      ...overrides,
+    });
+    const runFor = (templateKey, entityId, customer, extra = {}) => ({
+      id: randomUUID(), template_key: templateKey, entity_id: entityId, recipient_id: customer.id, recipient_email: customer.email, ...extra,
+    });
+
+    describe('lc.first_visit_pest', () => {
+      async function scenario(visitOverrides = {}) {
+        const customer = await makeCustomer({ latitude: null });
+        const techId = await makeTech();
+        await makeNextVisit(customer.id);
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, ...visitOverrides });
+        return { customer, recordId };
+      }
+
+      test('Taurus SC primary -> the non-repellent note is the manufacturer wording; every required field is filled', async () => {
+        const { customer, recordId } = await scenario({ products: ['taurus', 'talak'] });
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps(),
+        });
+        expect(result.ok).toBe(true);
+        expect(result.payload).toEqual(expect.objectContaining({
+          first_name: 'Jordan', tech_first_name: 'Marco', primary_product_name: 'Taurus SC', primary_active_ingredient: 'fipronil',
+          areas_treated_list: 'the foundation perimeter and garage entry', pests_named_list: 'ghost ants',
+          visit_date_short: 'Sep 20', visit_date_long: 'September 20, 2026', next_visit_date: 'December 24, 2099',
+        }));
+        expect(result.payload.nonrepellent_band_note).toBe('Its manufacturer describes Taurus SC as a non-repellent insecticide that target pests cannot detect, so they touch, ingest and spread it.');
+        expect(result.payload.secondary_products_sentence).toContain('We also applied Talak 7.9% F');
+        // No fixed minute figure anywhere in an advisory sentence.
+        expect(result.payload.pet_advisory_sentence).not.toMatch(/\d/);
+      });
+
+      test('a non-Taurus primary (Talak, bifenthrin) -> the non-repellent note stays BLANK', async () => {
+        const { customer, recordId } = await scenario({ products: ['talak'] });
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps(),
+        });
+        expect(result.ok).toBe(true);
+        expect(result.payload.primary_product_name).toBe('Talak 7.9% F');
+        expect(result.payload.nonrepellent_band_note).toBe('');
+      });
+
+      test('the activity-rating sentence: a tech-chosen rating + a >=20 cohort gives both clauses; a defaulted first-visit rating is never shown; no cohort drops the averages clause', async () => {
+        const chosen = await scenario({ rating: 3, ratingSource: 'technician', defaulted: false });
+        const cohort = { byVisit: { pest: { 1: 3.14, 2: 1.2 } }, counts: {} };
+        const both = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', chosen.recordId, chosen.customer), mode: 'live',
+          deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(both.payload.activity_rating_sentence).toBe('The pest activity rating recorded at this visit was 3, on a scale from 0 (none) to 5 (high). Across Waves visit records, that rating averages 3.1 at a first visit and 1.2 at the second.');
+
+        const noCohort = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', chosen.recordId, chosen.customer), mode: 'live', deps: baseDeps(),
+        });
+        expect(noCohort.payload.activity_rating_sentence).toBe('The pest activity rating recorded at this visit was 3, on a scale from 0 (none) to 5 (high).');
+
+        const defaulted = await scenario({ rating: 5, ratingSource: 'technician', defaulted: true });
+        const hidden = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', defaulted.recordId, defaulted.customer), mode: 'live', deps: baseDeps(),
+        });
+        expect(hidden.payload.activity_rating_sentence).toBe('');
+        const hiddenWithCohort = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', defaulted.recordId, defaulted.customer), mode: 'live',
+          deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(hiddenWithCohort.payload.activity_rating_sentence).not.toContain('recorded at this visit');
+        expect(hiddenWithCohort.payload.activity_rating_sentence).toContain('averages 3.1 at a first visit and 1.2 at the second');
+      });
+
+      test('skips (never renders a blank) when a required fact is missing: no upcoming PEST visit, no primary product, not first visit, wrong customer, non-pest line', async () => {
+        const noNext = await makeCustomer();
+        const noNextRecord = await makeVisit({ customerId: noNext.id, technicianId: await makeTech() });
+        const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', noNextRecord, noNext), mode: 'live', deps: baseDeps() });
+        expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'no_upcoming_pest_visit' }));
+
+        const noProduct = await scenario({ products: [] });
+        const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', noProduct.recordId, noProduct.customer), mode: 'live', deps: baseDeps() });
+        expect(r2).toEqual(expect.objectContaining({ skip: true, code: 'no_primary_product' }));
+
+        const repeat = await scenario({});
+        await makeVisit({ customerId: repeat.customer.id, visitNumber: 0, date: '2026-06-01', createdAt: new Date('2026-06-01T15:00:00Z') });
+        const r3 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', repeat.recordId, repeat.customer), mode: 'live', deps: baseDeps() });
+        expect(r3).toEqual(expect.objectContaining({ skip: true, code: 'not_first_visit' }));
+
+        const other = await makeCustomer();
+        const r4 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', repeat.recordId, other), mode: 'live', deps: baseDeps() });
+        expect(r4).toEqual(expect.objectContaining({ skip: true, code: 'recipient_not_visit_customer' }));
+
+        const lawn = await scenario({ serviceLine: 'lawn' });
+        const r5 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', lawn.recordId, lawn.customer), mode: 'live', deps: baseDeps() });
+        expect(r5).toEqual(expect.objectContaining({ skip: true, code: 'not_pest_line' }));
+      });
+
+      test('next visit is the next PEST appointment: a lawn visit tomorrow never names itself; no future pest visit -> SKIP', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const tomorrow = new Date(Date.now() + 24 * 3600 * 1000).toISOString().slice(0, 10);
+        await db('scheduled_services').insert({
+          customer_id: customer.id, scheduled_date: tomorrow, service_type: 'Lawn Care Service', status: 'confirmed',
+        });
+        await makeNextVisit(customer.id, 'quarterly', '2099-12-24');
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId });
+        const december = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps(),
+        });
+        expect(december.payload.next_visit_date).toBe('December 24, 2099');
+
+        const lawnOnly = await makeCustomer();
+        await db('scheduled_services').insert({
+          customer_id: lawnOnly.id, scheduled_date: tomorrow, service_type: 'Lawn Care Service', status: 'confirmed',
+        });
+        const lawnRecord = await makeVisit({ customerId: lawnOnly.id, technicianId: techId });
+        const skipped = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', lawnRecord, lawnOnly), mode: 'live', deps: baseDeps(),
+        });
+        expect(skipped).toEqual(expect.objectContaining({ skip: true, code: 'no_upcoming_pest_visit' }));
+        expect(skipped.reason).toContain('no upcoming pest appointment');
+      });
+
+      test('the rain sentence needs a COMPLETE radar read over whole days after the visit; shadow makes no external call', async () => {
+        const { customer, recordId } = await scenario({});
+        await db('customers').where({ id: customer.id }).update({ latitude: 27.5, longitude: -82.4 });
+        const rain = jest.fn(async ({ start, end }) => ({ days: [{ date: start, inches: 0.4 }, { date: end, inches: 0.5 }], complete: true }));
+        const live = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps({ fetchMrmsDailyRain: rain }),
+        });
+        expect(live.payload.rain_since_visit_sentence).toBe('NOAA radar shows about 0.9 inches of rain near your address since the visit; local totals may vary.');
+        const incomplete = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live',
+          deps: baseDeps({ fetchMrmsDailyRain: async () => ({ days: [{ date: 'x', inches: 2 }], complete: false }) }),
+        });
+        expect(incomplete.payload.rain_since_visit_sentence).toBe('');
+        rain.mockClear();
+        const shadow = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.first_visit_pest', recordId, customer), mode: 'shadow', deps: baseDeps({ fetchMrmsDailyRain: rain }),
+        });
+        expect(shadow.payload.rain_since_visit_sentence).toBe('');
+        expect(rain).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('lc.why_91_days', () => {
+      const cohort = { byVisit: { pest: { 1: 3.14, 2: 1.16 } }, counts: {} };
+      async function scenario({ products = ['taurus', 'talak'], pattern = 'quarterly', visitNumber = 2 } = {}) {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const scheduledId = await makeNextVisit(customer.id, pattern);
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+        const recordId = await makeVisit({
+          customerId: customer.id, technicianId: techId, visitNumber, products, scheduledServiceId: scheduledId, date: '2026-09-20',
+        });
+        return { customer, recordId };
+      }
+
+      test('Taurus SC plan + a >=20 cohort on the pest line -> the figures come from the reader, interval is the quarterly 91', async () => {
+        const { customer, recordId } = await scenario();
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({
+            getActivityRatingAverages: async () => cohort, getAreaIntelSentence: async () => 'In September our technicians treated ghost ants at 61% of our 90 visits in Parrish.',
+          }),
+        });
+        expect(result.ok).toBe(true);
+        expect(result.payload).toEqual(expect.objectContaining({
+          plan_interval_days: '91', plan_name: 'Quarterly Pest Control Service', nonrepellent_product: 'Taurus SC', contact_product: 'Talak 7.9% F',
+          activity_avg_first_visit: '3.1', activity_avg_second_visit: '1.2',
+          area_intel_sentence: 'In September our technicians treated ghost ants at 61% of our 90 visits in Parrish.',
+        }));
+      });
+
+      test('a non-Taurus non-repellent (Alpine) -> SKIP; no non-repellent at all -> SKIP', async () => {
+        const alpine = await scenario({ products: ['alpine', 'talak'] });
+        const r1 = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', alpine.recordId, alpine.customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'nonrepellent_not_taurus' }));
+        // Visit 1 of this scenario carries Taurus SC, so a plan mixing both is also refused.
+        const none = await makeCustomer();
+        const techId = await makeTech();
+        const scheduledId = await makeNextVisit(none.id);
+        const recordId = await makeVisit({ customerId: none.id, technicianId: techId, visitNumber: 2, products: ['talak'], scheduledServiceId: scheduledId });
+        const r2 = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, none), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(r2).toEqual(expect.objectContaining({ skip: true, code: 'nonrepellent_not_taurus' }));
+      });
+
+      test('a cohort under 20 (the reader omits it) -> SKIP, never a blank or stale figure', async () => {
+        const { customer, recordId } = await scenario();
+        const onlyFirst = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => ({ byVisit: { pest: { 1: 3.1 } }, counts: {} }) }),
+        });
+        expect(onlyFirst).toEqual(expect.objectContaining({ skip: true, code: 'cohort_below_20' }));
+        const other = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => ({ byVisit: { lawn: { 1: 3, 2: 1 } }, counts: {} }) }),
+        });
+        expect(other).toEqual(expect.objectContaining({ skip: true, code: 'cohort_below_20' }));
+      });
+
+      test('the plan is read off the PEST series only: a visit linked to a lawn appointment says nothing about the pest plan', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const [lawn] = await db('scheduled_services').insert({
+          customer_id: customer.id, scheduled_date: '2099-12-24', service_type: 'Lawn Care Service', status: 'confirmed', recurring_pattern: 'quarterly',
+        }).returning('id');
+        await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], createdAt: new Date('2026-06-20T15:00:00Z') });
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], scheduledServiceId: lawn.id });
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
+      });
+
+      test('SKIPs a non-quarterly plan and any visit that is not the second pest visit', async () => {
+        const monthly = await scenario({ pattern: 'monthly' });
+        const r1 = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', monthly.recordId, monthly.customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
+        const third = await scenario({ visitNumber: 3 });
+        const r2 = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', third.recordId, third.customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(r2).toEqual(expect.objectContaining({ skip: true, code: 'not_second_visit' }));
+      });
+    });
+
+    describe('lc.rain_and_treatment (B6) has no builder and no automation', () => {
+      test('there is no rain / weather trigger to wire it to', () => {
+        expect(Builders.hasPayloadBuilder('lc.rain_and_treatment')).toBe(false);
+        expect(Builders.BUILDER_TEMPLATE_KEYS).not.toContain('lc.rain_and_treatment');
+        const { TRIGGER_MAPPINGS } = Executor;
+        expect(Object.keys(TRIGGER_MAPPINGS).filter((key) => /rain|weather|storm/i.test(key))).toEqual([]);
+      });
+    });
+
+    describe('nurture.expired_1', () => {
+      const consultDeps = (overrides = {}) => baseDeps({
+        probeGoneQuietConsultation: jest.fn(async () => ({ leadId: 'lead-1', estimateId: 'est-1' })),
+        mintGoneQuietConsultationUrl: jest.fn(async () => 'https://wavespest.co/l/consult'),
+        goneQuietConsultationStillValid: jest.fn(async () => true),
+        mintEstimateLink: jest.fn(async () => ({ emailUrl: 'https://wavespest.co/l/est' })),
+        ...overrides,
+      });
+
+      test('consultation_url appears ONLY through the existing eligibility, for the lead\'s own inbox', async () => {
+        const customer = await makeCustomer();
+        const estimateId = await makeEstimate(customer.id, customer.email);
+        const deps = consultDeps();
+        const ok = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', estimateId, customer), mode: 'live', deps });
+        expect(ok.ok).toBe(true);
+        expect(ok.payload.consultation_url).toBe('https://wavespest.co/l/consult');
+        expect(ok.payload.estimate_link).toBe('https://wavespest.co/l/est');
+
+        // The eligibility says no (today's reality for an expired estimate) -> blank.
+        const refused = consultDeps({ probeGoneQuietConsultation: jest.fn(async () => null) });
+        const none = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', estimateId, customer), mode: 'live', deps: refused });
+        expect(none.payload.consultation_url).toBe('');
+        expect(refused.mintGoneQuietConsultationUrl).not.toHaveBeenCalled();
+
+        // The final own-inbox/eligibility re-check fails -> blank even though a link was minted.
+        const stale = consultDeps({ goneQuietConsultationStillValid: jest.fn(async () => false) });
+        const dropped = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', estimateId, customer), mode: 'live', deps: stale });
+        expect(dropped.payload.consultation_url).toBe('');
+      });
+
+      test('a recipient who is not the estimate\'s own inbox never gets the link (and nothing is probed or minted)', async () => {
+        const customer = await makeCustomer();
+        const estimateId = await makeEstimate(customer.id, 'lead.inbox@example.invalid');
+        const deps = consultDeps();
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('nurture.expired_1', estimateId, customer, { recipient_email: customer.email }), mode: 'live', deps,
+        });
+        expect(result.ok).toBe(true);
+        expect(result.payload.consultation_url).toBe('');
+        expect(deps.probeGoneQuietConsultation).not.toHaveBeenCalled();
+        expect(deps.mintGoneQuietConsultationUrl).not.toHaveBeenCalled();
+      });
+
+      test('shadow never probes, mints or links: long estimate URL, blank consultation_url', async () => {
+        const customer = await makeCustomer();
+        const estimateId = await makeEstimate(customer.id, customer.email);
+        const deps = consultDeps();
+        const result = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', estimateId, customer), mode: 'shadow', deps });
+        expect(result.payload.consultation_url).toBe('');
+        expect(result.payload.estimate_link).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/estimate\/qa-/);
+        expect(deps.probeGoneQuietConsultation).not.toHaveBeenCalled();
+        expect(deps.mintEstimateLink).not.toHaveBeenCalled();
+      });
+
+      test('names a pest only from the customer\'s own words; otherwise the quoted line in plain words', async () => {
+        const customer = await makeCustomer();
+        const named = await makeEstimate(customer.id, customer.email, { service_interest: 'Ghost ants in the kitchen' });
+        const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', named, customer), mode: 'shadow', deps: consultDeps() });
+        expect(r1.payload.pest_or_problem_named).toBe('ghost ants');
+        const plain = await makeEstimate(customer.id, customer.email, { service_interest: 'Quarterly pest control' });
+        const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', plain, customer), mode: 'shadow', deps: consultDeps() });
+        expect(r2.payload.pest_or_problem_named).toBe('pest problem');
+      });
+
+      test('skips an estimate that is no longer expired, and one with no customer record', async () => {
+        const customer = await makeCustomer();
+        const revived = await makeEstimate(customer.id, customer.email, { status: 'sent' });
+        const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', revived, customer), mode: 'shadow', deps: consultDeps() });
+        expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'estimate_not_expired' }));
+        const expired = await makeEstimate(customer.id, customer.email);
+        const r2 = await Builders.buildEmailDivisionPayload({
+          run: runFor('nurture.expired_1', expired, customer, { recipient_id: '' }), mode: 'shadow', deps: consultDeps(),
+        });
+        expect(r2).toEqual(expect.objectContaining({ skip: true, code: 'no_customer' }));
+        // A lead id that is not a customers row is "no customer", not a thrown uuid-cast error.
+        const r3 = await Builders.buildEmailDivisionPayload({
+          run: runFor('nurture.expired_1', expired, customer, { recipient_id: 'lead-123' }), mode: 'shadow', deps: consultDeps(),
+        });
+        expect(r3).toEqual(expect.objectContaining({ skip: true, code: 'customer_missing' }));
+      });
+    });
+  });
+
+  // ---- the automation seed -----------------------------------------------
+
+  describe('20260930200000 automation seed', () => {
+    const migration = () => require('../models/migrations/20260930200000_seed_email_division_automations');
+    const keys = () => migration().AUTOMATIONS.map((a) => a.automation_key);
+
+    test('seeded PAUSED (never runnable), with an idempotency key template each, one audit event per row, and NO rain/weather row', async () => {
+      const rows = await db('email_template_automations').whereIn('automation_key', keys());
+      expect(rows.map((r) => r.automation_key).sort()).toEqual(['lc.first_visit_pest', 'lc.why_91_days', 'nurture.expired_1']);
+      for (const row of rows) {
+        expect(row.status).toBe('paused');
+        expect(row.idempotency_key_template).toMatch(/\{[a-z_]+\}/);
+        expect(row.suppression_group_key).toBeTruthy();
+      }
+      expect(await db('email_template_automations').where({ template_key: 'lc.rain_and_treatment' })).toHaveLength(0);
+      // Per-EVENT run identity (once-per-customer / per-estimate is a send-time rule, not the key).
+      const keyTemplates = Object.fromEntries(rows.map((r) => [r.automation_key, r.idempotency_key_template]));
+      expect(keyTemplates['lc.why_91_days']).toBe('lc.why_91_days:{service_record_id}');
+      expect(keyTemplates['lc.first_visit_pest']).toBe('lc.first_visit_pest:{service_record_id}');
+      expect(keyTemplates['nurture.expired_1']).toBe('nurture.expired_1:{estimate_id}:{expires_on}');
+      // The templates stay DRAFT — unsendable a second way.
+      const templates = await db('email_templates').whereIn('template_key', ['lc.first_visit_pest', 'lc.why_91_days', 'nurture.expired_1']);
+      expect(templates.every((t) => t.status === 'draft')).toBe(true);
+      const audits = await db('audit_log').where({ action: 'email_template_automation.seeded' }).whereRaw("metadata->>'automationKey' = ANY(?)", [keys()]);
+      expect(audits.length).toBeGreaterThanOrEqual(3);
+      // A paused automation is invisible to a trigger: nothing on these triggers loads.
+      const loaded = await db('email_template_automations').whereIn('automation_key', keys()).where({ status: 'active' });
+      expect(loaded).toHaveLength(0);
+    });
+
+    test('insert-once: re-running never duplicates, never reverts an operator edit, never re-audits', async () => {
+      const auditCount = async () => Number((await db('audit_log').where({ action: 'email_template_automation.seeded' })
+        .whereRaw("metadata->>'automationKey' = ANY(?)", [keys()]).count('* as n').first()).n);
+      const before = await auditCount();
+      await db('email_template_automations').where({ automation_key: 'nurture.expired_1' }).update({ status: 'draft', name: 'Edited by an operator', delay_minutes: 99 });
+      try {
+        await migration().up(db);
+        await migration().up(db);
+        const rows = await db('email_template_automations').whereIn('automation_key', keys());
+        expect(rows).toHaveLength(3);
+        const edited = rows.find((r) => r.automation_key === 'nurture.expired_1');
+        expect(edited).toEqual(expect.objectContaining({ status: 'draft', name: 'Edited by an operator', delay_minutes: 99 }));
+        expect(await auditCount()).toBe(before);
+      } finally {
+        await db('email_template_automations').where({ automation_key: 'nurture.expired_1' }).update({
+          status: 'paused', name: 'Nurture · Estimate Expired (Touch 1)', delay_minutes: 4320,
+        });
+      }
+    });
+
+    test('a missing template row skips its automation (the FK is RESTRICT) instead of failing', async () => {
+      let reseeded;
+      await db.transaction(async (trx) => {
+        await trx('email_template_automations').where({ automation_key: 'lc.why_91_days' }).del();
+        await trx('email_templates').where({ template_key: 'lc.why_91_days' }).update({ template_key: 'lc.why_91_days_renamed' });
+        await migration().up(trx);
+        reseeded = await trx('email_template_automations').where({ automation_key: 'lc.why_91_days' });
+        throw new Error('rollback sandbox');
+      }).catch((err) => {
+        if (err.message !== 'rollback sandbox') throw err;
+      });
+      expect(reseeded).toHaveLength(0);
+      // The rollback discarded the sandbox: the real row is untouched.
+      expect(await db('email_template_automations').where({ automation_key: 'lc.why_91_days' })).toHaveLength(1);
+    });
+  });
+});

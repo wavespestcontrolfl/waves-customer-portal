@@ -9,8 +9,11 @@
  * need are passed; recipient EMAIL resolution is centralized in the
  * executor (processTrigger's resolveEmailForTrigger), not duplicated here.
  *
- * visit.completed_first and customer.churned are intentionally NOT wired
- * here yet — see the PR body for why (deferred to a follow-up PR).
+ * customer.churned is intentionally NOT wired here yet — see the PR body for
+ * why (deferred to a follow-up PR). visit.completed_first has its emitter
+ * below (emitVisitCompletedFirst, the email division's lc.first_visit_pest)
+ * but NO caller yet: the producer call belongs at the completion site, after
+ * the closeout commits, and is a separate step.
  *
  * codex round 3 on #5154 — STRUCTURAL rewrite of the recovery sweep. Round 2
  * re-derived "missed events" by guessing from entity timestamps
@@ -42,6 +45,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { isEnabled, emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { scrubSentryText } = require('../utils/sentry-scrub');
+const { etDateString } = require('../utils/datetime-et');
 
 // Every error text this module logs or persists (intents.last_error) goes
 // through the shared PII scrubber first (pre-push audit P1): a Postgres
@@ -185,6 +189,11 @@ async function emitEstimateExpired({ id, customer_id: customerId, customer_email
       category: category || '',
       service_interest: serviceInterest || '',
       expires_at: expiresAt || null,
+      // The expiry's own ET date: one nurture touch per (estimate, expiry), so
+      // a run skipped because the estimate was extended never consumes the key
+      // of the NEXT expiry. Derived from expires_at the same way on a direct
+      // emit and on an intent-marker replay (both carry the stored instant).
+      expires_on: expiresAt ? etDateString(new Date(expiresAt)) : '',
     },
   }, intentId);
 }
@@ -208,6 +217,24 @@ async function emitReviewLinked5Star({ reviewId, customerId, locationId, starRat
     recipient: { type: 'customer', id: customerId },
     payload: { review_id: reviewId, customer_id: customerId, location_id: locationId || '' },
   }, intentId);
+}
+
+// visit.completed_first — a customer's FIRST performed visit on a service
+// line, fired by the completion site after the closeout commits (no caller is
+// wired yet; see the header). Ids only: the email division's payload builder
+// (email-division/payload-builders.js) reads the visit itself and re-judges
+// that it really is the customer's first performed, customer-visible pest
+// visit, so a wrong or repeated emit can only produce a skipped run, never a
+// send. No intent marker: the completion transaction does not record one.
+async function emitVisitCompletedFirst({ serviceRecordId, customerId } = {}) {
+  if (!serviceRecordId || !customerId) return null;
+  return emitTrigger('visit.completed_first', {
+    triggerEventId: `visit_completed_first:${serviceRecordId}`,
+    entityType: 'service_record',
+    entityId: serviceRecordId,
+    recipient: { type: 'customer', id: customerId },
+    payload: { service_record_id: serviceRecordId, customer_id: customerId },
+  });
 }
 
 // Best-effort marker insert, isolated from the caller's transaction (codex
@@ -397,6 +424,7 @@ module.exports = {
   MAX_INTENT_ATTEMPTS,
   emitEstimateExpired,
   emitReviewLinked5Star,
+  emitVisitCompletedFirst,
   recordAutomationIntent,
   recordAutomationIntents,
   sweepMissedLifecycleEvents,
