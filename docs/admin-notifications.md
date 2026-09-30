@@ -118,3 +118,12 @@ Then, by severity:
   the full finding as `text`. `raiseAdminAlert` refuses a `broken` spec and says so.
 - **`fyi`**: `raiseAdminAlert` writes nothing and returns
   `{ id: null, suppressed: true, reason: 'fyi' }`. An FYI fact belongs on its page.
+
+A rule violation never costs an alert. Outside tests, a `needs-you` spec that breaks the
+rule still rings, with its headline cut to 60 and `metadata.ruleViolations` naming the
+rules it broke, and a warning is logged with the category and rule names only. Under
+`NODE_ENV=test` the same violation throws, so the emitter's own tests catch it.
+
+A why that quotes a customer's own words (a service request, a text) can trip the
+section 3 checks through no fault of the emitter. That is the fallback's job; do not
+rewrite what the customer said to get past it.
