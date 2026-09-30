@@ -68,6 +68,12 @@ const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
 // arrived), and a spam report / unsubscribe overwrites the status after the
 // message was delivered. bounced / dropped / blocked / failed never carry.
 const CARRIER_STATUSES = [...SENT_ISH, 'spam_report', 'unsubscribed'];
+// Plus the two statuses the transactional-email-provider-retry rail uses: a
+// provider / IP block marks the message `failed` and schedules another attempt
+// (provider_retry_next_at); the worker's claim flips it to `queued` while the
+// retry is in flight and it then returns to `sent` (or `failed` again). Whether
+// such a row is still a live carrier is decided by carrierRowState.
+const CARRIER_QUERY_STATUSES = [...CARRIER_STATUSES, 'failed', 'queued'];
 // How long a carrier that is only `sent` (accepted, no delivery event yet) may
 // hold the owed email back, from its send. SendGrid normally reports `delivered`
 // within seconds to minutes; a deferral (receiving server slow or greylisting)
@@ -197,14 +203,41 @@ async function recordExpected(rowId, values) {
 // ── Resolving owed records ────────────────────────────────────────────────
 
 // One carrier row's delivery state: 'delivered' (the provider reported delivery,
-// or an open / click proves it), 'pending' (accepted, nothing more yet), or
+// or an open / click proves it), 'pending' (accepted and not yet reported, or
+// blocked with the provider-retry rail still due to try again), or
 // 'failed' (bounced / dropped / blocked / failed, including a bounce that
 // followed an early delivered event).
 function carrierRowState(row) {
   if (row.bounced_at) return 'failed';
   const status = String(row.status || '').toLowerCase();
+  // A provider block the retry rail will still re-attempt: scheduled
+  // (`failed` + provider_retry_next_at) or in flight (`queued` after a claim,
+  // provider_retry_count > 0). Exhausted (provider_retry_exhausted_at set, no
+  // next attempt) is failed for good, like any other failure. A `failed` or
+  // `queued` status is decided here alone: whatever timestamps it carries, the
+  // message is not currently a delivered one.
+  if (status === 'failed' || status === 'queued') {
+    if (row.provider_retry_exhausted_at) return 'failed';
+    if (status === 'failed' && row.provider_retry_next_at) return 'pending';
+    if (status === 'queued' && Number(row.provider_retry_count) > 0) return 'pending';
+    return 'failed';
+  }
   if (['delivered', 'opened', 'clicked'].includes(status) || row.delivered_at || row.opened_at || row.clicked_at) return 'delivered';
   return status === 'sent' ? 'pending' : 'failed';
+}
+
+// When a pending carrier stops holding the owed email back. Measured from the
+// carrier's LAST state change, not the first send: the retry rail resets
+// sent_at on every re-attempt and stamps updated_at when a block is recorded or
+// a retry is claimed, so each attempt gets its own CARRIER_SETTLE_HOURS to
+// report, while a stalled rail (dead worker, repeated blocks) still ends the
+// wait 2h after it last moved and the email is sent separately. Attempts are
+// capped by the rail (3 retries), so the chain is bounded too.
+function carrierWaitUntil(row, now = Date.now()) {
+  const anchor = String(row.status || '').toLowerCase() === 'sent'
+    ? (row.sent_at || row.created_at)
+    : (row.updated_at || row.created_at);
+  return new Date(new Date(anchor || now).getTime() + CARRIER_SETTLE_HOURS * 60 * 60 * 1000);
 }
 
 // Does a message that carries every expected value exist, and has it SETTLED?
@@ -223,15 +256,15 @@ async function carrierState(meta, now = Date.now()) {
   const rows = await db('email_messages')
     .whereIn('template_key', [SIGNUP_TEMPLATE_KEY, SHORT_TEMPLATE_KEY])
     .where((q) => q.where('idempotency_key', meta.onboarding_key).orWhere('idempotency_key', 'like', `${meta.onboarding_key}:%`))
-    .whereIn('status', CARRIER_STATUSES)
-    .select('id', 'status', 'text_snapshot', 'html_snapshot', 'sent_at', 'created_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at');
+    .whereIn('status', CARRIER_QUERY_STATUSES)
+    .select('id', 'status', 'text_snapshot', 'html_snapshot', 'sent_at', 'created_at', 'updated_at', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at', 'provider_retry_next_at', 'provider_retry_exhausted_at', 'provider_retry_count');
   const carriers = (rows || []).filter((row) => messageCarriesAll({ message: row }, expected));
   const delivered = carriers.find((row) => carrierRowState(row) === 'delivered');
   if (delivered) return { state: 'delivered', id: delivered.id };
   let pending = null;
   for (const row of carriers) {
     if (carrierRowState(row) !== 'pending') continue;
-    const waitUntil = new Date(new Date(row.sent_at || row.created_at || now).getTime() + CARRIER_SETTLE_HOURS * 60 * 60 * 1000);
+    const waitUntil = carrierWaitUntil(row, now);
     if (waitUntil.getTime() > now && (!pending || waitUntil > pending.waitUntil)) pending = { state: 'pending', id: row.id, waitUntil };
   }
   return pending || { state: 'none' };

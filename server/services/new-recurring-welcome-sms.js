@@ -439,7 +439,11 @@ async function combinedSignupEmailCoversWelcome(customer, row) {
     // And only one the provider REPORTED DELIVERED (carrierRowState, the same
     // rule the owed membership email uses): a carrier that is only `sent`, or
     // that bounced / dropped / blocked, does not suppress the welcome email. No
-    // requeue: the welcome email simply sends.
+    // requeue: the welcome email simply sends. That includes a carrier the
+    // provider-retry rail is still re-attempting (state 'pending'): this runs
+    // about an hour after signup, when the rail's first retry (10 min) has
+    // normally landed, so a still-undelivered carrier means the customer may
+    // have nothing yet; the worst case of sending is a duplicate app pointer.
     const rows = await query.select('id', 'status', 'text_snapshot', 'html_snapshot', 'delivered_at', 'opened_at', 'clicked_at', 'bounced_at').limit(25);
     return (rows || []).some((message) => carrierRowState(message) === 'delivered' && messageCarriesAll({ message }, APP_SECTION_VALUES));
   } catch (err) {

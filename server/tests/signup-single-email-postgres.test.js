@@ -104,6 +104,7 @@ postgres('one signup email against migrated PostgreSQL', () => {
       ['a plain onboarding email (the old template)', { template_key: 'estimate.accepted_onboarding', categories: JSON.stringify(['estimate_accepted_onboarding']) }],
       ['an email that is only accepted (`sent`, no delivery evidence)', { status: 'sent', delivered_at: null }],
       ['an email delivered and then bounced', { bounced_at: new Date() }],
+      ['an email blocked with a provider retry still scheduled', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
       ['an email that failed', { status: 'failed' }],
       ['an email that was blocked', { status: 'blocked' }],
       ['another recipient address', { recipient_email_snapshot: 'someone-else@example.invalid' }],
@@ -150,6 +151,11 @@ postgres('one signup email against migrated PostgreSQL', () => {
 
       test('a carrier that is only `sent` (no delivery event) does not cover the welcome email', async () => {
         await message({ status: 'sent', delivered_at: null });
+        expect(await covers()).toBe(false);
+      });
+
+      test('a carrier the provider-retry rail is still re-attempting does not cover the welcome email (it sends)', async () => {
+        await message({ status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) });
         expect(await covers()).toBe(false);
       });
 
@@ -325,6 +331,63 @@ postgres('one signup email against migrated PostgreSQL', () => {
           await setStatus(messageId, { status: 'delivered', delivered_at: new Date() });
           await dueNow();
           expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ satisfied: 1 });
+        });
+
+        describe('provider-retry rail (a provider / IP block schedules another attempt at the same message)', () => {
+          const minutesAgo = (m) => new Date(Date.now() - m * 60 * 1000);
+          const inMinutes = (m) => new Date(Date.now() + m * 60 * 1000);
+
+          test('blocked with a retry scheduled: the row stays open and NOTHING is sent (the retry would deliver the full email too)', async () => {
+            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: inMinutes(10), provider_retry_count: 0, updated_at: new Date() });
+            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ requeued: true, pending: true });
+            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
+            expect((await owedRows())[0]).toMatchObject({ status: 'active' });
+          });
+
+          test('a retry claimed and in flight (queued, count > 0) is pending too', async () => {
+            await carrier(PLAN_VALUES.join('\n'), { status: 'queued', sent_at: null, provider_retry_count: 1, updated_at: new Date() });
+            expect(await Signup.resolveOwedEmail(membershipId)).toMatchObject({ pending: true });
+            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
+          });
+
+          test('the retry lands and is delivered: satisfied, nothing sent separately', async () => {
+            const messageId = await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: inMinutes(10), updated_at: new Date() });
+            expect(await Signup.resolveOwedEmail(membershipId)).toMatchObject({ pending: true });
+            await setStatus(messageId, { status: 'delivered', delivered_at: new Date(), provider_retry_next_at: null, provider_retry_count: 1 });
+            await dueNow();
+            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
+            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
+          });
+
+          test('retry exhausted (no further attempt): sent separately', async () => {
+            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: null, provider_retry_exhausted_at: new Date(), provider_retry_count: 3, updated_at: new Date() });
+            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
+            expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
+          });
+
+          test('a failed message with no retry scheduled at all is a plain failure: sent separately', async () => {
+            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, updated_at: new Date() });
+            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
+          });
+
+          test('a rail that stalls past the settle window (its last move was over 2h ago) stops holding the email: sent separately', async () => {
+            await carrier(PLAN_VALUES.join('\n'), { status: 'failed', sent_at: null, provider_retry_next_at: inMinutes(300), provider_retry_count: 1, updated_at: minutesAgo(Signup.CARRIER_SETTLE_HOURS * 60 + 5) });
+            expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
+            expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
+          });
+
+          test('the window restarts with each attempt: a retry re-sent 10 minutes ago (sent_at fresh, first block hours ago) is waited on', async () => {
+            await carrier(PLAN_VALUES.join('\n'), { status: 'sent', sent_at: minutesAgo(10), created_at: minutesAgo(400), updated_at: minutesAgo(10), provider_retry_count: 2 });
+            expect(await Signup.resolveOwedEmail(membershipId)).toMatchObject({ pending: true });
+            expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
+          });
+
+          test('the shared helper is the one rule: welcome and added-property choice treat a retry-pending carrier as NOT delivered', () => {
+            const row = { status: 'failed', provider_retry_next_at: inMinutes(10) };
+            expect(Signup.carrierRowState(row)).toBe('pending');
+            expect(Signup.carrierRowState({ ...row, provider_retry_exhausted_at: new Date() })).toBe('failed');
+            expect(Signup.carrierRowState({ status: 'queued', provider_retry_count: 0 })).toBe('failed');
+          });
         });
 
         test('an open or click proves delivery even when the delivered event never arrived (status stays sent)', async () => {
@@ -681,6 +744,50 @@ postgres('one signup email against migrated PostgreSQL', () => {
         expect((await trx('email_template_versions').where({ id: v.id }).first()).status).toBe('archived');
         const fixture = await trx('email_template_fixtures').where({ template_id: t.id, is_default: true }).first();
         expect(fixture.payload).toEqual({ first_name: 'Taylor' });
+      });
+    });
+
+    describe('20260930010000 fixes the names and descriptions and audits the signup migrations', () => {
+      const fourth = require('../models/migrations/20260930010000_signup_email_template_names_and_audit');
+      const auditCount = async (action) => (await trx('audit_log').where({ action })).length;
+
+      test('applied: neither library entry mentions Auto Pay or a payment section any more', async () => {
+        for (const key of ['estimate.accepted_signup', 'estimate.accepted_additional_property']) {
+          const t = await template(key);
+          expect(`${t.name} ${t.description}`).not.toMatch(/Auto Pay authorization|Auto Pay included|payment section only/i);
+        }
+        expect((await template('estimate.accepted_signup')).name).toBe('Estimate Accepted — Signup Email');
+      });
+
+      test('audit events exist for 20260929220000, 20260930000000 and 20260930010000, one each', async () => {
+        for (const migration of ['20260929220000', '20260930000000', '20260930010000']) {
+          expect(await auditCount(`migration:${migration}:publish`)).toBe(1);
+        }
+        const event = await trx('audit_log').where({ action: 'migration:20260930000000:publish' }).first();
+        expect(event.metadata.template_keys).toEqual(expect.arrayContaining(['estimate.accepted_signup', 'estimate.accepted_onboarding', 'estimate.accepted_additional_property']));
+      });
+
+      test('a re-run is idempotent: no second event, nothing rewritten', async () => {
+        const before = await template('estimate.accepted_signup');
+        await fourth.up(trx);
+        for (const migration of ['20260929220000', '20260930000000', '20260930010000']) {
+          expect(await auditCount(`migration:${migration}:publish`)).toBe(1);
+        }
+        expect((await template('estimate.accepted_signup')).updated_at).toEqual(before.updated_at);
+      });
+
+      test('text staff edited is preserved; text still at the seeded value is updated (and audited once)', async () => {
+        const signup = await template('estimate.accepted_signup');
+        const short = await template('estimate.accepted_additional_property');
+        await trx('email_templates').where({ id: signup.id }).update({ name: 'Admin-renamed', description: fourth._private.TEXT['estimate.accepted_signup'].description.from });
+        await trx('audit_log').where({ action: 'migration:20260930010000:publish' }).del();
+        await fourth.up(trx);
+        const after = await template('estimate.accepted_signup');
+        expect(after.name).toBe('Admin-renamed');
+        expect(after.description).toBe(fourth._private.TEXT['estimate.accepted_signup'].description.to);
+        expect((await template('estimate.accepted_additional_property')).description).toBe(short.description);
+        const event = await trx('audit_log').where({ action: 'migration:20260930010000:publish' }).first();
+        expect(event.metadata.fields).toEqual({ 'estimate.accepted_signup': ['description'] });
       });
     });
 

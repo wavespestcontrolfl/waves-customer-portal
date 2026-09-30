@@ -126,7 +126,10 @@ async function isAddedPropertyToday({ customerId, email, ownKey, property }) {
   // Only an email the provider REPORTED DELIVERED counts (the same rule the owed
   // membership email and the welcome check use): a first email that is merely
   // `sent`, or that bounced, leaves the customer without the full content, so
-  // this acceptance sends the full version.
+  // this acceptance sends the full version. A carrier the provider-retry rail
+  // is still re-attempting is likewise not delivered: the customer holds nothing
+  // yet, so the full email is the fail-safe (worst case they later receive the
+  // first property's full email as well, each naming its own property).
   const earlier = (rows || []).filter((r) => carrierRowState(r) === 'delivered').map((r) => ({
     full: (parsed(r.categories, []) || []).includes(SIGNUP_FULL_CATEGORY),
     address: normalizeAddress(parsed(r.payload_snapshot, {})?.property_address),
