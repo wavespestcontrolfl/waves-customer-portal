@@ -66,6 +66,23 @@ function gscRequestTimeoutMs(value = process.env.GSC_REQUEST_TIMEOUT_MS) {
   return positiveInt(value, DEFAULT_GSC_REQUEST_TIMEOUT_MS);
 }
 
+// Scopes are set HERE, in our code. Every read (sync, sites.list, URL
+// inspection) uses the read-only client; only submitSitemap below gets its own
+// write-scoped one, so no read path can ever mutate Search Console.
+const GSC_READ_SCOPE = 'https://www.googleapis.com/auth/webmasters.readonly';
+const GSC_WRITE_SCOPE = 'https://www.googleapis.com/auth/webmasters';
+
+// Support both a JSON string (Railway) and a file path (local dev)
+function gscAuthOptions(saEnv, scope) {
+  try {
+    let jsonStr = saEnv.trim();
+    if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
+    return { credentials: JSON.parse(jsonStr), scopes: [scope] };
+  } catch {
+    return { keyFile: saEnv, scopes: [scope] };
+  }
+}
+
 function gscRequestOptions(signal = null) {
   const options = { timeout: gscRequestTimeoutMs() };
   if (signal) options.signal = signal;
@@ -117,6 +134,8 @@ class SearchConsoleService {
   constructor() {
     this.auth = null;
     this.webmasters = null;
+    this.writeAuth = null;
+    this.writeWebmasters = null;
   }
 
   async init() {
@@ -134,30 +153,50 @@ class SearchConsoleService {
         return false;
       }
 
-      // Support both a JSON string (Railway) and a file path (local dev)
-      let authOptions;
-      try {
-        let jsonStr = saEnv.trim();
-        if (jsonStr.startsWith('{') && !jsonStr.endsWith('}')) jsonStr += '\n}';
-        const credentials = JSON.parse(jsonStr);
-        authOptions = {
-          credentials,
-          scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
-        };
-      } catch {
-        authOptions = {
-          keyFile: saEnv,
-          scopes: ['https://www.googleapis.com/auth/webmasters.readonly'],
-        };
-      }
-
-      this.auth = new g.auth.GoogleAuth(authOptions);
+      this.auth = new g.auth.GoogleAuth(gscAuthOptions(saEnv, GSC_READ_SCOPE));
 
       this.webmasters = g.searchconsole({ version: 'v1', auth: this.auth });
       return true;
     } catch (err) {
       logger.error(`GSC init failed: ${err.message}`);
       return false;
+    }
+  }
+
+  /**
+   * Submit a sitemap to Search Console (sitemaps.submit). The ONE write this
+   * service performs, on its own write-scoped client (webmasters) — separate
+   * from the read-only client every other method uses. `siteUrl` must be the
+   * exact property identifier resolveAccessibleProperty returned and
+   * `feedpath` the full sitemap URL; the Intelligence Bar passes the values
+   * its confirmation card showed.
+   *
+   * Returns { ok: true } or { error, writeAccessRequired? }. A 401/403 means
+   * the service account can read but is not a Full user / owner of the
+   * property — reported as writeAccessRequired, changing nothing.
+   */
+  async submitSitemap(siteUrl, feedpath) {
+    const g = getGoogle();
+    if (!g) return { error: 'googleapis is not installed — Search Console is unavailable.' };
+    const saEnv = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+    if (!saEnv) return { error: 'GOOGLE_SERVICE_ACCOUNT_JSON is not set.' };
+    try {
+      if (!this.writeWebmasters) {
+        this.writeAuth = new g.auth.GoogleAuth(gscAuthOptions(saEnv, GSC_WRITE_SCOPE));
+        this.writeWebmasters = g.searchconsole({ version: 'v1', auth: this.writeAuth });
+      }
+      await this.writeWebmasters.sitemaps.submit({ siteUrl, feedpath }, gscRequestOptions());
+      return { ok: true };
+    } catch (err) {
+      const status = Number(err?.code || err?.response?.status || err?.status) || null;
+      if (status === 401 || status === 403) {
+        return {
+          error: 'The Search Console service account has read access only — it must be a Full user (or owner) of this property to submit sitemaps.',
+          writeAccessRequired: true,
+          status,
+        };
+      }
+      return { error: `Search Console sitemap submit failed${status ? ` (HTTP ${status})` : ''}.`, status };
     }
   }
 

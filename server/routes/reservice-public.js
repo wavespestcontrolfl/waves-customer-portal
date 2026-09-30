@@ -68,6 +68,7 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 const { capacityEnabled } = require('../services/scheduling/policy');
 const { noStore } = require('../middleware/no-store');
+const { recordPageView } = require('../services/customer-page-views');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const {
   RESERVICE_LANES,
@@ -275,6 +276,12 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
     // and the commit's own preparedCapacity gate reading the same env.
     capacityPlacement: bookInsertionOffersLive(),
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+    // the gate is off). The commit is the same createSelfBooking, which
+    // re-reads the live grace for this date (no signed offer on this flow) —
+    // the rebuild and the commit run in the same request, so both see the
+    // same gate and grace value.
+    bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }
@@ -328,6 +335,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const customer = await loadByToken(req.params.token);
     if (!customer) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'reservice', customerId: customer.id, subjectType: 'customer', subjectId: customer.id });
 
     const laneCatalog = await loadLaneCatalog();
     const { lanes, bookableLanes } = await resolveLaneState(customer, laneCatalog);

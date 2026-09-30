@@ -187,6 +187,7 @@ const router = express.Router();
 const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { recordPageView } = require('../services/customer-page-views');
 const { noStore } = require('../middleware/no-store');
 const { etDateString, addETDays } = require('../utils/datetime-et');
 const { leadInspectionLinkLive } = require('../config/feature-gates');
@@ -776,6 +777,12 @@ async function buildAvailabilityForLead(coords, { rangeFrom, rangeTo, config, du
     // bookInsertionOffersLive() is what keeps that rebuild's capacityPlacement
     // and the commit's own preparedCapacity gate reading the same env.
     capacityPlacement: bookInsertionOffersLive(),
+    // Online-booking arrival grace (GATE_BOOK_ARRIVAL_GRACE; a no-op while
+    // the gate is off). The commit is the same createSelfBooking, which
+    // re-reads the live grace for this date (no signed offer on this flow) —
+    // the rebuild and the commit run in the same request, so both see the
+    // same gate and grace value.
+    bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
   });
 }
@@ -1584,6 +1591,10 @@ router.get('/:token', async (req, res, next) => {
     if (!lead) return res.json({ state: 'gone' });
 
     const custRow = await loadTrustedCustomer(db, lead, verified);
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    // Only the TRUSTED customer is attributed: leads.customer_id can come
+    // from unverified submitted contact info (see loadTrustedCustomer).
+    void recordPageView({ req, page: 'inspection', customerId: custRow?.id || null, subjectType: 'lead', subjectId: lead.id });
     const leadPayload = buildLeadPayload(lead, custRow);
 
     const eligibility = await readEligibility(lead, custRow, verified);

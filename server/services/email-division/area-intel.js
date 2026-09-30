@@ -7,7 +7,8 @@
  * re-identification floor; `visits` (the raw visit count) is still the
  * stored/sentence denominator once the floor clears. The pest numerator
  * is structured application targets only (service_products.targets, the
- * canonical completion-picker / product-label chips, counted as recorded),
+ * canonical completion-picker / product-label chips; species roll up to
+ * their family per the owner ruling 2026-09-30, see targetFamilyKey),
  * never technician_notes. This file is the authority on both rules; the
  * table's migration header (20260928070000, frozen once pushed) predates
  * them and still says "named in technician_notes" / "5-visit floor".
@@ -43,6 +44,33 @@ const PICKER_VOCAB_KEYS = new Set(
     .map((target) => treatmentTargetKey(target))
     .filter(Boolean),
 );
+
+// Owner ruling 2026-09-30: city stats count a species chip toward its
+// family ("Wolf spiders" → spiders, "German cockroaches" → roaches), so the
+// sentence speaks the way customers do and the counts don't split under the
+// privacy floor. Applied only to canonical-vocabulary keys (a hand-typed chip
+// that merely ends in "ants" never becomes "ants"). A visit counts once per
+// family however many of its species were treated.
+const FAMILY_LISTS = {
+  ants: [],
+  roaches: ['cockroaches'],
+  spiders: ['brown recluse'],
+  termites: [],
+  wasps: ['paper wasps', 'mud daubers', 'yellowjackets', 'hornets'],
+  flies: ['drain flies', 'house flies', 'fruit flies', 'phorid flies'],
+  'rats and mice': ['rats', 'mice', 'rodents', 'roof rats', 'norway rats', 'house mice'],
+};
+const FAMILY_SUFFIXES = [[' ants', 'ants'], [' cockroaches', 'roaches'], [' roaches', 'roaches'], [' spiders', 'spiders'], [' termites', 'termites']];
+const FAMILY_KEYS = new Set(Object.keys(FAMILY_LISTS));
+const FAMILY_BY_KEY = new Map(Object.entries(FAMILY_LISTS).flatMap(([family, keys]) => keys.map((key) => [key, family])));
+
+/** The family key a canonical target counts toward, or the key itself. */
+function targetFamilyKey(key) {
+  if (FAMILY_KEYS.has(key)) return key;
+  if (FAMILY_BY_KEY.has(key)) return FAMILY_BY_KEY.get(key);
+  const suffix = FAMILY_SUFFIXES.find(([end]) => key.endsWith(end));
+  return suffix ? suffix[1] : key;
+}
 
 /** The full canonical target vocabulary for one compute run: the static
  * picker lists above, unioned with every products_catalog.target_pests
@@ -133,7 +161,9 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
     const entry = byCity.get(city);
     entry.visits += 1;
     entry.customers.add(row.customer_id);
-    for (const pest of treatmentTargets(productsByVisit.get(row.id) || [])) {
+    const visitKeys = new Set(treatmentTargets(productsByVisit.get(row.id) || [])
+      .map((pest) => (vocabulary.has(pest) ? targetFamilyKey(pest) : pest)));
+    for (const pest of visitKeys) {
       entry.pestCounts.set(pest, (entry.pestCounts.get(pest) || 0) + 1);
     }
   }
@@ -153,7 +183,7 @@ async function computeAreaIntel({ month = new Date(), conn = db } = {}) {
       // string — dropped here rather than reaching email_area_intel_monthly
       // at all, which is the ONLY table getAreaIntelSentence reads.
       const toInsert = [...entry.pestCounts.entries()]
-        .filter(([pestKey, count]) => count > 0 && vocabulary.has(pestKey))
+        .filter(([pestKey, count]) => count > 0 && (vocabulary.has(pestKey) || FAMILY_KEYS.has(pestKey)))
         .map(([pestKey, count]) => ({
           month: monthStart, city, visits: entry.visits,
           pest_key: pestKey, visits_with_pest: count, computed_at: new Date(),
@@ -196,4 +226,6 @@ async function getAreaIntelSentence({ city, month = new Date(), minVisits = 20, 
   return `In ${monthName} our technicians treated ${targetForSentence(top.pest_key)} at ${pct}% of our ${top.visits} visits in ${String(city).trim()}.`;
 }
 
-module.exports = { computeAreaIntel, getAreaIntelSentence, targetForSentence, canonicalTargetVocabulary, MIN_CITY_CUSTOMERS };
+module.exports = {
+  computeAreaIntel, getAreaIntelSentence, targetForSentence, targetFamilyKey, canonicalTargetVocabulary, MIN_CITY_CUSTOMERS,
+};

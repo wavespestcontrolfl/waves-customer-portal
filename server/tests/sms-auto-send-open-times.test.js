@@ -107,6 +107,13 @@ test('a quoted slot that is STILL open sends normally', async () => {
   expect(sendCustomerMessage).toHaveBeenCalled();
 });
 
+test('a scheduler-minted snapshot forwards scheduledServiceId to the recheck (GATE_SMS_OFFERS_SCHEDULER)', async () => {
+  drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
+  const snap = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, scheduledServiceId: 'ss-1', source: 'scheduler' } };
+  await expect(attempt({ openTimesSnapshot: snap })).resolves.toMatchObject({ sent: true });
+  expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ scheduledServiceId: 'ss-1' }));
+});
+
 test('the snapshot\'s serviceType is forwarded to the recheck when present (Codex r3 audit P1)', async () => {
   drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
   const snap = { ...OPEN_TIMES_SNAPSHOT, lookup: { ...OPEN_TIMES_SNAPSHOT.lookup, serviceType: 'Lawn Fertilization' } };

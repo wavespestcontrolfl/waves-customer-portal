@@ -16,11 +16,18 @@
  * item 1, owner ruling 2026-09-28) are the outside-write tools: structurally
  * two-step (write-gates.js OUTSIDE_WRITE_TOOL_NAMES), full-access-only
  * (ib-access.js ibFullAccess, enforced in routes/admin-intelligence-bar.js —
- * not here). THIS PR IS PREVIEW ONLY: called with confirmed:true, both
- * refuse — the commit path (an actual Railway serviceInstanceRedeploy /
- * serviceInstanceRestart mutation) ships in a follow-up PR. RAILWAY_TOKEN is
- * read-scoped today; a write needs deploy/restart added (see the IB scope
- * doc's token checklist).
+ * not here). Confirmed, each acts ONLY on the pinned identifiers
+ * /confirm-action verified against the live preview's fingerprint
+ * (`_verified_railway_service_id` / `_verified_railway_deployment_id`,
+ * threaded in by admin-intelligence-bar.js) — never a re-resolve of
+ * service_name from the confirmed call's own input. Redeploy calls Railway's
+ * `serviceInstanceRedeploy(serviceId, environmentId)` mutation; restart calls
+ * `deploymentRestart(id)` on the pinned latest-deployment id — Railway's
+ * restart mutation targets a DEPLOYMENT, not a service, so restart pins the
+ * deployment id rather than the service id (verified live against the
+ * Railway public API schema via `railway api describe`). RAILWAY_TOKEN needs
+ * write access for either mutation to succeed; a 401/403 (or a permission-
+ * shaped GraphQL error) surfaces as a plain "the token is read-only" error.
  */
 
 const logger = require('../logger');
@@ -81,7 +88,7 @@ Use for: "is MODEL_DEEP set in prod?", "what env vars does the server have?", "i
   },
   {
     name: 'redeploy_railway_service',
-    description: `Redeploy a Railway service from its latest successful image (a fresh deploy of what is already built, not a rebuild). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Railway.
+    description: `Redeploy a Railway service from its latest successful image (a fresh deploy of what is already built, not a rebuild). Owner login only, through a confirmation card.
 Use for: "redeploy the server", "kick the portal service", "roll the deploy again"`,
     input_schema: {
       type: 'object',
@@ -92,7 +99,7 @@ Use for: "redeploy the server", "kick the portal service", "roll the deploy agai
   },
   {
     name: 'restart_railway_service',
-    description: `Restart a Railway service's running instance (no new deploy — the same build, process restarted). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Railway.
+    description: `Restart a Railway service's running instance (no new deploy — the same build, process restarted). Owner login only, through a confirmation card.
 Use for: "restart the server", "bounce the portal service", "it's hung, restart it"`,
     input_schema: {
       type: 'object',
@@ -103,7 +110,10 @@ Use for: "restart the server", "bounce the portal service", "it's hung, restart 
   },
 ];
 
-const NOT_YET_IMPLEMENTED_MESSAGE = 'Railway write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const READ_ONLY_TOKEN_MESSAGE = 'The Railway token cannot deploy or restart — it needs write access (a token with deploy/restart permission) before this action can commit.';
+// GraphQL reports an authorization failure as HTTP 200 + errors[]; match the
+// message shapes Railway uses for it.
+const RAILWAY_PERMISSION_ERROR_RE = /not authorized|unauthori[sz]ed|forbidden|permission|access denied|insufficient/i;
 
 // Discovered ids are cached for the process lifetime — a project token maps
 // to exactly one project + environment, so they cannot change under us.
@@ -123,7 +133,7 @@ function getAuthHeaders() {
   return null;
 }
 
-async function railwayGraphQL(query, variables = {}) {
+async function railwayGraphQL(query, variables = {}, { forWrite = false } = {}) {
   const authHeaders = getAuthHeaders();
   if (!authHeaders) {
     throw new Error(NOT_CONFIGURED_MESSAGE);
@@ -138,11 +148,24 @@ async function railwayGraphQL(query, variables = {}) {
       body: JSON.stringify({ query, variables }),
       signal: controller.signal,
     });
+    if (forWrite && (res.status === 401 || res.status === 403)) {
+      const err = new Error(READ_ONLY_TOKEN_MESSAGE);
+      err.status = res.status;
+      err.writeAccessRequired = true;
+      throw err;
+    }
     if (!res.ok) {
-      throw new Error(`Railway API returned HTTP ${res.status}`);
+      const err = new Error(`Railway API returned HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
     }
     const json = await res.json();
     if (json.errors && json.errors.length) {
+      if (forWrite && RAILWAY_PERMISSION_ERROR_RE.test(String(json.errors[0].message || ''))) {
+        const err = new Error(READ_ONLY_TOKEN_MESSAGE);
+        err.writeAccessRequired = true;
+        throw err;
+      }
       throw new Error(`Railway API error: ${json.errors[0].message}`);
     }
     return json.data;
@@ -383,7 +406,7 @@ async function getRailwayVariableNames(input) {
   };
 }
 
-// Shared preview/refuse-commit for redeploy/restart — the structural
+// Shared preview/commit for redeploy/restart — the structural
 // two-step gate (write-gates.js OUTSIDE_WRITE_TOOL_NAMES). Full access is
 // enforced by the route, not here (ib-access.js ibFullAccess).
 async function writeRailwayService(toolName, input) {
@@ -393,7 +416,7 @@ async function writeRailwayService(toolName, input) {
       preview: true,
       tool: toolName,
       // The pinned canonical identity (id + exact name) — never the
-      // operator's raw string — is what a future commit path must act on.
+      // operator's raw string — is what the confirmed commit acts on.
       service: {
         id: service.serviceId,
         service: service.serviceName,
@@ -411,7 +434,55 @@ async function writeRailwayService(toolName, input) {
         : `Restart "${service.serviceName}"'s running instance — no new deploy, the same build restarts.`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned service id + latest-deployment id that
+  // /confirm-action verified against the live preview above — never
+  // re-resolve service_name from this call's own input (untrusted here).
+  const pinnedServiceId = input._verified_railway_service_id;
+  const pinnedDeploymentId = input._verified_railway_deployment_id;
+  if (!pinnedServiceId) {
+    return {
+      error: 'Missing the verified service identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  // Re-read the environment and re-assert the pin under this call: the
+  // service must still exist and its latest deployment must still be the one
+  // the card showed. A deploy that landed in the gap means the card's
+  // "currently <status>" is stale — refuse rather than act on a newer build.
+  const { environmentId } = await resolveIds();
+  const { services } = await getServiceInstances();
+  const live = services.find((s) => s.serviceId === pinnedServiceId);
+  if (!live || (live.latestDeployment?.id || null) !== (pinnedDeploymentId || null)) {
+    return {
+      error: 'The Railway service changed after the card was shown (a new deployment landed or the service is gone). Ask again for a fresh confirmation card.',
+      code: 'target_changed',
+      preview_changed: true,
+    };
+  }
+  if (toolName === 'redeploy_railway_service') {
+    await railwayGraphQL(
+      `mutation serviceInstanceRedeploy($serviceId: String!, $environmentId: String!) {
+        serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+      }`,
+      { serviceId: pinnedServiceId, environmentId },
+      { forWrite: true },
+    );
+    return { success: true, tool: toolName, service_id: pinnedServiceId, redeployed_from_deployment_id: pinnedDeploymentId || null };
+  }
+  // Restart targets a DEPLOYMENT (Railway has no service-level restart
+  // mutation), so it needs a deployment to bounce.
+  if (!pinnedDeploymentId) {
+    return {
+      error: `Service "${live.serviceName}" has no deployment to restart.`,
+      code: 'no_deployment',
+    };
+  }
+  await railwayGraphQL(
+    `mutation deploymentRestart($id: String!) { deploymentRestart(id: $id) }`,
+    { id: pinnedDeploymentId },
+    { forWrite: true },
+  );
+  return { success: true, tool: toolName, service_id: pinnedServiceId, restarted_deployment_id: pinnedDeploymentId };
 }
 
 async function executeOpsTool(toolName, input = {}) {
@@ -445,7 +516,7 @@ async function executeOpsTool(toolName, input = {}) {
     } else {
       logger.error(`[intelligence-bar:ops] Tool ${toolName} failed:`, err);
     }
-    return { error: err.message };
+    return { error: err.message, ...(err.writeAccessRequired ? { code: 'write_access_required' } : {}) };
   }
 }
 

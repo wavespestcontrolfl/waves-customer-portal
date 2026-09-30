@@ -62,6 +62,24 @@ const cand = (id, intent, createdAt) => ({
   inbound_at: createdAt,
 });
 
+// The version-suffix contract (COMPANY FACTS = '_cf', PAYMENT FACTS = '_pf') plus the
+// SLA and FREE RE-SERVICE line markers. Whatever a version requires vs forbids, the
+// clauses bind in this ONE order (SLA, COMPANY FACTS, Payment options, FREE RE-SERVICE):
+// SLA and the Payment options / FREE RE-SERVICE lines are STRUCTURAL patterns (Postgres `~`,
+// PR #5331 round 9); COMPANY FACTS is the EXACT rendered section before the first BILLING:
+// line (Codex #5392 r3 P2), so its clause binds the delimiter + exact suffix.
+const {
+  BILLING_DELIMITER: D_, exactSectionSuffix: exactSuffix_,
+} = require('../services/sms-company-facts');
+const EXACT = exactSuffix_();
+const pattern_ = (m) => require('../services/sms-sealed-eval')._test.markerPattern(m);
+const CONTRACT_BINDINGS = [
+  pattern_('FOLLOW-UP SLA RIGHT NOW:'),
+  D_, D_, EXACT.length, EXACT,
+  pattern_('- Payment options:'),
+  pattern_('FREE RE-SERVICE:'),
+];
+
 describe('sealEvalItems — selection contract', () => {
   test('pool already at target → no candidate query side effects, sealed: 0', async () => {
     const dbi = makeFakeDb({ activeCount: 100 });
@@ -147,7 +165,6 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   // sms-sealed-eval.js), never a bare column reference — so each marker's
   // `%marker%` binding is preceded by one POSITION(...) binding per free-text
   // section header. Mirrors FREE_TEXT_SECTION_HEADERS in the service module.
-  const expectedBindingsFor = (markers) => markers.map((m) => require('../services/sms-sealed-eval')._test.markerPattern(m));
   const drafter = require('../services/sms-shadow-drafter');
   let versionSpy;
   afterEach(() => { if (versionSpy) versionSpy.mockRestore(); versionSpy = null; });
@@ -245,13 +262,13 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
   });
 
   test('+c (complaints on): the compatibility count, the candidate filter and the retirement all require BOTH fact lines', async () => {
-    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers+c');
+    versionSpy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers_cf_pf+c');
     const dbi = makeV12FakeDb({ activeCount: 100, compatibleCount: 0, candidates: [v12cand('a', '2026-08-01')] });
     await sealEvalItems({ target: 100, dbi });
     const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /~ \?/.test(String(args[0])));
     expect(likeRaws.length).toBeGreaterThanOrEqual(3); // count, candidates, retirement
     for (const [, args] of likeRaws) {
-      expect(args[1]).toEqual(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']));
+      expect(args[1]).toEqual(CONTRACT_BINDINGS);
       expect(String(args[0])).not.toMatch(/!~ \?/); // +c: every category fact is required, none forbidden
     }
     expect(likeRaws.some(([, args]) => /^NOT \(/.test(String(args[0])))).toBe(true);
@@ -268,7 +285,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
     expect(contract.length).toBeGreaterThanOrEqual(2); // the count + the candidate filter
     for (const [, args] of contract) {
       expect(String(args[0])).not.toMatch(/(?<!!)~ \?/); // nothing required, both lines forbidden
-      expect(args[1]).toEqual(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']));
+      expect(args[1]).toEqual(CONTRACT_BINDINGS);
     }
     expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /md\.facts_block/.test(String(args[0])) && /!~ \?/.test(String(args[0])))).toBe(true);
     // the v12 items beyond the target are retired (the fake reports 3)
@@ -295,7 +312,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       const likeRaws = dbi.calls.filter(([name, args]) => name === 'whereRaw' && /~ \?/.test(String(args[0])) && !/^NOT \(/.test(String(args[0])));
       expect(likeRaws.length).toBeGreaterThanOrEqual(2); // the compat count + the restore filter
       for (const [, args] of likeRaws) {
-        expect(args[1]).toEqual(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:']));
+        expect(args[1]).toEqual(CONTRACT_BINDINGS);
       }
       // restore targets INACTIVE rows, newest sealed_at first, limited to the whole shortfall (100)
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
@@ -338,7 +355,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
       // the restore selects RETIRED rows under the v11 contract: both v12 lines forbidden
       expect(dbi.calls.some(([name, args]) => name === 'where' && args[0] === 'active' && args[1] === false)).toBe(true);
       expect(dbi.calls.some(([name, args]) => name === 'whereRaw' && /^COALESCE\(facts_block, ''\)/.test(String(args[0])) && /!~ \?/.test(String(args[0]))
-        && JSON.stringify(args[1]) === JSON.stringify(expectedBindingsFor(['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:', 'FREE RE-SERVICE:'])))).toBe(true);
+        && JSON.stringify(args[1]) === JSON.stringify(CONTRACT_BINDINGS))).toBe(true);
       expect(dbi.updates.filter((u) => u.patch.active === false)).toHaveLength(1); // the v12 items are retired
     });
   });
@@ -347,7 +364,7 @@ describe('sealEvalItems — v12 compatibility-aware replenishment', () => {
 
 // #5194 r1 P1: the contract is exact — under plain v12 (complaints off) the
 // freezer counts, selects and keeps only rows WITHOUT the FREE RE-SERVICE line.
-test('v12 without +c: the compatibility SQL requires the SLA line AND forbids the FREE RE-SERVICE line', async () => {
+test('v12 without +c, _cf or _pf: the compatibility SQL requires the SLA line AND forbids the COMPANY FACTS, Payment options and FREE RE-SERVICE lines', async () => {
   const drafter = require('../services/sms-shadow-drafter');
   const spy = jest.spyOn(drafter, 'currentPromptVersion').mockReturnValue('house_voice_v12_real_answers');
   try {
@@ -363,18 +380,17 @@ test('v12 without +c: the compatibility SQL requires the SLA line AND forbids th
     dbi.raw = (sql) => sql;
     await sealEvalItems({ target: 100, dbi });
     const compat = calls.find(([m, args]) => m === 'whereRaw' && /~ \?/.test(String(args[0])));
-    // Independent-review P1 (round 6, PR #5331): the compat clause is now
-    // computed via the shared, position-scoped compatibleWhereRaw (see
-    // sms-sealed-eval.js's factsSectionSql) rather than a bare column
-    // reference — compare against that SAME helper instead of a hand-written
-    // SQL string, so this test tracks the real contract rather than a frozen
-    // snapshot of its SQL shape.
-    const expected = require('../services/sms-sealed-eval')._test.compatibleWhereRaw(
-      ['FOLLOW-UP SLA RIGHT NOW:', '- Payment options:'],
-      ['FREE RE-SERVICE:'],
+    // Computed via the shared compatibleWhereRaw, so this tracks the real contract rather than a
+    // frozen snapshot of its SQL shape: bare v12 requires SLA and forbids COMPANY FACTS,
+    // Payment options and FREE RE-SERVICE.
+    const contract = require('../services/sms-sealed-eval')._test.compatibleWhereRaw(
+      ['FOLLOW-UP SLA RIGHT NOW:'],
+      [require('../services/sms-company-facts').COMPANY_FACTS_HEADER, '- Payment options:', 'FREE RE-SERVICE:'],
     );
-    expect(compat[1][0]).toBe(expected.sql);
-    expect(compat[1][1]).toEqual(expected.bindings);
+    expect(compat[1][0]).toBe(contract.sql);
+    expect(compat[1][1]).toEqual(contract.bindings);
+    expect(compat[1][1]).toEqual(CONTRACT_BINDINGS);
+    expect(compat[1][0]).toMatch(/NOT \(position\(\?::text in .*split_part\(/); // the pre-_cf identity forbids COMPANY FACTS (Codex #5392 r1)
   } finally {
     spy.mockRestore();
   }

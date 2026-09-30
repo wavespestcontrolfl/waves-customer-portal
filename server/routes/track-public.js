@@ -35,6 +35,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { isTrackTokenLive } = require('../services/track-token-expiry');
 const logger = require('../services/logger');
+const { recordPageView, logViewFailure } = require('../services/customer-page-views');
 const { resolveTechPhotoUrl } = require('../services/tech-photo');
 const PhotoService = require('../services/photos');
 const {
@@ -638,6 +639,39 @@ router.post('/:token/stops-ahead', async (req, res, next) => {
     });
   } catch (err) {
     next(err);
+  }
+});
+
+// Customer-page-view write companion. The GET above is contractually
+// read-only (it is also the 30s en-route poll), so the page opens ONE view by
+// POSTing here once, on its first successful load, never on polls. Same token
+// resolution and expiry fence as the GET (unknown / malformed / expired = the
+// same generic 404, no write), same router-level rate limit, body ignored.
+// Answers 204 immediately; the insert is fire-and-forget (bots, staff
+// browsers and repeat opens inside the dedupe window are skipped by the
+// recorder).
+router.post('/:token/view', async (req, res) => {
+  res.set(PRIVACY_HEADERS);
+  if (!TOKEN_RE.test(req.params.token || '')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+  try {
+    const row = await db('scheduled_services as s')
+      .where('s.track_view_token', req.params.token)
+      .first('s.id', 's.customer_id', 's.track_token_expires_at');
+    if (!row || !isTrackTokenLive(row.track_token_expires_at)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    void recordPageView({
+      req, page: 'track', customerId: row.customer_id, subjectType: 'scheduled_service', subjectId: row.id,
+    });
+    return res.status(204).end();
+  } catch (err) {
+    // Never forward the raw error: Knex text can carry the bound
+    // track_view_token and the global handler logs err.message/stack.
+    // Code-only log; the beacon is best-effort telemetry, so answer 204.
+    logViewFailure('lookup', 'track', 'scheduled_service', err);
+    return res.status(204).end();
   }
 });
 

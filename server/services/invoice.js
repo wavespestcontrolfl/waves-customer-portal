@@ -452,6 +452,48 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // conversion, or annual-prepay stamping can commit between the two, and the
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
+// True when this invoice bills an upcoming visit OTHER than its own anchor,
+// read from the invoice's own lines (client_id scheduled_<id>_primary — every
+// service mint writes one) plus the combined first-application stamp
+// (scheduled_services.first_application_invoice_id). Fails closed.
+async function invoiceBillsAnotherUpcomingVisit(conn, invoiceRow) {
+  let items = invoiceRow.line_items;
+  if (typeof items === "string") { try { items = JSON.parse(items); } catch { items = []; } }
+  const lines = Array.isArray(items) ? items : [];
+  const itemized = lines.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ""))?.[1]).filter(Boolean);
+  const lineIds = itemized.filter((id) => id !== String(invoiceRow.scheduled_service_id));
+  // An unitemized base-application invoice on an anchor bills every member
+  // of that anchor's combined group (the re-price side reads it the same
+  // way — Codex r8 P1 on #5301), whichever stamp those members carry.
+  const aggregateOnAnchor = itemized.length === 0 && invoiceRow.scheduled_service_id
+    && lines.some((li) => lineIsBaseApplication(li));
+  if (!invoiceRow.id && !lineIds.length) return false; // nothing to match on
+  try {
+    // The stamp column postdates some schemas (dev/preview/rolling deploys);
+    // without it only the invoice's own member lines can match (Codex r9 P2).
+    const hasStamp = await conn.schema.hasColumn("scheduled_services", "first_application_invoice_id");
+    if (!hasStamp && !lineIds.length) return false;
+    const row = await conn("scheduled_services")
+      .where(function () {
+        if (hasStamp) this.where("first_application_invoice_id", invoiceRow.id);
+        if (lineIds.length) this.orWhereIn("id", lineIds);
+        if (hasStamp && aggregateOnAnchor) {
+          this.orWhereIn("first_application_invoice_id", function () {
+            this.select("id").from("invoices").where("scheduled_service_id", invoiceRow.scheduled_service_id);
+          });
+        }
+      })
+      .whereNot("id", invoiceRow.scheduled_service_id)
+      // Only statuses that prove the billed work won't be charged; a COMPLETED
+      // member can still be re-priced (Codex r9 P1 on #5301).
+      .whereNotIn("status", ["cancelled", "canceled", "no_show", "skipped", "rescheduled"])
+      .first("id");
+    return Boolean(row);
+  } catch (err) {
+    throw new Error(`Could not verify the other visits this invoice bills — refusing to unvoid (${err.message})`);
+  }
+}
+
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
   // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) additions — both
   // independent of the scheduled_service_id early-return below, so they
@@ -573,6 +615,16 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   ) {
     throw new Error(
       "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
+    );
+  }
+  // A combined first-application invoice also bills OTHER visits (owner
+  // ruling 2026-09-29 on #5301): restoring one while it bills another
+  // upcoming visit could revive an old price that visit was re-priced away
+  // from while this invoice was void. Refused outright — staff create a new
+  // invoice instead.
+  if (await invoiceBillsAnotherUpcomingVisit(conn, invoiceRow)) {
+    throw new Error(
+      "Cannot unvoid — this invoice also bills other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
     );
   }
 }

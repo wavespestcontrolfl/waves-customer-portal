@@ -448,7 +448,10 @@ const NotificationService = {
         if (Number.isFinite(windowMs) && windowMs > 0) {
           existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
         }
-        const existing = await existingQuery.first();
+        // Newest row first: a key with a rolling window (or a duplicate left by
+        // an old race) can hold several rows, and the LATEST is the standing
+        // one — never an arbitrary older row.
+        const existing = await existingQuery.orderBy('created_at', 'desc').first();
         if (existing) {
           // Compared and stored in create()'s admin form (emoji-stripped +
           // brevity-cut), or a difference the guard itself introduces (an

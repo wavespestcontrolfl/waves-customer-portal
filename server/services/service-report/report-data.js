@@ -26,6 +26,7 @@ const { getTurfHeightForVisit, getTurfHeightTrend } = require('../turf-height-se
 const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
+const { resolveWateringRule } = require('./lawn-watering-rule');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -228,6 +229,11 @@ function approvedReportProductFacts(catalog = {}) {
     // rendered directly, only classified deterministically.
     moaGroup: catalog.moa_group || null,
     rainfastMinutes: Number.isFinite(Number(catalog.rainfast_minutes)) ? Number(catalog.rainfast_minutes) : null,
+    // Post-application watering rule (hold / water_in / none, or null =
+    // unknown), frozen with the other facts so a later catalog edit never
+    // rewrites what an old visit told the customer. Internal only: it is NOT
+    // copied onto applications[].product (the public payload).
+    wateringRule: resolveWateringRule(catalog),
   };
 }
 
@@ -237,7 +243,64 @@ function approvedReportProductFacts(catalog = {}) {
 // approval, un-approval, label edit, or row delete must not rewrite what
 // this report says was applied. Ids absent from the map (pre-snapshot
 // records, or a product attached after the freeze) keep the live lookup.
-async function attachApprovedReportProductFacts(knex, products = [], { frozenFacts = null } = {}) {
+async function attachApprovedReportProductFacts(knex, products = [], options = {}) {
+  const attached = await attachApprovedReportProductFactsBase(knex, products, options);
+  return attachLiveWateringRules(knex, attached);
+}
+
+// Visits completed before the watering rule existed froze product facts with
+// no `wateringRule` key. For those (and only those) resolve the rule from the
+// live catalog and attach it to a COPY of the frozen facts: the snapshot object
+// itself is never mutated, and a product the snapshot marked unapproved (null
+// facts) keeps no rule. A failed lookup leaves the facts as they were (no rule
+// = no claim).
+async function attachLiveWateringRules(knex, products) {
+  if (!Array.isArray(products) || !products.length) return products;
+  const needsRule = (product) => {
+    const facts = product?.approved_report_product_facts;
+    return !!facts && typeof facts === 'object'
+      && !Object.prototype.hasOwnProperty.call(facts, 'wateringRule')
+      && !!canonicalProductId(product.product_id);
+  };
+  const ids = [...new Set(products.filter(needsRule).map((product) => canonicalProductId(product.product_id)))];
+  if (!ids.length) return products;
+  let rows = [];
+  try {
+    rows = await knex('products_catalog')
+      .whereIn('id', ids)
+      .select(
+        'id',
+        'name',
+        'category',
+        'subcategory',
+        'active_ingredient',
+        'formulation',
+        'application_method',
+        'irrigation_required',
+        'rainfast_minutes',
+        'post_application_watering',
+      );
+  } catch {
+    return products;
+  }
+  const byId = new Map(rows.map((row) => [String(row.id), row]));
+  const out = products.map((product) => {
+    if (!needsRule(product)) return product;
+    const row = byId.get(String(canonicalProductId(product.product_id)));
+    if (!row) return product;
+    return {
+      ...product,
+      approved_report_product_facts: {
+        ...product.approved_report_product_facts,
+        wateringRule: resolveWateringRule(row),
+      },
+    };
+  });
+  if (products.catalogEnrichmentFailed) out.catalogEnrichmentFailed = true;
+  return out;
+}
+
+async function attachApprovedReportProductFactsBase(knex, products = [], { frozenFacts = null } = {}) {
   const frozen = frozenFacts && typeof frozenFacts === 'object' ? frozenFacts : null;
   // service_products.product_id is ON DELETE SET NULL: a catalog row deleted
   // after completion leaves the applied row keyed only by its snapshot
@@ -309,6 +372,10 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
         'approved_for_service_report',
         'moa_group',
         'rainfast_minutes',
+        'subcategory',
+        'formulation',
+        'application_method',
+        'post_application_watering',
       );
   } catch {
     // Signal the failure instead of silently returning bare rows (codex P2
@@ -4175,7 +4242,13 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // "not termite" only through that same existing default.
         ...(reportProductCopyGateOn() && serviceLine !== 'termite'
           ? (() => {
-            const copy = reportProductCopyForApplicationProduct(product);
+            // service.city is the visit's own city (COALESCE stamped
+            // service_address_city, customers.city — the exact precedence
+            // the "Labeled for N+ City pests" ruling asks for: the property
+            // serviced, falling back to the customer's own city), already
+            // overlaid by applyReportIdentitySnapshot at the top of this
+            // function (owner ruling 2026-09-29).
+            const copy = reportProductCopyForApplicationProduct(product, service.city);
             return copy ? { report_copy: copy } : {};
           })()
           : {}),

@@ -148,7 +148,11 @@ condition disagreement is explained. `internal.identity` (per slot
 `{ disagreed, openai_answered }`, `trigger_reasons`, `lane`) and
 `internal.conditions` (`disagreed`, `openai_answered`, `trigger_reasons`,
 `host_union`, `corrected_host`) break the same flags out per scope;
-`escalation_reasons` is the union.
+`escalation_reasons` is the union. `internal.referee` (see the Referee
+section below) is a separate top-level key — the per-slot `disagreed` /
+`openai_answered` flags above already reflect a referee-settled outcome
+(e.g. `disagreed: false` after the referee sides with one earlier read), but
+never carry the referee's own diagnostics.
 
 ## The naming gate (§6.3)
 
@@ -352,6 +356,79 @@ bahiagrass.
   so two weeds are not rival answers.
 - **Output budget 4096**: Gemini's reasoning shares the output budget with
   the JSON answer, and at 2048 one lawn read came back cut off (a miss).
+
+## Referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-29 — narrowed from 09-28)
+
+Owner ruling 2026-09-28 replaced the 09-26 "Gemini → GPT-6 Astra, no Claude"
+ruling **for the plant engine only** (the pest engine's `photoIdVision`
+ladder in `pest-engine.js` / `pest-identification.js` is unchanged): the
+plant engine's second opinion moved from `OPENAI_FRONTIER` (Astra) to
+`OPENAI_PLANT_ID` (Sol) — `TEXT_POLICIES.plantIdVision`, unchanged by this
+narrowing. Owner ruling 2026-09-29 then narrowed the referee itself: Claude
+Fable 5.1 at effort `high` (`MODELS.ROUTES.plantIdReferee`) now breaks a
+plant-**NAME** tie only. Ships DARK behind `GATE_PLANT_ID_REFEREE` (off
+unless exactly `'true'`); off, the ladder is byte-identical to Gemini → Sol
+with no third call.
+
+`runReferee` runs AFTER `runEscalation` and AFTER the leg-failure check
+(`legFailureReason`): a run with no usable vision leg returns its failure
+first, so the billed referee call never runs for an answer that cannot be
+returned. It then runs only when **the run is `identify` mode**, the prior
+legs' combined photo read is neither unusable nor blocked, the
+total budget (`PHOTO_ID_V2_TIMEOUT_MS`) has room for one more leg, and at
+least one identity lane the subject actually uses
+(`identifyLaneSlotsFor(subject)`: turf/weeds for a lawn, host for
+tree_shrub/palm) came back **disagreed** (`identityFlags[slot].disagreed`
+with a `disagreementPair`). `identifyPlantV2` skips the call entirely when
+the combined prior read is already `blocked` (`namingGateFor(...).blocked`:
+unusable, conflicting `shows`, or `multiple_subjects`) — a blocked identify
+result discards every candidate, so the referee's vote could never surface
+either way.
+
+**Never a referee call for**: a workup (problem check) of any subject —
+workups stay Gemini → Sol, always; a missing second opinion
+(`blockPrettySure` with no disagreement); or a low-confidence AGREEMENT
+(both providers named the same thing, just under-confident). Only a genuine
+two-provider NAME split draws the call.
+
+One call covers every disagreed lane at once — same photos, the same
+`ESCALATION_SCHEMA` output (so the existing resolvers/validators apply
+unchanged), with an appended "earlier reads" block (`buildRefereePrompt`)
+naming each disagreed lane's first (Gemini) read and second (Sol) opinion
+(slug + confidence) and asking the referee to look at the photos fresh,
+since either earlier read may be wrong. The second read is exactly
+`disagreementPair[1]` — `combineIdentity` already sets that pair to
+`[geminiTop, openaiTop]`, i.e. Sol's own ranked top for that slot, never a
+merged (Gemini+Sol) list's top.
+
+**Merge (tie-break only, deterministic)**, per disagreed lane, `R` = the
+referee's own top for that slot:
+
+- `R` matches side `A` or `B` of `disagreementPair` → that side goes first,
+  `disagreed: false`, `disagreementPair: null`; wording is capped at
+  `likely` — a referee-settled split never reads `pretty_sure`. A match on
+  an off-catalog side also requires the normalized `offCatalogName` to
+  match (case/whitespace-insensitive) — `sameCandidateKey` alone (shared
+  with the pest engine, never changed here) matches two off-catalog
+  candidates by `groupId` only, so two different off-catalog names in the
+  same group must not count as the same candidate for this tie-break.
+- Anything else — a third name, no referee answer for that slot at all,
+  schema-invalid, or unusable referee photos — leaves the lane **exactly**
+  as the escalation left it: no append, no re-rank, no partial credit.
+  `internal.referee.outcome[slot]` reads `'no_majority'` (a third name) or
+  `'unavailable'` (no usable referee answer for that slot).
+- The referee's own `quality`/`shows` verdict joins the conservative
+  photo-quality combine (`photoReadFor`) only when its vote actually settled
+  a lane. When it says the photos are unusable (`quality.usable === false`
+  or `shows === 'nothing'`), its identity vote is not merged at all, every
+  disagreed lane is left exactly as it was, and its quality read does not
+  count either: a tie-break that changed nothing never downgrades the
+  Gemini/Sol answer that stands.
+
+Diagnostics land in `internal` only (never `v2`): `internal.models.referee`
+(the leg, like every other model call) and `internal.referee: { triggered,
+scopes, outcome }` — `outcome` maps each identity lane the referee actually
+looked at to `'settled' | 'no_majority' | 'unavailable'`.
 
 ## What L4 must do
 

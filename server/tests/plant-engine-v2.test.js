@@ -28,8 +28,8 @@ function loadFixtureEngine() {
       ...actual,
       TEXT_POLICIES: {
         ...actual.TEXT_POLICIES,
-        photoIdVision: {
-          name: 'photoIdVision',
+        plantIdVision: {
+          name: 'plantIdVision',
           primary: { provider: 'gemini', model: 'gemini-3.8-flash-test' },
           fallback: { provider: 'openai', model: 'gpt-6-astra-test' },
         },
@@ -1796,6 +1796,409 @@ describe('plant-engine — deterministic builder (fixture catalog)', () => {
       expect(dispatch).toHaveBeenCalledTimes(3);
       expect(result.internal.escalation_reasons).toEqual(['close_call']);
       expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+    });
+  });
+
+  // ── referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-29: narrowed to
+  // plant-NAME tie-breaks, identify mode only) ────────────────────────────
+  describe('referee (GATE_PLANT_ID_REFEREE, owner ruling 2026-09-29)', () => {
+    const PHOTOS = [{ data: 'x', mimeType: 'image/jpeg' }];
+    const OK_QUALITY = { usable: true, issue: 'none' };
+    const idItem = (slug, confidence) => ({
+      slug, off_catalog_name: '', group_id: null, confidence,
+    });
+    const savedGate = process.env.GATE_PLANT_ID_REFEREE;
+    afterEach(() => {
+      if (savedGate === undefined) delete process.env.GATE_PLANT_ID_REFEREE;
+      else process.env.GATE_PLANT_ID_REFEREE = savedGate;
+    });
+
+    // Gemini's own top (st-augustine, verified 0.95) vs. Sol's escalation
+    // top (bahia, 0.9) — a genuine disagreement, disagreementPair =
+    // [st-augustine, bahia].
+    const candidatesLeg = { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [idItem('fixture-st-augustine', 0.95), idItem('fixture-bahia', 0.30)], weeds: [], host: [] } };
+    const verifyLeg = {
+      ok: true,
+      json: {
+        candidates: [
+          { slug: 'fixture-st-augustine', confidence: 0.95, cues_visible: [1], cues_not_visible: [] },
+          { slug: 'fixture-bahia', confidence: 0.30, cues_visible: [1], cues_not_visible: [] },
+        ],
+      },
+    };
+    const disagreeingEscalationLeg = {
+      ok: true,
+      json: {
+        quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.9, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+      },
+    };
+    const refereeTurf = (slug, confidence) => ({
+      ok: true,
+      json: {
+        quality: OK_QUALITY, shows: 'plant', turf: [{ slug, off_catalog_name: '', group_id: null, confidence, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+      },
+    });
+
+    test('Codex #5307 r10: two different off-catalog names in one group never draw the referee; the answer is that group either way', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const offCatalog = (name, confidence) => ({
+        slug: '', off_catalog_name: name, group_id: 'turfgrasses', confidence, cues_visible: [], cues_not_visible: [],
+      });
+      dispatch.mockImplementation(async (route, payload) => {
+        const step = String(payload?.promptVersion || '').split(':')[1];
+        if (step === 'candidates') return { ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [offCatalog('Zoysia', 0.5)], weeds: [], host: [] } };
+        if (step === 'escalation') {
+          return {
+            ok: true,
+            json: {
+              quality: OK_QUALITY, shows: 'plant', turf: [offCatalog('Centipede', 0.6)], weeds: [], host: [], observed_terms: [], conditions: [],
+            },
+          };
+        }
+        return { ok: false, reason: 'unused_leg' };
+      });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      // An off-catalog read is never named, so settling Zoysia vs Centipede
+      // could not change the answer: it is the group, and no Fable call is billed.
+      expect(dispatch.mock.calls.map(([, p]) => p.laneId)).not.toContain('plant_id_referee');
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+    });
+
+    test('gate off: no 4th dispatch, result identical to the pre-referee disagreement outcome', async () => {
+      delete process.env.GATE_PLANT_ID_REFEREE;
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+      expect(result.internal.models.referee).toBeNull();
+    });
+
+    test('identify + disagreement: the referee sides with side A (Gemini) -> that answer first, not disagreed, wording capped at likely', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(dispatch.mock.calls[3][1].laneId).toBe('plant_id_referee');
+      // Codex #5307 r8: ledger rows join the switchboard lanes by exact id;
+      // each step stays attributable through its prompt version.
+      expect(dispatch.mock.calls.map(([, p]) => [p.laneId, p.promptVersion.split(':')[1]])).toEqual([
+        ['plant_id', 'candidates'], ['plant_id', 'verify'], ['plant_id', 'escalation'], ['plant_id_referee', 'referee'],
+      ]);
+      // The first live run (2026-09-29) found every Fable call 400ing on the
+      // schema's numeric bounds; what reaches Anthropic must carry none.
+      // The shared llm/call.js anthropicSchema() strips them on the wire (#5347).
+      const { anthropicSchema } = jest.requireActual('../services/llm/call');
+      expect(JSON.stringify(anthropicSchema(dispatch.mock.calls[3][1].jsonSchema))).not.toMatch(/"(minimum|maximum|exclusiveMinimum|exclusiveMaximum|multipleOf)"/);
+      // A tie-break never holds the request for the whole 4-minute ladder budget.
+      expect(dispatch.mock.calls[3][1].timeoutMs).toBeLessThanOrEqual(engine._test.REFEREE_MAX_MS);
+      // Settled on Gemini's own top — never pretty_sure, even though its own
+      // confidence (0.95) clears the threshold, because a referee-settled
+      // split is capped (owner ruling 2026-09-28, unchanged 09-29).
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-st-augustine', wording: 'likely' });
+      expect(result.internal.identity.turf.disagreed).toBe(false);
+      expect(result.internal.referee.triggered).toBe(true);
+      expect(result.internal.referee.scopes).toContain('turf');
+      expect(result.internal.referee.outcome.turf).toBe('settled');
+      expect(result.internal.models.referee).toMatchObject({ ok: true });
+    });
+
+    test('identify + disagreement: the referee sides with side B (Sol) -> that answer first instead', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-bahia', 0.6)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result.internal.referee.outcome.turf).toBe('settled');
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-bahia', wording: 'likely' });
+      expect(result.internal.identity.turf.disagreed).toBe(false);
+    });
+
+    test('identify + disagreement + a third answer: the lane is left exactly as escalation left it, outcome no_majority', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, refereeTurf('fixture-seashore-paspalum', 0.7)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      // Still no majority — owner ruling 2026-09-29: the lane is left EXACTLY
+      // as the escalation left it (no append, unlike the removed 2-of-3
+      // shape's `refereeOnly` third candidate).
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+      expect(result.internal.identity.turf.disagreed).toBe(true);
+      expect(result.internal.referee.outcome.turf).toBe('no_majority');
+      expect(result.v2.candidates.map((c) => c.slug)).not.toContain('fixture-seashore-paspalum');
+    });
+
+    test('referee invalid/unavailable: the escalation result stands unchanged, outcome unavailable', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, { ok: false, reason: 'provider_error' }].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+      expect(result.internal.identity.turf.disagreed).toBe(true);
+      expect(result.internal.referee.triggered).toBe(true);
+      expect(result.internal.referee.outcome.turf).toBe('unavailable');
+      expect(result.internal.models.referee).toMatchObject({ ok: false });
+    });
+
+    test('identify + low-confidence AGREEMENT (no split): no referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      // Gemini and Sol both land on st-augustine (agreement) even though the
+      // combined confidence never climbs — an undisputed but unsure top.
+      // Owner ruling 2026-09-29: the referee never runs for an agreement,
+      // low-confidence or not.
+      const lowConfidenceAgreeingLeg = {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [{ slug: 'fixture-st-augustine', off_catalog_name: '', group_id: null, confidence: 0.4, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+        },
+      };
+      [candidatesLeg, verifyLeg, lowConfidenceAgreeingLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.identity.turf.disagreed).toBe(false);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+    });
+
+    test('identify + missing second opinion (Sol left the scope empty): no referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const emptyTurfEscalationLeg = {
+        ok: true,
+        json: { quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [], observed_terms: [], conditions: [] },
+      };
+      [candidatesLeg, verifyLeg, emptyTurfEscalationLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      // Only 3 dispatches (candidates, verify, escalation) — a missing
+      // second opinion (`blockPrettySure`, never `disagreed`) is explicitly
+      // excluded from the narrowed referee (owner ruling 2026-09-29).
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.identity.turf.openai_answered).toBe(false);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+    });
+
+    test('workup mode: even with a condition disagreement, no referee call (workups stay Gemini -> Sol)', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      // Call A: no identity candidates at all (verify is skipped).
+      dispatch.mockResolvedValueOnce({ ok: true, json: { quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [] } });
+      // Call C (conditions): Gemini's own top.
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: OK_QUALITY,
+          observed_terms: ['browning'],
+          candidates: [{ slug: 'fixture-drought', confidence: 0.5, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
+        },
+      });
+      // Call D (escalation): Sol disagrees.
+      dispatch.mockResolvedValueOnce({
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [], observed_terms: [], conditions: [{ slug: 'fixture-herbicide-injury', confidence: 0.5, elements_visible: [1], signs_visible: [], symptoms_visible: [] }],
+        },
+      });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'workup' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.conditions.disagreed).toBe(true);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+    });
+
+    test('Codex #5307 r2: a run with no usable vision leg fails BEFORE the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      dispatch.mockResolvedValue({ ok: false, reason: 'gemini_503' });
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(result).toEqual({ ok: false, reason: 'vision_unavailable' });
+      const lanes = dispatch.mock.calls.map(([, payload]) => payload?.laneId);
+      expect(lanes).not.toContain('plant_id_referee');
+    });
+
+    test('Codex #5307 r6: a prior UNUSABLE read skips the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const unusableEscalation = {
+        ...disagreeingEscalationLeg,
+        json: { ...disagreeingEscalationLeg.json, quality: { usable: false, issue: 'blurry' } },
+      };
+      [candidatesLeg, verifyLeg, unusableEscalation, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.referee.triggered).toBe(false);
+    });
+
+    test('finding 2: a prior BLOCKED (but still usable) read — multiple subjects — also skips the billed referee call', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      // Identify results discard every candidate once the combined read is
+      // `blocked` (usable OR not), so the referee's vote could never
+      // surface either way (Codex #5307 r7 finding 2, widened from
+      // `.unusable` alone).
+      const blockedEscalation = {
+        ...disagreeingEscalationLeg,
+        json: { ...disagreeingEscalationLeg.json, quality: { usable: true, issue: 'multiple_subjects' } },
+      };
+      [candidatesLeg, verifyLeg, blockedEscalation, refereeTurf('fixture-st-augustine', 0.85)].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(3);
+      expect(result.internal.referee.triggered).toBe(false);
+    });
+
+    test('an unusable referee read never merges its vote, and never downgrades the Gemini/Sol answer that stands', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const unusableRefereeLeg = {
+        ok: true,
+        json: {
+          quality: { usable: false, issue: 'blurry' }, shows: 'plant', turf: [{ slug: 'fixture-seashore-paspalum', off_catalog_name: '', group_id: null, confidence: 0.99, cues_visible: [1], cues_not_visible: [] }], weeds: [], host: [], observed_terms: [], conditions: [],
+        },
+      };
+      [candidatesLeg, verifyLeg, disagreeingEscalationLeg, unusableRefereeLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'lawn', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(4);
+      // The disagreement stands exactly as it did before the referee — its
+      // confident vote is never merged once it says the photos themselves
+      // are unusable.
+      expect(result.internal.referee.outcome.turf).toBe('unavailable');
+      expect(result.internal.identity.turf.disagreed).toBe(true);
+      // Pre-push audit on Codex #5307 r8: a tie-break that merged nothing
+      // must not veto the earlier reads' usable photo — the answer is the
+      // same Gemini/Sol split it would have been without the referee.
+      expect(result.v2.quality.usable).toBe(true);
+      expect(result.v2.answer).toMatchObject({ level: 'group', node_id: 'turfgrasses' });
+    });
+
+    test('finding 5: a tree_shrub run with a total Gemini miss and a confident Sol host makes NO referee call (turf/weeds never apply, and no disagreement)', async () => {
+      process.env.GATE_PLANT_ID_REFEREE = 'true';
+      const geminiMiss = { ok: false, reason: 'provider_error' };
+      const solHostLeg = {
+        ok: true,
+        json: {
+          quality: OK_QUALITY, shows: 'plant', turf: [], weeds: [], host: [{ slug: 'fixture-citrus', off_catalog_name: '', group_id: null, confidence: 0.95, cues_visible: [1], cues_not_visible: [] }], observed_terms: [], conditions: [],
+        },
+      };
+      [geminiMiss, solHostLeg].forEach((leg) => dispatch.mockResolvedValueOnce(leg));
+      const result = await engine.identifyPlantV2({ photos: PHOTOS, subject: 'tree_shrub', mode: 'identify' });
+      expect(dispatch).toHaveBeenCalledTimes(2);
+      expect(result.internal.referee).toEqual({ triggered: false, scopes: [], outcome: {} });
+      expect(result.v2.answer).toMatchObject({ level: 'entry', node_id: 'fixture-citrus' });
+    });
+  });
+
+  // ── Codex #5307 r7 referee regressions (narrowed design) ────────────────
+  describe('Codex #5307 r7 referee regressions (name tie-breaks only)', () => {
+    test('identify mode gets its own subject lanes; workup mode never gets any (owner ruling 2026-09-29)', () => {
+      expect(engine._test.refereeCandidateScopes({ subject: 'tree_shrub', mode: 'workup' })).toEqual([]);
+      expect(engine._test.refereeCandidateScopes({ subject: 'palm', mode: 'workup' })).toEqual([]);
+      expect(engine._test.refereeCandidateScopes({ subject: 'lawn', mode: 'workup' })).toEqual([]);
+      expect(engine._test.refereeCandidateScopes({ subject: 'tree_shrub', mode: 'identify' })).toEqual(['host']);
+      expect(engine._test.refereeCandidateScopes({ subject: 'palm', mode: 'identify' })).toEqual(['host']);
+      expect(engine._test.refereeCandidateScopes({ subject: 'lawn', mode: 'identify' })).toEqual(['turf', 'weeds']);
+    });
+
+    test('a third referee answer never settles the tie, and the lane comes back untouched (no append, unlike the removed 2-of-3 shape)', () => {
+      const turfIndex = engine.turfIndexFor();
+      const bahia = {
+        slug: 'fixture-bahia', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.6, entry: turfIndex.find((e) => e.slug === 'fixture-bahia'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const stAug = {
+        slug: 'fixture-st-augustine', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.5, entry: turfIndex.find((e) => e.slug === 'fixture-st-augustine'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const escalation = {
+        identityFlags: {
+          turf: {
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [bahia, stAug],
+          },
+        },
+        slots: { turf: [bahia, stAug] },
+      };
+      const refereeJson = { turf: [{ slug: 'fixture-seashore-paspalum', off_catalog_name: '', group_id: null, confidence: 0.99 }] };
+      const merged = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, refereeJson);
+      expect(merged.outcome).toBe('no_majority');
+      expect(merged.slots).toBeUndefined();
+      expect(merged.flags).toBeUndefined();
+    });
+
+    test('no referee answer for the slot at all -> unavailable, no merge', () => {
+      const turfIndex = engine.turfIndexFor();
+      const bahia = {
+        slug: 'fixture-bahia', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.6, entry: turfIndex.find((e) => e.slug === 'fixture-bahia'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const stAug = {
+        slug: 'fixture-st-augustine', offCatalogName: null, groupId: 'turfgrasses', confidence: 0.5, entry: turfIndex.find((e) => e.slug === 'fixture-st-augustine'), cuesVisible: [1], cuesNotVisible: [], checked: true, verified: true,
+      };
+      const escalation = {
+        identityFlags: {
+          turf: {
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [bahia, stAug],
+          },
+        },
+        slots: { turf: [bahia, stAug] },
+      };
+      const merged = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, { turf: [] });
+      expect(merged.outcome).toBe('unavailable');
+    });
+
+    test('finding 1: an off-catalog third name in the SAME group does not settle the tie (sameCandidateKey alone would have matched it)', () => {
+      const turfIndex = engine.turfIndexFor();
+      const zoysia = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Zoysia', group_id: 'turfgrasses', confidence: 0.6,
+      }, turfIndex);
+      const centipede = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Centipede', group_id: 'turfgrasses', confidence: 0.5,
+      }, turfIndex);
+      const escalation = {
+        identityFlags: {
+          turf: {
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [zoysia, centipede],
+          },
+        },
+        slots: { turf: [zoysia, centipede] },
+      };
+      // "Bermuda" is off-catalog, same group ('turfgrasses') as both sides —
+      // `sameCandidateKey` alone (groupId only) would read this as matching
+      // EITHER side. It matches neither name, so it must not settle.
+      const thirdNameJson = { turf: [{ slug: '', off_catalog_name: 'Bermuda', group_id: 'turfgrasses', confidence: 0.9 }] };
+      const noMatch = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, thirdNameJson);
+      expect(noMatch.outcome).toBe('no_majority');
+      // A CATALOG referee answer in the same group never matches an
+      // off-catalog side either (sameCandidateKey requires equal slugs once
+      // either side has one).
+      const catalogJson = { turf: [{ slug: 'fixture-bahia', off_catalog_name: '', group_id: null, confidence: 0.9 }] };
+      const mixed = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, catalogJson);
+      expect(mixed.outcome).toBe('no_majority');
+    });
+
+    test('finding 1: an off-catalog referee answer matching a side\'s NAME (case/whitespace-insensitive) settles it', () => {
+      const turfIndex = engine.turfIndexFor();
+      const zoysia = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Zoysia', group_id: 'turfgrasses', confidence: 0.6,
+      }, turfIndex);
+      const centipede = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Centipede', group_id: 'turfgrasses', confidence: 0.5,
+      }, turfIndex);
+      const escalation = {
+        identityFlags: {
+          turf: {
+            disagreed: true, blockPrettySure: false, openaiAnswered: true, disagreementPair: [zoysia, centipede],
+          },
+        },
+        slots: { turf: [zoysia, centipede] },
+      };
+      const matchingNameJson = { turf: [{ slug: '', off_catalog_name: '  zoysia  ', group_id: 'turfgrasses', confidence: 0.9 }] };
+      const matched = engine._test.mergeIdentityScope({ indexes: { turf: turfIndex } }, 'turf', escalation, matchingNameJson);
+      expect(matched.outcome).toBe('settled');
+      expect(matched.slots[0]).toBe(zoysia);
+      expect(matched.flags.disagreed).toBe(false);
+      expect(matched.flags.disagreementPair).toBeNull();
+    });
+
+    test('finding 4: earlierReadsFor\'s second read is exactly disagreementPair[1] — Sol\'s own ranked top for the slot (verified: already correct, made explicit)', () => {
+      const geminiTop = { slug: 'fixture-st-augustine', offCatalogName: null, confidence: 0.95 };
+      const solTop = { slug: 'fixture-bahia', offCatalogName: null, confidence: 0.9 };
+      const escalation = {
+        identityFlags: { turf: { disagreementPair: [geminiTop, solTop] } },
+      };
+      const reads = engine._test.earlierReadsFor(escalation, ['turf']);
+      expect(reads).toEqual([{ scope: 'turf', first: { slug: 'fixture-st-augustine', confidence: 0.95 }, second: { slug: 'fixture-bahia', confidence: 0.9 } }]);
+    });
+
+    test('finding 7: describeIdentityRead reads the normalized offCatalogName field, not the raw off_catalog_name', () => {
+      const resolved = engine.resolveIdentityCandidate({
+        slug: '', off_catalog_name: 'Mystery Grass', group_id: null, confidence: 0.5,
+      }, []);
+      expect(engine._test.describeIdentityRead(resolved)).toEqual({ slug: 'Mystery Grass', confidence: 0.5 });
     });
   });
 });

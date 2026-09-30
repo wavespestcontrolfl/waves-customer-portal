@@ -1655,38 +1655,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY AGENT GAP DIGEST — Monday 8:15am ET — owner ACT email ONLY when the
-  // Intelligence Bar recorded a gap report (missing capability, tool failure,
-  // or blocked action) in the last 7 days; a clean week sends nothing.
+  // WEEKLY BOOKING-LINK TEXT CHECK — Monday 8:13am ET (owner 2026-09-29: a
+  // concise admin notification every 7 days while GATE_CALL_BOOKING_LINK_TEXT
+  // is on — sent count, top skips, or what needs a look). Minute 13 is free
+  // in every schedule here, step patterns included; :19/:49 belong to the
+  // DB/LLM-heavy previsit sweep (codex #5358 r2 P1).
   // =========================================================================
-  cron.schedule('15 8 * * 1', async () => {
+  cron.schedule('13 8 * * 1', async () => {
     const tickStartedAt = Date.now();
     try {
-      const lockRes = await runExclusive('agent-gap-digest', async () => {
-        const { runAgentGapDigest } = require('./agent-gap-digest');
-        const result = await runAgentGapDigest();
-        logger.info(`[agent-gap-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count ?? null })}`);
-        // A delivery-blocking skip (mailer unconfigured / non-internal
-        // recipient) or a failed send must still read as a FAILED run in
-        // job_health, mirroring the turf-variance digest block above.
+      const lockRes = await runExclusive('call-booking-link-weekly', async () => {
+        const { runCallBookingLinkWeeklyCheck } = require('./call-booking-link-weekly-check');
+        const result = await runCallBookingLinkWeeklyCheck();
+        logger.info(`[call-booking-link-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, problem: result.problem ?? null })}`);
         if (result?.skipped === 'query_failed' || result?.error
             || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
-          throw new Error(`agent gap digest did not complete (${result.skipped || 'send_failed'})`);
+          throw new Error(`booking-link weekly check did not complete (${result.skipped || 'send_failed'})`);
         }
       });
-      // A tick that got no DB connection returns { skipped } without running
-      // the job, and on the connection-acquire path without any job_health
-      // write: record the missed weekly run. recordMissedTick only writes when
-      // no start or success for this occurrence is already recorded within its
-      // 60 s tick window, so the slot-timeout path (which already recorded
-      // it) is not counted twice. lease_held means another instance ran this
-      // tick, which is not a miss.
       if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
-        await recordMissedTick('agent-gap-digest', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
-        throw new Error(`agent gap digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordMissedTick('call-booking-link-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`booking-link weekly check tick skipped: ${lockRes.reason || 'no_connection'}`);
       }
     } catch (err) {
-      logger.error(`Weekly agent gap digest failed: ${err.message}`);
+      logger.error(`Weekly booking-link check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1762,6 +1754,56 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Model-judged closing of Waves "other" call promises (PROMISE_CONTACT_CHECK,
+  // call-commitment-contact-check.js): every 15 minutes, best effort. Inert
+  // unless the kill switch, PROMISE_EVIDENCE_CLOSE and GATE_CALL_COMMITMENTS
+  // are all live; a tick that fails or is skipped never throws out of here.
+  cron.schedule('0 */15 * * * *', async () => {
+    const { isEnabled, promiseEvidenceCloseLive, promiseContactCheckLive } = require('../config/feature-gates');
+    if (!isEnabled('callCommitments') || !promiseEvidenceCloseLive() || !promiseContactCheckLive()) return;
+    try {
+      const lockRes = await runExclusive('call-commitment-contact-check', () => require('./call-commitment-contact-check').runPromiseContactCheck());
+      if (lockRes?.skipped === true && !['lease_held', 'gated_off'].includes(lockRes.reason)) {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Call contact check tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('call-commitment-contact-check').catch(() => {});
+        await recordJobEnd('call-commitment-contact-check', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-contact-check] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Customers blocked on the staff address-review queue (geocode-review-alert.js,
+  // kill: GEOCODE_REVIEW_ALERT_DISABLED=1): every 15 minutes. One rolling bell
+  // that rings only when a new customer joins; inert while GATE_GEOCODE_REVIEW
+  // is off. Best effort: a failed or skipped tick never throws out of here.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!gateEnvValue('GATE_GEOCODE_REVIEW')) return;
+    try {
+      const lockRes = await runExclusive('geocode-review-alert', async () => {
+        const { runGeocodeReviewAlert } = require('./geocode-review-alert');
+        const result = await runGeocodeReviewAlert();
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`geocode review alert did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`geocode review alert tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('geocode-review-alert').catch(() => {});
+        await recordJobEnd('geocode-review-alert', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[geocode-review-alert] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
@@ -1786,6 +1828,33 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Email intake and its own (simpler, non-watermarked) follow-up loop, same
+  // five-minute cadence as the SMS lane above (comms-promises-plan-20260928.md
+  // PR 1; coordinator correction #5, 2026-09-29).
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS')) return;
+    try {
+      const { runEmailOperationalActions } = require('./email-operational-actions');
+      await runEmailOperationalActions();
+    } catch {
+      logger.error('[email-operations] intake did not complete');
+    }
+    try {
+      const { refreshEmailCommitments } = require('./email-operational-actions');
+      const lockRes = await runExclusive('email-commitment-fulfillment', () => refreshEmailCommitments());
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Email fulfillment tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('email-commitment-fulfillment').catch(() => {});
+        await recordJobEnd('email-commitment-fulfillment', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch {
+      logger.error('[email-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
   // Promises kept by a booking for their promised slot whose proof lapsed
   // (visit cancelled/skipped/moved, call relinked) go back to Owed within
   // fifteen minutes on the commitments gate alone — the watchdog's own
@@ -1803,6 +1872,30 @@ function initScheduledJobs() {
       if (result?.reopened > 0) logger.info(`[slot-proof-reconciler] reopened=${result.reopened} of ${result.checked} call(s)`);
     } catch (err) {
       logger.error(`[slot-proof-reconciler] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Visit prep pest read recovery sweep (GATE_VISIT_PREP_READ_SWEEP, dark):
+  // every 15 minutes retries a never-attempted 'none' read or a stop
+  // reclassified to pest since an 'unsupported' verdict (never pending or
+  // failed rows). The gate is checked BEFORE the cron lock, so off means no
+  // query and no job_health write; runExclusive so a deploy overlap can't
+  // double-spend the daily read cap on the same backlog.
+  cron.schedule('0 */15 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').visitPrepReadSweepLive()) return;
+      const tickStartedAt = Date.now();
+      const result = await runExclusive('visit-prep-read-sweep', () => require('./visit-prep-pest-read-sweep').sweepVisitPrepPestReads());
+      // A tick that got no DB connection: record the miss through
+      // recordMissedTick (writes only if this tick's window has no start or
+      // success yet, so another replica's run and runExclusive's own record
+      // are never overwritten or double-counted). lease_held is not a miss.
+      if (result?.skipped && result.reason !== 'lease_held') {
+        await recordMissedTick('visit-prep-read-sweep', tickStartedAt, `tick skipped: ${result.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`Visit-prep read sweep tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[visit-prep-read-sweep] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2340,6 +2433,18 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Signup classifier failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // WEEKLY MON 4:47AM — Directory-listing (citation) audit: read-only GET of each
+  // seo_citations.listing_url, classified against config/locations.js NAP
+  // (services/seo/citation-auditor.js). Kill = GATE_CITATION_AUDIT=false.
+  // :47 is unused in the 4am hour (4:20 already runs three daily jobs).
+  cron.schedule('47 4 * * 1', async () => {
+    if (!isEnabled('citationAudit')) return;
+    logger.info('Running: citation audit');
+    try {
+      await runExclusive('citation-audit', () => require('./seo/citation-auditor').audit());
+    } catch (err) { logger.error(`Citation audit failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 3:30AM — Citation submission runner: auto-submit allowlisted submit_free
   // listings (fail-closed on account/CAPTCHA/payment). No-op without an allowlist
   // (SIGNUP_RUNNER_ALLOWLIST) — supervised-first. Never pays (Phase 2).
@@ -2508,8 +2613,9 @@ function initScheduledJobs() {
   // WEEKLY MONDAY 10:23AM ET — plan internal links to the pages Search
   // Console has just off page one (position 8–20), ranked by impressions,
   // ahead of the 10:30 sweep. On an unused 10am minute per the stagger rule
-  // (see the 10:16 invoice follow-up block). Kill switch:
-  // AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+  // (see the 10:16 invoice follow-up block), plus the AI-search benchmark's
+  // target pages. Kill switches: AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false,
+  // AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGETS=false.
   cron.schedule('23 10 * * 1', async () => {
     if (!isEnabled('autonomousContentEngine')) return;
     try {
@@ -4375,6 +4481,7 @@ function initScheduledJobs() {
                       customerId: openTimesSnapshot.lookup?.customerId || null,
                       estimateId: openTimesSnapshot.lookup?.estimateId || null,
                       ...(openTimesSnapshot.lookup?.serviceType ? { serviceType: openTimesSnapshot.lookup.serviceType } : {}),
+                      ...(openTimesSnapshot.lookup?.scheduledServiceId ? { scheduledServiceId: openTimesSnapshot.lookup.scheduledServiceId } : {}),
                       quotedWindows: plan.quotedWindows,
                     });
                     if (!recheck.ok) {
@@ -5511,6 +5618,14 @@ function initScheduledJobs() {
         await EngagementEngine.sweepTimeRules();
         await EngagementEngine.processDueJobs();
       });
+      // Best-effort, AFTER the engine's own work and outside its lock: close
+      // hot-estimate bells whose estimate settled (ALERT_EPISODES). Never
+      // fails or delays the tick's result.
+      try {
+        await require('./estimate-hot-view-alert').closeSettledHotViewAlerts();
+      } catch (err) {
+        logger.warn(`[est-engage] hot-view settle pass failed: ${err.message}`);
+      }
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }
@@ -7752,8 +7867,8 @@ function initScheduledJobs() {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();
-      if (!result.skipped && (result.misses > 0 || result.alerted > 0)) {
-        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted}`);
+      if (!result.skipped && (result.misses > 0 || result.alerted > 0 || result.repeated > 0)) {
+        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted} repeated=${result.repeated || 0}`);
       }
     } catch (err) {
       logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);

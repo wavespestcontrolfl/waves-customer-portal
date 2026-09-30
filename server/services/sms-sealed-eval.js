@@ -40,6 +40,9 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
+const {
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffix, hasExactCompanyFacts,
+} = require('./sms-company-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -120,15 +123,12 @@ const LIVE_EXAM_LEGS = Object.freeze(['anthropic', 'openai']);
 // drafted) and are unaffected — this only excludes items being graded AS v12
 // evidence that were never given v12 facts.
 const V12_FACTS_MARKER = 'FOLLOW-UP SLA RIGHT NOW:';
-// PR #5331: the PAYMENT OPTIONS fact is now properly gated (see
-// sms-shadow-drafter.js buildFactsBlock's own comment) and, like
-// V12_FACTS_MARKER, renders on EVERY gate-on facts block unconditionally
-// (one of its three wordings always pushes) — so it belongs in the same
-// base contract, not a category marker. Kept as its own constant rather
-// than folded into an array (open PR #5336 introduces a
-// V12_BASE_FACT_MARKERS array on a parallel branch for the same reason;
-// this stays a minimal, easy-to-merge addition and the two are expected to
-// conflict on this exact spot).
+// PR #5331: the PAYMENT OPTIONS fact is properly gated (see
+// sms-shadow-drafter.js buildFactsBlock's own comment) and renders on every
+// gate-on facts block of the payment-facts revision. It is a VERSION-SUFFIX
+// fact ('pf' in VERSION_SUFFIX_FACT_MARKERS below), NOT a base v12 marker:
+// every real-answers identity before that revision (bare, '_cf') never
+// carried it, so their historical sealed-eval contracts FORBID it.
 const V12_PAYMENT_OPTIONS_MARKER = '- Payment options:';
 
 function isV12PromptVersion(promptVersion) {
@@ -141,10 +141,30 @@ function isV12PromptVersion(promptVersion) {
 // stamped with that category's tag must grade only items frozen with it —
 // otherwise it scores category behavior on inputs live drafts never lack.
 const CATEGORY_FACT_MARKERS = Object.freeze({ c: 'FREE RE-SERVICE:' });
+// Version-SUFFIX fact contract (Codex #5392 r1 P1): the real-answers base
+// identity carries a suffix token for every per-draft fact section a later
+// revision added ('house_voice_v12_real_answers_cf' = COMPANY FACTS). A suffix
+// token REQUIRES its marker, and — since the contract is exact — versions
+// without the token FORBID it, so items frozen before the section existed
+// never grade a suffixed version and suffixed items never grade an older one.
+// A future fact section (LABEL FACTS, ...) is one more row here plus its
+// suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
+const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
+// 'pf' = PAYMENT FACTS (PR #5331): the gate-on BILLING section's "- Payment options:" line.
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER, pf: V12_PAYMENT_OPTIONS_MARKER });
+function versionSuffixTokens(promptVersion) {
+  const base = String(promptVersion).split('+')[0];
+  if (!base.startsWith(REAL_ANSWERS_BASE_VERSION)) return [];
+  return base.slice(REAL_ANSWERS_BASE_VERSION.length).split('_').filter(Boolean);
+}
 function requiredFactMarkers(promptVersion) {
   if (!isV12PromptVersion(promptVersion)) return [];
   const tags = String(promptVersion).split('+')[1] || '';
-  return [V12_FACTS_MARKER, V12_PAYMENT_OPTIONS_MARKER, ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean)];
+  return [
+    V12_FACTS_MARKER,
+    ...versionSuffixTokens(promptVersion).map((t) => VERSION_SUFFIX_FACT_MARKERS[t]).filter(Boolean),
+    ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
+  ];
 }
 // The contract is EXACT (Codex #5194 r1 P1): a fact the version does not
 // carry must be ABSENT too — an item frozen while complaints were on carries
@@ -152,7 +172,7 @@ function requiredFactMarkers(promptVersion) {
 // grade the plain v12 prompt after a rollback or switch. Every version has
 // one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
 // replay items frozen with the v12 SLA or category lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, V12_PAYMENT_OPTIONS_MARKER, ...Object.values(CATEGORY_FACT_MARKERS)]);
+const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS), ...Object.values(CATEGORY_FACT_MARKERS)]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));
@@ -173,6 +193,7 @@ function contractLabel(promptVersion) {
 //     ...UPCOMING SERVICES / OPEN TIMES
 //     FOLLOW-UP SLA RIGHT NOW: <phrase>          (gate on)
 //     FREE RE-SERVICE: <lanes>                   (gate on + complaints on)
+//     COMPANY FACTS (...):  + "- <fact>" lines   ('_cf' cohort; matched by main's exact-render test)
 //     BILLING:
 //     - <billing lines…>  (incl. "- Payment options: …")
 //     PENDING ESTIMATE: …
@@ -183,11 +204,15 @@ function contractLabel(promptVersion) {
 //   SLA           a column-0 line immediately before [FREE RE-SERVICE:] BILLING:
 //   FREE RE-SERVICE  a column-0 line immediately before BILLING:
 //   Payment options  a column-0 line INSIDE the BILLING section (before PENDING ESTIMATE:)
+// COMPANY FACTS is the one marker that is NOT structural here: it keeps main's exact-render
+// test (hasExactCompanyFacts / exactSectionSuffix), and the optional section below lets the SLA
+// and FREE RE-SERVICE anchors sit in front of it.
 // The pattern source below is valid for BOTH JS RegExp and PostgreSQL ARE (`~`),
 // so itemCompatibleWith and the SQL twin (compatibleWhereRaw) cannot drift.
+const COMPANY_FACTS_OPTIONAL = `(?:${COMPANY_FACTS_HEADER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n(?:- [^\\n]*\\n)*)?`;
 const MARKER_STRUCTURE = Object.freeze({
-  [V12_FACTS_MARKER]: '(?:^|\\n)FOLLOW-UP SLA RIGHT NOW: [^\\n]*\\n(?:FREE RE-SERVICE:[^\\n]*\\n)?BILLING:\\n',
-  [CATEGORY_FACT_MARKERS.c]: '\\nFREE RE-SERVICE:[^\\n]*\\nBILLING:\\n',
+  [V12_FACTS_MARKER]: `(?:^|\\n)FOLLOW-UP SLA RIGHT NOW: [^\\n]*\\n(?:FREE RE-SERVICE:[^\\n]*\\n)?${COMPANY_FACTS_OPTIONAL}BILLING:\\n`,
+  [CATEGORY_FACT_MARKERS.c]: `\\nFREE RE-SERVICE:[^\\n]*\\n${COMPANY_FACTS_OPTIONAL}BILLING:\\n`,
   [V12_PAYMENT_OPTIONS_MARKER]: '\\nBILLING:\\n(?:(?!PENDING ESTIMATE:|RECENT PHONE CALLS|LATEST CALL TRANSCRIPT|RECENT SMS THREAD:)[^\\n]*\\n)*?- Payment options:',
 });
 // Defense in depth: the three free-text sections buildFactsBlock writes AFTER
@@ -206,21 +231,37 @@ function markerRegex(marker) {
   return MARKER_REGEXES.get(marker);
 }
 function factsHasMarker(factsBlock, marker) {
-  return markerRegex(marker).test(String(factsBlock || ''));
+  const facts = String(factsBlock || '');
+  // COMPANY FACTS keeps main's exact-render trust test (a header typed into a multi-line SMS proves nothing).
+  if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
+  return markerRegex(marker).test(facts);
 }
 function itemCompatibleWith(factsBlock, promptVersion) {
   return requiredFactMarkers(promptVersion).every((m) => factsHasMarker(factsBlock, m))
     && forbiddenFactMarkers(promptVersion).every((m) => !factsHasMarker(factsBlock, m));
 }
 // SQL for "this row matches the exact contract" (wrap in NOT (...) for the
-// complement), parameterized: required markers present, forbidden absent —
-// each marker matched by the SAME structural pattern via Postgres `~`.
+// complement), parameterized: required markers present, forbidden absent.
+// Mirrors factsHasMarker: the structural pattern via Postgres `~` for the
+// line markers, the exact-suffix test for COMPANY FACTS (text before the first
+// BILLING: line ends with the exact render). Bindings follow clause order.
 function compatibleWhereRaw(markers, forbidden = []) {
-  const clauses = [
-    ...markers.map(() => "COALESCE(facts_block, '') ~ ?"),
-    ...forbidden.map(() => "COALESCE(facts_block, '') !~ ?"),
-  ];
-  return { sql: clauses.join(' AND ') || 'TRUE', bindings: [...markers, ...forbidden].map((m) => markerPattern(m)) };
+  const col = "COALESCE(facts_block, '')";
+  const clauses = [];
+  const bindings = [];
+  const add = (marker, negate) => {
+    if (marker === COMPANY_FACTS_HEADER) {
+      const exact = exactSectionSuffix();
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);
+    } else {
+      clauses.push(`${col} ${negate ? '!~' : '~'} ?`);
+      bindings.push(markerPattern(marker));
+    }
+  };
+  markers.forEach((m) => add(m, false));
+  forbidden.forEach((m) => add(m, true));
+  return { sql: clauses.join(' AND ') || 'TRUE', bindings };
 }
 
 /* ── Freezer ──────────────────────────────────────────────────────────── */

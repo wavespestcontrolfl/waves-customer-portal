@@ -242,3 +242,22 @@ describe('loadHistoryForCustomer — same-day sibling trim (audit 2026-07-16 P3)
     expect(out).toHaveLength(3);
   });
 });
+
+describe('loadHistoryForCustomer — scale provenance (#4741)', () => {
+  const { loadHistoryForCustomer } = require('../services/pest-pressure/store');
+  function knexRows(rows) {
+    const chain = {};
+    ['leftJoin', 'where', 'orderBy', 'orderByRaw', 'limit'].forEach((m) => { chain[m] = jest.fn(() => chain); });
+    chain.select = jest.fn(async () => rows);
+    return jest.fn(() => chain);
+  }
+
+  test('rows carry pressure_scale from component_scores and never leak the raw components', async () => {
+    const out = await loadHistoryForCustomer(knexRows([
+      { service_record_id: 2, service_date: '2026-09-28', displayed_score: 3, component_scores: { technicianActivityRating: { value: 3 } } },
+      { service_record_id: 1, service_date: '2026-06-10', displayed_score: 0.9, component_scores: { clientRating: { value: 3 } } },
+    ]), 9, { limit: 8 });
+    expect(out.map((r) => r.pressure_scale)).toEqual(['technician_rating', 'blended']);
+    expect(out[0]).not.toHaveProperty('component_scores');
+  });
+});

@@ -579,3 +579,123 @@ describe('conversion-lane marketing-consent suppression', () => {
     expect(mockLoadSuppression).not.toHaveBeenCalled();
   });
 });
+
+
+describe('extra match keys on conversions (name / ZIP / external id)', () => {
+  const hash = (v) => crypto.createHash('sha256').update(v).digest('hex');
+  const person = { first_name: 'Mrs. Jo-Ann', last_name: "O'Neil Jr.", city: 'Palmetto', state: 'FL', zip: '34221-1234' };
+
+  test('Google address identifier: hashed lowercase names (no honorific/suffix/punctuation), unhashed US region + 5-digit ZIP', () => {
+    const ud = hashedUserData({ email: 'a@x.com', firstName: 'Mrs. Jo-Ann', lastName: "O'Neil Jr.", zip: '34221-1234' });
+    expect(ud.userIdentifiers).toEqual([
+      { emailAddress: hash('a@x.com') },
+      { address: { givenName: hash('joann'), familyName: hash('oneil'), regionCode: 'US', postalCode: '34221' } },
+    ]);
+  });
+  test('Google address needs BOTH names and a ZIP — otherwise no address identifier at all', () => {
+    for (const partial of [{ firstName: 'Jo', zip: '34221' }, { lastName: 'Lee', zip: '34221' }, { firstName: 'Jo', lastName: 'Lee' }, { firstName: 'Jo', lastName: 'Lee', zip: 'K1A 0B1' }]) {
+      expect(hashedUserData({ email: 'a@x.com', ...partial }).userIdentifiers).toHaveLength(1);
+    }
+  });
+  test('a full name in first_name with no last name is split at the last space', () => {
+    const c = mapLeadCandidate({ id: 'l1', first_name: 'Jo Lee', last_name: null, zip: '34221', status: 'qualified' });
+    const ud = hashedUserData(c);
+    expect(ud.userIdentifiers[0].address).toMatchObject({ givenName: hash('jo'), familyName: hash('lee') });
+  });
+  test('the address alone is not a match key: no email/phone/click id is still missing_match_keys', () => {
+    const c = mapLeadCandidate({ id: 'l1', first_name: 'Jo', last_name: 'Lee', zip: '34221', eventTimestamp: 1, created_at: '2026-07-01T00:00:00Z' });
+    expect(skipReason(c)).toBe('missing_match_keys');
+  });
+  test('lead candidate: own name/ZIP first, same-person linked customer fills state; external id is lead-scoped', () => {
+    const c = mapLeadCandidate({
+      id: 'lead-1', customer_id: 'cust-1', created_at: '2026-07-01T00:00:00Z', status: 'qualified',
+      email: 'jo@example.com', customer_email: 'JO@example.com',
+      first_name: 'Jo', last_name: 'Lee', zip: '34221',
+      customer_first_name: 'Joanne', customer_last_name: 'Lee', customer_city: 'Palmetto', customer_state: 'FL', customer_zip: '34221',
+    });
+    expect(c).toMatchObject({ firstName: 'Jo', lastName: 'Lee', city: 'Palmetto', state: 'FL', zip: '34221', externalId: 'lead:lead-1' });
+  });
+  test('lead from a different caller linked to an account customer: no borrowed customer name/address', () => {
+    const c = mapLeadCandidate({
+      id: 'lead-2', customer_id: 'cust-1', created_at: '2026-07-01T00:00:00Z', status: 'qualified',
+      email: 'spouse@example.com', phone: '9415550101', customer_email: 'owner@example.com', customer_phone: '9415550199',
+      first_name: null, last_name: null, zip: null,
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34211',
+    });
+    expect(c).toMatchObject({ firstName: null, lastName: null, city: null, state: null, zip: null, email: 'spouse@example.com' });
+  });
+  test('unlinked lead gets a lead-scoped external id', () => {
+    expect(mapLeadCandidate({ id: 'lead-7', created_at: '2026-07-01T00:00:00Z' }).externalId).toBe('lead:lead-7');
+  });
+  test('completed job: the same-person customer record is canonical, the lead is the fallback; ids agree with the Lead event', () => {
+    const c = mapCompletedJobCandidate({
+      id: 'ea1', customer_id: 'cust-1', lead_id: 'lead-1', service_date: '2026-07-01', invoice_total: 100,
+      lead_phone: '(941) 555-0100', customer_phone: '941-555-0100',
+      customer_first_name: 'Joanne', customer_last_name: 'Lee', customer_zip: '34221',
+      lead_first_name: 'Jo', lead_last_name: 'Lee', lead_zip: '34202',
+    });
+    expect(c).toMatchObject({ firstName: 'Joanne', zip: '34221', externalId: 'lead:lead-1' });
+    expect(mapCompletedJobCandidate({ id: 'ea2', lead_id: 'lead-1', service_date: '2026-07-01' }).externalId).toBe('lead:lead-1');
+    expect(mapCompletedJobCandidate({ id: 'ea3', customer_id: 'cust-9', service_date: '2026-07-01' }).externalId).toBe('cust-9');
+    // a deleted/missing lead (join null) mirrored only in estimate_data never keys external_id
+    expect(mapCompletedJobCandidate({ id: 'ea6', customer_id: 'cust-9', lead_id: null, estimate_data: { lead_id: 'gone-1' }, service_date: '2026-07-01' }).externalId).toBe('cust-9');
+  });
+  test('completed job booked by a different caller: name/address follow the uploaded lead contact, not the account holder', () => {
+    const c = mapCompletedJobCandidate({
+      id: 'ea4', customer_id: 'cust-1', lead_id: 'lead-2', service_date: '2026-07-01', invoice_total: 100,
+      lead_email: 'tenant@example.com', lead_phone: '9415550101', customer_email: 'owner@example.com', customer_phone: '9415550199',
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_zip: '34211',
+      lead_first_name: 'Pat', lead_last_name: 'Lee', lead_zip: '34202',
+    });
+    expect(c).toMatchObject({ email: 'tenant@example.com', firstName: 'Pat', lastName: 'Lee', zip: '34202' });
+  });
+  test('consent: an opted-out contact loses name, address and external id along with email/phone', async () => {
+    mockLoadSuppression.mockResolvedValue({
+      invalidPhones: new Set(),
+      isSuppressed: (m) => m.email === 'optout@example.com',
+    });
+    const [cleaned] = await applyMarketingConsent('qualified_lead', [{
+      conversionType: 'qualified_lead', transactionId: 't-1', eventTimestamp: '2026-07-01T12:00:00Z',
+      email: 'optout@example.com', phone: '9415550100', gclid: 'g-1',
+      firstName: 'Jo', lastName: 'Lee', city: 'Palmetto', state: 'FL', zip: '34221', externalId: 'cust-1',
+    }]);
+    expect(cleaned).toMatchObject({
+      email: null, phone: null, firstName: null, lastName: null, city: null, state: null, zip: null, externalId: null, consentSuppressed: true,
+    });
+    // ...so the click-id-only event carries no user data whatsoever
+    expect(buildEvent(cleaned).userData).toBeUndefined();
+  });
+  test('consent: an opt-out on a TRANSACTION SIBLING strips this candidate\'s extras too', async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: (m) => m.email === 'optout@example.com' });
+    const cleaned = await applyMarketingConsent('completed_job_revenue', [
+      { transactionId: 't-9', email: 'optout@example.com', firstName: 'Jo', lastName: 'Lee', zip: '34221' },
+      { transactionId: 't-9', email: 'other@example.com', firstName: 'Jo', lastName: 'Lee', zip: '34221', externalId: 'cust-1' },
+    ]);
+    for (const c of cleaned) expect(c).toMatchObject({ firstName: null, zip: null, externalId: null });
+  });
+  test('consent: a wrong-number caller phone swapped for the account holder\'s re-picks name/address, and raw sources never leave', async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(['9415550101']), isSuppressed: () => false });
+    const job = mapCompletedJobCandidate({
+      id: 'ea5', customer_id: 'cust-1', lead_id: 'lead-3', service_date: '2026-07-01', invoice_total: 100,
+      lead_phone: '9415550101', customer_phone: '9415550199',
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_zip: '34211',
+      lead_first_name: 'Pat', lead_last_name: 'Lee', lead_zip: '34202',
+    });
+    expect(job).toMatchObject({ phone: '9415550101', firstName: 'Pat' });
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [job]);
+    expect(cleaned).toMatchObject({ phone: '9415550199', firstName: 'Sam', lastName: 'Rivera', zip: '34211' });
+    expect(cleaned).not.toHaveProperty('identitySources');
+  });
+  test('a clean contact keeps its extras through consent cleaning', async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
+    const [c] = await applyMarketingConsent('qualified_lead', [{ transactionId: 't-1', email: 'a@x.com', firstName: 'Jo', zip: '34221', externalId: 'cust-1' }]);
+    expect(c).toMatchObject({ firstName: 'Jo', zip: '34221', externalId: 'cust-1' });
+  });
+  test('redacted match-key summary reports the address flag without raw values', () => {
+    const c = { email: 'a@x.com', firstName: 'Jo', lastName: 'Lee', zip: '34221', ...person };
+    const ev = buildEvent({ conversionType: 'qualified_lead', eventTimestamp: '2026-07-01T00:00:00Z', transactionId: 't', ...c, firstName: 'Jo', lastName: 'Lee' });
+    const summary = redactedEventSummary(c, ev);
+    expect(summary.matchKeys).toMatchObject({ email: true, address: true, userIdentifiers: 2 });
+    expect(JSON.stringify(summary)).not.toContain('34221');
+  });
+});

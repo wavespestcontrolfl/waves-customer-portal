@@ -41,19 +41,23 @@ const CUSTOMER_FLAGGED = [{
   photoIds: ['photo-a', 'photo-b'],
 }];
 
-function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async () => ({ photos: [] })), onRetry = vi.fn() } = {}) {
+function panelElement({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async () => ({ photos: [] })), onRetry = vi.fn() } = {}) {
   const detail = detailFor({
     'svc-1': { estimate: null, brief: { brief: null, facts: { access: null, last_visit: null, customerFlagged } } },
   });
-  render(
+  return (
     <VisitBriefPanel
       stop={stopOf(BASE_SERVICE)}
       detail={detail}
       request={request}
       onRetry={onRetry} onPhotos={vi.fn()} onProject={vi.fn()} onZone={vi.fn()} onLead={vi.fn()}
-    />,
+    />
   );
-  return { request, onRetry };
+}
+
+function renderPanel({ customerFlagged = CUSTOMER_FLAGGED, request = vi.fn(async () => ({ photos: [] })), onRetry = vi.fn() } = {}) {
+  const { rerender } = render(panelElement({ customerFlagged, request, onRetry }));
+  return { request, onRetry, rerender };
 }
 
 describe('VisitBriefPanel — Customer flagged section', () => {
@@ -162,6 +166,82 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     )).toBeInTheDocument();
   });
 
+  it('shows the plant (lawn/tree & shrub) read as an AI suggestion built only from fixed fields', () => {
+    renderPanel({ customerFlagged: [{
+      ...CUSTOMER_FLAGGED[0],
+      read: {
+        status: 'done', kind: 'plant', wordingTier: 'likely', headline: 'Likely: Brown Patch',
+        plantCommonName: 'St. Augustinegrass', conditionName: 'Brown Patch',
+        fits: ['Roughly circular brown patch'], notYet: ['A smoke-ring edge'],
+        nextStepText: 'A technician checks this on your next visit.', referralKind: null, safetyLines: [],
+      },
+    }] });
+    expect(screen.getByText(
+      'Photo read (AI suggestion, not confirmed): Likely: Brown Patch. Plant: St. Augustinegrass. Fits: Roughly circular brown patch. Not yet seen: A smoke-ring edge. A technician checks this on your next visit.',
+    )).toBeInTheDocument();
+  });
+
+  describe('combined Lawn & Pest read (owner ruling 2026-09-30): BOTH notes', () => {
+    const PEST_PART = {
+      status: 'done', wordingTier: 'likely', commonName: 'German cockroach',
+      matches: ['Two dark stripes behind the head'], stillNeed: [], referralKind: null, hazards: null,
+    };
+    const PLANT_PART = {
+      status: 'done', kind: 'plant', subjectType: 'lawn', wordingTier: 'likely', headline: 'Likely: Brown Patch',
+      plantCommonName: 'St. Augustinegrass', conditionName: 'Brown Patch',
+      fits: ['Roughly circular brown patch'], notYet: [], nextStepText: 'A technician checks this on your next visit.', referralKind: null, safetyLines: [],
+    };
+
+    it('shows the pest note and the lawn note as two lines', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: PEST_PART, plant: PLANT_PART } }] });
+      expect(screen.getByText(
+        'Photo read — pest (AI suggestion, not confirmed): Likely: German cockroach. Matches: Two dark stripes behind the head.',
+      )).toBeInTheDocument();
+      expect(screen.getByText(
+        'Photo read — lawn (AI suggestion, not confirmed): Likely: Brown Patch. Plant: St. Augustinegrass. Fits: Roughly circular brown patch. A technician checks this on your next visit.',
+      )).toBeInTheDocument();
+    });
+
+    it('labels a tree & shrub plant note as such', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: PEST_PART, plant: { ...PLANT_PART, subjectType: 'tree_shrub' } } }] });
+      expect(screen.getByText(/^Photo read — tree & shrub \(AI suggestion, not confirmed\): Likely: Brown Patch/)).toBeInTheDocument();
+    });
+
+    it('a partial combo shows only the part that worked', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: PEST_PART, plant: null } }] });
+      expect(screen.getByText(/^Photo read — pest /)).toBeInTheDocument();
+      expect(screen.queryByText(/^Photo read — lawn/)).not.toBeInTheDocument();
+      cleanup();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: null, plant: PLANT_PART } }] });
+      expect(screen.getByText(/^Photo read — lawn /)).toBeInTheDocument();
+      expect(screen.queryByText(/^Photo read — pest/)).not.toBeInTheDocument();
+    });
+
+    it('a combo with neither part renders nothing', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: null, plant: null } }] });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+    });
+
+    it('a pending combo read shows "Photo read pending" and keeps the brief refreshing', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] });
+      expect(screen.getByText('Photo read pending')).toBeInTheDocument();
+    });
+  });
+
+  it('names the weeds a lawn read found (Codex #5320 r13)', () => {
+    renderPanel({ customerFlagged: [{
+      ...CUSTOMER_FLAGGED[0],
+      read: {
+        status: 'done', kind: 'plant', wordingTier: null, headline: 'Weeds in the lawn',
+        plantCommonName: null, conditionName: null, weedNames: ['Spotted Spurge', 'Dollarweed'],
+        fits: [], notYet: [], nextStepText: null, referralKind: null, safetyLines: [],
+      },
+    }] });
+    expect(screen.getByText(
+      'Photo read (AI suggestion, not confirmed): Weeds in the lawn. Weeds: Spotted Spurge, Dollarweed.',
+    )).toBeInTheDocument();
+  });
+
   it('shows "Photo read pending" while a read runs, and nothing for unsupported/failed/none', () => {
     renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] });
     expect(screen.getByText('Photo read pending')).toBeInTheDocument();
@@ -210,6 +290,46 @@ describe('VisitBriefPanel — Customer flagged section', () => {
       renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], sentAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(), read: { status: 'none' } }], onRetry: onRetryOld });
       await act(async () => { vi.advanceTimersByTime(31 * 1000); });
       expect(onRetryOld).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an older unread submission the recovery sweep may still read (awaiting) is polled once a minute, silently', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      renderPanel({
+        customerFlagged: [{ ...CUSTOMER_FLAGGED[0], sentAt: new Date(Date.now() - 40 * 60 * 1000).toISOString(), read: { status: 'none', awaiting: true } }],
+        onRetry,
+      });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+      await act(async () => { vi.advanceTimersByTime(31 * 1000); });
+      expect(onRetry).not.toHaveBeenCalled();
+      await act(async () => { vi.advanceTimersByTime(30 * 1000); await Promise.resolve(); });
+      expect(onRetry).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an awaited read the sweep claims starts a fresh budget at the pending pace (Codex #5320 r11)', async () => {
+    vi.useFakeTimers();
+    try {
+      const onRetry = vi.fn();
+      const sentAt = new Date(Date.now() - 40 * 60 * 1000).toISOString();
+      const entry = (read) => [{ ...CUSTOMER_FLAGGED[0], sentAt, read }];
+      const { rerender } = renderPanel({ customerFlagged: entry({ status: 'none', awaiting: true }), onRetry });
+      // Burn most of the awaiting budget (29 of 30 one-minute polls).
+      for (let i = 0; i < 29; i += 1) {
+        await act(async () => { vi.advanceTimersByTime(60 * 1000); await Promise.resolve(); });
+      }
+      expect(onRetry).toHaveBeenCalledTimes(29);
+      rerender(panelElement({ customerFlagged: entry({ status: 'pending' }), onRetry }));
+      for (let i = 0; i < 5; i += 1) {
+        await act(async () => { vi.advanceTimersByTime(30 * 1000); await Promise.resolve(); });
+      }
+      expect(onRetry).toHaveBeenCalledTimes(34);
     } finally {
       vi.useRealTimers();
     }
