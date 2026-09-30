@@ -4491,7 +4491,8 @@ function initScheduledJobs() {
                 // The reply guard runs on the final body of every real-answers
                 // decision (an edit may not add label timing); the visit recheck
                 // only for a body that still copies a snapshotted sentence.
-                labelStale = Boolean(await require('./agent-decision-send-checks').labelFactsBlock({ decision: labelDecision || {}, outgoingBody: msg.message_body }));
+                // (a decision row that cannot be read blocks the send: never "no snapshot, so send")
+                labelStale = Boolean(await require('./agent-decision-send-checks').scheduledLabelFactsBlock({ decision: labelDecision, outgoingBody: msg.message_body }));
               } catch (err) {
                 logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
                 labelStale = true;

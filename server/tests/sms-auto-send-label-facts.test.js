@@ -99,7 +99,7 @@ test('the label source is persisted on the claimed decision next to the other se
 
 test('a snapshot that is still current sends normally; the recheck reads the body that will go out', async () => {
   await expect(attempt({ labelFactsSnapshot: LABEL_SNAPSHOT })).resolves.toMatchObject({ sent: true });
-  expect(labelFacts.labelFactsSendBlockReason).toHaveBeenCalledWith({ snapshot: LABEL_SNAPSHOT, body: REPLY });
+  expect(labelFacts.labelFactsSendBlockReason).toHaveBeenCalledWith({ snapshot: LABEL_SNAPSHOT, body: REPLY, inbound: 'How long until the dogs can go out?' });
   expect(sendCustomerMessage).toHaveBeenCalled();
 });
 
@@ -118,3 +118,25 @@ test.each(['label_facts_visit_changed', 'label_facts_no_longer_current', 'label_
     expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
   },
 );
+
+describe('r29: EVERY real-answers auto-send dispatch runs the label reply guard, with the customer\'s own text', () => {
+  const REAL = 'house_voice_v12_x';
+  const actual = () => jest.requireActual('../services/sms-label-facts').labelFactsSendBlockReason;
+  test('no snapshot: a bare "Yes, they can go out." to a label question is blocked at dispatch', async () => {
+    labelFacts.labelFactsSendBlockReason.mockImplementation((args) => actual()({ ...args, conn: () => { throw new Error('must not read'); } }));
+    await expect(attempt({ reply: 'Yes, they can go out.', promptVersion: REAL, inboundMessage: 'Can the dogs go out now?' })).resolves.toMatchObject({ sent: false, reason: 'label_facts_unauthorized_claim' });
+    expect(labelFacts.labelFactsSendBlockReason).toHaveBeenCalledWith({ snapshot: null, body: 'Yes, they can go out.', inbound: 'Can the dogs go out now?' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+    expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
+  });
+  test('no snapshot: a hand-off, or any reply to a non-label question, still sends; the guard reads the claim\'s inbound', async () => {
+    labelFacts.labelFactsSendBlockReason.mockImplementation((args) => actual()({ ...args, conn: () => { throw new Error('must not read'); } }));
+    await expect(attempt({ reply: "I'll have the office confirm and get back to you.", promptVersion: REAL, inboundMessage: 'Can the dogs go out now?' })).resolves.toMatchObject({ sent: true });
+    await expect(attempt({ reply: 'Yes, Tuesday works.', promptVersion: REAL, inboundMessage: 'Can you come Tuesday?' })).resolves.toMatchObject({ sent: true });
+  });
+  test('an older-prompt draft with no snapshot still never runs the recheck (unchanged)', async () => {
+    await expect(attempt({ reply: 'Yes, they can go out.', promptVersion: 'house_voice_v8', inboundMessage: 'Can the dogs go out now?' })).resolves.toMatchObject({ sent: true });
+    expect(labelFacts.labelFactsSendBlockReason).not.toHaveBeenCalled();
+  });
+});

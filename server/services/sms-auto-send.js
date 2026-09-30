@@ -301,7 +301,11 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot };
+    return {
+      decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot,
+      // what the LABEL FACTS send-time check needs to read the question: the customer's own text and the prompt family
+      inboundMessage, promptVersion: promptVersion || null,
+    };
   });
 }
 
@@ -833,8 +837,10 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
     // must still be backed by the customer's CURRENT latest performed visit
     // (a newer visit, a visit today, a changed label all refuse). Same
     // supersede-via-failClaim refusal as the open-times recheck above.
-    if (claim.labelFactsSnapshot) {
-      const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot, body: reply });
+    // Every real-answers dispatch runs the reply guard (snapshot or not: "Yes, they can go out." copies no sentence and still
+    // answers a label question); older-prompt drafts run it only when they carry a snapshot.
+    if (claim.labelFactsSnapshot || (typeof claim.promptVersion === 'string' && claim.promptVersion.startsWith('house_voice_v12'))) {
+      const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot || null, body: reply, inbound: claim.inboundMessage });
       if (labelReason) {
         logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
         const outcome = await notSent(labelReason);

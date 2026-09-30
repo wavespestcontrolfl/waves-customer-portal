@@ -425,6 +425,13 @@ function groundedLineKinds(sectionText) {
 
 // Whitespace, curly quotes, width forms and zero-width characters folded, so a
 // reply cannot dodge (or forge) a verbatim match with typography.
+// Input caps (the guards run regexes over customer / model text): anything past these is never truncated and passed - a reply
+// past MAX_REPLY_CHARS is held, an inbound (or thread row) past MAX_INBOUND_CHARS is treated as unverified / another visit.
+const MAX_REPLY_CHARS = 2000;
+const MAX_INBOUND_CHARS = 1000;
+const overCap = (text, max) => String(text ?? '').length > max;
+const inboundOverCap = (inbound) => (Array.isArray(inbound) ? inbound : [inbound]).some((t) => overCap(t, MAX_INBOUND_CHARS));
+
 function canonText(text) {
   return String(text || '').normalize('NFKC')
     .replace(/[‘’‛′`´]/g, "'")
@@ -477,6 +484,7 @@ function labelSentencesCopiedIn(reply, sectionText) {
  * part of the reply the guard must judge. Every other screen reads this same remainder.
  */
 function stripLabelSentences(text, sectionText) {
+  if (overCap(text, MAX_REPLY_CHARS)) return canonText(text); // (never truncated: hasUngroundedLabelClaim holds it)
   let out = canonText(text);
   for (const s of labelSentencesIn(sectionText)) {
     // the marker keeps the copy's KIND (labelsentencereentry / labelsentencerainfast) so a rainfast copy never answers a pet question
@@ -496,7 +504,9 @@ const TIME_EXPR_RE = /(?<![\w./\u2044])(\d+(?:\.\d+)?)(?:\s*(?:-|–|to|or)\s*(\
 // next day). Digits are matched by TIME_EXPR_RE above; this covers the rest.
 const ONES_SRC = 'zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
 const TENS_SRC = 'twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety';
-const NUM_WORD_SRC = `(?:(?:${TENS_SRC})(?:[-\\s]+(?:${ONES_SRC}))?|${ONES_SRC}|hundred)`;
+// (a single word each: "twenty-one" is TENS then ONES through the sequence below - an optional TENS+ONES pair here made the two
+// readings overlap, and a long run of "twenty-one-" backtracked exponentially)
+const NUM_WORD_SRC = `(?:${TENS_SRC}|${ONES_SRC}|hundred)`;
 const NUM_SEQ_SRC = `${NUM_WORD_SRC}(?:[-\\s]+(?:and\\s+)?${NUM_WORD_SRC})*`;
 const FRACTION_SRC = '(?:\\d+\\s*[\\/\\u2044]\\s*\\d+|[\\u00BC-\\u00BE\\u2150-\\u215E])';
 const QTY_SRC = `(?:${NUM_SEQ_SRC}(?:[-\\s]+and[-\\s]+a[-\\s]+half)?|(?:\\d+\\s*)?${FRACTION_SRC}|half(?:\\s+an?)?|an?\\s+half|(?:an?\\s+)?(?:couple|few|several|handful|bunch|dozen|number|lot|ton|load)(?:\\s+of)?(?:\\s+more)?|(?:some|many|multiple|numerous|countless|plenty\\s+of|quite\\s+a\\s+few|a\\s+good\\s+few|a\\s+lot\\s+of)|an?)`;
@@ -756,6 +766,7 @@ function clauseIsLabelClaim(input) {
  * given only by copying a LABEL FACTS sentence, so nothing else may claim it.
  */
 function hasUngroundedLabelClaim(strippedText) {
+  if (overCap(strippedText, MAX_REPLY_CHARS)) return true;
   const text = canonText(strippedText).toLowerCase();
   // The clause rules are English: another language's timing words are held outright.
   // (a verbatim COMPANY FACTS sentence is owner-approved English, however few function words it has)
@@ -790,6 +801,7 @@ const NON_ENGLISH_MARKS_RE = /[\u00BF\u00A1]/;
 // A script this guard cannot read at all (Cyrillic, Arabic, CJK ...): unverifiable, so held.
 const UNREADABLE_SCRIPT_RE = /[^\p{Script=Latin}\p{Script=Common}\p{Script=Inherited}]/u;
 function looksNonEnglish(text) {
+  if (overCap(text, MAX_INBOUND_CHARS)) return true;
   const raw = String(text || '');
   if (NON_ENGLISH_MARKS_RE.test(raw)) return true;
   if (UNREADABLE_SCRIPT_RE.test(raw)) return true;
@@ -831,6 +843,7 @@ function sentenceIsUnsupportedLanguage(sentence) {
 }
 /** True when some sentence of `text` shows positive evidence of an unsupported (unreadable to the guards) language. */
 function hasUnsupportedLanguage(text) {
+  if (overCap(text, MAX_REPLY_CHARS)) return true;
   return String(text || '').split(/[.!?\n;]+/).some(sentenceIsUnsupportedLanguage);
 }
 /** False only on positive evidence of an unsupported language: terse English stays English (used for the inbound). */
@@ -848,6 +861,7 @@ const ALLOWED_DIACRITICS = 'áàâãçéèêëíîïñóôõœæùúûüÿ';
 // so a Spanish / Portuguese / French inbound ("\u00bfPueden salir los perros ahora?") or an unverified / unsupported one takes the
 // same fail-closed path as Polish (label facts none on file, both kinds asked, only allowlisted sentence types answer).
 function isEnglishInbound(inbound) {
+  if (inboundOverCap(inbound)) return false;
   const current = Array.isArray(inbound) ? inbound[0] : inbound;
   return !(isUnverifiedLanguageInbound(inbound) || looksNonEnglish(current) || hasUnsupportedLanguage(current));
 }
@@ -874,6 +888,7 @@ function englishKnown(word) {
 // tokens in seven and is unverified. Tokens are letters only, two or more of them (numbers, URLs, emoji and one-letter words drop out).
 const ENGLISH_SHARE = 0.6;
 function isUnverifiedLanguageInbound(inbound) {
+  if (inboundOverCap(Array.isArray(inbound) ? inbound[0] : inbound)) return true;
   const text = canonText(Array.isArray(inbound) ? inbound[0] : inbound).toLowerCase();
   const plain = stripMarks(text.replace(/https?:\/\/\S+|www\.\S+|\S+@\S+/g, ' '));
   if (wordsOf(plain).length < 2) return false;
@@ -887,6 +902,7 @@ function isUnverifiedLanguageInbound(inbound) {
 // The greeting "buenos dias" says no timing; everything else in the table is held.
 const NON_ENGLISH_GREETING_RE = /(?<![\p{L}])buen(?:os|as)\s+(?:dias|noches)(?![\p{L}])/giu;
 function nonEnglishTimingWords(text) {
+  if (overCap(text, MAX_REPLY_CHARS)) return true;
   const t = stripMarks(canonText(text).toLowerCase()).replace(NON_ENGLISH_GREETING_RE, ' ');
   return UNREADABLE_SCRIPT_RE.test(t) || NON_ENGLISH_TIMING_VOCAB.some((v) => v.re.test(t));
 }
@@ -907,6 +923,7 @@ const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| i
 const CONFIRM_TIMING_RE = new RegExp(`(?<![\\w'-])(?:your|the|our)\\s+(?:technician|tech)\\s+(?:will\\s+)?confirms?\\s+(?:the\\s+|your\\s+)?timing(?:\\s+(?:at|during|for|on)\\s+(?:the|your)\\s+(?:visit|appointment|yard|next\\s+visit|service))?(?:\\s+(?:${require('./sms-followup-sla').SLA_PHRASES.map((p) => escapeRegex(p).replace(/ /g, '\\s+')).join('|')}))?\\s*(?:[.!]|$)`, 'i');
 const NEGATION_HEDGE_RE = /\b(?:not|no|never|nothing|nobody|cannot|without|unable|unsure|uncertain|unclear|unknown|may|might|maybe|perhaps|possibly|probably|hopefully|depends?|depending|but|however|unless|although|though|except|neither|nor|hardly|barely)\b|\bcan\s+not\b|n't\b/i;
 function sanctionSafeOnceDry(text) {
+  if (overCap(text, MAX_REPLY_CHARS)) return String(text || ''); // (not sanctioned; the reply guard holds an over-long reply)
   const t = String(text || '');
   const canon = canonText(t);
   if (!SANCTIONED_SAFE_RE.test(t) || !CONFIRM_TIMING_RE.test(canon)) return t;
@@ -962,6 +979,7 @@ function askedKindsOf(inboundText) {
  * message with nothing classifiable anywhere in the thread asks both.
  */
 function askedLabelKinds(inbound) {
+  if (inboundOverCap(inbound)) return ['reentry', 'rain', 'unverified_language'];
   if (!isEnglishInbound(inbound)) return ['reentry', 'rain', 'unverified_language'];
   const reads = (Array.isArray(inbound) ? inbound : [inbound]).map(askedKindsOf);
   const sources = reads[0]?.elliptical ? reads : reads.slice(0, 1);
@@ -1116,6 +1134,7 @@ function replySentences(strippedText, asked) {
  * stored inbound) only an answer-shaped sentence that is not a hand-off / sanctioned / company line is held.
  */
 function answersAskedLabelQuestion(strippedText, asked) {
+  if (overCap(strippedText, MAX_REPLY_CHARS)) return true;
   if (asked === null) {
     return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !CONTENT_SENTENCE_TYPES.slice(0, 5).some((allowed) => allowed(peelFriendlyEnds(sentence))));
   }
@@ -1141,6 +1160,7 @@ function copiesDoNotAnswerAskedKinds(sentences, asked) {
 // of a hand-off / confirm clause ONLY: it is peeled off that sentence before the guards read it (so its duration or clock is
 // never read as a label time), and never makes any other sentence pass ("Go ahead within the hour." keeps the phrase and is held).
 function stripHandoffDeadlines(text) {
+  if (overCap(text, MAX_REPLY_CHARS)) return String(text || '');
   const { SLA_PHRASES } = require('./sms-followup-sla');
   return String(text || '').split(/([.!?\n]+)/).map((piece, i) => {
     if (i % 2) return piece;
@@ -1154,6 +1174,7 @@ function stripHandoffDeadlines(text) {
 const isHandoffBase = (base) => isDeferral(peelFriendlyEnds(base)) || /^(?:.*\s)?sanctioned_idiom\b[^.]*\bconfirms?\s+(?:the\s+|your\s+)?timing$/.test(base);
 
 function replyClaimsUngroundedLabelTiming(body, sectionText, asked = []) {
+  if (overCap(body, MAX_REPLY_CHARS)) return true;
   const stripped = stripLabelSentences(stripHandoffDeadlines(sanctionSafeOnceDry(body)), sectionText);
   return hasUngroundedLabelClaim(stripped) || answersAskedLabelQuestion(stripped, asked);
 }
@@ -1316,6 +1337,7 @@ const VISIT_REFERENCES = [
  * text points at another visit or is not in English (the sentences are English).
  */
 function labelFactsForInbound(labelFacts, inbound, today = etDateString(), renderedTexts = []) {
+  if (labelFacts && (inboundOverCap(inbound) || inboundOverCap(renderedTexts))) return null;
   if (!labelFacts) return null;
   const texts = Array.isArray(inbound) ? inbound : [inbound];
   // a short follow-up ("is it okay now?") is about whatever the thread was, so the thread's visit references count too;
@@ -1330,6 +1352,7 @@ function labelFactsForInbound(labelFacts, inbound, today = etDateString(), rende
  * visit (`visitDate`, YYYY-MM-DD, `today` the ET date). Errs toward true.
  */
 function inboundRefersToOtherVisit(inboundText, visitDate, today = etDateString()) {
+  if (overCap(inboundText, MAX_INBOUND_CHARS)) return true;
   const text = canonText(inboundText).toLowerCase();
   if (!text || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDate || ''))) return false;
   const visit = new Date(`${visitDate}T12:00:00Z`);

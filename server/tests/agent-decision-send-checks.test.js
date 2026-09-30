@@ -21,7 +21,7 @@ const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
 const { labelFactsSendBlockReason } = require('../services/sms-label-facts');
-const { agentDecisionSendBlockReason, parseInputSnapshot } = require('../services/agent-decision-send-checks');
+const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledLabelFactsBlock } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
 const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
@@ -148,4 +148,20 @@ test('no label snapshot: a real-answers decision still runs the reply guard on t
   labelFactsSendBlockReason.mockClear();
   await expect(agentDecisionSendBlockReason({ decision: decision({ prompt_version: 'house_voice_v11' }), outgoingBody: 'Keep pets off for 1 hour.' })).resolves.toBeNull();
   expect(labelFactsSendBlockReason).not.toHaveBeenCalled();
+});
+
+describe('r29: a scheduled send whose decision row cannot be read fails closed', () => {
+  test('a missing decision (null / undefined) blocks; a readable decision is judged exactly like the immediate send', async () => {
+    await expect(scheduledLabelFactsBlock({ decision: null, outgoingBody: 'Yes, they can go out.' })).resolves.toMatch(/agent decision was not found/);
+    await expect(scheduledLabelFactsBlock({ decision: undefined, outgoingBody: 'Sounds good.' })).resolves.toMatch(/not found/);
+    expect(labelFactsSendBlockReason).not.toHaveBeenCalled(); // no lookup can run without the decision
+    labelFactsSendBlockReason.mockResolvedValueOnce('label_facts_unauthorized_claim');
+    await expect(scheduledLabelFactsBlock({ decision: { prompt_version: 'house_voice_v12_x', input_snapshot: '{}' }, outgoingBody: 'Yes.' })).resolves.toMatch(/label timing no longer current/);
+    await expect(scheduledLabelFactsBlock({ decision: { prompt_version: 'house_voice_v12_x', input_snapshot: '{}' }, outgoingBody: 'Thanks' })).resolves.toBeNull();
+  });
+  test('the scheduler reads the decision through this helper and never coalesces a missing row to {}', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
+    expect(src).toMatch(/scheduledLabelFactsBlock\(\{ decision: labelDecision, outgoingBody: msg\.message_body \}\)/);
+    expect(src).not.toMatch(/labelFactsBlock\(\{ decision: labelDecision \|\| \{\}/);
+  });
 });

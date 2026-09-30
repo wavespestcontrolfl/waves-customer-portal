@@ -1847,6 +1847,126 @@ describe('r28: only the TECHNICIAN sanctions "safe once dry"', () => {
   });
 });
 
+describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
+  const N = 2000;
+  const rep = (unit) => unit.repeat(Math.ceil(N / unit.length)).slice(0, N);
+  const ADVERSARIAL = {
+    spaces: ' '.repeat(N), 'a ': rep('a '), digits: rep('1'), 'digit spaces': rep('1 '), 'number words': rep('one two three four five six seven eight nine ten '), 'hyphenated number words': rep('twenty-one-'),
+    'and a half': rep('one and a half '), 'keep off': rep('keep off '), 'keep the dogs': rep('keep the dogs '), 'wait for': rep('wait for '), 'give it a': rep('give it a '), 'let the dog': rep('let the dog '),
+    'dry and': rep('dry and '), 'trigger words': rep('rain pets dogs kids lawn stay off until dry '), 'for 2 hours or': rep('for 2 hours or '), dashes: rep('- '), dots: rep('. '), commas: rep(', '), 'question marks': rep('? '),
+    'zero width': rep('\u200b '), apostrophes: rep("don't "), 'may in': rep('may in '), 'next fri': rep('next fri '), years: rep('in 2025 '), 'am pm': rep('9 am '), clocks: rep('9:00 '), 'by 5': rep('by 5 '), colons: rep('a: '),
+  };
+  const SECTION = 'LABEL FACTS (Jun 5):\n- For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas for 4 hours.\n';
+  const CLASSIFIERS = {
+    hasUngroundedLabelClaim: (t) => labelFactsLib.hasUngroundedLabelClaim(t),
+    replyClaimsUngroundedLabelTiming: (t) => labelFactsLib.replyClaimsUngroundedLabelTiming(t, SECTION, ['reentry', 'rain']),
+    'replyClaims (no kind)': (t) => labelFactsLib.replyClaimsUngroundedLabelTiming(t, SECTION, []),
+    stripLabelSentences: (t) => labelFactsLib.stripLabelSentences(t, SECTION),
+    sanctionSafeOnceDry: (t) => labelFactsLib.sanctionSafeOnceDry(t),
+    stripHandoffDeadlines: (t) => labelFactsLib.stripHandoffDeadlines(t),
+    askedLabelKinds: (t) => labelFactsLib.askedLabelKinds(t),
+    'askedLabelKinds (thread)': (t) => labelFactsLib.askedLabelKinds([t, t, t]),
+    inboundRefersToOtherVisit: (t) => labelFactsLib.inboundRefersToOtherVisit(t, '2026-09-29', '2026-09-30'),
+    labelFactsForInbound: (t) => labelFactsLib.labelFactsForInbound({ serviceDate: '2026-09-29' }, [t, t], '2026-09-30', [t]),
+    looksNonEnglish: (t) => labelFactsLib.looksNonEnglish(t),
+    hasUnsupportedLanguage: (t) => labelFactsLib.hasUnsupportedLanguage(t),
+    isUnverifiedLanguageInbound: (t) => labelFactsLib.isUnverifiedLanguageInbound(t),
+    isEnglishInbound: (t) => labelFactsLib.isEnglishInbound(t),
+    answersAskedLabelQuestion: (t) => labelFactsLib.answersAskedLabelQuestion(t, ['reentry', 'rain']),
+    'answersAskedLabelQuestion (unknown)': (t) => labelFactsLib.answersAskedLabelQuestion(t, null),
+    labelSentencesCopiedIn: (t) => labelFactsLib.labelSentencesCopiedIn(t, SECTION),
+    nonEnglishTimingWords: (t) => labelFactsLib.nonEnglishTimingWords(t),
+  };
+  const timeMs = (fn, text) => {
+    fn(text); // warm-up (regex compilation, lazy lexicons)
+    const runs = [0, 1].map(() => { const t0 = process.hrtime.bigint(); fn(text); return Number(process.hrtime.bigint() - t0) / 1e6; });
+    return Math.min(...runs);
+  };
+  test('every exported classifier finishes an adversarial 2,000-character input in under 50 ms (a long run of "twenty-one-" used to backtrack exponentially)', () => {
+    const slow = [];
+    for (const [name, fn] of Object.entries(CLASSIFIERS)) {
+      for (const [label, text] of Object.entries(ADVERSARIAL)) {
+        expect(text.length).toBe(N);
+        const ms = timeMs(fn, text);
+        if (ms >= 50) slow.push(`${name} on "${label}": ${ms.toFixed(1)} ms`);
+      }
+    }
+    expect(slow).toEqual([]);
+  });
+  test('send time and the async path are bounded too', async () => {
+    const boom = () => { throw new Error('must not read'); };
+    for (const [label, text] of Object.entries(ADVERSARIAL)) {
+      const t0 = process.hrtime.bigint();
+      await labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked: ['reentry'] }, body: text, inbound: text, conn: boom });
+      expect([label, Number(process.hrtime.bigint() - t0) / 1e6 < 50]).toEqual([label, true]);
+    }
+  });
+  test('past the cap nothing is truncated and passed: a reply over 2,000 chars is held, an inbound over 1,000 is unverified / another visit / none on file', async () => {
+    const longReply = 'Thanks! '.repeat(251); // 2008 chars, otherwise harmless
+    expect(longReply.length).toBeGreaterThan(2000);
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming('Thanks!', SECTION, [])).toBe(false);
+    for (const asked of [[], ['reentry'], null]) expect(labelFactsLib.replyClaimsUngroundedLabelTiming(longReply, SECTION, asked)).toBe(true);
+    expect(labelFactsLib.hasUngroundedLabelClaim(longReply)).toBe(true);
+    expect(labelFactsLib.answersAskedLabelQuestion(longReply, ['reentry'])).toBe(true);
+    expect(labelFactsLib.hasUnsupportedLanguage(longReply)).toBe(true);
+    const boom = () => { throw new Error('must not read'); };
+    await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: longReply, inbound: 'hi', conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+    const longInbound = 'Can the dogs go out now? '.repeat(41); // 1025 chars
+    expect(longInbound.length).toBeGreaterThan(1000);
+    expect(labelFactsLib.askedLabelKinds(longInbound)).toEqual(['reentry', 'rain', 'unverified_language']);
+    expect(labelFactsLib.askedLabelKinds(['Is it okay now?', longInbound])).toEqual(expect.arrayContaining(['unverified_language']));
+    expect(labelFactsLib.inboundRefersToOtherVisit(longInbound, '2026-09-29', '2026-09-30')).toBe(true);
+    expect(labelFactsLib.isUnverifiedLanguageInbound(longInbound)).toBe(true);
+    expect(labelFactsLib.isEnglishInbound(longInbound)).toBe(false);
+    const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
+    expect(labelFactsLib.labelFactsForInbound(facts, ['Can the dogs go out now?'], '2026-09-30')).toBe(facts);
+    expect(labelFactsLib.labelFactsForInbound(facts, [longInbound], '2026-09-30')).toBeNull();
+    expect(labelFactsLib.labelFactsForInbound(facts, ['Can the dogs go out now?'], '2026-09-30', [longInbound])).toBeNull();
+  });
+  test('a reply exactly at the cap is still judged (not held for length alone)', () => {
+    const atCap = `${'Thanks! '.repeat(249)}Thanks!`.slice(0, 2000);
+    expect(atCap.length).toBeLessThanOrEqual(2000);
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming(atCap, SECTION, [])).toBe(false);
+  });
+});
+
+describe('r29 item 4: a thread that cannot be read for this sender is logged once per draft, without message text', () => {
+  const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
+  const logger = require('../services/logger');
+  const RE = 'For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas until dry.';
+  const makeClient = (scripted) => { const q = [...scripted]; return { messages: { create: () => Promise.resolve({ content: [{ text: JSON.stringify(q.shift()) }] }) } }; };
+  const draft = (reply) => ({ reply, intended_actions: [], missing_info: null, offered_times: [] });
+  const run = (inboundPhone, smsHistory) => generateGroundedDraft({
+    client: makeClient([draft(RE), draft(RE), draft(RE), { supported: true, violations: [] }]),
+    context: { summary: 'Test customer', customer: { id: 'cust-77' }, upcomingServices: [], smsHistory },
+    inboundMessage: 'Is it okay now?', inboundPhone, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+  });
+  beforeEach(() => {
+    process.env[GATE] = 'true';
+    mockFetchLabelFacts.mockReset();
+    mockFetchLabelFacts.mockResolvedValue({ ...labelFacts([product()]), customerId: 'cust-77', recordIds: ['r2'] });
+  });
+  test('no inbound phone with inbound rows: one structured warn (customer id and reason only)', async () => {
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const row = { direction: 'inbound', body: 'PRIVATE-MESSAGE-TEXT about my dogs', date: new Date().toISOString(), fromPhone: '+19415550100' };
+    await run(null, [row]);
+    const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('label-facts thread unreadable'));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('no_inbound_phone');
+    expect(lines[0]).toContain('cust-77');
+    expect(lines[0]).not.toContain('PRIVATE-MESSAGE-TEXT');
+    expect(lines[0]).not.toContain('+1941');
+    warn.mockClear();
+    await run('+19415550100', [row]); // readable: no warn
+    await run(null, []); // no inbound rows: nothing to hide, no warn
+    await run('+19415550100', [{ ...row, fromPhone: '+19415550199' }]); // only another number's rows
+    const after = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('label-facts thread unreadable'));
+    expect(after).toHaveLength(1);
+    expect(after[0]).toContain('no_same_sender_rows');
+    warn.mockRestore();
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {

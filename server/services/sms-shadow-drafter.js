@@ -1422,7 +1422,13 @@ function readInboundThread(context, inboundMessage, inboundPhone) {
   // Visit references are read over EVERY same-sender inbound row the model is shown, whatever its age (the kind-inheritance
   // window above is shorter): a 3-day-old "the May treatment" sits beside the facts just the same.
   const shown = sender ? (context?.smsHistory || []).slice(0, 10).filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && phoneIdentityKey(m.fromPhone) === sender).map((m) => m.body) : [];
-  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], shown, unreadable: !sender || (recent.length > 0 && !mine.length), mixed };
+  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], shown, unreadable: !sender || (recent.length > 0 && !mine.length), mixed, noSender: !sender, hasInboundRows: (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound') };
+}
+
+// A thread that cannot be read for this sender fails closed silently, so say so once per draft (ids and a reason only - no message text).
+function logUnreadableThread(thread, context, lane) {
+  if (!thread.hasInboundRows || !(thread.noSender || thread.unreadable)) return;
+  logger.warn(`[sms-shadow] label-facts thread unreadable (${thread.noSender ? 'no_inbound_phone' : 'no_same_sender_rows'}); customer ${context?.customer?.id || 'unknown'}, lane ${lane || 'live'} - facts none on file for a short follow-up`);
 }
 
 function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage }) {
@@ -2362,6 +2368,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // the guard also holds that language's timing words, sms-label-facts).
   const thread = readInboundThread(context, inboundMessage, inboundPhone);
   const askedTexts = thread.texts;
+  logUnreadableThread(thread, context, presetLaneId || metricsLane);
   // a short follow-up whose thread could not be read for this sender cannot be tied to the latest visit: none on file
   // A rendered thread with another number's (or an unattributable) inbound message gets none on file whatever the
   // current message says: the model reads that message too.

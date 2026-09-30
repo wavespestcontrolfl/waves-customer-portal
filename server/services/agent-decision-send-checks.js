@@ -93,6 +93,13 @@ async function labelFactsBlock({ decision, outgoingBody }) {
   return reason ? `label timing no longer current (${reason})` : null;
 }
 
+// The scheduled-send version of the same check: the scheduler reads the decision row itself, and a row it cannot read (missing,
+// or not yet visible) must never mean "no snapshot, so send" - the reply guard cannot run without the decision, so it refuses.
+async function scheduledLabelFactsBlock({ decision, outgoingBody }) {
+  if (!decision) return 'label timing could not be checked (the agent decision was not found)';
+  return labelFactsBlock({ decision, outgoingBody });
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -104,4 +111,4 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await amountsBlock({ decision, outgoingBody }));
 }
 
-module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, labelFactsBlock };
+module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, labelFactsBlock, scheduledLabelFactsBlock };
