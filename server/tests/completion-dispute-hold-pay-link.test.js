@@ -95,6 +95,15 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(notice).toBeLessThan(sms);
   });
 
+  test('a withheld pay link marks the invoice so the office release can send it (owner ruling 2026-09-30)', () => {
+    const lookup = src.indexOf('const payLinkHeldByDisputeHold =');
+    const mark = src.indexOf('markInvoiceWithheldByHold(invoice.id, db)', lookup);
+    const notice = src.indexOf('let paymentFailedNoticeSent = false;');
+    expect(mark).toBeGreaterThan(lookup);
+    expect(mark).toBeLessThan(notice);
+    expect(src.slice(src.lastIndexOf('if (', mark), mark)).toMatch(/payLinkHeldByDisputeHold && invoice\?\.id/);
+  });
+
   test('the completion/report SMS drops the pay link (and so the past-due line, the with-invoice lane and the invoice-delivery mark)', () => {
     const i = src.indexOf('const allowCompletionInvoiceLinkBase =');
     const end = src.indexOf('const allowCompletionInvoiceLink = ', i);

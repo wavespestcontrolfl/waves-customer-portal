@@ -4015,10 +4015,44 @@ postgres('visit completion packet records on PostgreSQL', () => {
     expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
       status: 202, body: { state: 'effects_pending', payment: { state: 'payment_pending', reason: 'collections-dispute-hold' } },
     });
-    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'draft', scheduled_send_at: null });
+    // The withheld draft is marked so the office release can send it at once.
+    expect(await mockPg('invoices').where({ id: invoiceId }).first())
+      .toMatchObject({ status: 'draft', scheduled_send_at: null, scheduled_send_error: 'dispute_hold_pay_link_withheld' });
     await mockPg('collections_flags').where({ id: flag.id }).update({ released_at: mockPg.fn.now() });
     expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
-    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled' });
+    expect(await mockPg('invoices').where({ id: invoiceId }).first()).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+  });
+
+  test('releasing the dispute hold queues the withheld packet invoice at once, and the closeout retry then sends nothing more', async () => {
+    const saved = await saveVisitCompletionPacket(submission());
+    const invoiceId = saved.body.billing.invoiceId;
+    await mockPg('collections_flags').insert({ customer_id: fixture.customerId, flag: 'collection_hold',
+      reason: 'dispute on call: synthetic billing question', created_by: 'test' });
+    expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({
+      status: 202, body: { payment: { state: 'payment_pending', reason: 'collections-dispute-hold' } },
+    });
+    // an unrelated draft of the same customer must not be sent by the release
+    const [{ id: bystanderId }] = await mockPg('invoices').insert({
+      token: randomUUID().replace(/-/g, '').slice(0, 24), invoice_number: `HT-${randomUUID().slice(0, 8)}`,
+      customer_id: fixture.customerId, status: 'draft', total: 10, subtotal: 10,
+    }).returning('id');
+    try {
+      const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+      const released = await releaseCollectionHold(fixture.customerId);
+      expect(released).toMatchObject({ ok: true, withheldSend: { ok: true, queued: [invoiceId] } });
+      const queued = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(queued).toMatchObject({ status: 'scheduled', scheduled_send_error: null });
+      expect(queued.scheduled_send_at).not.toBeNull();
+      expect(await mockPg('invoices').where({ id: bystanderId }).first()).toMatchObject({ status: 'draft', scheduled_send_at: null });
+      // the closeout's own retry sees the queued self-pay invoice as its own scheduling: no second send
+      expect(await runVisitCompletionPacketEffects(saved.body.packetId)).toMatchObject({ status: 200, body: { state: 'done' } });
+      const after = await mockPg('invoices').where({ id: invoiceId }).first();
+      expect(after.status).toBe('scheduled');
+      expect(after.scheduled_send_at.getTime()).toBe(queued.scheduled_send_at.getTime());
+      expect(after.scheduled_send_attempts).toBe(0);
+    } finally {
+      await mockPg('invoices').where({ id: bystanderId }).del();
+    }
   });
 
   test('a non-dispute (wrong-number fallback) hold does not stop the scheduled pay-link send', async () => {

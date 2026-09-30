@@ -894,6 +894,17 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
       // SAVEPOINT so a failed query cannot abort this transaction (which
       // still owns the payer-row locks and the withdrawal decision above).
       if (await packetCustomerOnDisputeHold(trx, { visit, invoiceId: payment.invoiceId })) {
+        // Mark the draft as withheld by the hold so the office RELEASE queues
+        // it at once (owner ruling 2026-09-30) instead of waiting for this
+        // closeout's next retry. The retry stays correct either way: an
+        // invoice the release already queued is 'scheduled' self-pay, which the
+        // branch below treats as this coordinator's own scheduling - never a
+        // second send. Best-effort: a marker failure only costs the immediacy.
+        try {
+          await require('./collections/collection-hold').markInvoiceWithheldByHold(payment.invoiceId, trx);
+        } catch (markErr) {
+          require('./logger').warn(`[visit-closeout] could not mark invoice ${payment.invoiceId} as withheld by a dispute hold: ${markErr.message}`);
+        }
         return { ...payment, state: 'payment_pending', reason: 'collections-dispute-hold' };
       }
       const scheduled = await trx('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })

@@ -478,6 +478,20 @@ const REGISTRY = {
         logger.warn(`[deferred-replay] completion hold recheck still failing for customer ${meta.customer_id || 'unknown'} at the attempt cap - sending report-only: ${err.message}`);
         return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
       }
+      // No hold now. If an EARLIER attempt of this row stripped the pay link
+      // because of a hold, the invoice was marked withheld and this text stays
+      // report-only (the strip is one-way) - so the invoice would never go out
+      // when the hold ended by any path other than the office release (which
+      // queues it itself, at once). Queue it here through the same atomic
+      // claim: whichever of the two paths claims it first sends it, the other
+      // finds the marker cleared and does nothing, so it is never sent twice.
+      if (meta.pay_link_stripped_reason === 'collections-dispute-hold') {
+        try {
+          await holdReader.releaseWithheldInvoices({ invoiceId: meta.invoice_id });
+        } catch (err) {
+          logger.warn(`[deferred-replay] could not queue the pay-link-withheld invoice ${meta.invoice_id} after the hold ended: ${err.message}`);
+        }
+      }
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) {
         // A transient read failure (DB outage mid-recheck) is NOT a
@@ -615,6 +629,14 @@ const REGISTRY = {
         // lookup failure throws the coded refusal into failClosed below:
         // retryable, then suppressed at the attempt cap.
         if (await require('../collections/collection-hold').customerHasActiveCollectionHoldChecked(meta.customer_id || inv.customer_id)) {
+          // The suppressed notice was the invoice's only pay-link delivery:
+          // mark the invoice so the office release sends it (owner ruling
+          // 2026-09-30). The suppression is terminal, so nothing else will.
+          try {
+            await require('../collections/collection-hold').markInvoiceWithheldByHold(inv.id);
+          } catch (markErr) {
+            logger.warn(`[deferred-replay] could not mark invoice ${inv.id} as pay-link-withheld by a dispute hold: ${markErr.message}`);
+          }
           return { eligible: false, reason: 'collections-dispute-hold' };
         }
         return { eligible: true };

@@ -1311,7 +1311,11 @@ describe('deferred-replay registry', () => {
     db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
     expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
       .toEqual({ eligible: false, reason: 'collections-dispute-hold' });
-    expect(db).toHaveBeenLastCalledWith('collections_flags');
+    expect(db).toHaveBeenCalledWith('collections_flags');
+    // The suppressed notice was the invoice's only pay-link delivery: the invoice is marked
+    // for the office release (owner ruling 2026-09-30). Behavior is covered against Postgres in
+    // collection-hold-withheld-invoice-release-postgres.test.js.
+    expect(db).toHaveBeenLastCalledWith('invoices');
 
     // The scheduler's terminal path for an ineligible, non-retryable recheck runs this hook.
     expect(requiresDurableFinalize('autopay_completion_decline_deferred')).toBe(true);

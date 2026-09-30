@@ -11795,6 +11795,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const payLinkHeldByDisputeHold = (invoiceCreated && payUrl && svc.customer_id)
       ? await require('../services/collections/collection-hold').shouldWithholdPayLink(svc.customer_id)
       : false;
+    // Mark the invoice as withheld by the hold so the office RELEASE sends it
+    // (owner ruling 2026-09-30). Without this the report-only text leaves the
+    // visit invoice a draft that nobody sends and the reminder ladder never
+    // starts. Best-effort: a marker write failure never fails the completion.
+    if (payLinkHeldByDisputeHold && invoice?.id) {
+      try {
+        await require('../services/collections/collection-hold').markInvoiceWithheldByHold(invoice.id, db);
+      } catch (markErr) {
+        logger.warn(`[dispatch] could not mark invoice ${invoice.id} as pay-link-withheld by a dispute hold: ${markErr.message}`);
+      }
+    }
     let paymentFailedNoticeSent = false;
     // Resume dedupe: the side-effects resume path reruns the auto-charge, so
     // a crash after this notice delivered but before the completion attempt

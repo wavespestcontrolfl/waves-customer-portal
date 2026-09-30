@@ -163,7 +163,87 @@ async function recordHoldOverride({ customerId, actorId = null, ip = null, userA
   }
 }
 
+// ---------------------------------------------------------------------------
+// Withheld pay link marker (owner ruling 2026-09-30: releasing a dispute hold
+// SENDS every invoice whose pay link the hold withheld, immediately).
+//
+// While a dispute hold stands, three completion lanes leave the visit invoice
+// a DRAFT that nobody sends: the single-visit completion text goes report-only,
+// a deferred completion replay strips its pay link, and a grouped-stop packet
+// closeout reports payment_pending. Each stamps the invoice with
+// HOLD_WITHHELD_SEND_ERROR at that moment, in invoices.scheduled_send_error
+// (the codebase's existing durable stamp column for a draft's send state - see
+// `payer_billed:` and `renewal_send_withheld:`; invoices has no metadata
+// column, so no migration). The marker is the ONLY thing the release looks
+// for, so a release never sends an unrelated draft. Invoices withheld before
+// this shipped carry no marker; the office sends those by hand.
+//
+// releaseWithheldInvoices is the one claim: a single UPDATE moves a marked,
+// still-draft, self-pay, unpaid invoice onto the normal scheduled-send queue
+// (status 'scheduled', scheduled_send_at now - the same idiom the packet
+// closeout uses) and clears the marker in the same statement. The queue worker
+// then applies the usual consent, suppression, quiet-hours and payer rules and
+// the Day 3-90 reminder ladder starts from the send. Because the claim and the
+// clear are one statement, however many paths call it (the office release, the
+// deferred-replay retry) an invoice is queued at most once.
+// ---------------------------------------------------------------------------
+const HOLD_WITHHELD_SEND_ERROR = 'dispute_hold_pay_link_withheld';
+
+// Stamp a draft invoice as withheld by the hold. Only a draft with no other
+// send stamp (NULL / empty) is marked: a payer_billed:, renewal or park stamp
+// carries its own meaning and is never overwritten. Best-effort by design -
+// callers log a failure and carry on; the completion itself must not fail.
+async function markInvoiceWithheldByHold(invoiceId, database = db) {
+  if (!invoiceId) return false;
+  // On a caller's transaction the write runs in a SAVEPOINT so a failed
+  // statement cannot leave the caller's transaction aborted (25P02).
+  if (database.isTransaction && typeof database.transaction === 'function') {
+    return database.transaction((sp) => stampWithheld(invoiceId, sp));
+  }
+  return stampWithheld(invoiceId, database);
+}
+
+async function stampWithheld(invoiceId, database) {
+  const n = await database('invoices')
+    .where({ id: invoiceId, status: 'draft' })
+    .whereNull('payer_id')
+    .whereNull('sent_at')
+    .where((q) => q.whereNull('scheduled_send_error').orWhere('scheduled_send_error', ''))
+    .update({ scheduled_send_error: HOLD_WITHHELD_SEND_ERROR, updated_at: database.fn.now() });
+  return Number(n) > 0;
+}
+
+// Queue the invoices the hold withheld. `customerId` = every marked invoice of
+// that customer (the office release); `invoiceId` = one (a retry that finds the
+// hold gone). Returns { queued: [ids], cleared: n }. Nothing moves while the
+// customer still has an active dispute hold (checked inside the UPDATE itself,
+// so a hold landing mid-release wins). Marked rows that are no longer sendable
+// (paid, void, refunded, already sent, payer-owned) only lose the marker.
+async function releaseWithheldInvoices({ customerId = null, invoiceId = null, database = db } = {}) {
+  if (!customerId && !invoiceId) return { queued: [], cleared: 0 };
+  const scope = (q) => {
+    q.where('scheduled_send_error', HOLD_WITHHELD_SEND_ERROR);
+    if (invoiceId) q.where({ id: invoiceId });
+    if (customerId) q.where({ customer_id: customerId });
+    return q.whereNotExists(function noActiveDisputeHold() { disputeHoldExistsSql(this, 'invoices.customer_id'); });
+  };
+  const queued = await scope(database('invoices'))
+    .where({ status: 'draft' })
+    .whereNull('payer_id').whereNull('payer_statement_id')
+    .whereNull('paid_at').whereNull('sent_at').whereNull('sms_sent_at').whereNull('email_sent_at')
+    .update({
+      status: 'scheduled', scheduled_send_at: database.fn.now(), scheduled_send_attempts: 0,
+      scheduled_send_error: null, updated_at: database.fn.now(),
+    })
+    .returning('id');
+  const cleared = await scope(database('invoices')).update({ scheduled_send_error: null, updated_at: database.fn.now() });
+  return { queued: queued.map((r) => (r && typeof r === 'object' ? r.id : r)), cleared: Number(cleared) || 0 };
+}
+
 module.exports = {
+  markInvoiceWithheldByHold,
+  releaseWithheldInvoices,
+  HOLD_WITHHELD_SEND_ERROR,
   recordHoldOverride,
   activeDisputeHolds,
   disputeHoldExistsSql,

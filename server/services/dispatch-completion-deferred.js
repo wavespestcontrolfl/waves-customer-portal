@@ -316,7 +316,37 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
   logger.warn(`[completion-deferred] decline notice for record ${claimMeta.service_record_id} terminally blocked — status restored to failed`);
 }
 
+// Persist the stripped body on the claimed ('sending') scheduled row and drop
+// `mark_invoice_delivery` so finalize never marks a pay link delivered that
+// never went out. Returns the changed-row count (0 = the claim was lost).
+//
+// A strip caused by a dispute hold (owner ruling 2026-09-30) also stamps the
+// invoice as withheld-by-the-hold in the SAME transaction: the row and the
+// invoice can never disagree about whether the pay link still needs sending.
+// The office release (or a later retry that finds the hold gone - see the
+// completion recheck in deferred-replay-registry.js) queues the invoice
+// through one atomic claim; this text stays report-only either way, so the
+// invoice is sent once, never by both. A marker failure rolls the strip back
+// and the attempt retries with a fresh recheck.
+async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invoiceId = null, stampedAt = new Date(), database = db }) {
+  return database.transaction(async (trx) => {
+    const changed = await trx('sms_log').where({ id: msgId, status: 'sending' }).update({
+      message_body: strippedBody,
+      metadata: trx.raw(
+        "(COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pay_link_stripped_at', ?::timestamptz, 'pay_link_stripped_reason', ?::text)) - 'mark_invoice_delivery'",
+        [stampedAt, reason],
+      ),
+      updated_at: stampedAt,
+    });
+    if (changed && reason === 'collections-dispute-hold' && invoiceId) {
+      await require('./collections/collection-hold').markInvoiceWithheldByHold(invoiceId, trx);
+    }
+    return changed;
+  });
+}
+
 module.exports = {
+  persistStrippedPayLink,
   finalizeDeferredCompletionSend,
   finalizeDeferredDeclineNotice,
   terminalDeferredCompletionSend,

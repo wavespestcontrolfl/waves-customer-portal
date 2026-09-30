@@ -4188,13 +4188,10 @@ function initScheduledJobs() {
                 continue;
               }
               const stampedAt = new Date();
-              const changed = await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                message_body: strippedBody,
-                metadata: db.raw(
-                  "(COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('pay_link_stripped_at', ?::timestamptz, 'pay_link_stripped_reason', ?::text)) - 'mark_invoice_delivery'",
-                  [stampedAt, recheck.reason || null],
-                ),
-                updated_at: stampedAt,
+              // A dispute-hold strip also stamps the invoice, atomically
+              // with the strip (see persistStrippedPayLink).
+              const changed = await require('./dispatch-completion-deferred').persistStrippedPayLink({
+                msgId: msg.id, strippedBody, reason: recheck.reason || null, invoiceId: claimMeta.invoice_id || null, stampedAt,
               });
               if (!changed) throw new Error('Scheduled completion claim lost before stripping the stale pay link');
               msg.message_body = strippedBody;
