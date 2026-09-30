@@ -87,6 +87,18 @@ test('a hold that finds nothing inside the pause is refused; in a multi-family a
   expect(mockSkips.mock.calls[0][0].map((h) => h.holdId)).toEqual(['h-mosquito']);
 });
 
+test('away pairing with nothing to pause on lawn still sets Away Mode on pest, and says why lawn is unchanged', async () => {
+  mockStartHold.mockResolvedValueOnce(notNeeded('lawn_care', 'November 5, 2026'));
+  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'November 1, 2026' });
+  const out = await executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['pest_control', 'lawn_care'],
+  });
+  expect(mockStartAwayMode).toHaveBeenCalledTimes(1);
+  expect(out.holds).toEqual([]);
+  expect(out.effects.join(' ')).toContain('visit is November 5, 2026, after you are back, so nothing changes for it');
+  expect(mockCancelHold).not.toHaveBeenCalled();
+});
+
 test('away pairing: the hold notices wait for Away Mode; a failed Away Mode compensates the holds and tells nobody', async () => {
   mockStartHold.mockResolvedValueOnce(hold('lawn_care', ['v1']));
   mockStartAwayMode.mockResolvedValueOnce({ until: null, effects: [] });

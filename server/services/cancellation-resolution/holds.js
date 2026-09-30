@@ -30,7 +30,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { etDateString, dateOnlyString } = require('../../utils/datetime-et');
-const { CANCELLABLE_STATUSES } = require('../cancellation-eligibility');
+const { CANCELLABLE_STATUSES, LIVE_TRACK_STATES } = require('../cancellation-eligibility');
 const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 const { resolveBillingLane } = require('../billing-lane');
 
@@ -358,7 +358,7 @@ async function applyHoldSkips(holdResults) {
           const date = dateOnlyString(row.scheduled_date);
           // Moved out of the pause in the gap: nothing to skip.
           if (!date || date < etDateString() || date >= hold.resumeOn) return 'left_pause';
-          if (['complete', 'en_route', 'on_site'].includes(row.track_state)) return 'live';
+          if (row.track_state === 'complete' || LIVE_TRACK_STATES.includes(row.track_state)) return 'live';
           const covered = await findBillingCoveredVisits(trx, [row]);
           if (covered.has(row.id)) return 'prepaid';
           await transitionJobStatus({

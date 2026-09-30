@@ -195,7 +195,7 @@ async function executeAwayMode({ customerId, caseRow, params }) {
   ] };
 }
 
-async function executeHold({ customerId, caseRow, action, params, families, deferTechNotices = false }) {
+async function executeHold({ customerId, caseRow, action, params, families, deferTechNotices = false, allowNoHold = false }) {
   const { startHold, cancelHold, applyHoldSkips, emitHoldTechNotices } = require('./holds');
   const holdable = families.filter((f) => ['lawn_care', 'mosquito', 'tree_shrub'].includes(f));
   if (!holdable.length) throw codedError('hold_family_required', 'Nothing on this plan can be held');
@@ -224,7 +224,9 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
   const notNeededEffects = notNeeded.map((n) => (n.nextVisitDisplay
     ? `Your next ${labelOf(n.familyKey)} visit is ${n.nextVisitDisplay}, after you are back, so nothing changes for it.`
     : `No ${labelOf(n.familyKey)} visits are booked before you are back, so nothing changes for it.`));
-  if (!results.length) throw codedError('hold_not_needed', notNeededEffects.join(' '));
+  // An away pairing still sets Away Mode on pest when no family needs a hold.
+  if (!results.length && !allowNoHold) throw codedError('hold_not_needed', notNeededEffects.join(' '));
+  if (!results.length) return { holds: [], effects: notNeededEffects, ...(deferTechNotices ? { techNotices: [], holdResults: [] } : {}) };
   // The techs hear about the moves, and the visits inside the pause are
   // skipped, only now — every family stands and no compensation can revert
   // them (a skip is one-way). An away pairing defers both further, until
@@ -249,7 +251,7 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
 async function executeAwayPairing(ctx) {
   // Holds first (they can fail and fully compensate); Away Mode is a
   // single idempotent preference write, so nothing partial can linger.
-  const { techNotices, holdResults, ...hold } = await executeHold({ ...ctx, deferTechNotices: true });
+  const { techNotices, holdResults, ...hold } = await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });
   let away;
   try {
     away = await executeAwayMode(ctx);

@@ -283,7 +283,7 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
 
     mockTransition.mockClear();
-    seedHeld([lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(12), { status: 'rescheduled', track_state: 'en_route' })]);
+    seedHeld([lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(12), { status: 'rescheduled', track_state: 'on_property' })]);
     mockCovered.mockImplementation(async (_conn, rows) => new Set(rows.filter((r) => r.id === 'l1').map((r) => r.id)));
     await applyHoldSkips([held()]);
     expect(mockTransition).not.toHaveBeenCalled();
