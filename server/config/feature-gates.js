@@ -3445,6 +3445,10 @@ const gates = {
   // This entry is for logGateStatus only: plant-engine.js's runReferee()
   // reads GATE_PLANT_ID_REFEREE at call time via plantIdRefereeLive().
   plantIdReferee: process.env.GATE_PLANT_ID_REFEREE === 'true',
+  // Lawn visit assessment name referee (owner ruling 2026-09-29): this entry
+  // is for logGateStatus only; lawn-visit-assessment.js reads
+  // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
+  lawnAssessmentReferee: process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true',
 
   // Call-address on-file assist (owner-approved review items 3 and 4,
   // 2026-09-30): the caller's on-file address rescues a spoken one when the
@@ -3800,6 +3804,16 @@ function callAddressOnFileAssistLive() {
   return process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true';
 }
 
+// GATE_LAWN_ASSESSMENT_REFEREE read at CALL time — ships DARK, off unless
+// exactly 'true' (owner ruling 2026-09-29). ONE gate covers both the GPT-6 Sol
+// second opinion and the Claude Fable name referee in
+// lawn-visit-assessment.js's analyzeVisit (the second opinion exists only to
+// feed the referee). Off, analyzeVisit is byte-identical to the single
+// Gemini -> Sol fallback chain: no extra call, same return shape.
+function lawnAssessmentRefereeLive() {
+  return process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -3974,4 +3988,5 @@ module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
+module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 // gates 1775330914

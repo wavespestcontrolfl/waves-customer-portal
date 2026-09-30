@@ -216,14 +216,6 @@ describe('intelligence bar Cloudflare write tools (preview only)', () => {
     expect(result.error).toMatch(/Multiple Cloudflare zones are exactly named/);
   });
 
-  test('purge_cloudflare_cache: confirmed:true refuses — the commit path is not built in this PR', async () => {
-    process.env.CF_API_TOKEN = 'cf-token';
-    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com', confirmed: true });
-    expect(result.error).toMatch(/not enabled yet/);
-    expect(result.code).toBe('not_yet_implemented');
-    expect(global.fetch).not.toHaveBeenCalled();
-  });
-
   test('retry_cloudflare_pages_build: unconfirmed names the actual project and its current status', async () => {
     process.env.CF_API_TOKEN = 'cf-token';
     process.env.CF_ACCOUNT_ID = 'acct-1';
@@ -342,12 +334,119 @@ describe('intelligence bar Cloudflare write tools (preview only)', () => {
     expect(result.error).toMatch(/Multiple Cloudflare Pages projects are exactly named/);
   });
 
-  test('retry_cloudflare_pages_build: confirmed:true refuses — the commit path is not built in this PR', async () => {
+});
+
+describe('intelligence bar Cloudflare write tools (confirmed commit)', () => {
+  const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+  const zonesResponse = () => jsonResponse({
+    success: true,
+    result: [
+      { id: 'zone-1', name: 'wavespestcontrol.com', status: 'active', paused: false },
+      { id: 'zone-2', name: 'bradentonflpestcontrol.com', status: 'active', paused: false },
+    ],
+  });
+  const projectsResponse = (depId = 'dep-111') => jsonResponse({
+    success: true,
+    result: [{
+      name: 'spoke-venice',
+      latest_deployment: {
+        id: depId, created_on: '2026-09-28T12:00:00Z',
+        latest_stage: { name: 'deploy', status: 'failure' },
+        deployment_trigger: { metadata: { branch: 'main' } },
+      },
+    }],
+  });
+
+  test('purge_cloudflare_cache: confirm POSTs purge_everything to the PINNED zone id only', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(zonesResponse());
+    const preview = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com' });
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValueOnce(jsonResponse({ success: true, result: { id: 'zone-1' } }));
+
+    const pins = outsideWritePins('purge_cloudflare_cache', preview);
+    expect(pins).toEqual({ _verified_cloudflare_zone_id: 'zone-1' });
+    // A confirmed call carrying a DIFFERENT raw zone_name still hits zone-1.
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'bradentonflpestcontrol.com', ...pins, confirmed: true });
+    expect(result).toEqual({ success: true, tool: 'purge_cloudflare_cache', zone_id: 'zone-1' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/zones\/zone-1\/purge_cache$/);
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body)).toEqual({ purge_everything: true });
+  });
+
+  test('retry_cloudflare_pages_build: confirm retries the PINNED deployment id in the PINNED project', async () => {
     process.env.CF_API_TOKEN = 'cf-token';
     process.env.CF_ACCOUNT_ID = 'acct-1';
-    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice', confirmed: true });
-    expect(result.error).toMatch(/not enabled yet/);
-    expect(result.code).toBe('not_yet_implemented');
+    global.fetch.mockResolvedValueOnce(projectsResponse('dep-111'));
+    const preview = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    global.fetch.mockClear();
+    global.fetch.mockResolvedValueOnce(jsonResponse({ success: true, result: { id: 'dep-222' } }));
+
+    const pins = outsideWritePins('retry_cloudflare_pages_build', preview);
+    expect(pins).toEqual({ _verified_cloudflare_project_name: 'spoke-venice', _verified_cloudflare_deployment_id: 'dep-111' });
+    const result = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'other', ...pins, confirmed: true });
+    expect(result).toEqual({
+      success: true, tool: 'retry_cloudflare_pages_build', project: 'spoke-venice',
+      retried_deployment_id: 'dep-111', new_deployment_id: 'dep-222',
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/accounts\/acct-1\/pages\/projects\/spoke-venice\/deployments\/dep-111\/retry$/);
+    expect(init.method).toBe('POST');
+  });
+
+  test('a newer deployment landing between preview and confirm changes the preview (target-changed) — the pin follows the preview, not "latest"', async () => {
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    global.fetch.mockResolvedValueOnce(projectsResponse('dep-111')).mockResolvedValueOnce(projectsResponse('dep-999'));
+    const first = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    const second = await executeCloudflareOpsTool('retry_cloudflare_pages_build', { project_name: 'spoke-venice' });
+    expect(previewFingerprint(first)).not.toBe(previewFingerprint(second));
+  });
+
+  test.each([
+    ['purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com' }],
+    ['retry_cloudflare_pages_build', { project_name: 'spoke-venice' }],
+  ])('%s: confirmed without a verified pin refuses and never calls Cloudflare', async (name, input) => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    const result = await executeCloudflareOpsTool(name, { ...input, confirmed: true });
+    expect(result.code).toBe('missing_verified_pin');
     expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['purge_cloudflare_cache', { _verified_cloudflare_zone_id: 'zone-1' }],
+    ['retry_cloudflare_pages_build', { _verified_cloudflare_project_name: 'spoke-venice', _verified_cloudflare_deployment_id: 'dep-111' }],
+  ])('%s: a read-only token (403) returns a clear write-access result and changes nothing', async (name, pins) => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    process.env.CF_ACCOUNT_ID = 'acct-1';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }, 403));
+    const result = await executeCloudflareOpsTool(name, { zone_name: 'wavespestcontrol.com', project_name: 'spoke-venice', ...pins, confirmed: true });
+    expect(result.code).toBe('write_access_required');
+    expect(result.error).toMatch(/read-only.*write scope/i);
+    expect(result.success).toBeUndefined();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a 2xx envelope with success:false and an auth error code is also mapped to write access', async () => {
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }));
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com', _verified_cloudflare_zone_id: 'zone-1', confirmed: true });
+    expect(result.code).toBe('write_access_required');
+  });
+
+  test('a non-permission failure stays a plain error and the log carries status only', async () => {
+    const logger = require('../services/logger');
+    process.env.CF_API_TOKEN = 'cf-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({}, 500));
+    const result = await executeCloudflareOpsTool('purge_cloudflare_cache', { zone_name: 'wavespestcontrol.com', _verified_cloudflare_zone_id: 'zone-1', confirmed: true });
+    expect(result.error).toMatch(/HTTP 500/);
+    expect(result.code).toBeUndefined();
+    expect(JSON.stringify(logger.error.mock.calls)).toContain('status=500');
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('cf-token');
   });
 });
