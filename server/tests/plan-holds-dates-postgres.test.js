@@ -4,10 +4,10 @@
  * scheduled_date, resume_on and tier_protected_until as a Date, and String()
  * of one reads "Mon Oct 05 …". cancellation-holds-and-scoped.test.js seeds
  * those as strings, which is how every date read below hid: startHold threw
- * on the first visit, tier protection could keep an earlier date, the 7-day
- * restart text said "Invalid Date", and a late or undeliverable notice never
- * pushed the restart. The visit mover, the text sender and the admin bell are
- * stood in, so nothing moves a real visit and nothing reaches a customer.
+ * on the first visit, tier protection could keep an earlier date, and the
+ * restart text said "Invalid Date" for the visit it names. The visit mover,
+ * the text sender and the admin bell are stood in, so nothing moves a real
+ * visit and nothing reaches a customer.
  * Every row these tests insert is deleted afterwards.
  */
 const { etDateString, addETDays, dateOnlyString } = require('../utils/datetime-et');
@@ -77,20 +77,24 @@ maybeDescribe('plan holds read DATE columns as dates (live Postgres)', () => {
     customer_id: c.id, scheduled_date: scheduledDate, service_type: 'Lawn Care', status: 'confirmed', window_start: '08:00', window_end: '10:00',
   });
   const holdRow = async (id) => db('plan_holds').where({ id }).first();
-  const WINDOW = { start: '08:00:00', end: '10:00:00' }; // TIME columns read back with seconds
 
-  test('startHold shifts the series by whole days onto the resume date and protects the tier through it', async () => {
+  test('startHold hands back the visits inside the pause to skip (moving none), and protects the tier through the return date', async () => {
     const c = await customer({ tier_protected_until: day(5) });
     const first = await lawnVisit(c, day(10));
-    const second = await lawnVisit(c, day(40));
+    const second = await lawnVisit(c, day(20));
+    const back = await lawnVisit(c, day(40));
     const result = await holds.startHold({ customerId: c.id, caseId: null, familyKey: 'lawn_care', resumeOn: day(30) });
     made.plan_holds.push(result.holdId);
-    expect(rebooker.reschedule).toHaveBeenCalledWith(first.id, day(30), WINDOW, 'plan_hold', 'customer', { suppressTechNotice: true });
-    expect(rebooker.reschedule).toHaveBeenCalledWith(second.id, day(60), WINDOW, 'plan_hold', 'customer', { suppressTechNotice: true });
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(result.pendingSkips.map((v) => [v.id, v.from])).toEqual([[first.id, day(10)], [second.id, day(20)]]);
+    // startHold leaves every visit as it was; skipping happens after the whole accept stands.
+    const rows = await db('scheduled_services').whereIn('id', [first.id, second.id, back.id]).select('id', 'status', 'scheduled_date');
+    expect(rows.map((r) => r.status)).toEqual(['confirmed', 'confirmed', 'confirmed']);
     const hold = await holdRow(result.holdId);
     expect(dateOnlyString(hold.resume_on)).toBe(day(30));
-    const moved = (typeof hold.moved_visits === 'string' ? JSON.parse(hold.moved_visits) : hold.moved_visits).moved;
-    expect(moved.map((m) => [m.from, m.to])).toEqual([[day(10), day(30)], [day(40), day(60)]]);
+    const record = typeof hold.moved_visits === 'string' ? JSON.parse(hold.moved_visits) : hold.moved_visits;
+    expect(record.moved).toEqual([]);
+    expect(record.toSkip.map((v) => [v.id, v.from])).toEqual([[first.id, day(10)], [second.id, day(20)]]);
     // An earlier protection date gives way to the resume date; a later one stands.
     expect(dateOnlyString((await db('customers').where({ id: c.id }).first('tier_protected_until')).tier_protected_until)).toBe(day(30));
     const later = await customer({ tier_protected_until: day(90) });
@@ -99,30 +103,60 @@ maybeDescribe('plan holds read DATE columns as dates (live Postgres)', () => {
     expect(dateOnlyString((await db('customers').where({ id: later.id }).first('tier_protected_until')).tier_protected_until)).toBe(day(90));
   });
 
-  // A hold whose restart is today, its 7-day text not yet sent, one visit parked on it.
-  const dueHold = async () => {
+  test('a pause with no visit inside it writes no hold and names the next visit, read from a Date column', async () => {
     const c = await customer();
-    const parked = await lawnVisit(c, day(0));
-    const hold = await insert('plan_holds', { customer_id: c.id, family_key: 'lawn_care', starts_on: day(-20), resume_on: day(0),
-      status: 'active', moved_visits: JSON.stringify({ moved: [] }) });
-    return { hold, parked };
-  };
-
-  test('a restart text delivered late names the real date and pushes the restart, and its parked visit, seven days out', async () => {
-    const { hold, parked } = await dueHold();
-    sendCustomerMessage.mockResolvedValue({ sent: true });
-    await holds.runPlanHoldLifecycle({ today: day(0) });
-    expect(renderRequiredSmsTemplate).toHaveBeenCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: display(day(0)) }), expect.anything());
-    expect(rebooker.reschedule).toHaveBeenCalledWith(parked.id, day(7), WINDOW, 'plan_hold_notice', 'system', {});
-    expect(dateOnlyString((await holdRow(hold.id)).resume_on)).toBe(day(7));
+    await lawnVisit(c, day(45));
+    expect(await holds.startHold({ customerId: c.id, caseId: null, familyKey: 'lawn_care', resumeOn: day(30) }))
+      .toEqual({ notNeeded: true, familyKey: 'lawn_care', nextVisitOn: day(45), nextVisitDisplay: display(day(45)) });
+    expect(await db('plan_holds').where({ customer_id: c.id }).first()).toBeUndefined();
   });
 
-  test('an undeliverable restart text pushes the restart a week and rings the office', async () => {
-    const { hold, parked } = await dueHold();
+  // A hold whose pause is over or nearly so, with its first visit back on `visitDay`.
+  const heldWithVisitBack = async (resumeDay, visitDay, status = 'active') => {
+    const c = await customer();
+    const visit = await lawnVisit(c, day(visitDay));
+    const hold = await insert('plan_holds', { customer_id: c.id, family_key: 'lawn_care', starts_on: day(-20), resume_on: day(resumeDay),
+      status, moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [] }) });
+    return { c, hold, visit };
+  };
+
+  test('the restart text names the first visit back (a Date column, not "Invalid Date"), stamps once, and moves nothing', async () => {
+    const { hold, visit } = await heldWithVisitBack(3, 5);
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    await holds.runPlanHoldLifecycle({ today: day(0) });
+    expect(renderRequiredSmsTemplate).toHaveBeenCalledWith('plan_hold_resume_reminder',
+      expect.objectContaining({ visit_date: display(day(5)), resume_date: display(day(5)) }), expect.anything());
+    expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ metadata: expect.objectContaining({ plan_hold_id: hold.id, visit_id: visit.id }) }));
+    expect((await holdRow(hold.id)).reminder_sent_at).toBeTruthy();
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    await holds.runPlanHoldLifecycle({ today: day(0) });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test('a resumed hold whose first visit back is still ahead gets its text; dues resume on the return date without one', async () => {
+    const owed = await heldWithVisitBack(-2, 4, 'resumed');
+    sendCustomerMessage.mockResolvedValue({ sent: true });
+    const out = await holds.runPlanHoldLifecycle({ today: day(0) });
+    expect(out.reminded).toBeGreaterThanOrEqual(1);
+    expect((await holdRow(owed.hold.id)).reminder_sent_at).toBeTruthy();
+
+    // No visit booked after the return date: it resumes, texts nothing, and the office is told.
+    sendCustomerMessage.mockClear();
+    const c = await customer();
+    const bare = await insert('plan_holds', { customer_id: c.id, family_key: 'lawn_care', starts_on: day(-20), resume_on: day(0),
+      status: 'active', moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [] }) });
+    await holds.runPlanHoldLifecycle({ today: day(0) });
+    expect((await holdRow(bare.id)).status).toBe('resumed');
+    expect(sendCustomerMessage).not.toHaveBeenCalledWith(expect.objectContaining({ customerId: c.id }));
+    expect(notifyAdmin).toHaveBeenCalledWith('service', 'Plan hold: no visit booked after the pause', expect.any(String), expect.objectContaining({ bell: true, dedupeKey: `plan_hold_no_visit_back:${bare.id}` }));
+  });
+
+  test('an undeliverable restart text is left unstamped for tomorrow and rings the office when the visit is tomorrow', async () => {
+    const { hold } = await heldWithVisitBack(1, 1);
     sendCustomerMessage.mockResolvedValue({ sent: false });
     await holds.runPlanHoldLifecycle({ today: day(0) });
-    expect(rebooker.reschedule).toHaveBeenCalledWith(parked.id, day(7), WINDOW, 'plan_hold_notice', 'system', {});
-    expect(dateOnlyString((await holdRow(hold.id)).resume_on)).toBe(day(7));
-    expect(notifyAdmin).toHaveBeenCalledWith('service', 'Plan hold cannot auto-resume: restart text undeliverable', expect.any(String), expect.objectContaining({ bell: true }));
+    expect((await holdRow(hold.id)).reminder_sent_at).toBeNull();
+    expect(rebooker.reschedule).not.toHaveBeenCalled();
+    expect(notifyAdmin).toHaveBeenCalledWith('service', 'Plan hold: restart text not delivered', expect.any(String), expect.objectContaining({ bell: true, dedupeKey: `plan_hold_restart_text_undelivered:${hold.id}` }));
   });
 });

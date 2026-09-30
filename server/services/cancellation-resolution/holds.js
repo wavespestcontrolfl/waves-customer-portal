@@ -9,14 +9,22 @@
  * reports still send; price and tier unchanged. Persisted as
  * property_preferences.away_mode_until — the dispatch/tech surfaces read it.
  *
- * Hold (lawn / mosquito / tree & shrub): every upcoming visit in the family
- * shifts forward so the series restarts on the customer's resume date; the
- * family's monthly component is suspended (held_monthly_rate restored on
- * resume) so "no visits, no charges" is literally true; the WaveGuard tier
- * is protected (customers.tier_protected_until) so the bundle price stays
- * locked; a text goes out 7 days before the restart; auto-resume on the
- * date (Adam's C-4: the 7-day text IS the consent step). Once per family
- * per 12 months. ≤ 180 days.
+ * Hold (lawn / mosquito / tree & shrub), owner rulings 2026-09-29:
+ *  1. Visits that fall while the customer is away are SKIPPED; the next
+ *     visit is simply the series' next regular one — nothing is pulled
+ *     earlier or pushed later. A PREPAID visit inside the pause is never
+ *     lost: it is moved to after the return date instead.
+ *  2. The family's monthly component is suspended for the pause
+ *     (held_monthly_rate restored on the return date). With no visit
+ *     inside the away dates there is nothing to pause, and no hold (no
+ *     free month).
+ *  3. The restart text goes out 7 days before the first visit back and
+ *     names that visit's real date — right away when it is under 7 days
+ *     out. Nothing is ever shifted to make room for the notice.
+ *  4. Once per family per 12 months; a hold that was undone (cancelled)
+ *     does not count. ≤ 180 days.
+ * The WaveGuard tier is protected (customers.tier_protected_until) through
+ * the return date so the bundle price stays locked.
  */
 
 const db = require('../../models/db');
@@ -27,6 +35,7 @@ const { lockCustomerComms } = require('../../utils/customer-comms-lock');
 const { resolveBillingLane } = require('../billing-lane');
 
 const HOLDABLE_FAMILIES = ['lawn_care', 'mosquito', 'tree_shrub'];
+const COUNTED_HOLD_STATUSES = ['active', 'resumed'];
 
 function codedError(code, message) {
   const err = new Error(message || code);
@@ -105,7 +114,7 @@ async function revertMoves(customerId, moved) {
     try {
       // A compensating move back is not a schedule change the tech should
       // hear about — the forward move it undoes was never announced either.
-      await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', { suppressTechNotice: true });
+      await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
     } catch (revertErr) {
       logger.error(`[holds] revert of visit ${done.id} failed: ${revertErr.message}`);
       const { notifyAdmin } = require('../notification-service');
@@ -123,9 +132,12 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   if (!resume || resume <= today) throw codedError('hold_date_invalid', 'Pick the date you are back');
   if (daysBetween(today, resume) > maxDays) throw codedError('hold_too_long', `A hold can run at most ${maxDays} days`);
 
-  // Once per family per 12 months — ET calendar months, any prior hold counts.
+  // Once per family per 12 months (rule 4) — a hold that was undone
+  // (status 'cancelled': compensated, obsolete, or churned) does not count.
   const floor = new Date(Date.now() - 365 * 86400000);
-  const prior = await db('plan_holds').where({ customer_id: customerId, family_key: familyKey }).where('created_at', '>=', floor).first('id');
+  const countedPrior = (q) => q.where({ customer_id: customerId, family_key: familyKey })
+    .whereIn('status', COUNTED_HOLD_STATUSES).where('created_at', '>=', floor).first('id');
+  const prior = await countedPrior(db('plan_holds'));
   if (prior) throw codedError('hold_cooldown', 'This service was already held in the last 12 months');
 
   // Money first (fail closed): a monthly-lane family we cannot attribute
@@ -142,35 +154,65 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
     heldRate = Number(component.monthly_rate) || 0;
   }
 
-  // Move the series FIRST (codex r1 P1): the hold's promise is "no visits
-  // until the resume date" — if any visit will not move, revert the ones
-  // that did and refuse the hold instead of suspending billing around a
-  // visit that can still dispatch.
+  // The visits the pause actually covers (rule 1): dated from today up to
+  // the day before the return date. A stale past-dated 'rescheduled'
+  // placeholder is not one of them — it anchors nothing and is left alone.
   const visits = await familyUpcomingVisits(customerId, familyKey);
+  const inPause = visits.filter((v) => {
+    const date = dateOnlyString(v.scheduled_date);
+    return date && date >= today && date < resume;
+  });
+  // Rule 2: no visit inside the away dates means nothing to pause — no
+  // hold, no suspended dues, no free month.
+  if (!inPause.length) {
+    const next = visits
+      .map((v) => dateOnlyString(v.scheduled_date))
+      .filter((date) => date && date >= resume)
+      .sort()[0] || null;
+    return { notNeeded: true, familyKey, nextVisitOn: next, nextVisitDisplay: next ? displayDate(next) : null };
+  }
+
+  // A prepaid visit is never lost to a pause (rule 1): money already held
+  // for it (canonical reader — annual prepay term, hand-collected prepay,
+  // a paying invoice, a card fee rail) moves it to after the return date.
+  // Every other visit inside the pause is skipped once the hold stands.
+  const { findBillingCoveredVisits } = require('../../routes/admin-schedule');
+  const covered = await findBillingCoveredVisits(db, inPause);
+  const toMove = inPause.filter((v) => covered.has(v.id));
+  const toSkip = inPause.filter((v) => !covered.has(v.id));
+
+  // Moves FIRST (codex r1 P1): if a prepaid visit will not move, revert the
+  // ones that did and refuse the hold instead of suspending billing around
+  // a visit that can still dispatch. Moves are reversible; skips are not,
+  // so skips wait until every write of the accept stands (applyHoldSkips).
   const moved = [];
   // Holder on each COMMITTED move (rebooker result), for the tech notices
   // sent only once the whole hold stands — kept off the persisted
   // moved_visits shape.
   const movedTechIds = new Map();
-  if (visits.length) {
+  if (toMove.length) {
     const SmartRebooker = require('../rebooker');
-    const delta = daysBetween(dateOnlyString(visits[0].scheduled_date), resume);
-    for (const visit of visits) {
+    // The first prepaid visit lands on the return date and the rest keep
+    // their spacing — always forward, never earlier than they were.
+    const delta = daysBetween(dateOnlyString(toMove[0].scheduled_date), resume);
+    for (const visit of toMove) {
       const from = dateOnlyString(visit.scheduled_date);
       const to = addDays(from, delta);
       try {
         // suppressTechNotice: a later visit in this loop, or the hold write
         // below, can still fail and revert every move made so far — the
         // tech must never act on a schedule change that gets rolled back.
+        // seriesPolicy 'single': collective move is on, and a series move
+        // would carry the regular visits after the return date along.
         const moveResult = await SmartRebooker.reschedule(visit.id, to, {
           start: visit.window_start || null, end: visit.window_end || null,
-        }, 'plan_hold', 'customer', { suppressTechNotice: true });
+        }, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
         moved.push({ id: visit.id, from, to, window: { start: visit.window_start || null, end: visit.window_end || null } });
         movedTechIds.set(String(visit.id), moveResult?.technicianId || null);
       } catch (err) {
         logger.error(`[holds] visit ${visit.id} did not move for a ${familyKey} hold: ${err.message}`);
         await revertMoves(customerId, moved);
-        throw codedError('hold_visits_unmovable', 'One of the upcoming visits could not be moved — call our office and we will set the hold up by hand');
+        throw codedError('hold_visits_unmovable', 'One of your prepaid visits could not be moved — call our office and we will set the hold up by hand');
       }
     }
   }
@@ -197,18 +239,24 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       // scoped wind-down that cancelled the family's visits in the gap
       // must not leave an active hold — and tier protection — on a family
       // the customer no longer owns.
-      const priorUnderLock = await trx('plan_holds').where({ customer_id: customerId, family_key: familyKey }).where('created_at', '>=', floor).first('id');
+      const priorUnderLock = await countedPrior(trx('plan_holds'));
       if (priorUnderLock) throw new Error('a hold for this family was written concurrently');
-      // Exactly the moved set, by identity — including the expected-EMPTY
-      // case: a cancelled moved visit, or a visit booked in the gap (the
-      // family's first one included) that would dispatch during the hold
-      // unmoved, both refuse the hold.
+      // The visits still inside the pause must be exactly the ones to skip,
+      // by identity: a skip target cancelled or moved in the gap, or a
+      // visit booked into the pause in the gap, refuses the hold. The
+      // moved prepaid visits must all still be live.
       const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
-      const liveIds = liveVisits.map((v) => String(v.id)).sort();
-      const movedIds = moved.map((v) => String(v.id)).sort();
-      if (liveIds.length !== movedIds.length || liveIds.some((id, i) => id !== movedIds[i])) {
-        throw new Error(`${familyKey} visits changed before the hold could be written (live ${liveIds.join(',')} vs moved ${movedIds.join(',')})`);
+      const liveInPause = liveVisits.filter((v) => {
+        const date = dateOnlyString(v.scheduled_date);
+        return date && date >= today && date < resume;
+      }).map((v) => String(v.id)).sort();
+      const skipIds = toSkip.map((v) => String(v.id)).sort();
+      if (liveInPause.length !== skipIds.length || liveInPause.some((id, i) => id !== skipIds[i])) {
+        throw new Error(`${familyKey} visits inside the pause changed before the hold could be written (live ${liveInPause.join(',')} vs planned ${skipIds.join(',')})`);
       }
+      const liveIds = new Set(liveVisits.map((v) => String(v.id)));
+      const lostMove = moved.find((m) => !liveIds.has(String(m.id)));
+      if (lostMove) throw new Error(`moved prepaid visit ${lostMove.id} is no longer live`);
       const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
       if (!live) throw new Error('customer vanished before the hold could be written');
       if (resolveBillingLane(live).mode === 'monthly_membership') {
@@ -225,7 +273,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
         starts_on: today,
         resume_on: resume,
         held_monthly_rate: heldRate,
-        moved_visits: JSON.stringify({ moved }),
+        moved_visits: JSON.stringify({ moved, toSkip: toSkip.map((v) => ({ id: v.id, from: dateOnlyString(v.scheduled_date) })), skipped: [] }),
         status: 'active',
       }).returning(['id']);
       holdId = hold?.id || hold;
@@ -266,11 +314,61 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       customer_id: customerId,
       interaction_type: 'note',
       subject: `${familyKey} on hold until ${resume} (cancel flow)`,
-      body: `Case ${caseId || '—'}. ${moved.length} visit(s) moved; monthly component ${heldRate == null ? 'n/a' : `$${heldRate} suspended`}; tier protected until ${resume}.`,
+      body: `Case ${caseId || '—'}. ${toSkip.length} visit(s) inside the pause to skip; ${moved.length} prepaid visit(s) moved to after ${resume}; monthly component ${heldRate == null ? 'n/a' : `$${heldRate} suspended`}; tier protected until ${resume}.`,
     });
   } catch (err) { logger.warn(`[holds] hold note failed for ${customerId}: ${err.message}`); }
 
-  return { holdId, familyKey, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length, techNotices };
+  return {
+    holdId, familyKey, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length,
+    pendingSkips: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })),
+    techNotices,
+  };
+}
+
+/**
+ * Skip the visits inside each hold's pause (rule 1) — only once every write
+ * of the accept stands, because a skip is one-way (job-status.js
+ * ONE_WAY_FROM_STATUSES) and could never be compensated. The canonical
+ * transition runs the usual follow-through (open invoice void, group
+ * detach, tech notice); the customer notice is off — the resolution
+ * confirmation already told them. A skip that fails leaves the hold
+ * standing and rings the office to skip that visit by hand.
+ */
+async function applyHoldSkips(holdResults) {
+  const { transitionJobStatus } = require('../job-status');
+  for (const hold of holdResults || []) {
+    if (!hold?.holdId || !hold.pendingSkips?.length) continue;
+    const skipped = [];
+    for (const visit of hold.pendingSkips) {
+      try {
+        await transitionJobStatus({
+          jobId: visit.id,
+          fromStatus: visit.status,
+          toStatus: 'skipped',
+          transitionedBy: null,
+          notes: `Skipped: ${hold.familyKey} paused until ${hold.resumeOn} (plan hold ${hold.holdId})`,
+          notifyCustomer: false,
+        });
+        skipped.push(visit.id);
+      } catch (err) {
+        logger.error(`[holds] visit ${visit.id} did not skip for hold ${hold.holdId}: ${err.message}`);
+        const { notifyAdmin } = require('../notification-service');
+        await notifyAdmin('service', 'Plan hold: a paused visit is still booked', `Visit ${visit.id} on ${visit.from} falls inside the ${hold.familyKey} pause (hold ${hold.holdId}, back ${hold.resumeOn}) but could not be skipped — skip it by hand.`, {
+          bell: true, dedupeKey: `plan_hold_skip_failed:${visit.id}`, metadata: { kind: 'plan_hold_skip_failed', holdId: hold.holdId, visitId: visit.id },
+        }).catch(() => {});
+      }
+    }
+    if (!skipped.length) continue;
+    try {
+      const row = await db('plan_holds').where({ id: hold.holdId }).first('moved_visits');
+      let record = {};
+      try { record = typeof row?.moved_visits === 'string' ? JSON.parse(row.moved_visits) : (row?.moved_visits || {}); } catch { record = {}; }
+      await db('plan_holds').where({ id: hold.holdId }).update({
+        moved_visits: JSON.stringify({ ...record, skipped: [...(record.skipped || []), ...skipped] }),
+        updated_at: new Date(),
+      });
+    } catch (err) { logger.warn(`[holds] skip record failed for hold ${hold.holdId}: ${err.message}`); }
+  }
 }
 
 /**
@@ -327,79 +425,85 @@ async function cancelHold(holdId, { compensateVisits = true } = {}) {
 }
 
 /**
- * Push a hold's restart out to `newResume`: every upcoming visit in the
- * family moves by the same delta (they were parked on the old resume
- * date) and the hold row follows, so no visit can dispatch while the
- * family is still held at $0 (codex r2 P1).
+ * The first visit back (rule 3): the family's earliest visit dated on or
+ * after the return date that was not cancelled or skipped. A completed one
+ * counts — it means the moment for the restart text has passed.
  */
-async function shiftHoldResume(hold, newResume) {
-  const oldResume = dateOnlyString(hold.resume_on);
-  const delta = daysBetween(oldResume, newResume);
-  if (delta <= 0) return { shifted: 0 };
-  const visits = await familyUpcomingVisits(hold.customer_id, hold.family_key);
-  const SmartRebooker = require('../rebooker');
-  const moved = [];
-  for (const visit of visits) {
-    const from = dateOnlyString(visit.scheduled_date);
-    try {
-      await SmartRebooker.reschedule(visit.id, addDays(from, delta), {
-        start: visit.window_start || null, end: visit.window_end || null,
-      }, 'plan_hold_notice', 'system', {});
-      moved.push({ id: visit.id, from, to: addDays(from, delta), window: { start: visit.window_start || null, end: visit.window_end || null } });
-    } catch (err) {
-      logger.error(`[holds] notice shift failed for visit ${visit.id} (hold ${hold.id}): ${err.message}`);
-      const { notifyAdmin } = require('../notification-service');
-      await notifyAdmin('service', 'Plan hold: visit needs a manual move', `Visit ${visit.id} could not be pushed to ${addDays(from, delta)} for hold ${hold.id} — move it by hand; the family is still held.`, {
-        bell: true, dedupeKey: `plan_hold_notice_shift_failed:${visit.id}:${newResume}`, metadata: { kind: 'plan_hold_notice_shift_failed', holdId: hold.id, visitId: visit.id },
-      }).catch(() => {});
-    }
-  }
-  let prior = {};
-  try { prior = typeof hold.moved_visits === 'string' ? JSON.parse(hold.moved_visits) : (hold.moved_visits || {}); } catch { prior = {}; }
-  await db('plan_holds').where({ id: hold.id }).update({
-    resume_on: newResume,
-    moved_visits: JSON.stringify({ moved: [...(prior.moved || []), ...moved] }),
-    updated_at: new Date(),
-  });
-  return { shifted: moved.length };
+async function firstVisitBack(hold, dbh = db) {
+  const { familyOfServiceRow } = require('../cancellation-processor');
+  const rows = await dbh('scheduled_services as s')
+    .leftJoin('services as sv', 's.service_id', 'sv.id')
+    .where('s.customer_id', hold.customer_id)
+    .where('s.scheduled_date', '>=', dateOnlyString(hold.resume_on))
+    .whereNotIn('s.status', ['cancelled', 'skipped', 'no_show'])
+    .orderBy('s.scheduled_date', 'asc')
+    .select('s.*', 'sv.service_key', 'sv.name as service_name');
+  return rows.find((row) => familyOfServiceRow(row) === hold.family_key) || null;
 }
 
+// A hold whose first visit back has not come round within this many days of
+// the return date is no longer texted about.
+const REMINDER_LOOKBACK_DAYS = 90;
+
 /**
- * Daily lifecycle (scheduler): 7-day restart texts, then auto-resume.
- * Both idempotent — the reminder stamps reminder_sent_at, the resume flips
- * status under the live-unique index.
+ * Daily lifecycle (scheduler). The restart text goes out 7 days before the
+ * first visit back, naming its date — at once when it is closer (rule 3);
+ * the dues restart on the return date (rule 2). Both idempotent — the
+ * reminder stamps reminder_sent_at, the resume flips status under the
+ * live-unique index. Nothing is ever moved to make room for the notice.
  */
 async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   const out = { reminded: 0, resumed: 0, errors: [] };
 
-  const remindOn = addDays(today, 7);
-  const toRemind = await db('plan_holds').where({ status: 'active' }).whereNull('reminder_sent_at').where('resume_on', '<=', remindOn).select('*');
+  const remindBy = addDays(today, 7);
+  // A resumed hold still owes its text when the first visit back comes
+  // after the return date.
+  const toRemind = await db('plan_holds').whereIn('status', ['active', 'resumed']).whereNull('reminder_sent_at')
+    .where('resume_on', '>=', addDays(today, -REMINDER_LOOKBACK_DAYS)).select('*');
   for (const hold of toRemind) {
     try {
-      // Send FIRST, stamp only after the provider accepted (codex r1 P1):
-      // a stamped-but-undelivered reminder would let the auto-resume fire
-      // without the consent text. runExclusive serializes the cron, so the
-      // post-send stamp cannot double-send.
       const customer = await db('customers').where({ id: hold.customer_id }).first('first_name', 'phone', 'active', 'pipeline_stage');
       if (!customer || customer.active === false || customer.pipeline_stage === 'churned') {
-        await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
+        if (hold.status === 'active') await db('plan_holds').where({ id: hold.id, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
         continue;
       }
+      const next = await firstVisitBack(hold);
+      if (!next) {
+        // Nothing booked after the pause: there is no date to name, so no
+        // text — the office books the restart.
+        if (dateOnlyString(hold.resume_on) <= today) {
+          const { notifyAdmin } = require('../notification-service');
+          await notifyAdmin('service', 'Plan hold: no visit booked after the pause', `Hold ${hold.id} (${hold.family_key}) reached its return date ${dateOnlyString(hold.resume_on)} with no visit booked after it — book the restart and let the customer know.`, {
+            bell: true, dedupeKey: `plan_hold_no_visit_back:${hold.id}`, metadata: { kind: 'plan_hold_no_visit_back', holdId: hold.id, customerId: hold.customer_id },
+          }).catch(() => {});
+        }
+        continue;
+      }
+      const nextOn = dateOnlyString(next.scheduled_date);
+      if (next.status === 'completed' || nextOn < today) continue;
+      if (nextOn > remindBy) continue;
+      // Send FIRST, stamp only after the provider accepted (codex r1 P1).
+      // runExclusive serializes the cron, so the post-send stamp cannot
+      // double-send.
       let sent = false;
-      if (customer?.phone) {
+      if (customer.phone) {
         const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
         const { sendCustomerMessage } = require('../messaging/send-customer-message');
         const { gsmSafeName } = require('../messaging/gsm-normalize');
         const { familyLabel } = require('./templates');
+        const visitDate = displayDate(nextOn);
         const body = await renderRequiredSmsTemplate('plan_hold_resume_reminder', {
           first_name: gsmSafeName(customer.first_name),
           service: familyLabel(hold.family_key) || hold.family_key,
-          resume_date: displayDate(dateOnlyString(hold.resume_on)),
+          visit_date: visitDate,
+          // The pre-20260930 body names {resume_date}; the date it now
+          // promises is the first visit back either way.
+          resume_date: visitDate,
         }, { workflow: 'plan_hold_resume_reminder', entity_type: 'plan_hold', entity_id: hold.id });
         const smsResult = await sendCustomerMessage({
           to: customer.phone, body, channel: 'sms', audience: 'customer', purpose: 'support_resolution',
           customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
-          metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id },
+          metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id, visit_id: next.id },
         });
         sent = !!smsResult.sent;
       }
@@ -408,47 +512,24 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         out.reminded += 1;
       } else {
         out.errors.push(`remind_unsent:${hold.id}`);
-        logger.error(`[holds] resume reminder not delivered for hold ${hold.id} — will retry tomorrow`);
+        logger.error(`[holds] restart text not delivered for hold ${hold.id} — will retry tomorrow`);
+        // The visit is about to run with no notice: the office calls.
+        if (nextOn <= addDays(today, 1)) {
+          const { notifyAdmin } = require('../notification-service');
+          await notifyAdmin('service', 'Plan hold: restart text not delivered', `Hold ${hold.id} (${hold.family_key}): the first visit back is ${nextOn} and the restart text could not be delivered — call the customer before the visit.`, {
+            bell: true, dedupeKey: `plan_hold_restart_text_undelivered:${hold.id}`, metadata: { kind: 'plan_hold_restart_text_undelivered', holdId: hold.id, customerId: hold.customer_id, visitId: next.id },
+          }).catch(() => {});
+        }
       }
     } catch (err) {
       out.errors.push(`remind:${hold.id}`);
-      logger.error(`[holds] resume reminder failed for hold ${hold.id}: ${err.message}`);
+      logger.error(`[holds] restart text failed for hold ${hold.id}: ${err.message}`);
     }
   }
 
   const toResume = await db('plan_holds').where({ status: 'active' }).where('resume_on', '<=', today).select('*');
   for (const hold of toResume) {
     try {
-      // The 7-day text IS the consent step (ruling C-4): billing never
-      // restarts before a reminder was ACCEPTED for delivery (codex P0).
-      // The remind branch above keeps retrying daily; a hold overdue with
-      // no deliverable reminder parks for the office instead.
-      // Seven elapsed days after DELIVERY, not merely a stamp (codex P0):
-      // a reminder that only got through on the resume date pushes the
-      // restart out a full week — the notice period is the consent.
-      if (hold.reminder_sent_at) {
-        const stampedEt = etDateString(new Date(hold.reminder_sent_at));
-        const effective = addDays(stampedEt, 7);
-        if (today < effective) {
-          // Late notice: the restart (and the parked visits) move out to
-          // seven days after delivery — once, idempotently.
-          if (dateOnlyString(hold.resume_on) < effective) await shiftHoldResume(hold, effective);
-          continue;
-        }
-      }
-      if (!hold.reminder_sent_at) {
-        if (dateOnlyString(hold.resume_on) <= today) {
-          // Undeliverable notice: push the restart a week, park a bell —
-          // the visits must not sit on a past date while the family is $0.
-          const pushed = addDays(today, 7);
-          await shiftHoldResume(hold, pushed);
-          const { notifyAdmin } = require('../notification-service');
-          await notifyAdmin('service', 'Plan hold cannot auto-resume: restart text undeliverable', `Hold ${hold.id} (${hold.family_key}) reached its resume date with no delivered reminder — pushed to ${pushed}; contact the customer and resume by hand.`, {
-            bell: true, dedupeKey: `plan_hold_resume_blocked:${hold.id}:${pushed}`, metadata: { kind: 'plan_hold_resume_blocked', holdId: hold.id, customerId: hold.customer_id },
-          }).catch(() => {});
-        }
-        continue;
-      }
       // A hold whose plan was cancelled or reconfigured in the meantime is
       // OBSOLETE (codex r1 P2): resuming would text a false restart and
       // overwrite the current component with the stale pre-hold rate.
@@ -508,4 +589,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, startHold, cancelHold, emitHoldTechNotices, shiftHoldResume, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, startHold, applyHoldSkips, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

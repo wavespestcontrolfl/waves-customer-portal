@@ -196,43 +196,60 @@ async function executeAwayMode({ customerId, caseRow, params }) {
 }
 
 async function executeHold({ customerId, caseRow, action, params, families, deferTechNotices = false }) {
-  const { startHold, cancelHold, emitHoldTechNotices } = require('./holds');
+  const { startHold, cancelHold, applyHoldSkips, emitHoldTechNotices } = require('./holds');
   const holdable = families.filter((f) => ['lawn_care', 'mosquito', 'tree_shrub'].includes(f));
   if (!holdable.length) throw codedError('hold_family_required', 'Nothing on this plan can be held');
   // Multi-family holds commit ALL or NOTHING (codex P0): a later family's
   // failure compensates every hold this accept just created — component
-  // restored, tier protection released, visits moved back.
+  // restored, tier protection released, prepaid visits moved back.
   const results = [];
+  const notNeeded = [];
   try {
     for (const familyKey of holdable) {
-      results.push(await startHold({
+      const result = await startHold({
         customerId, caseId: caseRow.id, familyKey, resumeOn: params?.resumeDate, maxDays: action.holdMaxDays || 180,
-      }));
+      });
+      if (result.notNeeded) notNeeded.push(result); else results.push(result);
     }
   } catch (err) {
-    for (const done of results.reverse()) {
+    for (const done of [...results].reverse()) {
       try { await cancelHold(done.holdId, { compensateVisits: true }); } catch (undoErr) {
         logger.error(`[cancel-actions] hold compensation failed for ${done.holdId}: ${undoErr.message}`);
       }
     }
     throw err;
   }
-  // The techs hear about the moves only now — every family stands and no
-  // compensation can revert them (the compensating moves are silent). An
-  // away pairing defers further, until its Away Mode write also stands.
+  // Rule 2 (owner 2026-09-29): no visit inside the away dates means there
+  // is nothing to pause — the next visit already comes after they are back.
+  const notNeededEffects = notNeeded.map((n) => (n.nextVisitDisplay
+    ? `Your next ${labelOf(n.familyKey)} visit is ${n.nextVisitDisplay}, after you are back, so nothing changes for it.`
+    : `No ${labelOf(n.familyKey)} visits are booked before you are back, so nothing changes for it.`));
+  if (!results.length) throw codedError('hold_not_needed', notNeededEffects.join(' '));
+  // The techs hear about the moves, and the visits inside the pause are
+  // skipped, only now — every family stands and no compensation can revert
+  // them (a skip is one-way). An away pairing defers both further, until
+  // its Away Mode write also stands.
   const techNotices = results.flatMap((r) => r.techNotices || []);
-  if (!deferTechNotices) emitHoldTechNotices(techNotices);
+  if (!deferTechNotices) {
+    emitHoldTechNotices(techNotices);
+    await applyHoldSkips(results);
+  }
   const first = results[0];
+  const heldLabels = results.map((r) => labelOf(r.familyKey));
   return { holds: results.map((r) => r.holdId), effects: [
-    `${holdable.map(labelOf).join(' and ')} on hold until ${first.resumeDisplay}: no visits and no charges for ${holdable.length > 1 ? 'them' : 'it'} until then.`,
-    `Your WaveGuard level and prices stay locked; we text you 7 days before the restart so you can move the date or cancel.`,
-  ], ...(deferTechNotices ? { techNotices } : {}) };
+    // effects[0] is the confirmation text's {summary}: keep it short.
+    `${heldLabels.join(' and ')} paused until ${first.resumeDisplay}: no visits and no charges for ${heldLabels.length > 1 ? 'them' : 'it'} until then.`,
+    'Visits that fall while you are away are skipped, and your regular schedule picks up after you are back.',
+    ...(results.some((r) => r.moved) ? ['Visits you already paid for are not lost: we moved them to after you are back.'] : []),
+    ...notNeededEffects,
+    'Your WaveGuard level and prices stay locked. We text you a week before your first visit back so you can move the date or cancel.',
+  ], ...(deferTechNotices ? { techNotices, holdResults: results } : {}) };
 }
 
 async function executeAwayPairing(ctx) {
   // Holds first (they can fail and fully compensate); Away Mode is a
   // single idempotent preference write, so nothing partial can linger.
-  const { techNotices, ...hold } = await executeHold({ ...ctx, deferTechNotices: true });
+  const { techNotices, holdResults, ...hold } = await executeHold({ ...ctx, deferTechNotices: true });
   let away;
   try {
     away = await executeAwayMode(ctx);
@@ -247,8 +264,11 @@ async function executeAwayPairing(ctx) {
     }
     throw err;
   }
-  // Holds and Away Mode both stand: the moved visits' techs hear now.
-  require('./holds').emitHoldTechNotices(techNotices);
+  // Holds and Away Mode both stand: the moved visits' techs hear now, and
+  // the visits inside the pause are skipped.
+  const holds = require('./holds');
+  holds.emitHoldTechNotices(techNotices);
+  await holds.applyHoldSkips(holdResults);
   return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
 }
 
