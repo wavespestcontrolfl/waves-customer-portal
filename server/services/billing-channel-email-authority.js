@@ -203,8 +203,11 @@ async function suppressionBlock(trx, recipientEmail, category, customer, templat
 async function dunningHoldBlock({ input, database, invoice, templateKey, holdExempt }) {
   const collectionHold = require('./collections/collection-hold');
   if (!templateKey || !collectionHold.HOLD_GATED_EMAIL_TEMPLATES.has(templateKey)) return null;
-  if (collectionHold.holdExemptionApplies(holdExempt) || invoice?.payer_id || !input?.customerId) return null;
-  const held = await collectionHold.dueInvoiceHeldByDisputeHold(input.customerId, database);
+  if (invoice?.payer_id || !input?.customerId) return null;
+  // A trusted operator / customer exemption skips a plain dispute hold only; a wrong-number /
+  // wrong-party fallback hold still stops the pay link.
+  const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database,
+    { ignoreDisputeHold: collectionHold.holdExemptionApplies(holdExempt) });
   if (!held.held) return null;
   return blocked(collectionHold.HOLD_DEFER_CODE, held.reason === 'lookup_failed'
     ? 'The collections dispute-hold lookup failed; billing email deferred'

@@ -2,7 +2,7 @@
 // canned chains): no active hold. The hold behavior has its own suites.
 jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
-  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/sendgrid-mail', () => ({
@@ -455,7 +455,7 @@ describe('automation runner suppression guardrails', () => {
   // FINAL provider boundary - not only in the one-time suppression callback.
   describe('collections dispute hold rides the authority\'s final provider-boundary check', () => {
     const Hold = require('../services/collections/collection-hold');
-    afterEach(() => { Hold.dueInvoiceHeldByDisputeHold.mockReset().mockResolvedValue({ held: false }); });
+    afterEach(() => { Hold.messagingHeldByCollectionHold.mockReset().mockResolvedValue({ held: false }); });
 
     test('the authority call carries a hold-aware preSendCheck that refuses with the retryable defer code', async () => {
       paymentFailedQueues();
@@ -467,20 +467,20 @@ describe('automation runner suppression guardrails', () => {
 
       const trx = jest.fn();
       await expect(preSendCheck({ channel: 'email', database: trx, providerBoundary: true })).resolves.toEqual({ ok: true });
-      expect(Hold.dueInvoiceHeldByDisputeHold).toHaveBeenLastCalledWith('cust-1', trx);
+      expect(Hold.messagingHeldByCollectionHold).toHaveBeenLastCalledWith('cust-1', trx);
 
-      Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: true });
+      Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true });
       await expect(preSendCheck({ channel: 'email', database: trx, providerBoundary: true })).resolves.toMatchObject({
         ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true,
       });
-      Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: true, reason: 'lookup_failed' });
+      Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'lookup_failed' });
       await expect(preSendCheck({ channel: 'email', database: trx })).resolves.toMatchObject({
         ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, reason: expect.stringContaining('lookup failed'),
       });
       // The one-time suppression callback no longer owns the hold read.
-      Hold.dueInvoiceHeldByDisputeHold.mockClear();
+      Hold.messagingHeldByCollectionHold.mockClear();
       await emailSuppression(jest.fn(() => chain({ result: [] })), 'customer@example.com');
-      expect(Hold.dueInvoiceHeldByDisputeHold).not.toHaveBeenCalled();
+      expect(Hold.messagingHeldByCollectionHold).not.toHaveBeenCalled();
     });
 
     test('a hold that commits during request preparation is caught at the final boundary: no send, step deferred, enrollment kept', async () => {
@@ -497,7 +497,7 @@ describe('automation runner suppression guardrails', () => {
         };
         // Clear at the pre-dispatch read; a hold commits while the provider request is prepared.
         await preSendCheck({ channel: 'email', database: 'authority-trx' });
-        Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: true });
+        Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true });
         try { await dispatch('authority-trx', boundary); } catch (err) { if (!err.providerBoundaryBlocked) throw err; }
         return { ok: false };
       });

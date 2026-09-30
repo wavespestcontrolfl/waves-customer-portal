@@ -32,6 +32,15 @@
  * hold committing in the milliseconds after the check races the charge
  * exactly like a dispute call landing just after the card was charged.
  *
+ * MESSAGING is the wider rule (Codex #5424 r13). A pay link / dunning touch waits on ANY active
+ * collection_hold row - a dispute OR a wrong-number / wrong-party fallback, which is an
+ * all-channel outreach block (ContactPolicy FLAG_BLOCKED_CHANNELS) that must survive a dispute's
+ * release. ONE predicate answers it: messagingHeldByCollectionHold (SQL twins:
+ * activeMessagingHolds, collectionHoldExistsSql). The two trusted exemptions (an operator send, a
+ * link the customer asked for) pass `ignoreDisputeHold`, which skips ONLY a plain dispute row,
+ * never a fallback row (nor a dispute row that still carries its embedded fallback trailer) -
+ * the same rule ContactPolicy applies. Charging keeps the dispute-only readers above.
+ *
  * Refusal codes (both thrown BEFORE any Stripe call, both RETRYABLE):
  *   COLLECTION_HOLD_ACTIVE        a dispute hold is active
  *   COLLECTION_HOLD_CHECK_FAILED  the lookup itself failed (fail closed)
@@ -104,10 +113,57 @@ function disputeHoldExistsSql(builder, outerCustomerColumn) {
     .whereRaw('f.reason ILIKE ?', [`${DISPUTE_REASON_PREFIX}%`]);
 }
 
+// MESSAGING readers: ANY active collection_hold row (dispute or fallback). `ignoreDisputeHold`
+// (a trusted operator / customer exemption) skips a plain dispute row only: a fallback row, and a
+// dispute row that still carries its "[earlier hold: ...]" fallback trailer, keep blocking.
+// In-memory twin: rowBlocksMessaging.
+const EARLIER_HOLD_LIKE = `%${PRIOR_HOLD_OPEN}%${PRIOR_HOLD_CLOSE}`;
+function rowBlocksMessaging(reason, { ignoreDisputeHold = false } = {}) {
+  if (!ignoreDisputeHold) return true;
+  return !isDisputeHoldReason(reason) || Boolean(priorHoldReasonOf(reason));
+}
+function activeMessagingHolds(query, { ignoreDisputeHold = false, alias = null } = {}) {
+  const col = (name) => (alias ? `${alias}.${name}` : name);
+  const scoped = query.where(col('flag'), HOLD_FLAG).whereNull(col('released_at'));
+  if (!ignoreDisputeHold) return scoped;
+  return scoped.where((w) => w
+    .whereRaw(`COALESCE(${col('reason')}, '') NOT ILIKE ?`, [`${DISPUTE_REASON_PREFIX}%`])
+    .orWhereRaw(`${col('reason')} LIKE ?`, [EARLIER_HOLD_LIKE]));
+}
+
+// The messaging twin of disputeHoldExistsSql: a correlated EXISTS body for the sender / dunning due
+// queries (`this` is the whereExists / whereNotExists builder). Any active hold row.
+function collectionHoldExistsSql(builder, outerCustomerColumn, { ignoreDisputeHold = false } = {}) {
+  return activeMessagingHolds(
+    builder.select(1).from('collections_flags as f').whereRaw('f.customer_id = ??', [outerCustomerColumn]),
+    { ignoreDisputeHold, alias: 'f' },
+  );
+}
+
 async function customerHasActiveCollectionHold(customerId, database = db) {
   if (!customerId) return false;
   const row = await activeDisputeHolds(database('collections_flags').where({ customer_id: customerId })).first('id');
   return !!row;
+}
+
+// MESSAGING: is ANY hold (dispute or fallback) active? `ignoreDisputeHold` is the trusted exemption.
+async function customerHasActiveMessagingHold(customerId, database = db, { ignoreDisputeHold = false } = {}) {
+  if (!customerId) return false;
+  const row = await activeMessagingHolds(database('collections_flags').where({ customer_id: customerId }), { ignoreDisputeHold }).first('id');
+  return !!row;
+}
+
+// Same answer, but a lookup failure throws COLLECTION_HOLD_CHECK_FAILED
+// (fail closed, retryable) - the messaging twin of customerHasActiveCollectionHoldChecked.
+async function customerHasActiveMessagingHoldChecked(customerId, database = db, opts = {}) {
+  try {
+    return await customerHasActiveMessagingHold(customerId, database, opts);
+  } catch (err) {
+    throw Object.assign(new Error(`Collection hold could not be verified (${err.message}). Review before sending.`), {
+      code: HOLD_CHECK_FAILED_CODE,
+      cause: err,
+    });
+  }
 }
 
 // Same answer, but a lookup failure throws COLLECTION_HOLD_CHECK_FAILED
@@ -142,7 +198,8 @@ async function assertNoCollectionHold(customerId, database = db) {
 async function shouldWithholdPayLink(customerId, database = db) {
   if (!customerId) return false;
   try {
-    return await customerHasActiveCollectionHold(customerId, database);
+    // ANY active hold (dispute or fallback): the completion text is automated pay-link outreach.
+    return await customerHasActiveMessagingHold(customerId, database);
   } catch (err) {
     require('../logger').warn(`[collection-hold] pay-link hold lookup failed for customer ${customerId} - omitting the pay link: ${err.message}`);
     return true;
@@ -213,7 +270,7 @@ async function recordHoldOverrideOn(database, { customerId, actorId, ip, userAge
 //
 // ONE chokepoint enforces (a): the scheduled-invoice SENDER
 // (InvoiceService.processScheduledSends). Right after it claims a due invoice
-// it asks dueInvoiceHeldByDisputeHold(); a held invoice is left `scheduled`,
+// it asks messagingHeldByCollectionHold(); a held invoice is left `scheduled`,
 // pushed a tick out with NO attempt spent, and the claim released. That covers
 // an invoice queued before the hold was placed, and a lookup that failed (fail
 // closed, retried every tick - never a permanent park).
@@ -284,16 +341,19 @@ function isHoldSuppression(result) {
   return code === 'COLLECTION_HOLD_SUPPRESSED' || code === HOLD_DEFER_CODE || result?.holdDefer === true;
 }
 
+// THE messaging-hold predicate (Codex #5424 r13): every automated pay-link / dunning leg asks it.
 // { held: true, reason: 'hold' | 'lookup_failed', error? } | { held: false }.
-// Fail closed: a lookup that cannot be answered holds the send (retried next tick).
-// On a caller's transaction the read runs in a SAVEPOINT, so a failed lookup
+// Held by ANY active collection_hold (dispute or wrong-number / wrong-party fallback);
+// `ignoreDisputeHold` is the trusted operator / customer exemption (see the header): a plain dispute
+// row is skipped, a fallback never is. Fail closed: a lookup that cannot be answered holds the send
+// (retried next tick). On a caller's transaction the read runs in a SAVEPOINT, so a failed lookup
 // cannot leave that (lock-holding) transaction aborted (25P02).
-async function dueInvoiceHeldByDisputeHold(customerId, database = db) {
+async function messagingHeldByCollectionHold(customerId, database = db, { ignoreDisputeHold = false } = {}) {
   if (!customerId) return { held: false };
   try {
     const held = database.isTransaction && typeof database.transaction === 'function'
-      ? await database.transaction((sp) => customerHasActiveCollectionHold(customerId, sp))
-      : await customerHasActiveCollectionHold(customerId, database);
+      ? await database.transaction((sp) => customerHasActiveMessagingHold(customerId, sp, { ignoreDisputeHold }))
+      : await customerHasActiveMessagingHold(customerId, database, { ignoreDisputeHold });
     return held ? { held: true, reason: 'hold' } : { held: false };
   } catch (err) {
     return { held: true, reason: 'lookup_failed', error: err };
@@ -373,9 +433,11 @@ async function storedLifecycleEmailHeld(message, database = db) {
   if (typeof categories === 'string') {
     try { categories = JSON.parse(categories); } catch { categories = []; }
   }
-  if (Array.isArray(categories) && (categories.includes(CUSTOMER_INITIATED_EMAIL_CATEGORY)
-    || categories.includes(OPERATOR_INITIATED_EMAIL_CATEGORY))) return { held: false };
-  return dueInvoiceHeldByDisputeHold(message.recipient_id, database);
+  // A stored copy of the customer's own notice / an operator's deliberate send keeps its dispute
+  // exemption but still waits on a wrong-number / wrong-party fallback hold.
+  const exempt = Array.isArray(categories) && (categories.includes(CUSTOMER_INITIATED_EMAIL_CATEGORY)
+    || categories.includes(OPERATOR_INITIATED_EMAIL_CATEGORY));
+  return messagingHeldByCollectionHold(message.recipient_id, database, { ignoreDisputeHold: exempt });
 }
 
 // A direct sender that refused on the hold and restored the invoice to draft must
@@ -465,7 +527,12 @@ module.exports = {
   OPERATOR_INITIATED_EMAIL_CATEGORY,
   holdExemptionApplies,
   isHoldSuppression,
-  dueInvoiceHeldByDisputeHold,
+  messagingHeldByCollectionHold,
+  customerHasActiveMessagingHold,
+  customerHasActiveMessagingHoldChecked,
+  activeMessagingHolds,
+  collectionHoldExistsSql,
+  rowBlocksMessaging,
   holdDeferOutcome,
   HOLD_DEFER_CODE,
   queueHeldInvoiceForSender,

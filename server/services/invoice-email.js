@@ -431,9 +431,11 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
           // handle (owner ruling 2026-09-30): a hold that committed while the PDF/template
           // rendered still stops the pay link - retryable + deferred, never terminal (savepoint
           // read, fail closed). Payer-billed and the explicit operator/customer exemptions skip it.
-          if (!current.payer_id && !['operator', 'customer'].includes(options.holdExempt)) {
+          // A trusted exemption skips a plain dispute hold only; a fallback hold still stops it.
+          if (!current.payer_id) {
             const collectionHold = require('./collections/collection-hold');
-            const held = await collectionHold.dueInvoiceHeldByDisputeHold(current.customer_id, trx);
+            const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, trx,
+              { ignoreDisputeHold: collectionHold.holdExemptionApplies(options.holdExempt) });
             if (held.held) {
               const defer = collectionHold.holdDeferOutcome(held);
               boundaryRefusal = { code: defer.code, reason: defer.reason, retryable: true, deferred: true, nextAllowedAt: defer.nextAllowedAt };

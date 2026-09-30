@@ -10,7 +10,7 @@
 // canned chains): no active hold. The hold behavior has its own suites.
 jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
-  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
 jest.mock('../models/db', () => {
   const mockDb = jest.fn();
@@ -338,24 +338,30 @@ describe('deferred-replay registry', () => {
   });
 
   // Round-11 P2: the dispute-hold recheck must not delay a notice the customer's OWN action produced
-  // (meta.customer_initiated === true, the marker the scheduler forwards as customerInitiated).
-  test('billing failure replay: a held customer waits with a named retry time, but customer_initiated skips the hold recheck', async () => {
+  // (meta.customer_initiated === true, the marker the scheduler forwards as customerInitiated) for a
+  // plain DISPUTE hold. Codex #5424 r13: a wrong-number / wrong-party FALLBACK hold still waits.
+  test('billing failure replay: a held customer waits with a named retry time, but customer_initiated skips the DISPUTE part of the recheck', async () => {
     const Hold = require('../services/collections/collection-hold');
     const run = async (extra) => {
       db.mockReturnValueOnce(firstChain({ status: 'failed', retry_count: 1 }));
       db.mockReturnValueOnce(firstChain({ id: 'cust-1' }));
       return recheckDeferredReplay('billing_failure_deferred', { payment_id: 'pay-1', customer_id: 'cust-1', retry_count: 1, ...extra });
     };
-    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: true, reason: 'hold' });
+    const holdKind = (kind) => Hold.messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (
+      opts.ignoreDisputeHold && kind === 'dispute' ? { held: false } : { held: true, reason: 'hold' }));
+    holdKind('dispute');
     try {
       expect(await run({})).toMatchObject({ eligible: false, reason: 'collection-hold', retryable: true });
-      Hold.dueInvoiceHeldByDisputeHold.mockClear();
+      Hold.messagingHeldByCollectionHold.mockClear();
       expect(await run({ customer_initiated: true })).toEqual({ eligible: true });
-      expect(Hold.dueInvoiceHeldByDisputeHold).not.toHaveBeenCalled();
+      expect(Hold.messagingHeldByCollectionHold).toHaveBeenCalledWith('cust-1', undefined, { ignoreDisputeHold: true });
       // only the boolean true exempts (a stringy marker does not)
       expect(await run({ customer_initiated: 'true' })).toMatchObject({ eligible: false, reason: 'collection-hold' });
+      // a FALLBACK hold is never skipped, customer-initiated or not
+      holdKind('fallback');
+      expect(await run({ customer_initiated: true })).toMatchObject({ eligible: false, reason: 'collection-hold', retryable: true });
     } finally {
-      Hold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: false });
+      Hold.messagingHeldByCollectionHold.mockReset().mockResolvedValue({ held: false });
     }
   });
 

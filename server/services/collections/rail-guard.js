@@ -44,7 +44,7 @@ function warnShadowWithoutPolicy() {
 }
 
 /**
- * Active collections DISPUTE hold on the customer (owner ruling 2026-09-30:
+ * Active collections hold on the customer (dispute, or the wrong-number / wrong-party fallback; owner ruling 2026-09-30:
  * while it stands no pay link reaches them, and the Day 3-90 ladder and every
  * other reminder rail wait, then start after the release). Consulted by every
  * dunning/reminder rail through THESE two functions, independent of
@@ -55,13 +55,15 @@ function warnShadowWithoutPolicy() {
  * transaction).
  */
 async function disputeHoldHolds(customerId, database, holdExempt = null) {
-  // Only a deliberate operator send, or a send the customer asked for themselves (the voice
-  // "text me the link" tool), skips the dispute-hold wait (owner ruling 2026-09-30); every
+  // Messaging waits on ANY active collection_hold (a dispute or a wrong-number / wrong-party
+  // fallback, Codex #5424 r13). Only a deliberate operator send, or a send the customer asked for
+  // themselves (the voice "text me the link" tool), skips the DISPUTE part (owner ruling
+  // 2026-09-30) - never a fallback hold, exactly as ContactPolicy's ignoreDisputeHold; every
   // automated rail still waits. The policy gate's own verdict is unaffected.
   const collectionHold = require('./collection-hold');
-  if (collectionHold.holdExemptionApplies(holdExempt)) return false;
   if (!customerId) return false;
-  const { held } = await collectionHold.dueInvoiceHeldByDisputeHold(customerId, database || undefined);
+  const { held } = await collectionHold.messagingHeldByCollectionHold(customerId, database || undefined,
+    { ignoreDisputeHold: collectionHold.holdExemptionApplies(holdExempt) });
   return held;
 }
 

@@ -762,8 +762,8 @@ async function retryOne(message) {
       // committed since the read above still stops the stored copy. A WAIT, never a spent retry.
       const collectionHold = require('./collections/collection-hold');
       if (collectionHold.HOLD_GATED_EMAIL_TEMPLATES.has(String(message.template_key || '').trim())) {
-        state.holdBoundaryCheck = async () => {
-          const heldNow = await collectionHold.storedLifecycleEmailHeld(message);
+        state.holdBoundaryCheck = async ({ database: handoffDb } = {}) => {
+          const heldNow = await collectionHold.storedLifecycleEmailHeld(message, handoffDb);
           if (heldNow.held) {
             state.holdRefusal = heldNow;
             throw Object.assign(new Error('Customer has an active collections dispute hold'), {

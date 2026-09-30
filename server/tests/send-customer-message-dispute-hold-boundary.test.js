@@ -54,7 +54,7 @@ jest.mock('../services/disclaimed-number-holds', () => ({
 
 jest.mock('../services/collections/collection-hold', () => {
   const actual = jest.requireActual('../services/collections/collection-hold');
-  return { ...actual, dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })) };
+  return { ...actual, messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })) };
 });
 
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
@@ -77,7 +77,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   persistAudit.mockResolvedValue({ id: 'audit-1' });
   disclaimedNumberBlocksSend.mockResolvedValue(false);
-  Hold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: false });
+  Hold.messagingHeldByCollectionHold.mockResolvedValue({ held: false });
   // Real Twilio awaits the preSendCheck hook immediately before messages.create().
   sendViaTwilio.mockImplementation(async (_input, hooks) => {
     const verdict = await hooks.preSendCheck();
@@ -88,10 +88,10 @@ beforeEach(() => {
 
 describe('the hold is re-checked in providerPreparationCheck', () => {
   test('a hold committed AFTER step 1.5 stops a gated payment_failure text at the provider boundary, coded and audited', async () => {
-    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
     const result = await sendCustomerMessage({ ...BASE_INPUT });
     expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
-    expect(Hold.dueInvoiceHeldByDisputeHold).toHaveBeenCalledTimes(2);
+    expect(Hold.messagingHeldByCollectionHold).toHaveBeenCalledTimes(2);
     expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
       validatorsFailed: ['collection_hold_boundary'],
       blockedBy: expect.objectContaining({ code: 'COLLECTION_HOLD_SUPPRESSED' }),
@@ -99,38 +99,71 @@ describe('the hold is re-checked in providerPreparationCheck', () => {
   });
 
   test('a lookup failure at the boundary fails closed the same way', async () => {
-    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: false })
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false })
       .mockResolvedValueOnce({ held: true, reason: 'lookup_failed', error: new Error('db down') });
     expect(await sendCustomerMessage({ ...BASE_INPUT })).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
   });
 
   test('the machine-initiated dunning entry points (shared purposes) are gated at the boundary too', async () => {
-    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
     const result = await sendCustomerMessage({ ...BASE_INPUT, purpose: 'payment_link', entryPoint: 'invoice_followup_sequence' });
     expect(result).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+  });
+
+  // A realistic predicate: a trusted exemption (ignoreDisputeHold) skips a plain DISPUTE row only; a
+  // wrong-number / wrong-party FALLBACK row always holds (Codex #5424 r13).
+  const holdKind = (kind) => Hold.messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (
+    opts.ignoreDisputeHold && kind === 'dispute' ? { held: false } : { held: true, reason: 'hold' }));
+
+  test.each([
+    ['customerInitiated', { customerInitiated: true }],
+    ['holdExempt customer', { holdExempt: 'customer' }],
+    ['holdExempt operator', { holdExempt: 'operator' }],
+  ])('%s skips a plain DISPUTE hold at both points (ignoreDisputeHold), the send goes out', async (_label, extra) => {
+    holdKind('dispute');
+    const result = await sendCustomerMessage({ ...BASE_INPUT, ...extra });
+    expect(result.sent).toBe(true);
+    expect(Hold.messagingHeldByCollectionHold).toHaveBeenCalledTimes(2);
+    for (const call of Hold.messagingHeldByCollectionHold.mock.calls) expect(call[2]).toEqual({ ignoreDisputeHold: true });
   });
 
   test.each([
     ['customerInitiated', { customerInitiated: true }],
     ['holdExempt customer', { holdExempt: 'customer' }],
     ['holdExempt operator', { holdExempt: 'operator' }],
-  ])('%s is exempt: no hold read at either point, the send goes out', async (_label, extra) => {
-    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: true, reason: 'hold' });
+  ])('%s is NOT exempt from a wrong-number / wrong-party FALLBACK hold: the send waits, coded', async (_label, extra) => {
+    holdKind('fallback');
     const result = await sendCustomerMessage({ ...BASE_INPUT, ...extra });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  });
+
+  test('the boundary re-read REUSES the provider handoff connection (handoffDb), never a root-pool read (Codex #5424 r13 P1)', async () => {
+    const handoffTrx = { isTransaction: true, name: 'handoff-trx' };
+    sendViaTwilio.mockImplementation(async (_input, hooks) => {
+      const verdict = await hooks.preSendCheck({ database: handoffTrx });
+      if (!verdict.ok) return { sent: false, provider: 'twilio', deliveryOutcome: 'not_sent' };
+      return { sent: true, provider: 'twilio', deliveryOutcome: 'accepted', providerMessageId: 'SM-real' };
+    });
+    const result = await sendCustomerMessage({ ...BASE_INPUT });
     expect(result.sent).toBe(true);
-    expect(Hold.dueInvoiceHeldByDisputeHold).not.toHaveBeenCalled();
+    const calls = Hold.messagingHeldByCollectionHold.mock.calls;
+    expect(calls).toHaveLength(2);
+    // step 1.5 runs before any handoff exists: the root pool. The FINAL read is on the held handle.
+    expect(calls[0][1]).toBeUndefined();
+    expect(calls[1][1]).toBe(handoffTrx);
   });
 
   test('a non-gated purpose never reads the hold, at either point', async () => {
-    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: true, reason: 'hold' });
+    Hold.messagingHeldByCollectionHold.mockResolvedValue({ held: true, reason: 'hold' });
     const result = await sendCustomerMessage({ ...BASE_INPUT, purpose: 'tech_en_route', entryPoint: 'tech_en_route' });
     expect(result.sent).toBe(true);
-    expect(Hold.dueInvoiceHeldByDisputeHold).not.toHaveBeenCalled();
+    expect(Hold.messagingHeldByCollectionHold).not.toHaveBeenCalled();
   });
 
   test('no hold at either point: the boundary passes and the notice goes out (two reads)', async () => {
     const result = await sendCustomerMessage({ ...BASE_INPUT });
     expect(result.sent).toBe(true);
-    expect(Hold.dueInvoiceHeldByDisputeHold).toHaveBeenCalledTimes(2);
+    expect(Hold.messagingHeldByCollectionHold).toHaveBeenCalledTimes(2);
   });
 });

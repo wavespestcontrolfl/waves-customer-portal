@@ -2412,9 +2412,12 @@ async function checkInvoiceDeliveryPreconditions(database, current, { sendClaimT
   // terminal (savepoint read, fail closed). Payer-billed and the explicit
   // operator/customer exemptions are skipped; no cross-writer locking (the hold
   // writer never waits - the accepted millisecond window of collection-hold.js).
-  if (!HOLD_EXEMPT_CALLERS.has(holdExempt) && !current.payer_id) {
+  if (!current.payer_id) {
     const collectionHold = require("./collections/collection-hold");
-    const held = await collectionHold.dueInvoiceHeldByDisputeHold(current.customer_id, database);
+    // A trusted operator / customer exemption skips a plain DISPUTE hold only; a wrong-number /
+    // wrong-party fallback hold (an all-channel outreach block) still stops the pay link.
+    const held = await collectionHold.messagingHeldByCollectionHold(current.customer_id, database,
+      { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
     if (held.held) {
       const defer = collectionHold.holdDeferOutcome(held);
       return { sent: false, blocked: true, ...defer, error: defer.reason, validator: "check_invoice_collection_hold" };
@@ -3496,10 +3499,11 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
 const HOLD_EXEMPT_CALLERS = new Set(["operator", "customer"]);
 // `row` is the invoice's { customer_id, payer_id } the caller already read.
 async function directSendHoldRefusal(row, holdExempt) {
-  if (HOLD_EXEMPT_CALLERS.has(holdExempt)) return null;
   if (!row || row.payer_id) return null;
   const collectionHold = require("./collections/collection-hold");
-  const held = await collectionHold.dueInvoiceHeldByDisputeHold(row.customer_id);
+  // The exemption skips the DISPUTE part only (Codex #5424 r13): a fallback hold still waits.
+  const held = await collectionHold.messagingHeldByCollectionHold(row.customer_id, undefined,
+    { ignoreDisputeHold: HOLD_EXEMPT_CALLERS.has(holdExempt) });
   return held.held ? collectionHold.holdDeferOutcome(held) : null;
 }
 
@@ -3527,8 +3531,11 @@ async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExem
 // collectionHoldDeferral. For an UNCLAIMED, non-exempt sender entry that is the hold refusal, not a
 // failure: it returns the coded retryable outcome. A pre-claimed send and an operator / customer
 // send (exempt from the hold) keep the throw as before.
-function renewalClearanceHoldDeferral(err, allowClaimed, holdExempt) {
-  return Boolean(err?.collectionHoldDeferral) && !allowClaimed && !HOLD_EXEMPT_CALLERS.has(holdExempt);
+function renewalClearanceHoldDeferral(err, allowClaimed) {
+  // The trusted exemption is threaded INTO the clearance (claimBillToFencedSend -> withRenewalSendClearance
+  // ignoreDisputeHold), so a hold deferral that still reaches here is one the exemption does not cover
+  // (a fallback hold) - a wait for every unclaimed caller, exempt or not.
+  return Boolean(err?.collectionHoldDeferral) && !allowClaimed;
 }
 function collectionHoldRefusalFromClearance() {
   return require("./collections/collection-hold").holdDeferOutcome({ reason: "hold" });
@@ -3807,7 +3814,12 @@ function assertRenewalGateAlive() {
 // send never reaches a provider; a worker's queue claim is given back first
 // (releaseRefusedRenewalSend) so the refusal never retries to the homeowner.
 async function claimRenewalInvoiceForSend(invoiceId, renewal, options = {}) {
+  // A trusted operator / customer send (Codex #5424 r13) is exempt from the DISPUTE part of the
+  // clearance's hold check, so the admin Send and a customer-requested link work for a renewal
+  // invoice too; a fallback hold still parks it.
+  const ignoreDisputeHold = HOLD_EXEMPT_CALLERS.has(options.holdExempt);
   return require("./termite-annual-renewal-charge").withRenewalSendClearance(renewal.id, {
+    ignoreDisputeHold,
     claim: () => claimRenewalInvoiceUnderFence(invoiceId, renewal.customer_id, options),
     release: (verdict) => releaseRefusedRenewalSend(invoiceId, verdict, options),
   });
@@ -5935,7 +5947,7 @@ const InvoiceService = {
         // A termite renewal invoice takes the same fence (claimBillToFencedSend). Bill-To is
         // resolved BEFORE the default-on dispute-hold backstop (see
         // holdRefusalAfterBillToResolution): the hold applies only to a still-self-pay invoice.
-        const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
+        const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, holdExempt });
         if (packetClaim?.payerBilled) {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
@@ -5946,7 +5958,7 @@ const InvoiceService = {
         claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, firstDeliveryOnly, overridesReviewHold });
       }
     } catch (claimErr) {
-      if (renewalClearanceHoldDeferral(claimErr, allowClaimed, holdExempt)) {
+      if (renewalClearanceHoldDeferral(claimErr, allowClaimed)) {
         const holdRefusal = collectionHoldRefusalFromClearance();
         return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
       }
@@ -6778,13 +6790,13 @@ const InvoiceService = {
     // A termite renewal invoice takes the same fence (claimBillToFencedSend).
     let packetClaim = null;
     try {
-      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true });
+      packetClaim = await claimBillToFencedSend(invoiceId, accrualPre, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend: true, holdExempt });
     } catch (err) {
       const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
       if (zeroDueResult) return zeroDueResult;
       // A self-pay renewal the clearance parked behind the customer's dispute hold: the same coded,
       // retryable refusal every unclaimed sender entry returns (nothing claimed, nothing sent).
-      if (renewalClearanceHoldDeferral(err, allowClaimed, holdExempt)) {
+      if (renewalClearanceHoldDeferral(err, allowClaimed)) {
         const holdRefusal = collectionHoldRefusalFromClearance();
         return { ok: false, ...holdRefusal, error: holdRefusal.reason,
           sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
@@ -7651,7 +7663,8 @@ const InvoiceService = {
           .whereNull("scheduled_send_attempts")
           .orWhere("scheduled_send_attempts", "<", 5),
       )
-      // Invoices held by a customer's active DISPUTE hold never take a page
+      // Invoices held by a customer's active collection HOLD (a dispute, or the wrong-number /
+      // wrong-party fallback a released dispute restores) never take a page
       // slot (owner ruling 2026-09-30): a pile of held invoices, re-due every
       // tick and oldest first, must not starve the unheld ones behind them.
       // A payer-billed invoice goes to the payer's AP inbox and is never held.
@@ -7674,8 +7687,10 @@ const InvoiceService = {
               .whereRaw("apt.prepay_invoice_id = invoices.id")
               .whereNotNull("apt.renewed_from_term_id").whereNotNull("apt.annual_plan_version");
           })
-          .orWhereNotExists(function noActiveDisputeHold() {
-            require("./collections/collection-hold").disputeHoldExistsSql(this, "invoices.customer_id");
+          .orWhereNotExists(function noActiveCollectionHold() {
+            // ANY active collection_hold (dispute OR a wrong-number / wrong-party fallback, the
+            // all-channel outreach block a released dispute restores): messaging waits on both.
+            require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
           }),
       )
       .orderBy("scheduled_send_at", "asc")
@@ -7900,8 +7915,9 @@ const InvoiceService = {
         .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
         .update({ ...payload, send_claim_token: null });
 
-      // Collections DISPUTE hold (owner ruling 2026-09-30): no pay link reaches
-      // a customer while they hold an active dispute, and this is the ONE
+      // Collections HOLD (owner ruling 2026-09-30; any active collection_hold - a dispute or the
+      // wrong-number / wrong-party fallback, Codex #5424 r13): no pay link reaches
+      // a customer while one stands, and this is the ONE
       // chokepoint for every queued self-pay invoice - including one queued
       // BEFORE the hold was placed. Nothing has been sent yet (the claim is
       // the only write so far). The invoice stays 'scheduled', moves one cron
@@ -7913,7 +7929,7 @@ const InvoiceService = {
       // to the payer's AP inbox, not the disputing homeowner - not held here.
       if (!claimed.payer_id) {
         const holdBlock = await require("./collections/collection-hold")
-          .dueInvoiceHeldByDisputeHold(claimed.customer_id);
+          .messagingHeldByCollectionHold(claimed.customer_id);
         if (holdBlock.held) {
           // A renewal invoice owned by a third-party payer is not the homeowner's pay link: run the
           // Bill-To fence FIRST so it reaches its payer even while the homeowner's dispute stands.

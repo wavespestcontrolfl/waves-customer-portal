@@ -228,9 +228,12 @@ async function sendLifecycleTemplate({
   // One live check at the shared send boundary (every caller - billing-cron, the retry
   // obligation, the Stripe webhook, the expiry workflows - passes through here); fail closed.
   // Confirmations and receipts carry no such link and are untouched.
-  const holdApplies = HOLD_GATED_TEMPLATES.has(templateKey) && customerInitiated !== true;
+  const holdApplies = HOLD_GATED_TEMPLATES.has(templateKey);
+  // The customer's own payment attempt skips a plain dispute hold only; a wrong-number / wrong-party
+  // fallback hold still stops the notice (Codex #5424 r13).
+  const holdOpts = { ignoreDisputeHold: customerInitiated === true };
   if (holdApplies) {
-    const held = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id);
+    const held = await require('./collections/collection-hold').messagingHeldByCollectionHold(customer.id, undefined, holdOpts);
     if (held.held) {
       logger.info(`[payment-lifecycle-email] ${templateKey} suppressed for customer ${customer.id}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
       return { ok: false, skipped: true, reason: 'collection_hold', code: 'COLLECTION_HOLD_SUPPRESSED', deliveryOutcome: 'not_sent' };
@@ -291,9 +294,9 @@ async function sendLifecycleTemplate({
   // before the fetch, so a dispute committed after the up-front read still stops the notice. A
   // refusal throws the boundary-blocked sentinel the library turns into a definite non-send, and
   // the coded retryable COLLECTION_HOLD_DEFER is returned below. Only the gated pay-link templates
-  // carry it; customerInitiated (holdApplies false) is exempt.
-  const holdBoundaryCheck = holdApplies ? async () => {
-    const heldNow = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id);
+  // carry it; customerInitiated skips the dispute part only (holdOpts).
+  const holdBoundaryCheck = holdApplies ? async ({ database: handoffDb } = {}) => {
+    const heldNow = await require('./collections/collection-hold').messagingHeldByCollectionHold(customer.id, handoffDb, holdOpts);
     if (heldNow.held) {
       handoffHold = heldNow;
       throw Object.assign(new Error('Customer has an active collections dispute hold'), {
@@ -327,7 +330,7 @@ async function sendLifecycleTemplate({
             }
             // Dispute hold re-read at the provider boundary (see the up-front check above).
             if (holdApplies) {
-              const heldNow = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id);
+              const heldNow = await require('./collections/collection-hold').messagingHeldByCollectionHold(customer.id, undefined, holdOpts);
               if (heldNow.held) {
                 handoffHold = heldNow;
                 return { ok: false };

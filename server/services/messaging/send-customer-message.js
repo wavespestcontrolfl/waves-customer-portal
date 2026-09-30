@@ -280,12 +280,19 @@ function isHoldGatedBillingMessage(input = {}) {
 // policy / contact / consent / caller-check awaits (or any pre-work added later) still stops the
 // send. Returns null (send may proceed) or the coded WAIT verdict. Exemptions live here, once: a
 // customer's own action (customerInitiated / holdExempt 'customer') and a deliberate operator send
-// (holdExempt 'operator'); a lookup failure answers held (fail closed).
-async function billingHoldBlock(input = {}) {
+// (holdExempt 'operator') skip a plain dispute hold only - a fallback hold still waits; a lookup
+// failure answers held (fail closed).
+// `database` is the provider handoff's held transaction when the final-boundary re-check runs inside
+// one (providerPreparationCheck's `handoffDb`): the read MUST reuse that connection (a savepoint read),
+// never open a root-pool one - at DB_POOL_MAX=2 a second connection waiting on the locks the handoff
+// holds would deadlock the send against its own pool (Codex #5424 r13 P1). Undefined = the root pool.
+// The exemptions skip a plain DISPUTE hold only: a wrong-number / wrong-party fallback hold (an
+// all-channel outreach block) still stops the notice.
+async function billingHoldBlock(input = {}, database = undefined) {
   const collectionHold = require('../collections/collection-hold');
   if (!isHoldGatedBillingMessage(input)) return null;
-  if (input.customerInitiated === true || collectionHold.holdExemptionApplies(input.holdExempt)) return null;
-  const held = await collectionHold.dueInvoiceHeldByDisputeHold(input.customerId);
+  const ignoreDisputeHold = input.customerInitiated === true || collectionHold.holdExemptionApplies(input.holdExempt);
+  const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database, { ignoreDisputeHold });
   if (!held.held) return null;
   logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
   return {
@@ -1080,7 +1087,7 @@ async function sendCustomerMessageCore(input) {
     // Dispute-hold boundary re-check (round-11 P1): the step-1.5 read ran before policy, contact,
     // suppression, consent and caller checks; a hold committed since must still stop a gated
     // billing notice here. Same coded WAIT outcome; exemptions live in billingHoldBlock.
-    const holdBlock = await billingHoldBlock(sendInput);
+    const holdBlock = await billingHoldBlock(sendInput, handoffDb);
     if (holdBlock) return rememberBoundaryBlock(holdBlock, 'collection_hold_boundary');
     // The awaited caller guard may itself straddle 20:00 ET. Keep this pure
     // clock check as the final operation before returning to the provider.

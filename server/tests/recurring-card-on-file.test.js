@@ -343,7 +343,7 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
       expect(guard).toBeGreaterThan(0);
       expect(send).toBeGreaterThan(guard);
       const block = src.slice(guard, send);
-      expect(block).toMatch(/dueInvoiceHeldByDisputeHold\(/);
+      expect(block).toMatch(/messagingHeldByCollectionHold\(/);
       expect(block).toMatch(/if \(fallbackHold\.held\) \{[\s\S]*continue;/);
       expect(block).not.toMatch(/resolve\(/);
     });

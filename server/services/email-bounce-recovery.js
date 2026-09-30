@@ -654,8 +654,8 @@ async function dispatchRecoveryMessage({ message, categories, bouncedMessage, co
     } else {
       // The hold is read again as sendOne's FINAL boundary check (after SendGrid's own request
       // preparation, right before the fetch). Non-gated templates answer "not held".
-      await dispatchToProvider(undefined, async () => {
-        const heldNow = await require('./collections/collection-hold').storedLifecycleEmailHeld(bouncedMessage);
+      await dispatchToProvider(undefined, async ({ database: handoffDb } = {}) => {
+        const heldNow = await require('./collections/collection-hold').storedLifecycleEmailHeld(bouncedMessage, handoffDb);
         if (heldNow.held) {
           heldRecovery = heldNow;
           throw Object.assign(new Error('collections dispute hold'), { code: 'COLLECTION_HOLD_DEFER', retryable: true, providerBoundaryBlocked: true });
@@ -885,11 +885,23 @@ async function retryHeldRecoveries({ limit = 25 } = {}) {
   const staleCutoff = new Date(Date.now() - HELD_RECOVERY_CLAIM_STALE_MS).toISOString();
   const staleClaimSql = "(metadata->>'hold_claimed_at') IS NOT NULL AND (metadata->>'hold_claimed_at')::timestamptz <= ?";
   // The ONE eligibility predicate the read and the claim share: a held row whose retry time is due,
-  // or a hold-originated 'pending' row whose sweep claim was abandoned (worker died / redeploy).
+  // a hold-originated 'pending' row whose sweep claim was abandoned (worker died / redeploy), or a
+  // hold-originated 'resent' row whose claim went stale BEFORE the provider outcome settled (Codex
+  // #5424 r13 P2): runRecoveryFlow flips the claim pending -> resent just before
+  // dispatchRecoveryMessage, so a worker lost in that interval leaves the recovery message queued
+  // with NO provider id. That reads as unsettled only while the recovery email is still 'queued' with
+  // no provider_message_id; an accepted send (provider id published) is settled and never reclaimed.
   const eligible = (q) => q
     .where((held) => held.where({ status: HELD_RECOVERY_STATUS })
       .whereRaw("COALESCE((metadata->>'hold_retry_at')::timestamptz, now()) <= now()"))
-    .orWhere((stale) => stale.where({ status: 'pending' }).whereRaw(staleClaimSql, [staleCutoff]));
+    .orWhere((stale) => stale.where({ status: 'pending' }).whereRaw(staleClaimSql, [staleCutoff]))
+    .orWhere((unsettled) => unsettled.where({ status: 'resent' }).whereRaw(staleClaimSql, [staleCutoff])
+      .whereExists(function unsentRecoveryMessage() {
+        this.select(1).from('email_messages as m')
+          .whereRaw('m.id = email_bounce_recoveries.recovery_message_id')
+          .whereNull('m.provider_message_id')
+          .where('m.status', 'queued');
+      }));
   const due = await db('email_bounce_recoveries')
     .where(eligible)
     .orderBy('updated_at', 'asc')

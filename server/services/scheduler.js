@@ -4278,13 +4278,16 @@ function initScheduledJobs() {
                 // delivery: queue it onto the scheduled-invoice sender FIRST
                 // (owner ruling 2026-09-30). A queue failure throws into this
                 // row's bounded retry ladder instead of blocking it unqueued.
-                if (recheck.reason === 'collections-dispute-hold' && claimMeta.invoice_id) {
-                  await require('./dispatch-completion-deferred').handOverHeldInvoiceToSender({ invoiceId: claimMeta.invoice_id, serviceRecordId: claimMeta.service_record_id || null });
-                }
-                await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
-                  status: 'blocked',
-                  updated_at: new Date(),
-                  metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?, 'terminal_pending', ?::boolean)", [`stale_replay:${recheck.reason || 'pay-link-only-body'}`, requiresTerminalHook(claimMeta.entry_point)]),
+                // The hand-over, the ownership marker and the terminal sms_log write are ONE
+                // transaction (blockPayLinkOnlyReplay): a crash between them can never leave the
+                // sender owning the link while this original text is replayed.
+                await require('./dispatch-completion-deferred').blockPayLinkOnlyReplay({
+                  msgId: msg.id,
+                  blockedReason: `stale_replay:${recheck.reason || 'pay-link-only-body'}`,
+                  terminalPending: requiresTerminalHook(claimMeta.entry_point),
+                  invoiceId: claimMeta.invoice_id || null,
+                  serviceRecordId: claimMeta.service_record_id || null,
+                  handOver: recheck.reason === 'collections-dispute-hold' && Boolean(claimMeta.invoice_id),
                 });
                 logger.info(`[scheduled-sms] deferred completion ${msg.id} suppressed: template body was pay-link-only, nothing safe to strip (${recheck.reason || 'invoice-not-collectible'})`);
                 await runTerminalHookDurably(msg.id, claimMeta.entry_point, recheckMeta);

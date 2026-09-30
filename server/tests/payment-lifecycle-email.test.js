@@ -2,7 +2,7 @@
 // canned chains): no active hold. The hold behavior has its own suites.
 jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
-  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({
@@ -392,7 +392,7 @@ describe('payment lifecycle email sender', () => {
       customer_interactions: [chain()],
     });
     // Clear at the up-front read; held by the time the handoff re-reads it.
-    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
     const provider = jest.fn();
     const beforeProviderHandoff = jest.fn(async () => true);
     EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {

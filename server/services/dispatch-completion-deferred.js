@@ -370,7 +370,31 @@ async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invo
   });
 }
 
+// The pay-link-ONLY replay (an operator-edited template with nothing left once the link is stripped):
+// terminalize the claimed sms_log row as blocked AND, for a dispute-hold suppression, queue the
+// invoice onto the sender + persist the `invoiceSenderOwnsPayLinkFor` ownership marker, all in ONE
+// transaction (Codex #5424 r13 P1) - the same atomicity persistStrippedPayLink gives the ordinary
+// strip. A worker that dies mid-way can no longer commit the hand-over and leave the original
+// link-bearing text scheduled: either everything landed or nothing did (the row stays 'sending' and
+// the stale-claim recovery replays it, and the replay recheck also consults the ownership marker).
+// Returns the changed-row count (0 = the claim was lost; nothing is handed over then).
+async function blockPayLinkOnlyReplay({ msgId, blockedReason, terminalPending = false, invoiceId = null, serviceRecordId = null, handOver = false, database = db }) {
+  return database.transaction(async (trx) => {
+    const changed = await trx('sms_log').where({ id: msgId, status: 'sending' }).update({
+      status: 'blocked',
+      updated_at: new Date(),
+      metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text, 'terminal_pending', ?::boolean)", [blockedReason, Boolean(terminalPending)]),
+    });
+    if (changed && handOver && invoiceId) {
+      await require('./collections/collection-hold').queueHeldInvoiceForSender(invoiceId, trx);
+      await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId);
+    }
+    return changed;
+  });
+}
+
 module.exports = {
+  blockPayLinkOnlyReplay,
   persistStrippedPayLink,
   handOverHeldInvoiceToSender,
   finalizeDeferredCompletionSend,

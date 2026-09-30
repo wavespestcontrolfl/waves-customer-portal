@@ -19,7 +19,7 @@ jest.mock('../models/db', () => mockDb);
 const mockHoldRead = jest.fn(async () => ({ held: false }));
 jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
-  dueInvoiceHeldByDisputeHold: (...args) => mockHoldRead(...args),
+  messagingHeldByCollectionHold: (...args) => mockHoldRead(...args),
 }));
 
 const mockWithCustomerCommsLock = jest.fn(async (database, _customerId, callback) => (
@@ -572,7 +572,7 @@ describe('billing channel email authority', () => {
       expect(state.handoffStarted).toBe(false);
       expect(dispatch).not.toHaveBeenCalled();
       // read on the locked handle (savepoint), not the shared pool
-      expect(mockHoldRead).toHaveBeenCalledWith('cust-1', mockDb);
+      expect(mockHoldRead).toHaveBeenCalledWith('cust-1', mockDb, { ignoreDisputeHold: false });
     });
 
     test('a hold that commits during provider preparation stops the send at the final provider-boundary check', async () => {
@@ -605,11 +605,24 @@ describe('billing channel email authority', () => {
       expect(state.boundaryBlock).toBeNull();
     });
 
-    test.each(['operator', 'customer'])('a trusted %s exemption skips the hold read entirely', async (holdExempt) => {
-      mockHoldRead.mockResolvedValue({ held: true, reason: 'hold' });
+    // A realistic predicate: a trusted exemption skips a plain DISPUTE row only; a wrong-number /
+    // wrong-party FALLBACK row always holds (Codex #5424 r13).
+    const holdKind = (kind) => mockHoldRead.mockImplementation(async (_id, _db, opts = {}) => (
+      opts.ignoreDisputeHold && kind === 'dispute' ? { held: false } : { held: true, reason: 'hold' }));
+
+    test.each(['operator', 'customer'])('a trusted %s exemption skips a plain DISPUTE hold', async (holdExempt) => {
+      holdKind('dispute');
       const { outcome } = await runAuthority({}, { templateKey: 'invoice.followup_3_day', holdExempt });
       expect(outcome.ok).toBe(true);
-      expect(mockHoldRead).not.toHaveBeenCalled();
+      expect(mockHoldRead).toHaveBeenCalledWith('cust-1', mockDb, { ignoreDisputeHold: true });
+    });
+
+    test.each(['operator', 'customer'])('a trusted %s exemption still waits on a FALLBACK hold (wrong number / wrong party)', async (holdExempt) => {
+      holdKind('fallback');
+      const { outcome, state, dispatch } = await runAuthority({}, { templateKey: 'invoice.followup_3_day', holdExempt });
+      expect(outcome).toEqual({ ok: false });
+      expect(state.boundaryBlock).toMatchObject({ code: 'COLLECTION_HOLD_DEFER', retryable: true });
+      expect(dispatch).not.toHaveBeenCalled();
     });
 
     test('an unrecognised exemption value does not exempt', async () => {

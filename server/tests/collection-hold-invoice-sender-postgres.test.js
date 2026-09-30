@@ -365,6 +365,47 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
         expect(await Invoices.sendViaSMS(pkt, {})).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
         expect(await invoice(pkt)).toMatchObject({ status: 'draft', send_claim_token: null });
       });
+
+      // Codex #5424 r13 P2: claimBillToFencedSend used to call withRenewalSendClearance without the
+      // trusted exemption, so the admin Send / a customer-requested link threw collectionHoldDeferral for
+      // a renewal invoice under a DISPUTE hold. The exemption is now threaded in (dispute only).
+      test('the renewal send clearance honours the trusted exemption for a DISPUTE hold, never for a wrong-number FALLBACK hold', async () => {
+        const Renewal = require('../services/termite-annual-renewal-charge');
+        const claim = jest.fn(async () => 'claimed');
+        const release = jest.fn(async () => {});
+
+        const disputed = await newCustomer();
+        await placeHold(disputed);
+        const d = await renewalInvoice(disputed);
+        // automated: parked behind the dispute (a hold deferral, nothing claimed)
+        await expect(Renewal.withRenewalSendClearance(d.successor, { claim, release })).rejects.toMatchObject({ code: 'renewal_send_withheld', collectionHoldDeferral: true });
+        expect(claim).not.toHaveBeenCalled();
+        // operator / customer: the dispute is exempt, the clearance proceeds to the claim
+        expect(await Renewal.withRenewalSendClearance(d.successor, { claim, release, ignoreDisputeHold: true })).toBe('claimed');
+        expect(claim).toHaveBeenCalledTimes(1);
+
+        const fallback = await newCustomer();
+        await placeHold(fallback, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
+        const f = await renewalInvoice(fallback);
+        claim.mockClear();
+        // even the exempt sender waits on a fallback hold
+        await expect(Renewal.withRenewalSendClearance(f.successor, { claim, release, ignoreDisputeHold: true })).rejects.toMatchObject({ code: 'renewal_send_withheld', collectionHoldDeferral: true });
+        expect(claim).not.toHaveBeenCalled();
+      });
+
+      test('the exemption reaches the clearance from the sender entry: an operator / customer renewal send for a FALLBACK-held homeowner is still the retryable hold deferral', async () => {
+        const c = await newCustomer();
+        await placeHold(c, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
+        const { inv } = await renewalInvoice(c);
+        for (const holdExempt of ['operator', 'customer']) {
+          const out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, { operatorInitiated: holdExempt === 'operator', holdExempt }));
+          expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER' });
+          expect(await invoice(inv)).toMatchObject({ status: 'draft', send_claim_token: null, sms_sent_at: null });
+        }
+        const src = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice.js'), 'utf8');
+        expect(src).toMatch(/claimBillToFencedSend\(invoiceId, pre, \{ firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend, holdExempt \}\)/);
+        expect(src).toMatch(/ignoreDisputeHold = HOLD_EXEMPT_CALLERS\.has\(options\.holdExempt\)/);
+      });
     });
   });
 
@@ -373,8 +414,8 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const c = await newCustomer();
       const inv = await newInvoice(c);
       await queueDue(inv); // clear at the due read
-      const real = Hold.dueInvoiceHeldByDisputeHold;
-      const race = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementationOnce(async (...args) => {
+      const real = Hold.messagingHeldByCollectionHold;
+      const race = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementationOnce(async (...args) => {
         await placeHold(c); // the dispute lands after the query selected this invoice, before the send
         return real(...args);
       });
@@ -487,11 +528,48 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(row.status).toBe('sent');
     });
 
-    test('a non-dispute (wrong-number fallback) hold does not stop the send', async () => {
+    // Codex #5424 r13: a wrong-number / wrong-party FALLBACK collection_hold is an all-channel outreach
+    // block. The sender waits on it exactly as on a dispute (deferred, nothing spent, never terminal).
+    const FALLBACK = 'wrong-number report on billing follow-up call; wrong_number flag write failed';
+
+    test('a wrong-number FALLBACK hold stops the send too (deferred, no attempt spent); once the fallback is released it sends', async () => {
       const c = await newCustomer();
-      await placeHold(c, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
+      const holdId = await placeHold(c, FALLBACK);
       const inv = await newInvoice(c);
       await queueDue(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv);
+      expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+      await db('collections_flags').where({ id: holdId }).update({ released_at: db.fn.now() });
+      await makeDueNow(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).toContain(inv);
+    });
+
+    test('a released DISPUTE that restores a wrong-number fallback keeps the queued invoice waiting; only the fallback release sends it (Codex #5424 r13 P1)', async () => {
+      const c = await newCustomer();
+      await placeHold(c, FALLBACK);
+      // the dispute lands on the active fallback row: one row, upgraded, the fallback rides in the trailer
+      const { placeDisputeHold } = require('../services/collections/outbound-voice/flags');
+      await placeDisputeHold(c, { summary: 'synthetic billing question' });
+      const inv = await newInvoice(c);
+      await queueDue(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv);
+      // releasing the DISPUTE (the admin path) puts the fallback back: still an active all-channel outreach block
+      const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+      const disputeRow = await db('collections_flags').where({ customer_id: c, flag: 'collection_hold' }).whereNull('released_at').first('id');
+      expect(await releaseCollectionHold(c, { holdId: disputeRow.id })).toMatchObject({ ok: true });
+      const restored = await db('collections_flags').where({ customer_id: c, flag: 'collection_hold' }).whereNull('released_at').select('id', 'reason');
+      expect(restored).toHaveLength(1);
+      expect(restored[0].reason).toBe(FALLBACK);
+      await makeDueNow(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv); // the wrong party is NOT sent the invoice / pay link
+      expect(await invoice(inv)).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
+      // the fallback itself released: the queued invoice goes out
+      await releaseViaOpsScript(c);
+      await makeDueNow(inv);
       await Invoices.processScheduledSends();
       expect(sentIds()).toContain(inv);
     });
@@ -648,6 +726,97 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const id = await queueRow(c, inv);
       await persistStrippedPayLink({ msgId: id, strippedBody: 'Your service is complete.', reason: 'invoice-terminal:paid', invoiceId: inv });
       expect(await invoice(inv)).toMatchObject({ status: 'draft', scheduled_send_at: null });
+    });
+
+    // Codex #5424 r13 P1: the pay-link-ONLY branch used to hand the invoice over (queue + marker) in one
+    // transaction and terminalize the sms_log row in a SECOND one. blockPayLinkOnlyReplay is ONE transaction.
+    describe('the pay-link-only replay hand-over is atomic (blockPayLinkOnlyReplay)', () => {
+      const { blockPayLinkOnlyReplay, handOverHeldInvoiceToSender } = require('../services/dispatch-completion-deferred');
+
+      test('one transaction: hand-over + ownership marker + the blocked terminal update all land together', async () => {
+        const c = await newCustomer();
+        await placeHold(c);
+        const inv = await newInvoice(c);
+        const rec = await newRecord(c);
+        const id = await queueRow(c, inv);
+        expect(await blockPayLinkOnlyReplay({
+          msgId: id, blockedReason: 'stale_replay:collections-dispute-hold', terminalPending: true, invoiceId: inv, serviceRecordId: rec, handOver: true,
+        })).toBe(1);
+        expect((await smsRow(id)).status).toBe('blocked');
+        expect((await smsRow(id)).metadata).toMatchObject({ blocked_reason: 'stale_replay:collections-dispute-hold', terminal_pending: true });
+        expect((await invoice(inv)).status).toBe('scheduled');
+        expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBe(String(inv));
+      });
+
+      test('a failure in ANY step rolls back ALL of them: the row stays claimed, the invoice unqueued, no marker (crash-between-steps cannot happen)', async () => {
+        const c = await newCustomer();
+        await placeHold(c);
+        const inv = await newInvoice(c);
+        const rec = await newRecord(c);
+        const id = await queueRow(c, inv);
+        // (a) the queue write fails: nothing else may land
+        await db.raw(`CREATE OR REPLACE FUNCTION b10_fail_queue3() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'queue down (synthetic)'; END $$ LANGUAGE plpgsql`);
+        await db.raw(`CREATE TRIGGER b10_fail_queue3_trg BEFORE UPDATE ON invoices FOR EACH ROW WHEN (OLD.id = '${inv}' AND OLD.status = 'draft' AND NEW.status = 'scheduled') EXECUTE FUNCTION b10_fail_queue3()`);
+        try {
+          await expect(blockPayLinkOnlyReplay({ msgId: id, blockedReason: 'stale_replay:x', invoiceId: inv, serviceRecordId: rec, handOver: true })).rejects.toThrow(/queue down/);
+        } finally {
+          await db.raw('DROP TRIGGER IF EXISTS b10_fail_queue3_trg ON invoices');
+          await db.raw('DROP FUNCTION IF EXISTS b10_fail_queue3()');
+        }
+        expect((await smsRow(id)).status).toBe('sending');
+        expect((await invoice(inv)).status).toBe('draft');
+        expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBeUndefined();
+        // (b) the MARKER write fails AFTER the queue write: the queue write and the terminal update roll back too
+        await db.raw(`CREATE OR REPLACE FUNCTION b10_fail_marker() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'marker down (synthetic)'; END $$ LANGUAGE plpgsql`);
+        await db.raw(`CREATE TRIGGER b10_fail_marker_trg BEFORE UPDATE ON service_records FOR EACH ROW WHEN (OLD.id = '${rec}') EXECUTE FUNCTION b10_fail_marker()`);
+        try {
+          await expect(blockPayLinkOnlyReplay({ msgId: id, blockedReason: 'stale_replay:x', invoiceId: inv, serviceRecordId: rec, handOver: true })).rejects.toThrow(/marker down/);
+        } finally {
+          await db.raw('DROP TRIGGER IF EXISTS b10_fail_marker_trg ON service_records');
+          await db.raw('DROP FUNCTION IF EXISTS b10_fail_marker()');
+        }
+        expect((await smsRow(id)).status).toBe('sending');
+        expect((await invoice(inv)).status).toBe('draft');
+      });
+
+      test('a lost claim hands nothing over', async () => {
+        const c = await newCustomer();
+        await placeHold(c);
+        const inv = await newInvoice(c);
+        const rec = await newRecord(c);
+        const id = await queueRow(c, inv);
+        await db('sms_log').where({ id }).update({ status: 'sent' });
+        expect(await blockPayLinkOnlyReplay({ msgId: id, blockedReason: 'stale_replay:x', invoiceId: inv, serviceRecordId: rec, handOver: true })).toBe(0);
+        expect((await invoice(inv)).status).toBe('draft');
+        expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      });
+
+      test('crash AFTER the hand-over committed but BEFORE the row terminalized: the replay consults the ownership marker and goes report-only, even after the release and after the sender delivered', async () => {
+        const c = await newCustomer();
+        await placeHold(c);
+        const inv = await newInvoice(c);
+        const rec = await newRecord(c);
+        const id = await queueRow(c, inv);
+        // the crash window (only reachable when the two writes were separate): hand-over committed, row still 'sending'
+        await handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: rec });
+        const replay = async () => {
+          const { recheckDeferredReplay } = require('../services/messaging/deferred-replay-registry');
+          const row = await smsRow(id);
+          return recheckDeferredReplay('dispatch_completion_deferred', { ...row.metadata, customer_id: row.customer_id, service_record_id: rec });
+        };
+        // hold still standing: stripped (the ordinary hold reason wins nothing the marker does not already say)
+        expect(await replay()).toMatchObject({ eligible: true, stripPayLink: true });
+        // the hold is released and the invoice SENDER delivers first: the link-bearing replay must NOT re-send it
+        await releaseViaOpsScript(c);
+        await makeDueNow(inv);
+        await Invoices.processScheduledSends();
+        expect(sentIds()).toContain(inv);
+        expect((await invoice(inv)).status).toBe('sent');
+        expect(await replay()).toEqual({ eligible: true, stripPayLink: true, reason: 'invoice-sender-owns-pay-link' });
+        // with no marker the same replay (hold released, invoice 'sent' and still collectible) would have kept the link
+        await db('service_records').where({ id: rec }).update({ structured_notes: JSON.stringify({ keep: 'me' }) });
+        expect(await replay()).toEqual({ eligible: true });
+      });
     });
 
     test('a lost claim changes nothing on the invoice either', async () => {
@@ -828,7 +997,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       const c = await newCustomer();
       const inv = await sentInvoice(c);
       const dispatch = jest.fn(async () => accepted);
-      const lookup = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValueOnce({ held: true, reason: 'lookup_failed', error: new Error('db down') });
+      const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockResolvedValueOnce({ held: true, reason: 'lookup_failed', error: new Error('db down') });
       try { expectHoldDefer(await Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c), dispatch)); } finally { lookup.mockRestore(); }
       expect(dispatch).not.toHaveBeenCalled();
     });
@@ -870,10 +1039,11 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
         await releaseViaOpsScript(c);
         expect(await ask(false)).toBe(true);
         expect(await guard.collectionsChannelVerdict({ customerId: c, channel: 'email', purpose: 'balance_reminder' })).toMatchObject({ permitted: true });
-        // a non-dispute (wrong-number fallback) hold is not a pay-link stop
+        // a wrong-number fallback hold waits too (it is an all-channel outreach block), exempt or not
         const other = await newCustomer();
         await placeHold(other, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
-        expect(await guard.collectionsChannelPermitted({ customerId: other, channel: 'sms', purpose: 'late_payment' })).toBe(true);
+        expect(await guard.collectionsChannelPermitted({ customerId: other, channel: 'sms', purpose: 'late_payment' })).toBe(false);
+        expect(await guard.collectionsChannelPermitted({ customerId: other, channel: 'sms', purpose: 'late_payment', holdExempt: 'operator' })).toBe(false);
       } finally { if (before === undefined) delete process.env.GATE_COLLECTIONS_POLICY; else process.env.GATE_COLLECTIONS_POLICY = before; }
     });
 

@@ -307,6 +307,18 @@ async function collectionsDisputeHoldBlocks(conn, customerId) {
     return true;
   }
 }
+// The MESSAGING twin (Codex #5424 r13): a renewal PAY LINK waits on ANY active collection_hold (a
+// dispute or a wrong-number / wrong-party fallback, an all-channel outreach block). Charging, the
+// withdrawal and the grace lapse keep the dispute-only reader above. `ignoreDisputeHold` is the
+// trusted operator / customer exemption: it skips a plain dispute row, never a fallback. A lookup
+// failure reads as held (fail closed).
+async function collectionsMessagingHoldBlocks(conn, customerId, { ignoreDisputeHold = false } = {}) {
+  const held = await require('./collections/collection-hold').messagingHeldByCollectionHold(customerId, conn, { ignoreDisputeHold });
+  if (held.held && held.reason === 'lookup_failed') {
+    logger.warn(`[termite-annual-renewal] collection-hold lookup failed for customer ${customerId} — treating as held: ${held.error?.message}`);
+  }
+  return held.held;
+}
 const HOLD_DEFER_REASON = 'the customer has an active collections dispute hold (or it could not be checked)';
 
 // The ONE "is this successor still inside its own grace window?" refusal
@@ -2848,7 +2860,8 @@ async function payLinkRefusal(successor, conn, context) {
 // (renewalPaymentRefusal): a collections dispute hold defers only the
 // AUTOMATED pay-link delivery / charge legs, it never blocks the customer
 // paying a renewal voluntarily (B10, customer-initiated is exempt).
-async function payLinkVerdict(successor, conn, { ignoreCollectionHold = false } = {}) {
+// `ignoreDisputeHold` (a trusted operator / customer send) skips a plain dispute hold only.
+async function payLinkVerdict(successor, conn, { ignoreCollectionHold = false, ignoreDisputeHold = false } = {}) {
   const stillPending = await conn('annual_prepay_terms').where({ id: successor.id, status: PAYMENT_PENDING_STATUS }).first();
   if (!stillPending) return { kind: 'handled', durable: true, reason: 'the renewal is no longer payment_pending' };
   if (successorDisputeSuspended(stillPending)) return { kind: 'dispute', durable: false, reason: 'the renewal payment is under dispute' };
@@ -2857,7 +2870,7 @@ async function payLinkVerdict(successor, conn, { ignoreCollectionHold = false } 
   // annual-prepay edit that won the gate first (a moved successor
   // term_start, say) is visible only in the fresh row, and the stale one
   // would still read as aligned with the parent.
-  let refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold });
+  let refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold, ignoreDisputeHold, messaging: true });
   // Codex #5424 r12 P1: a collections dispute hold waits only the HOMEOWNER's pay link. A renewal a
   // third-party payer owns (its own Bill-To, or the customer default payer) is not that link, so the
   // homeowner's unrelated dispute must not park it: judge the rest of the clearance as if no hold
@@ -2865,7 +2878,7 @@ async function payLinkVerdict(successor, conn, { ignoreCollectionHold = false } 
   // lookup that cannot be answered keeps the deferral (fail closed toward waiting).
   if (refusal && refusal.reason === HOLD_DEFER_REASON && !ignoreCollectionHold
     && await renewalPayerRouting(stillPending, conn) === 'payer_billed') {
-    refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold: true });
+    refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold: true, messaging: true });
   }
   return refusal ? { kind: 'refused', durable: Boolean(refusal.retire), reason: refusal.reason, refusal, fresh: stillPending } : null;
 }
@@ -2940,11 +2953,11 @@ async function actOnPayLinkVerdict(successor, verdict, conn, context) {
 // (renewalSendWithheldError). A successor no longer payment_pending owes no
 // pay link, but its invoice's own claim checks (paid / void) already answer
 // that — the claim runs as before.
-async function withRenewalSendClearance(successorId, { claim, release }) {
+async function withRenewalSendClearance(successorId, { claim, release, ignoreDisputeHold = false }) {
   const successor = await db('annual_prepay_terms').where({ id: successorId }).first();
   if (!successor?.renewed_from_term_id) return claim();
   return withRenewalGate(successor, async () => {
-    const verdict = await payLinkVerdict(successor, db);
+    const verdict = await payLinkVerdict(successor, db, { ignoreDisputeHold });
     if (!verdict || verdict.kind === 'handled') return claim();
     await release(verdict);
     const outcome = await actOnPayLinkVerdict(successor, verdict, db, 'the scheduled renewal invoice was due to be sent');
@@ -3988,7 +4001,10 @@ async function customerDeletedRefusal(conn, successor) {
   return customer?.deleted_at ? { reason: 'the customer deleted their account', retire: true } : null;
 }
 
-async function successorRecoveryRefusal(successor, conn, { ignoreCollectionHold = false } = {}) {
+// `messaging` is for the legs that deliver a PAY LINK (payLinkVerdict, refuseRecoveryDelivery): they
+// wait on any active collection_hold. The default (withdrawal, charge follow-through) keeps the
+// dispute-only reader.
+async function successorRecoveryRefusal(successor, conn, { ignoreCollectionHold = false, ignoreDisputeHold = false, messaging = false } = {}) {
   // Codex #4971 r10 P1: an account deleted after the mint (routes/auth.js
   // DELETE /account stamps customers.deleted_at and leaves Auto Pay armed)
   // is never renewed — no charge (stripe.js refuses it under the customer
@@ -4005,7 +4021,9 @@ async function successorRecoveryRefusal(successor, conn, { ignoreCollectionHold 
   }
   // A collections dispute hold defers (no pay link, no withdrawal, even past
   // grace) — covers crash / failed-fence-release cases in leg 7b (B10).
-  if (!ignoreCollectionHold && await collectionsDisputeHoldBlocks(conn, successor.customer_id)) return { reason: HOLD_DEFER_REASON, retire: false };
+  if (!ignoreCollectionHold && (messaging
+    ? await collectionsMessagingHoldBlocks(conn, successor.customer_id, { ignoreDisputeHold })
+    : await collectionsDisputeHoldBlocks(conn, successor.customer_id))) return { reason: HOLD_DEFER_REASON, retire: false };
   return graceWindowRefusal(successor);
 }
 
@@ -4027,7 +4045,7 @@ async function successorRecoveryRefusal(successor, conn, { ignoreCollectionHold 
 // (withdrawn, left to the lapse, or held for manual review — each only
 // once its bell persisted); 'deferred' when the row must be retried later.
 async function refuseRecoveryDelivery(successor, conn, context) {
-  const refusal = await successorRecoveryRefusal(successor, conn);
+  const refusal = await successorRecoveryRefusal(successor, conn, { messaging: true });
   return refusal ? actOnRecoveryRefusal(successor, refusal, conn, context) : null;
 }
 

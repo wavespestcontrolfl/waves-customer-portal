@@ -62,9 +62,9 @@ describe('shouldWithholdPayLink', () => {
     expect(await shouldWithholdPayLink('cust-1', database)).toBe(false);
   });
 
-  test('a non-dispute (wrong-number fallback) hold keeps the pay link', async () => {
+  test('a wrong-number / wrong-party FALLBACK hold withholds the pay link too (Codex #5424 r13: messaging waits on any active hold)', async () => {
     const database = makeFakeDb({ collections_flags: [WRONG_NUMBER] });
-    expect(await shouldWithholdPayLink('cust-1', database)).toBe(false);
+    expect(await shouldWithholdPayLink('cust-1', database)).toBe(true);
   });
 
   test('no hold row keeps the pay link; no customer id is not a hold', async () => {
@@ -192,7 +192,7 @@ describe('deferred replay registry wiring', () => {
 
   test('the completion recheck strips the pay link under a dispute hold before reading the invoice', () => {
     const start = src.indexOf('dispatch_completion_deferred: {');
-    const holdAt = src.indexOf("customerHasActiveCollectionHoldChecked(holdCustomerId)", start);
+    const holdAt = src.indexOf("customerHasActiveMessagingHoldChecked(holdCustomerId)", start);
     const invoiceAt = src.indexOf('await invoiceStillCollectible(meta)', start);
     expect(holdAt).toBeGreaterThan(start);
     expect(holdAt).toBeLessThan(invoiceAt);

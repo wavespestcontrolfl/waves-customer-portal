@@ -47,10 +47,10 @@ describe('customer-message purposes gated by the dispute hold at the send bounda
     expect(src).toMatch(/HOLD_GATED_DUNNING_ENTRY_POINTS\.has\(String\(input\.entryPoint/);
     // ONE predicate (billingHoldBlock) carries the gate + both exemptions, and runs twice: step 1.5
     // and again inside providerPreparationCheck, the last pre-provider callback (round-11 P1).
-    expect(src).toMatch(/if \(!isHoldGatedBillingMessage\(input\)\) return null;\s*if \(input\.customerInitiated === true \|\| collectionHold\.holdExemptionApplies\(input\.holdExempt\)\) return null;/);
+    expect(src).toMatch(/if \(!isHoldGatedBillingMessage\(input\)\) return null;\s*const ignoreDisputeHold = input\.customerInitiated === true \|\| collectionHold\.holdExemptionApplies\(input\.holdExempt\);/);
     expect(src.match(/await billingHoldBlock\(/g) || []).toHaveLength(2);
     const prep = src.slice(src.indexOf('const providerPreparationCheck'), src.indexOf('providerPreparationCheck.isStillValid'));
-    expect(prep).toMatch(/await billingHoldBlock\(sendInput\)/);
+    expect(prep).toMatch(/await billingHoldBlock\(sendInput, handoffDb\)/);
     expect(prep).toMatch(/'collection_hold_boundary'/);
   });
 
@@ -102,7 +102,7 @@ describe('lifecycle (payment.*) emails that carry a pay / update-card link', () 
     const src = read('services/automation-runner.js');
     expect(src).toMatch(/deferPaymentFailedForHold/);
     expect(src).toMatch(/whereNot\('e\.template_key', 'payment_failed'\)/);
-    expect(src).toMatch(/disputeHoldExistsSql\(this, 'e\.customer_id'\)/);
+    expect(src).toMatch(/collectionHoldExistsSql\(this, 'e\.customer_id'\)/);
   });
 });
 
@@ -206,7 +206,7 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
   test('the billing email authority reads the hold for those templates at the provider boundary, twice, honouring the exemptions', () => {
     const src = read('services/billing-channel-email-authority.js');
     expect(src).toMatch(/HOLD_GATED_EMAIL_TEMPLATES\.has\(templateKey\)/);
-    expect(src).toMatch(/holdExemptionApplies\(holdExempt\) \|\| invoice\?\.payer_id/);
+    expect(src).toMatch(/invoice\?\.payer_id \|\| !input\?\.customerId/);
     // before dispatch AND at the final provider-boundary check
     expect(src.match(/dunningHoldBlock\(/g)).toHaveLength(3); // definition + two call sites
     expect(src).toMatch(/code, held\.reason|HOLD_DEFER_CODE/);
@@ -242,5 +242,66 @@ describe('machine-initiated dunning senders are gated at the send boundaries', (
     // the voice "text me the link" tool: rail-guard consult and send both carry the customer exemption
     expect(read('services/collections/outbound-voice/collections-conversation.js')).toMatch(/holdExempt: 'customer',\s*\}\);/);
     expect(read('services/collections/outbound-voice/collections-conversation.js')).toMatch(/sendViaSMS\(invoiceId, \{ operatorInitiated: true, holdExempt: 'customer' \}\)/);
+  });
+});
+
+// Codex #5424 round 13: MESSAGING waits on any active collection_hold (dispute or wrong-number /
+// wrong-party fallback); CHARGING stops on a dispute only. The two predicates must not drift: every
+// module that still reads the dispute-only readers is a money / charge / lapse lane, listed here on
+// purpose. A messaging lane that reads them would let a restored fallback hold through.
+describe('messaging hold predicate vs charging hold predicate (round 13)', () => {
+  test('only the charge / lapse / credit lanes read the dispute-only readers; no messaging module does', () => {
+    expect(filesMatching(/customerHasActiveCollectionHold|collectionHoldInvoiceIds|disputeHoldExistsSql|activeDisputeHolds/)
+      .filter((f) => f !== 'services/collections/collection-hold.js')).toEqual([
+      'services/annual-prepay-renewals.js', // card-expiry exemption: a charge lane
+      'services/completion-balance-sweep.js', // off-session charge sweep
+      'services/customer-credit.js', // account-credit auto-apply (D9): a money lane
+      'services/termite-annual-renewal-charge.js', // renewal charge / lapse / withdrawal (its pay-link legs read the messaging predicate)
+      'services/termite-annual-signature-charge.js', // signature charge
+    ]);
+  });
+
+  test('the old dispute-only messaging name is gone: one shared predicate, messagingHeldByCollectionHold', () => {
+    expect(filesMatching(/dueInvoiceHeldByDisputeHold/)).toEqual([]);
+    const consumers = filesMatching(/messagingHeldByCollectionHold/);
+    for (const f of [
+      'services/billing-channel-email-authority.js', 'services/invoice-email.js', 'services/invoice.js',
+      'services/messaging/send-customer-message.js', 'services/messaging/deferred-replay-registry.js',
+      'services/messaging/invoice-send-replay-eligibility.js', 'services/collections/rail-guard.js',
+      'services/payment-lifecycle-email.js', 'services/automation-runner.js', 'services/recurring-card-on-file.js',
+      'services/billing-retry-email-obligation.js',
+    ]) expect(consumers).toContain(f);
+  });
+
+  test('the sender due queries skip ANY active hold (collectionHoldExistsSql), not the dispute-only subquery', () => {
+    expect(read('services/invoice.js')).toMatch(/noActiveCollectionHold[\s\S]{0,300}collectionHoldExistsSql\(this, "invoices\.customer_id"\)/);
+    expect(read('services/automation-runner.js')).toMatch(/collectionHoldExistsSql\(this, 'e\.customer_id'\)/);
+  });
+
+  test('a trusted exemption is passed as ignoreDisputeHold at every messaging boundary - never a skipped read (a fallback hold still waits)', () => {
+    expect(read('services/invoice.js')).toMatch(/\{ ignoreDisputeHold: HOLD_EXEMPT_CALLERS\.has\(holdExempt\) \}/);
+    expect(read('services/invoice-email.js')).toMatch(/ignoreDisputeHold: collectionHold\.holdExemptionApplies\(options\.holdExempt\)/);
+    expect(read('services/billing-channel-email-authority.js')).toMatch(/ignoreDisputeHold: collectionHold\.holdExemptionApplies\(holdExempt\)/);
+    expect(read('services/collections/rail-guard.js')).toMatch(/ignoreDisputeHold: collectionHold\.holdExemptionApplies\(holdExempt\)/);
+    expect(read('services/payment-lifecycle-email.js')).toMatch(/ignoreDisputeHold: customerInitiated === true/);
+    expect(read('services/messaging/deferred-replay-registry.js')).toMatch(/ignoreDisputeHold: Boolean\(meta && meta\.customer_initiated === true\)/);
+    expect(read('services/collections/collection-hold.js')).toMatch(/ignoreDisputeHold: exempt/);
+  });
+
+  test('every final provider-boundary hold read reuses the handoff connection (round 13 P1: no root-pool read under a held transaction)', () => {
+    expect(read('services/payment-lifecycle-email.js')).toMatch(/holdBoundaryCheck = holdApplies \? async \(\{ database: handoffDb \} = \{\}\) => \{\s*const heldNow = await require\('\.\/collections\/collection-hold'\)\.messagingHeldByCollectionHold\(customer\.id, handoffDb, holdOpts\)/);
+    expect(read('services/transactional-email-provider-retry.js')).toMatch(/state\.holdBoundaryCheck = async \(\{ database: handoffDb \} = \{\}\) => \{\s*const heldNow = await collectionHold\.storedLifecycleEmailHeld\(message, handoffDb\)/);
+    expect(read('services/email-bounce-recovery.js')).toMatch(/async \(\{ database: handoffDb \} = \{\}\) => \{\s*const heldNow = await require\('\.\/collections\/collection-hold'\)\.storedLifecycleEmailHeld\(bouncedMessage, handoffDb\)/);
+    // the dunning authority, the invoice email leg, the automation step and the replay eligibility already read on the locked handle
+    expect(read('services/billing-channel-email-authority.js')).toMatch(/messagingHeldByCollectionHold\(input\.customerId, database,/);
+    expect(read('services/invoice-email.js')).toMatch(/messagingHeldByCollectionHold\(current\.customer_id, trx,/);
+    expect(read('services/automation-runner.js')).toMatch(/messagingHeldByCollectionHold\(enrollment\.customer_id, database\)/);
+    expect(read('services/messaging/invoice-send-replay-eligibility.js')).toMatch(/messagingHeldByCollectionHold\(invoice\.customer_id, database\)/);
+  });
+
+  test('the scheduler hands a pay-link-only replay over through ONE transaction (no separate hand-over then terminal write)', () => {
+    const scheduler = read('services/scheduler.js');
+    expect(scheduler).toMatch(/blockPayLinkOnlyReplay\(\{/);
+    expect(scheduler).not.toMatch(/handOverHeldInvoiceToSender/);
   });
 });

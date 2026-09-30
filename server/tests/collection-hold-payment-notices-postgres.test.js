@@ -55,8 +55,8 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
     customers.push(row.id);
     return row.id;
   }
-  const placeHold = async (c) => (await db('collections_flags')
-    .insert({ customer_id: c, flag: 'collection_hold', reason: DISPUTE_REASON, created_by: 'test' }).returning('id'))[0].id;
+  const placeHold = async (c, reason = DISPUTE_REASON) => (await db('collections_flags')
+    .insert({ customer_id: c, flag: 'collection_hold', reason, created_by: 'test' }).returning('id'))[0].id;
   const release = (id) => db('collections_flags').where({ id }).update({ released_at: db.fn.now() });
 
   beforeAll(() => {
@@ -95,7 +95,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
   test('a lookup failure fails closed (suppressed), and a customer-initiated notice is exempt (source contract)', async () => {
     const Hold = require('../services/collections/collection-hold');
     const c = await newCustomer();
-    const lookup = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
+    const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
     try {
       const out = await sendCustomerMessage({
         to: '+15551230001', body: 'Your payment failed.', channel: 'sms', audience: 'customer', purpose: 'payment_failure',
@@ -104,7 +104,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       expect(out).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
     } finally { lookup.mockRestore(); }
     const src = fs.readFileSync(path.join(__dirname, '../services/messaging/send-customer-message.js'), 'utf8');
-    expect(src).toMatch(/if \(!isHoldGatedBillingMessage\(input\)\) return null;\s*if \(input\.customerInitiated === true \|\| collectionHold\.holdExemptionApplies\(input\.holdExempt\)\) return null;/);
+    expect(src).toMatch(/if \(!isHoldGatedBillingMessage\(input\)\) return null;\s*const ignoreDisputeHold = input\.customerInitiated === true \|\| collectionHold\.holdExemptionApplies\(input\.holdExempt\);/);
     expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES = Object\.freeze\(\['payment_failure', 'autopay'\]\)/);
   });
 
@@ -403,7 +403,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       await release(holdId);
     });
 
-    test('lifecycle email: a customer-initiated notice carries no hold boundary (exempt), a confirmation carries none (not gated)', async () => {
+    test('lifecycle email: a customer-initiated notice skips a plain DISPUTE at the boundary but a FALLBACK hold still stops it; a confirmation carries none (not gated)', async () => {
       const c = await newCustomer();
       await placeHold(c);
       const boundaryOf = async (call) => {
@@ -413,7 +413,13 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
         return dispatch.mock.calls[0]?.[1];
       };
       await Lifecycle.sendPaymentFailed({ customerId: c, paymentIntentId: `pi_synthetic_${randomUUID()}`, attemptId: 'a3', customerInitiated: true });
-      expect(await boundaryOf(EmailTemplateLibrary.sendTemplate.mock.calls[0][0])).toBeUndefined();
+      const customerBoundary = await boundaryOf(EmailTemplateLibrary.sendTemplate.mock.calls[0][0]);
+      // the dispute hold is skipped for the customer's own notice ...
+      await expect(customerBoundary({})).resolves.toEqual({ ok: true });
+      // ... but a wrong-number / wrong-party fallback hold still stops it
+      await db('collections_flags').where({ customer_id: c }).update({ released_at: db.fn.now() });
+      await placeHold(c, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
+      await expect(customerBoundary({})).rejects.toMatchObject({ code: 'COLLECTION_HOLD_DEFER', providerBoundaryBlocked: true });
       EmailTemplateLibrary.sendTemplate.mockClear();
       await Lifecycle.sendAutopayEnabled({ customerId: c, paymentMethodId: null });
       expect(await boundaryOf(EmailTemplateLibrary.sendTemplate.mock.calls[0][0])).toBeUndefined();
@@ -458,7 +464,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       // lifecycle + transactional retry + bounce recovery: their own providerBoundaryCheck
       expect(read('services/payment-lifecycle-email.js')).toMatch(/dispatch\(undefined, holdBoundaryCheck/);
       expect(read('services/transactional-email-provider-retry.js')).toMatch(/state\.holdBoundaryCheck = async/);
-      expect(read('services/email-bounce-recovery.js')).toMatch(/storedLifecycleEmailHeld\(bouncedMessage\);\s*if \(heldNow\.held\)/);
+      expect(read('services/email-bounce-recovery.js')).toMatch(/storedLifecycleEmailHeld\(bouncedMessage, handoffDb\);\s*if \(heldNow\.held\)/);
     });
   });
 
@@ -547,6 +553,47 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
     });
 
+    test('a worker lost AFTER the pending -> resent flip but BEFORE the provider outcome is reclaimed once stale; a live, settled or non-hold-originated resent row never is (Codex #5424 r13 P2)', async () => {
+      const sendgrid = require('../services/sendgrid-mail');
+      const Recovery = require('../services/email-bounce-recovery');
+      const local = randomUUID();
+      const typo = `${local}@gmial.com`;
+      const c = await newCustomer();
+      await db('customers').where({ id: c }).update({ email: typo });
+      const bounced = await bouncedPair(c, typo);
+      const holdId = await placeHold(c);
+      await Recovery.attemptRecovery(bounced, {});
+      let rec = await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first();
+      expect(rec.status).toBe(Recovery.HELD_RECOVERY_STATUS);
+      await release(holdId);
+      // What the crash leaves: the flow flipped the claim to 'resent' (hold_claimed_at still on the row) and the
+      // recovery message is still queued with no provider id - the provider was never reached.
+      const resentAt = (ms) => db('email_bounce_recoveries').where({ id: rec.id })
+        .update({ status: 'resent', metadata: db.raw('metadata || ?::jsonb', [JSON.stringify({ hold_claimed_at: new Date(Date.now() - ms).toISOString() })]) });
+      await resentAt(60 * 1000);
+      // a fresh claim is a live worker's: left alone
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0 });
+      // a resent row with NO hold_claimed_at (an ordinary webhook-originated recovery) is never reclaimed
+      await resentAt(11 * 60 * 1000);
+      await db('email_bounce_recoveries').where({ id: rec.id }).update({ metadata: db.raw("metadata - 'hold_claimed_at'") });
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0 });
+      // a stale resent claim whose provider outcome DID settle (provider id published) is settled: never reclaimed
+      await resentAt(11 * 60 * 1000);
+      await db('email_messages').where({ id: rec.recovery_message_id }).update({ provider_message_id: 'sg-accepted-before-crash', status: 'sent' });
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      // unsettled + stale: reclaimed and the flow re-runs to a resend
+      await db('email_messages').where({ id: rec.recovery_message_id }).update({ provider_message_id: null, status: 'queued' });
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 1 });
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(sendgrid.sendOne.mock.calls[0][0].to).toBe(`${local}@gmail.com`);
+      rec = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+      expect(rec.status).toBe('resent');
+      expect(await db('email_messages').where({ id: rec.recovery_message_id }).first()).toMatchObject({ status: 'sent', provider_message_id: 'sg-synthetic-1' });
+      // settled: never reclaimed again
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0 });
+    });
+
     test('a stale claim whose flow parks again under a still-standing hold goes back to held_dispute one interval out (no resend)', async () => {
       const sendgrid = require('../services/sendgrid-mail');
       const Recovery = require('../services/email-bounce-recovery');
@@ -599,8 +646,8 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
     const fn = runner.slice(runner.indexOf('async function sendPaymentFailedThroughBillingAuthority'), runner.indexOf('async function settlePaymentFailedRefusal'));
     // up front AND again through the authority's preSendCheck, which the authority re-runs on the
     // locked handle before dispatch and at the FINAL provider boundary (after request preparation)
-    expect(fn).toMatch(/dueInvoiceHeldByDisputeHold\(enrollment\.customer_id\)/);
-    expect(fn).toMatch(/preSendCheck: async \(\{ database \} = \{\}\) => \{[\s\S]*dueInvoiceHeldByDisputeHold\(enrollment\.customer_id, database\)/);
+    expect(fn).toMatch(/messagingHeldByCollectionHold\(enrollment\.customer_id\)/);
+    expect(fn).toMatch(/preSendCheck: async \(\{ database \} = \{\}\) => \{[\s\S]*messagingHeldByCollectionHold\(enrollment\.customer_id, database\)/);
     expect(fn).toMatch(/blocked\('COLLECTION_HOLD_DEFER'[\s\S]*retryable: true/);
   });
 });

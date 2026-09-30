@@ -6,7 +6,7 @@
 // canned chains): no active hold. The hold behavior has its own suites.
 jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
-  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
 jest.mock('../models/db', () => jest.fn());
 // Collections contact ledger (record-then-send, codex 2026-08-14): the rails

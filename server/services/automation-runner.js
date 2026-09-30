@@ -167,7 +167,7 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
   const holdBlock = (held) => blocked('COLLECTION_HOLD_DEFER', held.reason === 'lookup_failed'
     ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
     : 'Customer has an active collections dispute hold; payment-failed email deferred', { retryable: true });
-  const upFront = await holdCollections.dueInvoiceHeldByDisputeHold(enrollment.customer_id);
+  const upFront = await holdCollections.messagingHeldByCollectionHold(enrollment.customer_id);
   if (upFront.held) return settlePaymentFailedRefusal({ enrollment, sendId, block: holdBlock(upFront) });
   const input = {
     customerId: enrollment.customer_id, channel: 'email',
@@ -195,7 +195,7 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
     // as before dispatch - a hold committed while the request is prepared is caught there, not
     // only at this one-time pre-dispatch read. Refusals are the retryable COLLECTION_HOLD_DEFER.
     preSendCheck: async ({ database } = {}) => {
-      const heldNow = await holdCollections.dueInvoiceHeldByDisputeHold(enrollment.customer_id, database);
+      const heldNow = await holdCollections.messagingHeldByCollectionHold(enrollment.customer_id, database);
       if (!heldNow.held) return { ok: true };
       const refusal = holdBlock(heldNow);
       return { ok: false, code: refusal.code, reason: refusal.reason, retryable: true };
@@ -702,7 +702,7 @@ async function sendStepLocked(enrollment, { testRecipient } = {}) {
   // Collections DISPUTE hold: read BEFORE the step-send row is inserted, so a held step leaves no
   // row at all (sendPaymentFailedThroughBillingAuthority re-checks under the authority's locks).
   if (billingSend) {
-    const upFront = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(enrollment.customer_id);
+    const upFront = await require('./collections/collection-hold').messagingHeldByCollectionHold(enrollment.customer_id);
     if (upFront.held) {
       return deferPaymentFailedForHold({ enrollment, reason: upFront.reason === 'lookup_failed'
         ? 'The collections dispute-hold lookup failed; payment-failed email deferred'
@@ -828,7 +828,7 @@ async function processDueSteps() {
     // the first tick after the release. The step itself re-checks the hold (fail closed).
     .where((q) => q.whereNot('e.template_key', 'payment_failed')
       .orWhereNotExists(function heldPaymentFailed() {
-        require('./collections/collection-hold').disputeHoldExistsSql(this, 'e.customer_id');
+        require('./collections/collection-hold').collectionHoldExistsSql(this, 'e.customer_id');
       }))
     .orderBy('e.next_send_at', 'asc')
     .limit(50)

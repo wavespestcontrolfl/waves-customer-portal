@@ -79,8 +79,8 @@ run('dispute hold at the dunning send boundaries (postgres)', () => {
     customers.push(row.id);
     return row.id;
   }
-  const placeHold = async (c) => (await db('collections_flags')
-    .insert({ customer_id: c, flag: 'collection_hold', reason: DISPUTE_REASON, created_by: 'test' }).returning('id'))[0].id;
+  const placeHold = async (c, reason = DISPUTE_REASON) => (await db('collections_flags')
+    .insert({ customer_id: c, flag: 'collection_hold', reason, created_by: 'test' }).returning('id'))[0].id;
   const release = (id) => db('collections_flags').where({ id }).update({ released_at: db.fn.now() });
 
   beforeAll(() => {
@@ -124,25 +124,36 @@ run('dispute hold at the dunning send boundaries (postgres)', () => {
     test('an unanswerable hold lookup holds it too (fail closed)', async () => {
       const Hold = require('../services/collections/collection-hold');
       const c = await newCustomer();
-      const lookup = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
+      const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
       try {
         expect(await send(c)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
       } finally { lookup.mockRestore(); }
     });
 
-    test('a deliberate operator send, and a send the customer asked for, are exempt (hold not even read)', async () => {
+    test('a deliberate operator send, and a send the customer asked for, are exempt from a DISPUTE hold (the read ignores it)', async () => {
       const Hold = require('../services/collections/collection-hold');
       const c = await newCustomer();
       await placeHold(c);
-      const lookup = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold');
+      const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold');
       try {
         expect((await send(c, { holdExempt: 'operator', operatorInitiated: true })).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
         expect((await send(c, { holdExempt: 'customer' })).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
         expect((await send(c, { customerInitiated: true })).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
-        expect(lookup).not.toHaveBeenCalled();
+        for (const call of lookup.mock.calls) expect(call[2]).toEqual({ ignoreDisputeHold: true });
         // an unrecognised exemption value does not exempt
         expect(await send(c, { holdExempt: 'system' })).toMatchObject({ code: 'COLLECTION_HOLD_SUPPRESSED' });
       } finally { lookup.mockRestore(); }
+    });
+
+    test('a wrong-number FALLBACK hold stops the notice, and NO exemption skips it; after its release it sends (Codex #5424 r13)', async () => {
+      const c = await newCustomer();
+      const holdId = await placeHold(c, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
+      expect(await send(c)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+      for (const extra of [{ holdExempt: 'operator', operatorInitiated: true }, { holdExempt: 'customer' }, { customerInitiated: true }]) {
+        expect(await send(c, extra)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+      }
+      await release(holdId);
+      expect((await send(c)).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
     });
   });
 

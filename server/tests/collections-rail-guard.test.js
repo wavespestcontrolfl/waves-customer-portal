@@ -13,7 +13,7 @@
 // canned chains): no active hold. The hold behavior has its own suites.
 jest.mock('../services/collections/collection-hold', () => ({
   ...jest.requireActual('../services/collections/collection-hold'),
-  dueInvoiceHeldByDisputeHold: jest.fn(async () => ({ held: false })),
+  messagingHeldByCollectionHold: jest.fn(async () => ({ held: false })),
 }));
 jest.mock('../services/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
@@ -200,8 +200,8 @@ describe('detail verdict', () => {
 });
 
 describe('collections dispute hold (owner ruling 2026-09-30)', () => {
-  const held = () => CollectionHold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: true, reason: 'hold' });
-  afterEach(() => CollectionHold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: false }));
+  const held = () => CollectionHold.messagingHeldByCollectionHold.mockResolvedValue({ held: true, reason: 'hold' });
+  afterEach(() => CollectionHold.messagingHeldByCollectionHold.mockResolvedValue({ held: false }));
 
   test('an automated rail waits on an active dispute hold, gate off or on, as a non-durable denial', async () => {
     held();
@@ -213,10 +213,16 @@ describe('collections dispute hold (owner ruling 2026-09-30)', () => {
     expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
   });
 
-  test('the operator "send now" exemption skips ONLY the hold wait (gate off permits; gate on still asks the policy)', async () => {
-    held();
+  // A realistic predicate: a trusted exemption (ignoreDisputeHold) skips a plain DISPUTE row only; a
+  // wrong-number / wrong-party FALLBACK row always holds (Codex #5424 r13).
+  const heldKind = (kind) => CollectionHold.messagingHeldByCollectionHold.mockImplementation(async (_id, _db, opts = {}) => (
+    opts.ignoreDisputeHold && kind === 'dispute' ? { held: false } : { held: true, reason: 'hold' }));
+  afterEach(() => CollectionHold.messagingHeldByCollectionHold.mockReset().mockResolvedValue({ held: false }));
+
+  test('the operator "send now" exemption skips ONLY the DISPUTE hold wait (gate off permits; gate on still asks the policy)', async () => {
+    heldKind('dispute');
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
-    expect(CollectionHold.dueInvoiceHeldByDisputeHold).not.toHaveBeenCalled();
+    expect(CollectionHold.messagingHeldByCollectionHold).toHaveBeenCalledWith('cust-1', undefined, { ignoreDisputeHold: true });
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
@@ -225,10 +231,22 @@ describe('collections dispute hold (owner ruling 2026-09-30)', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(false);
   });
 
-  test('"operator" and "customer" exempt; any other value still waits', async () => {
-    held();
+  test('an operator / customer exemption NEVER skips a wrong-number / wrong-party FALLBACK hold, gate off or on', async () => {
+    heldKind('fallback');
+    for (const holdExempt of ['operator', 'customer']) {
+      await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt })).resolves.toBe(false);
+      await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt, detail: true })).resolves.toEqual({ allowed: false, durable: false, hold: true });
+      await expect(collectionsChannelVerdict({ ...BASE, holdExempt })).resolves.toMatchObject({ permitted: false, hold: true });
+    }
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(false);
+    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+  });
+
+  test('"operator" and "customer" exempt a dispute hold; any other value still waits', async () => {
+    heldKind('dispute');
     // A send the customer asked for themselves (the voice "text me the link" tool) is not automated
-    // follow-up, so the hold does not stop it; the policy verdict is still consulted.
+    // follow-up, so the dispute hold does not stop it; the policy verdict is still consulted.
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'customer' })).resolves.toBe(true);
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
     for (const value of ['system', 'admin', true, '', 'Customer']) {

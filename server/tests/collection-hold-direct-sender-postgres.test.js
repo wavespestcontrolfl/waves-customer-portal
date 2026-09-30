@@ -102,7 +102,7 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
   test('a lookup failure refuses the same way (fail closed, retryable)', async () => {
     const c = await newCustomer();
     const inv = await newInvoice(c);
-    const lookup = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
+    const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
     try {
       expectRefusal(await Invoices.sendViaSMSAndEmail(inv));
       expectRefusal(await Invoices.sendViaSMS(inv, {}));
@@ -145,7 +145,7 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
     }
   });
 
-  test('after the release the same automated call sends; a non-dispute hold never refused it', async () => {
+  test('after the release the same automated call sends; a wrong-number fallback hold refuses it too, exempt or not (Codex #5424 r13)', async () => {
     const c = await newCustomer();
     const holdId = await placeHold(c);
     const inv = await newInvoice(c);
@@ -157,7 +157,10 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
     const other = await newCustomer();
     await placeHold(other, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
     const inv2 = await newInvoice(other);
-    expect((await Invoices.sendViaSMS(inv2, {})).code).not.toBe('COLLECTION_HOLD_DEFER');
+    expectRefusal(await Invoices.sendViaSMS(inv2, {}));
+    // an operator / customer exemption skips the DISPUTE part only: a fallback hold still waits
+    expectRefusal(await Invoices.sendViaSMS(inv2, { operatorInitiated: true, holdExempt: 'operator' }));
+    expectRefusal(await Invoices.sendViaSMS(inv2, { holdExempt: 'customer' }));
   });
 
   describe('a hold that lands AFTER the up-front check is caught at the provider boundary', () => {
@@ -184,8 +187,8 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
       });
     });
     const raceHold = () => {
-      const real = Hold.dueInvoiceHeldByDisputeHold;
-      return jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold')
+      const real = Hold.messagingHeldByCollectionHold;
+      return jest.spyOn(Hold, 'messagingHeldByCollectionHold')
         .mockImplementationOnce(real)
         .mockImplementation(async () => ({ held: true, reason: 'hold' }));
     };
@@ -225,10 +228,10 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
     test('the scheduled worker path (allowClaimed): the boundary defers it without spending an attempt', async () => {
       const c = await newCustomer();
       const inv = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000) });
-      const real = Hold.dueInvoiceHeldByDisputeHold;
+      const real = Hold.messagingHeldByCollectionHold;
       // let the due query + the worker's own delivery-boundary check clear; the sender's boundary re-read holds
       let calls = 0;
-      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementation(async (...args) => {
+      const spy = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async (...args) => {
         calls += 1;
         return calls <= 1 ? real(...args) : { held: true, reason: 'hold' };
       });
@@ -253,13 +256,14 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
         return verdict.ok ? { sent: true, message: { provider_message_id: 'm1' } } : { sent: false, blocked: true, reason: verdict.reason };
       });
       // the dispute lands while the email is prepared: the boundary lookup answers "held"
-      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValue({ held: true, reason: 'hold' });
+      const spy = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: true, reason: 'hold' });
       let out;
       try { out = await InvoiceEmail.sendInvoiceEmail(inv, { claimToken: token }); } finally { spy.mockRestore(); }
       expect(emailReached).not.toHaveBeenCalled();
       expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deliveryOutcome: 'not_sent' });
-      // exemptions and payer-billed skip it (the lookup is never consulted for them)
-      const skipped = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValue({ held: true, reason: 'hold' });
+      // an exemption skips a plain DISPUTE only (the lookup is told to ignore it); a fallback hold still stops it
+      const skipped = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async (_id, _db, opts = {}) => (
+        opts.ignoreDisputeHold ? { held: false } : { held: true, reason: 'hold' }));
       try {
         const exempt = await InvoiceEmail.sendInvoiceEmail(inv, { claimToken: token, holdExempt: 'operator' });
         expect(exempt.code).not.toBe('COLLECTION_HOLD_DEFER');
@@ -277,9 +281,9 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
         const verdict = await opts.withProviderHandoff(async () => { emailReached(); });
         return verdict.ok ? { sent: true, message: { provider_message_id: 'm1' } } : { sent: false, blocked: true, reason: verdict.reason };
       });
-      const real = Hold.dueInvoiceHeldByDisputeHold;
+      const real = Hold.messagingHeldByCollectionHold;
       let calls = 0;
-      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementation(async (...args) => {
+      const spy = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async (...args) => {
         calls += 1;
         return calls <= 1 ? real(...args) : { held: true, reason: 'hold' };
       });
@@ -294,7 +298,8 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
     test('an operator/customer exemption is not stopped at the boundary either', async () => {
       const c = await newCustomer();
       const inv = await newInvoice(c);
-      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementation(async () => ({ held: true, reason: 'hold' }));
+      const spy = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockImplementation(async (_id, _db, opts = {}) => (
+        opts.ignoreDisputeHold ? { held: false } : { held: true, reason: 'hold' })); // a plain dispute: skipped when exempt
       try {
         const out = await Invoices.sendViaSMS(inv, { operatorInitiated: true, holdExempt: 'operator' });
         expect(out.code).not.toBe('COLLECTION_HOLD_DEFER');

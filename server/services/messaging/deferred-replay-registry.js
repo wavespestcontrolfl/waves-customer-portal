@@ -275,11 +275,14 @@ async function queueInvoiceOfDeadDeclineNotice(meta) {
 // closed: an unanswerable lookup waits the same way. Null = no hold.
 //
 // A row queued for a notice the customer's OWN action produced (meta.customer_initiated === true,
-// the marker the scheduler forwards to sendCustomerMessage as customerInitiated) is exempt, the
-// same way the live send boundary exempts it: the recheck must not delay it for the whole dispute.
+// the marker the scheduler forwards to sendCustomerMessage as customerInitiated) is exempt from the
+// DISPUTE part, the same way the live send boundary exempts it: the recheck must not delay it for the
+// whole dispute. A fallback hold still waits.
 async function disputeHoldRecheck(customerId, meta = null) {
-  if (meta && meta.customer_initiated === true) return null;
-  const held = await require('../collections/collection-hold').dueInvoiceHeldByDisputeHold(customerId);
+  // The customer-initiated marker skips a plain dispute hold only; a wrong-number / wrong-party
+  // fallback hold (an all-channel outreach block) still waits (Codex #5424 r13).
+  const held = await require('../collections/collection-hold').messagingHeldByCollectionHold(customerId, undefined,
+    { ignoreDisputeHold: Boolean(meta && meta.customer_initiated === true) });
   if (!held.held) return null;
   return {
     eligible: false,
@@ -287,6 +290,15 @@ async function disputeHoldRecheck(customerId, meta = null) {
     retryable: true,
     retryAt: new Date(Date.now() + require('../collections/collection-hold').HOLD_DEFER_MS),
   };
+}
+
+// True when the completion's service record carries the `invoiceSenderOwnsPayLinkFor` marker for
+// this text's invoice (see dispatch-completion-deferred markInvoiceSenderOwnsPayLink).
+async function completionInvoiceOwnedBySender(meta, database = db) {
+  const row = await database('service_records').where({ id: meta.service_record_id })
+    .whereRaw("COALESCE(structured_notes::jsonb, '{}'::jsonb) ->> 'invoiceSenderOwnsPayLinkFor' = ?", [String(meta.invoice_id)])
+    .first('id');
+  return Boolean(row);
 }
 
 const REGISTRY = {
@@ -570,8 +582,19 @@ const REGISTRY = {
         // The scheduler enriches meta.customer_id from sms_log.customer_id; a
         // row with neither must not read as "no hold" - resolve the customer
         // from the invoice the pay link belongs to.
+        // The scheduled-invoice SENDER already owns this invoice's pay link once a completion
+        // attempt handed it over (the service-record marker handOverInvoiceToSender /
+        // persistStrippedPayLink write in the SAME transaction as the queue write). A frozen
+        // link-bearing text that survived a crash between the hand-over and its own terminal
+        // update (or a retried closeout) must go report-only whether or not the hold has since
+        // been released: the sender sends the one pay link (Codex #5424 r13). No hand-over here -
+        // the sender already owns it.
+        if (meta.service_record_id && await completionInvoiceOwnedBySender(meta)) {
+          return { eligible: true, stripPayLink: true, reason: 'invoice-sender-owns-pay-link' };
+        }
         const holdCustomerId = meta.customer_id || await resolveFollowupCustomerId(meta);
-        if (await holdReader.customerHasActiveCollectionHoldChecked(holdCustomerId)) {
+        // ANY active hold (dispute or wrong-number / wrong-party fallback) withholds the link.
+        if (await holdReader.customerHasActiveMessagingHoldChecked(holdCustomerId)) {
           return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
         }
       } catch (err) {
@@ -720,7 +743,7 @@ const REGISTRY = {
         // the completion route re-arms nothing while the hold stands). A
         // lookup failure throws the coded refusal into failClosed below:
         // retryable, then suppressed at the attempt cap.
-        if (await require('../collections/collection-hold').customerHasActiveCollectionHoldChecked(meta.customer_id || inv.customer_id)) {
+        if (await require('../collections/collection-hold').customerHasActiveMessagingHoldChecked(meta.customer_id || inv.customer_id)) {
           // The suppressed notice was the invoice's only pay-link delivery:
           // queue the invoice onto the scheduled-invoice sender (owner ruling
           // 2026-09-30). The sender defers it while the hold stands and sends

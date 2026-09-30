@@ -1623,7 +1623,7 @@ async function sweepStrandedPrepayAutoCharges({ olderThanMinutes = 15, claimStal
       // Nothing terminal: the job stays claimed so the stale-claim lease retries it
       // after the office releases the hold.
       const fallbackHold = await require('./collections/collection-hold')
-        .dueInvoiceHeldByDisputeHold(invoice?.customer_id || row.customer_id);
+        .messagingHeldByCollectionHold(invoice?.customer_id || row.customer_id);
       if (fallbackHold.held) {
         logger.warn(`[recurring-cof] prepay sweep deferring estimate ${row.id} invoice ${job.invoice_id}: ${fallbackHold.reason === 'lookup_failed' ? 'collections hold lookup failed' : 'collections dispute hold'} - no fallback pay link, retried after release`);
         continue;
