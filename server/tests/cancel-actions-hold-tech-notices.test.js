@@ -213,3 +213,14 @@ test('a same-case retry never undoes a hold it picked up from another run: only 
   expect(mockCancelHold.mock.calls.map(([id]) => id)).toEqual(['h-mosquito']);
   expect(mockSkips).not.toHaveBeenCalled();
 });
+
+test('a failed paired retry restores the Away Mode value its first attempt recorded, not the one it re-read', async () => {
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', []));
+  mockRecordAway.mockResolvedValueOnce(null);
+  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: '2026-11-01' });
+  mockMarkAccepted.mockRejectedValueOnce(new Error('db down'));
+  await expect(executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],
+  })).rejects.toThrow('db down');
+  expect(mockRestoreAway).toHaveBeenCalledWith('c1', null, '2026-11-01');
+});

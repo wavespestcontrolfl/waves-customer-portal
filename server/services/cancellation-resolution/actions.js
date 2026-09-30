@@ -281,11 +281,14 @@ async function executeAwayPairing(ctx) {
   // single idempotent preference write, so nothing partial can linger.
   const { techNotices, holdResults, ownHolds, ...hold } = await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });
   let away;
+  // The Away Mode value before this accept, as first recorded on its holds
+  // (a same-case retry keeps the first attempt's); undefined without holds.
+  let recordedPrevious;
   try {
     // Durable first: recovery can undo the Away Mode write if this accept
     // dies before its holds are marked.
     const { ymdOrDefaultAwayUntil } = require('./holds');
-    await require('./holds').recordPendingAwayMode(hold.holds, { customerId: ctx.customerId, until: ymdOrDefaultAwayUntil(ctx.params?.resumeDate) });
+    recordedPrevious = await require('./holds').recordPendingAwayMode(hold.holds, { customerId: ctx.customerId, until: ymdOrDefaultAwayUntil(ctx.params?.resumeDate) });
     away = await executeAwayMode(ctx);
   } catch (err) {
     // Nothing partial survives (codex r2 P1): undo every hold this accept
@@ -301,7 +304,7 @@ async function executeAwayPairing(ctx) {
   } catch (err) {
     // The holds are undone; Away Mode goes back too, so a failed accept
     // really changed nothing.
-    try { await holds.restoreAwayMode(ctx.customerId, away.previousUntil, away.until); } catch (undoErr) {
+    try { await holds.restoreAwayMode(ctx.customerId, recordedPrevious !== undefined ? recordedPrevious : away.previousUntil, away.until); } catch (undoErr) {
       logger.error(`[cancel-actions] away-mode restore failed for ${ctx.customerId}: ${undoErr.message}`);
     }
     throw err;

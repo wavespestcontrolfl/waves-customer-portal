@@ -426,10 +426,21 @@ const readRecord = (raw) => {
  * preference back if the accept dies before it is marked.
  */
 async function recordPendingAwayMode(holdIds, { customerId, until }) {
-  if (!holdIds?.length) return;
+  if (!holdIds?.length) return undefined;
   const prefs = await db('property_preferences').where({ customer_id: customerId }).first('away_mode_until');
-  const previousUntil = prefs?.away_mode_until ? dateOnlyString(prefs.away_mode_until) : null;
+  const current = prefs?.away_mode_until ? dateOnlyString(prefs.away_mode_until) : null;
+  // A retry of the same accept keeps the value recorded by its first
+  // attempt: by now the preference may already hold `until` (that attempt
+  // wrote it), and re-reading it would make an undo restore `until` over
+  // itself — leaving Away Mode on after the accept failed.
+  let previousUntil = current;
   await db.transaction(async (trx) => {
+    for (const holdId of holdIds) {
+      const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
+      if (!row) continue;
+      const record = readRecord(row.moved_visits);
+      if (record.awayPairing && 'previousUntil' in record.awayPairing) previousUntil = record.awayPairing.previousUntil;
+    }
     for (const holdId of holdIds) {
       const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
       if (!row) continue;
@@ -439,6 +450,7 @@ async function recordPendingAwayMode(holdIds, { customerId, until }) {
       });
     }
   });
+  return previousUntil;
 }
 
 /**

@@ -525,6 +525,14 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
   });
 
+  test('a same-case retry keeps the Away Mode value recorded by its first attempt, never the date that attempt wrote', async () => {
+    const { recordPendingAwayMode } = require('../services/cancellation-resolution/holds');
+    holdSeed({ moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false, awayPairing: { previousUntil: null, until: daysOut(30) } }) });
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(30) }];
+    expect(await recordPendingAwayMode(['h1'], { customerId: 'c1', until: daysOut(30) })).toBe(null);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits).awayPairing).toEqual({ previousUntil: null, until: daysOut(30) });
+  });
+
   test('undoing an unfinished paired accept also puts Away Mode back — unless the preference changed since', async () => {
     const seedPaired = (awayNow) => {
       holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000),
