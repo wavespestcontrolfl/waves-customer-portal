@@ -128,3 +128,61 @@ test('an unwritten refusal repair leaves the loaded row pending', async () => {
   await Reservation.repairAcceptedBillingEmailReservations([row], jest.fn(() => ({ whereIn: jest.fn(async () => [refused]) })));
   expect(row.metadata.resolved).toBeUndefined();
 });
+
+describe('customer-level dunning email reservations', () => {
+  const eventKey = 'customer-dunning:sched-1:2:d60_reminder';
+  const ledgerRow = () => ({ id: 'ledger-9', customer_id: 'customer-1', channel: 'email', source: 'invoice_followups_customer',
+    metadata: JSON.stringify({ notificationEventKey: eventKey }) });
+  const stored = (over = {}) => ({
+    id: 'message-9', idempotency_key: 'customer_dunning_email:sched-1:2:d60_reminder', trigger_event_id: 'customer_dunning:sched-1:2:d60_reminder',
+    recipient_type: 'customer', recipient_id: 'customer-1', template_key: 'invoice.followup_combined_60_day',
+    payload_snapshot: JSON.stringify({ collections_ledger_id: 'ledger-9' }), send_attempt_token: null, sent_at: new Date('2026-10-06T14:00:00Z'), ...over,
+  });
+  // one handle serving the whereIn scan and the locked re-read
+  const handle = (message) => {
+    const locked = { where: jest.fn(() => locked), whereNull: jest.fn(() => locked), forUpdate: jest.fn(() => locked), first: jest.fn(async () => message) };
+    const trx = jest.fn(() => locked);
+    const database = jest.fn(() => ({ whereIn: jest.fn(async () => [message]) }));
+    database.transaction = jest.fn(async (callback) => callback(trx));
+    return { database, trx };
+  };
+
+  test('an accepted email bound to this reservation stamps exactly that ledger row, with the original acceptance time', async () => {
+    const { database, trx } = handle(stored());
+    const repaired = await Reservation.repairAcceptedBillingEmailReservations([ledgerRow()], database);
+    expect([...repaired]).toEqual(['ledger-9']);
+    expect(ContactLedger.markDelivered).toHaveBeenCalledWith({ id: 'ledger-9' }, {
+      database: trx,
+      match: { customerId: 'customer-1', channel: 'email', source: 'invoice_followups_customer', notificationEventKey: eventKey },
+      occurredAt: new Date('2026-10-06T14:00:00Z'),
+    });
+  });
+
+  test.each([
+    ['names another ledger row', { payload_snapshot: JSON.stringify({ collections_ledger_id: 'ledger-other' }) }],
+    ['carries no ledger binding', { payload_snapshot: '{}' }],
+    ['was sent to another customer', { recipient_id: 'customer-2' }],
+    ['has a different touch key', { idempotency_key: 'customer_dunning_email:sched-1:2:d90_final_notice' }],
+    ['has a different trigger id', { trigger_event_id: 'customer_dunning:sched-9:2:d60_reminder' }],
+    ['is not a follow-up template', { template_key: 'billing.notice' }],
+    ['was not accepted yet', { sent_at: null }],
+  ])('a stored email that %s is left held', async (_name, over) => {
+    const { database } = handle(stored(over));
+    const repaired = await Reservation.repairAcceptedBillingEmailReservations([ledgerRow()], database);
+    expect(repaired.size).toBe(0);
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+  });
+
+  test('a delivered, resolved, or non-dunning row is never scanned; a failed stamp reports nothing repaired', async () => {
+    const database = jest.fn();
+    const none = await Reservation.repairAcceptedBillingEmailReservations([
+      { ...ledgerRow(), metadata: JSON.stringify({ notificationEventKey: eventKey, delivered: true }) },
+      { ...ledgerRow(), metadata: JSON.stringify({ notificationEventKey: eventKey, resolved: true }) },
+      { ...ledgerRow(), source: 'invoice_followups' },
+    ], database);
+    expect(none.size).toBe(0);
+    const failing = handle(stored());
+    ContactLedger.markDelivered.mockResolvedValueOnce(false);
+    expect((await Reservation.repairAcceptedBillingEmailReservations([ledgerRow()], failing.database)).size).toBe(0);
+  });
+});

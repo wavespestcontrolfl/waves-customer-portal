@@ -73,7 +73,9 @@ jest.mock('../services/billing-channel-email-authority', () => ({
 jest.mock('../utils/customer-comms-lock', () => ({
   withCustomerCommsLock: jest.fn(async (_db, _id, fn) => fn(MOCK_TRX)),
 }));
-jest.mock('../services/billing-email-reservation', () => ({ repairAcceptedBillingEmailReservations: jest.fn(async () => new Set()) }));
+// Default: no repair. The crash-recovery tests point this at the REAL repair over an in-memory email_messages.
+let mockRepairImpl = async () => new Set();
+jest.mock('../services/billing-email-reservation', () => ({ repairAcceptedBillingEmailReservations: jest.fn((...a) => mockRepairImpl(...a)) }));
 
 // In-memory collections_contact_ledger.
 const mockLedger = [];
@@ -250,11 +252,24 @@ function acceptingSms(overrides = {}) {
     return { sent: true, blocked: false, deliveryOutcome: 'accepted', ...overrides };
   });
 }
+// Models the template library's email_messages row + idempotency dedupe: the
+// row exists once the provider accepted (sent_at), and a second send under the
+// same key returns the stored one instead of sending again.
+const mockEmailMessages = [];
 function acceptingEmail() {
-  mockSendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
+  mockSendTemplate.mockImplementation(async (args) => {
+    const existing = mockEmailMessages.find((m) => m.idempotency_key === args.idempotencyKey);
+    if (existing) return { sent: true, deduped: true, message: existing };
     let dispatched = false;
-    await withProviderHandoff(async () => { dispatched = true; });
-    return dispatched ? { sent: true, message: { id: 'em-1' } } : { sent: false, blocked: true, reason: 'aborted_by_caller_before_dispatch' };
+    await args.withProviderHandoff(async () => { dispatched = true; });
+    if (!dispatched) return { sent: false, blocked: true, reason: 'aborted_by_caller_before_dispatch' };
+    const message = {
+      id: `em-${mockEmailMessages.length + 1}`, idempotency_key: args.idempotencyKey, trigger_event_id: args.triggerEventId,
+      recipient_type: args.recipientType, recipient_id: args.recipientId, template_key: args.templateKey,
+      payload_snapshot: JSON.stringify(args.payload), send_attempt_token: null, sent_at: NOW,
+    };
+    mockEmailMessages.push(message);
+    return { sent: true, message };
   });
 }
 
@@ -262,6 +277,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockLedger.length = 0;
   mockLocked.length = 0;
+  mockEmailMessages.length = 0;
+  mockRepairImpl = async () => new Set();
   process.env.GATE_DUNNING_LADDER_90 = 'true';
   delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
   setup();
@@ -488,6 +505,140 @@ describe('the boundary check at every rail (A-1, A-6, A-12, A-13, B-15, B-16, A-
     expect(out.outcome).toBe('advanced');
     const payload = mockSendTemplate.mock.calls.at(-1)[0].payload;
     expect(payload.invoice_count).toBe('2');
+  });
+});
+
+describe('a crash between provider acceptance and the ledger stamp is recovered, never re-sent (P1)', () => {
+  const emailOnly = () => { prefs = { invoice_channels: ['email'] }; };
+  // the real repair over the in-memory email_messages, on a fake handle
+  const useRealRepair = () => {
+    const actual = jest.requireActual('../services/billing-email-reservation');
+    const emailDb = jest.fn(() => {
+      let keys = null;
+      const q = {
+        whereIn(_col, list) { keys = list; return q; },
+        then: (resolve) => resolve(mockEmailMessages.filter((m) => !keys || keys.includes(m.idempotency_key))),
+      };
+      return q;
+    });
+    emailDb.transaction = async (fn) => fn((table) => {
+      const q = { where() { return q; }, whereNull() { return q; }, forUpdate() { return q; }, first: async () => (table === 'email_messages' ? mockEmailMessages[0] : undefined) };
+      return q;
+    });
+    mockRepairImpl = (rows) => actual.repairAcceptedBillingEmailReservations(rows, emailDb);
+  };
+  // the process dies after the provider accepted, before markDelivered
+  const crashBeforeStamp = () => ContactLedger.markDelivered.mockResolvedValueOnce(false);
+
+  test('tick 1 accepts the email but the stamp is lost; tick 2 repairs the reservation from the stored email and advances WITHOUT a second email', async () => {
+    emailOnly();
+    crashBeforeStamp();
+    const first = await run();
+    expect(first.outcome).toBe('held');
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(mockEmailMessages).toHaveLength(1);
+    expect(rowFor('email').metadata.delivered).toBeUndefined(); // ambiguous reservation
+    expect(mockEmailMessages[0]).toMatchObject({ idempotency_key: `customer_dunning_email:${SCHEDULE_ID}:1:d60_reminder` });
+    expect(JSON.parse(mockEmailMessages[0].payload_snapshot).collections_ledger_id).toBe(rowFor('email').id);
+
+    useRealRepair();
+    const second = await run();
+    expect(second).toMatchObject({ outcome: 'advanced', recovered: true });
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1); // still ONE email for the touch
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(rowFor('email').metadata.delivered).toBe(true);
+    expect(mockLedger).toHaveLength(1);
+    expect(interactions).toHaveLength(0); // recovered: no second interaction row
+  });
+
+  test('without the repair (or an email not bound to this reservation) the reservation stays HELD and nothing is sent again', async () => {
+    emailOnly();
+    crashBeforeStamp();
+    await run();
+    // 1) repair not wired: the old behaviour, held forever, still never a second email
+    expect((await run()).outcome).toBe('held');
+    // 2) the stored email names a DIFFERENT ledger row: not ours, not stamped
+    useRealRepair();
+    mockEmailMessages[0].payload_snapshot = JSON.stringify({ collections_ledger_id: 'someone-elses-row' });
+    expect((await run()).outcome).toBe('held');
+    // 3) recipient is another customer
+    mockEmailMessages[0].payload_snapshot = JSON.stringify({ collections_ledger_id: rowFor('email').id });
+    mockEmailMessages[0].recipient_id = 'other-customer';
+    expect((await run()).outcome).toBe('held');
+    // 4) accepted evidence is missing (still queued): not accepted, not stamped
+    mockEmailMessages[0].recipient_id = CUSTOMER_ID;
+    mockEmailMessages[0].sent_at = null;
+    expect((await run()).outcome).toBe('held');
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(rowFor('email').metadata.delivered).toBeUndefined();
+  });
+});
+
+describe('transient email failures stay retryable, terminal ones pause (real sender shapes) (P1)', () => {
+  const emailOnly = () => { prefs = { invoice_channels: ['email'] }; };
+  // a thrown provider error AFTER the handoff started (SendGrid answered with `status`)
+  const providerError = (status) => Object.assign(new Error(`SendGrid ${status}`), { status });
+  const failAfterHandoff = (err) => mockSendTemplate.mockImplementation(async ({ withProviderHandoff }) => {
+    await withProviderHandoff(async () => { throw err; });
+  });
+
+  test('a SendGrid 429 (definite non-send, no retryable flag) holds the step for the next run and is delivered when the provider recovers', async () => {
+    emailOnly();
+    failAfterHandoff(providerError(429));
+    const out = await run();
+    expect(out).toMatchObject({ outcome: 'held' });
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+    expect(Schedule.markHeld).toHaveBeenCalledWith(expect.anything(), 'send_failed', expect.anything());
+    expect(rowFor('email').metadata).toMatchObject({ send_failed: true });
+    expect(rowFor('email').metadata.resolved).toBeUndefined();
+
+    acceptingEmail(); // the provider is back
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockEmailMessages).toHaveLength(1);
+  });
+
+  test('the raw provider message never becomes the hold reason', async () => {
+    emailOnly();
+    failAfterHandoff(Object.assign(new Error('rejected pat@example.test'), { status: 400 }));
+    const out = await run();
+    expect(out.outcome).toBe('held');
+    expect(out.reason).toBe('send_failed');
+    expect(Schedule.markHeld.mock.calls.map((c) => c[1]).join()).not.toContain('example.test');
+    expect(JSON.stringify(rowFor('email').metadata)).not.toContain('example.test');
+  });
+
+  test('a failure BEFORE the provider handoff (template lookup / preparation throws) is also retryable', async () => {
+    emailOnly();
+    mockSendTemplate.mockRejectedValue(new Error('template store down'));
+    expect(await run()).toMatchObject({ outcome: 'held' });
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+  });
+
+  test('an UNCERTAIN failure after the handoff stays held (reservation kept, not re-sent)', async () => {
+    emailOnly();
+    failAfterHandoff(providerError(502));
+    expect(await run()).toMatchObject({ outcome: 'held' });
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+    expect(rowFor('email').metadata.send_failed).not.toBe(true);
+  });
+
+  test('explicit terminal refusals still pause: a suppressed address, no billing address, template switched off', async () => {
+    emailOnly();
+    mockSendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'Suppressed: bounce (transactional_required)' });
+    expect(await run()).toMatchObject({ outcome: 'paused', reason: 'all_channels_terminal' });
+    expect(rowFor('email').metadata).toMatchObject({ resolved: true, resolution: 'email_terminal_refusal' });
+
+    mockLedger.length = 0;
+    Schedule.markPaused.mockClear();
+    mockSendTemplate.mockRejectedValue(Object.assign(new Error('off'), { code: 'EMAIL_TEMPLATE_DISABLED' }));
+    expect(await run()).toMatchObject({ outcome: 'paused' });
+  });
+
+  test('email + text: a transient email failure with the text delivered is TOLD, not paused', async () => {
+    failAfterHandoff(providerError(429));
+    const out = await run();
+    expect(out.outcome).toBe('told');
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
   });
 });
 
@@ -973,7 +1124,9 @@ describe('final notice, D2/D4/D5/D11', () => {
     await run();
     const vars = smsTemplates.getTemplate.mock.calls[0][1];
     expect(Object.keys(vars).sort()).toEqual(['first_name', 'invoice_count', 'pay_url', 'total_due']);
-    expect(Object.keys(mockSendTemplate.mock.calls[0][0].payload).sort()).toEqual(['customer_portal_url', 'first_name', 'invoice_count', 'pay_url', 'total_due']);
+    // collections_ledger_id is the recovery binding, not copy (never rendered)
+    expect(Object.keys(mockSendTemplate.mock.calls[0][0].payload).sort()).toEqual(['collections_ledger_id', 'customer_portal_url', 'first_name', 'invoice_count', 'pay_url', 'total_due']);
+    expect(mockSendTemplate.mock.calls[0][0].payload.collections_ledger_id).toBe(rowFor('email').id);
   });
 });
 

@@ -170,7 +170,10 @@ async function deliverEmail(ctx, ledger, { recipient, to }) {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
       to,
-      payload,
+      // The reservation's id rides in the stored payload: it is how an
+      // accepted-but-unstamped email is bound back to THIS ledger row when the
+      // process dies before markDelivered (billing-email-reservation.js).
+      payload: { ...payload, collections_ledger_id: String(ledger.id) },
       recipientType: 'customer',
       recipientId: ctx.customer.id,
       triggerEventId: triggerEventId(ctx.schedule, ctx.step.id),

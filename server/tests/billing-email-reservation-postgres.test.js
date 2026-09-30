@@ -621,4 +621,39 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     expect(rows.find((row) => row.id === sibling.id).metadata.delivered).toBeUndefined();
     expect(rows.find((row) => row.id === sibling.id).metadata.resolved).toBeUndefined();
   });
+  test('customer-level dunning: an accepted-but-unstamped email is repaired from the stored row, only when bound to THIS reservation', async () => {
+    const customerId = randomUUID();
+    const scheduleId = randomUUID();
+    const eventKey = `customer-dunning:${scheduleId}:1:d60_reminder`;
+    const tail = `${scheduleId}:1:d60_reminder`;
+    const mine = ledger({ customerId, invoiceId: randomUUID(), eventKey, source: 'invoice_followups_customer' });
+    const otherKey = `customer-dunning:${scheduleId}:1:d90_final_notice`;
+    const unbound = ledger({ customerId, invoiceId: randomUUID(), eventKey: otherKey, source: 'invoice_followups_customer' });
+    await mockDatabase('collections_contact_ledger').insert([mine, unbound]);
+    const dunningMessage = (key, over = {}) => message(
+      { customer_id: customerId, notificationEventKey: key },
+      {
+        template_key: 'invoice.followup_combined_60_day', trigger_event_id: key.replace('customer-dunning:', 'customer_dunning:'),
+        idempotency_key: key.replace('customer-dunning:', 'customer_dunning_email:'), payload_snapshot: { collections_ledger_id: mine.id },
+        sent_at: new Date('2026-10-06T14:16:05Z'), ...over,
+      },
+    );
+    await mockDatabase('email_messages').insert([
+      dunningMessage(eventKey),
+      dunningMessage(otherKey, { payload_snapshot: { collections_ledger_id: randomUUID() } }), // names another ledger row
+    ]);
+    const loaded = await mockDatabase('collections_contact_ledger').where({ customer_id: customerId });
+    const repaired = await Reservation.repairAcceptedBillingEmailReservations(loaded, mockDatabase);
+    expect([...repaired]).toEqual([mine.id]);
+    const rows = await mockDatabase('collections_contact_ledger').whereIn('id', [mine.id, unbound.id]);
+    expect(rows.find((r) => r.id === mine.id).metadata.delivered).toBe(true);
+    expect(new Date(rows.find((r) => r.id === mine.id).occurred_at).toISOString()).toBe('2026-10-06T14:16:05.000Z');
+    expect(rows.find((r) => r.id === unbound.id).metadata.delivered).toBeUndefined();
+    expect(tail).toContain(scheduleId);
+    // the real progress read sees the repaired leg as delivered and the other as owed
+    const progress = await require('../services/billing-reminder-delivery')
+      .reminderProgress(customerId, 'invoice_followups_customer', ['email']);
+    expect(progress.find((e) => e.metadata.notificationEventKey === eventKey).complete).toBe(true);
+    expect(progress.find((e) => e.metadata.notificationEventKey === otherKey).complete).toBe(false);
+  });
 });

@@ -21,6 +21,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const config = require('../../config/invoice-followups');
 const Followups = require('../invoice-followups');
+const { isTerminalEmailRefusal } = require('../billing-reminder-delivery');
 const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
 const { OPEN_STATUSES, CLAIM_TTL_MS, lockKey } = require('./constants');
 const { promotionSeed, seedRefusal, oldestActive, firstLiveStep } = require('./seed');
@@ -430,10 +431,22 @@ async function completeFinal(schedule, { claimStamp, deliveredAt, namedInvoiceId
 const TRANSIENT = (r) => r?.retryable === true || r?.held === true || r?.deliveryHeld === true
   || r?.deferred === true || r?.deliveryOutcome === 'uncertain' || r?.code === 'COLLECTIONS_POLICY';
 
+// An email that was not delivered is terminal ONLY when the shared classifier
+// says so (no address, email not selected, template off, suppressed). Every
+// other failure is retryable, including the real sender's definite non-sends
+// — `{ ok: false, error, deliveryOutcome: 'not_sent' }` from a SendGrid 429 or
+// a pre-handoff failure carries no `retryable` flag — so an email-only customer
+// is never paused for good by a temporary provider failure.
+const isTransientResult = (channel, r) => TRANSIENT(r)
+  || (channel === 'email' && !!r && r.sent !== true && r.ok !== true && !isTerminalEmailRefusal(r));
+
+// A machine code for held_reason / alerts; a raw provider `error` message can
+// echo an address, so it is never used.
 function firstCode(results) {
   for (const r of Object.values(results || {})) {
-    const code = r?.code || r?.reason || r?.error;
+    const code = r?.code || r?.reason;
     if (code) return String(code).slice(0, 80);
+    if (r?.error) return 'send_failed';
   }
   return 'not_delivered';
 }
@@ -452,9 +465,9 @@ function firstCode(results) {
 function dispositionOf(facts) {
   const delivered = facts.delivered || new Set();
   if (delivered.size > 0) return { kind: facts.complete ? 'advance' : 'told' };
-  const results = Object.values(facts.results || {});
+  const results = Object.entries(facts.results || {});
   if (facts.complete) return { kind: 'paused', reason: 'all_channels_terminal' };
-  if (!results.length || results.some(TRANSIENT)) return { kind: 'held', reason: firstCode(facts.results) };
+  if (!results.length || results.some(([channel, r]) => isTransientResult(channel, r))) return { kind: 'held', reason: firstCode(facts.results) };
   return { kind: 'paused', reason: firstCode(facts.results) };
 }
 

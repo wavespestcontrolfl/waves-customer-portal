@@ -4,6 +4,8 @@ const db = require('../models/db');
 const logger = require('./logger');
 const ContactLedger = require('./collections/contact-ledger');
 const { readStoredBillingReplayContext } = require('./email-template-library');
+const { storedEmailAcceptedAt } = require('./messaging/billing-channel-routing');
+const DunningKeys = require('./customer-dunning/constants');
 const BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX = 'Billing email terminal refusal: ';
 const BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX = 'Billing email re-quote required: ';
 const LEDGER_SOURCE_BY_ENTRY_POINT = Object.freeze({
@@ -158,9 +160,90 @@ function metadataOf(row) {
   try { return JSON.parse(row.metadata) || {}; } catch { return {}; }
 }
 
+// ── customer-level dunning emails (customer_dunning_email:<schedule>:<episode>:<step>) ──
+// These do not use the billing.notice replay context: the sender binds the
+// email row to its ledger reservation by carrying the reservation's id in the
+// stored payload (`collections_ledger_id`), and the identity below is derived
+// from the reservation's own notificationEventKey with the SAME key builders
+// the sender uses. An accepted-but-unstamped email is therefore repaired to
+// `delivered`, never re-sent (the template library's own idempotency key would
+// dedupe a second send anyway; this closes the ambiguous-reservation hold).
+function customerDunningEmailIdentity(notificationEventKey) {
+  const match = /^customer-dunning:([^:]+):(\d+):([A-Za-z0-9_-]+)$/.exec(String(notificationEventKey || ''));
+  if (!match) return null;
+  const schedule = { id: match[1], episode: match[2] };
+  return {
+    idempotencyKey: DunningKeys.emailIdempotencyKey(schedule, match[3]),
+    triggerEventId: DunningKeys.triggerEventId(schedule, match[3]),
+  };
+}
+
+function payloadOf(message) {
+  const raw = message?.payload_snapshot;
+  if (typeof raw !== 'string') return raw && typeof raw === 'object' ? raw : {};
+  try { return JSON.parse(raw) || {}; } catch { return {}; }
+}
+
+// The email row must be exactly this reservation's touch, to this customer,
+// and name this ledger row: anything else is left held.
+function boundToDunningReservation(message, row, identity) {
+  return message.idempotency_key === identity.idempotencyKey
+    && message.trigger_event_id === identity.triggerEventId
+    && message.recipient_type === 'customer'
+    && String(message.recipient_id) === String(row.customer_id)
+    && String(message.template_key || '').startsWith('invoice.followup_')
+    && String(payloadOf(message).collections_ledger_id || '') === String(row.id);
+}
+
+async function stampCustomerDunningEmailDelivered(message, row, identity, database) {
+  try {
+    return await database.transaction(async (trx) => {
+      const query = trx('email_messages').where({ id: message.id });
+      if (message.send_attempt_token == null) query.whereNull('send_attempt_token');
+      else query.where({ send_attempt_token: message.send_attempt_token });
+      const current = await query.forUpdate().first();
+      if (!current || !hasAcceptedEvidence(current) || !boundToDunningReservation(current, row, identity)) return false;
+      const occurredAt = storedEmailAcceptedAt(current);
+      const stamped = await ContactLedger.markDelivered({ id: row.id }, {
+        database: trx,
+        match: { customerId: row.customer_id, channel: 'email', source: DunningKeys.SOURCE, notificationEventKey: metadataOf(row).notificationEventKey },
+        ...(occurredAt ? { occurredAt } : {}),
+      });
+      if (!stamped) throw new Error('accepted reservation was not stamped');
+      return true;
+    });
+  } catch (err) {
+    logger.warn(`[billing-email-reservation] customer dunning delivered stamp failed: ${err.message}`);
+    return false;
+  }
+}
+
+async function repairAcceptedCustomerDunningEmails(rows, database) {
+  const pending = new Map();
+  for (const row of rows || []) {
+    const metadata = metadataOf(row);
+    if (row.channel !== 'email' || row.source !== DunningKeys.SOURCE || metadata.delivered === true || metadata.resolved === true) continue;
+    const identity = customerDunningEmailIdentity(metadata.notificationEventKey);
+    if (identity) pending.set(identity.idempotencyKey, { row, identity });
+  }
+  const repaired = new Set();
+  if (!pending.size) return repaired;
+  try {
+    const messages = await database('email_messages').whereIn('idempotency_key', [...pending.keys()]);
+    for (const message of messages) {
+      const hit = pending.get(message.idempotency_key);
+      if (!hit || !hasAcceptedEvidence(message) || !boundToDunningReservation(message, hit.row, hit.identity)) continue;
+      if (await stampCustomerDunningEmailDelivered(message, hit.row, hit.identity, database)) repaired.add(String(hit.row.id));
+    }
+  } catch (err) {
+    logger.warn(`[billing-email-reservation] customer dunning accepted-evidence repair failed: ${err.message}`);
+  }
+  return repaired;
+}
+
 // Repair a missed post-acceptance stamp from the canonical email ledger. A
 // provider id or handoff phase alone is deliberately insufficient evidence.
-async function repairAcceptedBillingEmailReservations(rows, database = db) {
+async function repairAcceptedBillingChannelEmails(rows, database) {
   const candidates = (rows || []).filter((row) => {
     const metadata = metadataOf(row);
     return row.channel === 'email' && metadata.notificationEventKey
@@ -216,6 +299,14 @@ async function repairAcceptedBillingEmailReservations(rows, database = db) {
     logger.warn(`[billing-email-reservation] accepted-evidence repair failed: ${err.message}`);
     return new Set();
   }
+}
+
+// billing_channel_email reservations (unchanged) plus customer-level dunning
+// email reservations; each repair swallows its own failures.
+async function repairAcceptedBillingEmailReservations(rows, database = db) {
+  const billing = await repairAcceptedBillingChannelEmails(rows, database);
+  const dunning = await repairAcceptedCustomerDunningEmails(rows, database);
+  return new Set([...billing, ...dunning]);
 }
 
 module.exports = {
