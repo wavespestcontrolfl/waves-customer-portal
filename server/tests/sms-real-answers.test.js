@@ -1227,7 +1227,7 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     const result = await drafter.generateGroundedDraft({
       client: {},
       context: { summary: 'Test customer', customer: { id: 'cust-1', tier: 'Gold' }, upcomingServices: [{ type: 'Quarterly Pest', date: '2026-10-20', window: '8-10am' }] },
-      inboundMessage: 'still there',
+      inboundMessage: 'they are still there',
       intent: { intent: 'general_customer_sms_needs_review' },
       schedulingIntent: false,
       city: 'Venice',
@@ -4062,6 +4062,68 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(state.lanes).toEqual(['pest']); // the covered pest offer is NOT suppressed
     });
 
+    // Codex round-37 P2s (PR #5336)
+    test('bare "back again" / questions about Waves returning are not pest reports, even with pest history', () => {
+      const { pestReportSignal, validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const ctx = { customer: { id: 'c1' }, serviceHistory: [{ type: 'General Pest Control' }] };
+      for (const m of ['Will you be back again next Tuesday?', 'Can you come back again tomorrow?', 'are you coming back again?', 'back again', 'you are back again']) expect(pestReportSignal(m, ctx)).toBe(false);
+      for (const m of ["they're back again", 'they came back', "it's back", "they've come back", 'they are still there']) expect(pestReportSignal(m, ctx)).toBe(true);
+      const facts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply: 'Yes, we will be there Tuesday.', factsBlock: facts, intendedActions: [], inboundMessage: 'Will you be back again next Tuesday?', context: ctx }).ok).toBe(true);
+      expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts, intendedActions: [], inboundMessage: "they're back again", context: ctx }).ok).toBe(false);
+    });
+
+    test('the mixed-request hint judges "another service" against the RESOLVED lane (a lawn report is not mixed with itself)', () => {
+      const { reserviceMixedRequest } = require('../services/sms-shadow-drafter');
+      for (const m of ['Chinch bugs are back', 'the mole crickets are back', 'the white grubs are back on the lawn']) expect(reserviceMixedRequest({ inboundMessage: m })).toBe(false);
+      expect(reserviceMixedRequest({ inboundMessage: 'Chinch bugs are back and the ants too' })).toBe(true);
+      expect(reserviceMixedRequest({ inboundMessage: 'the ants are back and my lawn needs weed control' })).toBe(true);
+      expect(reserviceMixedRequest({ inboundMessage: 'the ants are back' })).toBe(false);
+    });
+
+    test('lexical times of day in a callback claim are asserted times: unverifiable unless the full live window is stated', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        const send = async (body) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true, hasRecurringPlan: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        for (const bad of [
+          'Your pest re-service is scheduled for Thursday at noon.',
+          'Your pest re-service is scheduled for Thursday morning.',
+          'Your pest re-service is scheduled for Thursday afternoon.',
+          'Your pest re-service is scheduled for Thursday first thing.',
+          'Your pest re-service is scheduled for Thursday at midnight.',
+          'Your pest re-service is booked for this afternoon.',
+        ]) await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
+        // the full live window beside a lexical word is fine; a day-only reference is fine
+        await expect(send('Your pest re-service is scheduled for Thursday morning, 9-11 AM.')).resolves.toBeNull();
+        await expect(send('Your pest re-service is scheduled for Thursday.')).resolves.toBeNull();
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
+    test.each([
+      ['We will send your free re-service link for your grass.', ['lawn']],
+      ['We will send a free re-service for your yard.', ['lawn']],
+      ['We will send your free grass re-service link.', ['lawn']],
+      ['We will re-service your yard for free.', ['lawn']],
+      ['We will send your free pest re-service link for the ants in your yard.', ['pest']],
+      ['We will send your free pest re-service for your yard.', ['pest']],
+      ['Sorry about the ants in the yard. Your free pest re-service is covered.', ['pest']],
+    ])('grass / yard: the OBJECT of the re-service is lawn, a LOCATION is not: %s', (text, lanes) => {
+      const { namedReserviceLanesInText } = require('../services/sms-shadow-drafter');
+      expect(namedReserviceLanesInText(text)).toEqual(lanes);
+    });
+
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {
       const { RESERVICE_OFFER_SPAN_RES } = require('../services/sms-shadow-drafter');
       expect(RESERVICE_OFFER_SPAN_RES).toHaveLength(2);
@@ -4394,15 +4456,15 @@ describe('PRONOUN_RETURN_TEXT_RE + customerHasPestRelationship — the pronoun-o
   test('matches bare pronoun/return phrasings with no pest noun', () => {
     for (const text of [
       "they're back", 'it\'s back', 'they came back', 'they come back',
-      'they returned', 'back again', 'still there', 'still here',
-      "They're Back!",
+      'they returned', "they're back again", 'they are still there', 'it is still here',
+      "They're Back!", "they've come back",
     ]) {
       expect(PRONOUN_RETURN_TEXT_RE.test(text)).toBe(true);
     }
   });
 
   test('does not match unrelated "back"/"again" phrasings with no return-of-pests meaning', () => {
-    for (const text of ['call me back', "I'll be back tomorrow", 'talk to you again', 'text me back when you can', 'see you again soon']) {
+    for (const text of ['call me back', "I'll be back tomorrow", 'talk to you again', 'text me back when you can', 'see you again soon', 'Will you be back again next Tuesday?', 'Can you come back again tomorrow?', 'back again', 'still there', 'still here', 'you are back again']) {
       expect(PRONOUN_RETURN_TEXT_RE.test(text)).toBe(false);
     }
   });

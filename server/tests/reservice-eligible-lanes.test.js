@@ -468,6 +468,15 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['Previously, the ants were bad', false, 'pest', false],
     ['This year, the ants came back', true, 'pest', false],
     ['Previously the ants were bad, now they are back', true, 'pest', false],
+    // round-37 P2: ongoing-presence predicates
+    ['the ants remain', true, 'pest', false],
+    ['the ants remain in the kitchen', true, 'pest', false],
+    ['the roaches persist', true, 'pest', false],
+    ['the ants keep showing up', true, 'pest', false],
+    ["the ants won't go away", true, 'pest', false],
+    ['I am still dealing with ants', true, 'pest', false],
+    ['still battling roaches', true, 'pest', false],
+    ['we remain calm about the ants', false, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],

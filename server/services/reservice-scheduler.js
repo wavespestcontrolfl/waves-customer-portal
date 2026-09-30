@@ -498,7 +498,8 @@ const RESERVICE_LOCATION_PHRASE_RE = new RegExp(
 );
 // A pest noun that is really a SERVICE name ("pest control", "ant service", "ant plan") is not a sighting.
 const RESERVICE_NOUN_NOT_SERVICE = '(?!\\s+(?:control|service|services|treatment|treatments|plan|plans|program|visit|visits|schedule|contract|guarantee|coverage|company|inspection|inspections|spray|application|appointment)\\b)';
-const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|(?:never|haven'?t|hasn'?t|hadn'?t|didn'?t|won'?t|wouldn'?t|can'?t|not)\\s+(?:(?:yet|even|really|fully|completely|entirely)\\s+)?(?:went\\s+away|gone(?:\\s+away)?|go(?:ne|ing)?\\s+away|stopp\\w+|stop|left|leave|leaving)\\b|returned?|returning|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
+// Codex round-37 P2: ongoing-presence predicates ("the ants remain", "they persist", "keep showing up") are active-report predicates too
+const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|remain(?:s|ed|ing)?\\b|persist(?:s|ed|ing)?\\b|(?:never|haven'?t|hasn'?t|hadn'?t|didn'?t|won'?t|wouldn'?t|can'?t|not)\\s+(?:(?:yet|even|really|fully|completely|entirely)\\s+)?(?:went\\s+away|gone(?:\\s+away)?|go(?:ne|ing)?\\s+away|stopp\\w+|stop|left|leave|leaving)\\b|returned?|returning|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
 const RESERVICE_ACTIVITY_BOUND_RES = [
   // noun … activity ("the ants are back", "roaches keep coming", "ants are everywhere")
   new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}(?:\\W+[\\w'’-]+){0,6}?\\W+${RESERVICE_ACTIVITY_AFTER}`, 'i'),
@@ -620,7 +621,7 @@ function reservicePestReportFacts(text) {
 }
 // A pronoun return ("they're back", "it is coming back") in a clause that still counts, with a pest noun
 // (not a service name) anywhere in another surviving clause: "the roach poison is not working, they are back".
-const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|was|keep|keeps))?\s+(?:(?:coming|showing)\s+(?:back|up)|back|everywhere|returned|returning)\b/i;
+const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|was|keep|keeps))?\s+(?:(?:coming|showing)\s+(?:back|up)|back|everywhere|returned|returning|remain(?:s|ed|ing)?|persist(?:s|ed|ing)?)\b/i;
 const RESERVICE_PEST_NOUN_UNBOUND_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i');
 // Codex round-32 P2: plain possession with an explicit PAST-TIME marker is history, not an active report ("Last year I had
 // ants. What did you use?"). The persistence / sighting constructions are unaffected.

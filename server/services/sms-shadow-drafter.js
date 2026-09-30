@@ -1284,6 +1284,16 @@ const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|
 const RESERVICE_PURPOSE_VERB = 'treat|re-?treat|handle|take\\s+care\\s+of|spray|service|address|deal\\s+with|control|fix|inspect|check(?:\\s+on)?|look\\s+(?:at|over)|assess|get\\s+rid\\s+of|kill';
 const RESERVICE_LAWN_SERVICE_WORDS = `lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod|${TURF_INSECT_NOUN_SOURCES.join('|')}`;
 let reservicePromiseLaneRes = null;
+// Codex round-37 P2: grass / yard are LOCATIONS ("ants in the yard") — unless they are the OBJECT of the re-service or its purpose:
+// "free re-service link for your grass", "a grass re-service", "re-service your yard". A pest word modifying the offer noun keeps
+// the yard a location ("free pest re-service for your yard" is PEST).
+function lawnLocationObjectAlternatives(pestWords) {
+  const loc = '(?:grass|yard)';
+  return `|\\b(?<!\\bre-)(?<!(?:${pestWords})[\\s-]+(?:(?:control|care)[\\s-]+)?)(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?(?:\\s+link)?\\s+(?:for|of|on)\\s+(?:(?:your|my|our|the)\\s+)?${loc}\\b`
+    + `|\\b${loc}[\\s-]+(?:(?:control|care)[\\s-]+)?(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?\\b`
+    // ("re-treat the yard for the ants" stays PEST: the yard is where the ants are — a pest word in the purpose keeps it a location)
+    + `|\\b(?:re-?treat|re-?spray|re-?service|revisit|treat|spray|handle|take\\s+care\\s+of)\\s+(?:your|my|our|the)\\s+${loc}\\b(?![^.?!]{0,30}\\b(?:for|against|because\\s+of)\\b[^.?!]{0,30}\\b(?:${pestWords})\\b)`;
+}
 function promiseLaneRegexes() {
   if (reservicePromiseLaneRes) return reservicePromiseLaneRes;
   const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
@@ -1305,7 +1315,8 @@ function promiseLaneRegexes() {
       // "to <verb> (your) <lane>" anywhere in the promise — "at no charge to treat your lawn"
       + `|\\bto\\s+(?:${RESERVICE_PURPOSE_VERB})\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`
       // "<verb> (your) <lane>" — "we will re-treat your lawn", "re-spray the lawn"
-      + `|\\b(?:re-?treat|re-?spray|re-?service|revisit|treat|spray|service|handle|take\\s+care\\s+of)\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`,
+      + `|\\b(?:re-?treat|re-?spray|re-?service|revisit|treat|spray|service|handle|take\\s+care\\s+of)\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`
+      + (lane === 'lawn' ? lawnLocationObjectAlternatives(words.pest) : ''),
       'i',
     )];
   });
@@ -1460,10 +1471,13 @@ function reserviceHasSeparateRequest(text) {
 // (bookable or already booked) the guards ALWAYS apply — no offered_times, no book_appointment, no OPEN TIMES in the
 // facts — whatever else the inbound asks. This detector only decides whether to ADD a prompt hint telling the model
 // to hand the OTHER request to the office; it may be imperfect and never loosens anything.
-function reserviceMixedRequest({ inboundMessage }) {
+function reserviceMixedRequest({ inboundMessage, context }) {
   const text = String(inboundMessage || '');
+  // Codex round-37 P2: "another service" is judged against the RESOLVED reported lane (a lawn report's own lawn words are not another service)
+  const { reportedReserviceLane } = require('./reservice-scheduler');
+  const lane = reportedReserviceLane(text) || pronounOnlyReportLane(text, context) || 'pest';
   return SAVE_SALE_NON_PEST_TEXT_RE.test(text) || reserviceHasSeparateRequest(text)
-    || require('./reservice-scheduler').namesOtherService(text, 'pest');
+    || require('./reservice-scheduler').namesOtherService(text, lane);
 }
 // Per-draft user-prompt hint (NOT the pinned system prompt), gate-on only: the re-service is handled per the PEST REPORTS
 // rule; the other request goes to a person.
@@ -1701,6 +1715,7 @@ function reserviceAssertedDays(sentence) {
   return out;
 }
 // The clock times / windows a sentence asserts, as minutes-of-day with an optional meridiem: "1–3 PM", "at 9", "9:30 am".
+const RESERVICE_LEXICAL_TIME_RE = /\b(?:noon|midnight|midday|mornings?|afternoons?|evenings?|first\s+thing|end\s+of\s+(?:the\s+)?day|after\s+lunch|before\s+lunch|after\s+work|before\s+work|o['’]clock)\b/gi;
 function reserviceAssertedTimes(sentence) {
   const out = [];
   let rest = String(sentence);
@@ -1714,6 +1729,9 @@ function reserviceAssertedTimes(sentence) {
   });
   rest = rest.replace(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)/gi, (m, h, mi, mer) => { push(h, mi, mer[0].toLowerCase()); return ' '; });
   for (const m of rest.matchAll(/\bat\s+(\d{1,2})(?::(\d{2}))?\b|\b(\d{1,2}):(\d{2})\b/gi)) push(m[1] || m[3], m[2] || m[4], null);
+  // Codex round-37 P2: LEXICAL times of day ("at noon", "midnight", "Thursday morning", "this afternoon", "first thing") are asserted
+  // times too — they can only be verified by stating the full live window, so each is an unverifiable entry.
+  for (const m of rest.matchAll(RESERVICE_LEXICAL_TIME_RE)) out.push({ lexical: m[0].toLowerCase() });
   return out;
 }
 function reserviceLiveWindowMinutes(windowStart) {
@@ -1787,9 +1805,11 @@ async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
     if (claim.times.length) {
       const windowMinutes = live.windowStart ? reserviceLiveWindowMinutes(String(live.windowStart).slice(0, 5)) : null;
       if (!windowMinutes) return true;
-      const matches = (t, minutes) => (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720);
-      const onlyEndpoints = claim.times.every((t) => windowMinutes.some((minutes) => matches(t, minutes)));
-      const hasBoth = windowMinutes.every((minutes) => claim.times.some((t) => matches(t, minutes)));
+      const matches = (t, minutes) => (!t.lexical && (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720));
+      // a lexical time of day ("morning") beside BOTH numeric endpoints is fine; alone it is unverifiable
+      const numeric = claim.times.filter((t) => !t.lexical);
+      const onlyEndpoints = numeric.every((t) => windowMinutes.some((minutes) => matches(t, minutes)));
+      const hasBoth = windowMinutes.every((minutes) => numeric.some((t) => matches(t, minutes)));
       if (!onlyEndpoints || !hasBoth) return true;
     }
     return false;
@@ -3340,7 +3360,9 @@ const PEST_REPORT_TEXT_RE = {
 // customerHasPestRelationship() below (needsOpenTimes), never alone —
 // otherwise this would fire on "call me back"/"I'll be back tomorrow" for
 // any customer with pest history at all.
-const PRONOUN_RETURN_TEXT_RE = /\b(?:they'?re\s+back|it'?s\s+back|they\s+(?:came|come)\s+back|they\s+returned|back\s+again|still\s+(?:there|here))\b/i;
+// Codex round-37 P2: a pronoun return needs an actual pest PRONOUN SUBJECT ("they're back", "they've come back", "it is still there") —
+// a bare "back again" ("Will you be back again next Tuesday?") is about Waves returning, not a report.
+const PRONOUN_RETURN_TEXT_RE = /\b(?:they|it)(?:['’]re|['’]ve|['’]s|\s+(?:are|is|have|has|were|was))?\s+(?:(?:all\s+)?back(?:\s+again)?|(?:came|come|coming|comes)\s+back|returned|returning|(?:still|all)\s+(?:there|here))\b/i;
 
 // Cheap, synchronous relationship signal for the PRONOUN_RETURN_TEXT_RE
 // branch above — read from the SAME context object generateGroundedDraft
@@ -3598,7 +3620,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
     ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
-  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage }) ? RESERVICE_MIXED_REQUEST_HINT : '');
+  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage, context }) ? RESERVICE_MIXED_REQUEST_HINT : '');
 
   // Route once for the whole loop (revisions included) — routing looks at the
   // intent label AND the raw message so complaints mislabeled as scheduling
