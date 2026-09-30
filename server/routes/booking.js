@@ -6064,6 +6064,9 @@ async function createSelfBooking(payload = {}) {
             booking: replayBooked || null,
             bookedAt: txResult.existing.created_at || null,
             wonLeadIds: replayLeadConversion?.converted ? (replayLeadConversion.leadIds || []) : null,
+            // A replay only settles requests the customer made before this
+            // booking — a newer request is new work (codex #5399 r11).
+            requestedBy: txResult.existing.created_at || null,
           });
         } catch (err) {
           logger.warn(`[booking:confirm] replay preferred-time conversion failed for ${txResult.existing.id} (non-blocking): ${err.message}`);

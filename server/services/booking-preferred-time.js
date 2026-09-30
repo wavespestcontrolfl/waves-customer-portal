@@ -36,7 +36,11 @@ const LEAD_TYPE = 'book_preferred_time';
 // back to created_at for a row without one. leads.updated_at is deliberately
 // NOT used — office edits (status, notes, assignment) stamp it.
 const LAST_REQUESTED_SQL = "COALESCE(NULLIF(extracted_data->>'last_requested_at', '')::timestamptz, created_at) > ?";
-const FIRST_CONTACT_CHANNEL = 'book_preferred_time';
+// 'booking' (the /book page's own channel), not a novel value: the shared
+// customer-originated-contact allowlist (collections/consent-provenance.js,
+// reused by outbound-call-reason.js) fails closed on unknown channels, which
+// would hide this prospect-initiated contact from the call pipeline.
+const FIRST_CONTACT_CHANNEL = 'booking';
 const HORIZON_DAYS = 120;
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -298,7 +302,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   const attr = value.attribution || null;
   const clickId = (v) => (v ? String(v).slice(0, 255) : null);
   const requestFields = {
-    source: FIRST_CONTACT_CHANNEL,
+    source: LEAD_TYPE,
     preferred_date: value.preferredDate,
     second_date: value.secondDate,
     time_of_day: value.timeOfDay,
@@ -546,7 +550,7 @@ async function noteBookingAlreadyWon(db, { leadId, wonLeadIds }) {
  * markConverted actually won its conditional write, so the caller can tell
  * attributeSelfBooking that the funnel entry is the lead's.
  */
-async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null, bookedAt = null, wonLeadIds = null } = {}) {
+async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = null, bookedAt = null, wonLeadIds = null, requestedBy = null } = {}) {
   if (!customerId) return { converted: 0 };
   try {
     const customer = await db('customers').where({ id: customerId }).first('phone');
@@ -557,6 +561,11 @@ async function convertPreferredTimeLeadsOnBooking(db, { customerId, booking = nu
       .whereNull('deleted_at')
       .whereIn('status', OPEN_LEAD_STATUSES)
       .whereNull('converted_at');
+    if (requestedBy) {
+      const cutoff = new Date(requestedBy);
+      if (Number.isNaN(cutoff.getTime())) return { converted: 0 };
+      q.whereRaw(LAST_REQUESTED_SQL.replace(' > ?', ' <= ?'), [cutoff]);
+    }
     const open = (await tenMatch(q, ten).select('id')) || [];
     if (!open.length) return { converted: 0 };
     if (open.length > 1) {

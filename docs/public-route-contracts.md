@@ -949,7 +949,11 @@ for this customer (its own quote-wizard / estimate / series conversion, or an
 earlier preferred-time win the same appointment already settled), the
 preferred-time lead is NOT converted — it stays OPEN with a one-time system note
 naming the won lead, rings no bell, and the office closes it (no lead status
-closes work without the funnel reading it as lost, so none is written); the explicit-lead
+closes work without the funnel reading it as lost, so none is written); a crash-replay of `/confirm` settles only requests whose
+`last_requested_at` is at or before that booking (a newer request is new work).
+The lead's `first_contact_channel` is `booking`, so the shared
+customer-originated-contact allowlist (`collections/consent-provenance.js`)
+counts it as prospect-initiated contact; the explicit-lead
 conversion claims the lead's open status AND the identity it was read with
 (customer link, phone, email, estimate link), so a lead staff re-assigned or
 re-contacted in between is never credited to this booking. A booking that

@@ -22,6 +22,8 @@ let mockBookedList = null;     // when set, the reconcile's multi-booking lookup
 let mockDeadVisit = false;      // the booking's only visit is cancelled/skipped/rescheduled (live-status lookup finds nothing, any-visit lookup finds one)
 let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
 let mockWonLeads = [];         // won leads (any type) a customer's booking already produced
+const mockRaws = [];            // whereRaw calls (query-shape asserts)
+let mockOpenLeadsNewerOnly = false; // the open preferred leads all postdate a replay's booking
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
 
@@ -34,7 +36,7 @@ function builder(table) {
     whereNot: () => b,
     whereIn: () => b,
     whereNotIn: () => { b._liveOnly = true; return b; },
-    whereRaw: () => b,
+    whereRaw: (sql, vals) => { mockRaws.push({ table, op: 'whereRaw', arg: sql, vals }); if (/<= \?/.test(String(sql))) b._requestedBy = vals && vals[0]; return b; },
     orWhereRaw: () => b,
     leftJoin: () => b,
     orderBy: () => b,
@@ -42,7 +44,7 @@ function builder(table) {
     select: () => b,
     then: (resolve, reject) => Promise.resolve(
       table === 'leads as won_lead' ? mockWonLeads
-      : table === 'leads' ? mockOpenLeads
+      : table === 'leads' ? (b._requestedBy && mockOpenLeadsNewerOnly ? [] : mockOpenLeads)
         : table === 'self_booked_appointments as sba' ? (mockBookedList || (mockBookedSince ? [mockBookedSince] : []))
           : [],
     ).then(resolve, reject),
@@ -180,6 +182,8 @@ beforeEach(() => {
   mockRetireError = null;
   mockBookedSince = null;
   mockWonLeads = [];
+  mockOpenLeadsNewerOnly = false;
+  mockRaws.length = 0;
   mockLeadSettled = false;
   mockBookedList = null;
   mockScheduledService = null;
@@ -375,7 +379,7 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(lead).toMatchObject({
       first_name: 'Pat', last_name: 'Sample', phone: '+19415550100', email: 'pat@example.com',
       address: '1 Example Way', city: 'Cortez', zip: '34215',
-      lead_type: 'book_preferred_time', first_contact_channel: 'book_preferred_time',
+      lead_type: 'book_preferred_time', first_contact_channel: 'booking',
       service_interest: 'Pest Control', status: 'new',
     });
     // First-touch attribution rides onto the lead like every other funnel's.
@@ -878,6 +882,26 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
       expect(mockOps.filter((o) => o.table === 'ad_service_attribution')).toHaveLength(0);
     });
 
+    test('a replay only settles requests made before its booking (codex r11 P1): a newer request stays open', async () => {
+      mockWonLeads = [];
+      mockOpenLeadsNewerOnly = true;
+      const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt, requestedBy: bookedAt });
+      expect(out).toEqual({ converted: 0 });
+      expect(mockMarkConverted).not.toHaveBeenCalled();
+      const cutoff = mockRaws.find((o) => o.table === 'leads' && /<= \?/.test(o.arg));
+      expect(cutoff).toBeTruthy();
+      expect(cutoff.arg).toMatch(/last_requested_at/);
+      expect(cutoff.vals[0]).toEqual(bookedAt);
+    });
+
+    test('without requestedBy (normal confirm / submit reconcile) no request-time cutoff is applied', async () => {
+      mockWonLeads = [];
+      mockOpenLeadsNewerOnly = true;
+      const out = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt });
+      expect(out).toEqual({ converted: 1 });
+      expect(mockRaws.some((o) => /<= \?/.test(o.arg))).toBe(false);
+    });
+
     test('the won-lead note is written once per lead (a replay does not stack notes)', async () => {
       mockWonLeads = [{ id: 'quote-lead-9' }];
       await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1', bookedAt });
@@ -944,12 +968,15 @@ describe('a completed booking converts the customer\'s open preferred-time lead 
     // codex #5399 r10 P1: the replay re-runs the SAME originating-lead conversion the normal path runs, BEFORE the preferred lead, and hands its result over.
     expect(replaySrc).toContain('convertOriginatingLeadOnBooking({ seriesBooked: !!replaySeriesChild })');
     expect(replaySrc).toContain('wonLeadIds: replayLeadConversion?.converted ? (replayLeadConversion.leadIds || []) : null');
+    // codex #5399 r11 P1: a replay only settles requests made before its booking.
+    expect(replaySrc).toContain('requestedBy: txResult.existing.created_at || null');
     expect(replaySrc.indexOf('convertOriginatingLeadOnBooking({ seriesBooked: !!replaySeriesChild })'))
       .toBeLessThan(replaySrc.indexOf('convertPreferredTimeLeadsOnBooking(db, {'));
     const normal = src.slice(replayEnd);
     expect(normal).toContain('convertPreferredTimeLeadsOnBooking(db, {\n        customerId: custId,\n        booking: serviceRow,');
     // ...and the normal path hands the helper the conversion it just ran, so it can skip a second win.
     expect(normal).toContain('wonLeadIds: leadConversion?.converted ? (leadConversion.leadIds || []) : null');
+    expect(normal.slice(0, normal.indexOf('wonLeadIds: leadConversion'))).not.toContain('requestedBy');
     expect(src).toMatch(/leadConverted: !!leadConversion\?\.converted \|\| preferredLeadConverted/);
     // No raw status write anywhere in the service.
     const svc = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
