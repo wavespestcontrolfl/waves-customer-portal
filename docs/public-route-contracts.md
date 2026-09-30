@@ -916,6 +916,66 @@ suppression writes are best effort: the abandoned-booking recovery worker
 re-checks at send time (SMS and email) and skips, marking suppressed, any intent
 whose draft is so linked — a lookup error skips that tick — so a failed
 suppression write can never lead to a message. All three apply only while the customers-only gate is on; with it off the flow still books and recovery is untouched.
+`/book` "Can't find a time?" request (owner 2026-09-29, dark behind
+`GATE_BOOK_PREFERRED_TIME`, strict opt-in read at call time via
+`bookPreferredTimeLive()`; `GET /api/booking/config` reports it as
+`preferred_time`): `POST /api/booking/preferred-time` is guarded by a pre-router
+mount in `server/index.js` (above the global cors(), the global `/api/` limiter
+and the body parsers): while the gate is off EVERY method answers the generic
+unknown-route 404, and every response (404, 400, 429, success) carries
+`Cache-Control: no-store`, `X-Robots-Tag: noindex` and `Referrer-Policy:
+no-referrer`. Its two limiters key by the /64-collapsed client IP. On: the same IP-bound funnel token
+`/availability` mints for capture-intent is required (`400 session_expired`
+otherwise), a hidden honeypot field answers success and stores nothing, and
+two per-IP limiters apply (5/min, 15/hour). A valid request files ONE internal
+lead (`lead_type = 'book_preferred_time'`, status `new`, the preferred days /
+time of day / note as plain English in `transcript_summary` and structured in
+`extracted_data`) that the office answers by hand and rings one `new_lead`
+admin bell (the /book first-touch attribution — click ids, UTMs, referrer — is
+resolved through `resolveLeadSource` onto the lead like every other funnel's);
+lookup and write run under a per-phone advisory lock, so a repeat or overlapping
+submit from the same phone inside 24h refreshes that still-open lead (no second
+row or bell). Recency is `extracted_data.last_requested_at`, written only by a
+submit — office edits (status, notes, assignment) never extend the dedupe
+window or the suppression. Filing a lead also stamps its
+`ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
+public lead. A booking NEVER closes a preferred-time request (owner ruling
+2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
+on both the first commit and the `txResult.existing` replay; a free re-service
+callback visit is skipped) never marks the lead won and never touches its funnel
+row — the booking's own attribution runs exactly as for any other booking.
+Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
+booked customer's open preferred-time leads (phone match) whose
+`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
+booked <service> for <date> (visit <id>) on /book — close this request if
+nothing else is needed" — deduped per (lead, visit) through
+`lead_activities.metadata`, so a replay never stacks notes; a newer request is
+new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+is `booking`, so the shared customer-originated-contact allowlist
+(`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
+booking that committed while a submit was still in flight (its note ran before
+the lead was visible) is reconciled by the submit after its commit: the lead gets
+the same note and NO `new_lead` bell rings; with no live booking since the
+request began the bell rings as usual. A repeat submit inside 24h merges only that
+request's own fields into `extracted_data`; the lead's first-touch UTM /
+referrer / landing URL are written once at creation and kept. The service line
+`address_line2` (apartment unit) is kept inline with the street line and in
+`extracted_data.address_line2`. It sends NOTHING to the customer — no SMS, no email — and
+retires every open abandoned-booking intent for the same phone or session, and
+capture-intent skips a phone that filed a request in the last day, and the
+recovery worker itself re-checks for a request filed since the intent was
+captured (fail closed on a lookup error) immediately before every text and
+email. The fence with the worker is the `booking_intents` ROW lock, not the
+per-phone advisory lock: the submit's suppression UPDATE and the worker's final
+check + dispatch (`withLockedRecoveryIntent`, which runs `SELECT ... FOR UPDATE`
+on the intent row and holds it through the send) contend on the same row, so
+exactly one goes first — the worker never takes the advisory lock, which only
+de-duplicates concurrent SUBMITS from one phone. A submit that waited out a
+send commits after it; a worker that arrives after the submit's commit reads the
+row as suppressed and its re-check sees the request. Neither a failed
+suppression write nor a racing capture nor a racing submit can lead to a message
+after the visitor's confirmation. Success is a constant
+`{"ok": true}`.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
 one shared anchor set and packed-start formula `scheduling/find-time.js`
