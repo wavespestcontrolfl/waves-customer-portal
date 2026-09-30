@@ -461,22 +461,20 @@ async function markLookupAttempt(address, status, reason = null) {
 
 // Shared cooldown for caller-forced live refreshes (a paid upstream call).
 // One conditional upsert on the address row claims the refresh only when no
-// live attempt was stamped inside the window, so the limit holds across
-// replicas and deploys. A cache_hit stamp is not a live attempt and never
-// holds the cooldown. The claim stamps 'pending' (the lookup it precedes
-// stamps its own attempt next), so a second concurrent claim sees a live
-// attempt; attempt_count moves only on the lookup's own stamp. Fails closed:
-// when the claim cannot be written, callers serve the cache instead.
+// forced refresh was claimed inside the window, so the limit holds across
+// replicas and deploys. The claim has its own column: attempt stamps move on
+// every lookup outcome (cache hits included) and never hold or release it.
+// Fails closed (including before its migration): when the claim cannot be
+// written, callers serve the cache instead of going upstream.
 async function claimLiveRefresh(address, cooldownSeconds) {
   try {
     const { hash, normalizedAddress } = addressKey(address);
     const { rows } = await db.raw(`
-      INSERT INTO property_lookups (address_hash, normalized_address, last_attempt_at, last_attempt_status)
-      VALUES (?, ?, now(), 'pending')
-      ON CONFLICT (address_hash) DO UPDATE SET last_attempt_at = now(), last_attempt_status = 'pending'
-      WHERE property_lookups.last_attempt_at IS NULL
-         OR property_lookups.last_attempt_status = 'cache_hit'
-         OR property_lookups.last_attempt_at < now() - make_interval(secs => ?)
+      INSERT INTO property_lookups (address_hash, normalized_address, live_refresh_claimed_at)
+      VALUES (?, ?, now())
+      ON CONFLICT (address_hash) DO UPDATE SET live_refresh_claimed_at = now()
+      WHERE property_lookups.live_refresh_claimed_at IS NULL
+         OR property_lookups.live_refresh_claimed_at < now() - make_interval(secs => ?)
       RETURNING address_hash`, [hash, normalizedAddress, cooldownSeconds]);
     return rows.length > 0;
   } catch (err) {

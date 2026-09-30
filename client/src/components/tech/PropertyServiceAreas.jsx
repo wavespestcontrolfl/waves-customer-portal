@@ -157,7 +157,9 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
         {visitArea != null && savedArea?.reviewedAt && <Button variant="ghost" className={controlClass} disabled={disabled}
           onClick={() => onVisitAreaChange(null)}>Use property area</Button>}
       </div>}
-      {['beds', 'lawn'].some(key => !data.areas[key]) && <Button variant="ghost" className={controlClass}
+      {/* The lookup estimates beds and lawn only; a service panel offers it
+          only when its own visible area is the one missing. */}
+      {(activeKey ? [activeKey] : ['beds', 'lawn']).some(key => (key === 'beds' || key === 'lawn') && !data.areas[key]) && <Button variant="ghost" className={controlClass}
         disabled={disabled || busy} onClick={refreshLookup}>{busy ? 'Looking up property…' : 'Get area estimate'}</Button>}
       {message && <p role="status" className="text-zinc-600 mt-2">{message}</p>}
       {error && !open && <p role="alert" className="text-alert-fg mt-2">{error}</p>}

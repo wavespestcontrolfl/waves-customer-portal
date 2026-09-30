@@ -103,4 +103,14 @@ describe('property area review', () => {
     await waitFor(() => expect(adminFetch).toHaveBeenCalled());
     expect(view.container).toBeEmptyDOMElement();
   });
+  it.each([
+    ['a tree & shrub job with reviewed beds but no lawn', 'tree_shrub', { lawn: null }, false],
+    ['a lawn job whose lawn is missing', 'lawn', { lawn: null }, true],
+    ['a mosquito job (the lookup has no mosquito estimate)', 'mosquito', {}, false],
+  ])('offers the paid area lookup only for the visible area: %s', async (_label, serviceLine, areas, offered) => {
+    adminFetch.mockResolvedValue({ ...measurements(), areas: { ...measurements().areas, ...areas } });
+    render(<PropertyServiceAreas serviceId="visit-1" serviceLine={serviceLine} />);
+    await screen.findByRole('button', { name: 'Review areas' });
+    expect(!!screen.queryByRole('button', { name: 'Get area estimate' })).toBe(offered);
+  });
 });

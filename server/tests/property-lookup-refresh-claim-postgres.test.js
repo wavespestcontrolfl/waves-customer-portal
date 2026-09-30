@@ -33,6 +33,7 @@ postgres('claimLiveRefresh on PostgreSQL', () => {
     // The real schema, from the migrations that own it.
     await require('../models/migrations/20260611000011_property_lookups').up(mockPg);
     await require('../models/migrations/20260812000001_property_lookup_attempt_status').up(mockPg);
+    await require('../models/migrations/20260930120000_property_lookup_refresh_claim').up(mockPg);
   });
   afterAll(async () => {
     await mockPg?.destroy();
@@ -48,31 +49,28 @@ postgres('claimLiveRefresh on PostgreSQL', () => {
     expect(rows).toHaveLength(1);
     // A claim row is a stub: it never reads as cached property data, and the
     // attempt counter only moves on the lookup's own stamps.
-    expect(rows[0]).toMatchObject({ address_hash: addressKey(ADDRESS).hash, property_record: null, attempt_count: 0, last_attempt_status: 'pending' });
+    expect(rows[0]).toMatchObject({ address_hash: addressKey(ADDRESS).hash, property_record: null, attempt_count: 0, last_attempt_status: null });
   });
 
-  test('a recent cache hit is not a live attempt and never holds the cooldown', async () => {
+  test('lookup attempt stamps never hold or release the claim', async () => {
     const { hash, normalizedAddress } = addressKey(ADDRESS);
+    // A recent live lookup that was not a forced refresh does not hold it.
     await mockPg('property_lookups').insert({
       address_hash: hash, normalized_address: normalizedAddress, attempt_count: 4,
-      last_attempt_status: 'cache_hit', last_attempt_at: mockPg.raw("now() - interval '10 seconds'"),
+      last_attempt_status: 'resolved', last_attempt_at: mockPg.raw("now() - interval '10 seconds'"),
     });
-    const claims = await Promise.all(Array.from({ length: 4 }, () => claimLiveRefresh(ADDRESS, 120)));
-    expect(claims.filter(Boolean)).toHaveLength(1);
-    expect(await mockPg('property_lookups').first()).toMatchObject({ attempt_count: 4, last_attempt_status: 'pending' });
+    expect(await claimLiveRefresh(ADDRESS, 120)).toBe(true);
+    // A cache hit stamped while that refresh runs does not release it.
+    await mockPg('property_lookups').update({ last_attempt_status: 'cache_hit', last_attempt_at: mockPg.fn.now() });
+    expect(await claimLiveRefresh(ADDRESS, 120)).toBe(false);
+    expect(await mockPg('property_lookups').first()).toMatchObject({ attempt_count: 4, last_attempt_status: 'cache_hit' });
   });
 
-  test('a recent live attempt refuses the claim without touching its stamps; an old one grants it', async () => {
-    const { hash, normalizedAddress } = addressKey(ADDRESS);
-    await mockPg('property_lookups').insert({
-      address_hash: hash, normalized_address: normalizedAddress, attempt_count: 3,
-      last_attempt_status: 'resolved', last_attempt_at: mockPg.raw("now() - interval '30 seconds'"),
-    });
-    expect(await claimLiveRefresh(ADDRESS, 120)).toBe(false);
-    expect(await mockPg('property_lookups').first()).toMatchObject({ attempt_count: 3, last_attempt_status: 'resolved' });
-    await mockPg('property_lookups').update({ last_attempt_at: mockPg.raw("now() - interval '5 minutes'") });
+  test('a recent claim refuses a second one; an expired claim grants it', async () => {
     expect(await claimLiveRefresh(ADDRESS, 120)).toBe(true);
-    expect(await mockPg('property_lookups').first()).toMatchObject({ attempt_count: 3, last_attempt_status: 'pending' });
+    expect(await claimLiveRefresh(ADDRESS, 120)).toBe(false);
+    await mockPg('property_lookups').update({ live_refresh_claimed_at: mockPg.raw("now() - interval '5 minutes'") });
+    expect(await claimLiveRefresh(ADDRESS, 120)).toBe(true);
   });
 });
 

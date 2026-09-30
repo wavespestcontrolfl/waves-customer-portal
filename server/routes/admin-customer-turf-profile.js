@@ -214,16 +214,15 @@ router.put('/:customerId/turf-profile', async (req, res, next) => {
         // to withdraw and the column predicate below would error.
         && await require('../services/property-service-areas').hasAreaMeasurementsColumn(trx)) {
         // This older editor does not review service areas. A changed turf
-        // amount withdraws the old review instead of keeping its stamp on
-        // a different number, and moves the lawn mirrors the review had set
-        // (property and customer property_sqft) to the same amount, so no
-        // reader keeps pricing the withdrawn one. Only the primary property
-        // at the customer's own address carries those mirrors — the shared
-        // editor's rule. Same customer fence as the shared editor.
+        // amount withdraws any lawn review (its stamp must not sit on a
+        // different number) and moves the lawn mirrors — property and
+        // customer property_sqft — to the same amount on every edit, so no
+        // reader keeps pricing a former value. Only the primary property at
+        // the customer's own address carries those mirrors (the shared
+        // editor's rule). Same customer fence as the shared editor.
         const { addressKey } = require('../services/customer-properties');
         const customer = await trx('customers').where({ id: customerId }).first();
-        const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true })
-          .whereRaw("jsonb_exists(service_area_measurements->'areas', 'lawn')").first();
+        const primary = await trx('customer_properties').where({ customer_id: customerId, is_primary: true, active: true }).first();
         if (primary && customer && addressKey(customer) === addressKey(primary)) {
           await trx('customer_properties').where({ id: primary.id }).update({
             service_area_measurements: trx.raw("service_area_measurements #- '{areas,lawn}'"),

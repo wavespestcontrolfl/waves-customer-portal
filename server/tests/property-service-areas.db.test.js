@@ -176,6 +176,10 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(4500);
     expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(4500);
     expect((await knex('customer_properties').where({ id: second.id }).first()).property_sqft).toBe(1200);
+    // With the review already withdrawn, a later legacy edit still moves both mirrors.
+    await write(4700);
+    expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(4700);
+    expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(4700);
     expect((await knex('customer_properties').where({ id: second.id }).first()).service_area_measurements.areas.lawn.sqft).toBe(1200);
   });
   test('rolls back the property and mirrors if the required audit fails', async () => {
