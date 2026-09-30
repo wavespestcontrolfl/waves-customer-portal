@@ -107,7 +107,13 @@ describe('flagWrongNumber writes the canonical messaging_suppression row (B14)',
     expect(res.ok).toBe(false);
     expect(recordSuppression).toHaveBeenCalledWith(expect.objectContaining({ reason: 'wrong_number' }));
     expect(res.suppression.ok).toBe(true);
-    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    // Partial success still gets an accurate manual-action card.
+    expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
+    const [, , detail, opts] = NotificationService.notifyAdmin.mock.calls[0];
+    expect(detail).toContain('ending 0142 is on the do-not-text list');
+    expect(detail).toContain('collections wrong-number flag could not be saved');
+    expect(detail).not.toContain('Collections calls and texts to this customer are blocked');
+    expect(opts.bell).toBe(true);
   });
 
   test('a failed canonical write names the dialed number on a manual-action card that rings past the bell policy', async () => {

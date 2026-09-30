@@ -166,11 +166,11 @@ async function flagWrongNumber(customerId, { detail, createdBy, phone, callLogId
   if (!suppression.ok) {
     logger.error(`[collections-flags] WRONG-NUMBER SUPPRESSION NOT WRITTEN customer=${customerId} callLog=${callLogId || 'n/a'}: ${suppression.reason} — other SMS rails may still text this number`);
   }
-  // The suppression-failure card is filed whatever happened to the flag
-  // row: it is the only staff signal that other rails can still text this
-  // number (the caller's collection_hold fallback files a card only when the
-  // hold ALSO fails). Its copy states only what landed.
-  if (res.ok || !suppression.ok) {
+  // A card is filed for every outcome and its copy states only what landed.
+  // Whichever half failed, this is the only staff signal: the caller's
+  // collection_hold fallback files a card of its own only when the hold
+  // ALSO fails.
+  {
     const last4 = suppression.phone ? suppression.phone.slice(-4) : null;
     const collectionsBlocked = res.ok
       ? 'Collections calls and texts to this customer are blocked'
@@ -179,6 +179,8 @@ async function flagWrongNumber(customerId, { detail, createdBy, phone, callLogId
     let detailText;
     if (!suppression.ok) {
       detailText = `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${collectionsBlocked}, BUT the do-not-text record for ${last4 ? `the number ending ${last4}` : 'this number'} could NOT be written: appointment reminders, review requests and other texts may still go to it. Add that number to the do-not-contact list or correct the customer's phone by hand now.`;
+    } else if (!res.ok) {
+      detailText = `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${numberLabel} is on the do-not-text list for every text and App notice${suppression.effectiveReason === 'manual_dnc' ? ' (the staff do-not-contact entry, which also blocks payment emails, stays in place)' : ''}, BUT the collections wrong-number flag could not be saved (a billing hold may have been placed instead). Review and correct the customer's phone, then release any hold.`;
     } else if (suppression.effectiveReason === 'manual_dnc') {
       detailText = `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${numberLabel} was already on the staff do-not-contact list, which stays in place and blocks every text, App notice and payment email to it; collections calls and texts to this customer are blocked pending a number review.`;
     } else {
@@ -188,10 +190,10 @@ async function flagWrongNumber(customerId, { detail, createdBy, phone, callLogId
       customerId,
       flag: 'wrong_number',
       detail: detailText,
-      manualAction: !suppression.ok,
+      manualAction: !suppression.ok || !res.ok,
     });
-    if (!filed && !suppression.ok) {
-      logger.error(`[collections-flags] wrong-number card ALSO failed customer=${customerId} — canonical suppression missing and no admin card`);
+    if (!filed && (!suppression.ok || !res.ok)) {
+      logger.error(`[collections-flags] wrong-number card ALSO failed customer=${customerId} (suppression ${suppression.ok ? 'ok' : 'MISSING'}, flag ${res.ok ? 'ok' : 'MISSING'}) — no admin card`);
     }
   }
   return { ...res, suppression };
