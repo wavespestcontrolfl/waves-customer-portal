@@ -153,6 +153,32 @@ describe("PublicBookingPage \"Can't find a time?\" block (GATE_BOOK_PREFERRED_TI
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/booking/capture-intent'))).toBe(false);
   });
 
+  it('date limits are Eastern-calendar days, whatever the browser clock says, and the booking attribution rides along', async () => {
+    // 2026-10-01 03:30 UTC is still Sept 30 in Eastern time (23:30 EDT).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T03:30:00Z'));
+    window.history.replaceState({}, '', '/book?gclid=g-1&utm_source=google');
+    try {
+      const fetchMock = stubFetch({ config: { enabled: true, preferred_time: true }, empty: true });
+      render(<MemoryRouter initialEntries={['/book?gclid=g-1&utm_source=google']}><PublicBookingPage /></MemoryRouter>);
+      fireEvent.change(await screen.findByLabelText('Service address'), { target: { value: '123 Main St' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Choose address with Apt A' }));
+      fireEvent.click(screen.getByRole('button', { name: /Find my best times/ }));
+      const block = await screen.findByTestId('cant-find-time');
+      const date = within(block).getByLabelText('Preferred day');
+      expect(date).toHaveAttribute('min', '2026-09-30');
+      expect(date).toHaveAttribute('max', '2026-12-29');
+
+      fireEvent.change(within(block).getByLabelText('Your name'), { target: { value: 'Pat Sample' } });
+      fireEvent.change(within(block).getByLabelText('Mobile phone'), { target: { value: '9415550100' } });
+      fireEvent.change(date, { target: { value: '2026-10-05' } });
+      fireEvent.click(within(block).getByRole('button', { name: 'Send request' }));
+      await within(block).findByText('Got it — our team will text you to set a time.');
+      const call = fetchMock.mock.calls.find(([u]) => String(u).includes('/booking/preferred-time'));
+      expect(JSON.parse(call[1].body).attribution).toMatchObject({ gclid: 'g-1', utm: { source: 'google' } });
+    } finally { vi.useRealTimers(); window.history.replaceState({}, '', '/'); }
+  });
+
   it('an expired funnel token tells the visitor to refresh or text, and keeps the form', async () => {
     stubFetch({ config: { enabled: true, preferred_time: true }, empty: true, submitStatus: 400, submitBody: { error: 'session_expired' } });
     await reachStep2();

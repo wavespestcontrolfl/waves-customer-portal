@@ -23,6 +23,7 @@ function builder(table) {
     whereNot: () => b,
     whereIn: () => b,
     whereRaw: () => b,
+    orWhereRaw: () => b,
     leftJoin: () => b,
     orderBy: () => b,
     first: () => Promise.resolve(table === 'leads' ? mockExistingLead : null),
@@ -40,6 +41,13 @@ function builder(table) {
 const mockDb = jest.fn((table) => builder(table));
 mockDb.fn = { now: () => 'NOW' };
 mockDb.raw = jest.fn((s) => s);
+const mockLocks = [];
+mockDb.transaction = jest.fn(async (cb) => {
+  const trx = (table) => builder(table);
+  trx.fn = mockDb.fn;
+  trx.raw = jest.fn(async (sql, bindings) => { mockLocks.push({ sql, bindings }); return { rows: [] }; });
+  return cb(trx);
+});
 
 const mockTriggerNotification = jest.fn(async () => ({ bellWritten: 1 }));
 const mockSendCustomerMessage = jest.fn();
@@ -55,7 +63,15 @@ jest.mock('../services/messaging/send-customer-message', () => ({
   sendCustomerMessage: (...a) => mockSendCustomerMessage(...a),
 }));
 jest.mock('../services/twilio', () => ({ sendSMS: (...a) => mockSendSMS(...a) }));
-jest.mock('../services/sendgrid-mail', () => ({ sendEmail: (...a) => mockSendEmail(...a) }), { virtual: true });
+jest.mock('../services/sendgrid-mail', () => ({
+  sendOne: (...a) => mockSendEmail(...a),
+  sendBatch: (...a) => mockSendEmail(...a),
+  sendTemplated: (...a) => mockSendEmail(...a),
+  sendBroadcast: (...a) => mockSendEmail(...a),
+}));
+jest.mock('../services/lead-source-resolver', () => ({
+  resolveLeadSource: jest.fn(async () => ({ leadSourceId: 'src-main' })),
+}));
 
 const express = require('express');
 const bookingRouter = require('../routes/booking');
@@ -110,6 +126,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   nextIp();
   mockOps.length = 0;
+  mockLocks.length = 0;
   mockExistingLead = null;
   mockTriggerNotification.mockClear();
   mockSendCustomerMessage.mockClear();
@@ -134,6 +151,84 @@ describe('gate', () => {
     expect(bookPreferredTimeLive()).toBe(false);
     process.env.GATE_BOOK_PREFERRED_TIME = 'true';
     expect(bookPreferredTimeLive()).toBe(true);
+  });
+});
+
+describe('pre-router guard (mounted above cors, the global limiter and the body parsers)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const { preferredTimePreParserGuard } = bookingRouter;
+
+  // A tiny app in the SAME order index.js uses: guard first, then a strict JSON
+  // parser that would answer malformed bodies 400 on its own.
+  async function guarded() {
+    const app = express();
+    app.use('/api/booking/preferred-time', ...preferredTimePreParserGuard);
+    app.use(express.json({ limit: 20 }));
+    app.use('/api/booking', bookingRouter);
+    app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: 'parser' }));
+    const srv = app.listen(0);
+    return { srv, url: `http://127.0.0.1:${srv.address().port}/api/booking/preferred-time` };
+  }
+
+  test('dark: every method, even a malformed or oversized body, is the generic 404 with the privacy headers', async () => {
+    const { srv, url } = await guarded();
+    try {
+      for (const init of [
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{not json' },
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ pad: 'x'.repeat(500) }) },
+        { method: 'OPTIONS' },
+        { method: 'GET' },
+      ]) {
+        const res = await fetch(url, init);
+        expect(res.status).toBe(404);
+        expect(res.headers.get('cache-control')).toMatch(/no-store/);
+        expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+        expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+      }
+    } finally { await new Promise((r) => srv.close(r)); }
+  });
+
+  test('live: success, 400 and 429 responses all carry no-store / noindex / no-referrer', async () => {
+    process.env.GATE_BOOK_PREFERRED_TIME = 'true';
+    const check = (res) => {
+      expect(res.headers.get('cache-control')).toMatch(/no-store/);
+      expect(res.headers.get('x-robots-tag')).toMatch(/noindex/);
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    };
+    const send = (body) => fetch(`${baseUrl}/api/booking/preferred-time`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': currentIp }, body: JSON.stringify(body),
+    });
+    check(await send({ ...validBody(), capture_token: loopbackToken() }));
+    check(await send({ name: '' }));
+    let last;
+    for (let i = 0; i < 6; i += 1) last = await send({ name: '' });
+    expect(last.status).toBe(429);
+    check(last);
+  });
+
+  test('index.js mounts the guard above the global cors(), the /api/ limiter and the body parsers', () => {
+    const src = fs.readFileSync(path.join(__dirname, '../index.js'), 'utf8');
+    const guardAt = src.indexOf("app.use('/api/booking/preferred-time', ...require('./routes/booking').preferredTimePreParserGuard)");
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(src.indexOf('app.use(cors({'));
+    expect(guardAt).toBeLessThan(src.indexOf("app.use('/api/', limiter)"));
+    expect(guardAt).toBeLessThan(src.indexOf('app.use(express.json'));
+  });
+
+  test('limiters key by the /64-collapsed IP: rotating IPv6 addresses inside one /64 shares one bucket', async () => {
+    process.env.GATE_BOOK_PREFERRED_TIME = 'true';
+    const statuses = [];
+    for (let i = 0; i < 6; i += 1) {
+      const res = await fetch(`${baseUrl}/api/booking/preferred-time`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `2001:db8:abcd:12::${i + 1}` },
+        body: JSON.stringify({ name: '' }),
+      });
+      statuses.push(res.status);
+    }
+    expect(statuses.slice(0, 5)).toEqual([400, 400, 400, 400, 400]);
+    expect(statuses[5]).toBe(429);
   });
 });
 
@@ -204,6 +299,10 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
         second_date: dayOffset(7), note: 'Cortez, near the bridge',
         address_line1: '1 Example Way', city: 'Cortez', zip: '34215',
         service_id: 'pest_control', session_id: 'sess-1', email: 'pat@example.com',
+        attribution: {
+          gclid: 'g-123', fbc: 'fb.1.x', utm: { source: 'google', campaign: 'venice' },
+          referrer: 'https://www.google.com/', landing_url: 'https://portal.test/book?gclid=g-123',
+        },
       }),
       capture_token: loopbackToken(),
     });
@@ -219,6 +318,15 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
       lead_type: 'book_preferred_time', first_contact_channel: 'book_preferred_time',
       service_interest: 'Pest Control', status: 'new',
     });
+    // First-touch attribution rides onto the lead like every other funnel's.
+    expect(lead).toMatchObject({ lead_source_id: 'src-main', gclid: 'g-123', fbc: 'fb.1.x' });
+    expect(JSON.parse(lead.extracted_data)).toMatchObject({
+      utm: { source: 'google', campaign: 'venice' }, referrer: 'https://www.google.com/',
+    });
+    // Lookup + write ran under a per-phone advisory lock.
+    expect(mockLocks).toHaveLength(1);
+    expect(mockLocks[0].sql).toMatch(/pg_advisory_xact_lock/);
+    expect(mockLocks[0].bindings[0]).toBe('book_preferred_time:9415550100');
     expect(lead.transcript_summary).toMatch(/Could not find an online time on \/book for Pest Control/);
     expect(lead.transcript_summary).toMatch(/morning/);
     expect(lead.transcript_summary).toMatch(/Second choice/);
@@ -313,6 +421,30 @@ describe('capture-intent never stages recovery for a phone that asked for a time
     // Proves the skip ran (not an earlier gate): the leads lookup happened.
     expect(mockDb).toHaveBeenCalledWith('leads');
     expect(mockOps.filter((o) => o.table === 'booking_intents' && o.op === 'insert')).toHaveLength(0);
+  });
+});
+
+describe('abandoned-booking recovery re-checks at send time', () => {
+  const recovery = require('../services/booking-abandon-recovery');
+  const intent = { id: 'intent-1', phone: '+19415550100', session_id: 'sess-1', captured_at: new Date(Date.now() - 3600000) };
+
+  test('a preferred-time request filed for the phone blocks the send and suppresses the intent', async () => {
+    mockExistingLead = { id: 'lead-existing' };
+    expect(await recovery._internals.blockedByPreferredTimeRequest(intent)).toBe(true);
+    const upd = mockOps.filter((o) => o.table === 'booking_intents' && o.op === 'update');
+    expect(upd).toHaveLength(1);
+    expect(upd[0].arg).toMatchObject({ suppressed: true });
+  });
+
+  test('no request on file: the send is not blocked', async () => {
+    mockExistingLead = null;
+    expect(await recovery._internals.blockedByPreferredTimeRequest(intent)).toBe(false);
+    expect(mockOps.filter((o) => o.table === 'booking_intents')).toHaveLength(0);
+  });
+
+  test('a lookup error fails closed (skip this tick)', async () => {
+    mockDb.mockImplementationOnce(() => { throw new Error('db down'); });
+    expect(await recovery._internals.blockedByPreferredTimeRequest(intent)).toBe(true);
   });
 });
 

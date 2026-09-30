@@ -125,6 +125,30 @@ async function blockedByContactLinkedHandoff(intent) {
   return true;
 }
 
+// A visitor who filed a /book "Can't find a time?" request asked the office to
+// reach out by hand — never send them an automated recovery text or email
+// afterwards (GATE_BOOK_PREFERRED_TIME). The submit suppresses their open
+// intents and capture-intent skips them, but both are best effort / racy, so
+// this re-checks at SEND time whatever the gate currently reads (a request
+// already filed still blocks). A hit is marked suppressed (best effort); a
+// LOOKUP ERROR fails closed (skip this tick, retry next).
+async function blockedByPreferredTimeRequest(intent) {
+  try {
+    const { hasRecentPreferredTimeRequest } = require('./booking-preferred-time');
+    const hit = await hasRecentPreferredTimeRequest(db, last10(intent.phone), {
+      sessionId: intent.session_id || null,
+      since: intent.captured_at || null,
+    });
+    if (!hit) return false;
+  } catch (e) {
+    logger.warn(`[booking-recovery] preferred-time check failed for intent ${intent.id} — skipping (fail closed): ${e.message}`);
+    return true;
+  }
+  logger.info(`[booking-recovery] skip ${intent.id}: visitor asked the office for a preferred time`);
+  await db('booking_intents').where({ id: intent.id }).update({ suppressed: true, updated_at: db.fn.now() }).catch(() => {});
+  return true;
+}
+
 // Honor an existing customer's email opt-out (notification_prefs.email_enabled).
 // email_suppressions covers hard bounces/unsubs; this covers a customer who
 // turned email off in prefs but isn't suppressed.
@@ -375,6 +399,7 @@ async function runSmsStage(now, sentPhones) {
         continue;
       }
       if (await blockedByContactLinkedHandoff(intent)) continue;
+      if (await blockedByPreferredTimeRequest(intent)) continue;
       const body = await renderOneSegmentSms(intent);
       if (!body) continue; // missing template — don't claim, retry next tick
 
@@ -393,6 +418,7 @@ async function runSmsStage(now, sentPhones) {
       // here. Blocked or lookup error → nothing is sent; `continue` releases
       // the claim and a hit is already marked suppressed.
       if (await blockedByContactLinkedHandoff(intent)) continue;
+      if (await blockedByPreferredTimeRequest(intent)) continue;
 
       const result = await sendCustomerMessage({
         to: intent.phone,
@@ -489,6 +515,7 @@ async function runEmailStage(now, sentPhones) {
         continue;
       }
       if (await blockedByContactLinkedHandoff(intent)) continue;
+      if (await blockedByPreferredTimeRequest(intent)) continue;
       if (!(await claimStage(intent.id, 'followup_email_sent', new Date(nowMs - EMAIL_MIN_AGE_H * 3600000)))) continue;
       claimed = true;
       // Re-check active booking AFTER claiming (race-safe; see SMS stage).
@@ -500,6 +527,7 @@ async function runEmailStage(now, sentPhones) {
       // B11 last look, AFTER the claim and right before dispatch (see the SMS
       // stage): blocked or lookup error → no send, claim released.
       if (await blockedByContactLinkedHandoff(intent)) continue;
+      if (await blockedByPreferredTimeRequest(intent)) continue;
       const result = await EmailTemplateLibrary.sendTemplate({
         templateKey: 'booking.abandonment_recovery',
         to: intent.email,
@@ -542,5 +570,5 @@ async function checkAbandoned(now = new Date()) {
 
 module.exports = {
   checkAbandoned,
-  _internals: { blockedByContactLinkedHandoff, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
+  _internals: { blockedByContactLinkedHandoff, blockedByPreferredTimeRequest, hasRepliedRecently, claimStage, runSmsStage, runEmailStage, last10, bookingUrlFor, SERVICE_LABELS, SMS_SERVICE_LABELS, renderOneSegmentSms },
 };

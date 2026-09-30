@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button } from '../Button';
 import { COLORS } from '../../theme-brand';
+import { addETDays, etDateString } from '../../lib/timezone';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_SMS_TEL } from '../../constants/business';
 
 // "Can't find a time that works?" block under the /book time picker
@@ -17,9 +18,6 @@ const TIME_OF_DAY = [
   { id: 'any', label: 'Any' },
 ];
 
-const pad2 = (n) => String(n).padStart(2, '0');
-const toYmd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-
 export default function CantFindTimeBlock({
   zeroTimes = false,
   contact = {},
@@ -27,6 +25,7 @@ export default function CantFindTimeBlock({
   serviceId = '',
   serviceLabel = '',
   getCaptureToken = () => null,
+  getAttribution = () => null,
   sessionId = '',
   apiBase = '/api',
   onSubmitted,
@@ -52,11 +51,11 @@ export default function CantFindTimeBlock({
     setPhone((prev) => prev || contact.phone || '');
   }, [contact.firstName, contact.lastName, contact.phone]);
 
-  const today = new Date();
-  const min = toYmd(today);
-  const maxDate = new Date(today);
-  maxDate.setDate(maxDate.getDate() + 90);
-  const max = toYmd(maxDate);
+  // Eastern-calendar bounds — the server validates the day in ET, so a visitor
+  // in another timezone must not get a different "today".
+  const now = new Date();
+  const min = etDateString(now);
+  const max = etDateString(addETDays(now, 90));
 
   const phoneDigits = phone.replace(/\D/g, '');
   const phoneOk = phoneDigits.length === 10 || (phoneDigits.length === 11 && phoneDigits.startsWith('1'));
@@ -76,6 +75,7 @@ export default function CantFindTimeBlock({
         body: JSON.stringify({
           capture_token: getCaptureToken() || undefined,
           session_id: sessionId || undefined,
+          attribution: getAttribution() || undefined,
           name: name.trim(),
           phone,
           email: contact.email || undefined,

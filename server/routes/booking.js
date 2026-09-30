@@ -16,12 +16,9 @@ const {
   validateEstimateOwnershipUnderLock,
 } = require('../services/customer-account-ownership');
 const logger = require('../services/logger');
-// Read at call time; tolerant of a test double for feature-gates that predates
-// this reader (undefined = off).
-const bookPreferredTimeLive = () => {
-  const gates = require('../config/feature-gates');
-  return typeof gates.bookPreferredTimeLive === 'function' && gates.bookPreferredTimeLive() === true;
-};
+const { bookPreferredTimeLive } = require('../config/feature-gates');
+const { noStore } = require('../middleware/no-store');
+const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
 const {
   validatePreferredTimeRequest,
   recordPreferredTimeRequest,
@@ -6761,12 +6758,28 @@ router.get('/embed-snippet', (req, res) => {
   res.json({ source, url: iframeSrc, snippet });
 });
 
+// Dark gate + token-route privacy headers for POST /api/booking/preferred-time.
+// server/index.js mounts this ABOVE the global cors(), the global /api/ limiter
+// and the shared body parsers (like the other dark public routes), so while the
+// gate is off every method gets the generic unknown-route 404 — no CORS 204, no
+// limiter 429, no body parse 400/413 — and every response (404, 429, 400,
+// success) carries no-store / noindex / no-referrer. The route below re-runs it
+// as its own first layer.
+const preferredTimePreParserGuard = [
+  noStore,
+  (req, res, next) => {
+    if (!bookPreferredTimeLive()) return res.status(404).json(require('../middleware/errors').notFoundBody(req));
+    return next();
+  },
+];
+
 // Per-IP limiters for the preferred-time request (an internal lead + one
 // admin bell per new phone). Generous for a real visitor, tight against bulk
 // office-inbox spam. Same shape as capture-intent's.
 const preferredTimeLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 5,
+  keyGenerator: unauthenticatedAuthLimitKey,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please try again in a minute.' },
@@ -6774,6 +6787,7 @@ const preferredTimeLimiter = rateLimit({
 const preferredTimeHourlyLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 15,
+  keyGenerator: unauthenticatedAuthLimitKey,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests. Please try again later.' },
@@ -6786,10 +6800,7 @@ const preferredTimeHourlyLimiter = rateLimit({
 // recovery worker can't text them either. Gate off = the generic 404 before
 // the limiter. Proof-of-funnel: the same IP-bound token /availability mints
 // for capture-intent (the funnel always fetches availability first).
-router.post('/preferred-time', (req, res, next) => {
-  if (!bookPreferredTimeLive()) return res.status(404).json({ error: 'Not found' });
-  return next();
-}, preferredTimeLimiter, preferredTimeHourlyLimiter, async (req, res) => {
+router.post('/preferred-time', ...preferredTimePreParserGuard, preferredTimeLimiter, preferredTimeHourlyLimiter, async (req, res) => {
   try {
     const b = req.body || {};
     const parsed = validatePreferredTimeRequest(b);
@@ -6865,6 +6876,7 @@ router.get('/status/:code', bookingStatusLimiter, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.preferredTimePreParserGuard = preferredTimePreParserGuard;
 module.exports._internals = {
   assertContactLinkedHandoffProvisional,
   suppressRecoveryIntents,

@@ -1242,6 +1242,7 @@ export default function PublicBookingPage() {
                     serviceId={service.id}
                     serviceLabel={quotedServiceLabel || service.label}
                     getCaptureToken={() => captureTokenRef.current}
+                    getAttribution={captureBookingAttribution}
                     sessionId={sessionIdRef.current}
                     apiBase={API_BASE}
                     onSubmitted={() => { preferredSubmittedRef.current = true; }}

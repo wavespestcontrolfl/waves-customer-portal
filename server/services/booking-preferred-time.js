@@ -21,6 +21,7 @@
  */
 
 const logger = require('./logger');
+const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 
 const LEAD_TYPE = 'book_preferred_time';
@@ -35,6 +36,11 @@ const TIME_OF_DAY_LABELS = {
   afternoon: 'Afternoon',
   any: 'Any time',
 };
+
+// Same allowlist the other public funnels use for first-touch attribution
+// (routes/public-lawn-assessment.js) — required lazily: that route module is
+// heavy and only the rare submit needs it.
+const sanitizeAttribution = (raw) => require('../routes/public-lawn-assessment').sanitizeAttribution(raw);
 
 const clean = (value, max) => {
   const s = (value == null ? '' : String(value)).replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
@@ -104,6 +110,7 @@ function validatePreferredTimeRequest(body, { now = new Date() } = {}) {
       timeOfDay: timeKey,
       note: clean(b.note, 500) || null,
       sessionId: clean(b.session_id, 80) || null,
+      attribution: sanitizeAttribution(b.attribution),
     },
   };
 }
@@ -143,26 +150,39 @@ async function retireOpenBookingIntents(db, { phone, sessionId }) {
 }
 
 /**
- * True when this phone filed a preferred-time request in the last 24h — the
- * capture-intent path uses it to stop staging a recovery row for them.
+ * True when this phone (or the same funnel session) filed a preferred-time
+ * request since `since` (default: the last 24h). capture-intent uses the
+ * default; the recovery worker passes the intent's own capture time so a
+ * request filed AFTER the abandonment always blocks its send.
  */
-async function hasRecentPreferredTimeRequest(db, phone) {
-  const row = await tenMatch(
-    db('leads')
-      .where({ lead_type: LEAD_TYPE })
-      .whereNull('deleted_at')
-      .where('created_at', '>', new Date(Date.now() - DEDUPE_WINDOW_MS)),
-    phone,
-  ).first('id');
-  return !!row;
+async function hasRecentPreferredTimeRequest(db, phone, { sessionId = null, since = null } = {}) {
+  const floor = since ? new Date(Math.min(new Date(since).getTime(), Date.now() - DEDUPE_WINDOW_MS)) : new Date(Date.now() - DEDUPE_WINDOW_MS);
+  const q = db('leads')
+    .where({ lead_type: LEAD_TYPE })
+    .whereNull('deleted_at')
+    .where('created_at', '>', floor)
+    .where((w) => {
+      tenMatch(w, phone);
+      if (sessionId) w.orWhereRaw("extracted_data->>'session_id' = ?", [sessionId]);
+    });
+  return !!(await q.first('id'));
+}
+
+// Serializes concurrent submits for one phone (two tabs, a retry) so exactly
+// one lead + one bell is created per 24h. Transaction-scoped advisory lock.
+async function lockPhone(trx, phone) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`book_preferred_time:${phone}`]);
 }
 
 /**
  * Persist the request. Returns { created, leadId }. A second submit from the
- * same phone within 24h refreshes the one lead (no second row, no second bell).
- * Never sends to the customer.
+ * same phone within 24h refreshes the one lead (no second row, no second
+ * bell). The lookup and write run under a per-phone advisory lock. Never
+ * sends to the customer.
  */
 async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serviceKey = null, notify = true } = {}) {
+  const attr = value.attribution || null;
+  const clickId = (v) => (v ? String(v).slice(0, 255) : null);
   const extracted = {
     source: FIRST_CONTACT_CHANNEL,
     preferred_date: value.preferredDate,
@@ -174,36 +194,49 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     state: value.state,
     session_id: value.sessionId,
     customer_messaged: false,
+    utm: attr?.utm || null,
+    referrer: attr?.referrer || null,
+    landing_url: attr?.landing_url || null,
   };
   const summary = buildSummary(value, serviceLabel);
   const phoneE164 = `+1${value.phone}`;
+  const sourceMeta = await resolveLeadSource(attr);
+  const attribution = {
+    lead_source_id: sourceMeta?.leadSourceId || null,
+    gclid: clickId(attr?.gclid),
+    wbraid: clickId(attr?.wbraid),
+    gbraid: clickId(attr?.gbraid),
+    fbclid: clickId(attr?.fbclid),
+    fbc: clickId(attr?.fbc),
+    fbp: clickId(attr?.fbp),
+  };
 
-  let leadId;
-  let created = false;
-  const existing = await tenMatch(
-    db('leads')
-      .where({ lead_type: LEAD_TYPE })
-      .whereNull('deleted_at')
-      .where('created_at', '>', new Date(Date.now() - DEDUPE_WINDOW_MS)),
-    value.phone,
-  ).orderBy('created_at', 'desc').first('id');
+  const { leadId, created } = await db.transaction(async (trx) => {
+    await lockPhone(trx, value.phone);
+    const existing = await tenMatch(
+      trx('leads')
+        .where({ lead_type: LEAD_TYPE })
+        .whereNull('deleted_at')
+        .where('created_at', '>', new Date(Date.now() - DEDUPE_WINDOW_MS)),
+      value.phone,
+    ).orderBy('created_at', 'desc').first('id');
 
-  if (existing) {
-    leadId = existing.id;
-    await db('leads').where({ id: leadId }).update({
-      first_name: value.firstName,
-      last_name: value.lastName,
-      email: value.email,
-      address: value.addressLine1 || '',
-      city: value.city,
-      zip: value.zip,
-      service_interest: serviceLabel,
-      transcript_summary: summary,
-      extracted_data: JSON.stringify(extracted),
-      updated_at: db.fn.now(),
-    });
-  } else {
-    const [row] = await db('leads').insert({
+    if (existing) {
+      await trx('leads').where({ id: existing.id }).update({
+        first_name: value.firstName,
+        last_name: value.lastName,
+        email: value.email,
+        address: value.addressLine1 || '',
+        city: value.city,
+        zip: value.zip,
+        service_interest: serviceLabel,
+        transcript_summary: summary,
+        extracted_data: JSON.stringify(extracted),
+        updated_at: trx.fn.now(),
+      });
+      return { leadId: existing.id, created: false };
+    }
+    const [row] = await trx('leads').insert({
       first_name: value.firstName,
       last_name: value.lastName,
       phone: phoneE164,
@@ -219,13 +252,15 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
       is_residential: true,
       transcript_summary: summary,
       extracted_data: JSON.stringify(extracted),
+      ...attribution,
     }).returning('id');
-    leadId = row && row.id ? row.id : row;
-    created = true;
-  }
+    return { leadId: row && row.id ? row.id : row, created: true };
+  });
 
-  // Best effort from here: the lead is already saved, so a failure below must
-  // not turn into an error the visitor sees.
+  // Best effort from here: the lead is saved, so a failure below must not
+  // become an error the visitor sees. The recovery worker re-checks for this
+  // lead at send time (booking-abandon-recovery.js), so a failed suppression
+  // here can never lead to a message.
   try {
     await retireOpenBookingIntents(db, { phone: value.phone, sessionId: value.sessionId });
   } catch (err) {

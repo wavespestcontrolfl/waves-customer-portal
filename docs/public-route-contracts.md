@@ -878,19 +878,29 @@ suppression write can never lead to a message. All three apply only while the cu
 `/book` "Can't find a time?" request (owner 2026-09-29, dark behind
 `GATE_BOOK_PREFERRED_TIME`, strict opt-in read at call time via
 `bookPreferredTimeLive()`; `GET /api/booking/config` reports it as
-`preferred_time`): `POST /api/booking/preferred-time` answers the generic 404
-while the gate is off (before its limiter). On: the same IP-bound funnel token
+`preferred_time`): `POST /api/booking/preferred-time` is guarded by a pre-router
+mount in `server/index.js` (above the global cors(), the global `/api/` limiter
+and the body parsers): while the gate is off EVERY method answers the generic
+unknown-route 404, and every response (404, 400, 429, success) carries
+`Cache-Control: no-store`, `X-Robots-Tag: noindex` and `Referrer-Policy:
+no-referrer`. Its two limiters key by the /64-collapsed client IP. On: the same IP-bound funnel token
 `/availability` mints for capture-intent is required (`400 session_expired`
 otherwise), a hidden honeypot field answers success and stores nothing, and
 two per-IP limiters apply (5/min, 15/hour). A valid request files ONE internal
 lead (`lead_type = 'book_preferred_time'`, status `new`, the preferred days /
 time of day / note as plain English in `transcript_summary` and structured in
 `extracted_data`) that the office answers by hand and rings one `new_lead`
-admin bell; a repeat from the same phone inside 24h refreshes that lead (no
-second row or bell). It sends NOTHING to the customer — no SMS, no email — and
+admin bell (the /book first-touch attribution — click ids, UTMs, referrer — is
+resolved through `resolveLeadSource` onto the lead like every other funnel's);
+lookup and write run under a per-phone advisory lock, so a repeat or overlapping
+submit from the same phone inside 24h refreshes that lead (no second row or
+bell). It sends NOTHING to the customer — no SMS, no email — and
 retires every open abandoned-booking intent for the same phone or session, and
-capture-intent skips a phone that filed a request in the last day, so the
-recovery worker cannot text them either. Success is a constant
+capture-intent skips a phone that filed a request in the last day, and the
+recovery worker itself re-checks for a request filed since the intent was
+captured (fail closed on a lookup error) immediately before every text and
+email, so neither a failed suppression write nor a racing capture can lead to a
+message. Success is a constant
 `{"ok": true}`.
 Packed offers + expected-minutes travel gap (owner ruling 2026-09-23,
 `scheduling/packing-geometry.js` — `loadPackingAnchors`/`packedBounds`, the
