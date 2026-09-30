@@ -28,7 +28,7 @@
 const sendgrid = require('./sendgrid-mail');
 const logger = require('./logger');
 const db = require('../models/db');
-const { deliverOpsDigest, inAppEnabled } = require('./ops-digest');
+const { deliverOpsDigest } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 
@@ -182,27 +182,44 @@ async function runGeocodeReviewAlert(opts = {}) {
     return { skipped: 'disabled', ...composed };
   }
 
-  const appEnabled = (opts.inAppEnabled || inAppEnabled)();
-  if (!appEnabled && await (opts.emailFallbackRecently || emailFallbackRecently)()) {
-    return { skipped: 'recent_send', ...composed };
-  }
-
-  // The mailer and recipient checks guard the email fallback only:
-  // deliverOpsDigest sends email only while the in-app bell is dark, so a
-  // mail problem must never stop the bell itself from posting.
+  // Every email-only guard lives INSIDE sendEmail, because deliverOpsDigest
+  // emails on two paths: the in-app bell dark, AND a bell write that failed
+  // while the bell is live (its DB-failure fallback). The bell itself is
+  // never held back by a mail problem. The throttle is judged on an actual
+  // email send, whichever path asked for it.
   const mailer = opts.sendgrid || sendgrid;
   const to = watcherEmail();
-  if (!appEnabled) {
+  const email = { outcome: null };
+  const sendEmail = async () => {
+    if (await (opts.emailFallbackRecently || emailFallbackRecently)()) {
+      email.outcome = 'recent_send';
+      return { ok: true, skipped: 'recent_send' };
+    }
     if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
-      logger.warn('[geocode-review-alert] mailer not configured — skipping send');
-      return { skipped: 'unconfigured', ...composed };
+      logger.warn('[geocode-review-alert] mailer not configured — email not sent');
+      email.outcome = 'unconfigured';
+      return { ok: false, error: 'unconfigured' };
     }
-    // FAIL CLOSED: owner/internal inboxes only.
+    // FAIL CLOSED: owner/internal inboxes only (the email lists customer names).
     if (!isInternalEmailRecipient(to)) {
-      logger.warn('[geocode-review-alert] recipient is not an internal address — skipping send; set a valid GEOCODE_REVIEW_ALERT_EMAIL');
-      return { skipped: 'recipient', ...composed };
+      logger.warn('[geocode-review-alert] recipient is not an internal address — email not sent; set a valid GEOCODE_REVIEW_ALERT_EMAIL');
+      email.outcome = 'recipient';
+      return { ok: false, error: 'recipient' };
     }
-  }
+    const sent = await mailer.sendOne({
+      to,
+      fromEmail: fromEmail(),
+      fromName: FROM_NAME,
+      subject: composed.subject,
+      html: composed.html,
+      text: composed.text,
+      categories: ['ops', 'geocode-review'],
+      suppressErrorLog: true,
+    });
+    await (opts.stampEmailFallback || stampEmailFallback)();
+    email.outcome = 'sent';
+    return sent;
+  };
 
   let result;
   try {
@@ -222,22 +239,15 @@ async function runGeocodeReviewAlert(opts = {}) {
       // ring-only-on-change test decides whether this refresh re-bells.
       dedupeKey: DEDUPE_KEY,
       refreshOnDedupe: true,
-      sendEmail: () => mailer.sendOne({
-        to,
-        fromEmail: fromEmail(),
-        fromName: FROM_NAME,
-        subject: composed.subject,
-        html: composed.html,
-        text: composed.text,
-        categories: ['ops', 'geocode-review'],
-        suppressErrorLog: true,
-      }),
+      sendEmail,
     });
   } catch (err) {
     logger.error(`[geocode-review-alert] send failed (status ${Number.isInteger(err?.status) ? err.status : 'network'})`);
     return { sent: false, error: true, ...composed };
   }
-  if (!appEnabled) await (opts.stampEmailFallback || stampEmailFallback)();
+  // The email path could not deliver (or was throttled): report it, so the
+  // scheduler records an undeliverable tick as a failure.
+  if (email.outcome && email.outcome !== 'sent') return { skipped: email.outcome, ...composed };
   logger.info(`[geocode-review-alert] posted: ${composed.count} customer(s) blocked on address review`);
   return { sent: true, channel: result?.channel || null, ...composed };
 }

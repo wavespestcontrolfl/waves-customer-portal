@@ -1736,7 +1736,8 @@ function initScheduledJobs() {
       const lockRes = await runExclusive('geocode-review-alert', async () => {
         const { runGeocodeReviewAlert } = require('./geocode-review-alert');
         const result = await runGeocodeReviewAlert();
-        if (result?.skipped === 'query_failed' || result?.error) {
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
           throw new Error(`geocode review alert did not complete (${result.skipped || 'send_failed'})`);
         }
       });

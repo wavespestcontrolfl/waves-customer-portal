@@ -9,12 +9,21 @@ jest.mock('../models/db', () => {
   return qb;
 });
 jest.mock('../services/ops-digest-fall-off', () => ({ retireIfClean: jest.fn(async () => {}) }));
+// Mirrors deliverOpsDigest's two email paths: the in-app bell dark, and a
+// bell write that fails while the bell is live (its DB-failure fallback).
+const bell = { live: true, writeFails: false };
 jest.mock('../services/ops-digest', () => ({
-  deliverOpsDigest: jest.fn(async () => ({ channel: 'in_app' })),
-  inAppEnabled: jest.fn(() => true),
+  deliverOpsDigest: jest.fn(async ({ sendEmail }) => {
+    if (!bell.live || bell.writeFails) {
+      const result = await sendEmail();
+      return { ok: !(result && result.ok === false), channel: 'email', result, fallback: bell.live };
+    }
+    return { ok: true, channel: 'in_app' };
+  }),
 }));
 
-const { deliverOpsDigest, inAppEnabled } = require('../services/ops-digest');
+const { deliverOpsDigest } = require('../services/ops-digest');
+const sendgrid = require('../services/sendgrid-mail');
 const { retireIfClean } = require('../services/ops-digest-fall-off');
 const {
   runGeocodeReviewAlert,
@@ -25,7 +34,9 @@ const row = (customerId, status, name = 'Test Customer') => ({ customerId, statu
 
 beforeEach(() => {
   jest.clearAllMocks();
-  inAppEnabled.mockReturnValue(true);
+  bell.live = true;
+  bell.writeFails = false;
+  sendgrid.isConfigured.mockReturnValue(true);
   process.env.GATE_GEOCODE_REVIEW = 'true';
   delete process.env.GEOCODE_REVIEW_ALERT_DISABLED;
   delete process.env.GEOCODE_REVIEW_ALERT_EMAIL;
@@ -114,34 +125,77 @@ describe('runGeocodeReviewAlert', () => {
   });
 
   test('with the in-app bell dark, the email fallback is throttled to one per window', async () => {
-    inAppEnabled.mockReturnValue(false);
+    bell.live = false;
     const result = await runGeocodeReviewAlert({
       loadBlockedReviews: async () => [row('c1', 'needs_pin')],
       emailFallbackRecently: async () => true,
     });
     expect(result.skipped).toBe('recent_send');
-    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('with the in-app bell dark, an email is sent and the throttle stamped', async () => {
+    bell.live = false;
+    const stampEmailFallback = jest.fn(async () => {});
+    const result = await runGeocodeReviewAlert({
+      loadBlockedReviews: async () => [row('c1', 'needs_pin')],
+      emailFallbackRecently: async () => false,
+      stampEmailFallback,
+    });
+    expect(result.sent).toBe(true);
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    expect(stampEmailFallback).toHaveBeenCalledTimes(1);
   });
 
   test('with the bell dark, a non-internal email recipient is refused (owner inboxes only)', async () => {
-    inAppEnabled.mockReturnValue(false);
+    bell.live = false;
     process.env.GEOCODE_REVIEW_ALERT_EMAIL = 'someone@example.com';
     const result = await runGeocodeReviewAlert({
       loadBlockedReviews: async () => [row('c1', 'needs_pin')],
       emailFallbackRecently: async () => false,
     });
     expect(result.skipped).toBe('recipient');
-    expect(deliverOpsDigest).not.toHaveBeenCalled();
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  // Codex r1 P1/P2: deliverOpsDigest also emails when the bell write fails
+  // with the bell live; the recipient guard and the throttle must hold there.
+  test('a failed bell write falls back to email with the recipient guard still enforced', async () => {
+    bell.writeFails = true;
+    process.env.GEOCODE_REVIEW_ALERT_EMAIL = 'someone@example.com';
+    const result = await runGeocodeReviewAlert({
+      loadBlockedReviews: async () => [row('c1', 'needs_pin')],
+      emailFallbackRecently: async () => false,
+    });
+    expect(result.skipped).toBe('recipient');
+    expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+
+  test('a failed bell write is throttled and stamped like any email fallback', async () => {
+    bell.writeFails = true;
+    const stampEmailFallback = jest.fn(async () => {});
+    const first = await runGeocodeReviewAlert({
+      loadBlockedReviews: async () => [row('c1', 'needs_pin')],
+      emailFallbackRecently: async () => false,
+      stampEmailFallback,
+    });
+    expect(first.sent).toBe(true);
+    expect(stampEmailFallback).toHaveBeenCalledTimes(1);
+    const again = await runGeocodeReviewAlert({
+      loadBlockedReviews: async () => [row('c1', 'needs_pin')],
+      emailFallbackRecently: async () => true,
+      stampEmailFallback,
+    });
+    expect(again.skipped).toBe('recent_send');
+    expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
   });
 
   // Email-only problems must never stop the in-app bell.
   test('with the bell live, an unconfigured mailer or outside recipient still posts the bell', async () => {
-    const sendgrid = require('../services/sendgrid-mail');
     sendgrid.isConfigured.mockReturnValue(false);
     process.env.GEOCODE_REVIEW_ALERT_EMAIL = 'someone@example.com';
     const result = await runGeocodeReviewAlert({ loadBlockedReviews: async () => [row('c1', 'needs_pin')] });
     expect(result.sent).toBe(true);
-    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
-    sendgrid.isConfigured.mockReturnValue(true);
+    expect(result.channel).toBe('in_app');
   });
 });
