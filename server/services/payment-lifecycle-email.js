@@ -665,6 +665,20 @@ async function intentCustomerConflicts({ emailedCustomerId, paymentIntent }) {
   }
 }
 
+// Two "<brand> ending in <last4>" labels name the same card when the last four
+// match and the brands match once normalized (stored brands arrive as "VISA",
+// "visa" or "Visa"). Anything that is not that shape only matches exactly.
+function sameCardLabel(a, b) {
+  const parse = (label) => {
+    const m = /^(.*) ending in (\S+)$/.exec(clean(label));
+    return m ? { brand: BillingEmailDetails.cardBrandName(m[1]).toLowerCase(), last4: m[2] } : null;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return clean(a) === clean(b);
+  return pa.last4 === pb.last4 && pa.brand === pb.brand;
+}
+
 // The retry the dunning ladder ACTUALLY armed for this failure — a stored
 // payments.next_retry_at (billing-cron's RETRY_DELAYS_DAYS ladder writes it),
 // never a computed guess. A pay-page failure the ladder does not retry has no
@@ -775,7 +789,7 @@ async function sendPaymentFailed({
         }
         // Brand AND last four must match the card Stripe reports for this
         // attempt (a Visa 4242 is not a Mastercard 4242); any difference blanks.
-        if (intentLabel && payload.payment_method_label && payload.payment_method_label !== intentLabel) {
+        if (intentLabel && payload.payment_method_label && !sameCardLabel(payload.payment_method_label, intentLabel)) {
           payload.payment_method_label = '';
         }
       }
