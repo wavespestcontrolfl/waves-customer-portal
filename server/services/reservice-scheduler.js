@@ -21,7 +21,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
-const { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_PEST_NOUN_SOURCES, CATALOG_SEPARATE_PEST_NOUN_SOURCES, TURF_INSECT_NOUN_SOURCES } = require('./covered-pests');
+const { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_PEST_NOUN_SOURCES, CATALOG_SEPARATE_PEST_NOUN_SOURCES, TURF_INSECT_NOUN_SOURCES, specialtyLedLabel, MOSQUITO_NOUN_SOURCE, TERMITE_NOUN_SOURCE } = require('./covered-pests');
 const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentBooking, scopeToAssessmentBookings } = require('./assessment-booking');
 
 // The two self-bookable callback lanes. serviceKey resolves the catalog row
@@ -78,13 +78,6 @@ function laneForCoverageRow({ category, serviceType } = {}) {
 // Assessment" as a bookable RE-SERVICE lane, which it categorically is not
 // (a re-service is a free callback for an ACTIVE recurring/WaveGuard
 // customer; an assessment is the free first-visit consultation for a lead).
-// index of the first excluded-specialty mention in a service label (or -1)
-function firstSpecialtyIndex(label) {
-  const hits = [EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE, TREE_SHRUB_SPECIALTY_ISSUE_RE, /\bpalm\b/i]
-    .map((re) => label.search(new RegExp(re.source, re.flags.replace('g', ''))))
-    .filter((at) => at >= 0);
-  return hits.length ? Math.min(...hits) : -1;
-}
 function laneForCallbackRow({ serviceKey, serviceType } = {}) {
   if (serviceKey === ASSESSMENT_SERVICE_KEY || isAssessmentServiceType(serviceType)) return 'assessment';
   if (serviceKey === RESERVICE_LANES.lawn.serviceKey) return 'lawn';
@@ -99,9 +92,7 @@ function laneForCallbackRow({ serviceKey, serviceType } = {}) {
   // tree-and-shrub callback would populate booked.pest and suppress the covered pest offer. Only SPECIALTY-LED labels
   // qualify: a retained pest-led "Pest & Rodent Control" service stays pest.
   const label = String(serviceType || '');
-  const pestAt = label.search(/\bpest\b/i);
-  const specialtyAt = firstSpecialtyIndex(label);
-  if (specialtyAt >= 0 && (pestAt < 0 || specialtyAt < pestAt)) return /\brodent/i.test(label) ? 'rodent' : 'specialty';
+  if (specialtyLedLabel(label)) return /\brodent/i.test(label) ? 'rodent' : 'specialty';
   return /\blawn\b|\bturf\b/i.test(String(serviceType || '')) ? 'lawn' : 'pest';
 }
 
@@ -390,7 +381,7 @@ async function loadEligibleReserviceLanesStrict(customerId, dbh = db) {
 // concerns scope within a program — rodent exclusion, palm injection billing, copper/oil tanks).
 // Every pest under the estimate copy's "Separate services" row (derived in covered-pests.js: German roaches, fleas, bed bugs,
 // rodents, wildlife) is an excluded specialty too — Codex round-31.
-const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = new RegExp(`\\b(termites?|mosquito(?:es)?|${SEPARATE_SERVICE_PEST_NOUN_SOURCES.concat(CATALOG_SEPARATE_PEST_NOUN_SOURCES).join('|')})\\b`, 'i');
+const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = new RegExp(`\\b(${TERMITE_NOUN_SOURCE}|${MOSQUITO_NOUN_SOURCE}|${SEPARATE_SERVICE_PEST_NOUN_SOURCES.concat(CATALOG_SEPARATE_PEST_NOUN_SOURCES).join('|')})\\b`, 'i');
 const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
   // A dedicated tree & shrub service/treatment/care/program/spray call, the
   // service word on EITHER side of the noun (Codex round-9, PR #5336: "the
@@ -449,7 +440,7 @@ const RESERVICE_LANE_WORD_PATTERNS = [
 // ---------------------------------------------------------------------------
 const RESERVICE_CLAUSE_DELIMITER_RE = /[.!?;:,\n–—]+|\s-\s|\b(?:and|but|however|though|although|yet|while|whereas|plus)\b/gi;
 const RESERVICE_NEG = "(?:not|no|never|none|nor|without|cannot|can'?t|don'?t|doesn'?t|didn'?t|won'?t|wasn'?t|isn'?t|aren'?t|weren'?t|haven'?t|hasn'?t|hadn'?t|couldn'?t|wouldn'?t)";
-const RESERVICE_ANY_PEST_NOUN = `(?:${TURF_INSECT_NOUN_SOURCES.join('|')}|${SEPARATE_SERVICE_PEST_NOUN_SOURCES.concat(CATALOG_SEPARATE_PEST_NOUN_SOURCES).join('|')}|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*)`;
+const RESERVICE_ANY_PEST_NOUN = `(?:${TURF_INSECT_NOUN_SOURCES.join('|')}|${SEPARATE_SERVICE_PEST_NOUN_SOURCES.concat(CATALOG_SEPARATE_PEST_NOUN_SOURCES).join('|')}|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|${TERMITE_NOUN_SOURCE}|${MOSQUITO_NOUN_SOURCE})`;
 // Codex round-27/28 P2: only constructions that AFFIRM the sighting are exempt from negation — surprise
 // ("I can't believe the ants are back"), puzzlement ("I don't know why ants are back", "not sure why …"). They are
 // blanked before the negation test. "I don't think / don't believe / not sure ants are back" DENY or doubt it, so
@@ -516,8 +507,6 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
   new RegExp(`\\b(?:have|having|got|getting)\\s+(?:more|new|another|so\\s+many|a\\s+lot\\s+of|lots\\s+of|tons\\s+of|a\\s+bunch\\s+of)\\s+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
 ];
 
-// index of the plain-possession pattern ("I have / had / we've got ants") — the only one a past-time marker demotes
-const RESERVICE_POSSESSION_RE_INDEX = RESERVICE_ACTIVITY_BOUND_RES.findIndex((re) => re.source.includes('now\\s+have'));
 function reserviceClauseDropped(clause) {
   return RESERVICE_CLAUSE_NEGATED_RE.test(clause.replace(RESERVICE_AFFIRMING_EPISTEMIC_RE, (m) => ' '.repeat(m.length))) || reserviceClauseResolved(clause);
 }
@@ -616,10 +605,17 @@ const RESERVICE_PRONOUN_RETURN_RE = /\b(?:they|it)(?:'re|'s|\s+(?:are|is|were|wa
 const RESERVICE_PEST_NOUN_UNBOUND_RE = new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i');
 // Codex round-32 P2: plain possession with an explicit PAST-TIME marker is history, not an active report ("Last year I had
 // ants. What did you use?"). The persistence / sighting constructions are unaffected.
-const RESERVICE_PAST_MARKER_RE = /\b(?:last\s+(?:year|month|summer|winter|spring|fall|season|week)|(?:a\s+)?(?:year|month|week|decade)s?\s+ago|years\s+ago|used\s+to|previously|formerly|before\s+(?:we|i)\b|back\s+in\s+(?:\d{4}|the\s+day)|in\s+(?:19|20)\d{2}|when\s+(?:we|i)\s+(?:first\s+)?(?:moved|bought|lived))\b/i;
+const RESERVICE_PAST_MARKER_RE = /\b(?:last\s+(?:year|month|decade)|(?:a\s+)?(?:year|month|decade)s?\s+ago|years\s+ago|used\s+to|previously|formerly|before\s+(?:we|i)\b|back\s+in\s+(?:\d{4}|the\s+day)|in\s+(?:19|20)\d{2}|when\s+(?:we|i)\s+(?:first\s+)?(?:moved|bought|lived))\b/i;
+// ...unless the same clause also says it is happening NOW ("came back last year and they're still here" splits anyway; "again
+// this week", "still", "right now", "today" override the historical reading).
+const RESERVICE_PRESENT_MARKER_RE = /\b(?:still|right\s+now|currently|today|tonight|this\s+(?:week|month|morning|afternoon|evening)|again\s+now|as\s+of\s+now)\b/i;
+// Codex round-35 P2: the past-time guard applies to EVERY activity pattern, not only "I had ants" ("Last year the ants came
+// back. What did you use?" is not an active report).
+function reserviceClauseIsHistorical(clause) {
+  return RESERVICE_PAST_MARKER_RE.test(clause) && !RESERVICE_PRESENT_MARKER_RE.test(clause);
+}
 function activePestClauses(kept) {
-  return kept.filter((clause) => RESERVICE_ACTIVITY_BOUND_RES.some((re, i) => re.test(clause)
-    && !(i === RESERVICE_POSSESSION_RE_INDEX && RESERVICE_PAST_MARKER_RE.test(clause))));
+  return kept.filter((clause) => !reserviceClauseIsHistorical(clause) && RESERVICE_ACTIVITY_BOUND_RES.some((re) => re.test(clause)));
 }
 // Does the message name ANOTHER service than `lane` (the other self-bookable lane, or an excluded specialty)?
 // Location phrases ("on the lawn") are not a service. Used to keep the re-service the sole need (round-29 P1).

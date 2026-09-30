@@ -451,6 +451,16 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['crickets are back', true, 'pest', false],
     ['the bugs are back', true, 'pest', false],
     ['chinch bugs and ants are back', true, null, false],
+    // round-35 P2: mosquito plurals; the past-time guard applies to every activity pattern
+    ['mosquitos are back', true, null, true],
+    ['the mosquitoes came back', true, null, true],
+    ['a mosquito problem again', true, null, true],
+    ['Last year the ants came back. What did you use?', false, 'pest', false],
+    ['Last year the ants were everywhere', false, 'pest', false],
+    ['Last year I saw roaches in the kitchen', false, 'pest', false],
+    ['ants came back last year and are still here', true, 'pest', false],
+    ['the ants came back last week', true, 'pest', false],
+    ['the ants are back again this week', true, 'pest', false],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],
@@ -663,5 +673,49 @@ describe('reserviceLaneAvailability — hasRecurringPlan (the affirmative prospe
   test('a lookup error: strict rethrows; non-strict reports null (unknown)', async () => {
     await expect(reserviceLaneAvailability(customer, fakeDb({ throwOnRecurring: true }), { strict: true })).rejects.toThrow('db down');
     expect((await reserviceLaneAvailability(customer, fakeDb({ throwOnRecurring: true }))).hasRecurringPlan).toBeNull();
+  });
+});
+
+
+// Codex round-35 (CI): covered-pests' load-time copy derivation must NEVER throw. Main's reworked lawn copy renamed the
+// "Covered turf insects" row to "Covered insects"; the old load-time throw took down every request path that loaded the
+// scheduler (request-app-receipts-postgres: 500s). Drift now falls back to the known static set and is reported on DERIVATION.
+describe('covered-pests load-time derivation never throws (and drift is reported, not fatal)', () => {
+  const load = (copy) => {
+    jest.resetModules();
+    jest.doMock('../services/estimate-service-details', () => ({ SERVICE_DETAILS_COPY: copy }));
+    const mod = require('../services/covered-pests');
+    const scheduler = require('../services/reservice-scheduler');
+    jest.dontMock('../services/estimate-service-details');
+    jest.resetModules();
+    return { mod, scheduler };
+  };
+  const lawnRow = (label) => ({ lawn_care: { systemBox: { rows: [[label, 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets \u2014 checked every visit, treated on evidence']] } } });
+
+  test('the LIVE copy derives cleanly (no fallback, nothing unmapped)', () => {
+    const { DERIVATION } = require('../services/covered-pests');
+    expect(DERIVATION).toEqual({ separateServices: 'copy', turfInsects: 'copy', unmapped: [] });
+  });
+
+  test('an empty / reshaped copy: the module and the scheduler still load, falling back to the static sets', () => {
+    for (const copy of [{}, { lawn_care: {} }, null, { pest: { systemBox: { rows: [] } } }]) {
+      const { mod, scheduler } = load(copy);
+      expect(mod.DERIVATION.separateServices).toBe('fallback');
+      expect(mod.DERIVATION.turfInsects).toBe('fallback');
+      expect(mod.TURF_INSECT_ITEMS).toHaveLength(5);
+      expect(mod.SEPARATE_SERVICE_ITEMS).toContain('fleas');
+      expect(scheduler.reportedReserviceLane('chinch bugs are back')).toBe('lawn');
+      expect(scheduler.reportedReserviceLane('the fleas are back')).toBeNull();
+    }
+  });
+
+  test('both lawn row labels derive ("Covered turf insects" and the reworked "Covered insects"); an unmapped new item is reported, not thrown', () => {
+    for (const label of ['Covered turf insects', 'Covered insects']) {
+      expect(load(lawnRow(label)).mod.DERIVATION.turfInsects).toBe('copy');
+    }
+    const copy = { lawn_care: { rows: [['Covered insects', 'Chinch bugs, billbugs \u2014 monitored']] } };
+    const { mod } = load(copy);
+    expect(mod.DERIVATION.unmapped).toContain('turf:billbugs');
+    expect(mod.TURF_INSECT_NOUN_SOURCES).toHaveLength(1);
   });
 });

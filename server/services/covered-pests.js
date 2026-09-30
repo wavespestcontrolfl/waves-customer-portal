@@ -53,6 +53,10 @@ const SEPARATE_SERVICE_ITEM_SOURCES = Object.freeze({
   'turf insect programs': null,
 });
 
+// Load-time derivation must NEVER throw: this module sits under reservice-scheduler, which portal request paths load. A copy
+// rewrite (main's lawn/estimate copy was reworked and dropped the old "Covered turf insects" row) once made the throw take
+// down every request that touched the scheduler (CI: request-app-receipts 500s). On any drift it falls back to the KNOWN
+// static set and reports it on `DERIVATION`; a test asserts the derivation is clean, so drift fails CI instead of production.
 function separateServiceItems() {
   const { SERVICE_DETAILS_COPY } = require('./estimate-service-details');
   const rows = [];
@@ -63,12 +67,17 @@ function separateServiceItems() {
     } else if (o && typeof o === 'object') Object.values(o).forEach(walk);
   };
   walk(SERVICE_DETAILS_COPY);
-  if (!rows.length) throw new Error('covered-pests: the pest "Separate services" row is missing from estimate-service-details');
+  if (!rows.length) return null;
   return rows[0].split(/,\s*/).map((item) => item.trim().toLowerCase());
 }
-const SEPARATE_SERVICE_ITEMS = Object.freeze(separateServiceItems());
-const unmapped = SEPARATE_SERVICE_ITEMS.filter((item) => !Object.prototype.hasOwnProperty.call(SEPARATE_SERVICE_ITEM_SOURCES, item));
-if (unmapped.length) throw new Error(`covered-pests: map these "Separate services" items to a pest noun source (or null): ${unmapped.join(', ')}`);
+const DERIVATION = { separateServices: 'copy', turfInsects: 'copy', unmapped: [] };
+function safely(fn) {
+  try { return fn(); } catch (err) { return null; }
+}
+let derivedSeparate = safely(separateServiceItems);
+if (!derivedSeparate) { DERIVATION.separateServices = 'fallback'; derivedSeparate = Object.keys(SEPARATE_SERVICE_ITEM_SOURCES); }
+const SEPARATE_SERVICE_ITEMS = Object.freeze(derivedSeparate);
+DERIVATION.unmapped.push(...SEPARATE_SERVICE_ITEMS.filter((item) => !Object.prototype.hasOwnProperty.call(SEPARATE_SERVICE_ITEM_SOURCES, item)).map((item) => `separate:${item}`));
 const SEPARATE_SERVICE_PEST_NOUN_SOURCES = Object.freeze(SEPARATE_SERVICE_ITEMS.map((item) => SEPARATE_SERVICE_ITEM_SOURCES[item]).filter(Boolean));
 
 /**
@@ -89,18 +98,21 @@ function turfInsectItems() {
   const rows = [];
   const walk = (o) => {
     if (Array.isArray(o)) {
-      if (o[0] === 'Covered turf insects' && typeof o[1] === 'string') rows.push(o[1]);
+      // the lawn copy's covered-insects row: "Covered turf insects" (old copy) / "Covered insects" (reworked copy)
+      if (/^covered (?:turf )?insects$/i.test(String(o[0])) && typeof o[1] === 'string' && /chinch/i.test(o[1])) rows.push(o[1]);
       o.forEach(walk);
     } else if (o && typeof o === 'object') Object.values(o).forEach(walk);
   };
   walk(SERVICE_DETAILS_COPY);
-  if (!rows.length) throw new Error('covered-pests: the lawn "Covered turf insects" row is missing from estimate-service-details');
+  if (!rows.length) return null;
   return rows[0].split(/\s+[\u2014\u2013-]\s+/)[0].split(/\s*,\s*|\s*&\s*|\s+and\s+/).map((item) => item.trim().toLowerCase()).filter(Boolean);
 }
-const TURF_INSECT_ITEMS = Object.freeze(turfInsectItems());
-const unmappedTurf = TURF_INSECT_ITEMS.filter((item) => !Object.prototype.hasOwnProperty.call(TURF_INSECT_ITEM_SOURCES, item));
-if (unmappedTurf.length) throw new Error(`covered-pests: map these "Covered turf insects" items to a noun source: ${unmappedTurf.join(', ')}`);
-const TURF_INSECT_NOUN_SOURCES = Object.freeze(TURF_INSECT_ITEMS.map((item) => TURF_INSECT_ITEM_SOURCES[item]));
+let derivedTurf = safely(turfInsectItems);
+if (!derivedTurf) { DERIVATION.turfInsects = 'fallback'; derivedTurf = Object.keys(TURF_INSECT_ITEM_SOURCES); }
+const TURF_INSECT_ITEMS = Object.freeze(derivedTurf);
+DERIVATION.unmapped.push(...TURF_INSECT_ITEMS.filter((item) => !Object.prototype.hasOwnProperty.call(TURF_INSECT_ITEM_SOURCES, item)).map((item) => `turf:${item}`));
+// unmapped items are skipped (never thrown); the DERIVATION report + its test catch them
+const TURF_INSECT_NOUN_SOURCES = Object.freeze(TURF_INSECT_ITEMS.map((item) => TURF_INSECT_ITEM_SOURCES[item]).filter(Boolean));
 
 /**
  * Pests the service CATALOG sells as their own services (models/migrations service_library: tick_control, flea_tick,
@@ -114,4 +126,26 @@ const CATALOG_SEPARATE_PEST_ITEM_SOURCES = Object.freeze({
 });
 const CATALOG_SEPARATE_PEST_NOUN_SOURCES = Object.freeze([...new Set(Object.values(CATALOG_SEPARATE_PEST_ITEM_SOURCES))]);
 
-module.exports = { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_ITEMS, SEPARATE_SERVICE_PEST_NOUN_SOURCES, TURF_INSECT_ITEMS, TURF_INSECT_NOUN_SOURCES, CATALOG_SEPARATE_PEST_ITEM_SOURCES, CATALOG_SEPARATE_PEST_NOUN_SOURCES };
+/**
+ * ONE shared rule for a service LABEL that leads with a specialty (Codex round-35 P2, PR #5336): a label is specialty-led
+ * when a specialty word (termite, mosquito, rodent, tree & shrub, palm, and every separate-service / catalog-separate pest)
+ * appears BEFORE any "pest" word. A pest-led combined label — "Pest & Rodent Control Service", "Quarterly Pest + Termite
+ * Bait Station Service" (catalog pest_control; combined-service cutover migration 20260612000031) — is a pest service.
+ * Used by reservice-scheduler.laneForCallbackRow (callback lanes) and sms-shadow-drafter.customerHasPestRelationship.
+ */
+const MOSQUITO_NOUN_SOURCE = 'mosquito(?:e?s)?';
+const TERMITE_NOUN_SOURCE = 'termites?';
+const SPECIALTY_LABEL_SOURCES = Object.freeze([
+  TERMITE_NOUN_SOURCE, MOSQUITO_NOUN_SOURCE, '\\btrees?\\b', '\\bshrubs?\\b', '\\bpalm\\b',
+  ...SEPARATE_SERVICE_PEST_NOUN_SOURCES, ...CATALOG_SEPARATE_PEST_NOUN_SOURCES,
+]);
+const SPECIALTY_LABEL_RE = new RegExp(`(?:${SPECIALTY_LABEL_SOURCES.join('|')})`, 'i');
+function specialtyLedLabel(label) {
+  const text = String(label || '');
+  const specialtyAt = text.search(SPECIALTY_LABEL_RE);
+  if (specialtyAt < 0) return false;
+  const pestAt = text.search(/\bpest\b/i);
+  return pestAt < 0 || specialtyAt < pestAt;
+}
+
+module.exports = { specialtyLedLabel, MOSQUITO_NOUN_SOURCE, TERMITE_NOUN_SOURCE, DERIVATION, COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_ITEMS, SEPARATE_SERVICE_PEST_NOUN_SOURCES, TURF_INSECT_ITEMS, TURF_INSECT_NOUN_SOURCES, CATALOG_SEPARATE_PEST_ITEM_SOURCES, CATALOG_SEPARATE_PEST_NOUN_SOURCES };

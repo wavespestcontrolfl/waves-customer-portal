@@ -30,7 +30,7 @@ const { GRATITUDE_INTENT, GRATITUDE_POLICY_VERSION, isGratitudeOnly, buildGratit
 const { gateEnvValue } = require('../config/feature-gates');
 const { renderCompanyFactsSection } = require('./sms-company-facts');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
-const { TURF_INSECT_NOUN_SOURCES } = require('./covered-pests');
+const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
 const { etParts } = require('../utils/datetime-et');
 
 const DRAFTER = 'house_voice';
@@ -980,6 +980,10 @@ const RESERVICE_DENIAL_RE = new RegExp(
   + "|no\\s+(?:free|complimentary)\\b"
   + "|(?:not|isn['’]?t|aren['’]?t)\\s+(?:currently\\s+)?(?:available|offered)|unavailable"
   + "|(?:doesn['’]?t|does\\s+not|don['’]?t|do\\s+not)\\s+(?:currently\\s+)?(?:include|cover|qualify|offer|provide|come\\s+with)"
+  // Codex round-35 P2: a NEGATED scheduling / booking is a denial too — "Your free re-service is not scheduled", "We have not
+  // booked a free re-service", "hasn't been booked yet", "never scheduled" — nothing is promised.
+  + "|(?:isn['’]?t|is\\s+not|aren['’]?t|are\\s+not|wasn['’]?t|weren['’]?t|hasn['’]?t\\s+been|has\\s+not\\s+been|haven['’]?t\\s+been|have\\s+not\\s+been)\\s+(?:yet\\s+|currently\\s+|been\\s+)?(?:scheduled|booked|set|confirmed|arranged|on\\s+the\\s+(?:schedule|calendar))"
+  + "|(?:haven['’]?t|hasn['’]?t|have\\s+not|has\\s+not|didn['’]?t|did\\s+not|never)\\s+(?:yet\\s+|actually\\s+)?(?:scheduled|booked|arranged|set\\s+up)"
   + ')',
   'i',
 );
@@ -1746,7 +1750,9 @@ function reserviceBookedClaims(body, snapshot) {
 async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
   const snapshot = reserviceBookedSnapshot(booked);
   const claims = reserviceBookedClaims(body, snapshot);
-  if (!claims.length || !customerId) return null;
+  if (!claims.length) return null;
+  // Codex round-35 P2: a booked-appointment claim with NO customer (lead-only / deleted customer) has nothing to verify against — block
+  if (!customerId) return 'reservice_booking_changed — the reply refers to a booked re-service appointment but no customer is on record to verify it against';
   const { open } = await liveReserviceLaneState(customerId);
   const now = claims.some((c) => c.relative) ? reserviceEtDates() : null;
   // A claimed lane needs BOTH a snapshotted booked callback and a live open one — anything else is an appointment the
@@ -3348,15 +3354,11 @@ function customerHasPestRelationship(context) {
   return history.some((s) => {
     const label = String(s?.type || '').toLowerCase();
     if (!label) return false;
-    if (/termite|mosquito|tree|shrub/.test(label)) return false;
-    // Codex round-32 P2: exclude RODENT-LED services only. A retained "Pest & Rodent Control Service" (catalog pest_control —
-    // migration 20260712600000_retire_pest_rodent_combined.js) is pest-led and stays; "Rodent Pest Control" / "Rodent
-    // Trapping" lead with rodent and go.
-    const rodentAt = label.search(/rodent/);
-    if (rodentAt >= 0) {
-      const pestAt = label.search(/\bpest\b/);
-      if (pestAt < 0 || rodentAt < pestAt) return false;
-    }
+    // Codex round-35 P2: exclude SPECIALTY-LED labels only — one shared helper with the callback-lane rule. A retained pest-led combined
+    // service ("Pest & Rodent Control Service", "Quarterly Pest + Termite Bait Station Service" — catalog pest_control;
+    // migrations 20260712600000 / 20260612000031) is a pest relationship; "Termite Bait Stations", "Rodent Trapping",
+    // "Mosquito Misting", "Tree & Shrub Care" lead with the specialty and go.
+    if (specialtyLedLabel(label)) return false;
     return /\bpest\b|waveguard/.test(label);
   });
 }

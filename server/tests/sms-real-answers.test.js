@@ -3306,6 +3306,12 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["I'm free at 3 if you want to talk.", false, []],
   ["Free on Thursday after 5, we can send a tech.", false, []],
   ["The re-service is free Tuesday.", true, []],
+  ["Your free re-service is not scheduled.", false, []],
+  ["We have not booked a free re-service.", false, []],
+  ["Your free pest re-service isn't scheduled yet.", false, []],
+  ["We haven't scheduled your free re-service.", false, []],
+  ["Your free re-service has not been booked.", false, []],
+  ["Your lawn treatment is not scheduled yet, but I will send your free pest re-service link.", true, ['pest']],
   ["We can offer a free pest re-service after your regular visit is scheduled.", true, ['pest']],
   ["We can offer a free pest re-service once your regular visit is booked.", true, ['pest']],
   ["Your free pest re-service visit is booked.", false, []],
@@ -3690,6 +3696,16 @@ describe('free re-service is an entitlement resolved through the existing mechan
       }
     });
 
+    // Codex round-35 P2s
+    test('a booked-appointment claim with NO customer on record is blocked', async () => {
+      const { drafter } = loadWith({ lanes: ['pest'] });
+      const send = (body, customerId) => drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId, promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: null } });
+      await expect(send('Your pest re-service is scheduled for Thursday.', null)).resolves.toMatch(/reservice_booking_changed.*no customer/);
+      await expect(send('Your pest re-service is scheduled for Thursday.', undefined)).resolves.toMatch(/reservice_booking_changed/);
+      // ordinary copy with no booked-appointment claim is untouched without a customer
+      await expect(send('Thanks for reaching out!', null)).resolves.toBeNull();
+    });
+
     test('an asserted time against a live callback with NO valid window_start is blocked (cannot be verified)', async () => {
       const dt = require('../utils/datetime-et');
       const realEt = dt.etDateString;
@@ -3940,7 +3956,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
       const has = (type) => customerHasPestRelationship({ serviceHistory: [{ type }] });
       expect(has('Pest & Rodent Control Service')).toBe(true);
       expect(has('Pest Control')).toBe(true);
-      for (const t of ['Rodent Pest Control', 'Rodent Trapping', 'Rodent Control', 'Rodent Exclusion', 'Termite Bait Stations', 'Mosquito Misting']) expect(has(t)).toBe(false);
+      for (const t of ['Rodent Pest Control', 'Rodent Trapping', 'Rodent Control', 'Rodent Exclusion', 'Termite Bait Stations', 'Mosquito Misting', 'Tree & Shrub Care']) expect(has(t)).toBe(false);
+      // Codex round-35 P2: pest-LED combined labels stay (catalog pest_control — combined-service cutover)
+      for (const t of ['Quarterly Pest + Termite Bait Station Service', 'Pest & Mosquito Combo', 'Pest Control + Rodent Exclusion']) expect(has(t)).toBe(true);
     });
 
     // Codex round-33 P2: verified-but-no-supported-lane (a termite / mosquito / tree-and-shrub recurring customer) is a PLAN customer.
