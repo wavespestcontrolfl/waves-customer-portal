@@ -20,6 +20,17 @@ exports.up = async function up(knex) {
     await knex.raw(`ALTER TABLE call_commitments ADD CONSTRAINT commitment_one_source
       CHECK ((call_log_id IS NOT NULL)::int + (sms_log_id IS NOT NULL)::int + (email_id IS NOT NULL)::int = 1)`);
   }
+  // The customer an email row belongs to, as a real column: a staff
+  // promise's Gmail SENT row never carries emails.customer_id, and a
+  // customer merge repoints every *_customer_id column (customer-dedupe.js
+  // customerFkColumns, and its undo) but never a jsonb snapshot. No FK, like
+  // the other soft pointers the merge already covers.
+  if (!(await knex.schema.hasColumn('call_commitments', 'email_customer_id'))) {
+    await knex.schema.alterTable('call_commitments', (t) => {
+      t.uuid('email_customer_id');
+      t.index(['email_customer_id']);
+    });
+  }
   // Intake dedup for the email lane, mirroring sms_log.operational_analysis.
   if (!(await knex.schema.hasColumn('emails', 'operational_analysis'))) {
     await knex.schema.alterTable('emails', (t) => t.jsonb('operational_analysis'));
@@ -55,6 +66,9 @@ exports.down = async function down(knex) {
       t.dropUnique(['email_id', 'commitment_key']);
       t.dropColumn('email_id');
     });
+    if (await knex.schema.hasColumn('call_commitments', 'email_customer_id')) {
+      await knex.schema.alterTable('call_commitments', (t) => t.dropColumn('email_customer_id'));
+    }
     // Restore the exact pre-email 2-source constraint.
     await knex.raw(`ALTER TABLE call_commitments ADD CONSTRAINT commitment_one_source
       CHECK ((call_log_id IS NOT NULL)::int + (sms_log_id IS NOT NULL)::int = 1)`);

@@ -252,6 +252,37 @@ postgres('Email commitments on PostgreSQL', () => {
     const promiseRow = await mockPg('call_commitments').where({ email_id: sent.id }).first();
     expect(promiseRow).toMatchObject({ party: 'waves', channel: 'email' });
     expect(promiseRow.sms_context).toMatchObject({ basis: 'promise', customer_id: customerId });
+    expect(promiseRow.email_customer_id).toBe(customerId);
+  });
+
+  test('a staff promise follows a customer merge (email_customer_id is repointed; the jsonb snapshot is not)', async () => {
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
+    const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', body_text: "I'll send the estimate tomorrow", customer_id: null,
+      classification: null, label_ids: JSON.stringify(['SENT']) });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [], facts: [], additional_properties: [] } });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+      description: 'send the estimate', quote: "I'll send the estimate tomorrow", basis: 'promise', property_id: null,
+      due_text: 'tomorrow', due_at: null, due_date: null, promise_firm: true, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    // What customer-dedupe's merge does: every *_customer_id column (and
+    // emails.customer_id) moves to the winner, the loser is soft-deleted,
+    // and the jsonb snapshot is left naming the loser.
+    const winnerId = randomUUID();
+    await mockPg('customers').insert({ id: winnerId, first_name: 'Winner', last_name: 'Fixture',
+      phone: '+12025550102', email: 'winner@example.invalid', address_line1: '100 Example Lane', city: 'Sarasota', zip: '34236' });
+    await mockPg('emails').where({ customer_id: customerId }).update({ customer_id: winnerId });
+    await mockPg('call_commitments').where({ email_customer_id: customerId }).update({ email_customer_id: winnerId });
+    await mockPg('customers').where({ id: customerId }).update({ deleted_at: new Date() });
+    const promiseRow = await mockPg('call_commitments').where({ email_id: sent.id }).first();
+    expect(promiseRow.sms_context.customer_id).toBe(customerId);
+    const now = new Date();
+    await mockPg('call_commitments').where({ id: promiseRow.id }).update({ due_at: new Date(now.getTime() - 3600000) });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    const refresh = await refreshEmailCommitments({ conn: mockPg, now });
+    expect(refresh.scanned).toBe(1);
+    const after = await mockPg('call_commitments').where({ id: promiseRow.id }).first();
+    expect(after.sms_context.customer_id).toBe(winnerId);
   });
 
   // Coordinator correction #2, 2026-09-29 (BUG): a provider outage used to
@@ -415,7 +446,7 @@ postgres('Email commitments on PostgreSQL', () => {
   test('D1 reverse: an SMS reply closes an email-sourced general ask (through refreshEmailCommitments end-to-end)', async () => {
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
       body_text: 'Did you come to my house today?' });
-    await mockPg('call_commitments').insert({ email_id: email.id, commitment_key: 'waves:other:ask2',
+    await mockPg('call_commitments').insert({ email_id: email.id, email_customer_id: customerId, commitment_key: 'waves:other:ask2',
       party: 'waves', kind: 'other', description: 'Did you come to my house today?', channel: 'email',
       due_at: null, due_basis: null, source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: 'Did you come to my house today?', email_id: email.id, matched: true, speaker: 'caller' }]),
@@ -435,7 +466,7 @@ postgres('Email commitments on PostgreSQL', () => {
   test('negative: an automated email_delivery (SendGrid) send never closes a general ask — never the person-reply path', async () => {
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
       body_text: 'Did you come to my house today?' });
-    const [commitment] = await mockPg('call_commitments').insert({ email_id: email.id, commitment_key: 'waves:other:ask3',
+    const [commitment] = await mockPg('call_commitments').insert({ email_id: email.id, email_customer_id: customerId, commitment_key: 'waves:other:ask3',
       party: 'waves', kind: 'other', description: 'Did you come to my house today?', channel: 'email',
       due_at: null, due_basis: null, source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: 'Did you come to my house today?', email_id: email.id, matched: true, speaker: 'caller' }]),
@@ -472,7 +503,7 @@ postgres('Email commitments on PostgreSQL', () => {
       from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null,
       body_text: "I'll send the estimate today", label_ids: JSON.stringify(['SENT']), received_at: sentAt });
     const dueAt = new Date(sentAt.getTime() + 1000);
-    await mockPg('call_commitments').insert({ email_id: sent.id, commitment_key: 'waves:other:promise-nofix1',
+    await mockPg('call_commitments').insert({ email_id: sent.id, email_customer_id: customerId, commitment_key: 'waves:other:promise-nofix1',
       party: 'waves', kind: 'other', description: 'send the estimate today', channel: 'email',
       due_at: dueAt, due_basis: 'default_kind', source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: "I'll send the estimate today", email_id: sent.id, matched: true, speaker: 'agent' }]),
@@ -499,7 +530,7 @@ postgres('Email commitments on PostgreSQL', () => {
       from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null,
       body_text: "Ok, we'll get the prep guide today", label_ids: JSON.stringify(['SENT']), received_at: sentAt });
     const dueAt = new Date(sentAt.getTime() + 1000);
-    await mockPg('call_commitments').insert({ email_id: promiseSent.id, commitment_key: 'waves:other:promise1',
+    await mockPg('call_commitments').insert({ email_id: promiseSent.id, email_customer_id: customerId, commitment_key: 'waves:other:promise1',
       party: 'waves', kind: 'other', description: "get the prep guide today", channel: 'email',
       due_at: dueAt, due_basis: 'default_kind', source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: "we'll get the prep guide today", email_id: promiseSent.id, matched: true, speaker: 'agent' }]),
@@ -546,7 +577,7 @@ postgres('Email commitments on PostgreSQL', () => {
       evidence: JSON.stringify([{ quote: 'Please call me back', sms_log_id: smsRow.id, matched: true, speaker: 'caller' }]) });
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
       body_text: 'Please send the estimate' });
-    await mockPg('call_commitments').insert({ email_id: email.id, commitment_key: 'waves:send_estimate:list1',
+    await mockPg('call_commitments').insert({ email_id: email.id, email_customer_id: customerId, commitment_key: 'waves:send_estimate:list1',
       party: 'waves', kind: 'send_estimate', description: 'send the estimate', channel: 'email', due_at: null, due_basis: null,
       source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: 'Please send the estimate', email_id: email.id, matched: true, speaker: 'caller' }]),
@@ -563,7 +594,7 @@ postgres('Email commitments on PostgreSQL', () => {
   test('fix 4: applySmsCommitmentUpdate closes an email row (fulfill), and closes its bell', async () => {
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
       body_text: 'Please send the estimate' });
-    const [row] = await mockPg('call_commitments').insert({ email_id: email.id, commitment_key: 'waves:send_estimate:close1',
+    const [row] = await mockPg('call_commitments').insert({ email_id: email.id, email_customer_id: customerId, commitment_key: 'waves:send_estimate:close1',
       party: 'waves', kind: 'send_estimate', description: 'send the estimate', channel: 'email', due_at: null, due_basis: null,
       source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: 'Please send the estimate', email_id: email.id, matched: true, speaker: 'caller' }]),
@@ -581,7 +612,7 @@ postgres('Email commitments on PostgreSQL', () => {
   test('fix 4: applySmsCommitmentUpdate refuses a send_reschedule_link email row (the one deliberate scope limit)', async () => {
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
       body_text: "I'll text you a link to reschedule" });
-    const [row] = await mockPg('call_commitments').insert({ email_id: email.id, commitment_key: 'waves:send_reschedule_link:refuse1',
+    const [row] = await mockPg('call_commitments').insert({ email_id: email.id, email_customer_id: customerId, commitment_key: 'waves:send_reschedule_link:refuse1',
       party: 'waves', kind: 'send_reschedule_link', description: 'text a reschedule link', channel: 'email', due_at: null, due_basis: null,
       source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: "I'll text you a link to reschedule", email_id: email.id, matched: true, speaker: 'caller' }]),
@@ -596,7 +627,7 @@ postgres('Email commitments on PostgreSQL', () => {
     const actualNotifications = jest.requireActual('../services/notification-service');
     NotificationService.notifyAdmin.mockImplementation(actualNotifications.notifyAdmin.bind(actualNotifications));
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request' });
-    await mockPg('call_commitments').insert({ email_id: email.id, commitment_key: 'waves:other:ask4',
+    await mockPg('call_commitments').insert({ email_id: email.id, email_customer_id: customerId, commitment_key: 'waves:other:ask4',
       party: 'waves', kind: 'other', description: 'Did you come today?', channel: 'email',
       due_at: new Date(email.received_at.getTime() + 1000), due_basis: 'default_kind', source: 'ai', extractor_version: 'sms-ops-v22:email',
       evidence: JSON.stringify([{ quote: 'Did you come today?', email_id: email.id, matched: true, speaker: 'caller' }]),

@@ -745,12 +745,10 @@ const KIND_LABELS = {
 // kind (owner-approved staff-promise plan, 2026-09-28).
 const PROMISE_LABEL = 'A promise texted to a customer needs follow-up';
 
-// A malformed sms_context.customer_id must never throw the whole page —
-// same regex-guarded cast used by email-operational-actions.js's own
-// customer resolution (coordinator correction #1, 2026-09-29).
-const RESOLVED_EMAIL_CUSTOMER_ID_SQL = `COALESCE(e.customer_id,
-    CASE WHEN cc.sms_context->>'customer_id' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-      THEN (cc.sms_context->>'customer_id')::uuid END)`;
+// An ask row's emails.customer_id, else the row's own email_customer_id —
+// the same resolution email-operational-actions.js uses; both follow a
+// customer merge.
+const RESOLVED_EMAIL_CUSTOMER_ID_SQL = 'COALESCE(e.customer_id, cc.email_customer_id)';
 
 // Only the customer profile opts into SMS/email rows. Call queues and
 // workers continue using their call-scoped reader and implicit deadline
@@ -810,12 +808,11 @@ async function applySmsCommitmentUpdate(conn, id, { customerId, action, note, re
     } else {
       const source = await trx('emails').where({ id: initial.email_id }).forUpdate().first();
       if (!source) throw Object.assign(new Error('Email follow-up moved; reload this profile'), { status: 409 });
-      const snapshot = await trx('call_commitments').where({ id }).first('sms_context');
+      const row = await trx('call_commitments').where({ id }).first('email_customer_id');
       // An ask row's emails.customer_id follows a merge; a staff promise's
-      // SENT row never carries one at all (email-sync.js never sets it on
-      // a SENT row) — same resolution rule as intake/refresh (coordinator
-      // correction #1, 2026-09-29).
-      const resolvedCustomerId = source.customer_id || snapshot?.sms_context?.customer_id;
+      // SENT row never carries one (email-sync.js never sets it on a SENT
+      // row), so its own email_customer_id does — same rule as refresh.
+      const resolvedCustomerId = source.customer_id || row?.email_customer_id;
       if (resolvedCustomerId !== customerId) throw Object.assign(new Error('Email follow-up moved; reload this profile'), { status: 409 });
       sourceId = source.id;
     }

@@ -14,6 +14,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callContactSelects } = require('./staff-contact');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
+const { stripQuotedAndSignature } = require('./email/email-strip');
 
 const LIMIT = 50;
 // A logged move: both dates present and either the date or the window
@@ -327,7 +328,12 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       const resolved = await Promise.all(candidates.map(async (row) => ({
         row, linkedCustomerId: await resolveEmailCustomerLink(conn, row),
       })));
-      return resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId)).map((entry) => entry.row);
+      // The same quote/signature strip intake uses: a reply's own words are
+      // the evidence, never the quoted thread under them (an old line would
+      // otherwise ground as fresh proof, and a long thread would trip the
+      // 16000-char body cap for the whole check).
+      return resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId))
+        .map((entry) => ({ ...entry.row, body_text: stripQuotedAndSignature(entry.row.body_text) }));
     })(),
     // Unowned commercial proposals are sent to the lead, not the customer
     // row; their delivery emails are reached through the estimate they name.

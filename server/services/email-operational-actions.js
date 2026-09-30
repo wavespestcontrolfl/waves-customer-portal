@@ -134,7 +134,7 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
         const propertyId = properties.length === 1 && properties.some((p) => p.id === item.property_id) ? item.property_id : null;
         const { due_at: dueAt, due_basis: dueBasis } = resolveDueDeadline(item, email.received_at);
         return {
-          email_id: email.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
+          email_id: email.id, email_customer_id: customer.id, commitment_key: keyOf({ ...item, property_id: propertyId }), party: item.party, kind: item.kind,
           description: item.description, channel: 'email', due_at: dueAt, due_basis: dueBasis,
           source: 'ai', extractor_version: VERSION,
           evidence: JSON.stringify([{ quote: item.quote, email_id: email.id, matched: true,
@@ -276,7 +276,7 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
 // (emails have no send queue). expectedCustomerId is what refreshEmailCommitment
 // resolved and already ran evidence/verify against, outside this lock; the
 // FRESH locked emails row is re-resolved the same way (its own customer_id,
-// falling back to the row's snapshot) and must still agree, or a merge
+// falling back to the locked row's email_customer_id) and must still agree, or a merge
 // raced this tick and the row is left for the next one (mirrors
 // sms-operational-actions.js's lockLiveCommitment sameSource check).
 // A new lead's first email usually arrives before they have a property (it
@@ -292,9 +292,9 @@ async function soleProperty(conn, row, customerId) {
 async function lockLiveEmailCommitment(trx, row, expectedCustomerId) {
   const customer = expectedCustomerId && await trx('customers').where({ id: expectedCustomerId }).whereNull('deleted_at').forUpdate().first('id');
   const source = customer && await trx('emails').where({ id: row.email_id }).forUpdate().first('id', 'customer_id');
-  const sameCustomer = !!source && (source.customer_id || row.sms_context?.customer_id) === expectedCustomerId;
-  const live = sameCustomer && await trx('call_commitments').where({ id: row.id }).forUpdate().first();
-  return live && enabled() && live.status === 'open' && live.human_state == null ? live : null;
+  const live = source && await trx('call_commitments').where({ id: row.id }).forUpdate().first();
+  const sameCustomer = !!live && (source.customer_id || live.email_customer_id) === expectedCustomerId;
+  return sameCustomer && enabled() && live.status === 'open' && live.human_state == null ? live : null;
 }
 
 // One open row: verify (deadline passed, or an admissible witness already
@@ -306,9 +306,9 @@ async function refreshEmailCommitment(conn, row, now, verify) {
   // correction #1, 2026-09-29 — the bug this fixes): an ASK row's
   // emails.customer_id follows a customer merge, so prefer it; a STAFF
   // PROMISE row is a Gmail SENT row, which the sync never stamps with a
-  // customer_id at all (design note §1) — it always falls back to the
-  // snapshot resolved at intake time (sms_context.customer_id).
-  const customerId = email.customer_id || row.sms_context?.customer_id;
+  // customer_id at all (design note §1) — it falls back to the row's own
+  // email_customer_id, stamped at intake and repointed by a customer merge.
+  const customerId = email.customer_id || row.email_customer_id;
   if (!customerId) return { outcome: 'ineligible' };
   const customer = await conn('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'phone');
   if (!customer) return { outcome: 'ineligible' };
@@ -382,16 +382,13 @@ async function refreshEmailCommitments({ now = new Date(), conn = db, verify = v
   // `customers c ON c.id = e.customer_id` INNER JOIN silently dropped every
   // staff-promise row from this whole page — email-sync.js never sets
   // customer_id on a SENT row (design note §1), so that join always missed.
-  // COALESCE to the row's OWN resolved snapshot (sms_context.customer_id,
-  // stamped at intake and re-stamped by refreshEmailCommitment on every
-  // tick) whenever the live email row carries none — a regex guard keeps a
-  // malformed snapshot value from throwing the whole page's query.
+  // COALESCE to the row's own email_customer_id (stamped at intake; a
+  // customer merge repoints it like any *_customer_id column — a jsonb
+  // snapshot would stay on the merged-away customer and strand the row)
+  // whenever the live email row carries none.
   const rows = await conn('call_commitments as cc')
     .join('emails as e', 'e.id', 'cc.email_id')
-    .joinRaw(`JOIN customers c ON c.id = COALESCE(e.customer_id,
-        CASE WHEN cc.sms_context->>'customer_id' ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-          THEN (cc.sms_context->>'customer_id')::uuid END)
-      AND c.deleted_at IS NULL`)
+    .joinRaw('JOIN customers c ON c.id = COALESCE(e.customer_id, cc.email_customer_id) AND c.deleted_at IS NULL')
     .where({ 'cc.status': 'open', 'cc.party': 'waves' }).whereNull('cc.human_state')
     .where((q) => q.whereNull('cc.due_at').orWhere('cc.due_at', '<=', now))
     .modify((q) => { if (afterId) q.where('cc.id', '>', afterId); })
