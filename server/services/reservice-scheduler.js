@@ -164,7 +164,7 @@ async function membershipPestEvidence(customerId, dbh = db, { lockCoverage = fal
  *
  * Returns ['pest'], ['lawn'], ['pest','lawn'], or [] (not eligible).
  */
-async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = false, coverageScope = null } = {}) {
+async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = false, coverageScope = null, strict = false } = {}) {
   if (!customer?.id) return [];
   const lanes = new Set();
   try {
@@ -195,6 +195,8 @@ async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = fa
     }
   } catch (err) {
     logger.warn(`[reservice-scheduler] lane lookup failed for customer ${customer.id}: ${err.message}`);
+    // strict: the caller must tell "not eligible" from "could not check" (admin link composer) — rethrow.
+    if (strict) throw err;
   }
   return ['pest', 'lawn'].filter((lane) => lanes.has(lane));
 }
@@ -291,6 +293,20 @@ async function loadEligibleReserviceLanes(customerId, dbh = db) {
   return eligibility ? eligibility.lanes : [];
 }
 
+/**
+ * Codex round-21 P2 (PR #5336): the same predicate as loadEligibleReserviceLanes, but a lookup FAILURE
+ * throws instead of collapsing to [] ("not eligible"). The admin link composer scans sibling properties
+ * in order and takes the first eligible one — a swallowed error on the operator-selected row let the scan
+ * fall through to a sibling and text a re-service link for the WRONG property. [] here means the row is
+ * genuinely ineligible (missing / inactive / tokenless / no live lane).
+ */
+async function loadEligibleReserviceLanesStrict(customerId, dbh = db) {
+  if (!customerId) return [];
+  const customer = await loadReserviceCustomerRow(customerId, dbh);
+  if (!customer) return [];
+  return reserviceLanesForCustomer(customer, dbh, { strict: true });
+}
+
 // Free-text lane classification for a CUSTOMER-REPORTED issue — used by the
 // re-service SMS promise validators (sms-shadow-drafter.js
 // validateReserviceOffer / reservicePromiseStillEligible) to resolve which
@@ -331,7 +347,14 @@ const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
   + '|\\b(?:disease|fungus|scale)\\b[^.?!\\n]{0,20}\\b(?:trees?|shrubs?)\\b',
   'i',
 );
-const RESERVICE_LAWN_WORDS_RE = /\b(lawn|turf|grass|weeds?|fert|fertilizer|fertilization|mow(?:ing)?|sod|yard)\b/i;
+// Codex round-21 P2 (PR #5336): the lawn SERVICE words are the SAME list the outgoing promise classifier
+// (sms-shadow-drafter.js RESERVICE_LAWN_SERVICE_WORDS) reads — a test pins they cannot drift. "yard" is a
+// LOCATION ("ants are back in the yard" is a pest report on a dual-lane account), a lawn word only when
+// service-qualified ("yard treatment", "service for my yard"); "grass" keeps its own reading.
+const RESERVICE_LAWN_SERVICE_WORDS = 'lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod';
+const RESERVICE_LAWN_LOCATION_SERVICE_QUALIFIED = '(?:yard|grass)\\s+(?:service|treatment|care|program|maintenance|spray(?:ing)?)'
+  + '|(?:service|treatment|care|program|spray(?:ing)?)\\s+(?:for|on|of|to)\\s+(?:(?:my|our|the|your)\\s+)?(?:yard|grass)';
+const RESERVICE_LAWN_WORDS_RE = new RegExp(`\\b(?:${RESERVICE_LAWN_SERVICE_WORDS}|grass|${RESERVICE_LAWN_LOCATION_SERVICE_QUALIFIED})\\b`, 'i');
 // Codex round-15 P2 (PR #5336): the ONE pest-noun list. The lane vocabulary below and
 // sms-shadow-drafter.js's PEST_REPORT_TEXT_RE (the open-times / pest-report prescreen) are both
 // built from it, so a pest the prescreen accepts ("earwigs are back") can never be missing from
@@ -497,9 +520,11 @@ module.exports = {
   reserviceLanesForCustomer,
   loadReserviceEligibility,
   loadEligibleReserviceLanes,
+  loadEligibleReserviceLanesStrict,
   reserviceLaneAvailability,
   loadReserviceLaneAvailability,
   RESERVICE_LANE_WORD_PATTERNS,
+  RESERVICE_LAWN_SERVICE_WORDS,
   RESERVICE_PEST_NOUNS_SOURCE,
   reportedReserviceLane,
   reportedReserviceExcludedSpecialty,

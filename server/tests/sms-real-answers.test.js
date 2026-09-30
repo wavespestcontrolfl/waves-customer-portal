@@ -2588,7 +2588,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
         await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'Your balance is $95, due at the next visit.', dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
         // A pre-deploy queued row (no carries flag) with a body that evades both the detector and the prescreen.
-        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'Someone will pop back by Thursday for the ants.', carriesAction: false, dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'Someone will pop back by Thursday for the ants.', dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
       });
 
       test('DB throw on a re-service PROMISE → blocked (fail closed)', async () => {
@@ -2606,12 +2606,12 @@ describe('free re-service is an entitlement resolved through the existing mechan
         await expect(require('../services/agent-decision-send-checks').scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, dbh: rowDb(row) })).resolves.toBeNull();
       });
 
-      // Codex round-15 P1 #1: a failed decision read never lets an action-carrying decision through.
-      test('row read fails: the scheduled row\'s own carries_reservice_link flag blocks a missed-promise body', async () => {
+      // Codex round-15 P1 #1 (round-21: the queue-time flag is gone; the fire-time check always re-reads the row): a failed read blocks.
+      test('row read fails: a missed-promise body blocks', async () => {
         loadWith({ lanes: ['pest'] });
         const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
         const missed = 'We will have someone stop by again for the ants, no cost to you.';
-        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, carriesAction: true, dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
+        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, dbh: throwingDb })).resolves.toBe('reservice_recheck_failed');
       });
 
       test('row read fails, action unknown: FAIL CLOSED whatever the body says (round-19 P1)', async () => {
@@ -2627,17 +2627,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const { scheduledReserviceBlockReason } = require('../services/agent-decision-send-checks');
         const missingRowDb = () => ({ where: () => ({ first: async () => undefined }) });
         const missed = 'We will have someone stop by again for the ants, no cost to you.';
-        await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, carriesAction: true, dbh: missingRowDb })).resolves.toBe('reservice_recheck_failed');
         await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: missed, dbh: missingRowDb })).resolves.toBe('reservice_recheck_failed');
         await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: "We'll send your free pest re-service link now.", dbh: missingRowDb })).resolves.toBe('reservice_recheck_failed');
         await expect(scheduledReserviceBlockReason({ agentDecisionId: 'd1', outgoingBody: 'See you Tuesday at 9!', dbh: missingRowDb })).resolves.toBe('reservice_recheck_failed');
-      });
-
-      test('/schedule-sms records carries_reservice_link from the decision snapshot', () => {
-        const { decisionCarriesReserviceLink } = require('../services/agent-decision-send-checks');
-        expect(decisionCarriesReserviceLink({ input_snapshot: JSON.stringify({ intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }] }) })).toBe(true);
-        expect(decisionCarriesReserviceLink({ input_snapshot: { intended_actions: [{ type: 'escalate' }] } })).toBe(false);
-        expect(decisionCarriesReserviceLink({ input_snapshot: null })).toBe(false);
       });
 
       test('an ordinary decision (no action) with a non-promise body sends without touching eligibility', async () => {
@@ -2809,6 +2801,27 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const owed = (inboundMessage) => validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage }).ok === false;
         for (const m of ['the ants came back', "I'm frustrated, the roaches are back", 'so upset, ants are back again', 'angry and disappointed, the ants are still showing up', "I'm sick of these roaches, they're back", 'sick and tired of the ants coming back', 'the roach poison is not working, they are back']) expect(owed(m)).toBe(true);
         for (const m of ['the ants came back, I want a refund', 'roaches are back, cancel my service', 'ants are back and you charged me twice', 'the ants are back, I am calling my lawyer', 'your spray killed my plants, the ants are back and there is damage', 'ants are back and my dog got sick from the chemical']) expect(owed(m)).toBe(false);
+      });
+
+      // Codex round-21 P2: negated / resolved sightings are NOT pest reports; a clause that still reports is.
+      test.each([
+        ["I don't see ants anymore", false],
+        ['I have not seen any roaches since the treatment', false],
+        ['the ants are gone, thank you', false],
+        ['no more spiders in the house', false],
+        ['they stopped coming, no more ants', false],
+        ["haven't noticed a single wasp lately", false],
+        ["still see ants, they didn't go away", true],
+        ['I still see ants in the kitchen', true],
+        ['no ants in the kitchen anymore but the wasps are back', true],
+        ['the ants are gone but I still see roaches', true],
+        ['saw ants again this morning', true],
+        ['the ants came back', true],
+      ])('pest report signal: %s → %s', (text, expected) => {
+        const { PEST_REPORT_TEXT_RE, validateReserviceOffer } = require('../services/sms-shadow-drafter');
+        expect(PEST_REPORT_TEXT_RE.test(text)).toBe(expected);
+        // ...and the owed offer follows it
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: text }).ok).toBe(!expected);
       });
 
       // Codex round-19 P2: a pronoun-only report ("they're back") from a customer with a pest relationship
@@ -3118,6 +3131,24 @@ describe('free re-service is an entitlement resolved through the existing mechan
         // facts lanes given directly (no draft read): pest cancelled → blocked
         const lawnOnly = loadWith({ lanes: ['lawn'] });
         await expect(lawnOnly.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: meta({}) })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+      });
+
+      // Codex round-21 P2: a pre-deploy estimate-conversion decision has no draft_id; its inbound is the snapshot's sms.body.
+      test('grandfathered estimate-conversion decision (no draft_id): the reported lane comes from the snapshot inbound', async () => {
+        const factsBoth = `X\n${require('../services/sms-shadow-drafter').reserviceFactLine(['pest', 'lawn'])}\nBILLING:`;
+        const { drafter } = loadWith({ lanes: ['lawn'] }); // pest cancelled; lawn still eligible
+        const meta = (inboundMessage) => ({ promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: sendLinkAction, factsBlock: factsBoth, inboundMessage });
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: meta('the ants are back') })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+        // ...and through the decision path: input_snapshot.sms.body is handed to the recheck
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        const decision = { ...predeploy, input_snapshot: JSON.stringify({ intended_actions: sendLinkAction, sms: { body: 'the ants are back' } }) };
+        const lawnOnly = loadWith({ lanes: ['lawn'] });
+        expect(lawnOnly.drafter).toBeTruthy();
+        await expect(require('../services/agent-decision-send-checks').agentDecisionSendBlockReason({ decision, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable \(no longer eligible for a free pest re-service\)/);
+        expect(agentDecisionSendBlockReason).toBeDefined();
+        // a lawn report recovered the same way is satisfied by the live lawn lane
+        const ok = loadWith({ lanes: ['lawn'] });
+        await expect(ok.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: meta('weeds all over my lawn') })).resolves.toBeNull();
       });
 
       test('a pre-deploy decision WITHOUT a send_reservice_link action stays blocked, even for an eligible customer (Codex round-10 P2)', async () => {

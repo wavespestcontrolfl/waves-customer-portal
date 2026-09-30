@@ -4,7 +4,7 @@
  * admin-communications-reschedule-link.test.js, which covers those rules in
  * depth); these tests instead pin the eligibility predicate this route now
  * shares with the SMS FREE RE-SERVICE fact and the send-time promise recheck
- * (reservice-scheduler.loadEligibleReserviceLanes, Codex round-4 P1
+ * (reservice-scheduler.loadEligibleReserviceLanesStrict, Codex round-4 P1
  * structural fix): the link only resolves for the first candidate row that
  * loader reports eligible, operator-selected row first, and 404s when none
  * is — byte-identical to the route's pre-fix per-row behavior.
@@ -79,7 +79,7 @@ jest.mock('../services/reschedule-link', () => ({
 }));
 jest.mock('../services/reservice-scheduler', () => ({
   reserviceSelfServeEnabled: jest.fn(() => true),
-  loadEligibleReserviceLanes: jest.fn(async () => []),
+  loadEligibleReserviceLanesStrict: jest.fn(async () => []),
 }));
 jest.mock('../services/reservice-link', () => ({
   buildReserviceLink: jest.fn(),
@@ -88,7 +88,7 @@ jest.mock('../services/reservice-link', () => ({
 const express = require('express');
 const db = require('../models/db');
 const communicationsRouter = require('../routes/admin-communications');
-const { reserviceSelfServeEnabled, loadEligibleReserviceLanes } = require('../services/reservice-scheduler');
+const { reserviceSelfServeEnabled, loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
 const { buildReserviceLink } = require('../services/reservice-link');
 
 const CUSTOMER_UUID = '3f2b8c4e-9d1a-4f6b-8e2c-5a7d9b1c3e5f';
@@ -182,7 +182,7 @@ describe('POST /admin/communications/reservice-link', () => {
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/not enabled/);
       expect(db).not.toHaveBeenCalled();
-      expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
+      expect(loadEligibleReserviceLanesStrict).not.toHaveBeenCalled();
     });
   });
 
@@ -202,25 +202,47 @@ describe('POST /admin/communications/reservice-link', () => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/No customer/);
-      expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
+      expect(loadEligibleReserviceLanesStrict).not.toHaveBeenCalled();
     });
   });
 
   test('404 with "no active recurring plan" when the ONE matched candidate is not eligible', async () => {
     wireDb(soloCustomer());
-    loadEligibleReserviceLanes.mockResolvedValue([]); // deleted/inactive/tokenless/lane-less — any of them collapse to []
+    loadEligibleReserviceLanesStrict.mockResolvedValue([]); // deleted/inactive/tokenless/lane-less — any of them collapse to []
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234' });
       expect(res.status).toBe(404);
       expect((await res.json()).error).toMatch(/No active recurring plan/);
-      expect(loadEligibleReserviceLanes).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(loadEligibleReserviceLanesStrict).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(buildReserviceLink).not.toHaveBeenCalled();
+    });
+  });
+
+  // Codex round-21 P2 (PR #5336): a FAILED eligibility lookup is not "no lanes" — it aborts the scan.
+  test('a thrown eligibility lookup on the selected row aborts with 500 and never falls through to a sibling', async () => {
+    const customers = makeCustomersBuilder({
+      firstRow: { id: CUSTOMER_UUID, phone: '9415551234', account_id: 'acct-1' },
+      selectResults: [[{ id: '00000000-0000-0000-0000-000000000001' }, { id: CUSTOMER_UUID }]],
+    });
+    wireDb(customers);
+    loadEligibleReserviceLanesStrict.mockReset();
+    loadEligibleReserviceLanesStrict.mockImplementation(async (id) => {
+      if (id === CUSTOMER_UUID) throw new Error('db timeout');
+      return ['lawn']; // the sibling WOULD be eligible — it must never be reached
+    });
+    await withServer(async (baseUrl) => {
+      const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
+      expect(res.status).toBe(500);
+      expect((await res.json()).error).toMatch(/Could not verify re-service eligibility/);
+      expect(loadEligibleReserviceLanesStrict).toHaveBeenCalledTimes(1);
+      expect(loadEligibleReserviceLanesStrict).toHaveBeenCalledWith(CUSTOMER_UUID);
       expect(buildReserviceLink).not.toHaveBeenCalled();
     });
   });
 
   test('200 mints the link for the ONE eligible candidate and reports its lanes', async () => {
     wireDb(soloCustomer());
-    loadEligibleReserviceLanes.mockResolvedValue(['pest', 'lawn']);
+    loadEligibleReserviceLanesStrict.mockResolvedValue(['pest', 'lawn']);
     buildReserviceLink.mockResolvedValue(GOOD_LINK);
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234' });
@@ -248,7 +270,7 @@ describe('POST /admin/communications/reservice-link', () => {
     });
     wireDb(customers);
     // Both rows would be eligible — the SELECTED one must win.
-    loadEligibleReserviceLanes.mockImplementation(async (id) => (id === CUSTOMER_UUID ? ['pest'] : ['lawn']));
+    loadEligibleReserviceLanesStrict.mockImplementation(async (id) => (id === CUSTOMER_UUID ? ['pest'] : ['lawn']));
     buildReserviceLink.mockResolvedValue(GOOD_LINK);
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
@@ -256,7 +278,7 @@ describe('POST /admin/communications/reservice-link', () => {
       const body = await res.json();
       expect(body.customerId).toBe(CUSTOMER_UUID);
       expect(body.lanes).toEqual(['pest']);
-      expect(loadEligibleReserviceLanes).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(loadEligibleReserviceLanesStrict).toHaveBeenCalledWith(CUSTOMER_UUID);
     });
   });
 
@@ -266,20 +288,20 @@ describe('POST /admin/communications/reservice-link', () => {
       selectResults: [[{ id: CUSTOMER_UUID }, { id: SIB_ID }]],
     });
     wireDb(customers);
-    loadEligibleReserviceLanes.mockImplementation(async (id) => (id === SIB_ID ? ['lawn'] : []));
+    loadEligibleReserviceLanesStrict.mockImplementation(async (id) => (id === SIB_ID ? ['lawn'] : []));
     buildReserviceLink.mockResolvedValue(GOOD_LINK);
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234', customerId: CUSTOMER_UUID });
       expect(res.status).toBe(200);
       expect((await res.json()).customerId).toBe(SIB_ID);
-      expect(loadEligibleReserviceLanes).toHaveBeenCalledWith(CUSTOMER_UUID);
-      expect(loadEligibleReserviceLanes).toHaveBeenCalledWith(SIB_ID);
+      expect(loadEligibleReserviceLanesStrict).toHaveBeenCalledWith(CUSTOMER_UUID);
+      expect(loadEligibleReserviceLanesStrict).toHaveBeenCalledWith(SIB_ID);
     });
   });
 
   test('404 "no re-service link" when the eligible customer has no usable link (legacy tokenless mint failure)', async () => {
     wireDb(soloCustomer());
-    loadEligibleReserviceLanes.mockResolvedValue(['pest']);
+    loadEligibleReserviceLanesStrict.mockResolvedValue(['pest']);
     buildReserviceLink.mockResolvedValue({ url: null, line: '' });
     await withServer(async (baseUrl) => {
       const res = await post(baseUrl, { phone: '9415551234' });

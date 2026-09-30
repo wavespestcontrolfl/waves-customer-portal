@@ -1345,56 +1345,72 @@ async function reservicePromiseStillEligible(args) {
   const changed = await reserviceBookedReferenceBlock({ body: String(args.outgoingBody || ''), customerId: args.customerId, booked: args.decisionMeta && args.decisionMeta.bookedCallbacks });
   return changed || reserviceLanesStillEligible(args);
 }
-async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta: meta = NO_DECISION }) {
-  const body = String(outgoingBody || '');
-  // STRUCTURAL BACKSTOP (pre-push audit P1, PR #5336): a decision whose intended_actions carry the
-  // send-reservice-link action ALWAYS revalidates its snapshot lanes live, whatever the (possibly
-  // edited) body says — the detector may miss a promise ("I'll get a tech back out for the ants, no
-  // cost to you"). Body detection only ADDS checks (a body promising more / an excluded
-  // specialty); it is never the only trigger.
-  const promise = isReserviceOfferPromise(body);
-  if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
-  // Codex round-7 (PR #5336): checked BEFORE any snapshot fallback — an edit that
-  // swaps the promised service for an excluded specialty names no pest/lawn lane.
-  // (A detected promise scopes specialties/lanes to its offer spans; an action-backed body the detector
-  // misses is classified over the WHOLE body — Codex round-17 P2.)
+// The body-only half of the recheck: what the (possibly edited) body itself promises. Returns
+// { reason } when the body is unsendable on its own, else { snapshotLanes, namedLanes, lanes }.
+function reserviceBodyLaneFault(body, promise, promisedLanes) {
+  // Codex round-7 (PR #5336): checked BEFORE any snapshot fallback — an edit that swaps the promised
+  // service for an excluded specialty names no pest/lawn lane. (A detected promise scopes specialties/lanes
+  // to its offer spans; an action-backed body the detector misses is classified over the WHOLE body — round 17.)
   if (reserviceExcludedSpecialtyInPromise(body)) {
-    return 're-service promise names an excluded specialty (termites/rodents/mosquitoes/tree & shrub) the link cannot book';
+    return { reason: 're-service promise names an excluded specialty (termites/rodents/mosquitoes/tree & shrub) the link cannot book' };
   }
   const snapshotLanes = ['pest', 'lawn'].filter((lane) => [].concat(promisedLanes).includes(lane));
   const namedLanes = reserviceBodyLanes(body, promise);
   // Round-17: any lane named anywhere in an action-backed non-promise body must be one the card promised.
-  if (!promise && namedLanes.some((lane) => snapshotLanes.length && !snapshotLanes.includes(lane))) {
-    return `re-service body names a service line (${namedLanes.join(' and ')}) outside the promised lane(s) ${snapshotLanes.join(' and ')}`;
+  if (!promise && snapshotLanes.length && namedLanes.some((lane) => !snapshotLanes.includes(lane))) {
+    return { reason: `re-service body names a service line (${namedLanes.join(' and ')}) outside the promised lane(s) ${snapshotLanes.join(' and ')}` };
   }
-  const lanes = namedLanes.length ? namedLanes : snapshotLanes;
-  // Where the promised lanes come from, resolved ONCE (Codex round-14): the draft-time snapshot; the
-  // body's own named lanes when no decision backs it; a grandfathered pre-deploy decision (older
-  // prompt version, no snapshot) that live eligibility decides; else nothing on record — which
-  // includes a NEW-version decision missing its snapshot (Codex round-11 P1: the edited body never
-  // stands in for the snapshot).
+  return { snapshotLanes, namedLanes, lanes: namedLanes.length ? namedLanes : snapshotLanes };
+}
+// The decision's own record: intended actions, the draft's facts, and the inbound the promise answers.
+// A backed decision reads the persisted draft row only when something is missing from the send path's
+// own metadata or the promise names no lane (the inbound is needed to recover the reported one).
+async function reserviceDecisionRecord(meta, backed, laneUnnamed) {
+  const needsRow = backed && (!meta.intendedActions || meta.factsBlock === undefined || laneUnnamed);
+  const row = needsRow ? await loadDraftRowForReservice(meta.draftId) : {};
+  return {
+    actions: backed ? (meta.intendedActions || draftIntendedActions(row.intended_actions)) : [{ type: 'escalate', note: 'send_reservice_link' }],
+    factsBlock: meta.factsBlock === undefined ? row.facts_block : meta.factsBlock,
+    // Codex round-21 P2: the persisted draft's inbound, else the decision snapshot's (estimate-conversion
+    // decisions carry no draft_id; their inbound rides input_snapshot.sms.body).
+    inbound: row.inbound_message || meta.inboundMessage || null,
+  };
+}
+// Which lanes must still be bookable. Codex round-19/21 P2: a grandfathered generic promise (no snapshot,
+// no named lane) requires the REPORTED lane recovered from the inbound; when it cannot be recovered,
+// EVERY lane the facts list must stay bookable (fail closed). Only when NOTHING is on record does one
+// bookable lane of the two suffice (anyOf).
+function reserviceLanesToRequire({ lanes, laneUnnamed, record }) {
+  const recovered = laneUnnamed ? require('./reservice-scheduler').reportedReserviceLane(record.inbound) : null;
+  const factsLanes = eligibleReserviceLanes(record.factsBlock);
+  const required = [lanes, recovered ? [recovered] : [], factsLanes].find((set) => set.length);
+  return required ? { candidates: required, anyOf: false } : { candidates: ['pest', 'lawn'], anyOf: true };
+}
+async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta: meta = NO_DECISION }) {
+  const body = String(outgoingBody || '');
+  // STRUCTURAL BACKSTOP (pre-push audit P1, PR #5336): a decision whose intended_actions carry the
+  // send-reservice-link action ALWAYS revalidates its snapshot lanes live, whatever the (possibly
+  // edited) body says — body detection only ADDS checks; it is never the only trigger.
+  const promise = isReserviceOfferPromise(body);
+  if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
+  const fault = reserviceBodyLaneFault(body, promise, promisedLanes);
+  if (fault.reason) return fault.reason;
+  // Where the promised lanes come from (Codex round-14): the draft-time snapshot; the body's own named
+  // lanes when no decision backs it; a grandfathered pre-deploy decision (older prompt version, no
+  // snapshot) that live eligibility decides; else nothing on record — which includes a NEW-version decision
+  // missing its snapshot (round 11 P1: the edited body never stands in for the snapshot).
   const backed = !meta.none;
-  const known = snapshotLanes.length || (backed ? !reserviceSnapshotVersionEmitted(meta.promptVersion) : namedLanes.length);
+  const laneUnnamed = backed && !fault.snapshotLanes.length && !fault.namedLanes.length;
+  const known = fault.snapshotLanes.length || (backed ? !reserviceSnapshotVersionEmitted(meta.promptVersion) : fault.namedLanes.length);
   if (!known) return 'no promised re-service lane on record to revalidate';
-  // Every decision-backed promise also needs the send_reservice_link action on record (Codex
-  // round-10 P2 / round-11): without it nothing would actually text the link. A promise naming no
-  // lane also needs the persisted draft's facts, to limit which live lane counts.
-  const grandfatheredGeneric = backed && !snapshotLanes.length && !namedLanes.length;
-  const draftRow = backed && (!meta.intendedActions || meta.factsBlock === undefined || grandfatheredGeneric) ? await loadDraftRowForReservice(meta.draftId) : {};
-  const actions = backed ? (meta.intendedActions || draftIntendedActions(draftRow.intended_actions)) : [{ type: 'escalate', note: 'send_reservice_link' }];
-  if (!actions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link')) {
+  // Every decision-backed promise also needs the send_reservice_link action on record (round 10 P2 / 11).
+  const record = await reserviceDecisionRecord(meta, backed, laneUnnamed);
+  if (!record.actions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link')) {
     return 'no send_reservice_link action on record — nothing would actually send the re-service link';
   }
   if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
-  const factsLanes = eligibleReserviceLanes(meta.factsBlock === undefined ? draftRow.facts_block : meta.factsBlock);
-  // Codex round-19 P2: a grandfathered generic promise (no snapshot, no named lane) recovers the REPORTED
-  // lane from the persisted inbound message and requires that lane; when it cannot be recovered, EVERY
-  // lane the facts list must remain bookable (fail closed) — one bookable lane never stands in for the
-  // cancelled one the customer actually reported.
-  const recovered = grandfatheredGeneric ? require('./reservice-scheduler').reportedReserviceLane(draftRow.inbound_message) : null;
-  const candidates = [lanes, recovered ? [recovered] : [], factsLanes].find((set) => set.length);
-  // Only when NOTHING is on record (no lane, no facts) does one bookable lane of the two suffice.
-  return reserviceLanesBlockedReason(candidates || ['pest', 'lawn'], await liveReserviceLaneState(customerId), !candidates);
+  const { candidates, anyOf } = reserviceLanesToRequire({ lanes: fault.lanes, laneUnnamed, record });
+  return reserviceLanesBlockedReason(candidates, await liveReserviceLaneState(customerId), anyOf);
 }
 
 // Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
@@ -2805,8 +2821,21 @@ const SAVE_SALE_TEXT_RE = /\b(cancel(?:l?ed|l?ing|lation|s)?|complain(?:t|ts|ed|
 // with NO silent fallback — a scheduler mock that omits the list throws here rather than quietly
 // narrowing the prescreen. Exposed as { test } so callers keep the regex-style `.test(text)`.
 let pestReportTextRe = null;
+// Codex round-21 P2: a NEGATED or RESOLVED sighting is not a report ("I don't see ants anymore", "the
+// roaches are gone", "they stopped coming"). Each clause that negates the seeing verb, or says the pests
+// are gone / stopped / no more / anymore, is dropped BEFORE the noun+activity test, so a clause that is
+// still a report survives ("still see ants, they didn't go away"; "no ants in the kitchen anymore but the
+// wasps are back").
+const PEST_REPORT_NEGATED_SIGHTING_RE = /\b(?:don'?t|do\s+not|didn'?t|did\s+not|haven'?t|have\s+not|hasn'?t|has\s+not|can'?t|cannot|couldn'?t|no\s+longer|not)\s+(?:\w+\s+){0,2}?(?:see|seen|seeing|saw|find|finding|found|notice[ds]?|noticing|show(?:ed|ing)?\s*up|return\w*|come|coming|came|have|had|getting|get)\b(?:(?!\b(?:but|however|though|although|yet)\b)[^.,;!?])*/gi;
+const PEST_REPORT_RESOLVED_CLAUSE_RE = /(?:(?!\b(?:but|however|though|although|yet)\b)[^.,;!?])*\b(?:anymore|any\s+more|no\s+more|gone|stopped|disappeared|went\s+away|nothing\s+since|no\s+(?:sign|signs|activity)|none\s+(?:left|since))\b(?:(?!\b(?:but|however|though|although|yet)\b)[^.,;!?])*/gi;
+function withoutNegatedOrResolvedSightings(text) {
+  return String(text || '')
+    .replace(PEST_REPORT_NEGATED_SIGHTING_RE, ' ')
+    .replace(PEST_REPORT_RESOLVED_CLAUSE_RE, ' ');
+}
 const PEST_REPORT_TEXT_RE = {
-  test(text) {
+  test(rawText) {
+    const text = withoutNegatedOrResolvedSightings(rawText);
     if (!pestReportTextRe) {
       const nouns = require('./reservice-scheduler').RESERVICE_PEST_NOUNS_SOURCE;
       if (typeof nouns !== 'string' || !nouns) throw new Error('reservice-scheduler must export RESERVICE_PEST_NOUNS_SOURCE');

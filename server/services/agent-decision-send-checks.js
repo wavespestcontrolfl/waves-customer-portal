@@ -89,7 +89,9 @@ async function reserviceBlock({ decision, outgoingBody }) {
     // Codex round-9 (PR #5336): lets a PRE-DEPLOY decision (no snapshot, older
     // prompt version) be grandfathered onto live eligibility instead of being
     // rejected outright; new-version decisions missing a snapshot stay closed.
-    decisionMeta: { promptVersion: decision.prompt_version, draftId: snapshot?.draft_id || null, intendedActions: Array.isArray(snapshot?.intended_actions) ? snapshot.intended_actions : null, bookedCallbacks: snapshot?.reservice_booked_snapshot || null },
+    decisionMeta: { promptVersion: decision.prompt_version, draftId: snapshot?.draft_id || null, intendedActions: Array.isArray(snapshot?.intended_actions) ? snapshot.intended_actions : null, bookedCallbacks: snapshot?.reservice_booked_snapshot || null,
+      // Codex round-21 P2: a pre-deploy estimate-conversion decision has no draft_id; its inbound rides the snapshot (sms.body).
+      inboundMessage: (snapshot?.sms && typeof snapshot.sms.body === 'string' ? snapshot.sms.body : null) },
   });
   return reason ? `re-service promise unsendable (${reason})` : null;
 }
@@ -106,27 +108,16 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
 }
 
 /**
- * Whether a decision's snapshot carries the re-service link action — recorded onto a scheduled row's
- * metadata at queue time (admin-communications /schedule-sms) so the scheduled-send recheck does not
- * depend on re-reading the decision to learn it.
- */
-function decisionCarriesReserviceLink(decision) {
-  const { reserviceCarriesLinkAction } = require('./sms-shadow-drafter');
-  const snapshot = parseInputSnapshot(decision && decision.input_snapshot);
-  return reserviceCarriesLinkAction(snapshot && snapshot.intended_actions);
-}
-
-/**
  * The scheduled-send form of the re-service recheck (scheduler.js): the same verdict as
  * agentDecisionSendBlockReason's re-service leg, for a queued reply whose decision row still has to be
  * read. FAIL CLOSED (round 19): a scheduled send backed by an agent decision whose row cannot be read
  * (a throw, or no row) BLOCKS whatever the body says. The only sends it lets through are a readable row
  * that does not carry the link action with a non-promise body. Returns a short reason, or null.
  */
-async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fallbackCustomerId = null, carriesAction = false, dbh = require('../models/db') }) {
+async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fallbackCustomerId = null, dbh = require('../models/db') }) {
   const { reserviceCarriesLinkAction } = require('./sms-shadow-drafter');
   const logger = require('./logger');
-  let known = carriesAction === true;
+  let known = false;
   try {
     const row = await dbh('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot', 'customer_id', 'prompt_version');
     // Codex round-16/19 (PR #5336): a missing row is not a pre-deploy decision to grandfather — nothing is
@@ -138,11 +129,11 @@ async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fa
   } catch (err) {
     // Codex round-19 P1: any agent-decision-backed scheduled send whose decision cannot be read BLOCKS,
     // whatever the body says — a body that evades both the promise detector and the prescreen must not
-    // send just because a pre-deploy queued row carries no carries_reservice_link flag. The only send
+    // send just because a pre-deploy queued row carries no marker of the action. The only send
     // this recheck lets through is a READABLE row that does not carry the action with a non-promise body.
     logger.warn(`[agent-decision-send-checks] re-service recheck failed for decision ${agentDecisionId}: ${err.message}; blocking send${known ? ' (decision carries the re-service link action)' : ''}`);
     return 'reservice_recheck_failed';
   }
 }
 
-module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, decisionCarriesReserviceLink, parseInputSnapshot };
+module.exports = { agentDecisionSendBlockReason, scheduledReserviceBlockReason, parseInputSnapshot };

@@ -252,3 +252,39 @@ describe('RESERVICE_LANE_WORD_PATTERNS — the one shared lane vocabulary (Codex
     expect(RESERVICE_LANE_WORD_PATTERNS.map(([lane]) => lane)).toEqual(['pest', 'lawn']);
   });
 });
+
+
+// Codex round-21 P2 (PR #5336)
+describe('reportedReserviceLane — "yard" is a location unless service-qualified', () => {
+  const { reportedReserviceLane, RESERVICE_LAWN_SERVICE_WORDS } = require('../services/reservice-scheduler');
+  test.each([
+    ['ants are back in the yard', 'pest'],
+    ['there are roaches in my yard again', 'pest'],
+    ['yard treatment did not work', 'lawn'],
+    ['service for my yard was missed', 'lawn'],
+    ['weeds all over the yard', 'lawn'],
+    ['ants in the yard and weeds in the lawn', null],
+  ])('%s → %s', (text, lane) => {
+    expect(reportedReserviceLane(text)).toBe(lane);
+  });
+
+  test('the lawn SERVICE words are the same list the outgoing promise classifier reads', () => {
+    jest.resetModules();
+    const drafter = require('../services/sms-shadow-drafter');
+    // an outgoing promise naming "yard" alone names no lane; each scheduler service word names lawn on both sides
+    expect(drafter.namedReserviceLanesInText('We will send your free re-service for the ants in your yard.')).toEqual(['pest']);
+    for (const word of ['lawn', 'turf', 'weeds', 'fertilizer', 'fertilization', 'mowing', 'sod']) {
+      expect(reportedReserviceLane(`my ${word} looks bad`)).toBe('lawn');
+      expect(drafter.namedReserviceLanesInText(`We will send your free ${word} re-service link.`)).toEqual(['lawn']);
+    }
+    expect(RESERVICE_LAWN_SERVICE_WORDS).toBe('lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod');
+  });
+
+  test('loadEligibleReserviceLanesStrict throws on a lookup error but returns [] for a genuinely ineligible row', async () => {
+    const { loadEligibleReserviceLanesStrict } = require('../services/reservice-scheduler');
+    const failingDb = () => { throw new Error('db down'); };
+    await expect(loadEligibleReserviceLanesStrict('c1', failingDb)).rejects.toThrow('db down');
+    const noRow = () => ({ where: () => ({ whereNull: () => ({ first: async () => undefined }) }) });
+    await expect(loadEligibleReserviceLanesStrict('c1', noRow)).resolves.toEqual([]);
+  });
+});
