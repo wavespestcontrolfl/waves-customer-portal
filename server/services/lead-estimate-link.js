@@ -1544,18 +1544,6 @@ async function convertLeadFromEvent({
   // Every booking/completion trigger passes its row; estimate-driven and
   // invoice-driven events have no visit and pass nothing.
   booking = null,
-  // Explicit lead the event is about (a caller that already identified THE
-  // lead — e.g. the /book preferred-time request keyed on the booked
-  // customer's verified phone). It replaces the estimate/customer/contact
-  // resolution: only that one lead, and only while it is still open, converts
-  // — through the same markConverted + funnel settlement as every other win.
-  leadId = null,
-  // With leadId: the identity the caller matched the lead on (its 10-digit
-  // phone). The explicit lead is taken only while it still carries that phone
-  // and is unlinked or linked to this customer, so a staff re-assignment
-  // between the caller's lookup and this read never credits this event
-  // (the onlyIfIdentity claim below then pins that same, validated snapshot).
-  explicitPhone = null,
   database = db,
   leadAttributionService = leadAttribution,
 }) {
@@ -1637,19 +1625,12 @@ async function convertLeadFromEvent({
     //     gated to the customer's FIRST close + a single open lead.
     //  3. contact fallback — an open, never-linked lead matched by phone/email.
     let candidates = [];
-    let resolution = null; // 'estimate' | 'customer_link' | 'contact' | 'explicit'
-    if (leadId) {
-      const explicit = await database('leads').where({ id: leadId }).first();
-      const stillOurs = !explicit ? false
-        : (!explicitPhone || normalizePhone(explicit.phone) === normalizePhone(explicitPhone))
-          && (!explicit.customer_id || !resolvedCustomerId || explicit.customer_id === resolvedCustomerId);
-      candidates = stillOurs && OPEN_LEAD_STATUSES.includes(explicit.status) && !explicit.converted_at ? [explicit] : [];
-      resolution = 'explicit';
-    } else if (estimateId) {
+    let resolution = null; // 'estimate' | 'customer_link' | 'contact'
+    if (estimateId) {
       candidates = await database('leads').where({ estimate_id: estimateId });
       if (candidates.length) resolution = 'estimate';
     }
-    if (!candidates.length && resolution !== 'explicit') {
+    if (!candidates.length) {
       if (!resolvedPhone && !resolvedEmail && resolvedCustomerId) {
         const customer = await database('customers').where({ id: resolvedCustomerId }).first();
         resolvedPhone = customer?.phone || null;
@@ -1720,15 +1701,6 @@ async function convertLeadFromEvent({
       if (estimateId) conversion.estimateId = estimateId;
       if (resolvedCustomerId) conversion.customerId = resolvedCustomerId;
       else if (lead.customer_id) conversion.customerId = lead.customer_id;
-      // An explicit-lead conversion wins only while the lead is still in the
-      // open state AND on the identity it was read with (customer link, phone,
-      // email, estimate link): a staff transition or a re-assignment /
-      // re-contact in between wins, so this booking is never credited to a
-      // lead that is now another person's opportunity (codex #5399 r6 P1).
-      if (resolution === 'explicit') {
-        conversion.onlyIfStatusIn = OPEN_LEAD_STATUSES;
-        conversion.onlyIfIdentity = identityOf(lead);
-      }
       // Pass revenue fields only when an estimate supplied them — otherwise
       // markConverted preserves whatever the lead already has.
       if (haveEstimateHints) {
@@ -1751,12 +1723,7 @@ async function convertLeadFromEvent({
       // stub covers it (r18 P1). A claim lost to a concurrent relabel of the
       // root follows the new marker one hop (convertCustomerLinkRow, r34 P1).
       if (resolution !== 'customer_link') {
-        // markConverted answers false when its conditional write lost (lead
-        // missing/deleted, or — for an explicit lead — no longer in the open
-        // state it was read in): this event then converted NOTHING, and must
-        // not report a conversion (the booking path keys attributeSelfBooking
-        // on it). Strict false: a stub that answers nothing is not a loss.
-        if ((await leadAttributionService.markConverted(lead.id, conversion)) === false) continue;
+        await leadAttributionService.markConverted(lead.id, conversion);
         convertedIds.push(lead.id);
         continue;
       }
@@ -1765,7 +1732,6 @@ async function convertLeadFromEvent({
       if (!wonId) return { converted: false, reason: 'customer_link_claim_lost' };
       convertedIds.push(wonId);
     }
-    if (!convertedIds.length) return { converted: false, reason: 'claim_lost' };
     return { converted: true, count: convertedIds.length, leadIds: convertedIds };
   } catch (err) {
     logger.error(`[lead-trigger] convertLeadFromEvent failed (${source || 'unknown'}): ${err.message}`);

@@ -15,10 +15,10 @@
  *     lead instead of writing onto the closed one;
  *   - a refresh MERGES its request fields into extracted_data (first-touch keys
  *     survive, a staff-added key survives);
- *   - a booking that committed while the submit was in flight converts the
- *     just-filed lead post-commit (no bell);
- *   - a booking that already converted the lead (helper reports converted:0)
- *     leaves the bell silent; a callback visit is never reconciled as a win;
+ *   - a booking that committed while the submit was in flight leaves ONE note
+ *     on the just-filed lead post-commit and rings no bell; the lead is never
+ *     converted (owner ruling 2026-09-30), the note is deduped per (lead, visit),
+ *     and a callback visit is neither noted nor silences the bell;
  *   - a refresh that changes the service reclassifies the linked funnel row.
  */
 jest.mock('../models/db', () => jest.fn());
@@ -31,8 +31,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/experimentation/growthbook', () => ({ assignBookingRecoveryExperiment: jest.fn() }));
 jest.mock('../services/lead-source-resolver', () => ({ resolveLeadSource: jest.fn(async () => ({ leadSourceId: null })) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({})) }));
-const mockConvert = jest.fn();
-jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: (...a) => mockConvert(...a) }));
 const mockStamp = jest.fn();
 jest.mock('../services/lead-funnel-bridge', () => ({ stampLeadFunnelRow: (...a) => mockStamp(...a) }));
 
@@ -78,7 +76,8 @@ jest.setTimeout(60000);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text)', [schema]);
     await database.raw(`CREATE TABLE ??.self_booked_appointments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status text DEFAULT 'confirmed', created_at timestamptz DEFAULT now())`, [schema]);
-    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, status text DEFAULT \'pending\', is_callback boolean DEFAULT false)', [schema]);
+    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, status text DEFAULT \'pending\', is_callback boolean DEFAULT false, service_type text DEFAULT \'Pest Control\', scheduled_date date DEFAULT \'2099-01-08\')', [schema]);
+    await database.raw('CREATE TABLE ??.lead_activities (id serial PRIMARY KEY, lead_id uuid NOT NULL, activity_type text, description text, performed_by text, metadata jsonb, created_at timestamptz DEFAULT now())', [schema]);
     await database.raw('CREATE TABLE ??.ad_service_attribution (lead_id uuid PRIMARY KEY, service_line text, specific_service text, service_bucket text, funnel_stage text DEFAULT \'lead\')', [schema]);
     ({ recordPreferredTimeRequest } = require('../services/booking-preferred-time'));
     ({ _internals: { withLockedRecoveryIntent } } = require('../services/booking-abandon-recovery'));
@@ -96,7 +95,7 @@ jest.setTimeout(60000);
     await database('self_booked_appointments').del();
     await database('scheduled_services').del();
     await database('customers').del();
-    mockConvert.mockReset();
+    await database('lead_activities').del();
     mockStamp.mockReset();
     mockStamp.mockImplementation(async (handle, lead) => { await handle('funnel_rows').insert({ lead_id: lead.id }); return lead.id; });
   });
@@ -202,65 +201,73 @@ jest.setTimeout(60000);
     });
   });
 
-  test('a booking committed while the submit was in flight converts the just-filed lead after commit, and no bell rings', async () => {
+  const noteRows = () => database('lead_activities').where({ activity_type: 'note' });
+
+  test('a booking committed while the submit was in flight: the just-filed lead gets ONE note after commit, is NOT converted, and no bell rings', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
     const slow = gate();
     mockStamp.mockImplementation(async (handle, lead) => { await slow.p; await handle('funnel_rows').insert({ lead_id: lead.id }); });
-    mockConvert.mockResolvedValue({ converted: true });
     const submit = recordPreferredTimeRequest(database, value(), { notify: true });
     await tick();
-    // /confirm commits its booking (and its own conversion finds no lead yet) while the submit is mid-transaction.
+    // /confirm commits its booking (and its own note step finds no lead yet) while the submit is mid-transaction.
     await database('customers').insert({ id: cust, phone: '+19415550100' });
     const sba = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
-    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    const visit = await database('scheduled_services').insert({ self_booking_id: sba[0].id }).returning('id');
     slow.open();
     const out = await submit;
     expect(out.created).toBe(true);
-    expect(mockConvert).toHaveBeenCalledWith(expect.objectContaining({ source: 'preferred_time_booked', customerId: cust, leadId: out.leadId }));
+    const notes = await noteRows();
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatchObject({ lead_id: out.leadId, performed_by: 'system' });
+    expect(notes[0].description).toContain(`(visit ${visit[0].id}) on /book`);
+    expect(notes[0].metadata).toMatchObject({ reason: 'booking_on_preferred_request', visit_id: String(visit[0].id) });
+    expect(await database('leads').where({ id: out.leadId }).first()).toMatchObject({ status: 'new', converted_at: null });
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 
-  test('a booking made BEFORE the request began (beyond the skew slack) is not this request\'s to reconcile: the bell rings', async () => {
+  test('the note is written once per (lead, visit): the booking path and the reconcile racing for the same visit write one row', async () => {
+    const { noteBookingOnPreferredLeads } = require('../services/booking-preferred-time');
+    const first = await recordPreferredTimeRequest(database, value(), { notify: false });
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() + 5000) }).returning(['id', 'created_at']);
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    const runs = await Promise.all([1, 2, 3].map(() => noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] })));
+    expect(runs.reduce((n, r) => n + r.noted, 0)).toBe(1);
+    expect(await noteRows()).toHaveLength(1);
+    expect((await noteRows())[0].lead_id).toBe(first.leadId);
+    // a request filed AFTER the booking is new work: not noted
+    await database('leads').where({ id: first.leadId }).update({ status: 'lost' });
+    const later = await recordPreferredTimeRequest(database, value(), { notify: false });
+    await database('leads').where({ id: later.leadId }).update({ extracted_data: database.raw("extracted_data || ?::jsonb", [JSON.stringify({ last_requested_at: new Date(Date.now() + 600000).toISOString() })]) });
+    const before = (await noteRows()).length;
+    await noteBookingOnPreferredLeads(database, { customerId: cust, booking: sba[0] });
+    expect((await noteRows()).length).toBe(before);
+  });
+
+  test('a booking made BEFORE the request began (beyond the skew slack) is not this request\'s to reconcile: no note, the bell rings', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
     await database('customers').insert({ id: cust, phone: '+19415550100' });
-    await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() - 3600000) });
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() - 3600000) }).returning('id');
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
     await recordPreferredTimeRequest(database, value(), { notify: true });
-    expect(mockConvert).not.toHaveBeenCalled();
+    expect(await noteRows()).toHaveLength(0);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 
-  test('a concurrent booking that already converted the lead (the helper then reports converted:0) leaves the bell silent', async () => {
-    const { triggerNotification } = require('../services/notification-triggers');
-    triggerNotification.mockClear();
-    const cust = randomUUID();
-    await database('customers').insert({ id: cust, phone: '+19415550100' });
-    const sba = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
-    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
-    // The booking's own conversion wins the lead just before our helper's write: our call reports nothing converted.
-    mockConvert.mockImplementation(async ({ leadId }) => {
-      await database('leads').where({ id: leadId }).update({ status: 'converted', converted_at: new Date() });
-      return { converted: false };
-    });
-    const out = await recordPreferredTimeRequest(database, value(), { notify: true });
-    expect(out.created).toBe(true);
-    expect(mockConvert).toHaveBeenCalledTimes(1);
-    expect(triggerNotification).not.toHaveBeenCalled();
-  });
-
-  test('a callback visit is not reconciled as a win: the lead stays open and rings; an older real booking still converts', async () => {
+  test('a callback visit is neither noted nor silences the bell; an older real booking in the same window still notes and silences it', async () => {
     const { triggerNotification } = require('../services/notification-triggers');
     triggerNotification.mockClear();
     const cust = randomUUID();
     await database('customers').insert({ id: cust, phone: '+19415550100' });
     const cb = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
     await database('scheduled_services').insert({ self_booking_id: cb[0].id, is_callback: true });
-    mockConvert.mockResolvedValue({ converted: true });
     const out = await recordPreferredTimeRequest(database, value(), { notify: true });
-    expect(mockConvert).not.toHaveBeenCalled();
+    expect(await noteRows()).toHaveLength(0);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     expect(out.created).toBe(true);
 
@@ -273,9 +280,10 @@ jest.setTimeout(60000);
     await database('scheduled_services').insert({ self_booking_id: real[0].id, is_callback: false });
     const cb2 = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
     await database('scheduled_services').insert({ self_booking_id: cb2[0].id, is_callback: true });
-    await recordPreferredTimeRequest(database, value(), { notify: true });
-    expect(mockConvert).toHaveBeenCalledTimes(1);
-    expect(mockConvert.mock.calls[0][0].booking).toMatchObject({ self_booking_id: real[0].id });
+    const again = await recordPreferredTimeRequest(database, value(), { notify: true });
+    const notes = await noteRows();
+    expect(notes).toHaveLength(1);
+    expect(notes[0].lead_id).toBe(again.leadId);
     expect(triggerNotification).not.toHaveBeenCalled();
   });
 

@@ -939,27 +939,24 @@ row or bell). Recency is `extracted_data.last_requested_at`, written only by a
 submit — office edits (status, notes, assignment) never extend the dedupe
 window or the suppression. Filing a lead also stamps its
 `ad_service_attribution` funnel row (`stampLeadFunnelRow`), like every other
-public lead. A completed self-booking (`createSelfBooking`, every service type,
-on both the first commit and the `txResult.existing` replay) hands the booked
-customer's open preferred-time leads to the existing lifecycle —
-`convertLeadFromEvent` with an explicit `leadId` → `markConverted` → funnel
-settle — so staff do not chase someone who already booked and the booking counts
-on the lead's own funnel row (never a raw status write); one booking wins at most ONE lead: when the booking has already won a lead
-for this customer (its own quote-wizard / estimate / series conversion, or an
-earlier preferred-time win the same appointment already settled), the
-preferred-time lead is NOT converted — it stays OPEN with a one-time system note
-naming the won lead, rings no bell, and the office closes it (no lead status
-closes work without the funnel reading it as lost, so none is written); a crash-replay of `/confirm` settles only requests whose
-`last_requested_at` is at or before that booking (a newer request is new work).
-The lead's `first_contact_channel` is `booking`, so the shared
-customer-originated-contact allowlist (`collections/consent-provenance.js`)
-counts it as prospect-initiated contact; the explicit-lead
-conversion claims the lead's open status AND the identity it was read with
-(customer link, phone, email, estimate link), so a lead staff re-assigned or
-re-contacted in between is never credited to this booking. A booking that
-committed while a submit was still in flight (its own conversion ran before the
-lead was visible) is reconciled by the submit after its commit through the same
-conversion, and then rings no bell. A repeat submit inside 24h merges only that
+public lead. A booking NEVER closes a preferred-time request (owner ruling
+2026-09-30): a completed self-booking (`createSelfBooking`, every service type,
+on both the first commit and the `txResult.existing` replay; a free re-service
+callback visit is skipped) never marks the lead won and never touches its funnel
+row — the booking's own attribution runs exactly as for any other booking.
+Instead `noteBookingOnPreferredLeads` writes ONE system note on each of the
+booked customer's open preferred-time leads (phone match) whose
+`last_requested_at` is at or before the booking (60 s of clock slack) — "Customer
+booked <service> for <date> (visit <id>) on /book — close this request if
+nothing else is needed" — deduped per (lead, visit) through
+`lead_activities.metadata`, so a replay never stacks notes; a newer request is
+new work and is not noted. Staff close the lead. The lead's `first_contact_channel`
+is `booking`, so the shared customer-originated-contact allowlist
+(`collections/consent-provenance.js`) counts it as prospect-initiated contact. A
+booking that committed while a submit was still in flight (its note ran before
+the lead was visible) is reconciled by the submit after its commit: the lead gets
+the same note and NO `new_lead` bell rings; with no live booking since the
+request began the bell rings as usual. A repeat submit inside 24h merges only that
 request's own fields into `extracted_data`; the lead's first-touch UTM /
 referrer / landing URL are written once at creation and kept. The service line
 `address_line2` (apartment unit) is kept inline with the street line and in
