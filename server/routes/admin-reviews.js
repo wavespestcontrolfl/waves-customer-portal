@@ -13,6 +13,7 @@ const { runExclusive } = require('../utils/cron-lock');
 const OUTREACH = require('../services/review-outreach-templates');
 const { isEnabled } = require('../config/feature-gates');
 const { toE164 } = require('../utils/phone');
+const { REVIEW_LINK_CLICKED_REASON } = require('../services/review-click-guard');
 
 const { DRAFT_REPLY_PREFIX, isDraftReply, stripDraftPrefix, whereNeedsRealReply, whereHasRealReply } = require('../services/review-reply/draft-prefix');
 const ReplyPublisher = require('../services/review-reply/publisher');
@@ -918,7 +919,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
         });
       case 'blocked':
         return res.status(result.httpStatus || 409).json({
-          error: (result.reason === 'review_link_clicked' && require('../services/review-click-guard').REVIEW_LINK_CLICKED_REASON) || result.reason || `Review request was not sent (${result.code || 'blocked'}). Check the customer's messaging consent / suppression.`,
+          error: (result.reason === 'review_link_clicked' && REVIEW_LINK_CLICKED_REASON) || result.reason || `Review request was not sent (${result.code || 'blocked'}). Check the customer's messaging consent / suppression.`,
         });
       case 'error':
         // NON-durable failure (lock never ran, or no scheduled_for was
