@@ -45,9 +45,14 @@ const gmailId = () => `qa-${randomUUID()}`;
 const insertEmail = (overrides = {}) => mockPg('emails').insert({
   id: randomUUID(), gmail_id: gmailId(), gmail_thread_id: overrides.gmail_thread_id || randomUUID(),
   from_address: 'customer@example.invalid', to_address: 'contact@wavespestcontrol.com',
+  // Recipients captured ('' = no Cc/Bcc header); NULL means never captured.
+  cc_address: '', bcc_address: '',
   // 20 minutes old by default: staff sends are read only after intake's
   // 15-minute link grace period.
   subject: 'Estimate', body_text: 'Please send the estimate', received_at: new Date(Date.now() - 20 * 60000),
+  // Stored 20 minutes ago too: intake and subject history read a row only
+  // once its thread has settled (15 minutes after it was stored).
+  created_at: new Date(Date.now() - 20 * 60000),
   label_ids: JSON.stringify(['INBOX']), ...overrides,
 }).returning('*').then(([row]) => row);
 
@@ -561,6 +566,75 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(fulfillment).toMatchObject({ verdict: 'fulfilled', record_type: 'email_reply', record_id: reply.id, basis: 'person_reply' });
   });
 
+  test('a reply with no body words counts only when its subject is new text, never the thread subject behind Re:', async () => {
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const sourceAt = new Date(Date.now() - 10 * 60000);
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', subject: 'Please reschedule Friday',
+      received_at: new Date(sourceAt.getTime() - 60000) });
+    const sent = (subject, minutes) => insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null, subject, body_text: '',
+      label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + minutes * 60000) });
+    const echo = await sent('Re: Please reschedule Friday', 1);
+    const answer = await sent('Re: Booked you for Monday 9am', 2);
+    const message = { id: randomUUID(), customer_id: customerId, direction: 'inbound', created_at: sourceAt,
+      from_phone: '+12025550101', to_phone: '+12025550101', any_customer_phone: true };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, { kind: 'other', party: 'waves', sms_context: { basis: 'request' } }, message, new Date());
+    const replies = evidence.records.filter((r) => r.type === 'email_reply');
+    expect(replies.map((r) => r.id)).toEqual([answer.id]);
+    expect(replies[0].text).toBe('Subject: Booked you for Monday 9am');
+    expect(replies.some((r) => r.id === echo.id)).toBe(false);
+  });
+
+  test('a reply with body words still carries a new subject as evidence', async () => {
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const sourceAt = new Date(Date.now() - 10 * 60000);
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', subject: 'Please reschedule Friday',
+      received_at: new Date(sourceAt.getTime() - 60000) });
+    const answer = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null, subject: 'Re: Booked you for Monday 9am',
+      body_text: 'Thanks', label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + 60000) });
+    const message = { id: randomUUID(), customer_id: customerId, direction: 'inbound', created_at: sourceAt,
+      from_phone: '+12025550101', to_phone: '+12025550101', any_customer_phone: true };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, { kind: 'other', party: 'waves', sms_context: { basis: 'request' } }, message, new Date());
+    const reply = evidence.records.find((r) => r.type === 'email_reply' && r.id === answer.id);
+    expect(reply.text).toBe('Subject: Booked you for Monday 9am\nThanks');
+  });
+
+  test('a subject first carried deep in a long thread is still no new text when a later reply repeats it', async () => {
+    const { ownSubjectsInThreads } = require('../services/email/email-strip');
+    const threadId = randomUUID();
+    const start = Date.now() - 3 * 3600000;
+    for (let i = 0; i < 60; i += 1) {
+      await insertEmail({ gmail_thread_id: threadId, subject: 'Re: Estimate', received_at: new Date(start + i * 60000) });
+    }
+    await insertEmail({ gmail_thread_id: threadId, subject: 'Booked you for Monday 9am', received_at: new Date(start + 61 * 60000) });
+    const echo = await insertEmail({ gmail_thread_id: threadId, subject: 'Re: Booked you for Monday 9am', received_at: new Date(start + 62 * 60000) });
+    expect((await ownSubjectsInThreads(mockPg, [echo])).get(echo.id)).toBe('');
+  });
+
+  test('a row stored under 15 minutes ago waits for its thread to settle: not read by intake, its subject not new yet', async () => {
+    const { ownSubjectsInThreads } = require('../services/email/email-strip');
+    const fresh = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Please reschedule Friday', created_at: new Date() });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 0 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect((await ownSubjectsInThreads(mockPg, [fresh])).get(fresh.id)).toBe('');
+    await mockPg('emails').where({ id: fresh.id }).update({ created_at: new Date(Date.now() - 20 * 60000) });
+    expect((await ownSubjectsInThreads(mockPg, [fresh])).get(fresh.id)).toBe('Please reschedule Friday');
+  });
+
+  test('an unsent draft is no earlier message: the sent subject stays new', async () => {
+    const { ownSubjectsInThreads } = require('../services/email/email-strip');
+    const threadId = randomUUID();
+    const start = Date.now() - 3 * 3600000;
+    await insertEmail({ gmail_thread_id: threadId, subject: 'Booked you for Friday', label_ids: JSON.stringify(['DRAFT']),
+      received_at: new Date(start) });
+    const sent = await insertEmail({ gmail_thread_id: threadId, subject: 'Booked you for Friday', label_ids: JSON.stringify(['SENT']),
+      received_at: new Date(start + 60000) });
+    expect((await ownSubjectsInThreads(mockPg, [sent])).get(sent.id)).toBe('Booked you for Friday');
+  });
+
   test('with the email gate off, a staff Gmail reply is no evidence for a live SMS ask (dark launch)', async () => {
     const sourceAt = new Date();
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', received_at: new Date(sourceAt.getTime() - 60000) });
@@ -665,8 +739,16 @@ postgres('Email commitments on PostgreSQL', () => {
 
   test('resolveEmailCustomerLink: a two-recipient to_address resolves when exactly one is an active customer', async () => {
     const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
-    const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'someone.else@nowhere.invalid, customer@example.invalid' };
+    const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'someone.else@nowhere.invalid, customer@example.invalid', cc_address: '', bcc_address: '' };
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+  });
+
+  test('resolveEmailCustomerLink: an unthreaded send naming the customer only in Cc or Bcc still resolves (Codex #5422 r6)', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const base = { id: randomUUID(), gmail_thread_id: null, to_address: null, cc_address: '', bcc_address: '' };
+    await expect(resolveEmailCustomerLink(mockPg, { ...base, bcc_address: 'customer@example.invalid' })).resolves.toBe(customerId);
+    await expect(resolveEmailCustomerLink(mockPg, { ...base, to_address: '', cc_address: 'Synthetic <customer@example.invalid>' })).resolves.toBe(customerId);
+    await expect(resolveEmailCustomerLink(mockPg, base)).resolves.toBeNull();
   });
 
   test('resolveEmailCustomerLink: two recipients matching two different customers resolves to nobody (never guesses)', async () => {
@@ -674,14 +756,14 @@ postgres('Email commitments on PostgreSQL', () => {
     const otherId = randomUUID();
     await mockPg('customers').insert({ id: otherId, first_name: 'Other', last_name: 'Fixture',
       phone: '+12025559999', email: 'other.customer@example.invalid', address_line1: '2 Fixture Way', city: 'Sarasota', zip: '34236' });
-    const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'other.customer@example.invalid, customer@example.invalid' };
+    const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'other.customer@example.invalid, customer@example.invalid', cc_address: '', bcc_address: '' };
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
   });
 
   test('resolveEmailCustomerLink: a send in the customer\'s thread that never went to the customer (internal forward) resolves to nobody', async () => {
     const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
     const inbound = await insertEmail({ customer_id: customerId });
-    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'Office <office@wavespestcontrol.com>' };
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'Office <office@wavespestcontrol.com>', cc_address: '', bcc_address: '' };
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
     await expect(resolveEmailCustomerLink(mockPg, { ...row, to_address: null })).resolves.toBeNull();
   });
@@ -691,15 +773,130 @@ postgres('Email commitments on PostgreSQL', () => {
     await mockPg('customers').insert({ id: randomUUID(), first_name: 'Third', last_name: 'Fixture',
       phone: '+12025559998', email: 'third.customer@example.invalid', address_line1: '3 Fixture Way', city: 'Sarasota', zip: '34236' });
     const inbound = await insertEmail({ customer_id: customerId });
-    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid, third.customer@example.invalid' };
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid, third.customer@example.invalid', cc_address: '', bcc_address: '' };
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
   });
 
   test('resolveEmailCustomerLink: a thread reply to the address the customer wrote in from resolves to that customer', async () => {
     const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
     const inbound = await insertEmail({ customer_id: customerId, from_address: 'Dryrun Fixture <work.inbox@example.invalid>' });
-    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'work.inbox@example.invalid' };
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'work.inbox@example.invalid', cc_address: '', bcc_address: '' };
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+  });
+
+  test('subject-only ask: an empty body with an actionable subject is eligible, and the quote grounds in the subject', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Please reschedule Friday' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',
+      description: 'reschedule Friday', quote: 'Please reschedule Friday', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 1, failed: 0 });
+    const row = await mockPg('call_commitments').first();
+    expect(row).toMatchObject({ email_id: email.id, party: 'waves', channel: 'email', description: 'reschedule Friday' });
+    // The subject rode inside the JSON payload, never the prompt text.
+    const prompt = dispatchWithFallback.mock.calls[0][1].text;
+    expect(prompt).toContain('"subject":"Please reschedule Friday"');
+    expect(prompt.slice(0, prompt.indexOf('Return only JSON'))).not.toContain('Please reschedule Friday');
+  });
+
+  test('subject-only ask: a later reply repeating the subject behind Re: neither blanks the first email\'s subject nor re-asks', async () => {
+    const at = Date.now() - 30 * 60000;
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Please reschedule Friday', received_at: new Date(at) });
+    const echo = await insertEmail({ gmail_thread_id: email.gmail_thread_id, customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Re: Please reschedule Friday', received_at: new Date(at + 5 * 60000) });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',
+      description: 'reschedule Friday', quote: 'Please reschedule Friday', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"subject":"Please reschedule Friday"');
+    const rows = await mockPg('call_commitments').select('email_id');
+    expect(rows.map((r) => r.email_id)).toEqual([email.id]);
+    expect(rows.some((r) => r.email_id === echo.id)).toBe(false);
+  });
+
+  test('subject-only ask: a quote grounded in neither the subject nor the body is still dropped', async () => {
+    await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: '', subject: 'Please reschedule Friday' });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',
+      description: 'send the estimate', quote: 'Please send the estimate', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(await mockPg('call_commitments').count('* as n').first()).toMatchObject({ n: '0' });
+  });
+
+  test('the extraction receipt hash covers subject and body: same body, different subject = a different source', async () => {
+    const { VERSION } = require('../services/email-operational-actions');
+    const { hashExtractionSource } = require('../services/data-hygiene/source-extraction-store');
+    const one = await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: 'Thanks', subject: 'Please reschedule Friday' });
+    const two = await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: 'Thanks', subject: 'Please reschedule Monday' });
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { obligations: [], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    const hashOf = (id) => mockPg('data_hygiene_source_extractions').where({ source_id: id, extractor_version: VERSION }).first('source_hash').then((r) => r.source_hash);
+    const [h1, h2] = [await hashOf(one.id), await hashOf(two.id)];
+    expect(h1).not.toBe(h2);
+    expect(h1).not.toBe(hashExtractionSource('Thanks')); // not the body alone
+    dispatchWithFallback.mockReset();
+  });
+
+  test('an email with neither a body nor a subject is not eligible', async () => {
+    await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: '', subject: '' });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ processed: 0 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
+
+  test('cc/bcc: a staff send with customer A in To and customer B in Cc resolves to nobody', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    await mockPg('customers').insert({ id: randomUUID(), first_name: 'Cc', last_name: 'Fixture',
+      phone: '+12025559997', email: 'cc.customer@example.invalid', address_line1: '4 Fixture Way', city: 'Sarasota', zip: '34236' });
+    const inbound = await insertEmail({ customer_id: customerId });
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      cc_address: 'cc.customer@example.invalid', bcc_address: '' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
+    // Same without a thread partner (direct recipient branch).
+    await expect(resolveEmailCustomerLink(mockPg, { ...row, gmail_thread_id: randomUUID() })).resolves.toBeNull();
+  });
+
+  test('cc/bcc: another customer in Bcc resolves to nobody; a non-customer Cc/Bcc still resolves', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    await mockPg('customers').insert({ id: randomUUID(), first_name: 'Bcc', last_name: 'Fixture',
+      phone: '+12025559996', email: 'bcc.customer@example.invalid', address_line1: '5 Fixture Way', city: 'Sarasota', zip: '34236' });
+    const inbound = await insertEmail({ customer_id: customerId });
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      cc_address: '', bcc_address: 'Bcc Fixture <bcc.customer@example.invalid>' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
+    await expect(resolveEmailCustomerLink(mockPg, { ...row, bcc_address: 'office@wavespestcontrol.com',
+      cc_address: 'Office <office2@wavespestcontrol.com>' })).resolves.toBe(customerId);
+  });
+
+  test('cc/bcc: the customer only in Cc still counts as reached (the recipient set is To+Cc+Bcc)', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const row = { id: randomUUID(), gmail_thread_id: randomUUID(), to_address: 'someone.else@nowhere.invalid',
+      cc_address: 'customer@example.invalid', bcc_address: '' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+  });
+
+  test('cc/bcc: a SENT row whose cc or bcc was never captured (NULL) never links to a customer', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const inbound = await insertEmail({ customer_id: customerId });
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid' };
+    await expect(resolveEmailCustomerLink(mockPg, { ...row, cc_address: null, bcc_address: '' })).resolves.toBeNull();
+    await expect(resolveEmailCustomerLink(mockPg, { ...row, cc_address: '', bcc_address: null })).resolves.toBeNull();
+    await expect(resolveEmailCustomerLink(mockPg, { ...row, cc_address: '', bcc_address: '' })).resolves.toBe(customerId);
+  });
+
+  test('cc/bcc: intake marks a NULL-recipient SENT row seen with no commitment, and links a captured one', async () => {
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: '', subject: '' });
+    const sent = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      cc_address: null, bcc_address: null, from_address: 'contact@wavespestcontrol.com', body_text: "I'll send the estimate tomorrow",
+      customer_id: null, classification: null, label_ids: JSON.stringify(['SENT']) });
+    const result = await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(result).toMatchObject({ failed: 0 });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    expect(await mockPg('call_commitments').count('* as n').first()).toMatchObject({ n: '0' });
+    expect((await mockPg('emails').where({ id: sent.id }).first()).operational_analysis).toMatchObject({ skipped: 'no_customer_link' });
   });
 
   test('D1 reverse: an SMS reply closes an email-sourced general ask (through refreshEmailCommitments end-to-end)', async () => {

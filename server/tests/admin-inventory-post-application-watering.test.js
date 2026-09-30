@@ -15,6 +15,7 @@ jest.mock('../models/db', () => {
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => 'audit-1') }));
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, _res, next) => { req.technician = { id: 'admin-1', name: 'Owner' }; req.technicianId = 'admin-1'; next(); },
   requireTechOrAdmin: (_req, _res, next) => next(),
@@ -24,6 +25,7 @@ jest.mock('../middleware/admin-auth', () => ({
 const express = require('express');
 const db = require('../models/db');
 const inventoryRouter = require('../routes/admin-inventory');
+const { recordAuditEvent } = require('../services/audit-log');
 
 const PRODUCT = '11111111-1111-4111-8111-111111111111';
 
@@ -48,12 +50,15 @@ async function withServer(fn) {
 }
 
 // Returns the update bodies written to products_catalog.
-function wire() {
+function wire(existingRule = undefined) {
   const updates = [];
   const resolve = (q) => {
     const update = q._calls.find(([name]) => name === 'update');
     if (update) { updates.push(update[1][0]); return { id: PRODUCT, name: 'Celsius WG', category: 'herbicide', post_application_watering: null }; }
-    return { id: PRODUCT, name: 'Celsius WG', category: 'herbicide', epa_reg_number: '432-1507', active_ingredient: 'x' };
+    return {
+      id: PRODUCT, name: 'Celsius WG', category: 'herbicide', epa_reg_number: '432-1507', active_ingredient: 'x',
+      ...(existingRule !== undefined ? { post_application_watering: existingRule } : {}),
+    };
   };
   const trx = jest.fn((table) => makeChain(table, resolve));
   trx.raw = jest.fn(async () => ({}));
@@ -133,5 +138,111 @@ describe.each([
       expect(res.status).toBe(200);
     });
     expect(Object.keys(updates[0])).not.toContain('post_application_watering');
+  });
+});
+
+describe('audit trail (local audit P1 on #5393)', () => {
+  beforeEach(() => recordAuditEvent.mockClear());
+
+  test.each([
+    ['PATCH', `/lawn-outline-facts/${PRODUCT}`],
+    ['PUT', `/${PRODUCT}`],
+  ])('%s records an audit_log entry with before/after when the rule changes', async (method, path) => {
+    wire();
+    await withServer(async (base) => {
+      const res = await send(base, method, path, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
+      expect(res.status).toBe(200);
+    });
+    expect(recordAuditEvent).toHaveBeenCalledTimes(1);
+    const call = recordAuditEvent.mock.calls[0][0];
+    expect(call).toMatchObject({
+      actor_type: 'technician', actor_id: 'admin-1',
+      action: 'products_catalog.post_application_watering.updated',
+      resource_type: 'products_catalog', resource_id: PRODUCT,
+    });
+    expect(call.metadata.before).toBeNull();
+    expect(call.metadata.after).toMatchObject({ mode: 'hold', hold_hours: 12, source: 'owner', verified_by: 'Owner' });
+    // Both paths audit inside the locked transaction: critical, so the audit
+    // and the catalog save commit or roll back together.
+    expect(call.critical).toBe(true);
+    expect(call.trx).toBeTruthy();
+  });
+
+  test.each([
+    ['PUT', `/${PRODUCT}`],
+    ['PATCH', `/lawn-outline-facts/${PRODUCT}`],
+  ])('%s: a failed audit insert fails the save instead of being swallowed inside the transaction', async (method, path) => {
+    wire();
+    recordAuditEvent.mockImplementationOnce(async () => { throw new Error('audit down'); });
+    await withServer(async (base) => {
+      const res = await send(base, method, path, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
+      expect(res.status).toBe(500);
+    });
+  });
+
+  test('PATCH reads the product row FOR UPDATE inside the transaction, ahead of the update', async () => {
+    const order = [];
+    const updates = wire();
+    const trxImpl = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation(async (fn) => trxImpl(async (trx) => {
+      const wrapped = jest.fn((table) => {
+        const q = trx(table);
+        const lock = q.forUpdate;
+        q.forUpdate = jest.fn((...a) => { order.push('forUpdate'); return lock(...a); });
+        const upd = q.update;
+        q.update = jest.fn((...a) => { order.push('update'); return upd(...a); });
+        return q;
+      });
+      Object.assign(wrapped, trx);
+      return fn(wrapped);
+    }));
+    await withServer(async (base) => {
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
+      expect(res.status).toBe(200);
+    });
+    expect(order).toEqual(['forUpdate', 'update']);
+    expect(updates).toHaveLength(1);
+  });
+
+  test('PATCH: 404 for a missing product (no write), 422 readiness refusal unchanged, both inside the lock', async () => {
+    const updates = [];
+    const resolve = (q) => {
+      if (q._calls.find(([name]) => name === 'update')) { updates.push(1); return {}; }
+      return q._missing ? null : { id: PRODUCT, name: 'Celsius WG', category: 'herbicide' };
+    };
+    const trx = jest.fn((table) => { const q = makeChain(table, resolve); q._missing = trx.missing; return q; });
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    trx.missing = true;
+    await withServer(async (base) => {
+      expect((await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { publicSummary: 'x' })).status).toBe(404);
+      trx.missing = false;
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { approve: true });
+      expect(res.status).toBe(422);
+    });
+    expect(updates).toEqual([]);
+  });
+
+  test('resubmitting the same rule in JSONB key order records nothing', async () => {
+    const rule = {
+      mode: 'hold', hold_hours: 12, source: 'label', label_note: null, verified_at: '2026-09-01T00:00:00.000Z', verified_by: 'Owner',
+    };
+    // Postgres hands JSONB back with its own key order.
+    const reordered = Object.fromEntries(Object.entries(rule).reverse());
+    wire(reordered);
+    await withServer(async (base) => {
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { postApplicationWatering: rule });
+      expect(res.status).toBe(200);
+    });
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('a save that does not mention the field records nothing', async () => {
+    wire();
+    await withServer(async (base) => {
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { irrigationNotes: 'x' });
+      expect(res.status).toBe(200);
+    });
+    expect(recordAuditEvent).not.toHaveBeenCalled();
   });
 });

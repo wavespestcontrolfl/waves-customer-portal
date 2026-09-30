@@ -119,8 +119,10 @@
  *
  *   GATE_LAWN_PROPERTY_HISTORY=true (property-scoped confirmed lawn history, one installed row per visit, report-date/reset windows and confirm-time baseline; dark in dev AND prod; consumers read at call time)
  *   GATE_LAWN_COMPLETION_DEFAULTS=true (appointment-plan completion defaults; requires GATE_LAWN_PROPERTY_HISTORY; opt-in in every environment)
+ *   GATE_PROPERTY_SERVICE_AREAS=true (reviewed property areas for beds, lawn and mosquito; draft visit coverage and product-area prefills; opt-in in every environment)
  *   GATE_LAWN_ACTUALS_LEDGER=true (lawn actuals ledger for EVERY lawn visit — one-time, commercial and incomplete-with-products included, no protocol attribution invented; off = WaveGuard-only writer, byte-identical; read at call time)
  *   GATE_LAWN_DELIVERY_RECOVERY=true (resume a confirmed lawn visit's interrupted customer delivery; FAILS CLOSED everywhere — off = the sweep shadow-logs candidates and sends nothing)
+ *   GATE_LAWN_WATERING_RULE=true (lawn report watering instruction: frozen per-product watering rules drive the aftercare writer, the top-of-report banner payload and the weekly-plan "not before" overlay; sets evidenceSource product_instruction so the existing verdict table finally resolves hold / credit; ships DARK, read at call time via lawnWateringRuleLive(); off = byte-identical report payload)
  *   SELF_SERVE_NOTICE_HOURS=24 (not a gate — the self-serve BOOK notice window, server/services/scheduling/self-serve-notice.js: no SELF-SERVE booking of a slot starting within this many hours of now, on the estimate picker + reserve, /book, public reschedule's DESTINATION slot, public re-service and the assistant's booking tools; staff/admin/voice agent unaffected; cancels keep the fee-window policy; read at call time, default 24)
  *   SELF_SERVE_MOVE_NOTICE_HOURS=24 (not a gate — the self-serve MOVE notice window, same module, split out 2026-09-28 so a book-only env change never touches it, no fallback to SELF_SERVE_NOTICE_HOURS: no SELF-SERVE reschedule of a visit that itself currently starts within this many hours of now, on public reschedule (reschedule-public.js) and the promised-reschedule-link worker (reschedule-link-promises.js); the DESTINATION slot of a move still uses the book window above; read at call time, default 24)
  *   SELF_SERVE_ARRIVAL_GRACE_MINUTES=0 (not a gate — the self-serve arrival grace, server/services/scheduling/policy.js#selfServeArrivalGraceMinutes, owner ruling 2026-09-28 "I'd rather be more lenient than strict": a self-serve (customer-picked) time is an ARRIVAL window, kept when the technician can arrive within this many minutes of the window's start. CAPACITY MODE ONLY (GATE_SCHEDULING_CAPACITY) — reads 0 with it off — and never for a same-day pick (today's route is already live). Unset/blank/garbage/negative all read as 0 (today's byte-identical strict behavior); clamped to 120, the existing arrival-promise ceiling (ARRIVAL_WINDOW_MINUTES, utils/sms-time-format.js) — grace can only narrow that promise, never widen it. **ESTIMATE PICKER ONLY** (Codex r1 P1, #5314 — until GATE_BOOK_ARRIVAL_GRACE, the next line, gave /book its own opt-in): /book and public reschedule both run a STRICT pre-verify travel probe ahead of their capacity commit, so a grace-kept slot there would 409 SLOT_TAKEN before ever reaching the capacity check — `estimate-slot-availability.js` is the ONLY caller that opts find-time.js's `packCapacityEnds` into grace (`arrivalGrace: true`, checked in ADDITION to the env value — the flag is the real gate; the env alone changes nothing for /book, voice, re-service, inspection, or any reschedule surface, even though several of them share the SAME `packEnds:true` admission). Offer side also checks EVERY live hold on the tech/date (Codex r2 P1), not just the single nearest anchor `capacityGapNeighbours` picks per side — a hold's window is a promise, not a fixed slot, so an earlier-starting hold can still end later than a later-starting committed stop chosen instead, and grace must never overlook it. **A hold is certified ONCE, at reserve** (Codex r2 P0): `slot-reservation.js`'s `reserveSlot` is the ONLY `verifyArrivalCapacity` caller that passes `arrivalGraceMinutes` (its own commit path has no pre-verify probe under capacity), and it reads the EXACT grace that justified the offer — carried as its own HMAC-bound + cleartext field on the signed estimate slot offer (`utils/slot-offer-token.js`) — never a fresh live env read. **The wire format is opt-in PER OFFER, not a blanket bump** (Codex round 3: the first cut bumped the canonical string/slotId shape for every offer unconditionally, breaking every in-flight estimate offer at deploy even with grace dark — "default 0 = byte-identical" has to cover the wire format too): an ungraced offer (grace 0 or omitted — every `/book` offer, every estimate offer with capacity/grace off or the date excluded) signs/appends the EXACT `<base>.<exp>.<sig>` shape origin/main always produced, verifying under both old and new code across a deploy; only a genuinely graced offer takes the new `<base>.<exp>.<arrivalGrace>.<sig>` shape (and only such an offer in flight at the exact deploy instant fails once, same accepted trade as the file's original v1→v2 bump). `signCustomerFacingSlots` signs a non-zero grace only for a slot marked `routeMode: 'arrival_windows'` (find-time's own stamp, proof it passed the grace-aware filter at all — anything else signs 0, so a future non-route-mode generator's slot can never inherit an unchecked leniency). `commitReservation` NEVER applies a grace bound at all (keeps only the pre-existing 120-minute promise, byte-identical to before this lane): a hold reserved at grace 90 with an 80-minute delay is accepted regardless of what this env reads by accept time, and a grace change between offer and reserve is likewise inert for that one signed offer (fixed at mint time; only a fresh availability fetch picks up a changed value). `extendReservation` never re-verifies capacity fitness at all under capacity mode (a pre-existing, unrelated gap — a live hold's certified route order is trusted as-is; re-running the whole-route simulation on every extend was judged not cheap enough to add here), so a hold's grace certification is fixed at reserve time and is not re-checked if grace or the route changes before an extend.)
@@ -175,6 +177,7 @@ const gates = {
   appPropertyTexts: gateEnvValue('GATE_APP_PROPERTY_TEXTS'),
   // Registered for startup logging; the planner decides both gates per operation.
   lawnCompletionDefaults: gateEnvValue('GATE_LAWN_COMPLETION_DEFAULTS'),
+  propertyServiceAreas: gateEnvValue('GATE_PROPERTY_SERVICE_AREAS'),
   // Registered for startup logging; the completion writer reads it at call time (strict 'true').
   lawnActualsLedger: process.env.GATE_LAWN_ACTUALS_LEDGER === 'true',
   // Lawn delivery recovery sweep. Resuming a confirmed visit's delivery can put
@@ -3546,6 +3549,15 @@ const gates = {
   // GATE_LAWN_ASSESSMENT_REFEREE at call time via lawnAssessmentRefereeLive().
   lawnAssessmentReferee: process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true',
 
+  // Billing email details (owner-approved 2026-09-29 audit of email_messages):
+  // the invoice / receipt / payment-failed / estimate follow-up emails carry
+  // the service, service date, payment method, full street address, card
+  // label, attempt date and the retry date the ladder armed. Ships DARK:
+  // off unless exactly 'true'. This entry is for logGateStatus only: every
+  // sender reads GATE_BILLING_EMAIL_DETAILS at call time via
+  // billingEmailDetailsLive().
+  billingEmailDetails: process.env.GATE_BILLING_EMAIL_DETAILS === 'true',
+
   // Call-address on-file assist (owner-approved review items 3 and 4,
   // 2026-09-30): the caller's on-file address rescues a spoken one when the
   // HOUSE NUMBER matches — the on-file street joins street recovery as an
@@ -3557,6 +3569,13 @@ const gates = {
   // reads GATE_CALL_ADDRESS_ONFILE_ASSIST at call time via
   // callAddressOnFileAssistLive().
   callAddressOnFileAssist: process.env.GATE_CALL_ADDRESS_ONFILE_ASSIST === 'true',
+
+  // Lawn report watering instruction (lawn report rebuild P2): the frozen
+  // per-product watering rules drive the aftercare writer, the banner payload
+  // and the weekly-plan not-before overlay. Ships DARK. This entry is for
+  // logGateStatus only: report-data.js reads GATE_LAWN_WATERING_RULE at call
+  // time via lawnWateringRuleLive().
+  lawnWateringRule: gateEnvValue('GATE_LAWN_WATERING_RULE'),
 
   // Intelligence Bar cancel_appointment card-confirm (ib-cancel-pinned-effects
   // lane, owner ruling 2026-09-28: the bar cancels BARE visits only — see
@@ -3949,6 +3968,15 @@ function bookPreferredTimeLive() {
   return process.env.GATE_BOOK_PREFERRED_TIME === 'true';
 }
 
+// GATE_LAWN_WATERING_RULE read at CALL time (same 1/true/on convention as
+// gateEnvValue). The one canonical reader for the lawn report's watering
+// instruction: report-data.js builds it from the frozen product rules and
+// hands it to buildLawnReportV2. Off = the report payload is byte-identical
+// to before (no banner, no product_instruction aftercare, no afterHold plan).
+function lawnWateringRuleLive() {
+  return gateEnvValue('GATE_LAWN_WATERING_RULE');
+}
+
 // GATE_CALL_ADDRESS_ONFILE_ASSIST read at CALL time — strict `=== 'true'`, off
 // by default. The one canonical reader for
 // server/services/address-validation/onfile-assist.js. Off, the call pipeline
@@ -3967,6 +3995,18 @@ function callAddressOnFileAssistLive() {
 // Gemini -> Sol fallback chain: no extra call, same return shape.
 function lawnAssessmentRefereeLive() {
   return process.env.GATE_LAWN_ASSESSMENT_REFEREE === 'true';
+}
+
+// GATE_BILLING_EMAIL_DETAILS read at CALL time — ships DARK, off unless exactly
+// 'true' (owner-approved 2026-09-29). ONE gate covers every change of the
+// billing-email-details lane: the extra detail rows on invoice.sent /
+// invoice.receipt / billing.notice / billing.receipt_notice, the card label,
+// attempt date and armed retry date on payment.failed, the Property row on the
+// estimate follow-ups. The template
+// blocks are variable-driven, so with the gate off no sender fills the new
+// variables and every email renders exactly as before.
+function billingEmailDetailsLive() {
+  return process.env.GATE_BILLING_EMAIL_DETAILS === 'true';
 }
 
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
@@ -4247,6 +4287,7 @@ module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
+module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
 module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
 module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
 module.exports.dunningCustomerScheduleLive = dunningCustomerScheduleLive;
@@ -4255,6 +4296,7 @@ module.exports.dunningCustomerScheduleAllowlistStatus = dunningCustomerScheduleA
 module.exports.zoneRouteDaysLive = zoneRouteDaysLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
+module.exports.billingEmailDetailsLive = billingEmailDetailsLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
 module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
 // gates 1775330914

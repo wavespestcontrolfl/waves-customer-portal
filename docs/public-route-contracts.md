@@ -1584,6 +1584,51 @@ evidence provenance is normalized to review-required: its recorded note remains
 visible beside confirmation guidance, while the former inferred “normal watering
 within 24 hours” instruction is removed. Historical neutral fallbacks retain
 their existing shape and wording.
+`GATE_LAWN_WATERING_RULE` (dark; gate off leaves this payload unchanged, key for
+key) expands the lawn payload with the visit's one watering instruction, built
+from the per-product rules frozen with the visit, the completion time and the
+customer's own irrigation entries (withheld after a move). When it resolves to
+hold, water-in or hold-then-water-in: `reportV2.banner`
+`{ state, lines, holdUntil, waterInBy, expiresAt, ruleSource }` (`state` is
+`hold`, `water_in`, `hold_then_water_in` or `none`; `lines` are at most three
+finished customer sentences with absolute Eastern clock times; `holdUntil`,
+`waterInBy` and `expiresAt` are ISO instants or `null`; an "until the treatment
+has dried" hold has no printed duration and `expiresAt: null` (dryness is a
+condition, so no instruction that waits for drying, including one followed by a
+water-in, ever ends by the clock; the plan-week scope bounds it), and an until-dry-only hold also has
+`holdUntil: null`; `expiresAt` is read only by the live banner, which shows an
+"ended" note past it; the key is absent when there is no claim).
+`reportV2.aftercare` is a record of the visit and never changes by the clock
+(owner ruling 2026-09-30): it gains `evidenceSource: 'product_instruction'`,
+`wateringHold` (hold states), `creditableWaterIn` (water-in only; a mixed visit
+is a hold), `holdTask` (the banner's first line verbatim, or its first two lines
+for hold-then-water-in), `waterInTask` (the banner's first line verbatim, for a
+water-in that earns no plan credit; it stays the customer's task in the hero,
+the follow-up card and the assistant within the visit's plan week), `ruleSource`,
+`holdUntil` and `waterInBy`; and
+`reportV2.water.weekPlan` / `waterContext.weekPlan` gains `afterHold`
+`{ title, detail }`, the week's plan with a "not before" sentence naming the hold's
+end time (the `{holdUntil}` placeholder is always filled or the key dropped; it
+never reaches the payload). Provenance: `ruleSource` is `label`, `owner` or
+`default`, the weakest source among the rules that drive the instruction; state
+`none` is asserted only when every applied product resolved to a rule and at
+least one is label- or owner-sourced; any applied product with no rule makes
+the whole visit no claim (no banner, no product_instruction aftercare, the
+existing fail-closed aftercare stays), whatever the other products say. The rule itself
+(`wateringRule` / `post_application_watering`) never appears on
+`applications[].product` or anywhere else in the public payload. The complete
+instruction is frozen at completion under `structured_notes.lawnWateringFreeze`
+(first writer wins, atomically) and later reads replay it, so an edit to the customer's
+sprinkler entries after the visit never changes the minutes or times an existing
+report showed; a record with no frozen instruction regenerates it. Only the treatment-specific sentences are frozen; the one
+sentence that depends on the weekly plan ("follow this week's plan", or "that
+counts toward this week's watering" for a water-in shallower than the plan's
+run) is composed on each render from the plan present on that render.
+`reportV2.aftercare.watering` carries every treatment sentence. A render whose
+watering inputs could not be read (customer preferences or the catalog) omits
+the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
+such a render is served but never cached, and a pinned delivery defers. The gate is
+part of the lawn PDF cache signature.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
 email outcome. Signed `plan` render pins bind to the stable publication time
@@ -1593,7 +1638,7 @@ The optional whole-report AI narrative runs
 only when `droughtSignal` is `true`; otherwise all deterministic report copy
 is retained before narrative cache/model access. Review-required or restricted
 aftercare also keeps the deterministic report before cache/model access. Lawn
-PDF render strategy `p6-aftercare-guards-20260927` regenerates older cached PDFs
+PDF render strategy `p7-watering-instruction-20260929` regenerates older cached PDFs
 to match these evidence rules),
 the legacy SPA `/recap/:token` link (token-shaped and rate-limited; redirects
 to `/report/:token#visit-recap`, where the report embeds the approved "Your
@@ -3885,8 +3930,12 @@ against the service area via `checkServiceArea`, applied uniformly to every
 resolved location including a customer's stored coordinates: county via
 `services/address-validation`'s `reverseGeocodeCounty` when a Google key is
 configured (a null county is NOT permission — 503
-`{ error: 'service_area_unavailable' }`, recoverable), else the box test
-`services/service-area.js` enforces explicitly. Out of area 422s
+`{ error: 'service_area_unavailable' }`, recoverable; a DeSoto county is out,
+DeSoto is not served per the 2026-09-30 owner ruling), else the explicit
+no-key fallback: outside the coarse box is out; inside the DeSoto exclusion
+rectangle (`DESOTO_EXCLUSION`) the point is out unless the address's own ZIP
+is a served ZIP (`isInServiceAreaBox(lat, lng, { zip })`, which holds no
+DeSoto ZIP); elsewhere in the box is in. Out of area 422s
 `{ error: 'out_of_area', county, waitlist_ticket }` and books nothing; an unresolvable
 address 422s `{ error: 'address_unresolved' }`, distinct and recoverable.
 The slot is re-validated against a fresh single-day

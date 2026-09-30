@@ -184,7 +184,9 @@ function signatureFor(entry) {
       hosts: c.hosts,
       outcome: c.outcome,
       recoveryNote: c.recovery_note,
-      isPestPossibility: false,
+      // A pest-section organism that carries a condition block (it cannot be
+      // confirmed from a photo, e.g. ground pearls) keeps the pest hard cap.
+      isPestPossibility: catalog.sectionOf(entry) === 'pest',
     };
   }
   const differentials = entry.look_alikes.map((la) => ({
@@ -573,6 +575,9 @@ function ownSignatureSettleIt(top) {
   if (sig.confirmableBy === 'photo') return { kind: 'photo', text: sig.signatureText };
   if (sig.confirmableBy === 'field_test' && sig.fieldTests[0]) return fieldTestBlock(sig.fieldTests[0]);
   if (sig.confirmableBy === 'lab') return { kind: 'technician', text: LAB_CONFIRM_TEXT };
+  // Technician-found but arborist-confirmed (Thielaviopsis, shot-hole borers):
+  // name the arborist, never a routine visit (Codex #5433 r3).
+  if (sig.confirmableBy === 'technician' && top.entry.service?.referral === 'arborist') return { kind: 'technician', text: REFERRAL_TEMPLATES.arborist };
   if (sig.confirmableBy === 'technician' || sig.confirmableBy === 'field_test') return { kind: 'technician', text: TECHNICIAN_CONFIRM_TEXT };
   return { kind: 'technician', text: TECHNICIAN_CONFIRM_TEXT };
 }
@@ -608,7 +613,12 @@ function settleItFor(possibilities, subject) {
 // ── next_step_hint (§6.6) ───────────────────────────────────────────────────
 
 function referralOutcomeCandidateAmong(possibilities) {
-  return possibilities.slice(0, 2).find((p) => p.entry.service?.referral && ['no_cure', 'regulated'].includes(p.sig.outcome)) || null;
+  return possibilities.slice(0, 2).find((p) => p.entry.service?.referral && (
+    ['no_cure', 'regulated'].includes(p.sig.outcome)
+    // A tree & shrub pest that needs a specialist (shot-hole borers → arborist)
+    // keeps its referral even though its outcome is manageable (Codex #5433 r2).
+    || (p.entry.action === 'specialist' && p.entry.service.line === 'tree_shrub')
+  )) || null;
 }
 /** Contract §6.6: referrals look at the top 2 only, but ANY displayed
  * possibility needing inspection routes `inspection` (herbicide injury
