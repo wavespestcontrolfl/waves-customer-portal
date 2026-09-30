@@ -447,7 +447,7 @@ async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
 // data, so they can never drift apart.
 async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null, serviceType = null, offersFromScheduler = false, scheduledServiceId = null } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { block: null, days: [] };
-  if (!schedulingIntent || !city) return { block: null, days: [] };
+  if (!schedulingIntent || (!city && !offersFromScheduler)) return { block: null, days: [] };
   // GATE_SMS_OFFERS_SCHEDULER: the identity step resolved to ONE upcoming
   // visit, so its times come from the reschedule link's own picker. Never
   // falls back to the zone finder below — a visit the picker refuses (or one
@@ -1260,7 +1260,7 @@ async function currentOfferedDays({ city, customerId, estimateId, serviceType, s
 // actually confirm that.
 async function openTimesStillOffered({ city, customerId, estimateId = null, serviceType = null, scheduledServiceId = null, quotedWindows } = {}) {
   if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
-  if (!city) return { ok: false, reason: 'open_times_recheck_no_city' };
+  if (!city && !scheduledServiceId) return { ok: false, reason: 'open_times_recheck_no_city' };
   let timer = null;
   const startedAt = Date.now();
   try {
@@ -1283,19 +1283,30 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
     // The picker excludes the visit itself, so a visit moved ONTO a quoted
     // slot since the draft reads as open there: refuse it — the customer
     // would be "offered" the time they already have.
+    // Same 2-hour overlap rule the draft applies: a quoted window that now
+    // overlaps the visit's current one (quoted 9-11, visit moved to 10-12)
+    // is refused too, not only an exact match.
     const cur = current.currentWindow;
-    if (cur && quotedWindows.some((w) => w.date === cur.date && w.window === cur.window)) {
-      return { ok: false, reason: 'open_times_visit_already_there' };
-    }
     const currentWindows = new Set();
+    const startMinutesOf = new Map();
     for (const d of current.days) {
       const date = current.labelOf(d);
       for (const s of (d.slots || [])) {
         const range = arrivalWindowRange(s.startTime24);
         const window = range ? formatSmsTimeRange(range) : null;
-        if (window) currentWindows.add(`${date}|${window}`);
+        if (!window) continue;
+        currentWindows.add(`${date}|${window}`);
+        const hhmm = String(s.startTime24 || '').slice(0, 5);
+        if (/^\d{2}:\d{2}$/.test(hhmm)) startMinutesOf.set(`${date}|${window}`, Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)));
       }
     }
+    const overlapsVisit = (w) => {
+      if (!cur || w.date !== cur.date) return false;
+      if (w.window === cur.window) return true;
+      const start = startMinutesOf.get(`${w.date}|${w.window}`);
+      return start != null && cur.startMinutes != null && Math.abs(start - cur.startMinutes) < 120;
+    };
+    if (quotedWindows.some(overlapsVisit)) return { ok: false, reason: 'open_times_visit_already_there' };
     const goneWindows = quotedWindows.filter((w) => !currentWindows.has(`${w.date}|${w.window}`));
     if (goneWindows.length) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows };
     return { ok: true };
@@ -2021,7 +2032,7 @@ async function generateDraftOnce(client, system, userContent, route = MODELS.ROU
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null }) {
+async function generateGroundedDraft({ client, context, inboundMessage, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, metricsLane, laneId: presetLaneId, city, estimateId = null, openEstimate = null, liveOpenTimes = false }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -2080,7 +2091,14 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // or with no city to look up (fetchOpenTimesData returns nothing then —
   // the backfill lane never passes one), drafting makes no catalog query and
   // no extra model call.
-  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && Boolean(city) && gateEnvValue('GATE_SMS_REAL_ANSWERS');
+  // A live draft (liveOpenTimes: only draftShadowReply passes it — replay and
+  // backfill callers pass no city on purpose) may also fetch with no customer
+  // city under GATE_SMS_OFFERS_SCHEDULER: the scheduler path locates the visit
+  // from the visit row itself; the zone finder still needs a city and returns
+  // nothing without one.
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes
+    && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
+    && gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const identity = willFetchOpenTimes && !estimateId
     ? await serviceIdentityFor(inboundMessage, context, { openEstimate })
     : { serviceType: liveServiceType(context), certain: true };
@@ -2406,7 +2424,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
       openTimesSnapshot, factsGeneratedAt,
     } = await generateGroundedDraft({
-      client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null,
+      client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
     });
     if (!parsed) {
       logger.warn(`[sms-shadow] unparseable draft response (customer ${customer?.id || 'unknown'}); dropping`);

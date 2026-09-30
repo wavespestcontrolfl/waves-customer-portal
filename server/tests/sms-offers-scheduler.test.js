@@ -594,3 +594,48 @@ describe("the visit's own current slot (picker excludes the visit itself, so it 
     expect(result).toEqual({ ok: false, reason: 'open_times_visit_already_there' });
   });
 });
+
+describe('customer with no city on file (Codex #5379 r2)', () => {
+  test('gate on + live draft: a visit-backed offer still runs through the picker, and its snapshot rechecks without a city', async () => {
+    process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
+    const drafter = freshDrafter();
+    const context = baseContext([upcomingEntry('Quarterly Pest', '2026-10-02', VISIT_ID)]);
+    const client = makeClient(replyWith('9:00 AM - 11:00 AM', 'Tuesday, September 29'));
+    const r = await drafter.generateGroundedDraft(argsFor(client, context, { city: null, liveOpenTimes: true }));
+    expect(picker.buildAvailabilityForService).toHaveBeenCalled();
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot.lookup).toEqual(expect.objectContaining({ city: null, scheduledServiceId: VISIT_ID }));
+    await expect(drafter.openTimesStillOffered({ ...r.openTimesSnapshot.lookup, quotedWindows: r.openTimesSnapshot.quotedWindows }))
+      .resolves.toEqual({ ok: true });
+  });
+
+  test('no liveOpenTimes (replay/backfill callers) or gate off: no city still means no fetch at all', async () => {
+    process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
+    let drafter = freshDrafter();
+    const context = baseContext([upcomingEntry('Quarterly Pest', '2026-10-02', VISIT_ID)]);
+    await drafter.generateGroundedDraft(argsFor(makeClient(plainReply()), context, { city: null }));
+    delete process.env.GATE_SMS_OFFERS_SCHEDULER;
+    drafter = freshDrafter();
+    await drafter.generateGroundedDraft(argsFor(makeClient(plainReply()), context, { city: null, liveOpenTimes: true }));
+    expect(picker.loadById).not.toHaveBeenCalled();
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(mockIdentity.prompts).toEqual([]);
+  });
+
+  test('a legacy snapshot with no city and no visit id still fails closed', async () => {
+    const drafter = freshDrafter();
+    await expect(drafter.openTimesStillOffered({ city: null, customerId: 'cust-9', quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] }))
+      .resolves.toEqual({ ok: false, reason: 'open_times_recheck_no_city' });
+  });
+});
+
+describe('send-time recheck: a quoted window that OVERLAPS the visit\'s new window (Codex #5379 r2)', () => {
+  test('quoted 9-11, visit since moved to 10-12 the same day → refused', async () => {
+    mockPicker({ loaded: { ...SVC, scheduled_date: '2026-09-29', window_start: '10:00:00' } });
+    const drafter = freshDrafter();
+    await expect(drafter.openTimesStillOffered({
+      city: 'Venice', customerId: 'cust-9', scheduledServiceId: VISIT_ID,
+      quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }],
+    })).resolves.toEqual({ ok: false, reason: 'open_times_visit_already_there' });
+  });
+});
