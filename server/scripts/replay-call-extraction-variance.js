@@ -1280,7 +1280,7 @@ async function replayCall(call, context) {
   const priorV2 = parseJson(call.ai_extraction_enriched, null);
   const priorV2Valid = priorV2 && helpers.isV2Extraction(priorV2);
   const priorV2Flat = priorV2Valid ? helpers.flatView(priorV2) : null;
-  const storedAvRaw = parseJson(call.ai_address_validation, null);
+  const storedAvRaw = require('../services/call-triage-flags').reconstructWaivedAddressValidation(parseJson(call.ai_address_validation, null));
   // Effective-verdict reconstruction (codex round-12 P2, mirroring the
   // readiness script): a recovered address routed on the recovery's ACCEPTING
   // verdict while the ORIGINAL unresolvable one was persisted — the

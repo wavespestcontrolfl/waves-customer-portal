@@ -9,7 +9,7 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const fs = require('fs');
 const CRP = require('../services/call-recording-processor');
-const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey } = require('../services/call-triage-flags');
+const { canAutoRoute, computeDeterministicTriageFlags, mergeTriageFlags, streetCompareKey, reconstructWaivedAddressValidation } = require('../services/call-triage-flags');
 
 function dbConn() {
   const url = process.env.DATABASE_PUBLIC_URL || process.env.DATABASE_URL;
@@ -108,7 +108,7 @@ async function main() {
       // is unchanged (codex round-11 P1); a changed street degrades to null
       // rather than riding on a stale validated_accept.
       const pj = (v) => { try { return typeof v === 'string' ? JSON.parse(v) : (v || null); } catch { return null; } };
-      const rawAv = pj(r.ai_address_validation);
+      const rawAv = reconstructWaivedAddressValidation(pj(r.ai_address_validation));
       const priorEnriched = pj(r.ai_extraction_enriched);
       const addrKey = (sa) => [streetCompareKey(sa?.street_line_1 || ''), String(sa?.street_line_2 || '').toLowerCase().trim(), String(sa?.city || '').toLowerCase().trim(), String(sa?.postal_code || '').trim()].join('|');
       // Recovery reconstruction (codex round-12 P2): a recovered call routed

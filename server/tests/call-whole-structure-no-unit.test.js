@@ -7,13 +7,14 @@
  */
 const {
   applyWholeStructureUnitWaiver,
+  reconstructWaivedAddressValidation,
   isWholeStructureService,
   WHOLE_STRUCTURE_SERVICE_KEYS,
   canAutoRoute,
   computeDeterministicTriageFlags,
   suppressAddressFlagsForAV,
 } = require('../services/call-triage-flags');
-const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+const { V2_DECISION_VERSION, V2_DECISION_VERSIONS, resolveDecisionVersion, buildRouteDecision } = require('../services/call-routing-gates');
 const { wholeStructureUnitWaiverForCall } = require('../services/call-recording-processor')._test;
 
 // Google's verdict for a duplex given without a unit: the building resolved,
@@ -75,10 +76,9 @@ describe('applyWholeStructureUnitWaiver (pure)', () => {
     for (const key of ['termite_spot_treatment', 'termite_bait', 'termite_monitoring', 'bed_bug_treatment', 'pest_control_one_time', 'termite_bond_5yr']) {
       expect(isWholeStructureService({ serviceKey: key })).toBe(false);
     }
-    // A resolved catalog row outranks the coarse label.
+    // A coarse label with no catalog row never qualifies (codex #5378 r1 P1).
     expect(isWholeStructureService({ serviceKey: 'bed_bug_treatment', coarseLabel: 'WDO Inspection' })).toBe(false);
-    expect(isWholeStructureService({ coarseLabel: 'WDO Inspection' })).toBe(true);
-    expect(isWholeStructureService({ coarseLabel: 'Termite Inspection' })).toBe(false);
+    expect(isWholeStructureService({ coarseLabel: 'WDO Inspection' })).toBe(false);
     expect(isWholeStructureService({})).toBe(false);
   });
 
@@ -108,20 +108,31 @@ describe('applyWholeStructureUnitWaiver (pure)', () => {
 });
 
 describe('call-level waiver (service resolved the way the booking resolves it)', () => {
-  test('WDO inspection at a duplex with no unit is waived', () => {
+  test('WDO inspection at a duplex with no unit is waived when the catalog row resolves', () => {
     const picked = call({ specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection for a duplex sale' });
     expect(picked.status).toBe('validated_accept');
     expect(picked.wholeStructureUnitWaived.service).toBe('wdo_inspection');
-    // A coarse label with no catalog pick is allowlisted too.
-    const coarse = call({ matched_service: 'WDO Inspection', requested_service: 'WDO inspection for a duplex sale' });
-    expect(coarse.status).toBe('validated_accept');
   });
 
-  test('WDO named only in the transcript (coarse label, no catalog pick) is waived', () => {
-    const out = call({ requested_service: 'wood destroying organism inspection' }, {
+  test('a coarse label with no catalog row stays held (catalog outage, inactive or non-bookable row)', () => {
+    const extracted = { matched_service: 'WDO Inspection', requested_service: 'WDO inspection for a duplex sale' };
+    // "WDO Inspection" alone names no catalog row in this catalog.
+    expect(call(extracted)).toBe(AV_UNIT_MISSING);
+    // The services query failed: no rows at all.
+    expect(wholeStructureUnitWaiverForCall({
+      addressValidation: AV_UNIT_MISSING, extracted, services: [], property: { property_type: 'multi_family' },
+    })).toBe(AV_UNIT_MISSING);
+    // The matching row exists but is not in the bookable list.
+    expect(wholeStructureUnitWaiverForCall({
+      addressValidation: AV_UNIT_MISSING,
+      extracted: { specific_service_name: 'WDO Inspection (Termite Letter)' },
+      services: CATALOG.filter((r) => r.service_key !== 'wdo_inspection'),
+      property: { property_type: 'multi_family' },
+    })).toBe(AV_UNIT_MISSING);
+    // Transcript-only WDO, no catalog pick: still no row.
+    expect(call({ requested_service: 'wood destroying organism inspection' }, {
       transcription: 'Agent: Are you buying it? Caller: yes, the duplex, I need the WDO letter.',
-    });
-    expect(out.status).toBe('validated_accept');
+    })).toBe(AV_UNIT_MISSING);
   });
 
   test('termite pre-treat and slab pre-treat are waived', () => {
@@ -145,7 +156,7 @@ describe('call-level waiver (service resolved the way the booking resolves it)',
   });
 
   test('a unit-level WDO in a condo stays held', () => {
-    const extracted = { matched_service: 'WDO Inspection', requested_service: 'WDO inspection' };
+    const extracted = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection' };
     expect(call(extracted, { property: { property_type: 'condo' } })).toBe(AV_UNIT_MISSING);
     expect(call(extracted, { transcription: 'Caller: it is a condominium unit we are buying' })).toBe(AV_UNIT_MISSING);
   });
@@ -155,36 +166,52 @@ describe('call-level waiver (service resolved the way the booking resolves it)',
   });
 
   test('commercial stays held', () => {
-    const extracted = { matched_service: 'WDO Inspection', requested_service: 'WDO inspection' };
+    const extracted = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection' };
     expect(call(extracted, { property: { property_type: 'commercial' } })).toBe(AV_UNIT_MISSING);
+    expect(call(extracted).status).toBe('validated_accept');
     expect(call(extracted, { property: { hoa_common_area_service: true } })).toBe(AV_UNIT_MISSING);
   });
 
   test('a V1 allowlisted pick that the V2-approved booking replaces stays held (V1/V2 service disagreement)', () => {
-    const v1Wdo = { matched_service: 'WDO Inspection', requested_service: 'WDO inspection' };
+    const v1Wdo = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection' };
     const v2 = (svc) => ({
       meta: { schema_version: '1.20.0' },
       property: { property_type: 'multi_family' },
       service_request: svc,
     });
-    const run = (extracted, v2Extraction) => wholeStructureUnitWaiverForCall({
-      addressValidation: AV_UNIT_MISSING, extracted, services: CATALOG, v2Extraction,
+    const run = (extracted, v2Extraction, preAdoptionExtracted = null) => wholeStructureUnitWaiverForCall({
+      addressValidation: AV_UNIT_MISSING, extracted, preAdoptionExtracted, services: CATALOG, v2Extraction,
     });
-    // V2 says bed bugs (category maps one-to-one, so it overrides V1 at booking).
     expect(run(v1Wdo, v2({ primary_service_category: 'bed_bug', specific_service_name: null }))).toBe(AV_UNIT_MISSING);
-    // V2 names a catalog service that is not whole-structure.
     expect(run(v1Wdo, v2({ primary_service_category: 'pest_general', specific_service_name: 'Bed Bug Treatment' }))).toBe(AV_UNIT_MISSING);
     expect(run(v1Wdo, v2({ primary_service_category: 'termite', specific_service_name: 'Termite Foam Drill Service' }))).toBe(AV_UNIT_MISSING);
-    // The reverse: V1 interior pest, V2 WDO. V1's own pick still governs the gate view.
-    expect(run({ matched_service: 'General Pest Control', requested_service: 'pest control' },
-      v2({ primary_service_category: 'wdo', specific_service_name: null }))).toBe(AV_UNIT_MISSING);
     // Both views on the list: waived.
     expect(run(v1Wdo, v2({ primary_service_category: 'wdo', specific_service_name: 'WDO Inspection (Termite Letter)' })).status)
       .toBe('validated_accept');
   });
 
+  test('V1 interior pest that V2-primary adoption already turned into WDO stays held (codex #5378 r1 P1)', () => {
+    // `extracted` at the gate is POST-adoption: it already carries V2's WDO pick.
+    const adopted = { specific_service_name: 'WDO Inspection (Termite Letter)', matched_service: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection' };
+    const preAdoption = { matched_service: 'General Pest Control', requested_service: 'pest control' };
+    const v2Extraction = {
+      meta: { schema_version: '1.20.0' },
+      property: { property_type: 'multi_family' },
+      service_request: { primary_service_category: 'wdo', specific_service_name: 'WDO Inspection (Termite Letter)' },
+    };
+    const args = { addressValidation: AV_UNIT_MISSING, extracted: adopted, services: CATALOG, v2Extraction };
+    expect(wholeStructureUnitWaiverForCall({ ...args, preAdoptionExtracted: preAdoption })).toBe(AV_UNIT_MISSING);
+    // Same call where V1 agreed: waived.
+    expect(wholeStructureUnitWaiverForCall({ ...args, preAdoptionExtracted: { ...adopted } }).status).toBe('validated_accept');
+    // The processor snapshots the V1 fields before adoption.
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeGreaterThan(0);
+    expect(src.indexOf('const preAdoptionExtracted = { ...extracted };')).toBeLessThan(src.indexOf('const adoption = adoptV2PrimaryFields('));
+    expect(src).toContain('preAdoptionExtracted,\n            transcription,');
+  });
+
   test('an allowlisted service with another address problem stays held', () => {
-    const extracted = { matched_service: 'WDO Inspection', requested_service: 'WDO inspection' };
+    const extracted = { specific_service_name: 'WDO Inspection (Termite Letter)', requested_service: 'WDO inspection' };
     const out = wholeStructureUnitWaiverForCall({
       addressValidation: { ...AV_UNIT_MISSING, hasUnconfirmed: true },
       extracted, services: CATALOG, property: { property_type: 'multi_family' },
@@ -283,9 +310,52 @@ describe('gate wiring', () => {
     expect(src.indexOf('ai_address_validation: v2AddressValidation')).toBeLessThan(src.lastIndexOf('wholeStructureUnitWaiverForCall({'));
   });
 
-  test('decision version bumped past #5371 and listed', () => {
-    expect(V2_DECISION_VERSION).toBe('v2-1.52.0');
+  test('the gate is a dark decision tag: base version untouched, fresh key only while live (codex r1)', () => {
+    expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
+    expect(resolveDecisionVersion([])).toBe('v2-1.50.0');
+    expect(resolveDecisionVersion(['w'])).toBe('v2-1.50.0+w');
+    expect(resolveDecisionVersion(['u', 'w'])).toBe('v2-1.50.0+uw');
+    expect(V2_DECISION_VERSIONS).toEqual(expect.arrayContaining(['v2-1.50.0+w', 'v2-1.50.0+uw']));
     expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
     expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
+    expect(Math.max(...V2_DECISION_VERSIONS.map((v) => v.length))).toBeLessThanOrEqual(30);
+    const args = { callLogId: 'c1', extraction: {}, finalTriageFlags: [], routingResult: { allowed: true }, action: 'x' };
+    expect(buildRouteDecision(args).decision_version).toBe('v2-1.50.0');
+    expect(buildRouteDecision({ ...args, decisionVersion: resolveDecisionVersion(['w']) }).decision_version).toBe('v2-1.50.0+w');
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(src).toContain("if (isEnabled('callWholeStructureNoUnit') === true) tags.push('w');");
+  });
+});
+
+describe('persisted marker + stale unit ask', () => {
+  test('a waived verdict is persisted as a marker on the ORIGINAL and the audits rebuild it', () => {
+    const waived = applyWholeStructureUnitWaiver(AV_UNIT_MISSING, {
+      enabled: true, serviceKey: 'wdo_inspection', propertyType: 'multi_family', text: '',
+    });
+    const persisted = JSON.parse(JSON.stringify({ ...AV_UNIT_MISSING, wholeStructureUnitWaived: waived.wholeStructureUnitWaived }));
+    expect(persisted.status).toBe('ambiguous');
+    const rebuilt = reconstructWaivedAddressValidation(persisted);
+    expect(rebuilt.status).toBe('validated_accept');
+    expect(rebuilt.missingComponents).toEqual([]);
+    expect(rebuilt.inServiceArea).toBe(true);
+    // The rebuilt verdict routes like the in-memory one; an unmarked row is untouched.
+    expect(reconstructWaivedAddressValidation(AV_UNIT_MISSING)).toBe(AV_UNIT_MISSING);
+    expect(reconstructWaivedAddressValidation(null)).toBe(null);
+    expect(reconstructWaivedAddressValidation(waived)).toBe(waived);
+    for (const f of ['v2-promotion-readiness', 'verify-v2-shadow-path', 'replay-call-extraction-variance']) {
+      const src = require('fs').readFileSync(require.resolve(`../scripts/${f}`), 'utf8');
+      expect(src).toContain('reconstructWaivedAddressValidation');
+    }
+    const proc = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    expect(proc).toContain('ai_address_validation: JSON.stringify({ ...v2AddressValidation, wholeStructureUnitWaived: wsAv.wholeStructureUnitWaived })');
+  });
+
+  test('an open missing_unit_number card from an earlier pass keeps the hold', () => {
+    const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor'), 'utf8');
+    const at = src.indexOf("reason_code: 'missing_unit_number' })\n          .whereIn('status', ['open', 'in_progress'])\n          .first('id');");
+    expect(at).toBeGreaterThan(0);
+    // The card check runs BEFORE the waiver is computed, and a lookup failure fails closed (hold stands).
+    expect(at).toBeLessThan(src.lastIndexOf('wholeStructureUnitWaiverForCall({'));
+    expect(src).toContain('whole-structure unit waiver failed open (hold stands)');
   });
 });
