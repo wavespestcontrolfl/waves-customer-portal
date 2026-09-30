@@ -197,7 +197,7 @@ jobs:
         working-directory: server
         env:
           BOOK_CAPACITY_COMMIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/booking-capacity-commit-db.test.js tests/booking-account-ownership-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/booking-capacity-commit-db.test.js tests/multi-tech-confirm-db.test.js tests/booking-account-ownership-postgres.test.js
       - name: Previsit Text provider authority tests
         working-directory: server
         env:
