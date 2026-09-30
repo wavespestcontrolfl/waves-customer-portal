@@ -698,7 +698,11 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
 
   test('r12 recording replacement: the street-level review card survives the supersede sweep (both sites share one predicate); nothing re-files it', () => {
     const gates = require('../services/call-routing-gates');
-    expect(gates.SUPERSEDE_KEPT_CARD_SQL).toBe("NOT (reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true')");
+    expect(gates.SUPERSEDE_KEPT_CARD_SQL).toContain("reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true'");
+    // ...and the owed-follow-up card the confirm hook files for a hold (so a sweep never resolves the office's task).
+    expect(gates.SUPERSEDE_KEPT_CARD_SQL).toContain("reason_code = 'attached_booking_followup_unbooked' AND COALESCE(payload->>'skipped_reason', '') = 'street_level_address_confirmed_follow_up_unbooked'");
+    // Two-valued: a card with no payload keys still retires.
+    expect(gates.SUPERSEDE_KEPT_CARD_SQL.startsWith('NOT (')).toBe(true);
     for (const f of ['../routes/twilio-voice-webhook.js', '../routes/admin-call-recordings.js']) {
       const s = read(f);
       const at = s.indexOf('.whereNotIn(\'reason_code\', SUPERSEDE_KEPT_REASON_CODES)');
