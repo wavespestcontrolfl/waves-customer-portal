@@ -8,7 +8,8 @@
 const { canAutoRoute } = require('../services/call-triage-flags');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 
-const { resolveSchedulableCallService } = CallRecordingProcessor._test;
+const { resolveSchedulableCallService, forcedAssessmentBooking, demoteOpenTriageCards } = CallRecordingProcessor._test;
+const { buildRouteDecision, resolveDecisionVersion, V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
 
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
 const ON_FILE = Object.freeze({ hasAddress: true, addressLine1: '100 Synthetic St', addressZip: '34202' });
@@ -266,9 +267,138 @@ describe('gate wiring', () => {
     expect(loadGates('true').isEnabled('callUnclearServiceAssessment')).toBe(true);
   });
 
-  test('the decision version was bumped and is listed', () => {
-    const { V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
-    expect(V2_DECISION_VERSION).toBe('v2-1.51.0');
-    expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
+  test('the base decision version is NOT consumed while the gate is dark (codex r1 P1)', () => {
+    expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
+    expect(resolveDecisionVersion([])).toBe('v2-1.50.0');
+    // gate on: a distinct, listed, column-sized (varchar 30) version
+    const live = resolveDecisionVersion(['u']);
+    expect(live).toBe('v2-1.50.0+u');
+    expect(live.length).toBeLessThanOrEqual(30);
+    expect(V2_DECISION_VERSIONS).toContain(live);
+    expect(V2_DECISION_VERSIONS).toContain(V2_DECISION_VERSION);
+    expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
+  });
+
+  test('buildRouteDecision stamps the base version by default and the live one when handed it', () => {
+    const args = { callLogId: 'c1', extraction: extraction(), routingResult: { allowed: true }, action: 'auto_route' };
+    expect(buildRouteDecision(args).decision_version).toBe('v2-1.50.0');
+    expect(buildRouteDecision({ ...args, decisionVersion: resolveDecisionVersion(['u']) }).decision_version).toBe('v2-1.50.0+u');
+  });
+});
+
+describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () => {
+  test('canAutoRoute marks the ambiguous demotion and names the flags it waived', () => {
+    const r = canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
+    expect(r).toMatchObject({ allowed: true, forceAssessmentService: true, unclearServiceDemotedFlags: ['ambiguous_pest_or_service'] });
+  });
+
+  test('a low-confidence-only demotion waives the flag but does not force the Assessment', () => {
+    const r = canAutoRoute(extraction({
+      confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9 },
+    }), GATE_ON);
+    expect(r.allowed).toBe(true);
+    expect(r.unclearServiceDemotedFlags).toEqual(['low_extraction_confidence']);
+    expect(r.forceAssessmentService).toBe(false);
+  });
+
+  test('gate off: no marker at all', () => {
+    const r = canAutoRoute(extraction(), GATE_OFF);
+    expect(r.allowed).toBe(true);
+    expect(r.forceAssessmentService).toBeUndefined();
+    expect(r.unclearServiceDemotedFlags).toBeUndefined();
+  });
+
+  const catalog = [
+    { id: 'svc-pest', name: 'Quarterly Pest Control' },
+    { id: 'svc-assess', name: 'Waves Assessment' },
+  ];
+
+  test('a concrete resolved service is overridden by the Assessment row', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: catalog[0] });
+    expect(out).toEqual({ applied: true, row: catalog[1] });
+  });
+
+  test('an unresolved (noMatch) service also lands on the Assessment row', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: false, noMatch: true }, services: catalog, current: null });
+    expect(out.row).toBe(catalog[1]);
+  });
+
+  test('a resolver hard veto is left alone (still un-bookable)', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: false, reason: 'unsupported_service' }, services: catalog, current: null });
+    expect(out.applied).toBe(false);
+  });
+
+  test('no Assessment row available: hold, never the flagged concrete service', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: [catalog[0]], current: catalog[0] });
+    expect(out).toMatchObject({ applied: true, unbookable: true });
+  });
+});
+
+describe('full-transcript unsupported veto (codex r1 P1)', () => {
+  // The extracted fields look like a real pest call; only the transcript
+  // shows an SEO solicitor.
+  const extracted = {
+    matched_service: 'General Pest Control',
+    requested_service: 'pest control',
+    call_summary: 'Caller about pest control.',
+  };
+  const transcription = 'Agent: Hello. Caller: I can improve your website SEO and Google ranking for your pest control company, organic traffic guaranteed.';
+
+  test('without the option the transcript veto is skipped once a service resolved (today)', () => {
+    expect(resolveSchedulableCallService(extracted, { transcription })).toMatchObject({ ok: true, service: 'General Pest Control' });
+  });
+
+  test('with the option the transcript vetoes even though a service resolved', () => {
+    const r = resolveSchedulableCallService(extracted, { transcription, fullTranscriptVeto: true });
+    expect(r).toMatchObject({ ok: false, reason: 'unsupported_service' });
+    expect(r.noMatch).toBeUndefined();
+  });
+
+  test('with the option an ordinary pest call is unaffected', () => {
+    const r = resolveSchedulableCallService(extracted, { transcription: 'Agent: Hi. Caller: I have ants in my kitchen, can someone come Tuesday at ten?', fullTranscriptVeto: true });
+    expect(r).toMatchObject({ ok: true, service: 'General Pest Control' });
+  });
+
+  test('an admin-only call is vetoed on the transcript with or without the option', () => {
+    const r = resolveSchedulableCallService({ matched_service: 'General Pest Control', requested_service: 'pest control' }, {
+      transcription: 'Caller: I need a copy of my invoice and a receipt for my last payment, that is all.',
+      fullTranscriptVeto: true,
+    });
+    expect(r.ok).toBe(false);
+    expect(r.noMatch).toBeUndefined();
+  });
+});
+
+describe('an open blocking card is demoted on reprocess (codex r1 P1)', () => {
+  function fakeConn() {
+    const calls = [];
+    const chain = {
+      where(a) { calls.push(['where', a]); return chain; },
+      whereIn(c, v) { calls.push(['whereIn', c, v]); return chain; },
+      update(u) { calls.push(['update', u]); return Promise.resolve(2); },
+    };
+    const conn = (table) => { calls.push(['table', table]); return chain; };
+    conn.fn = { now: () => 'NOW' };
+    return { conn, calls };
+  }
+
+  test('updates only open/in-progress BLOCKING rows of the waived flags to advisory', async () => {
+    const { conn, calls } = fakeConn();
+    const n = await demoteOpenTriageCards(conn, 'call-1', ['ambiguous_pest_or_service']);
+    expect(n).toBe(2);
+    expect(calls).toEqual([
+      ['table', 'triage_items'],
+      ['where', { call_log_id: 'call-1', severity: 'blocking' }],
+      ['whereIn', 'reason_code', ['ambiguous_pest_or_service']],
+      ['whereIn', 'status', ['open', 'in_progress']],
+      ['update', { severity: 'advisory', updated_at: 'NOW' }],
+    ]);
+  });
+
+  test('gate off / nothing waived: no query', async () => {
+    const { conn, calls } = fakeConn();
+    expect(await demoteOpenTriageCards(conn, 'call-1', undefined)).toBe(0);
+    expect(await demoteOpenTriageCards(conn, 'call-1', [])).toBe(0);
+    expect(calls).toEqual([]);
   });
 });

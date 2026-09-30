@@ -132,9 +132,16 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, resolveDecisionVersion } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
+
+// The route_decisions version stamped THIS pass: the base version plus a tag
+// for every dark-gated decision behavior that is live (see call-routing-gates
+// resolveDecisionVersion). Gate off = the plain base version, as before.
+function currentDecisionVersion() {
+  return resolveDecisionVersion(isEnabled('callUnclearServiceAssessment') === true ? ['u'] : []);
+}
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
@@ -5657,6 +5664,32 @@ async function loadCustomerServiceContext(customerId, conn = db) {
   return { estimates, serviceRecords, scheduledServices };
 }
 
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: which catalog row an ambiguous-service
+// demotion books. Applies only where the resolver did not hard-veto the call
+// (ok:false WITHOUT noMatch stays un-bookable). Returns { applied:false } when
+// it does not apply, { applied, row } with the Waves Assessment row otherwise —
+// even when a concrete service was resolved or `current` names one — or
+// { applied, unbookable:true } when that row is not available (hold; never the
+// concrete service the model flagged as unclear).
+function forcedAssessmentBooking({ serviceResolution, services, current }) {
+  if (!(serviceResolution?.ok || serviceResolution?.noMatch === true)) return { applied: false, row: current };
+  const row = (services || []).find((s) => /^waves assessment$/i.test(String(s.name || '')));
+  return row ? { applied: true, row } : { applied: true, unbookable: true, row: current };
+}
+
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a card an earlier (held) pass left
+// open as `blocking` for a flag this pass let through must not stay red on a
+// call that is now booked. The advisory insert is ON CONFLICT DO NOTHING, so
+// demote in place — open / in-progress blocking rows only; nothing is resolved.
+async function demoteOpenTriageCards(conn, callLogId, flags) {
+  if (!Array.isArray(flags) || !flags.length) return 0;
+  return conn('triage_items')
+    .where({ call_log_id: callLogId, severity: 'blocking' })
+    .whereIn('reason_code', flags)
+    .whereIn('status', ['open', 'in_progress'])
+    .update({ severity: 'advisory', updated_at: conn.fn.now() });
+}
+
 function resolveSchedulableCallService(extracted = {}, opts = {}) {
   const requestedText = compactText(extracted.requested_service);
   const extractedDetailText = compactText(
@@ -5683,6 +5716,15 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
     && !requestedHistoryReference;
 
   if (hasUnsupportedCallContext(extractedDetailText)) {
+    return { ok: false, reason: 'unsupported_service', service: null };
+  }
+  // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT (opts.fullTranscriptVeto): a call let
+  // through past ambiguous_pest_or_service has no settled service, so the
+  // unsupported-topic veto reads the WHOLE transcript up front — otherwise a
+  // solicitor whose extracted fields still say "pest control" resolves a
+  // service first and the transcript-only veto below (no service) never runs.
+  // Off = byte-identical: the check below stays as it was.
+  if (opts.fullTranscriptVeto === true && hasUnsupportedCallContext(fullContextText)) {
     return { ok: false, reason: 'unsupported_service', service: null };
   }
   if (hasAdministrativeOnlyContext(adminContextText, extracted)) {
@@ -9603,6 +9645,11 @@ const CallRecordingProcessor = {
     let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: set when routing let the call
+    // through past ambiguous_pest_or_service — the booking must then be the
+    // Waves Assessment row (never a resolver/model-picked service) and the
+    // resolver's unsupported-call veto reads the full transcript.
+    let v2ForceAssessmentService = false;
     // The customer the on-file PROOF above was computed against, plus the
     // address snapshot compared — Step 3 below may retain or reconcile the
     // call to a DIFFERENT canonical customer than knownCaller (codex P1:
@@ -10098,6 +10145,7 @@ const CallRecordingProcessor = {
             action: routingResult.allowed ? 'auto_route' : 'triage_review',
             mode: 'enforce',
             recordingSid: call.recording_sid,
+            decisionVersion: currentDecisionVersion(),
           });
           // Targetless DO NOTHING: tolerant of BOTH the legacy three-column
           // constraint (kept until the contract migration) and the
@@ -10292,6 +10340,17 @@ const CallRecordingProcessor = {
                 extracted.state = null;
                 extracted.zip = null;
               }
+            }
+            // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the advisory insert above is
+            // ON CONFLICT DO NOTHING, so a card an earlier (held) pass left
+            // open as `blocking` would stay red on a call that is now booked
+            // — and read as an unbooked visit. Demote it in place (open /
+            // in-progress rows only, blocking ones only; nothing is resolved).
+            v2ForceAssessmentService = routingResult.forceAssessmentService === true;
+            try {
+              await demoteOpenTriageCards(db, call.id, routingResult.unclearServiceDemotedFlags);
+            } catch (demoteErr) {
+              logger.warn(`[call-proc-v2] unclear-service card demotion failed for ${maskSid(callSid)}: ${demoteErr.message}`);
             }
             v2ApprovedExtraction = v2Extraction;
             v2UsesOnFileAddress = routingResult.usesOnFileAddress === true;
@@ -15282,7 +15341,7 @@ const CallRecordingProcessor = {
     const timeStr = (extracted.preferred_date_time || '').toLowerCase();
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
-    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext });
+    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext, fullTranscriptVeto: v2ForceAssessmentService });
     // Catalog anchor: the specific bookable service this call maps to, when
     // one resolves. Drives service_type/service_id/price/duration/follow-up on
     // the booking. Also rescues catalog services whose names don't hit the
@@ -15358,6 +15417,28 @@ const CallRecordingProcessor = {
         // can't book.)
         genericBookingUnbookable = true;
         logger.warn(`[call-proc] "Waves Assessment" fallback row unavailable for ${maskSid(callSid)} — holding generic booking for review`);
+      }
+    }
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: routing let this call through past
+    // ambiguous_pest_or_service, so the service is NOT settled — book the
+    // Waves Assessment row even when the resolver or a model-selected catalog
+    // field named a concrete service (the office card sets the real one). A
+    // resolver hard veto (ok:false, no noMatch) is left alone: it still makes
+    // the call un-bookable. No Assessment row available = hold, never the
+    // concrete service the model flagged as unclear.
+    if (v2ForceAssessmentService && isEnabled('callFailOpenBooking')) {
+      const forced = forcedAssessmentBooking({ serviceResolution, services: bookableCallServices, current: callBookingCatalogRow });
+      if (forced.applied) {
+        if (forced.unbookable) {
+          genericBookingUnbookable = true;
+          logger.warn(`[call-proc] "Waves Assessment" row unavailable for ${maskSid(callSid)} — holding ambiguous-service booking for review`);
+        } else {
+          if (forced.row !== callBookingCatalogRow) {
+            logger.info(`[call-proc] Service flagged ambiguous for ${maskSid(callSid)} — booking as "Waves Assessment" (forced; assess on-site)`);
+          }
+          callBookingCatalogRow = forced.row;
+          genericBookingUnbookable = false;
+        }
       }
     }
     // Use the module-level isOutboundCall(call) helper — a local `const
@@ -18711,7 +18792,7 @@ const CallRecordingProcessor = {
           // Same-run outcome update: targets the row THIS process wrote
           // moments ago, so the CURRENT version only (a reprocess writes —
           // and updates — its own fresh v2-1.1.0 row).
-          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' })
+          .where({ call_log_id: call.id, decision_version: currentDecisionVersion(), mode: 'enforce', recording_sid: call.recording_sid || '' })
           .update({
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
@@ -19430,6 +19511,7 @@ const CallRecordingProcessor = {
             action: routingResult.allowed ? 'shadow_auto_route_candidate' : 'shadow_needs_review_candidate',
             mode: 'shadow',
             recordingSid: call.recording_sid,
+            decisionVersion: currentDecisionVersion(),
           });
           await db('route_decisions')
             .insert(shadowDecision)
@@ -19440,7 +19522,7 @@ const CallRecordingProcessor = {
       }
 
       const validationPayload = {
-        validator: V2_DECISION_VERSION,
+        validator: currentDecisionVersion(),
         mode: validationMode,
         extraction_status: v2Result.status || null,
         routing: routingResult ? {
@@ -20842,6 +20924,8 @@ CallRecordingProcessor._test = {
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
+  forcedAssessmentBooking,
+  demoteOpenTriageCards,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   slotOnlyLinkAllowed,

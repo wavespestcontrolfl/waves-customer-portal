@@ -1973,6 +1973,10 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
   let unclearServiceOk = false;
   let lowConfidenceIsServiceAddressOnly = false;
+  // Flags THIS gate (and only this gate) took out of the blocking set — the
+  // processor forces the Waves Assessment row for an ambiguous demotion and
+  // demotes an already-open blocking card for each (reprocess).
+  const unclearServiceDemotedFlags = [];
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -2017,8 +2021,8 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       // one). Anything less keeps the hold. The service resolver's own vetoes
       // (unsupported / administrative-only) still run downstream and are not
       // touched here.
-      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); return false; }
-      if (unclearServiceOk && f === 'low_extraction_confidence' && lowConfidenceIsServiceAddressOnly) { failedOpenFlags.push(f); return false; }
+      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); return false; }
+      if (unclearServiceOk && f === 'low_extraction_confidence' && lowConfidenceIsServiceAddressOnly) { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); return false; }
       return true;
     });
   }
@@ -2216,6 +2220,14 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     flags: finalFlags,
     failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined,
     ...(!avPositivelyValidated && dispatchesToOnFile ? { usesOnFileAddress: true } : {}),
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: an ambiguous-service demotion must
+    // book the Waves Assessment row, never a service the resolver or a model
+    // field happened to pick (the flag said the service is unclear), and the
+    // resolver's unsupported-call veto must read the full transcript.
+    ...(unclearServiceDemotedFlags.length ? {
+      unclearServiceDemotedFlags,
+      forceAssessmentService: unclearServiceDemotedFlags.includes('ambiguous_pest_or_service'),
+    } : {}),
   };
 }
 
