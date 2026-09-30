@@ -135,7 +135,7 @@ describe('hold-deferral placeholders (armed or collected) stay out of the custom
     expect(builders).toHaveLength(1);
     const calls = predicateCalls(builders[0]);
     expect(calls).toHaveLength(1);
-    expect(calls[0][1]).toEqual(['collection_hold']);
+    expect(calls[0][1]).toEqual(['collection_hold', 'absorbed_annual_prepay']);
   });
 
   test('the payer-filtered count query excludes them too', async () => {
