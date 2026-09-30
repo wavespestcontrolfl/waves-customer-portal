@@ -793,7 +793,13 @@ async function dispatchClaimedSend({
     if (parkedIds.length) await suggest.reopenScheduledSuggestions({ decisionIds: parkedIds, reason });
   };
   const notSent = async (reason, settleReason = reason) => {
-    await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    // Codex round-13 P1: the claim is released on EVERY pre-send error path — a
+    // throwing reservation settle must never leave the decision stuck 'sending'.
+    try {
+      await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId });
+    } catch (err) {
+      logger.warn(`[sms-auto-send] reservation settle threw while releasing (decision ${claim.decisionId}): ${err.message}`);
+    }
     await failClaim(claim.decisionId, settleReason);
     return { sent: false, reason };
   };
@@ -801,7 +807,13 @@ async function dispatchClaimedSend({
   // Arm before provider entry. A timeout followed by a DB outage still has
   // durable uncertainty evidence; if this write misses, fail closed before
   // any customer communication.
-  if (!await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, uncertain: true })) {
+  let armed = false;
+  try {
+    armed = await suggest.settleReplyHoldingReservation({ reservationId: claim.reservationId, uncertain: true });
+  } catch (err) {
+    logger.warn(`[sms-auto-send] arming the provider-outcome reservation threw (decision ${claim.decisionId}): ${err.message}`);
+  }
+  if (!armed) {
     await failClaim(claim.decisionId, 'could not arm provider-outcome reservation');
     await reopenParked('Auto-send reservation failed before delivery — suggestion reopened.');
     return { sent: false, reason: 'reservation_failed' };
@@ -856,10 +868,18 @@ async function dispatchClaimedSend({
     // as the OPEN TIMES recheck.
     const { outgoingZelleStale, hasAffirmativeZelleMention, zelleInvoiceStillEligible } = require('./sms-amount-recheck');
     if (hasAffirmativeZelleMention(reply)) {
-      const zelleContact = outgoingZelleStale(reply);
-      const zelleEligibility = zelleContact.stale
-        ? { eligible: false, reason: zelleContact.reason }
-        : await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: claim.zelleInvoiceId || null });
+      // Codex round-13 P1: a THROWING recheck fails closed with its own reason and
+      // releases the claim (notSent + reopenParked below) — never a generic send_error.
+      let zelleEligibility;
+      try {
+        const zelleContact = outgoingZelleStale(reply);
+        zelleEligibility = zelleContact.stale
+          ? { eligible: false, reason: zelleContact.reason }
+          : await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: claim.zelleInvoiceId || null });
+      } catch (err) {
+        logger.warn(`[sms-auto-send] Zelle recheck threw (decision ${claim.decisionId}): ${err.message}`);
+        zelleEligibility = { eligible: false, reason: 'zelle_recheck_failed' };
+      }
       if (!zelleEligibility.eligible) {
         logger.warn(`[sms-auto-send] Zelle recheck failed (decision ${claim.decisionId}): ${zelleEligibility.reason}`);
         const outcome = await notSent(zelleEligibility.reason);
@@ -877,7 +897,13 @@ async function dispatchClaimedSend({
     // regardless of prompt version. Same supersede-via-failClaim mechanism
     // as the other two rechecks above.
     const { amountFreeStatusClaimStale } = require('./sms-amount-recheck');
-    const statusClaimCheck = await amountFreeStatusClaimStale({ customerId, body: reply, strict: true, inboundMessage });
+    let statusClaimCheck;
+    try {
+      statusClaimCheck = await amountFreeStatusClaimStale({ customerId, body: reply, strict: true, inboundMessage });
+    } catch (err) {
+      logger.warn(`[sms-auto-send] status-claim recheck threw (decision ${claim.decisionId}): ${err.message}`);
+      statusClaimCheck = { stale: true, reason: 'amount_recheck_failed' };
+    }
     if (statusClaimCheck.stale) {
       logger.warn(`[sms-auto-send] amount-free status claim stale (decision ${claim.decisionId}): ${statusClaimCheck.reason}`);
       const outcome = await notSent(statusClaimCheck.reason);

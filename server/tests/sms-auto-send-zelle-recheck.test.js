@@ -216,3 +216,55 @@ test('the amount-free status recheck is passed the original inbound message', as
     strict: true, inboundMessage: 'Did you get my $120 Zelle payment?',
   }));
 });
+
+// Codex round-13 P1: a THROWING recheck fails closed with its own reason and
+// RELEASES the claim (failClaim + reservation settled + parked reopened).
+describe('a throwing recheck releases the claim (fail closed)', () => {
+  test('zelleInvoiceStillEligible throws', async () => {
+    amountRecheck.hasAffirmativeZelleMention.mockReturnValue(true);
+    amountRecheck.outgoingZelleStale.mockReturnValue({ stale: false });
+    amountRecheck.zelleInvoiceStillEligible.mockRejectedValue(new Error('pg down'));
+    await expect(attempt({ zelleInvoiceId: 'inv-1' })).resolves.toMatchObject({ sent: false, reason: 'zelle_recheck_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+    expect(suggest.settleReplyHoldingReservation).toHaveBeenCalledWith({ reservationId: '33333333-3333-4333-8333-333333333333' });
+    expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
+  });
+
+  test('outgoingZelleStale throws', async () => {
+    amountRecheck.hasAffirmativeZelleMention.mockReturnValue(true);
+    amountRecheck.outgoingZelleStale.mockImplementation(() => { throw new Error('env read failed'); });
+    await expect(attempt({ zelleInvoiceId: 'inv-1' })).resolves.toMatchObject({ sent: false, reason: 'zelle_recheck_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+  });
+
+  test('amountFreeStatusClaimStale throws', async () => {
+    amountRecheck.amountFreeStatusClaimStale.mockRejectedValue(new Error('billing down'));
+    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: false, reason: 'amount_recheck_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+    expect(suggest.settleReplyHoldingReservation).toHaveBeenCalled();
+    expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
+  });
+});
+
+describe('the claim is released on every other pre-send error path', () => {
+  test('the arming write (uncertain reservation settle) throws => claim failed, siblings reopened, nothing sent', async () => {
+    suggest.settleReplyHoldingReservation.mockRejectedValueOnce(new Error('pg down'));
+    await expect(attempt({ reply: 'Sounds good, thanks!' })).resolves.toMatchObject({ sent: false, reason: 'reservation_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+    expect(suggest.reopenScheduledSuggestions).toHaveBeenCalledWith(expect.objectContaining({ decisionIds: ['parked-1'] }));
+  });
+
+  test('a recheck throws AND the reservation release throws => the claim is STILL failed', async () => {
+    amountRecheck.amountFreeStatusClaimStale.mockRejectedValue(new Error('billing down'));
+    suggest.settleReplyHoldingReservation
+      .mockResolvedValueOnce(true) // arm
+      .mockRejectedValue(new Error('settle down')); // release
+    await expect(attempt({ reply: "You're paid up!" })).resolves.toMatchObject({ sent: false, reason: 'amount_recheck_failed' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(decisions.update).toHaveBeenCalledWith(expect.objectContaining({ status: autoSend.FAILED_STATUS }));
+  });
+});

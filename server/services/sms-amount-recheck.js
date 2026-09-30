@@ -382,6 +382,11 @@ async function outgoingAmountsStale({
     if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
   }
   const strict = strictForVersion(promptVersion);
+  // The clause-aware binder runs for every strict decision AND for any
+  // human-edited one (trustOwedAmounts): the human-review exemption excuses an
+  // OWED amount only — a receipt/status claim asserts a fact that can go stale
+  // whoever wrote the words (round-4 finding 3 / round-13 P1).
+  const binderStrict = strict || trustOwedAmounts;
   const amounts = bodyAmountCents(text);
   if (!amounts.length) {
     // Price grammar the numeric extractor cannot verify ("fifty dollars",
@@ -395,15 +400,12 @@ async function outgoingAmountsStale({
     // Independent-review P1 (round 5, finding 1): a payment-status or receipt
     // claim with no dollar figure at all ("You're paid up.") still needs
     // fresh billing before it sends — see amountFreeStatusClaimStale above.
-    return amountFreeStatusClaimStale({ customerId, body: text, strict, trustOwedAmounts, dbh, inboundMessage });
+    // Codex round-13 P1: a human-edited (trustOwedAmounts) reply is checked by the
+    // clause-aware binder even on a pre-v12 prompt — the trust covers OWED clauses
+    // only, never a receipt/status claim.
+    return amountFreeStatusClaimStale({ customerId, body: text, strict: binderStrict, trustOwedAmounts, dbh, inboundMessage });
   }
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
-  // trustOwedAmounts on the POOLED (pre-v12) rule has nothing left to check —
-  // it excuses the whole amount figure, not just its owed half (see the
-  // comment above the pooled branch) — so this skips the customer/billing
-  // read entirely, matching the scheduler's original human-authored
-  // exemption byte-for-byte (no DB read at all).
-  if (trustOwedAmounts && !strict) return { stale: false };
   try {
     const customerRow = await dbh('customers').where({ id: customerId }).first();
     // Same sweep (round-6 pre-push audit P1): a missing customer/context is a
@@ -423,15 +425,13 @@ async function outgoingAmountsStale({
     const { owed, paid } = drafter.billingAmountCents(ctx);
     // Polarity-aware (round-10 P1): a negated ack ("wasn't processed") never widens the pooled paid allowance.
     const ack = drafter.hasAffirmativePaymentAck(text.replace(AMOUNT_FORMS_RE, ' AMT '));
-    // The pooled rule (pre-v12 prompts) has no per-clause owed/receipt
-    // split to excuse only the owed half — trustOwedAmounts here matches
-    // the ORIGINAL scope of the 2026-07-30 exemption exactly (skip the
-    // whole amount check for a human-reviewed legacy reply), same as before
-    // this finding widened the STRICT rule's own, finer-grained trust.
-    if (strict) await ensureAbsenceHistory(ctx, text, dbh);
-    const stale = strict
+    // The pooled rule (pre-v12 prompts, NOT human-edited) has no per-clause
+    // owed/receipt split; a human-edited pre-v12 reply uses the clause-aware
+    // binder with trustOwedAmounts so only its OWED clauses are excused.
+    if (binderStrict) await ensureAbsenceHistory(ctx, text, dbh);
+    const stale = binderStrict
       ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage })
-      : !trustOwedAmounts && amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
+      : amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] amount revalidation failed for customer ${customerId}: ${err.message}; blocking send`);

@@ -444,8 +444,10 @@ async function payPageZelleVisibility({
   // amount).
   let projectedCredit;
   try { projectedCredit = await invoiceProjectedCreditApplied(inv); } catch { return { visible: false, reason: 'credit_unverifiable' }; }
-  if (projectedCredit > 0) return { visible: false, reason: 'credit_pending' };
-  return { visible: true, reason: null };
+  // projectedCredit rides the verdict so GET /:token reuses it instead of a
+  // third credit read (Codex round-13 P1).
+  if (projectedCredit > 0) return { visible: false, reason: 'credit_pending', projectedCredit };
+  return { visible: true, reason: null, projectedCredit };
 }
 
 router.get('/:token', async (req, res, next) => {
@@ -586,6 +588,7 @@ router.get('/:token', async (req, res, next) => {
     // entirely, same as the old plain-boolean isZelleTransferEligible check.
     const configuredManualPayOptions = manualPayOptionsFromEnv();
     let manualPayOptions = null;
+    let visibilityProjectedCredit = null;
     if (configuredManualPayOptions) {
       const zelleVisibility = await payPageZelleVisibility({
         invoice: data,
@@ -596,6 +599,7 @@ router.get('/:token', async (req, res, next) => {
       });
       if (zelleVisibility.visible || zelleVisibility.reason === 'credit_pending') {
         manualPayOptions = configuredManualPayOptions;
+        visibilityProjectedCredit = zelleVisibility.projectedCredit ?? null;
       }
     }
     if (manualPayOptions) {
@@ -606,8 +610,9 @@ router.get('/:token', async (req, res, next) => {
       // credit WILL apply at /setup, flag it: the client withholds the
       // transfer links until /setup answers with the post-credit amount, and
       // never pre-fills either the gross or a projected figure meanwhile.
-      let projectedCredit = null;
-      try { projectedCredit = await invoiceProjectedCreditApplied(data); } catch { projectedCredit = null; }
+      // Reuse the projection payPageZelleVisibility already computed (no third
+      // credit read); a missing value is unverifiable => withheld, as before.
+      const projectedCredit = visibilityProjectedCredit;
       if (projectedCredit == null) {
         // Codex round-10 P1: an unverifiable credit is never read as zero.
         manualPayOptions = null;

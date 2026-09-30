@@ -19,10 +19,13 @@ const AUX = /^(?:is|was|has|have|had|isn't|wasn't|hasn't|haven't|didn't|did|not|
 // Natural positive sentence for (family, subject, phrase).
 function positive(family, subject, phrase) {
   const subj = withArticle(subject);
-  if (V.PAYMENT_STATUS_VOCABULARY[family] && family === 'paid') {
+  if (family === 'paid') {
     if (/^(?:all set|all paid|paid in full)$/.test(phrase)) return `${subj} is ${phrase}`;
+    // Literal paid-status forms are predicates of the subject ("your payment shows as paid").
+    if (V.PAID_STATUS_PHRASES.includes(phrase)) return `${subj} ${phrase}`;
     return `We ${phrase} ${subj}`;
   }
+  if (family === 'unpaid') return `${subj} ${phrase}`;
   if (family === 'not_found' || family === 'not_received') return `We ${phrase} ${subj}`;
   return AUX.test(phrase) ? `${subj} ${phrase}` : `${subj} was ${phrase}`;
 }
@@ -49,9 +52,9 @@ describe('every table phrase x subject classifies (negative polarity)', () => {
     const misses = [];
     for (const subject of SUBJECTS) {
       for (const [family, { phrases }] of Object.entries(V.PAYMENT_STATUS_VOCABULARY)) {
-        if (family === 'not_found' || family === 'not_received') continue; // already negative
+        if (family === 'not_found' || family === 'not_received' || family === 'unpaid') continue; // already negative
         for (const phrase of phrases) {
-          if (family === 'paid' && /^(?:all set|all paid|paid in full)$/.test(phrase)) continue;
+          if (family === 'paid' && (/^(?:all set|all paid|paid in full)$/.test(phrase) || V.PAID_STATUS_PHRASES.includes(phrase))) continue;
           const subj = withArticle(subject);
           const s = family === 'paid' ? `${subj} has not ${phrase}` : `${subj} is not ${phrase.replace(/^(?:is|was|has been|being|currently|still)\s+/, '')}`;
           if (kind(s) === 'none') misses.push(`"${s}"`);
@@ -110,5 +113,32 @@ describe('settlement + status claims are validated at draft (and therefore send:
     expect(rq('Is your payment still processing?', ctx())).toBe(false);
     expect(rq('Did it go through?', ctx())).toBe(false);
     expect(rq('Your payment is still processing—does that answer it?', ctx({}, [{ amount: 40, status: 'processing', payment_date: '2026-09-12' }]))).toBe(false);
+  });
+});
+
+describe('round-13: literal paid / unpaid forms', () => {
+  const ctx = (payments, extra = {}) => ({ billing: { outstandingBalance: 0, recentPayments: payments, ...extra } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const paid = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  test('"shows as paid" / "marked paid" / "it\'s been paid" / "is paid" are paid-family claims that bind to a current paid row', () => {
+    for (const phrase of ['shows as paid', 'is marked paid', "it's been paid", 'is paid']) {
+      const r = `Your $120 payment ${phrase} from Sep 12.`;
+      expect({ phrase, kind: kind(`Your payment ${phrase}`) }).toEqual({ phrase, kind: 'ack' });
+      expect({ phrase, ungrounded: rq(r, ctx([paid])) }).toEqual({ phrase, ungrounded: false });
+      expect({ phrase, ungrounded: rq(r, ctx([{ ...paid, status: 'refunded' }])) }).toEqual({ phrase, ungrounded: true });
+      expect({ phrase, ungrounded: rq(r, ctx([])) }).toEqual({ phrase, ungrounded: true });
+    }
+    // amount-free paid claims never name a payment
+    expect(rq('This invoice is paid.', ctx([paid]))).toBe(true);
+  });
+  test('"is unpaid" / "hasn\'t been paid" are contradicted by a PAID row; owed figures must be owed', () => {
+    const r = "Your $120 payment hasn't been paid from Sep 12.";
+    expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 120 }))).toBe(false);
+    expect(rq('Your $120 invoice is unpaid.', ctx([paid], { outstandingBalance: 120 }))).toBe(true); // a paid $120 row contradicts
+    expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 50 }))).toBe(true); // $120 is not owed
+    expect(rq('This invoice is unpaid.', ctx([]))).toBe(false);
+    expect(rq('This invoice is unpaid.', ctx([paid]))).toBe(true);
+    expect(rq('You have an unpaid balance of $50.', ctx([], { outstandingBalance: 50 }))).toBe(false); // owed language, untouched
+    expect(r).toBeTruthy();
   });
 });

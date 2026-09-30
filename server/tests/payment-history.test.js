@@ -27,7 +27,8 @@ describe('loadPaymentHistory', () => {
     expect(names.indexOf('whereRaw')).toBeGreaterThan(-1);
     expect(names.indexOf('whereRaw')).toBeLessThan(names.indexOf('limit'));
     const raw = dbh.calls.find(([m]) => m === 'whereRaw')[1];
-    expect(raw[0]).toMatch(/NOT IN \(SELECT id::text FROM invoices WHERE customer_id = \? AND payer_id IS NOT NULL\)/);
+    expect(raw[0]).toMatch(/NOT EXISTS \(SELECT 1 FROM invoices i WHERE i\.id::text = payments\.metadata->>'invoice_id' AND i\.customer_id = \? AND i\.payer_id IS NOT NULL\)/);
+    expect(raw[0]).not.toMatch(/NOT IN|COALESCE/);
     expect(raw[1]).toEqual(['c1']);
     expect(dbh.calls.find(([m]) => m === 'limit')[1]).toEqual([PAYMENT_HISTORY_CAP + 1]);
     expect(dbh.calls.some(([m, a]) => m === 'whereNot' && a[1] === 'upcoming')).toBe(true);
@@ -97,5 +98,30 @@ describe('Codex round-12 P0: the aggregator\'s Recent payments read excludes pay
     expect(line).toBeDefined();
     expect(line).toMatch(/whereNull\('payments\.payer_id'\)/);
     expect(line.indexOf("whereNull('payments.payer_id')")).toBeLessThan(line.indexOf('.limit('));
+  });
+});
+
+// Codex round-13 P1: hasProcessingPayment is an authoritative EXISTENCE query, not a window read.
+describe('hasInFlightMoney', () => {
+  const { hasInFlightMoney, IN_FLIGHT_SQL } = require('../services/payment-history');
+  const rawDb = (impl) => ({ raw: jest.fn(impl) });
+
+  test('one existence query over payments AND invoices, own (non-payer) rows only, JSONB ->> with no window/limit', () => {
+    expect(IN_FLIGHT_SQL).toMatch(/FROM payments p/);
+    expect(IN_FLIGHT_SQL).toMatch(/p\.payer_id IS NULL/);
+    expect(IN_FLIGHT_SQL).toMatch(/IN \('pending', 'processing', 'requires_action'\)/);
+    expect(IN_FLIGHT_SQL).toMatch(/NOT EXISTS \(SELECT 1 FROM invoices pi WHERE pi\.id::text = p\.metadata->>'invoice_id'/);
+    expect(IN_FLIGHT_SQL).toMatch(/FROM invoices i[\s\S]*i\.payer_id IS NULL AND lower\(i\.status\) = 'processing'/);
+    expect(IN_FLIGHT_SQL).not.toMatch(/LIMIT|ORDER BY/i);
+  });
+
+  test('true / false from the row; an older processing row is found regardless of newer rows (no window in the query)', async () => {
+    expect(await hasInFlightMoney('c1', rawDb(async () => ({ rows: [{ in_flight: true }] })))).toBe(true);
+    expect(await hasInFlightMoney('c1', rawDb(async () => ({ rows: [{ in_flight: false }] })))).toBe(false);
+  });
+
+  test('a failed read or no customer is null (unknown => the aggregator reads it as in flight)', async () => {
+    expect(await hasInFlightMoney('c1', rawDb(async () => { throw new Error('db down'); }))).toBeNull();
+    expect(await hasInFlightMoney(null, rawDb(async () => ({ rows: [] })))).toBeNull();
   });
 });

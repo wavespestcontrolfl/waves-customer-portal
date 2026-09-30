@@ -27,8 +27,10 @@ async function loadPaymentHistory(customerId, dbh = db) {
       // homeowner's history, even with no metadata.invoice_id (Codex round-12 P0).
       .whereNull('payments.payer_id')
       .whereNot('payments.status', 'upcoming')
+      // payments.metadata is JSONB (initial_schema `t.jsonb('metadata')`, never altered), so
+      // ->> is total (NULL metadata / missing key => NULL => the row is kept).
       .whereRaw(
-        "COALESCE(payments.metadata->>'invoice_id', '') NOT IN (SELECT id::text FROM invoices WHERE customer_id = ? AND payer_id IS NOT NULL)",
+        "NOT EXISTS (SELECT 1 FROM invoices i WHERE i.id::text = payments.metadata->>'invoice_id' AND i.customer_id = ? AND i.payer_id IS NOT NULL)",
         [customerId],
       )
       .orderBy('payments.payment_date', 'desc')
@@ -51,4 +53,36 @@ async function ensureAbsenceHistory(context, replyText, dbh = db) {
   return context;
 }
 
-module.exports = { loadPaymentHistory, ensureAbsenceHistory, PAYMENT_HISTORY_CAP };
+// Codex round-13 P1: is ANY of this customer's own money still IN FLIGHT? An
+// EXISTENCE query over the whole table — deliberately independent of the 3/5-row
+// display window (an older processing payment must still block "you're paid up"
+// when five newer rows push it out of view). Own = not payer-owned: payments with
+// payer_id NULL whose metadata invoice is not a payer-billed one; invoices with
+// payer_id NULL. true when a payment is pending/processing/requires_action OR an
+// invoice is processing. Returns null when the read fails (unknown => callers
+// fail closed). payments.metadata is JSONB, so ->> is total.
+const IN_FLIGHT_SQL = `SELECT (
+  EXISTS (
+    SELECT 1 FROM payments p
+    WHERE p.customer_id = ? AND p.payer_id IS NULL
+      AND lower(p.status) IN ('pending', 'processing', 'requires_action')
+      AND NOT EXISTS (SELECT 1 FROM invoices pi WHERE pi.id::text = p.metadata->>'invoice_id' AND pi.customer_id = ? AND pi.payer_id IS NOT NULL)
+  )
+  OR EXISTS (
+    SELECT 1 FROM invoices i
+    WHERE i.customer_id = ? AND i.payer_id IS NULL AND lower(i.status) = 'processing'
+  )
+) AS in_flight`;
+async function hasInFlightMoney(customerId, dbh = db) {
+  if (!customerId) return null;
+  try {
+    const res = await dbh.raw(IN_FLIGHT_SQL, [customerId, customerId, customerId]);
+    const row = (res && (res.rows ? res.rows[0] : res[0])) || null;
+    return row ? row.in_flight === true : null;
+  } catch (err) {
+    logger.warn(`[payment-history] in-flight read failed for customer ${customerId}: ${err.message}`);
+    return null;
+  }
+}
+
+module.exports = { loadPaymentHistory, ensureAbsenceHistory, hasInFlightMoney, IN_FLIGHT_SQL, PAYMENT_HISTORY_CAP };

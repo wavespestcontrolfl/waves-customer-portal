@@ -89,7 +89,7 @@ describe('payment-status vocabulary: the prompt and the classifier share ONE tab
 
   test('every phrase in every family is recognized by the guard', () => {
     for (const [family, { phrases, rowStatuses }] of Object.entries(PAYMENT_STATUS_VOCABULARY)) {
-      const absence = family === 'not_found' || family === 'not_received';
+      const absence = family === 'not_found' || family === 'not_received' || family === 'unpaid';
       for (const phrase of phrases) {
         const reply = absence
           ? `Note: ${phrase} for your $120.00 payment.`
@@ -100,7 +100,9 @@ describe('payment-status vocabulary: the prompt and the classifier share ONE tab
         const noRow = check(reply, ctx([]));
         const withRow = check(reply, backing);
         // an ordinary family needs a matching row; an ABSENCE family is contradicted by one
-        expect({ family, phrase, noRow, withRow }).toEqual({ family, phrase, noRow: !absence, withRow: absence });
+        // an ordinary family needs a matching row; an ABSENCE family is contradicted by one;
+        // "unpaid" is owed-shaped too, so its $120 figure must itself be owed (rejected with no balance)
+        expect({ family, phrase, noRow, withRow }).toEqual({ family, phrase, noRow: family === 'unpaid' ? true : !absence, withRow: absence });
       }
     }
   });

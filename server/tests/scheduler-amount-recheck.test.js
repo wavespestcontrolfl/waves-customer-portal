@@ -63,7 +63,10 @@ describe('recheckScheduledSmsAmounts', () => {
     expect(zelle.stale).toBe(true);
     expect(zelle.reason).toMatch(/^zelle_/);
     const status = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta: { ...claimMeta, agent_decision_id: 'd1' } });
-    expect(status).toEqual({ stale: false, reason: null }); // pre-v12 (non-strict) amount-free claims are unchanged
+    // Codex round-13: a HUMAN-edited status claim is now rechecked even pre-v12 => no customer fails closed
+    expect(status).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    const agentDrafted = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
+    expect(agentDrafted).toEqual({ stale: false, reason: null }); // pre-v12 agent draft: amount-free claims unchanged
     const amount = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'Your balance is $95.' }, claimMeta });
     expect(amount).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
     db.mockClear();

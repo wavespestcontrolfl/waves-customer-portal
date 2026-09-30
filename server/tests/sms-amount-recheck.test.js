@@ -472,11 +472,31 @@ describe('Codex round 4 P1 (finding 3): the Zelle recheck resolves the customer\
     })).resolves.toEqual({ stale: true, reason: 'zelle_invoice_ineligible' });
   });
 
-  test('trustOwedAmounts skips the pooled owed-amount check (gate off / legacy prompt)', async () => {
+  // Codex round-13 P1: a human-edited PRE-v12 reply no longer skips everything —
+  // the clause-aware binder runs with trustOwedAmounts (owed clauses excused, receipts not).
+  test('trustOwedAmounts on a pre-v12 prompt runs the clause-aware binder with the owed-only trust (no early skip)', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
+    replyQuotesUngroundedAmount.mockReturnValue(false);
     await expect(outgoingAmountsStale({
       customerId: 'c1', body: 'Your balance is $9,999.00.', dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true,
     })).resolves.toEqual({ stale: false });
-    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith('Your balance is $9,999.00.', expect.any(Object), { byMeaning: true, trustOwedAmounts: true, inboundMessage: null });
+  });
+
+  test('a human-edited pre-v12 receipt claim that the binder rejects is stale', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
+    replyQuotesUngroundedAmount.mockReturnValue(true);
+    await expect(outgoingAmountsStale({
+      customerId: 'c1', body: 'We received your $500 payment.', dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true,
+    })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+
+  test('an amount-free receipt/status claim on a human-edited pre-v12 reply is rechecked too', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [] } });
+    replyQuotesUngroundedAmount.mockReturnValue(true);
+    await expect(outgoingAmountsStale({
+      customerId: 'c1', body: "You're paid up!", dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true,
+    })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
 
   test('without trustOwedAmounts, the same ungrounded balance is still blocked (regression guard)', async () => {

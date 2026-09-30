@@ -636,6 +636,7 @@ class ContextAggregator {
       const invId = paymentInvoiceId(p);
       return !(invId && payerInvoiceIds.has(invId));
     });
+    const inFlightMoney = await require('./payment-history').hasInFlightMoney(customer.id);
     // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
     // collectible OWN invoices (net of credit) plus failed standalone
     // attempts — a customer with a sent-but-unpaid invoice and no failed
@@ -785,8 +786,9 @@ class ContextAggregator {
         // (the balance above excludes a processing invoice, so "you're paid up"
         // would read as true while money is in flight). True when any own payment
         // is pending/processing/requires_action or any own invoice is processing.
-        hasProcessingPayment: ownPayments.some((p) => ['pending', 'processing', 'requires_action'].includes(String(p.status || '').toLowerCase()))
-          || invoiceRows.some((r) => !r.payer_id && String(r.status || '').toLowerCase() === 'processing'),
+        // Authoritative EXISTENCE query (payment-history.hasInFlightMoney), independent of
+        // the display window; null (read failed) is read as in flight — fail closed.
+        hasProcessingPayment: inFlightMoney !== false,
         // v10: real autopay state (canonical eligibility, null = unknown).
         autopay: autopayState,
         // v10: the newest sent-and-unpaid invoice. payerBilled=true means a

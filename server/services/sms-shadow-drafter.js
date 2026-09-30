@@ -1465,14 +1465,16 @@ function classifyPaymentClause(masked, hasAmounts, env) {
   const phrase = paymentStatusPhraseClaim(masked, hasAmounts || inboundNamesPayment(env.inboundText));
   if (phrase === 'negated') return { kind: 'negated' };
   if (phrase === 'not_found' || phrase === 'not_received') return { kind: 'absence', family: phrase };
+  if (phrase === 'unpaid') return { kind: 'unpaid', family: phrase };
   if (phrase) return { kind: 'status', family: phrase };
   const ackPol = paymentAckPolarity(masked);
   const statusKind = paymentStatusClaimKind(masked);
   return hasAmounts ? classifyAmountClause(masked, ackPol, statusKind, env) : classifyAmountFreeClause(ackPol, statusKind);
 }
 function classifyAmountFreeClause(ackPol, statusKind) {
-  if (ackPol === 'positive' || statusKind === 'event') return { kind: 'ack' };
+  // Settlement first: "you are paid up" contains the literal "are paid" ack form.
   if (statusKind === 'settlement') return { kind: 'settlement' };
+  if (ackPol === 'positive' || statusKind === 'event') return { kind: 'ack' };
   if (ackPol === 'negated') return { kind: 'negated_ack' };
   return { kind: 'none' };
 }
@@ -1554,6 +1556,9 @@ const KIND_VALIDATORS = {
   ambiguous: () => true, // reads as both or neither of owed/receipt (round-5/6)
   status: validateStatusClaim,
   absence: validateAbsenceClaim,
+  // "is unpaid": contradicted by a paid row like any absence claim, AND — being
+  // owed-shaped — any figure it states must itself be owed (round-13).
+  unpaid: (c, env) => validateAbsenceClaim(c, env) || c.amounts.some((a) => !env.owedCents.has(a)),
   ack: validateAck,
   // a negated ack ("wasn't processed") with a figure is never a binding claim;
   // amount-free it is a truthful denial and untouched (round-10 P1 polarity).

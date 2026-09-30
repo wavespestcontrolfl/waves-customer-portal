@@ -398,7 +398,7 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
     process.env.ZELLE_RECIPIENT = 'pay@example.com';
     db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
     const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
-    expect(result).toEqual({ visible: true, reason: null });
+    expect(result).toEqual({ visible: true, reason: null, projectedCredit: 0 });
   });
 
   // Finding 4: the client-side "hides Zelle while creditPending" rule
@@ -415,7 +415,7 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
       return chain({ first: null });
     });
     const result = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue' }) });
-    expect(result).toEqual({ visible: false, reason: 'credit_pending' });
+    expect(result).toEqual({ visible: false, reason: 'credit_pending', projectedCredit: 20 });
   });
 
   test('a LIVE-resolved payer denies visibility (round 5 finding 3)', async () => {
@@ -465,7 +465,7 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
 
     test('no live payer ⇒ still eligible', async () => {
       PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: null });
-      await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: true, reason: null });
+      await expect(payPageZelleVisibility({ invoice: unstamped() })).resolves.toEqual({ visible: true, reason: null, projectedCredit: 0 });
     });
   });
 });
@@ -524,6 +524,36 @@ describe('payPageZelleVisibility + GET: an erroring credit lookup fails closed',
     const { body, status } = await getPayPage(invoiceData(), { dbImpl });
     expect(status).toBe(200);
     expect(Object.prototype.hasOwnProperty.call(body, 'manualPayOptions')).toBe(false);
+  });
+});
+
+// Codex round-13 P1: the projected-credit read happens ONCE per public GET (it rides the visibility verdict).
+describe('GET /pay/:token reads account credit no more than twice (coverage + one projection)', () => {
+  const gates = require('../config/feature-gates').gates;
+  const PayerService = require('../services/payer');
+  beforeEach(() => {
+    PayerService.resolveForInvoice.mockReset();
+    PayerService.resolveForInvoice.mockResolvedValue({ payerId: null });
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    gates.autoApplyAccountCredit = true;
+  });
+  afterEach(() => { gates.autoApplyAccountCredit = false; delete process.env.ZELLE_RECIPIENT; });
+
+  test('credit lookups on customers.account_credits: no third read; creditPending still flagged from the shared projection', async () => {
+    let creditReads = 0;
+    const dbImpl = (table) => {
+      const q = chain({ first: { billing_mode: null, monthly_rate: null } });
+      if (table === 'customers') {
+        q.first = jest.fn(async (...cols) => {
+          if (cols.includes('account_credits')) { creditReads += 1; return { account_credits: 20, auto_apply_account_credit: true }; }
+          return { billing_mode: null, monthly_rate: null };
+        });
+      }
+      return q;
+    };
+    const { body } = await getPayPage(invoiceData(), { dbImpl });
+    expect(creditReads).toBeLessThanOrEqual(2);
+    expect(body.manualPayOptions).toMatchObject({ creditPending: true });
   });
 });
 
