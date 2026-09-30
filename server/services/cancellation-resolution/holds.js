@@ -90,7 +90,7 @@ async function startAwayMode({ customerId, caseId, until = null }) {
   const today = etDateString();
   const untilYmd = ymd(until) || addDays(today, 180);
   if (untilYmd <= today) throw codedError('away_date_invalid', 'The return date must be in the future');
-  const existing = await db('property_preferences').where({ customer_id: customerId }).first('id');
+  const existing = await db('property_preferences').where({ customer_id: customerId }).first('id', 'away_mode_until');
   if (existing) {
     await db('property_preferences').where({ id: existing.id }).update({ away_mode_until: untilYmd, updated_at: new Date() });
   } else {
@@ -104,7 +104,19 @@ async function startAwayMode({ customerId, caseId, until = null }) {
       body: `Case ${caseId}. Exterior-only visits while away; reports continue; price and tier unchanged.`,
     });
   } catch (err) { logger.warn(`[holds] away-mode note failed for ${customerId}: ${err.message}`); }
-  return { until: untilYmd, untilDisplay: displayDate(untilYmd) };
+  // previousUntil (undefined = no preferences row before) lets a paired
+  // accept that fails afterwards put the preference back (restoreAwayMode).
+  return {
+    until: untilYmd, untilDisplay: displayDate(untilYmd),
+    previousUntil: existing ? (existing.away_mode_until ? dateOnlyString(existing.away_mode_until) : null) : undefined,
+  };
+}
+
+// Undo startAwayMode for an accept that failed after it: the preference
+// returns to what it was (a row this accept created keeps a NULL date).
+async function restoreAwayMode(customerId, previousUntil) {
+  await db('property_preferences').where({ customer_id: customerId })
+    .update({ away_mode_until: previousUntil || null, updated_at: new Date() });
 }
 
 async function revertMoves(customerId, moved) {
@@ -715,4 +727,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, restoreAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

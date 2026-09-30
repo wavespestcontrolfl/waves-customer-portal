@@ -12,6 +12,7 @@ const mockEmit = jest.fn();
 const mockSkips = jest.fn().mockResolvedValue(undefined);
 const mockRestartTexts = jest.fn().mockResolvedValue(undefined);
 const mockMarkAccepted = jest.fn().mockResolvedValue(undefined);
+const mockRestoreAway = jest.fn().mockResolvedValue(undefined);
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -23,6 +24,7 @@ jest.mock('../services/cancellation-resolution/holds', () => ({
   applyHoldSkips: (...a) => mockSkips(...a),
   sendDueRestartTexts: (...a) => mockRestartTexts(...a),
   markHoldsAccepted: (...a) => mockMarkAccepted(...a),
+  restoreAwayMode: (...a) => mockRestoreAway(...a),
 }));
 
 const { executeAcceptedAction } = require('../services/cancellation-resolution/actions');
@@ -165,4 +167,17 @@ test('the accept is marked as standing before any skip runs; a marking failure u
   expect(mockCancelHold).toHaveBeenCalledWith('h-lawn_care', { compensateVisits: true });
   expect(mockSkips).not.toHaveBeenCalled();
   expect(mockEmit).not.toHaveBeenCalled();
+});
+
+test('away pairing: a marking failure after Away Mode was written undoes the holds AND puts Away Mode back', async () => {
+  mockStartHold.mockResolvedValueOnce(hold('lawn_care', ['v1']));
+  mockStartAwayMode.mockResolvedValueOnce({ until: '2026-11-01', untilDisplay: 'Nov 1', previousUntil: '2026-08-01' });
+  mockMarkAccepted.mockRejectedValueOnce(new Error('db down'));
+  await expect(executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],
+  })).rejects.toThrow('db down');
+  expect(mockCancelHold).toHaveBeenCalledWith('h-lawn_care', { compensateVisits: true });
+  expect(mockRestoreAway).toHaveBeenCalledWith('c1', '2026-08-01');
+  expect(mockEmit).not.toHaveBeenCalled();
+  expect(mockSkips).not.toHaveBeenCalled();
 });

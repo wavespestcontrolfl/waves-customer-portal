@@ -288,11 +288,21 @@ async function executeAwayPairing(ctx) {
   // Holds and Away Mode both stand: the moved visits' techs hear now, and
   // the visits inside the pause are skipped.
   const holds = require('./holds');
-  await markAcceptedOrUndo(hold.holds);
+  try {
+    await markAcceptedOrUndo(hold.holds);
+  } catch (err) {
+    // The holds are undone; Away Mode goes back too, so a failed accept
+    // really changed nothing.
+    try { await holds.restoreAwayMode(ctx.customerId, away.previousUntil); } catch (undoErr) {
+      logger.error(`[cancel-actions] away-mode restore failed for ${ctx.customerId}: ${undoErr.message}`);
+    }
+    throw err;
+  }
   holds.emitHoldTechNotices(techNotices);
   await holds.applyHoldSkips(holdResults);
   await holds.sendDueRestartTexts(hold.holds);
-  return { ...away, ...hold, effects: [...away.effects, ...hold.effects] };
+  const { previousUntil: _previousUntil, ...awayOut } = away;
+  return { ...awayOut, ...hold, effects: [...away.effects, ...hold.effects] };
 }
 
 /* ------------------------------------------------------------------ */
