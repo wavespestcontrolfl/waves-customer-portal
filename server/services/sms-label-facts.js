@@ -722,7 +722,19 @@ const CLAIM_RULES_BEFORE_QUESTION = [
 // "The treatment is set / bonded / absorbed / sealed / locked in" is a rain claim in other words (allowed only inside the
 // reply's own dry-and-bond condition, like the COMPANY FACTS rain line).
 const TREATMENT_STATE_RE = /\b(?:treatment|spray|application|product|granules?|fertilizer|it|everything)\b[^.?!]{0,25}\b(?:is|are|has|have|was|were|'s)\s+(?:now\s+|already\s+|fully\s+|completely\s+|all\s+|been\s+)*(?:set(?:\s+in)?|bonded|absorbed|locked\s+in|sealed|cured|soaked\s+in|sunk\s+in)\b/;
+// Permission to go / use, stated to the customer's side: (you / they / the kids / the family / everyone / pets / dogs, or feel free / it's fine
+// to) + a permission modal + any verb + an immediacy adverb ("You may return now.", "They're free to come in whenever.", "Feel free to head
+// back anytime.", an imperative like "Go back inside now."). Contact / billing / scheduling actions are excluded by verb or object ("you can
+// reply anytime", "you can pay online anytime", "you can book now"). Every gap is bounded.
+const PERMISSION_ADVERB_SRC = 'now|anytime|any\\s+time|whenever|right\\s+away|immediately|at\\s+this\\s+point|already|today|tonight';
+const PERMISSION_SUBJECT_SRC = "you|they|everyone|everybody|the\\s+(?:kids|children|family|dogs?|pets?)|your\\s+(?:kids|children|family|dogs?|pets?|cats?)|kids|children|pets|dogs|cats";
+const PERMISSION_NOW_RE = new RegExp(
+  `\\b(?:(?:${PERMISSION_SUBJECT_SRC})(?:\\s+(?:can|may|could)|\\s+are\\s+(?:free|welcome|allowed|good)\\s+to|'re\\s+(?:free|welcome|allowed|good)\\s+to)|(?:it(?:'s|\\s+is)\\s+fine\\s+to|feel\\s+free\\s+to))\\s+(?:\\w+\\s+){0,6}?(?:${PERMISSION_ADVERB_SRC})\\b`
+  // (an imperative counts only with a going-in / going-out particle or a plainly re-entry verb: "Go back inside now.", not "Come by today." or "Get a free inspection today.")
+  + `|^(?:please\\s+)?(?:(?:go|come|head|move|get)\\s+(?:back|in|inside|indoors|out|outside|outdoors)|enter|re-?enter|return|walk|step|play|sit|swim)\\b(?:\\s+\\w+){0,5}?\\s+(?:${PERMISSION_ADVERB_SRC})\\b`);
+const SERVICE_ACTION_RE = /\b(?:call|text|reply|respond|reach|contact|email|message|chat|talk|ask|tell|pay|paying|book|reschedule|schedule|cancel|view|check|log|sign|access|download|see\s+your|portal|app|online|link|website|invoice|bill|receipt|report|account|estimate|quote|appointment|card|payment|phone)\b|\b(?:swing|stop|come|drop|pop)\s+by\b/;
 const CLAIM_RULES_AFTER_QUESTION = [
+  { name: 'permission to go / use now', test: (x) => PERMISSION_NOW_RE.test(x.c) && !SERVICE_ACTION_RE.test(x.c) && !x.staffLed },
   { name: 'a treatment stated as set / bonded / absorbed / sealed', test: (x) => TREATMENT_STATE_RE.test(x.c) && !x.replyDryCondition },
   // people / pets, or a lawn activity, with permission, a directive or a movement word
   {
@@ -963,7 +975,7 @@ const ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|you|us|our|my|me|they
 // indoor place with a question / ok word. Staff going in ("can you come inside to spray", "the tech will come inside") is access,
 // not re-entry. Every alternative is a plain word list with bounded gaps.
 const INDOOR_PLACE_RE = /\b(?:inside|indoors?|house|home|rooms?|bedrooms?|kitchen|living\s+room|garage|attic|crawlspace|basement|bathroom|closet|cabinets?|pantry|baseboards?|floors?|carpets?|couch|furniture|nursery)\b/;
-const ENTRY_RE = /\b(?:re-?enter|enter|(?:go|come|get|walk|move)\s+(?:back\s+)?(?:in|inside|indoors)|let\s+(?:\w+\s+){0,2}?(?:back\s+)?(?:in|inside|indoors)|sleep(?:ing)?\s+in|stay(?:ing)?\s+in|use\s+the\s+(?:kitchen|bathroom|bedroom|room|garage|basement|attic))\b/;
+const ENTRY_RE = /\b(?:re-?enter|enter|return\s+(?:home|inside|indoors|in|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|come\s+home|(?:get|head|move|be)\s+back\s+(?:home|in|inside|indoors|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|(?:go|come|get|walk|move)\s+(?:back\s+)?(?:in|inside|indoors)|let\s+(?:\w+\s+){0,2}?(?:back\s+)?(?:in|inside|indoors)|sleep(?:ing)?\s+in|stay(?:ing)?\s+in|use\s+the\s+(?:kitchen|bathroom|bedroom|room|garage|basement|attic))\b/;
 const STAFF_ENTRY_RE = /\b(?:you|(?:the|our|your)\s+(?:tech|technician|guy|team|crew)|tech|technician|someone)\s+(?:will\s+|can\s+|could\s+|should\s+|would\s+|need\s+to\s+|have\s+to\s+|to\s+)?(?:come|go|get|enter|walk)\s+(?:in|inside|indoors|into)\b/;
 const OK_WORD_RE = /\b(?:safe|ok|okay|fine|ready|usable|clear|allowed)\b/;
 // ("you" is not the one going in: "do you spray inside the house?" is a question about the service)

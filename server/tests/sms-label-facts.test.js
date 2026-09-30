@@ -1877,7 +1877,7 @@ describe('r29: input caps and adversarial-input timing (no ReDoS)', () => {
     'and a half': rep('one and a half '), 'keep off': rep('keep off '), 'keep the dogs': rep('keep the dogs '), 'wait for': rep('wait for '), 'give it a': rep('give it a '), 'let the dog': rep('let the dog '),
     'dry and': rep('dry and '), 'trigger words': rep('rain pets dogs kids lawn stay off until dry '), 'for 2 hours or': rep('for 2 hours or '), dashes: rep('- '), dots: rep('. '), commas: rep(', '), 'question marks': rep('? '),
     'let the cat': rep('let the cat '), 'go back in': rep('go back in '), 'come back inside': rep('come back inside '), 'sleep in the': rep('sleep in the '), 'use the kitchen': rep('use the kitchen '),
-    'inside house home': rep('inside house home '), 'water the': rep('water the '), 'turn the water back on': rep('turn the water back on '), 'run the sprinklers': rep('run the sprinklers '), 'water in': rep('water in the '), 'hand-off deadline': rep('Your technician will confirm the timing within the hour. '), 'we my kids': rep('we my kids '), 'you can come': rep('you can come '),
+    'inside house home': rep('inside house home '), 'water the': rep('water the '), 'turn the water back on': rep('turn the water back on '), 'run the sprinklers': rep('run the sprinklers '), 'water in': rep('water in the '), 'hand-off deadline': rep('Your technician will confirm the timing within the hour. '), 'you can go': rep('you can go back in '), 'free to': rep('they are free to '), 'feel free': rep('feel free to head back '), 'come home': rep('come home '), 'return to the': rep('return to the house '), 'we my kids': rep('we my kids '), 'you can come': rep('you can come '),
     'zero width': rep('\u200b '), apostrophes: rep("don't "), 'may in': rep('may in '), 'next fri': rep('next fri '), years: rep('in 2025 '), 'am pm': rep('9 am '), clocks: rep('9:00 '), 'by 5': rep('by 5 '), colons: rep('a: '),
   };
   const SECTION = 'LABEL FACTS (Jun 5):\n- For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas for 4 hours.\n';
@@ -2064,6 +2064,39 @@ describe('r32: an apology opener is peeled; what follows must be allowed on its 
       'So sorry about that.', 'I apologize for the trouble.', 'Sorry for the delay!', 'Sorry!', 'Apologies.', 'Our apologies.', 'Sorry about that \u2014 a manager will reach out within the hour.', "I'm so sorry about that, someone will follow up within the hour.",
       'I am sorry the spiders are back.', "Hello Catherine! I am sorry the spiders are back. Let me check with the office on what happened this morning and I will follow up shortly.", 'So sorry about that \u2014 a manager will reach out by 9 AM tomorrow morning.',
     ]) expect([reply, guard(reply)]).toEqual([reply, false]);
+  });
+});
+
+describe('r33: return / come home inbound verbs; permission-to-go-now outgoing statements', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const claims = (reply) => labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences(reply, ''));
+  test('inbound: return / come home / get, head, move, be back in are entry verbs', () => {
+    for (const text of ['When can we return to the house?', 'can we come home now', 'ok to get back inside', 'when can we be back in the house', 'can I head back in', 'when can the kids move back into their room', 'can we return home now', 'can I get back to the house']) {
+      expect([text, asked(text).includes('reentry')]).toEqual([text, true]);
+    }
+    for (const text of ['will you be back Thursday?', 'when will you return my call', 'can you come back next week', 'when do you return the estimate']) expect([text, asked(text).includes('reentry')]).toEqual([text, false]);
+  });
+  test('outgoing: permission modal + verb + immediacy adverb to the customer\'s side is a clearance claim', () => {
+    for (const reply of [
+      'You may return now.', 'You can go back now.', "They're free to come in whenever.", 'Feel free to head back anytime.', 'Go back inside now.', 'Please come back in now.', 'The kids can play outside right away.',
+      'Everyone is welcome to use the yard today.', 'Your dogs are good to go out immediately.', "It's fine to walk on it tonight.", 'You are allowed to go out at this point.', 'The family can move back in already.',
+      'They can go out any time.',
+    ]) expect([reply, claims(reply)]).toEqual([reply, true]);
+  });
+  test('staff scheduling, contact, billing and portal actions are not clearance', () => {
+    for (const reply of [
+      'You can reschedule anytime.', 'You can reply anytime.', 'You can call us anytime.', 'You can pay online anytime.', 'You can book now.', 'You can view your report in the portal anytime.', 'Feel free to text us anytime.',
+      'We can come back Thursday.', 'Please reply now.', 'You can ask us anything anytime.', 'You can now see your visit report online.', 'Feel free to reach out anytime.', 'You can cancel anytime.', 'They can reach us anytime.',
+      'You can check your portal now.', 'You can log in anytime.', 'You can sign up now.', 'You can swing by today.', 'Come by today.', 'Get a free inspection today.', 'Your appointment is today.', 'The tech will be there today.',
+    ]) expect([reply, claims(reply)]).toEqual([reply, false]);
+  });
+  test('held unless an authorized copy answers: a bare clearance to an indoor / outdoor question is held at draft and send time', async () => {
+    const q = 'When can we return to the house?';
+    for (const reply of ['You may return now.', 'You can go back now.']) {
+      expect([reply, labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', asked(q))]).toEqual([reply, true]);
+      await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body: reply, inbound: q, conn: () => { throw new Error('must not read'); } })).resolves.toBe('label_facts_unauthorized_claim');
+    }
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming("I'll have the office confirm within the hour.", '', asked(q))).toBe(false);
   });
 });
 
