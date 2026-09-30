@@ -56,7 +56,7 @@ const {
 // v4: + visitStage, so the first visit of a rodent trapping program reads as
 // the setup it is instead of a routine re-check (owner 2026-08-02).
 // v5: validate appointment date, window, and time claims through the shared guard.
-const PROMPT_VERSION = 'typed_report_narrative_v6';
+const PROMPT_VERSION = 'typed_report_narrative_v7';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const _cache = new Map();
 
@@ -379,7 +379,7 @@ function deterministicSummary(facts) {
   return parts.filter(Boolean).join(' ');
 }
 
-const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control & Lawn Care service report.
+const SYSTEM_PROMPT = `You write the Visit Summary for a Waves Pest Control service report.
 
 ${HUMAN_PROSE_RULES}
 

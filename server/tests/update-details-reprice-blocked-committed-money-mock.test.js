@@ -370,7 +370,7 @@ test('re-price refuses with a retry while a /secure card confirmation is mid-fin
   const fs = require('fs');
   const src = fs.readFileSync(require.resolve('../routes/admin-schedule.js'), 'utf8');
   const guardAt = src.indexOf("const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);");
-  const completingAt = src.indexOf(".where({ scheduled_service_id: req.params.id, status: 'completing' })");
+  const completingAt = src.indexOf('await findCompletingCardRequestVisitId(trx, [req.params.id])');
   const estimateAt = src.indexOf('await findEstimateScopedCommitment(trx, priceGuardRow?.source_estimate_id)');
   const firstWriteAt = src.indexOf('if (addressPlan) addressUpdatedIds = await applyAppointmentAddress(trx, addressPlan, req.technicianId);');
   for (const at of [completingAt, estimateAt]) {

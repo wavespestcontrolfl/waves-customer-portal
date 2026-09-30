@@ -36,7 +36,7 @@ test('one numbered-photo chain uses the registered vision policy and validates t
   const [policy, payload, options] = dispatchWithFallback.mock.calls[0];
   expect(policy).toBe(MODELS.TEXT_POLICIES.lawnVisitAssessment);
   expect(policy.primary.provider).toBe('gemini');
-  expect(policy.fallback).toEqual({ provider: 'openai', model: MODELS.OPENAI_FRONTIER });
+  expect(policy.fallback).toEqual({ provider: 'openai', model: MODELS.OPENAI_LAWN_ASSESSMENT });
   expect(payload).toMatchObject({
     system: input.SYSTEM_PROMPT, jsonMode: true, jsonSchema: input.RESPONSE_SCHEMA,
     maxTokens: input.MAX_OUTPUT_TOKENS, reasoningEffort: 'medium',
@@ -60,11 +60,11 @@ test('one numbered-photo chain uses the registered vision policy and validates t
 
 test('preserves the fallback model and billed failed-leg usage without dispatching twice', async () => {
   const failures = [{ provider: 'gemini', reason: 'malformed_assessment', usage: { input_tokens: 2100, output_tokens: 600 } }];
-  dispatchWithFallback.mockResolvedValue(ok(validAnswer(), { provider: 'openai', model: MODELS.OPENAI_FRONTIER, fallbackUsed: true, failures }));
+  dispatchWithFallback.mockResolvedValue(ok(validAnswer(), { provider: 'openai', model: MODELS.OPENAI_LAWN_ASSESSMENT, fallbackUsed: true, failures }));
   const result = await analyzeVisit({ photos, thinkingLevel: 'LOW', visionContext: null });
   expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
   expect(dispatchWithFallback.mock.calls[0][1].thinkingLevel).toBe('LOW');
-  expect(result).toMatchObject({ provider: 'openai', model: MODELS.OPENAI_FRONTIER, fallbackUsed: true, failures, visionContext: {} });
+  expect(result).toMatchObject({ provider: 'openai', model: MODELS.OPENAI_LAWN_ASSESSMENT, fallbackUsed: true, failures, visionContext: {} });
 });
 
 test('server IDs and technician photo zones govern the normalized answer', async () => {

@@ -53,6 +53,18 @@
       ]
     },
     {
+      "router": "server/routes/public-map-image.js",
+      "mount": "/api/public/map-image",
+      "reason": "Signed satellite image proxy: the lead-form lookup, customer service report and portal station map carry short-lived HMAC-signed paths (services/signed-map-image.js, key derived from REPORT_PIN_SECRET||JWT_SECRET, 2 h expiry; 24 h for the lead-form lookup) instead of Google Static Maps URLs that embedded the server Maps key. The route reads ONLY the signed token in the path — never a query param — rebuilds the keyless Static Maps URL from the signed, range-checked lat/lng/zoom/size/scale/maptype, appends the key inside the fetch and streams the bytes, so it cannot become an open proxy or SSRF. Every refusal (bad shape/signature, expired, no key, upstream failure) answers one generic 404 with no-store/no-referrer/CORP cross-origin; its own 60 req/min per-IP (IPv6 /64) limiter (429 stamped with the same headers) fronts the mount, which is mounted in server/index.js above the global cors(), the global limiter and the body parsers (so an OPTIONS preflight also gets the router's generic 404, not cors()'s 204); no server-side image cache. The router stamps the privacy headers and applies the limiter to EVERY request under the mount (any method/subpath, case-insensitive, trailing slash) and ends in a terminal catch-all that answers the same generic 404 for anything but a valid GET/HEAD /:token (the inline USE entries — header stamp, terminal 404, and a last error handler that turns any error, e.g. a malformed percent-encoding, into that same 404 — and the limiter USE entry). See docs/public-route-contracts.md.",
+      "routes": [
+        "GET /api/public/map-image/:token",
+        "USE /api/public/map-image (express-rate-limit({ handler#94fc883d }))",
+        "USE /api/public/map-image (inline function#0946a58f)",
+        "USE /api/public/map-image (inline function#322aaeb5)",
+        "USE /api/public/map-image (inline function#9f9f4d83)"
+      ]
+    },
+    {
       "router": "server/routes/stripe-webhook.js",
       "mount": "/api/stripe/webhook",
       "reason": "Stripe webhook — signature-verified in-handler (stripe.webhooks.constructEvent over the raw body; rejects when STRIPE_WEBHOOK_SECRET is unset)",
