@@ -291,6 +291,8 @@ describe('a name disagreement draws Fable', () => {
       const result = await pending;
       expect(result.findings[0]).toMatchObject({ name: 'Chinch bug damage', confidence: 'high' });
       expect(result.referee).toMatchObject({ triggered: true, outcome: 'unavailable', reason: 'timeout' });
+      // Recorded latency covers the second opinion and referee wait, not just the first read.
+      expect(result.latencyMs).toBeGreaterThanOrEqual(referee.REFEREE_MAX_MS);
     });
 
     test('a Sol call that never returns is abandoned at its cap and Gemini stands', async () => {

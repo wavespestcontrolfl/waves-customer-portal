@@ -82,7 +82,8 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } =
     // changes only the normalized fields, and `referee` records what moved.
     usage: outcome.usage || null, raw: outcome.json,
     ...withoutNoteInfluencedProse(normalizeAssessment(assessed, photos.length, zones), context.technicianNotes),
-    ...(refereeOn ? { referee } : {}),
+    // Gate on: latency covers the second opinion and referee calls too.
+    ...(refereeOn ? { referee, latencyMs: Date.now() - started } : {}),
   };
 }
 
