@@ -45,17 +45,60 @@ const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
 const CUSTOMER_EMAIL_FIELDS = require('../utils/customer-comms-lock').CUSTOMER_EMAIL_COLUMNS
   .filter((column) => column !== 'billing_email');
 
-// Vetoes that will not clear by themselves: the address is suppressed or the
-// customer asked not to be contacted. Everything else (ownership busy, an
-// unverifiable lookup, a provider error) is transient and worth a retry.
-const PERMANENT_VETO_REASONS = new Set(['address_suppressed', 'do_not_contact']);
-
 class ConfirmationVetoedError extends Error {
   constructor(reason) {
     super(`confirmation email vetoed: ${reason}`);
     this.name = 'ConfirmationVetoedError';
     this.code = 'confirmation_vetoed';
     this.reason = reason;
+  }
+}
+
+// How long a send waits for a concurrent ownership writer before refusing.
+// Writers hold the shared ownership lock only for the length of their own
+// assignment, so a wait normally just delays the send by a moment.
+const OWNERSHIP_WAIT_MS = 3000;
+
+/**
+ * lockEmailOwnershipForSend refuses immediately when an ownership assignment
+ * is in progress. For this send that would mean a failed confirmation the
+ * public form cannot retry, so wait a bounded moment instead: the non-blocking
+ * try first (the common case), then blocking exclusive locks on the same keys,
+ * in the same sorted order, under a short lock_timeout.
+ *
+ * Lock-order safety: we already hold the address key(s) exclusively. Ownership
+ * writers take the address key BEFORE the shared ownership lock (the DB trigger
+ * takes the shared lock at assignment time, after the writer's own
+ * lockCustomerEmail), so a writer holding the shared lock is one that already
+ * passed the address key, never one waiting for it. A raw writer that skipped
+ * the address key and later wanted it would be the only cycle: PostgreSQL's
+ * deadlock detector or the lock_timeout ends it and this send fails closed
+ * (no email), so the worst case is a refused send, never a delivery.
+ * The wait runs in a savepoint so a timeout cannot poison the caller's
+ * transaction, and lock_timeout is restored afterwards.
+ */
+async function fenceOwnership(trx, emailLc, waitMs) {
+  const locks = require('../utils/customer-comms-lock');
+  try {
+    await locks.lockEmailOwnershipForSend(trx, emailLc);
+    return;
+  } catch (err) {
+    if (!err || err.code !== 'EMAIL_OWNERSHIP_CHECK_BUSY' || !(waitMs > 0)) {
+      if (err && err.code === 'EMAIL_OWNERSHIP_CHECK_BUSY') throw new ConfirmationVetoedError('ownership_busy');
+      throw err;
+    }
+  }
+  const keys = locks.customerEmailLockKeys(emailLc).map((value) => `email-ownership:${value}`).sort();
+  try {
+    await trx.transaction(async (sp) => {
+      const previous = (await sp.raw("SELECT current_setting('lock_timeout') AS value")).rows[0].value;
+      await sp.raw("SELECT set_config('lock_timeout', ?, true)", [`${Math.ceil(waitMs)}ms`]);
+      for (const key of keys) await sp.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [key]);
+      await sp.raw("SELECT set_config('lock_timeout', ?, true)", [previous]);
+    });
+  } catch (err) {
+    if (err && err.code === '55P03') throw new ConfirmationVetoedError('ownership_busy');
+    throw err;
   }
 }
 
@@ -76,9 +119,10 @@ class ConfirmationVetoedError extends Error {
  *      do-not-email is either committed before this read or lands after the
  *      send. Blocking; taken first (caller-held row locks are always taken
  *      AFTER the address key by the writers, never before).
- *   2. lockEmailOwnershipForSend — non-blocking, AFTER the blocking locks,
+ *   2. lockEmailOwnershipForSend — non-blocking try, AFTER the blocking locks,
  *      fencing assignment of this address to a customer between the profile
- *      read and the send. Busy = a writer is mid-assignment: refuse (retryable).
+ *      read and the send. Busy = a writer is mid-assignment: wait a bounded
+ *      few seconds (fenceOwnership), then refuse.
  *
  *  - email_suppressions: an active bounce / spam_complaint / do_not_email row
  *    (any stream) or an ungrouped row, on this mailbox under ANY Gmail
@@ -94,18 +138,13 @@ class ConfirmationVetoedError extends Error {
  * so nothing is sent. Vetoes are not surfaced to anonymous callers — every
  * caller already swallows a send error and answers uniformly.
  */
-async function assertConfirmationAllowed(subscriber, dbh = db) {
+async function assertConfirmationAllowed(subscriber, dbh = db, { ownershipWaitMs = OWNERSHIP_WAIT_MS } = {}) {
   const emailLc = String(subscriber.email || '').trim().toLowerCase();
   try {
     const locks = require('../utils/customer-comms-lock');
     if (!dbh || !dbh.isTransaction) throw Object.assign(new Error('transaction required'), { code: 'NO_TRANSACTION' });
     await locks.lockCustomerEmail(dbh, emailLc);
-    try {
-      await locks.lockEmailOwnershipForSend(dbh, emailLc);
-    } catch (lockErr) {
-      if (lockErr && lockErr.code === 'EMAIL_OWNERSHIP_CHECK_BUSY') throw new ConfirmationVetoedError('ownership_busy');
-      throw lockErr;
-    }
+    await fenceOwnership(dbh, emailLc, ownershipWaitMs);
     // Reads run in a savepoint so a failing statement cannot poison a
     // caller's transaction; the locks above (taken outside it) survive.
     await dbh.transaction(async (sp) => {
@@ -150,49 +189,6 @@ async function assertConfirmationAllowed(subscriber, dbh = db) {
     // ID-only, no address, per AGENTS.md.
     logger.warn(`[newsletter-confirm] veto check failed for subscriber id=${subscriber.id}: ${err.code || err.name || 'error'} — not sending`);
     throw new ConfirmationVetoedError('veto_unverifiable');
-  }
-}
-
-/**
- * subscribeOrResubscribe stamps confirmation_sent_at BEFORE the send. When the
- * send then fails for a TRANSIENT reason (ownership busy, unverifiable veto
- * lookup, provider error) the row would look delivered: nothing retries, the
- * DOI TTL runs against a mail that never left, and the purge sweep deletes the
- * row. Undo the pre-stamp so the row reads "not sent" again (a repeat signup
- * re-sends, the stale-pending lifecycle stays honest) — the discipline the
- * call pipeline and the email fanout already follow. A PERMANENT veto
- * (suppressed / do-not-contact) is left stamped: it must not be retried, and
- * the purge sweep retires the row.
- *
- * Never null a stamp that records a REAL delivery. A pending resubscribe
- * re-mails the SAME token, so the stamp it overwrote (`restoreTo`, from
- * subscribeOrResubscribe's priorConfirmationSentAt) may be the delivery of a
- * link the recipient already holds; nulling it would exempt that link from
- * the DOI expiry and the purge sweep for good. So: restore that value when
- * there is one, null only when this attempt was the first ever. And the undo is
- * a compare-and-set on the exact pre-stamp THIS attempt wrote
- * (subscriber.confirmation_sent_at): a concurrent attempt that re-stamped the
- * row (its send may have succeeded) makes this a no-op. Also scoped to the
- * attempted email+token+pending so a correction that rotated the row keeps its
- * own stamp. Best-effort; never throws.
- */
-async function releaseUnsentConfirmationStamp(subscriber, err, { restoreTo = null, dbh = db } = {}) {
-  try {
-    if (!subscriber || !subscriber.id || !subscriber.confirmation_sent_at) return false;
-    if (err && err.code === 'confirmation_vetoed' && PERMANENT_VETO_REASONS.has(err.reason)) return false;
-    const updated = await dbh('newsletter_subscribers')
-      .where({
-        id: subscriber.id,
-        confirmation_token: subscriber.confirmation_token,
-        status: 'pending',
-        confirmation_sent_at: subscriber.confirmation_sent_at,
-      })
-      .whereRaw('LOWER(email) = ?', [String(subscriber.email || '').trim().toLowerCase()])
-      .update({ confirmation_sent_at: restoreTo || null, updated_at: new Date() });
-    return updated > 0;
-  } catch (clearErr) {
-    logger.warn(`[newsletter-confirm] confirmation_sent_at release failed for subscriber id=${subscriber && subscriber.id}: ${clearErr.code || clearErr.name || 'db_error'}`);
-    return false;
   }
 }
 
@@ -255,15 +251,14 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
 
   const handoff = async (trx) => {
     await assertConfirmationAllowed(subscriber, trx);
-    // KNOWN LIMIT (owner ruling on PR #5390: document, no pipeline fence): the
-    // address, suppression and ownership races are fenced by the locks above,
-    // but a call-log do-not-contact request committed by ANOTHER call between
-    // the read in assertConfirmationAllowed and the provider request is not.
-    // Nothing fences call_log extraction writes (call-recording-processor
-    // persists them at ~7 standalone sites before the call has a customer
-    // link), and the other outbound vetoes (auto-text holds, first-touch
-    // resume) read-then-send the same way. The read above is the last await
-    // before sendOne, so the window is that gap only.
+    // ACCEPTED LIMIT, same as the other outbound vetoes (auto-text holds,
+    // first-touch resume): the address, suppression and ownership races are
+    // fenced by the locks above, but a call-log do-not-contact request
+    // committed by ANOTHER call between the read in assertConfirmationAllowed
+    // and the provider request is not. Nothing fences call_log extraction
+    // writes (call-recording-processor persists them at ~7 standalone sites
+    // before the call has a customer link). The read is the last await before
+    // sendOne, so the window is that gap only.
     // Confirmation emails are transactional — they must arrive even for
     // recipients who've previously unsubscribed from newsletter broadcasts.
     // Pass asmGroupId: 0 to bypass the SendGrid suppression group entirely.
@@ -289,5 +284,5 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
 }
 
 module.exports = {
-  sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError, releaseUnsentConfirmationStamp,
+  sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError,
 };

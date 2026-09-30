@@ -174,8 +174,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
     await expect(assertConfirmationAllowed(sub(addr()), db)).rejects.toMatchObject({ reason: 'veto_unverifiable' });
   });
 
-  test('an ownership assignment holding the fence refuses the send (busy)', async () => {
-    const email = addr();
+  // A concurrent ownership writer holds the shared ownership lock (what the
+  // assignment trigger takes) on its own connection until `release()`.
+  async function withOwnershipWriter(email, fn) {
     const key = `email-ownership:customer-email:${email}`;
     const rollback = new Error('rollback');
     let release;
@@ -189,13 +190,34 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
       throw rollback;
     }).catch((e) => { if (e !== rollback) throw e; });
     await isHeld;
-    try {
+    try { await fn(release); } finally { release(); await writer; }
+  }
+
+  test('a writer that outlasts the bounded wait refuses the send (busy) and lock_timeout is restored', async () => {
+    const email = addr();
+    await withOwnershipWriter(email, async () => {
       await inRolledBackTx(async (trx) => {
-        await expect(assertConfirmationAllowed(sub(email), trx)).rejects.toMatchObject({ reason: 'ownership_busy' });
+        const before = (await trx.raw('SHOW lock_timeout')).rows[0].lock_timeout;
+        const started = Date.now();
+        await expect(assertConfirmationAllowed(sub(email), trx, { ownershipWaitMs: 300 })).rejects.toMatchObject({ reason: 'ownership_busy' });
+        expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+        // The savepoint rolled back with the timeout: the caller's transaction is still usable.
+        expect((await trx.raw('SHOW lock_timeout')).rows[0].lock_timeout).toBe(before);
+        await expect(trx.raw('SELECT 1 AS ok')).resolves.toBeTruthy();
       });
-    } finally {
-      release();
-      await writer;
-    }
+    });
+  });
+
+  test('a writer that finishes within the wait just delays the send (no refusal)', async () => {
+    const email = addr();
+    await withOwnershipWriter(email, async (release) => {
+      await inRolledBackTx(async (trx) => {
+        setTimeout(release, 300);
+        const started = Date.now();
+        await expect(assertConfirmationAllowed(sub(email), trx, { ownershipWaitMs: 5000 })).resolves.toBeUndefined();
+        expect(Date.now() - started).toBeGreaterThanOrEqual(250);
+        expect((await trx.raw('SHOW lock_timeout')).rows[0].lock_timeout).toBe('0');
+      });
+    });
   });
 });

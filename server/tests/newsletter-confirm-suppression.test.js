@@ -9,7 +9,6 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-jwt-secret';
 
 jest.mock('../services/logger', () => ({ error: jest.fn(), info: jest.fn(), warn: jest.fn() }));
 const mockOrder = [];
-const mockUpdates = [];
 jest.mock('../services/sendgrid-mail', () => ({
   isConfigured: () => true,
   sendOne: jest.fn(async () => { mockOrder.push('send'); return { messageId: 'sg-1' }; }),
@@ -30,11 +29,12 @@ jest.mock('../services/newsletter-subscribers', () => ({
 const express = require('express');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
-const { sendConfirmationEmail, releaseUnsentConfirmationStamp, ConfirmationVetoedError } = require('../services/newsletter-confirm');
+const { sendConfirmationEmail } = require('../services/newsletter-confirm');
 
 // Per-table canned results. A value that is an Error is thrown by the query.
 let tables;
 let ownershipBusy;
+let ownershipWaitTimesOut;
 function fakeQuery(table) {
   const q = {};
   const settle = () => {
@@ -45,7 +45,6 @@ function fakeQuery(table) {
   ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'whereNull', 'select'].forEach((m) => {
     q[m] = jest.fn((arg) => { if (typeof arg === 'function') arg.call(q, q); return q; });
   });
-  q.update = jest.fn(async (patch) => { mockUpdates.push({ table, patch, wheres: q.where.mock.calls.map((c) => c[0]) }); return 1; });
   q.first = jest.fn(async () => { mockOrder.push(`read:${table}`); const v = settle(); return Array.isArray(v) ? v[0] || null : v || null; });
   q.then = (res, rej) => Promise.resolve().then(() => { mockOrder.push(`read:${table}`); return settle() || []; }).then(res, rej);
   return q;
@@ -60,6 +59,13 @@ function makeTrx() {
       mockOrder.push(`try:${key}`);
       return { rows: [{ locked: !ownershipBusy }] };
     }
+    if (/current_setting\('lock_timeout'\)/.test(sql)) return { rows: [{ value: '0' }] };
+    if (/set_config\('lock_timeout'/.test(sql)) { mockOrder.push(`timeout:${key}`); return { rows: [] }; }
+    if (/^SELECT pg_advisory_xact_lock/.test(sql) && /^email-ownership:/.test(String(key))) {
+      mockOrder.push(`wait:${key}`);
+      if (ownershipWaitTimesOut) throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+      return { rows: [] };
+    }
     mockOrder.push(`lock:${key}`);
     return { rows: [] };
   });
@@ -73,8 +79,8 @@ const SUB = { id: 'sub-1', email: 'Neighbor@Example.com', first_name: 'Pat', con
 beforeEach(() => {
   jest.clearAllMocks();
   mockOrder.length = 0;
-  mockUpdates.length = 0;
   ownershipBusy = false;
+  ownershipWaitTimesOut = false;
   tables = { email_suppressions: [], customers: [], notification_prefs: [], call_log: [] };
   rootTrx = makeTrx();
   db.mockImplementation((t) => fakeQuery(t));
@@ -184,11 +190,44 @@ describe('locking, ordering and connection reuse (B13 review)', () => {
     expect(mockOrder).toContain('send');
   });
 
-  test('a busy ownership fence refuses the send and reads nothing', async () => {
+  test('a busy ownership fence WAITS (bounded) and then sends once the writer is done', async () => {
+    ownershipBusy = true; // the non-blocking try is refused, the bounded wait succeeds
+    await sendConfirmationEmail(SUB);
+    const emailLc = 'neighbor@example.com';
+    expect(mockOrder.slice(0, 5)).toEqual([
+      `lock:customer-email:${emailLc}`,
+      `try:email-ownership:customer-email:${emailLc}`,
+      'timeout:3000ms',
+      `wait:email-ownership:customer-email:${emailLc}`,
+      'timeout:0',
+    ]);
+    expect(mockOrder).toContain('send');
+    expect(mockOrder.indexOf('send')).toBeGreaterThan(mockOrder.findIndex((e) => e.startsWith('read:')));
+  });
+
+  test('a Google address waits on both ownership keys in the sorted order', async () => {
     ownershipBusy = true;
+    await sendConfirmationEmail({ ...SUB, email: 'Pat.Smith+news@gmail.com' });
+    const waits = mockOrder.filter((e) => e.startsWith('wait:'));
+    expect(waits).toEqual([
+      'wait:email-ownership:customer-email:pat.smith+news@gmail.com',
+      'wait:email-ownership:customer-mailbox:patsmith@gmail.com',
+    ]);
+  });
+
+  test('a writer that outlasts the wait refuses the send and reads nothing', async () => {
+    ownershipBusy = true;
+    ownershipWaitTimesOut = true;
     await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ code: 'confirmation_vetoed', reason: 'ownership_busy' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
     expect(mockOrder.some((e) => e.startsWith('read:'))).toBe(false);
+  });
+
+  test('a zero wait refuses at once without blocking', async () => {
+    ownershipBusy = true;
+    const { assertConfirmationAllowed } = require('../services/newsletter-confirm');
+    await expect(assertConfirmationAllowed(SUB, rootTrx, { ownershipWaitMs: 0 })).rejects.toMatchObject({ reason: 'ownership_busy' });
+    expect(mockOrder.some((e) => e.startsWith('wait:'))).toBe(false);
   });
 
   test('a failing lock statement fails closed', async () => {
@@ -266,6 +305,9 @@ describe('POST /api/public/newsletter/subscribe with a vetoed address', () => {
     expect(vetoed).toEqual(normal);
     expect(vetoed).toEqual({ status: 200, body: { success: true, pending: true } });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+    // A failed / vetoed public send leaves the row exactly as a provider failure always has
+    // (stamp kept; a repeat post re-sends): the route writes nothing after the send.
+    expect(db.mock.calls.filter((c) => c[0] === 'newsletter_subscribers')).toHaveLength(0);
   });
 
   test('a veto lookup error also answers uniformly and sends nothing', async () => {
@@ -273,95 +315,6 @@ describe('POST /api/public/newsletter/subscribe with a vetoed address', () => {
     const r = await post('neighbor@example.com');
     expect(r).toEqual({ status: 200, body: { success: true, pending: true } });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
-  });
-});
-
-describe('pre-stamp release after a failed send (public callers)', () => {
-  async function post(email) {
-    const router = require('../routes/public-newsletter');
-    const app = express();
-    app.use(express.json());
-    app.use('/api/public/newsletter', router);
-    const server = app.listen(0);
-    try {
-      const r = await fetch(`http://127.0.0.1:${server.address().port}/api/public/newsletter/subscribe`, {
-        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
-      });
-      return { status: r.status, body: await r.json() };
-    } finally {
-      await new Promise((resolve) => server.close(resolve));
-    }
-  }
-  const stampClears = () => mockUpdates.filter((u) => u.table === 'newsletter_subscribers' && u.patch.confirmation_sent_at === null);
-
-  beforeEach(() => { mockSubscribe.mockResolvedValue({ action: 'confirmation_resent', subscriber: { ...SUB, confirmation_sent_at: new Date('2026-09-29T12:00:00.000Z') } }); });
-
-  test('a transient ownership_busy veto clears the pre-stamp; the response stays uniform', async () => {
-    ownershipBusy = true;
-    const r = await post('neighbor@example.com');
-    expect(r).toEqual({ status: 200, body: { success: true, pending: true } });
-    expect(sendgrid.sendOne).not.toHaveBeenCalled();
-    expect(stampClears()).toHaveLength(1);
-  });
-
-  test('an unverifiable veto lookup clears the pre-stamp', async () => {
-    tables.email_suppressions = new Error('connection terminated');
-    const r = await post('neighbor@example.com');
-    expect(r.status).toBe(200);
-    expect(stampClears()).toHaveLength(1);
-  });
-
-  test('permanent vetoes (suppressed, do-not-contact) leave the row stamped: no retry', async () => {
-    // Direct (the route's per-IP limiter caps posts per minute in one file).
-    tables.email_suppressions = [{ id: 's1', suppression_type: 'do_not_email' }];
-    const stamped = { ...SUB, confirmation_sent_at: new Date() };
-    const suppressed = await sendConfirmationEmail(stamped).catch((e) => e);
-    expect(await releaseUnsentConfirmationStamp(stamped, suppressed)).toBe(false);
-    tables.email_suppressions = [];
-    mockDnc.mockResolvedValue(true);
-    tables.customers = [{ id: 'c1' }];
-    const dnc = await sendConfirmationEmail(SUB).catch((e) => e);
-    expect(dnc.reason).toBe('do_not_contact');
-    expect(await releaseUnsentConfirmationStamp(stamped, dnc)).toBe(false);
-    expect(mockUpdates.filter((u) => u.patch.confirmation_sent_at === null)).toHaveLength(0);
-  });
-
-  test('a successful send leaves the stamp alone', async () => {
-    await sendConfirmationEmail(SUB);
-    expect(stampClears()).toHaveLength(0);
-  });
-
-  const STAMP = new Date('2026-09-29T12:00:00.000Z');
-  const PRIOR = new Date('2026-09-20T12:00:00.000Z');
-  const STAMPED = { ...SUB, confirmation_sent_at: STAMP };
-
-  test('release is a compare-and-set on the exact pre-stamp, scoped to email + token + pending, and never throws', async () => {
-    const ok = await releaseUnsentConfirmationStamp(STAMPED, new ConfirmationVetoedError('ownership_busy'));
-    expect(ok).toBe(true);
-    const u = mockUpdates.find((x) => x.table === 'newsletter_subscribers');
-    expect(u.wheres).toContainEqual({ id: 'sub-1', confirmation_token: 'tok-1', status: 'pending', confirmation_sent_at: STAMP });
-    expect(u.patch.confirmation_sent_at).toBeNull();
-    db.mockImplementation(() => { throw new Error('db down'); });
-    await expect(releaseUnsentConfirmationStamp(STAMPED, new Error('sendgrid'))).resolves.toBe(false);
-  });
-
-  test('a prior real delivery is RESTORED, never nulled', async () => {
-    await releaseUnsentConfirmationStamp(STAMPED, new Error('sendgrid down'), { restoreTo: PRIOR });
-    const u = mockUpdates.find((x) => x.table === 'newsletter_subscribers');
-    expect(u.patch.confirmation_sent_at).toBe(PRIOR);
-  });
-
-  test('a subscriber without a recorded pre-stamp is left alone', async () => {
-    expect(await releaseUnsentConfirmationStamp(SUB, new Error('x'))).toBe(false);
-    expect(mockUpdates).toHaveLength(0);
-  });
-
-  test('both public routes hand the prior stamp to the release (source pin; the limiter caps posts per minute)', () => {
-    const fs = require('fs');
-    for (const f of ['public-newsletter.js', 'public-quote.js']) {
-      const src = fs.readFileSync(require('path').join(__dirname, '..', 'routes', f), 'utf8');
-      expect(src).toContain('await releaseUnsentConfirmationStamp(result.subscriber, e, { restoreTo: result.priorConfirmationSentAt })');
-    }
   });
 });
 

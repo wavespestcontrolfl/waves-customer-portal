@@ -95,8 +95,7 @@ async function transitionWaitlistRow(existing, {
  *   'confirmation_sent'   — new pending row inserted; caller must send
  *                           the confirmation email (the subscriber row
  *                           contains the freshly-issued confirmation_token)
- *   'confirmation_resent' — (also returns priorConfirmationSentAt: the stamp
- *                           this call overwrote) existing pending row's confirmation_sent_at
+ *   'confirmation_resent' — existing pending row's confirmation_sent_at
  *                           was bumped; caller resends the email with
  *                           the SAME token (the user may already have
  *                           the prior link)
@@ -173,17 +172,7 @@ async function subscribeOrResubscribeOnce({
         });
         if (linkCustomer) await linkToCustomer(lc);
         const fresh = await db('newsletter_subscribers').where({ id: existing.id }).first();
-        // The SAME token is re-mailed, so the stamp this call just overwrote
-        // may record a REAL earlier delivery of that link. A caller whose
-        // resend then fails restores it (releaseUnsentConfirmationStamp)
-        // instead of nulling it: a null stamp exempts the row from the DOI
-        // expiry and the purge sweep, which would make the delivered link
-        // permanent.
-        return {
-          subscriber: fresh,
-          action: 'confirmation_resent',
-          priorConfirmationSentAt: existing.confirmation_sent_at || null,
-        };
+        return { subscriber: fresh, action: 'confirmation_resent' };
       }
       // Trusted-context promotion: flip pending to active.
       await db('newsletter_subscribers').where({ id: existing.id }).update({
