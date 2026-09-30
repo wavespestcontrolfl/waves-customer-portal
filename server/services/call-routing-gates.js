@@ -413,7 +413,7 @@ const ROUTE_DECISION_REFRESH_COLUMNS = [
 //   2. a keyed UPDATE of the refresh columns (a later pass lands here).
 // `fence` ({ callLogId, processingToken }) scopes the REFRESH to the pass that
 // still owns the call's processing_token, exactly like the processor's other
-// ownership fences — a superseded worker can insert a first row for a key but
+// ownership fences (and skipped for a decision a human already reviewed) — a superseded worker can insert a first row for a key but
 // never overwrite a newer pass's decision. Returns a promise (await it).
 async function upsertRouteDecision(conn, decision, fence = null) {
   await conn('route_decisions').insert(decision).onConflict().ignore();
@@ -427,6 +427,15 @@ async function upsertRouteDecision(conn, decision, fence = null) {
       recording_sid: decision.recording_sid,
     })
     .update(refresh);
+  // A REVIEWED decision is never refreshed (codex #5371 r6 P1): route_feedback
+  // points at a decision row by id and calibration joins that row's CURRENT
+  // action / reasons to the human's verdict, so mutating a reviewed row would
+  // re-attach an old verdict to a decision the reviewer never saw. The row a
+  // human judged stays exactly as judged; a later pass's different decision
+  // is simply not recorded over it.
+  update.whereNotExists(function reviewed() {
+    this.select(conn.raw('1')).from('route_feedback').whereRaw('route_feedback.route_decision_id = route_decisions.id');
+  });
   if (fence) {
     // A fence that was ASKED FOR but is incomplete (a missing processing
     // token) fails closed: the refresh is skipped, never run unfenced.

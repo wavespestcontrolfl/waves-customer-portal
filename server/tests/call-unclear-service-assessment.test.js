@@ -556,6 +556,7 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
       qb.then = (res, rej) => { sqls.push(qb.toSQL()); return Promise.resolve([]).then(res, rej); };
       return qb;
     };
+    conn.raw = (...a) => knex.raw(...a);
     return { conn, sqls };
   }
 
@@ -581,6 +582,12 @@ describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => 
     await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
     expect(sqls[1].sql).toMatch(/EXISTS \(SELECT 1 FROM call_log WHERE call_log\.id = \? AND call_log\.processing_token = \?\)/i);
     expect(sqls[1].bindings.slice(-2)).toEqual(['c1', 'tok']);
+  });
+
+  test('a refresh skips a decision that has route_feedback (codex r6 P1)', async () => {
+    const { conn, sqls } = recordingConn();
+    await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
+    expect(sqls[1].sql).toMatch(/not exists \(select 1 from "route_feedback" where route_feedback\.route_decision_id = route_decisions\.id\)/i);
   });
 
   test('an incomplete fence (no processing token) fails closed: no refresh runs', async () => {
@@ -661,6 +668,19 @@ describe('the offline audits run the downstream transcript veto (codex r5 P1)', 
     const r = canAutoRoute(extraction({ confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9 } }), GATE_ON);
     expect(r.unclearServiceGateAdmitted).toBe(true);
     expect(applyUnclearServiceTranscriptVeto(r, extracted, seo).allowed).toBe(false);
+  });
+
+  test('the in-process SHADOW decision applies the same veto before it is built (codex r6 P1)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    const veto = src.indexOf('routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);');
+    const build = src.indexOf('const shadowDecision = buildRouteDecision({');
+    expect(veto).toBeGreaterThan(-1);
+    expect(build).toBeGreaterThan(veto);
+    // and it sits after the V1 address demotion it mirrors
+    expect(src.lastIndexOf('routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);', veto)).toBeGreaterThan(-1);
+    // behavior: a vetoed admitted call is held in the shadow verdict
+    const r = applyUnclearServiceTranscriptVeto(admitted(), extracted, seo);
+    expect(r.allowed).toBe(false);
   });
 
   test('all three audit scripts call the ONE shared helper', () => {

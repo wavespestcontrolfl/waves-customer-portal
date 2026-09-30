@@ -19602,6 +19602,11 @@ const CallRecordingProcessor = {
         // shadow decision must hold exactly where enforce would hold, or
         // rollout metrics overstate safe fail-open bookings.
         routingResult = demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller);
+        // …and the downstream full-transcript service veto the live pass applies
+        // to every call GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT admitted (the
+        // resolver skips the appointment there), or the stored shadow evidence
+        // overstates safe auto-routes.
+        routingResult = applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription);
         // …and the house-number hold this pass actually applied (codex r38
         // P1): a call whose legacy booking was HELD must not be persisted as
         // a shadow auto-route candidate, or the promotion cohort counts an
