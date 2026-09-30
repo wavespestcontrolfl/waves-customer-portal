@@ -20,10 +20,11 @@
 // the tool-list level (getToolsForContext) and at proposal/confirm time in
 // admin-intelligence-bar.js via FULL_ACCESS_TWO_STEP_TOOL_NAMES below — never
 // by inventing a new access helper (ib-access.js's ibFullAccess /
-// requireFullAccess are the only predicate). This PR ships PREVIEW ONLY: each
-// executor refuses when called with confirmed:true ("commit path ships in
-// the next PR") — no outside write actually reaches Sentry/Cloudflare/
-// Railway/GitHub/GSC yet, whoever calls it.
+// requireFullAccess are the only predicate). On confirm, each executor acts
+// ONLY on the `_verified_*` pins /confirm-action derives from the
+// fingerprint-verified live preview (outside-write-pins.js) — never on the
+// operator's raw strings — and a read-only token refuses with
+// code "write_access_required", changing nothing.
 const OUTSIDE_WRITE_TOOL_NAMES = new Set([
   'resolve_sentry_issue',
   'ignore_sentry_issue',
