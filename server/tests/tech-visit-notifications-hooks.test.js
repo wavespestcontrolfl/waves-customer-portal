@@ -343,27 +343,38 @@ describe('cancel-flow plan hold (source order)', () => {
     const fs = require('fs');
     const path = require('path');
     const holds = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/holds.js'), 'utf8');
-    expect(holds).toContain("}, 'plan_hold', 'customer', { suppressTechNotice: true });");
-    expect(holds).toContain("'plan_hold_revert', 'customer', { suppressTechNotice: true });");
+    // Forward prepaid move and its compensating move back both stay silent.
+    const forward = holds.slice(holds.indexOf("'plan_hold', 'customer', {"), holds.indexOf("'plan_hold', 'customer', {") + 120);
+    expect(forward).toContain('suppressTechNotice: true');
+    const revert = holds.slice(holds.indexOf("'plan_hold_revert', 'customer', {"), holds.indexOf("'plan_hold_revert', 'customer', {") + 120);
+    expect(revert).toContain('suppressTechNotice: true');
     // startHold never emits: the notices are built after the last
     // compensation point and handed back to the caller.
     expect(holds).not.toContain('void techNotices.notifyVisitRescheduled(');
-    const compensate = holds.indexOf("throw codedError('hold_setup_failed'");
-    const built = holds.indexOf('const techNotices = moved');
+    const compensate = holds.indexOf("throw codedError('hold_setup_failed'", holds.indexOf('async function startHold('));
+    const built = holds.indexOf('techNotices: moveTechNotices(moved, movedTechIds)');
+    expect(compensate).toBeGreaterThan(-1);
     expect(built).toBeGreaterThan(compensate);
-    expect(holds).toContain('moved: moved.length, techNotices };');
     // The recipient is the holder on the COMMITTED move (rebooker result).
     expect(holds).toContain("movedTechIds.set(String(visit.id), moveResult?.technicianId || null);");
-    // The action emits after its own compensation catch (multi-family) …
+    // The action emits only after every family stood and the accept was
+    // marked (which undoes this run's holds on failure) …
     const actions = fs.readFileSync(path.join(__dirname, '../services/cancellation-resolution/actions.js'), 'utf8');
-    const holdCatch = actions.indexOf("try { await cancelHold(done.holdId, { compensateVisits: true }); }");
-    const holdEmit = actions.indexOf('if (!deferTechNotices) emitHoldTechNotices(techNotices);');
-    expect(holdEmit).toBeGreaterThan(holdCatch);
-    // … and the away pairing defers past Away Mode's own compensation catch.
-    expect(actions).toContain('await executeHold({ ...ctx, deferTechNotices: true });');
-    const awayCatch = actions.indexOf("try { await cancelHold(holdId, { compensateVisits: true }); }");
-    const awayEmit = actions.indexOf("require('./holds').emitHoldTechNotices(techNotices);");
-    expect(awayEmit).toBeGreaterThan(awayCatch);
+    const holdCatch = actions.indexOf('await undoOwnHolds(ownHoldIds(results).reverse());');
+    const holdMark = actions.indexOf('await markAcceptedOrUndo(results.map((r) => r.holdId), ownHoldIds(results));');
+    const holdEmit = actions.indexOf('    emitHoldTechNotices(techNotices);');
+    expect(holdCatch).toBeGreaterThan(-1);
+    expect(holdMark).toBeGreaterThan(holdCatch);
+    expect(holdEmit).toBeGreaterThan(holdMark);
+    // … and the away pairing defers past Away Mode's own compensation and
+    // its marking.
+    expect(actions).toContain('await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });');
+    const awayCatch = actions.indexOf('await undoOwnHolds(ownHolds);');
+    const awayMark = actions.indexOf('await markAcceptedOrUndo(hold.holds, ownHolds);');
+    const awayEmit = actions.indexOf('holds.emitHoldTechNotices(techNotices);');
+    expect(awayCatch).toBeGreaterThan(-1);
+    expect(awayMark).toBeGreaterThan(awayCatch);
+    expect(awayEmit).toBeGreaterThan(awayMark);
   });
 });
 
