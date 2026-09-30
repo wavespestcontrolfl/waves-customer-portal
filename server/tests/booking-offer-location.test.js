@@ -306,4 +306,18 @@ describe('availabilityForExistingCustomer — refusals before any picker runs', 
     const customersQuery = db.mock.results.map((r, i) => ({ table: db.mock.calls[i][0], chain: r.value })).find((c) => c.table === 'customers');
     expect(customersQuery.chain.filters).toEqual({ id: CUSTOMER_ID, active: true });
   });
+
+  // createSelfBooking refuses a pre-customer pipeline stage under
+  // bookingCustomersOnly (Codex #5406 r2), so no offer is made either.
+  test('bookingCustomersOnly on + a pre-customer stage (new_lead) → null before any pin; gate off → the stage does not block', async () => {
+    const gates = jest.spyOn(require('../config/feature-gates'), 'isEnabled').mockImplementation(() => true);
+    firstResults.customers = customerRow({ pipeline_stage: 'new_lead' });
+    const geocode = jest.spyOn(geocoder, 'geocodeAddress').mockResolvedValue(null);
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(geocode).not.toHaveBeenCalled();
+    gates.mockImplementation((gate) => gate !== 'bookingCustomersOnly');
+    firstResults.customers = customerRow({ pipeline_stage: 'new_lead' });
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(geocode).toHaveBeenCalled();
+  });
 });

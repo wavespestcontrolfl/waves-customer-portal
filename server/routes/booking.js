@@ -2041,7 +2041,11 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
   // resolveBearerCustomer): an inactive/cancelled customer cannot sign in to
   // /book, so the texting AI must not offer them times it could not commit.
   const customer = await db('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
-    .first('id', 'account_id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+    .first('id', 'account_id', 'pipeline_stage', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
+  // createSelfBooking's own rule: under bookingCustomersOnly a row still in a
+  // pre-customer pipeline stage is not a verified customer and cannot book, so
+  // it is offered nothing either.
+  if (customer && isEnabled('bookingCustomersOnly') && PRE_CUSTOMER_PIPELINE_STAGES.has(String(customer.pipeline_stage || ''))) return null;
   const location = customer ? await customerBookingLocation(customer) : null;
   if (!location) return null;
   const config = await loadBookingConfig();
