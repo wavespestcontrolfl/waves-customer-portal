@@ -3103,7 +3103,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
           await expect(send({}, body)).resolves.toMatch(/reservice_booking_changed/); // cancelled after drafting
           setToday('2026-10-08'); // the card crossed midnight: "tomorrow" is now today
           await expect(send({ pest: { date: '2026-10-08', windowStart: '09:00' } }, body)).resolves.toMatch(/reservice_booking_changed/);
-          await expect(send({ pest: { date: '2026-10-08', windowStart: '09:00' } }, 'Your pest re-service is today at 9.')).resolves.toBeNull();
+          await expect(send({ pest: { date: '2026-10-08', windowStart: '09:00' } }, 'Your pest re-service is today, 9-11 AM.')).resolves.toBeNull();
           // no re-service context → an ordinary "tomorrow" is untouched
           await expect(send({}, 'See you tomorrow!')).resolves.toBeNull();
         } finally {
@@ -3122,7 +3122,6 @@ describe('free re-service is an entitlement resolved through the existing mechan
           'Your regular lawn treatment is already scheduled for Thursday.',
           'Your quarterly service is on Thursday, October 8.',
           'We will see you Thursday, October 8.',
-          'Your free lawn re-service is already scheduled for Thursday.', // another lane's re-service
           'Your visit is scheduled for Thursday.', // a plain visit with no free/follow-up qualifier
           'Your regular pest treatment is already scheduled for Thursday.',
         ]) {
@@ -3131,7 +3130,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
         for (const related of [
           'Your free pest re-service is already scheduled for Thursday.',
           'Your pest callback visit is set for Thursday, October 8.',
-          'Your re-service is booked for Thursday at 9.',
+          'Your re-service is booked for Thursday, 9-11 AM.',
           'Your free pest visit is already scheduled for Thursday.',
           'Your complimentary pest follow-up appointment is set for Thursday, October 8.',
         ]) {
@@ -3650,12 +3649,68 @@ describe('free re-service is an entitlement resolved through the existing mechan
           return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
         };
         // the live arrival window is 9:00 AM – 11:00 AM
-        for (const ok of ['Your pest re-service is scheduled for Thursday.', 'Your pest re-service is scheduled for Thursday at 9.', 'Your pest re-service is scheduled for Thursday, 9-11 AM.', 'Your pest re-service is scheduled for Thursday from 9:00 AM to 11:00 AM.', 'Your pest re-service is scheduled for Thursday between 9 and 11 am.']) {
+        // Codex round-31 P2: an asserted time must state the FULL live window (a lone time reads as an exact arrival);
+        // a day-only reference is fine
+        for (const ok of ['Your pest re-service is scheduled for Thursday.', 'Your pest re-service is scheduled for Thursday, 9-11 AM.', 'Your pest re-service is scheduled for Thursday from 9:00 AM to 11:00 AM.', 'Your pest re-service is scheduled for Thursday between 9 and 11 am.']) {
           await expect(send(ok)).resolves.toBeNull();
         }
-        for (const bad of ['Your pest re-service is scheduled for Thursday from 1–3 PM.', 'Your pest re-service is scheduled for Thursday at 1 PM.', 'Your pest re-service is scheduled for Thursday at 2.', 'Your pest re-service is scheduled for Thursday, 9-11 PM.', 'Your pest re-service is scheduled for Thursday between 1 and 3 pm.']) {
+        for (const bad of ['Your pest re-service is scheduled for Thursday at 9.', 'Your pest re-service is scheduled for Thursday at 9 AM.', 'Your pest re-service is scheduled for Thursday around 11 AM.', 'Your pest re-service is scheduled for Thursday from 1–3 PM.', 'Your pest re-service is scheduled for Thursday at 1 PM.', 'Your pest re-service is scheduled for Thursday at 2.', 'Your pest re-service is scheduled for Thursday, 9-11 PM.', 'Your pest re-service is scheduled for Thursday between 1 and 3 pm.']) {
           await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
         }
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
+    // Codex round-31 P2: claimed lanes come from the OUTGOING body, not just the snapshot.
+    test('a booked reference for a lane with no snapshot / no live callback is blocked (lawn claim with only a pest snapshot; no snapshot at all)', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const send = async ({ booked, open, body }) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest', 'lawn'], open, bookable: [], verified: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        const pest = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        // pest snapshot + live pest callback: the pest sentence passes, an edited LAWN sentence is blocked
+        await expect(send({ booked: pest, open: pest, body: 'Your pest re-service is scheduled for Thursday.' })).resolves.toBeNull();
+        await expect(send({ booked: pest, open: pest, body: 'Your lawn re-service is scheduled for Thursday.' })).resolves.toMatch(/reservice_booking_changed.*lawn/);
+        // a lawn snapshot without a LIVE lawn callback is blocked too; with both it passes
+        const both = { ...pest, lawn: { date: '2026-10-09', windowStart: '13:00' } };
+        await expect(send({ booked: both, open: pest, body: 'Your lawn re-service is scheduled for Friday.' })).resolves.toMatch(/reservice_booking_changed.*lawn/);
+        await expect(send({ booked: both, open: both, body: 'Your lawn re-service is scheduled for Friday, 1-3 PM.' })).resolves.toBeNull();
+        // NO snapshot at all: any booked-appointment claim is unsupported (live callback or not)
+        await expect(send({ booked: null, open: {}, body: 'Your pest re-service is scheduled for Thursday.' })).resolves.toMatch(/reservice_booking_changed/);
+        await expect(send({ booked: null, open: pest, body: 'Your pest re-service is scheduled for Thursday.' })).resolves.toMatch(/reservice_booking_changed/);
+        await expect(send({ booked: null, open: {}, body: 'Your re-service is booked for Thursday.' })).resolves.toMatch(/reservice_booking_changed/);
+        // ordinary copy with no re-service context is untouched even with no snapshot
+        await expect(send({ booked: null, open: {}, body: 'Your regular lawn treatment is scheduled for Thursday.' })).resolves.toBeNull();
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
+    test('an asserted time must state the FULL live window: a lone endpoint ("9 AM") is rejected, both endpoints or a day-only reference pass', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        const send = async (body) => {
+          jest.resetModules();
+          const actual = jest.requireActual('../services/reservice-scheduler');
+          jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true }) }));
+          require('../utils/datetime-et').etDateString = dt.etDateString;
+          const drafter = require('../services/sms-shadow-drafter');
+          return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        };
+        for (const ok of ['Your pest re-service is on Thursday.', 'Your pest re-service is on Thursday, October 8.', 'Your pest re-service is on Thursday between 9 and 11 AM.', 'Your pest re-service is on Thursday, 9:00 AM - 11:00 AM.']) await expect(send(ok)).resolves.toBeNull();
+        for (const bad of ['Your pest re-service is on Thursday at 9 AM.', 'Your pest re-service is on Thursday at 9:00.', 'Your pest re-service is on Thursday after 11 AM.', 'Your pest re-service is on Thursday from 9 AM to 10 AM.']) await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
       } finally {
         dt.etDateString = realEt;
       }

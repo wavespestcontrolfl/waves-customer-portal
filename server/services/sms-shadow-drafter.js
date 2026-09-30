@@ -1653,9 +1653,13 @@ function reserviceLiveDayTokens(dateStr) {
   const d = new Date(`${String(dateStr).slice(0, 10)}T12:00:00Z`);
   return new Set([RESERVICE_WEEKDAYS[d.getUTCDay()], `${RESERVICE_MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`, `${d.getUTCMonth() + 1}/${d.getUTCDate()}`]);
 }
-// What the body claims about the booked callback: { refers, relative: Set('today'|'tomorrow'), days: Set }.
-function reserviceBookedClaims(body, info, lane) {
-  const named = reserviceBookedDayNames(info).map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
+// The booked-callback claims of an OUTGOING body, one per referring sentence: { lanes, relative, days, times } where `lanes` are
+// the lanes the SENTENCE names (Codex round-31 P2 — derived from the body itself, never only from snapshotted lanes, so an
+// edited "Your lawn re-service is scheduled Thursday" is a lawn claim even with no lawn snapshot). A sentence refers when it
+// carries an existing-appointment marker, a relative day, or a snapshotted day/date/time AND has re-service context.
+function reserviceBookedClaims(body, snapshot) {
+  const named = Object.values(snapshot).flatMap((info) => reserviceBookedDayNames(info))
+    .map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
   const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
   const contextRe = new RegExp(`\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})`, 'i');
   // Codex round-23 P2: a generic visit noun counts as callback context only when the same sentence QUALIFIES it
@@ -1663,48 +1667,63 @@ function reserviceBookedClaims(body, info, lane) {
   // already scheduled for Thursday". A plain "your visit is scheduled" still does not.
   const qualifiedVisitRe = /\b(?:free|complimentary|no[- ]charge|at\s+no\s+(?:additional\s+)?(?:charge|cost)|follow-?up|call-?back)\b/i;
   const visitNounRe = /\b(?:visit|appointment|treatment|service|trip)s?\b/i;
-  const claims = { refers: false, relative: new Set(), days: new Set(), times: [] };
+  const claims = [];
   for (const sentence of String(body).split(/[.!?\n]+/)) {
     const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
     if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
     if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) continue;
-    const lanesNamed = RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l);
-    if (lanesNamed.length && !lanesNamed.includes(lane)) continue;
-    claims.refers = true;
-    for (const d of reserviceAssertedDays(sentence)) claims.days.add(d);
-    claims.times.push(...reserviceAssertedTimes(sentence));
-    if (relative) claims.relative.add(relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today');
+    // A sentence whose re-service is a NEW OFFER (its marker belongs to something else: "Your lawn treatment is scheduled, and
+    // I'll send your free pest re-service link") is not a reference to a booked callback.
+    const spans = reserviceOfferSpans(sentence);
+    if (spans.length && !spans.some((span) => reserviceExistingApptGoverns(span, sentence))) continue;
+    claims.push({
+      lanes: RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l),
+      relative: relative ? (relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today') : null,
+      days: reserviceAssertedDays(sentence),
+      times: reserviceAssertedTimes(sentence),
+    });
   }
   return claims;
 }
 async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
-  const entries = Object.entries(reserviceBookedSnapshot(booked))
-    .map(([lane, info]) => [lane, info, reserviceBookedClaims(body, info, lane)])
-    .filter(([, , claims]) => claims.refers);
-  if (!entries.length || !customerId) return null;
+  const snapshot = reserviceBookedSnapshot(booked);
+  const claims = reserviceBookedClaims(body, snapshot);
+  if (!claims.length || !customerId) return null;
   const { open } = await liveReserviceLaneState(customerId);
-  const now = entries.some(([, , claims]) => claims.relative.size) ? reserviceEtDates() : null;
-  // an absolute day/date the body asserts must be the LIVE callback's ("scheduled for Friday" vs a Thursday callback)
-  const assertedDayStale = (lane, claims) => {
-    if (!claims.days.size || !open[lane]) return false;
-    const live = reserviceLiveDayTokens(open[lane].date);
-    return [...claims.days].some((day) => !live.has(day));
+  const now = claims.some((c) => c.relative) ? reserviceEtDates() : null;
+  // A claimed lane needs BOTH a snapshotted booked callback and a live open one — anything else is an appointment the
+  // reply cannot support ("Your lawn re-service is scheduled Thursday" with no lawn callback, or no snapshot at all).
+  const laneStale = (lane, info, claim) => {
+    const live = open[lane];
+    if (!info || !live) return true;
+    if (String(live.date).slice(0, 10) !== info.date) return true;
+    if (info.windowStart && String(live.windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5)) return true;
+    if (claim.relative && String(live.date).slice(0, 10) !== (claim.relative === 'tomorrow' ? now.tomorrow : now.today)) return true;
+    // an absolute day/date the body asserts must be the LIVE callback's ("scheduled for Friday" vs a Thursday callback)
+    if (claim.days.length) {
+      const dayTokens = reserviceLiveDayTokens(live.date);
+      if (claim.days.some((day) => !dayTokens.has(day))) return true;
+    }
+    // a clock time must state the FULL live arrival window (both endpoints): a lone "9 AM" would turn the two-hour
+    // arrival window into an exact-arrival promise (AGENTS.md — arrival copy is window_start → +120 min, display-only)
+    if (claim.times.length && live.windowStart) {
+      const windowMinutes = reserviceLiveWindowMinutes(String(live.windowStart).slice(0, 5));
+      if (windowMinutes) {
+        const matches = (t, minutes) => (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720);
+        const onlyEndpoints = claim.times.every((t) => windowMinutes.some((minutes) => matches(t, minutes)));
+        const hasBoth = windowMinutes.every((minutes) => claim.times.some((t) => matches(t, minutes)));
+        if (!onlyEndpoints || !hasBoth) return true;
+      }
+    }
+    return false;
   };
-  // ...and so must an asserted clock time / window ("Thursday from 1–3 PM" vs a 9:00 callback, whose arrival window is 9–11)
-  const assertedTimeStale = (lane, claims) => {
-    if (!claims.times.length || !open[lane] || !open[lane].windowStart) return false;
-    const live = reserviceLiveWindowMinutes(String(open[lane].windowStart).slice(0, 5));
-    if (!live) return false;
-    return claims.times.some((t) => !live.some((minutes) => (t.mer ? minutes === t.minutes : minutes % 720 === t.minutes % 720)));
-  };
-  const relativeStale = (lane, claims) => {
-    const live = open[lane] && String(open[lane].date).slice(0, 10);
-    return [...claims.relative].some((rel) => live !== (rel === 'tomorrow' ? now.tomorrow : now.today));
-  };
-  const moved = entries.filter(([lane, info, claims]) => !open[lane] || String(open[lane].date).slice(0, 10) !== info.date
-    || (info.windowStart && String(open[lane].windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5))
-    || relativeStale(lane, claims) || assertedDayStale(lane, claims) || assertedTimeStale(lane, claims));
-  return moved.length ? `reservice_booking_changed — the already-booked ${moved.map(([lane]) => lane).join(' and ')} re-service appointment was cancelled or moved since this reply was drafted` : null;
+  const moved = new Set();
+  for (const claim of claims) {
+    // a lane-less sentence refers to the snapshotted lane(s); with no snapshot at all it claims an appointment nothing supports
+    const lanes = claim.lanes.length ? claim.lanes : (Object.keys(snapshot).length ? Object.keys(snapshot) : ['pest']);
+    for (const lane of lanes) if (laneStale(lane, snapshot[lane], claim)) moved.add(lane);
+  }
+  return moved.size ? `reservice_booking_changed — the already-booked ${[...moved].join(' and ')} re-service appointment was cancelled, moved or never booked since this reply was drafted` : null;
 }
 // decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that
 // hold a decision row (agent-decision-send-checks, scheduler.js); NO_DECISION (no row behind the body)

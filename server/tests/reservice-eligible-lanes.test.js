@@ -136,7 +136,7 @@ describe('reportedReserviceLane', () => {
     'the ants are in the grass again',
     'ants are back on the lawn',
     'roaches are in the grass again',
-    'fleas all over the yard',
+    'crickets all over the yard',
     'ants around the front lawn',
   ])('%s → pest (a lawn/grass/yard location, dual-lane account)', (text) => {
     expect(reportedReserviceLane(text)).toBe('pest');
@@ -253,7 +253,7 @@ describe('RESERVICE_LANE_WORD_PATTERNS — the one shared lane vocabulary (Codex
 
   test('every noun the pest-report prescreen accepts (bar the excluded specialties) resolves to the pest lane', () => {
     const { PEST_REPORT_TEXT_RE } = require('../services/sms-shadow-drafter');
-    for (const noun of ['ants', 'roaches', 'spiders', 'fleas', 'ticks', 'wasps', 'bees', 'silverfish', 'scorpions', 'earwigs', 'centipedes', 'millipedes', 'bugs', 'pests']) {
+    for (const noun of ['ants', 'roaches', 'spiders', 'ticks', 'wasps', 'bees', 'silverfish', 'scorpions', 'earwigs', 'centipedes', 'millipedes', 'bugs', 'pests']) {
       const text = `${noun} are back`;
       expect(PEST_REPORT_TEXT_RE.test(text)).toBe(true);
       expect(reportedReserviceLane(text)).toBe('pest');
@@ -318,7 +318,8 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     // lawn / grass / yard are locations
     ['ants are back on the lawn', true, 'pest', false],
     ['roaches are in the grass again', true, 'pest', false],
-    ['fleas are everywhere in the yard', true, 'pest', false],
+    ['crickets are everywhere in the yard', true, 'pest', false],
+    ['fleas are everywhere in the yard', true, null, true], // fleas are a "Separate services" pest (round-31)
     // informational, not a report
     ['Can someone call me back about my ant service?', false, 'pest', false],
     ['Tell me more about ants', false, 'pest', false],
@@ -415,6 +416,14 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['Is it the ants again?', false, 'pest', false],
     ['Do you spray for ants?', false, 'pest', false],
     ['Are ants back?', false, 'pest', false],
+    // round-31 P2: the covered-pest list (services/covered-pests.js) — crickets, pillbugs & synonyms, stink / boxelder bugs
+    ['crickets are back', true, 'pest', false],
+    ['the pillbugs are back', true, 'pest', false],
+    ['roly-polies everywhere again', true, 'pest', false],
+    ['sowbugs came back', true, 'pest', false],
+    ['stink bugs are back', true, 'pest', false],
+    ['boxelder bugs are back', true, 'pest', false],
+    ['bed bugs are back', true, null, true],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],
@@ -455,5 +464,68 @@ describe('persistence constructions share one source', () => {
     const re = /\b(?:cancel\w*|refund\w*)\b/i;
     for (const t of ["I don't need a refund, the ants are back", "I don't want to cancel; ants are back", 'do not cancel my plan', 'no need to cancel', "A refund isn't needed—the ants are back", "cancellation isn't what I want", "a refund is not necessary", "refund won't be needed"]) expect(mentionsAffirmed(t, re)).toBe(false);
     for (const t of ['I want a refund', 'the ants are back, cancel my service', 'I am going to cancel', 'I want a refund not a credit', 'a refund is needed']) expect(mentionsAffirmed(t, re)).toBe(true);
+  });
+});
+
+
+// Codex round-31 P2: the pest nouns have ONE source (services/covered-pests.js), tied to the estimate copy's covered list.
+describe('covered-pest noun source', () => {
+  const { COVERED_PEST_NOUN_SOURCES } = require('../services/covered-pests');
+  const { RESERVICE_PEST_NOUNS_SOURCE, reportedReserviceLane, reportedReserviceExcludedSpecialty } = require('../services/reservice-scheduler');
+  const { SERVICE_DETAILS_COPY } = require('../services/estimate-service-details');
+
+  const coveredRow = () => {
+    const found = [];
+    const walk = (o) => {
+      if (Array.isArray(o)) { if (o[0] === 'Covered pests' && typeof o[1] === 'string') found.push(o[1]); o.forEach(walk); } else if (o && typeof o === 'object') Object.values(o).forEach(walk);
+    };
+    walk(SERVICE_DETAILS_COPY);
+    return found[0];
+  };
+
+  test('the scheduler noun source is built from the shared list', () => {
+    expect(RESERVICE_PEST_NOUNS_SOURCE).toBe(COVERED_PEST_NOUN_SOURCES.join('|'));
+  });
+
+  // The pests under the copy's "Separate services" row are derived from it (services/covered-pests.js) — never a free
+  // general-pest re-service. ticks / bees / hornets are in NEITHER row of the copy and keep their prior pest-noun handling.
+  test('every pest under "Separate services" is an excluded specialty (lane null), derived from the copy', () => {
+    const { SEPARATE_SERVICE_ITEMS, SEPARATE_SERVICE_PEST_NOUN_SOURCES } = require('../services/covered-pests');
+    expect(SEPARATE_SERVICE_ITEMS).toEqual(['german-roach cleanouts', 'fleas', 'bed bugs', 'rodents', 'wildlife', 'turf insect programs']);
+    expect(SEPARATE_SERVICE_PEST_NOUN_SOURCES.length).toBe(5); // "turf insect programs" is a program, not a pest noun
+    for (const text of ['the fleas are back', 'German roaches are back', 'the german cockroaches came back', 'bed bugs are back', 'rats are back', 'the rodents are back', 'wildlife is back in the attic', 'we keep seeing fleas']) {
+      expect(reportedReserviceLane(text)).toBeNull();
+      expect(reportedReserviceExcludedSpecialty(text)).toBe(true);
+    }
+    // a plain roach report (no "German") and the covered pests stay pest
+    expect(reportedReserviceLane('the roaches are back')).toBe('pest');
+    // a negated separate service is not the specialty
+    expect(reportedReserviceExcludedSpecialty("it's not fleas, the ants are back")).toBe(false);
+    // the covered noun list no longer contains fleas
+    expect(RESERVICE_PEST_NOUNS_SOURCE).not.toMatch(/flea/);
+  });
+
+  test('ticks / bees / hornets appear in NEITHER pest row of the copy, so they keep their prior pest-noun handling', () => {
+    const row = coveredRow().toLowerCase();
+    for (const noun of ['tick', 'bees', 'hornet']) expect(row).not.toContain(noun);
+    const { SEPARATE_SERVICE_ITEMS } = require('../services/covered-pests');
+    for (const noun of ['tick', 'bee', 'hornet']) expect(SEPARATE_SERVICE_ITEMS.join(' ')).not.toContain(noun);
+    for (const noun of ['ticks', 'bees', 'hornets']) expect(reportedReserviceLane(`the ${noun} are back`)).toBe('pest');
+  });
+
+  test('every pest the estimate copy lists as covered resolves to the pest lane (and specialties do not)', () => {
+    const row = coveredRow();
+    expect(row).toMatch(/pillbugs/);
+    const nouns = { ants: 'ants', roaches: 'roaches', 'palmetto bugs': 'palmetto bugs', spiders: 'spiders', crickets: 'crickets', earwigs: 'earwigs', silverfish: 'silverfish', millipedes: 'millipedes', centipedes: 'centipedes', pillbugs: 'pillbugs', scorpions: 'scorpions', wasps: 'wasps', 'stink & boxelder bugs': null };
+    for (const [key, noun] of Object.entries(nouns)) {
+      expect(row.toLowerCase()).toContain(key.toLowerCase().split(' ')[0]);
+      if (noun) expect(reportedReserviceLane(`the ${noun} are back`)).toBe('pest');
+    }
+    for (const noun of ['stink bugs', 'boxelder bugs', 'sowbugs', 'roly-polies', 'cockroaches']) expect(reportedReserviceLane(`the ${noun} are back`)).toBe('pest');
+    // the separate services in that copy stay out of the pest lane
+    for (const noun of ['termites', 'rodents', 'bed bugs', 'mosquitoes', 'fleas', 'German roaches', 'wildlife']) {
+      expect(reportedReserviceLane(`the ${noun} are back`)).toBeNull();
+      expect(reportedReserviceExcludedSpecialty(`the ${noun} are back`)).toBe(true);
+    }
   });
 });

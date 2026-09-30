@@ -21,6 +21,7 @@ const { etDateString } = require('../utils/datetime-et');
 const { TERMINAL_STATUSES, isMembershipCustomerRow } = require('./waveguard-existing-services');
 const { RE_SERVICE_SERVICE_KEYS, isReService } = require('./re-service');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
+const { COVERED_PEST_NOUN_SOURCES, SEPARATE_SERVICE_PEST_NOUN_SOURCES } = require('./covered-pests');
 const { ASSESSMENT_SERVICE_KEY, isAssessmentServiceType, isAssessmentBooking, scopeToAssessmentBookings } = require('./assessment-booking');
 
 // The two self-bookable callback lanes. serviceKey resolves the catalog row
@@ -347,7 +348,9 @@ async function loadEligibleReserviceLanesStrict(customerId, dbh = db) {
 // bug with general pest. This is a specialty treatment with separate prep, pricing, and follow-up." It is the
 // ONLY program the protocols file explicitly separates from general pest (checked: every other "separate" note
 // concerns scope within a program — rodent exclusion, palm injection billing, copper/oil tanks).
-const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = /\b(termites?|rodents?|rats?|mice|mouse|mosquito(?:es)?|bed[- ]?bugs?)\b/i;
+// Every pest under the estimate copy's "Separate services" row (derived in covered-pests.js: German roaches, fleas, bed bugs,
+// rodents, wildlife) is an excluded specialty too — Codex round-31.
+const EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE = new RegExp(`\\b(termites?|mosquito(?:es)?|${SEPARATE_SERVICE_PEST_NOUN_SOURCES.join('|')})\\b`, 'i');
 const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
   // A dedicated tree & shrub service/treatment/care/program/spray call, the
   // service word on EITHER side of the noun (Codex round-9, PR #5336: "the
@@ -376,7 +379,7 @@ const RESERVICE_LAWN_WORDS_RE = new RegExp(`\\b(?:${RESERVICE_LAWN_SERVICE_WORDS
 // the lane classifier. Termites / rodents / mosquitoes are deliberately NOT here — they are the
 // excluded specialties (EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE above), which the prescreen adds
 // on its own since it only asks "is this a pest report", not "which lane".
-const RESERVICE_PEST_NOUNS_SOURCE = 'pests?|bugs?|palmetto\\s*bugs?|ants?|roach(?:es)?|cockroach(?:es)?|spider\\w*|fleas?|ticks?|wasps?|bees?|hornets?|silverfish|scorpions?|earwigs?|centipedes?|millipedes?';
+const RESERVICE_PEST_NOUNS_SOURCE = COVERED_PEST_NOUN_SOURCES.join('|'); // one source: services/covered-pests.js (Codex round-31 P2)
 const RESERVICE_PEST_WORDS_RE = new RegExp(`\\b(${RESERVICE_PEST_NOUNS_SOURCE}|exterminator)\\b`, 'i');
 // Codex round-6 P1: the ONE lane vocabulary, shared by reportedReserviceLane
 // below (a customer's INBOUND report) and sms-shadow-drafter.js's
@@ -406,7 +409,7 @@ const RESERVICE_LANE_WORD_PATTERNS = [
 // ---------------------------------------------------------------------------
 const RESERVICE_CLAUSE_DELIMITER_RE = /[.!?;:,\n–—]+|\s-\s|\b(?:and|but|however|though|although|yet|while|whereas|plus)\b/gi;
 const RESERVICE_NEG = "(?:not|no|never|none|nor|without|cannot|can'?t|don'?t|doesn'?t|didn'?t|won'?t|wasn'?t|isn'?t|aren'?t|weren'?t|haven'?t|hasn'?t|hadn'?t|couldn'?t|wouldn'?t)";
-const RESERVICE_ANY_PEST_NOUN = `(?:bed[- ]?bugs?|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)`;
+const RESERVICE_ANY_PEST_NOUN = `(?:${SEPARATE_SERVICE_PEST_NOUN_SOURCES.join('|')}|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*)`;
 // Codex round-27/28 P2: only constructions that AFFIRM the sighting are exempt from negation — surprise
 // ("I can't believe the ants are back"), puzzlement ("I don't know why ants are back", "not sure why …"). They are
 // blanked before the negation test. "I don't think / don't believe / not sure ants are back" DENY or doubt it, so
