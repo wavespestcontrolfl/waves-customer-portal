@@ -10,7 +10,7 @@ const WavesAssistant = require('../services/ai-assistant/assistant');
 const logger = require('../services/logger');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { preferredRouteDecisionForFeedback } = require('../services/call-route-decisions');
-const { withLockedRouteDecisions } = require('../services/call-routing-gates');
+const { withLockedRouteDecisions, resolveDisplayedRouteDecision, STALE_ROUTE_DECISION } = require('../services/call-routing-gates');
 
 async function tableExists(name) {
   return db.schema.hasTable(name).catch(() => false);
@@ -640,17 +640,21 @@ router.post('/admin/calls/:id/route-feedback', adminAuthenticate, requireTechOrA
 
     let row;
     if (await tableExists('route_decisions')) {
-      const outcome = await withLockedRouteDecisions(db, {
-        callLogId: call.id,
-        decisionId: requestedRouteDecisionId || null,
-      }, async (trx, decisionRows) => {
-        if (requestedRouteDecisionId && !decisionRows.length) return { missing: true };
-        const routeDecision = requestedRouteDecisionId
-          ? decisionRows[0]
-          : preferredRouteDecisionForFeedback(decisionRows);
-        return { row: await writeFeedback(trx, routeDecision) };
+      // The call's decision rows are locked whole (not narrowed to the requested
+      // one): the displayed decision must still be the NEWEST one under the lock
+      // (resolveDisplayedRouteDecision) or the verdict is rejected with 409 — a
+      // reprocess since the page loaded would otherwise have it judge a decision
+      // the reviewer never saw. No id (an older client): the newest row, as before.
+      const outcome = await withLockedRouteDecisions(db, { callLogId: call.id }, async (trx, decisionRows) => {
+        const picked = resolveDisplayedRouteDecision(decisionRows, requestedRouteDecisionId || null, preferredRouteDecisionForFeedback);
+        if (picked.missing) return { missing: true };
+        if (picked.stale) return { stale: true };
+        return { row: await writeFeedback(trx, picked.decision) };
       });
       if (outcome.missing) return res.status(400).json({ error: 'routeDecisionId does not belong to this call' });
+      if (outcome.stale) {
+        return res.status(409).json({ error: 'This decision changed since it loaded — review the refreshed decision before answering.', code: STALE_ROUTE_DECISION });
+      }
       row = outcome.row;
     } else {
       row = await writeFeedback(db, null);

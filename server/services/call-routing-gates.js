@@ -453,6 +453,27 @@ async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mo
   });
 }
 
+// Which decision does a verdict attach to? The reviewer judged a DISPLAYED
+// decision; a reprocess since the page loaded may have written a newer one, and a
+// verdict silently landing on it would judge a decision nobody looked at. Called
+// with the call's decision rows AFTER the row lock (withLockedRouteDecisions) and
+// `newestOf(rows)` (each reader's own "the current decision" pick):
+//   - no displayed id (an older client): today's behavior, the newest row;
+//   - the displayed row is not among the locked rows: { missing: true };
+//   - the displayed row is no longer the newest (or is a different decision than
+//     the one the pick names): { stale: true } — the caller answers 409 and the
+//     client reloads;
+//   - otherwise the displayed row.
+function resolveDisplayedRouteDecision(rows, displayedId, newestOf) {
+  const newest = newestOf(rows) || null;
+  if (!displayedId) return { decision: newest };
+  const shown = rows.find((r) => r.id === displayedId);
+  if (!shown) return { missing: true };
+  if (!newest || newest.id !== shown.id) return { stale: true, decision: newest };
+  return { decision: shown };
+}
+const STALE_ROUTE_DECISION = 'STALE_ROUTE_DECISION';
+
 // Insert-or-refresh in two statements, so the INSERT stays TARGETLESS
 // (ON CONFLICT DO NOTHING names no constraint: tolerant of BOTH the legacy
 // three-column constraint and the recording-keyed index during a rolling
@@ -957,6 +978,8 @@ module.exports = {
   excludeReviewedDecisions,
   updateUnreviewedRouteDecisions,
   withLockedRouteDecisions,
+  resolveDisplayedRouteDecision,
+  STALE_ROUTE_DECISION,
   SUPERSEDE_KEPT_REASON_CODES,
   onFileAddressSnapshot,
   computeAppointmentIdempotencyKey,

@@ -829,7 +829,7 @@ describe('every route_feedback writer takes the route_decisions row lock (codex 
     expect(triage).toMatch(/withLockedRouteDecisions\(db, \{ callLogId, mode: 'enforce' \}, async \(trx, rows\) => \{[\s\S]*?trx\('route_feedback'\)/);
     expect(triage).not.toMatch(/db\('route_feedback'\)\s*\.insert/);
     const ai = fs.readFileSync(path.join(root, 'routes/ai-assistant.js'), 'utf8');
-    expect(ai).toMatch(/withLockedRouteDecisions\(db, \{[\s\S]*?writeFeedback\(trx, routeDecision\)/);
+    expect(ai).toMatch(/withLockedRouteDecisions\(db, \{[\s\S]*?writeFeedback\(trx, picked\.decision\)/);
     expect(ai).not.toMatch(/db\('route_feedback'\)\s*\.insert/);
   });
 
