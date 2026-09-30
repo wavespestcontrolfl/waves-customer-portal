@@ -381,6 +381,37 @@ describe('payment lifecycle email sender', () => {
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
   });
 
+  test('a dispute hold that commits between the up-front check and the provider handoff returns the coded retryable defer, not a bare not-sent (#5424 round 10)', async () => {
+    const Hold = require('../services/collections/collection-hold');
+    const prefs = { payment_issue_channels: ['email'] };
+    setDbQueues({
+      payments: [chain({ first: payment() })],
+      payment_methods: [chain({ first: paymentMethod() })],
+      customers: [chain({ first: customer() }), chain({ first: customer() })],
+      notification_prefs: [chain({ first: prefs }), chain({ first: prefs })],
+      customer_interactions: [chain()],
+    });
+    // Clear at the up-front read; held by the time the handoff re-reads it.
+    Hold.dueInvoiceHeldByDisputeHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
+    const provider = jest.fn();
+    const beforeProviderHandoff = jest.fn(async () => true);
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      await withProviderHandoff(provider);
+      return { sent: false, aborted: true, reason: 'provider_handoff_aborted' };
+    });
+
+    const result = await PaymentLifecycleEmail.sendPaymentRetryNotice({
+      customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23', beforeProviderHandoff,
+    });
+
+    expect(result).toMatchObject({
+      ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+    });
+    expect(Hold.isHoldSuppression(result)).toBe(true);
+    expect(provider).not.toHaveBeenCalled();
+    expect(beforeProviderHandoff).not.toHaveBeenCalled();
+  });
+
   test.each(['INVOICE_UNREADABLE', 'INVOICE_PAYER_BILLED'])('a retry notice classifies ownership refusal %s before provider handoff', async (code) => {
     const ownership = jest.spyOn(require('../services/invoice-helpers'), 'selfPayAtDispatch')
       .mockReturnValueOnce(async () => ({ ok: false, code }));

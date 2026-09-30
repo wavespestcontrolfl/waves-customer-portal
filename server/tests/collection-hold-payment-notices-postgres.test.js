@@ -354,9 +354,10 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
     expect(lifecycle).toMatch(/HOLD_GATED_TEMPLATES = require\('\.\/collections\/collection-hold'\)\.HOLD_GATED_EMAIL_TEMPLATES/);
     const runner = fs.readFileSync(path.join(__dirname, '../services/automation-runner.js'), 'utf8');
     const fn = runner.slice(runner.indexOf('async function sendPaymentFailedThroughBillingAuthority'), runner.indexOf('async function settlePaymentFailedRefusal'));
-    // up front AND again under the authority's locks right before the provider request
+    // up front AND again through the authority's preSendCheck, which the authority re-runs on the
+    // locked handle before dispatch and at the FINAL provider boundary (after request preparation)
     expect(fn).toMatch(/dueInvoiceHeldByDisputeHold\(enrollment\.customer_id\)/);
-    expect(fn).toMatch(/dueInvoiceHeldByDisputeHold\(enrollment\.customer_id, trx\)/);
+    expect(fn).toMatch(/preSendCheck: async \(\{ database \} = \{\}\) => \{[\s\S]*dueInvoiceHeldByDisputeHold\(enrollment\.customer_id, database\)/);
     expect(fn).toMatch(/blocked\('COLLECTION_HOLD_DEFER'[\s\S]*retryable: true/);
   });
 });

@@ -57,6 +57,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
   let Invoices;
   let sendSpy;
   const customers = [];
+  const packetFixtures = { packets: [], visits: [], services: [], payers: [] };
 
   async function newCustomer() {
     const [row] = await db('customers').insert({ first_name: 'Synthetic', last_name: 'Holdtest', phone: `+1555${Math.floor(1000000 + Math.random() * 8999999)}` }).returning('id');
@@ -99,6 +100,12 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
   afterAll(async () => {
     sendSpy.mockRestore();
     if (customers.length) {
+      await db('invoices').whereIn('customer_id', customers).del();
+      await db('visit_completion_packets').whereIn('id', packetFixtures.packets).del();
+      await db('service_visits').whereIn('id', packetFixtures.visits).del();
+      await db('scheduled_services').whereIn('id', packetFixtures.services).del();
+      await db('payers').whereIn('id', packetFixtures.payers).del();
+      await db('service_records').whereIn('customer_id', customers).del();
       await db('dispatch_alerts').whereRaw("payload->>'customerId' = ANY(?)", [customers.map(String)]).del();
       await db('sms_log').whereIn('customer_id', customers).del();
       await db('collections_flags').whereIn('customer_id', customers).del();
@@ -160,6 +167,63 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
         throw new Error('roll back');
       })).rejects.toThrow('roll back');
       expect((await invoice(draft)).status).toBe('draft');
+    });
+  });
+
+  describe('combined-visit (packet) invoices reach the live Bill-To fence before the hold exclusion (#5424 round 10)', () => {
+    async function packetInvoice(customerId, { payer = false } = {}) {
+      const [visit] = await db('service_visits').insert({
+        customer_id: customerId, scheduled_date: '2040-03-04', stop_base_key: `pkt-${randomUUID().slice(0, 8)}`, created_by: 'fixture',
+      }).returning('id');
+      const [svc] = await db('scheduled_services').insert({
+        customer_id: customerId, status: 'confirmed', scheduled_date: '2040-03-04', service_type: 'Pest Control',
+      }).returning('id');
+      const [packet] = await db('visit_completion_packets').insert({
+        visit_id: visit.id, idempotency_key: `pkt-${randomUUID()}`, request_hash: 'fixture', status: 'processing',
+        payload: JSON.stringify({ billingSnapshot: { billedServiceIds: [svc.id] } }),
+      }).returning('id');
+      packetFixtures.visits.push(visit.id); packetFixtures.services.push(svc.id); packetFixtures.packets.push(packet.id);
+      let payerId = null;
+      if (payer) {
+        // The Bill-To is assigned AFTER the invoice was queued: invoices.payer_id stays NULL until
+        // the claim-time fence resolves it.
+        const [p] = await db('payers').insert({ display_name: 'Synthetic Bill-To', ap_email: 'ap@example.invalid' }).returning('id');
+        packetFixtures.payers.push(p.id);
+        payerId = p.id;
+        await db('scheduled_services').where({ id: svc.id }).update({ payer_id: p.id });
+      }
+      const inv = await newInvoice(customerId, { visit_completion_packet_id: packet.id });
+      return { inv, payerId };
+    }
+
+    test('a packet invoice for a held homeowner who now has a payer is routed to the payer (withdrawn), never held behind the homeowner\'s dispute, never texted', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const { inv, payerId } = await packetInvoice(c, { payer: true });
+      await queueDue(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).not.toContain(inv);
+      expect(await invoice(inv)).toMatchObject({ status: 'draft', scheduled_send_at: null, send_claim_token: null });
+      expect((await invoice(inv)).scheduled_send_error).toMatch(new RegExp(`^payer_billed:${payerId}`));
+    });
+
+    test('a truly self-pay packet invoice for a held homeowner still waits: claimed by the fence, released at the delivery-boundary hold check, no attempt spent, then sends after the release', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const { inv } = await packetInvoice(c);
+      await queueDue(inv);
+      const before = Date.now();
+      const out = await Invoices.processScheduledSends();
+      expect(out.deferred).toBeGreaterThanOrEqual(1);
+      expect(sentIds()).not.toContain(inv);
+      const row = await invoice(inv);
+      expect(row).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0, send_claim_token: null });
+      expect(row.scheduled_send_at.getTime()).toBeGreaterThan(before + 3 * 60 * 1000);
+
+      await releaseViaOpsScript(c);
+      await makeDueNow(inv);
+      await Invoices.processScheduledSends();
+      expect(sentIds()).toContain(inv);
     });
   });
 
@@ -374,6 +438,66 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       // the retry (fresh recheck, fault gone) strips and queues
       const retry = await recheckFor(id);
       expect(await persistStrippedPayLink({ msgId: id, strippedBody: 'Your service is complete.', reason: retry.reason, invoiceId: inv })).toBe(1);
+      expect((await invoice(inv)).status).toBe('scheduled');
+    });
+
+    // #5424 round 10: the strip + queue also persists the handover's ownership marker on the
+    // completion's service record, in the SAME transaction, so a retried closeout sees the sender
+    // owns the pay link (report-only) even after the report-only replay dies terminally.
+    async function newRecord(customerId) {
+      const [r] = await db('service_records').insert({
+        customer_id: customerId, service_date: '2040-03-04', service_type: 'Pest Control', status: 'completed', structured_notes: JSON.stringify({ keep: 'me' }),
+      }).returning('id');
+      return r.id;
+    }
+    const recordNotes = async (id) => {
+      const n = (await db('service_records').where({ id }).first('structured_notes')).structured_notes;
+      return typeof n === 'string' ? JSON.parse(n) : n;
+    };
+
+    test('the strip + queue persists invoiceSenderOwnsPayLinkFor on the service record (existing notes kept), atomically', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c);
+      const rec = await newRecord(c);
+      const id = await queueRow(c, inv);
+      expect(await persistStrippedPayLink({
+        msgId: id, strippedBody: 'Your service is complete.', reason: 'collections-dispute-hold', invoiceId: inv, serviceRecordId: rec,
+      })).toBe(1);
+      expect(await recordNotes(rec)).toMatchObject({ keep: 'me', invoiceSenderOwnsPayLinkFor: String(inv) });
+      expect((await invoice(inv)).status).toBe('scheduled');
+    });
+
+    test('a queue failure rolls the marker back with the strip (no ownership claimed for an invoice that was never queued)', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const inv = await newInvoice(c);
+      const rec = await newRecord(c);
+      const id = await queueRow(c, inv);
+      await db.raw(`CREATE OR REPLACE FUNCTION b10_fail_queue2() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'queue down (synthetic)'; END $$ LANGUAGE plpgsql`);
+      await db.raw(`CREATE TRIGGER b10_fail_queue2_trg BEFORE UPDATE ON invoices FOR EACH ROW WHEN (OLD.id = '${inv}' AND OLD.status = 'draft' AND NEW.status = 'scheduled') EXECUTE FUNCTION b10_fail_queue2()`);
+      try {
+        await expect(persistStrippedPayLink({ msgId: id, strippedBody: 'x', reason: 'collections-dispute-hold', invoiceId: inv, serviceRecordId: rec }))
+          .rejects.toThrow(/queue down/);
+      } finally {
+        await db.raw('DROP TRIGGER IF EXISTS b10_fail_queue2_trg ON invoices');
+        await db.raw('DROP FUNCTION IF EXISTS b10_fail_queue2()');
+      }
+      expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBeUndefined();
+    });
+
+    test('a non-hold strip records no ownership; the pay-link-only sibling hand-over records it with the queue', async () => {
+      const { handOverHeldInvoiceToSender } = require('../services/dispatch-completion-deferred');
+      const c = await newCustomer();
+      const inv = await newInvoice(c);
+      const rec = await newRecord(c);
+      const id = await queueRow(c, inv);
+      await persistStrippedPayLink({ msgId: id, strippedBody: 'x', reason: 'invoice-terminal:paid', invoiceId: inv, serviceRecordId: rec });
+      expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBeUndefined();
+
+      await placeHold(c);
+      expect(await handOverHeldInvoiceToSender({ invoiceId: inv, serviceRecordId: rec })).toMatchObject({ queued: true });
+      expect((await recordNotes(rec)).invoiceSenderOwnsPayLinkFor).toBe(String(inv));
       expect((await invoice(inv)).status).toBe('scheduled');
     });
 

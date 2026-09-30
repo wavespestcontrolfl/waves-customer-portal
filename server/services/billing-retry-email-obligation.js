@@ -266,6 +266,11 @@ async function replayPaymentRetryNotice(meta = {}, database = db) {
     if (providerStarted && await clearProviderMarker(database, meta.scheduled_sms_log_id) !== 1) {
       return { sent: false, blocked: true, code: 'BILLING_EMAIL_MARKER_CLEAR_FAILED', deliveryOutcome: 'uncertain' };
     }
+    // A hold that committed at the lifecycle handoff is a WAIT, exactly like the early check
+    // above: the coded outcome keeps the obligation pending and refunds the rail's attempt.
+    if (result.code === require('./collections/collection-hold').HOLD_DEFER_CODE) {
+      return { sent: false, blocked: true, ...require('./collections/collection-hold').holdDeferOutcome({ reason: 'hold' }) };
+    }
     return result.retryable === true
       ? { sent: false, retryable: true, code: 'BILLING_EMAIL_RETRY', deliveryOutcome: 'not_sent', reason: result.reason }
       : { sent: false, blocked: true, code: result.reason || 'BILLING_EMAIL_NOT_SENT', deliveryOutcome: 'not_sent' };

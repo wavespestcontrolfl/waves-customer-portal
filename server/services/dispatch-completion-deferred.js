@@ -327,7 +327,32 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
 // the hold stands and sends it on the first tick after the hold is released,
 // so the pay link goes out exactly once. A queue failure rolls the strip back
 // and the attempt retries with a fresh recheck (the scheduler's bounded ladder).
-async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invoiceId = null, stampedAt = new Date(), database = db }) {
+//
+// The same transaction also persists the `invoiceSenderOwnsPayLinkFor` ownership marker on the
+// completion's service record (the marker handOverInvoiceToSender writes), so a terminal
+// report-only replay followed by a retried closeout sees the sender owns the pay link and
+// sends report-only instead of texting a second one.
+async function markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId) {
+  if (!serviceRecordId || !invoiceId) return;
+  await trx('service_records').where({ id: serviceRecordId }).update({
+    structured_notes: trx.raw(
+      "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
+      [JSON.stringify({ invoiceSenderOwnsPayLinkFor: String(invoiceId) })],
+    ),
+  });
+}
+
+// Queue a held invoice onto the scheduled-invoice sender AND record sender ownership on the
+// service record, atomically (used where no sms_log strip write shares the transaction).
+async function handOverHeldInvoiceToSender({ invoiceId, serviceRecordId = null, database = db }) {
+  return database.transaction(async (trx) => {
+    const queued = await require('./collections/collection-hold').queueHeldInvoiceForSender(invoiceId, trx);
+    await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId);
+    return queued;
+  });
+}
+
+async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invoiceId = null, serviceRecordId = null, stampedAt = new Date(), database = db }) {
   return database.transaction(async (trx) => {
     const changed = await trx('sms_log').where({ id: msgId, status: 'sending' }).update({
       message_body: strippedBody,
@@ -339,6 +364,7 @@ async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invo
     });
     if (changed && reason === 'collections-dispute-hold' && invoiceId) {
       await require('./collections/collection-hold').queueHeldInvoiceForSender(invoiceId, trx);
+      await markInvoiceSenderOwnsPayLink(trx, serviceRecordId, invoiceId);
     }
     return changed;
   });
@@ -346,6 +372,7 @@ async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invo
 
 module.exports = {
   persistStrippedPayLink,
+  handOverHeldInvoiceToSender,
   finalizeDeferredCompletionSend,
   finalizeDeferredDeclineNotice,
   terminalDeferredCompletionSend,

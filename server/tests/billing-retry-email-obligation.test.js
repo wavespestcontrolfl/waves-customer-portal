@@ -199,6 +199,26 @@ test('a known not-sent result clears its marker and retries in branded mode with
   expect(mockEnroll).not.toHaveBeenCalled();
 });
 
+test('a hold that commits at the lifecycle handoff keeps the obligation pending (coded defer, never a terminal block)', async () => {
+  const markerWrite = query();
+  const markerClear = query();
+  wire({
+    payments: [query({ first: payment })],
+    customers: [query({ first: { id: 'cust-1' } })],
+    notification_prefs: [query({ first: { payment_issue_channels: ['email'] } })],
+    sms_log: [markerWrite, markerClear],
+  });
+  // The lifecycle sender's own result for a hold at its provider handoff.
+  mockSendRetryNotice.mockImplementationOnce(async () => ({
+    ok: false, blocked: true, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent',
+    reason: 'Customer has an active collections dispute hold; delivery deferred until it is released',
+  }));
+
+  const outcome = await BillingRetryEmail.replayPaymentRetryNotice({ ...replayMeta, billing_retry_email_mode: 'branded' });
+  expect(outcome).toMatchObject({ sent: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+  expect(require('../services/collections/collection-hold').isHoldSuppression(outcome)).toBe(true);
+});
+
 test('an existing provider-start marker parks the row before any provider call', async () => {
   wire({
     payments: [query({ first: payment })],

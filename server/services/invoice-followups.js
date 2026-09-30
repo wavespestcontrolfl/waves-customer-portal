@@ -1822,6 +1822,11 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
             ...(channel === 'push' ? { appOnly: true } : {}),
           },
           hasEmailLeg: emailSelected,
+          // An operator "send now" keeps its pay link during a dispute hold on EVERY Text/App leg
+          // (owner ruling 2026-09-30), the same exemption the legacy single-SMS call carries.
+          // (Today an operator send never resolves explicit channels, so this leg is only reached
+          // by automated touches; the exemption is threaded so the two paths cannot diverge.)
+          ...(operatorInitiated ? { operatorInitiated: true, holdExempt: 'operator' } : {}),
           preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
         });
       } catch (err) {

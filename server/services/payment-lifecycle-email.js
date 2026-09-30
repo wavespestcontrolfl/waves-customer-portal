@@ -282,6 +282,10 @@ async function sendLifecycleTemplate({
 
   let providerStarted = false;
   let handoffGuardFailed = false;
+  // A hold that committed between the up-front check and the provider handoff: a WAIT, reported
+  // as the coded retryable COLLECTION_HOLD_DEFER (never a bare not-sent, which the retry
+  // obligation would turn into a terminal block).
+  let handoffHold = null;
   try {
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
@@ -304,9 +308,12 @@ async function sendLifecycleTemplate({
               }
             }
             // Dispute hold re-read at the provider boundary (see the up-front check above).
-            if (holdApplies
-              && (await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id)).held) {
-              return { ok: false };
+            if (holdApplies) {
+              const heldNow = await require('./collections/collection-hold').dueInvoiceHeldByDisputeHold(customer.id);
+              if (heldNow.held) {
+                handoffHold = heldNow;
+                return { ok: false };
+              }
             }
             const [freshCustomer, freshPrefs] = await Promise.all([
               loadCustomer(customer.id),
@@ -348,6 +355,14 @@ async function sendLifecycleTemplate({
       };
     }
 
+    if (!result.sent && handoffHold) {
+      await logPaymentLifecycleEmailAttempt({
+        customerId: customer.id, invoiceId, paymentId, paymentMethodId, refundId, paymentPlanId, templateKey, eventType,
+        status: 'skipped', failureReason: 'collection_hold',
+      });
+      const { holdDeferOutcome } = require('./collections/collection-hold');
+      return { ok: false, blocked: true, ...holdDeferOutcome(handoffHold) };
+    }
     const status = result.sent ? 'sent' : result.blocked ? 'blocked' : 'failed';
     await logPaymentLifecycleEmailAttempt({
       customerId: customer.id,

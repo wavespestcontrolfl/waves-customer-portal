@@ -7587,10 +7587,15 @@ const InvoiceService = {
       // slot (owner ruling 2026-09-30): a pile of held invoices, re-due every
       // tick and oldest first, must not starve the unheld ones behind them.
       // A payer-billed invoice goes to the payer's AP inbox and is never held.
-      // The delivery-boundary check below stays: it is the authoritative
-      // answer for a hold that lands between this read and the send.
+      // A combined-visit (packet) invoice whose Bill-To is not yet resolved
+      // (no payer_id stamped) is NOT excluded either: the live Bill-To fence
+      // below (claimPacketInvoiceForSend) must run first, because a payer
+      // assigned since queueing routes it to the payer, held homeowner or not.
+      // The delivery-boundary check below stays AFTER that fence: it is the
+      // authoritative answer for a truly self-pay invoice and for a hold that
+      // lands between this read and the send.
       .where((q) =>
-        q.whereNotNull("payer_id").orWhereNotExists(function noActiveDisputeHold() {
+        q.whereNotNull("payer_id").orWhereNotNull("visit_completion_packet_id").orWhereNotExists(function noActiveDisputeHold() {
           require("./collections/collection-hold").disputeHoldExistsSql(this, "invoices.customer_id");
         }),
       )

@@ -190,9 +190,17 @@ async function sendPaymentFailedThroughBillingAuthority({ enrollment, template, 
   await dispatchUnderBillingEmailAuthority({
     input,
     recipientEmail: context.recipientEmail,
+    // The hold rides the authority's preSendCheck, which the authority re-runs at the FINAL
+    // provider boundary (after SendGrid's request preparation, right before the fetch) as well
+    // as before dispatch - a hold committed while the request is prepared is caught there, not
+    // only at this one-time pre-dispatch read. Refusals are the retryable COLLECTION_HOLD_DEFER.
+    preSendCheck: async ({ database } = {}) => {
+      const heldNow = await holdCollections.dueInvoiceHeldByDisputeHold(enrollment.customer_id, database);
+      if (!heldNow.held) return { ok: true };
+      const refusal = holdBlock(heldNow);
+      return { ok: false, code: refusal.code, reason: refusal.reason, retryable: true };
+    },
     emailSuppression: async (trx, email) => {
-      const heldNow = await holdCollections.dueInvoiceHeldByDisputeHold(enrollment.customer_id, trx);
-      if (heldNow.held) return holdBlock(heldNow);
       const suppression = await activeAutomationSuppressionFor(template, email, trx);
       return suppression ? blocked('EMAIL_SUPPRESSED', automationSuppressionReason(suppression)) : null;
     },

@@ -4267,7 +4267,7 @@ function initScheduledJobs() {
                 // (owner ruling 2026-09-30). A queue failure throws into this
                 // row's bounded retry ladder instead of blocking it unqueued.
                 if (recheck.reason === 'collections-dispute-hold' && claimMeta.invoice_id) {
-                  await require('./collections/collection-hold').queueHeldInvoiceForSender(claimMeta.invoice_id);
+                  await require('./dispatch-completion-deferred').handOverHeldInvoiceToSender({ invoiceId: claimMeta.invoice_id, serviceRecordId: claimMeta.service_record_id || null });
                 }
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
@@ -4283,7 +4283,7 @@ function initScheduledJobs() {
               // scheduled-invoice sender, atomically with the strip (see
               // persistStrippedPayLink).
               const changed = await require('./dispatch-completion-deferred').persistStrippedPayLink({
-                msgId: msg.id, strippedBody, reason: recheck.reason || null, invoiceId: claimMeta.invoice_id || null, stampedAt,
+                msgId: msg.id, strippedBody, reason: recheck.reason || null, invoiceId: claimMeta.invoice_id || null, serviceRecordId: claimMeta.service_record_id || null, stampedAt,
               });
               if (!changed) throw new Error('Scheduled completion claim lost before stripping the stale pay link');
               msg.message_body = strippedBody;

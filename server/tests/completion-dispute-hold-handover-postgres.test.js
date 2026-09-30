@@ -314,6 +314,45 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
     } finally { Stripe.chargeInvoiceWithSavedCard.mockReset(); await mockPg('payment_methods').where({ customer_id: f.customerId }).del(); await mockPg('customers').where({ id: f.customerId }).update({ autopay_payment_method_id: null }); await cleanup(f); }
   });
 
+  test('a deferred-replay strip persists the sender-ownership marker: a terminal report-only replay followed by a retried closeout sends no second pay link (#5424 round 10)', async () => {
+    const f = await seedVisit();
+    const key = randomUUID();
+    const { persistStrippedPayLink, terminalDeferredCompletionSend } = require('../services/dispatch-completion-deferred');
+    try {
+      // Attempt 1 (no hold yet): the closeout text fails retryably, so a retry is owed.
+      sendCustomerMessage.mockImplementationOnce(async () => ({ sent: false, blocked: false, code: 'PROVIDER_FAILURE', retryable: true, reason: 'provider down (synthetic)' }));
+      const first = await complete(f, {}, key);
+      expect(first.status).toBeGreaterThanOrEqual(500);
+      const inv = await invoiceFor(f);
+      const record = await recordFor(f);
+      expect(record.structured_notes.invoiceSenderOwnsPayLinkFor).toBeUndefined();
+      // The deferred completion text (pay link in its frozen body) is replayed while a hold stands:
+      // the replay strips the link and queues the invoice, in the same transaction as the marker.
+      const payUrl = 'https://pay.example.test/i/synthetic-token';
+      const [row] = await mockPg('sms_log').insert({
+        customer_id: f.customerId, direction: 'outbound', from_phone: '+15550000001', to_phone: '+15550000002', status: 'sending',
+        message_body: `Your service is complete.\nInvoice: ${payUrl}`,
+        metadata: { entry_point: 'dispatch_completion_deferred', invoice_id: inv.id, pay_url: payUrl, service_record_id: record.id, mark_invoice_delivery: true },
+      }).returning('id');
+      expect(await persistStrippedPayLink({
+        msgId: row.id, strippedBody: 'Your service is complete.', reason: 'collections-dispute-hold', invoiceId: inv.id, serviceRecordId: record.id,
+      })).toBe(1);
+      expect((await recordFor(f)).structured_notes.invoiceSenderOwnsPayLinkFor).toBe(String(inv.id));
+      expect(await invoiceFor(f)).toMatchObject({ status: 'scheduled' });
+      // The report-only replay then exhausts its attempts: the terminal hook restores the retry state.
+      await terminalDeferredCompletionSend({ service_record_id: record.id });
+      const afterTerminal = (await recordFor(f)).structured_notes;
+      expect(afterTerminal.completionSmsStatus).toBe('failed');
+      expect(afterTerminal.invoiceSenderOwnsPayLinkFor).toBe(String(inv.id));
+      // The tech retries the closeout: report-only, no second pay link.
+      jest.clearAllMocks();
+      sendCustomerMessage.mockImplementation(async () => ({ sent: true, channel: 'sms', sid: `SM${randomUUID().replace(/-/g, '').slice(0, 32)}` }));
+      expect(await complete(f, {}, key)).toMatchObject({ status: 200 });
+      expect(sendCustomerMessage).toHaveBeenCalled();
+      for (const text of bodies()) expect(payLinkIn(text, inv)).toBe(false);
+    } finally { await cleanup(f); }
+  });
+
   test('a completion RETRY after the release sends no second pay link: the sender owns the invoice, the retry text is report-only', async () => {
     const f = await seedVisit();
     const key = randomUUID();

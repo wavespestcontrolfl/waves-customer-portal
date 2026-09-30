@@ -327,6 +327,13 @@ describe('invoice follow-up email sidecar', () => {
       expect(BillingEmailAuthority.dispatchUnderBillingEmailAuthority).not.toHaveBeenCalled();
       expect(ownershipCalls).toContainEqual(['inv-1', db]);
       expect(dispatch).toHaveBeenCalledWith();
+      // The Text leg of an operator send-now carries the dispute-hold exemption (#5424 round 10),
+      // even for a customer whose stored choice is an explicit channel list.
+      if (!options.noSms) {
+        expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
+          entryPoint: 'invoice_followup_sequence', operatorInitiated: true, holdExempt: 'operator',
+        }));
+      }
     } else {
       const input = {
         customerId: 'cust-1', invoiceId: 'inv-1', channel: 'email', metadata: { billingDeliveryCategory: 'invoice' },
