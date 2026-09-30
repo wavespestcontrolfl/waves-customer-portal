@@ -316,6 +316,22 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(ok.reportV2.banner.state).toBe('hold');
     });
 
+    test('a failed base catalog read on products that already carry their category: rules unknown, uncacheable, nothing to freeze', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const LEGACY_ID = PRODUCT_ID.replace('5555', '7777');
+      const service = serviceWith(HOLD);
+      const rows = [
+        { id: 'sp-1', service_record_id: 'svc-lawn-w1', product_id: PRODUCT_ID, product_name: 'Celsius WG', product_category: 'herbicide', created_at: '2026-09-30T18:00:00Z' },
+        { id: 'sp-2', service_record_id: 'svc-lawn-w1', product_id: LEGACY_ID, product_name: 'Legacy Product', product_category: 'fertilizer', created_at: '2026-09-30T18:01:00Z' },
+      ];
+      const out = {};
+      const data = await buildReportV1Data(service, 'token-w1', makeKnex({ ...fixtures(), service_products: rows, products_catalog: FAIL }), { wateringInstructionOut: out });
+      expect(out.productsLoadFailed).toBe(true);
+      expect(out.instruction).toBeNull();
+      expect(data.lawnAssessment.wateringInputsUnavailable).toBe(true);
+      expect(data.lawnAssessment.weekWeatherUncacheable).toBe(true);
+    });
+
     test('a pre-toggle preferences row (irrigation_system false) still gets the head-type minutes, never "no system"', async () => {
       process.env.GATE_LAWN_WATERING_RULE = 'true';
       const render = async (prefs) => (await buildReportV1Data(serviceWith(WATER_IN), 'token-w1', makeKnex(fixtures([{ customer_id: 'cust-lawn-w1', ...prefs }])))).reportV2.banner.lines;

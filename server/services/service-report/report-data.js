@@ -5193,11 +5193,15 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       let wateringInstruction = null;
       let wateringInputsFailed = false;
       if (featureGates.lawnWateringRuleLive()) {
+        // Rules are UNKNOWN (not absent) when either catalog read failed: the
+        // live rule lookup, or the base enrichment (which a product that
+        // already carries its category does not surface as productsLoadFailed).
+        const rulesUnknown = !!(products.wateringRuleLookupFailed || products.catalogEnrichmentFailed);
         try {
           // Replay the frozen instruction; regenerate only when none exists (and
-          // only from a complete rule set: a failed live rule lookup builds none).
+          // only from a complete rule set: a failed catalog read builds none).
           wateringInstruction = readFrozenWateringInstruction(structured)
-            || (products.wateringRuleLookupFailed ? null
+            || (rulesUnknown ? null
               : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
         } catch { wateringInstruction = null; wateringInputsFailed = true; }
         // An UNFROZEN render whose inputs could not be read omits the customer's
@@ -5205,7 +5209,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         // defer (the week-weather / prefs-read flags pdf-queue and reports-public
         // already gate on). A frozen render read nothing and is unaffected.
         if (!readFrozenWateringInstruction(structured)
-          && (wateringInputsFailed || products.wateringRuleLookupFailed || productsLoadFailed)) {
+          && (wateringInputsFailed || rulesUnknown || productsLoadFailed)) {
           lawnAssessment.wateringInputsUnavailable = true;
           lawnAssessment.weekWeatherUncacheable = true;
           lawnAssessment.weekWeatherPendingReason = lawnAssessment.weekWeatherPendingReason || 'unfrozen';
@@ -5215,7 +5219,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') {
           opts.wateringInstructionOut.instruction = wateringInstruction;
           // A failed product read means the rules were unknown, not absent.
-          opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || !!products.wateringRuleLookupFailed;
+          opts.wateringInstructionOut.productsLoadFailed = productsLoadFailed || rulesUnknown;
         }
         // In place, so the lawnAssessment the payload returns never carries
         // the raw {holdUntil} token either (a null instruction drops it).
