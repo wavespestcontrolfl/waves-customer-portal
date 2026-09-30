@@ -332,6 +332,23 @@ describe('resolveRecurringCardPolicyForEstimate', () => {
     });
   });
 
+  describe('prepay recovery fallback pay link vs a collections dispute hold (owner ruling 2026-09-30)', () => {
+    // The sweep is too large to drive here; pin the ordering that matters: the live
+    // hold check (fail closed, job left claimed for the lease) sits before the
+    // direct sender that delivers the fallback pay link.
+    it('checks the live hold before the fallback delivery and leaves the job retryable', () => {
+      const src = require('fs').readFileSync(require('path').join(__dirname, '../services/recurring-card-on-file.js'), 'utf8');
+      const guard = src.indexOf('const fallbackHold = await require(\'./collections/collection-hold\')');
+      const send = src.indexOf("withJobFence(async () => require('./invoice').sendViaSMSAndEmail(job.invoice_id))", guard);
+      expect(guard).toBeGreaterThan(0);
+      expect(send).toBeGreaterThan(guard);
+      const block = src.slice(guard, send);
+      expect(block).toMatch(/dueInvoiceHeldByDisputeHold\(/);
+      expect(block).toMatch(/if \(fallbackHold\.held\) \{[\s\S]*continue;/);
+      expect(block).not.toMatch(/resolve\(/);
+    });
+  });
+
   describe('sweepStrandedPrepayAutoCharges', () => {
     it('still scans with the gate OFF (kill switch must drain committed jobs, not strand them)', async () => {
       delete process.env.GATE_PREPAY_CARD_AND_CHARGE;
