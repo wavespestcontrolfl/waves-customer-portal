@@ -406,3 +406,31 @@ describe('a standing row stored uncut, before the body guard covered its categor
     expect(mockRows.notifications[0].detail).toBe(LONG);
   });
 });
+
+// The mirror of the block above, after ADMIN_BODY_GUARD_ALL is killed: a row
+// stored cut (full text in `detail`) and the same whole text arriving uncut
+// must not re-ring every standing alert once.
+describe('a standing row stored cut, then re-emitted with the body guard killed', () => {
+  const LONG = `A recurring visit is still awaiting placement: ${'review availability and preferences; '.repeat(5)}end.`;
+  const OLD_ENV = process.env.ADMIN_BODY_GUARD_ALL;
+  afterEach(() => { if (OLD_ENV === undefined) delete process.env.ADMIN_BODY_GUARD_ALL; else process.env.ADMIN_BODY_GUARD_ALL = OLD_ENV; });
+
+  test('the same text is not a change; different text rewrites the row whole and clears detail', async () => {
+    const first = await NotificationService.notifyAdmin('alert', 'Placement needed', LONG, { dedupeKey: 'k-cut', refreshOnDedupe: true });
+    expect(first.deduped).toBe(false);
+    expect(mockRows.notifications[0].detail).toBe(LONG);
+    mockRows.notifications[0].read_at = new Date('2026-09-29T12:00:00Z');
+
+    process.env.ADMIN_BODY_GUARD_ALL = 'off';
+    const again = await NotificationService.notifyAdmin('alert', 'Placement needed', LONG, { dedupeKey: 'k-cut', refreshOnDedupe: true });
+    expect(again.refreshed).toBeUndefined();
+    expect(mockUpdates).toEqual([]);
+    expect(mockRows.notifications[0].read_at).not.toBeNull();
+
+    const next = `${LONG} Changed.`;
+    const moved = await NotificationService.notifyAdmin('alert', 'Placement needed', next, { dedupeKey: 'k-cut', refreshOnDedupe: true });
+    expect(moved.refreshed).toBe(true);
+    expect(mockRows.notifications[0].body).toBe(next);
+    expect(mockRows.notifications[0].detail).toBeNull();
+  });
+});

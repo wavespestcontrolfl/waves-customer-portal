@@ -505,7 +505,13 @@ const NotificationService = {
           // is not news: without this, every such row would re-ring once on
           // the first emission after the guard went live.
           const storedUncut = !existing.detail && Boolean(nextDetail) && existing.body === nextDetail;
-          const detailChanged = !storedUncut && (existing.detail || null) !== (nextDetail || null);
+          // The mirror, after ADMIN_BODY_GUARD_ALL is killed: a row stored cut
+          // (full text in `detail`) and the same whole text arriving uncut.
+          // Only when the caller supplied no detail of its own, so the stored
+          // detail can only be the guard's copy of that body.
+          const storedCut = !createOpts.detail && Boolean(existing.detail) && !nextDetail && existing.detail === nextBody;
+          const sameText = storedUncut || storedCut;
+          const detailChanged = !sameText && (existing.detail || null) !== (nextDetail || null);
           // Routing metadata is content too: a FIX -> ACT flip with identical
           // text must still merge the new feed/kind/audience, or the owner's
           // action stays hidden behind a stale feed:'activity' (codex r3 P0 on
@@ -519,14 +525,14 @@ const NotificationService = {
           // Compared by JSON so an itemKeys array compares by value.
           const ringMetadataChanged = RING_METADATA_KEYS.some((k) => Object.prototype.hasOwnProperty.call(metadata, k)
             && JSON.stringify(existingMeta[k] ?? null) !== JSON.stringify(metadata[k] ?? null));
-          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: storedUncut ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
+          if (refreshOnDedupe && standingRowChanged(existing, { versionChanged, nextTitle, nextBody: sameText ? existing.body : nextBody, nextLink, detailChanged, routingChanged, ringMetadataChanged })) {
             // A row that newly enters the owner audience (engineering/fyi ->
             // owner) is news to the owner even at an equal count: it may
             // have been read in Activity, so it must ring into the bell.
             const enteredOwner = metadata.audience === 'owner' && Boolean(existingMeta.audience) && existingMeta.audience !== 'owner';
             const shouldRing = enteredOwner || await resolveRingOnRefresh(ringOnRefresh, existing, existingMeta);
             const mergedMetadata = mergeRefreshMetadata(existingMeta, metadata, shouldRing);
-            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || storedUncut ? { detail: nextDetail } : {}), link: nextLink,
+            const refreshed = { title: nextTitle, body: nextBody, ...(detailChanged || sameText ? { detail: nextDetail } : {}), link: nextLink,
               metadata: JSON.stringify(mergedMetadata), ...(shouldRing ? { read_at: null } : {}) };
             await trx('notifications').where({ id: existing.id }).update(refreshed);
             return { notification: { ...existing, ...refreshed, metadata: mergedMetadata }, deduped: true, refreshed: true, rung: shouldRing };
