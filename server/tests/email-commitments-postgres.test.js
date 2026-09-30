@@ -427,6 +427,7 @@ postgres('Email commitments on PostgreSQL', () => {
   test('rejected thread sends never crowd a valid older staff reply out of the evidence window', async () => {
     const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
     const sourceAt = new Date(Date.now() - 3 * 3600000);
+    process.env.GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE = new Date(sourceAt.getTime() - 3600000).toISOString();
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', received_at: new Date(sourceAt.getTime() - 60000) });
     const reply = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
       from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null, body_text: 'Yes, booked you for Friday',
@@ -558,6 +559,27 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(evidence.records.some((r) => r.type === 'email_reply' && r.id === reply.id)).toBe(true);
     const fulfillment = replyFulfillment(evidence, commitment);
     expect(fulfillment).toMatchObject({ verdict: 'fulfilled', record_type: 'email_reply', record_id: reply.id, basis: 'person_reply' });
+  });
+
+  test('with the email gate off, a staff Gmail reply is no evidence for a live SMS ask (dark launch)', async () => {
+    const sourceAt = new Date();
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', received_at: new Date(sourceAt.getTime() - 60000) });
+    const reply = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null, body_text: 'Yes, all done — thanks!',
+      label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + 60000) });
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const message = { id: randomUUID(), customer_id: customerId, direction: 'inbound', from_phone: '+12025550101', to_phone: '+19418889999', created_at: sourceAt };
+    const commitment = { kind: 'other', party: 'waves', sms_context: { basis: 'request' } };
+    const at = new Date(reply.received_at.getTime() + 2000);
+    process.env.GATE_EMAIL_OPERATIONAL_ACTIONS = 'false';
+    expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, at)).records.some((r) => r.type === 'email_reply')).toBe(false);
+    process.env.GATE_EMAIL_OPERATIONAL_ACTIONS = 'true';
+    delete process.env.GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE;
+    expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, at)).records.some((r) => r.type === 'email_reply')).toBe(false);
+    process.env.GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE = new Date(reply.received_at.getTime() + 1000).toISOString();
+    expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, at)).records.some((r) => r.type === 'email_reply')).toBe(false);
+    process.env.GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE = new Date(sourceAt.getTime() - 3600000).toISOString();
+    expect((await loadSmsFulfillmentEvidence(mockPg, commitment, message, at)).records.some((r) => r.type === 'email_reply' && r.id === reply.id)).toBe(true);
   });
 
   test('a staff send with no words of its own (only quoted history) is not a reply witness', async () => {

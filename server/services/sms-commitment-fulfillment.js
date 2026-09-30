@@ -15,6 +15,7 @@ const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callCont
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
 const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
+const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
 
 const LIMIT = 50;
 // email_reply reads this many raw candidates before resolving them to the
@@ -314,9 +315,16 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
     // still the authoritative check below, so an ambiguous thread, or a
     // substring hit that does not truly resolve, never counts.
     email_reply: (async () => {
+      // Dark until the email lane is live: with its gate off (or no
+      // activation time), staff Gmail sends are no evidence for anything,
+      // so the live SMS lane behaves exactly as before; once on, only sends
+      // from the activation time count.
+      const emailSince = gateEnvTimestamp('GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE');
+      if (!gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS') || !emailSince) return [];
       const candidates = await conn('emails as er')
         .whereRaw(personSentFilter('er'))
         .where('er.received_at', '>', after).where('er.received_at', '<=', now)
+        .where('er.received_at', '>=', emailSince)
         .where((q) => q.whereExists(function threadLink() {
           this.select(1).from('emails as inbound').whereRaw('inbound.gmail_thread_id = er.gmail_thread_id')
             .where('inbound.customer_id', customerId);
