@@ -677,9 +677,21 @@ const CLAIM_RULES_AFTER_QUESTION = [
 ];
 const holds = (rules, x) => rules.some((r) => r.test(x));
 
+// An explicit clock time ("9:00 AM - 11:00 AM", "at 2 PM") with no label-context word in its clause is an
+// appointment offer, not timing: it does not decide the clause and the ordinary rules still read it.
+// A relative anchor ("by 5", "after 3:30 pm", "around 3", "5ish") is never plain: it can be a drying time.
+const ANCHORED_CLOCK_RE = /\b(?:by|until|till|til|after|before|around|about|through|past)\s+(?:1[0-2]|[1-9])(?::[0-5]\d)?(?:\s*[ap]\.?m\.?)?(?!\d)|\b\d{1,2}ish\b|\b(?:by|until|till|before|after)\s+(?:noon|midnight)\b/g;
+// Clearance wording beside a time ("it will be ready at 2 PM", "fine at 3:30") stays a claim unless the clause is a
+// question or plainly offers / books a time ("how about", "between", "open", "works", "appointment", "arrive").
+const CLEARANCE_ANY_RE = new RegExp([PERMISSION_RE, CLEARANCE_STATE_RE, PRONOUN_CLEARANCE_RE, PLACE_CLEARANCE_RE].map((re) => re.source).join('|'));
+const OFFER_CUE_RE = /\b(?:how\s+about|between|open|openings?|available|slots?|works?|appointments?|visits?|arriv\w+|stop\s+by|see\s+you|come|book(?:ed|ing)?|schedule[ds]?|windows?)\b/;
+const isPlainClockOffer = (x) => x.clock && !x.duration && !LABEL_CONTEXT_RE.test(x.c)
+  && hasClockTime(x.c.replace(ANCHORED_CLOCK_RE, ' '))
+  && (x.question || !CLEARANCE_ANY_RE.test(x.c) || OFFER_CUE_RE.test(x.c));
+
 function clauseIsLabelClaim(input) {
   const x = clauseFacts(input);
-  if (x.duration || x.clock) return !x.sched(x.clock && !x.duration);
+  if (x.duration || (x.clock && !isPlainClockOffer(x))) return !x.sched(x.clock && !x.duration);
   if (holds(CLAIM_RULES_BEFORE_QUESTION, x)) return true;
   return !x.question && holds(CLAIM_RULES_AFTER_QUESTION, x);
 }

@@ -852,6 +852,27 @@ describe('r8: a pronoun subject going back out after a staff time anchor is a re
   });
 });
 
+describe('r9: a clock time or window with no label context is an appointment offer, not label timing', () => {
+  const claims = (t) => labelFactsLib.replyClaimsUngroundedLabelTiming(t, '');
+  // every window the scheduler-offer suites (sms-offers-scheduler, sms-auto-send-open-times) draft as "How about <window>?"
+  const WINDOWS = ['10:00 AM - 12:00 PM', '11:00 AM - 1:00 PM', '1:00 PM - 3:00 PM', '2:00 PM - 4:00 PM', '3:00 PM - 5:00 PM', '8:00 AM - 10:00 AM', '9:00 AM - 11:00 AM', '9:15 AM - 11:15 AM'];
+  test('offered windows and appointment times pass', () => {
+    for (const w of WINDOWS) expect([w, claims(`How about ${w}?`)]).toEqual([w, false]);
+    for (const t of [
+      'How about Tuesday 9-11?', 'We have 1:00 PM - 3:00 PM open.', 'Your arrival window is between 8 and 10 AM.', 'Arrival between 8 and 10 AM.', 'Your visit is at 2 PM.',
+      'Does 2 PM work?', 'Is 2 PM ok?', 'Sounds good, does 2 PM work for you?', 'I can do 9:00 AM - 11:00 AM on Tuesday.', 'We can be there at 2 PM.', 'Tuesday 9-11 works.',
+      'I will confirm a time and get right back to you.', 'Sounds good, thanks!',
+    ]) expect([t, claims(t)]).toEqual([t, false]);
+  });
+  test('a time beside label context, clearance wording or a relative anchor stays held', () => {
+    for (const t of [
+      'Rain after 2 PM is fine.', 'Pets can go out at 3.', 'Dry by 5.', 'Around 3.', 'After 3:30 pm', 'By 3:30', '5ish', 'It will be ready at 2 PM.', 'Everything will be good at 3 PM.',
+      'It should be fine at 3:30.', "You're good to go at 3 PM.", 'Kids can play at 3 PM.', 'The lawn is safe at 4 PM.', 'Good to go by 3 PM.', 'Keep the dogs in until 5 PM.',
+      'It will be dry at 2 PM.', 'You can water at 4 PM.', 'How about 9:00 AM - 11:00 AM? The pets can go out at 3 PM.',
+    ]) expect([t, claims(t)]).toEqual([t, true]);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
