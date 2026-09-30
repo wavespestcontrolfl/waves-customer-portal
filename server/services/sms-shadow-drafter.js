@@ -1415,7 +1415,11 @@ function readInboundThread(context, inboundMessage, inboundPhone) {
   const recent = (context?.smsHistory || []).slice(0, 10)
     .filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && !(new Date(m.date) < cutoff));
   const mine = sender ? recent.filter((m) => phoneIdentityKey(m.fromPhone) === sender) : [];
-  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], unreadable: !sender || (recent.length > 0 && !mine.length) };
+  // The model is shown RECENT SMS THREAD = the first 10 rows, every direction and age. An inbound row there that is
+  // not provably from this sender (another number, no phone, or no known sender phone) makes the thread mixed:
+  // it may hold another person's question about another visit, so the latest visit's sentences cannot be authorized.
+  const mixed = (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound' && (!sender || phoneIdentityKey(m.fromPhone) !== sender));
+  return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], unreadable: !sender || (recent.length > 0 && !mine.length), mixed };
 }
 
 function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage }) {
@@ -2356,7 +2360,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const thread = readInboundThread(context, inboundMessage, inboundPhone);
   const askedTexts = thread.texts;
   // a short follow-up whose thread could not be read for this sender cannot be tied to the latest visit: none on file
-  const labelFacts = thread.unreadable && labelFactsLib.inboundIsElliptical(askedTexts)
+  // A rendered thread with another number's (or an unattributable) inbound message gets none on file whatever the
+  // current message says: the model reads that message too.
+  const labelFacts = thread.mixed || (thread.unreadable && labelFactsLib.inboundIsElliptical(askedTexts))
     ? null : labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,

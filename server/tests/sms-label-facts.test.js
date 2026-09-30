@@ -1814,9 +1814,12 @@ describe('C: the section is for the latest visit only - a text about another vis
       const NONE = 'LABEL FACTS (none on file for the last visit):';
       r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: OTHER }]);
       expect(r.factsBlock).toContain(NONE);
-      // ...whereas this sender's own earlier message is readable: benign keeps the facts, an other-visit reference voids them
+      // ...and even beside this sender's own message, another number's message in the rendered thread means none on file
       const own = { direction: 'inbound', body: 'Can the dogs go out after you sprayed?', date: ago(1), fromPhone: PHONE };
-      r = await run('Is it okay now?', [draft(RE)], [own, { ...may, fromPhone: OTHER }]);
+      r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [own, { ...may, fromPhone: OTHER }]);
+      expect(r.factsBlock).toContain(NONE);
+      // a thread of this sender's own messages only keeps the facts
+      r = await run('Is it okay now?', [draft(RE)], [own, { ...own, body: 'Hello', fromPhone: '(941) 555-0100' }]);
       expect(r.factsBlock).toContain(`- ${RE}`);
       r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [{ ...may, fromPhone: PHONE }]);
       expect(r.factsBlock).toContain(NONE);
@@ -1830,11 +1833,42 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(r.factsBlock).toContain(NONE);
       r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], [], null);
       expect(r.factsBlock).toContain(NONE); // no known sender phone: unreadable even with no history
-      // a self-contained message is unaffected by an unreadable thread
-      r = await run('Can the dogs go out now?', [draft(RE)], [{ ...may, fromPhone: OTHER }], null);
+      // a self-contained message is judged on its own, but a mixed rendered thread is none on file whatever it says (below)
+      r = await run('Can the dogs go out now?', [draft(RE)], [], null);
       expect(r.factsBlock).toContain(`- ${RE}`);
       // a sender with no history at all (known phone) has nothing to hide: facts apply
       r = await run('Is it okay now?', [draft(RE)], []);
+      expect(r.factsBlock).toContain(`- ${RE}`);
+    });
+
+    test('r18: a rendered thread with another number\'s or an unattributable inbound message renders none on file, whatever the current message says', async () => {
+      const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+      const OTHER = '+19415550199';
+      const NONE = 'LABEL FACTS (none on file for the last visit):';
+      const row = (over) => ({ direction: 'inbound', body: 'Hello', date: ago(1), fromPhone: PHONE, ...over });
+      const may = row({ body: 'What about the May treatment?', fromPhone: OTHER });
+      const bad = [draft(RE), draft(RE), draft(RE)];
+      // mixed numbers: the model would read phone A's May question in phone B's thread, so no sentence is authorized
+      let r = await run('Can the dogs go out now?', bad, [row(), may]);
+      expect(r.factsBlock).toContain(NONE);
+      expect(r.factsBlock).not.toContain('keep people and pets');
+      expect(r.converged).toBe(false);
+      expect(r.labelFactsSnapshot ?? null).toBeNull();
+      // a row with no phone is not provably the sender's; so is an unknown sender phone with any inbound row shown
+      r = await run('Can the dogs go out now?', bad, [row({ fromPhone: null })]);
+      expect(r.factsBlock).toContain(NONE);
+      r = await run('Can the dogs go out now?', bad, [row()], null);
+      expect(r.factsBlock).toContain(NONE);
+      // the single-number thread keeps the facts (any format of the sender's number), outbound rows never matter
+      r = await run('Can the dogs go out now?', [draft(RE)], [row(), row({ fromPhone: '(941) 555-0100' }), { direction: 'outbound', body: 'Hi!', date: ago(2), fromPhone: null }]);
+      expect(r.factsBlock).toContain(`- ${RE}`);
+      expect(r.converged).toBe(true);
+      expect(r.labelFactsSnapshot.sentences).toEqual([RE]);
+      r = await run('Can the dogs go out now?', [draft(RE)], [{ direction: 'outbound', body: 'Hi!', date: ago(2), fromPhone: null }], null);
+      expect(r.factsBlock).toContain(`- ${RE}`);
+      // only the rows the model is shown count: an other-number message past the 10 shown rows is not rendered
+      const older = Array.from({ length: 10 }, (_, i) => row({ body: `msg ${i}`, date: ago(1 + i / 100) })).concat([may]);
+      r = await run('Can the dogs go out now?', [draft(RE)], older);
       expect(r.factsBlock).toContain(`- ${RE}`);
     });
 
