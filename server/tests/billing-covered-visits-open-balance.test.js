@@ -414,6 +414,14 @@ describe('liveInvoice reaches the combined first-application invoice link', () =
 // window of this route's own.
 describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', () => {
   const TERM_TABLE = 'annual_prepay_terms as t';
+  // The rail projects first activation "as if paid today" (the late-payment
+  // window slide), so the clock is pinned to the terms' start: no lag unless
+  // a test moves it. Only Date is faked — timers/microtasks stay real.
+  const REAL_TIMERS = ['nextTick', 'setImmediate', 'clearImmediate', 'setTimeout', 'clearTimeout',
+    'setInterval', 'clearInterval', 'queueMicrotask', 'hrtime', 'performance'];
+  const pinToday = (iso) => jest.useFakeTimers({ now: new Date(iso), doNotFake: REAL_TIMERS });
+  beforeEach(() => pinToday('2026-01-01T17:00:00Z'));
+  afterEach(() => jest.useRealTimers());
   const term = (overrides = {}) => ({
     id: 't1',
     customer_id: 'c1',
@@ -579,6 +587,32 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
       { liveInvoice: true },
     );
     expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a late payment\'s window slide is projected as if paid today (Fable P2 on #5387)', async () => {
+    // Stored window ends 2026-12-31; paid "today" 2026-03-01 slides the end
+    // by the same 59-day lag first activation applies → 2027-02-28.
+    pinToday('2026-03-01T17:00:00Z');
+    const v1 = visit({ scheduled_date: '2027-01-10' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('no slide on the stored window when paid on the start day', async () => {
+    const v1 = visit({ scheduled_date: '2027-01-10' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('an active term with no linked visit yet (mid- or failed activation) still blocks (Fable P2 on #5387)', async () => {
+    // The fixture stands in for the SQL filter (pending OR active with no
+    // linked row); this pins that the rail judges such a term the same way.
+    const v1 = visit();
+    const conn = fixture({ visits: [v1], terms: [term({ status: 'active' })] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/just paid at the old price/);
   });
 
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {

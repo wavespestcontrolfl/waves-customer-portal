@@ -825,11 +825,29 @@ async function coverageCandidateRows(term, conn, termStart, termEnd) {
   return scope ? rows.filter((row) => rowInRenewalScope(row, scope)) : rows;
 }
 
-async function coverageRowsForTerm(term, conn = db, { includeTerminalStatuses = false, extraCandidateRows = null } = {}) {
+async function coverageRowsForTerm(term, conn = db, {
+  includeTerminalStatuses = false, extraCandidateRows = null, projectFirstActivationOn = null,
+} = {}) {
   const coverageServiceType = normalizeCoverageServiceType(term?.coverage_service_type);
   const coverageVisitCount = normalizeCoverageVisitCount(term?.coverage_visit_count);
   const termStart = dateOnly(term?.term_start);
-  const termEnd = dateOnly(term?.term_end);
+  let termEnd = dateOnly(term?.term_end);
+  // projectFirstActivationOn (a YYYY-MM-DD "paid on" day): a read-only
+  // caller asking which visits a NOT-yet-activated term would cover if its
+  // first activation ran on that day (the re-price guard's pending /secure
+  // pick). First activation slides term_end by the payment lag
+  // (ensureCoverageRowsForTerm's anchorLagDays — same anchors, same
+  // windowFixedAtCreation exemption), so the stored window alone would miss
+  // the tail a late payment adds. The successor-term cap is not applied:
+  // that only over-reports coverage (a stricter guard), never under.
+  if (projectFirstActivationOn && termEnd && termStart && !windowFixedAtCreation(term)) {
+    const mintAnchor = coverageSeriesAnchor(termStart, { firstVisitDate: term?.first_visit_date || null }) || termStart;
+    const paidAnchor = coverageSeriesAnchor(termStart, {
+      firstVisitDate: term?.first_visit_date || null, notBefore: projectFirstActivationOn,
+    }) || termStart;
+    const lag = daysUntil(mintAnchor, paidAnchor);
+    if (lag != null && lag > 0) termEnd = addDaysYmd(termEnd, lag);
+  }
   if (!term?.customer_id || !coverageServiceType || !coverageVisitCount || !termStart || !termEnd) {
     return [];
   }

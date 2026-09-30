@@ -17816,7 +17816,23 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
   const pendingTerms = await conn('annual_prepay_terms as t')
     .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
     .whereIn('t.customer_id', customerIds)
-    .where('t.status', 'payment_pending')
+    // payment_pending, OR active but never activated — no visit ever linked
+    // (ensureCoverageRowsForTerm's own alreadyActivated test). The webhook
+    // commits pending→active in its own transaction BEFORE coverage rows are
+    // linked and stamped, and a refresh that throws after the flip leaves
+    // the term active-and-unlinked until the daily sweep; the direct
+    // annual_prepay_term_id rail sees neither (Fable review P2 on #5387).
+    // A term with ANY linked row is fully owned by that direct rail.
+    .where(function () {
+      this.where('t.status', 'payment_pending')
+        .orWhere(function () {
+          this.whereIn('t.status', ['active', 'renewal_pending'])
+            .whereNotExists(function () {
+              this.select(conn.raw('1')).from('scheduled_services as ss_link')
+                .whereRaw('ss_link.annual_prepay_term_id = t.id');
+            });
+        });
+    })
     .whereNotIn('inv.status', NO_MONEY_HELD)
     .select('t.*');
   if (pendingTerms.length === 0) return marks;
@@ -17843,9 +17859,17 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
     // successor, scope) test a fresh DB read of the written date would.
     const candidateRow = { ...v, ...(v._proposed || {}) };
     for (const term of terms) {
-      const covered = await coverageRowsForTerm(term, conn, { extraCandidateRows: [candidateRow] });
+      const covered = await coverageRowsForTerm(term, conn, {
+        extraCandidateRows: [candidateRow],
+        // Judged on the window a payment TODAY would give it (the late-
+        // payment slide; Fable review P2 on #5387). A later payment slides
+        // further — a known limit, stated on the PR.
+        projectFirstActivationOn: etDateString(),
+      });
       if (covered.some((row) => String(row.id) === String(v.id))) {
-        marks.set(v.id, 'on an annual prepay invoice from the card-confirmation page that is still open at the old price');
+        marks.set(v.id, term.status === 'payment_pending'
+          ? 'on an annual prepay invoice from the card-confirmation page that is still open at the old price'
+          : 'covered by an annual prepay that was just paid at the old price and is still being applied to its visits');
         break;
       }
     }
