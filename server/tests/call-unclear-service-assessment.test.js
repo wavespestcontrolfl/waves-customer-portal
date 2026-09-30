@@ -215,6 +215,66 @@ describe('low_extraction_confidence with only service_address low', () => {
   });
 });
 
+describe('the transcript veto rides EVERY admission by this gate (codex r3 P1)', () => {
+  const lowAddressOnly = () => extraction({
+    confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9 },
+  });
+
+  test('both waivers set the single admitted signal; only the ambiguous one forces the Assessment', () => {
+    const lowConf = canAutoRoute(lowAddressOnly(), GATE_ON);
+    expect(lowConf).toMatchObject({ allowed: true, unclearServiceGateAdmitted: true, forceAssessmentService: false });
+    const amb = canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
+    expect(amb).toMatchObject({ allowed: true, unclearServiceGateAdmitted: true, forceAssessmentService: true });
+    // gate off: neither
+    expect(canAutoRoute(extraction(), GATE_OFF).unclearServiceGateAdmitted).toBeUndefined();
+  });
+
+  test('SEO solicitor through the low-confidence path: the resolver vetoes on the transcript once the signal is passed', () => {
+    const admitted = canAutoRoute(lowAddressOnly(), GATE_ON);
+    expect(admitted.unclearServiceGateAdmitted).toBe(true);
+    const extracted = { matched_service: 'General Pest Control', requested_service: 'pest control', call_summary: 'Caller about pest control.' };
+    const transcription = 'Agent: Hello.\nCaller: I can improve your website SEO and Google ranking for your pest control company, organic traffic guaranteed.\n';
+    // what the processor passes: fullTranscriptVeto = admitted.unclearServiceGateAdmitted
+    const r = resolveSchedulableCallService(extracted, { transcription, fullTranscriptVeto: admitted.unclearServiceGateAdmitted === true });
+    expect(r).toMatchObject({ ok: false, reason: 'unsupported_service' });
+    expect(r.noMatch).toBeUndefined();
+  });
+
+  test('the processor wires the veto to the admitted signal, not to the forced-Assessment flag', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toMatch(/fullTranscriptVeto: v2UnclearServiceGateAdmitted/);
+    expect(src).toMatch(/v2UnclearServiceGateAdmitted = routingResult\.unclearServiceGateAdmitted === true/);
+  });
+});
+
+describe('the V1 address-conflict hold keeps the gate\'s waived-flag cards (codex r3 P2)', () => {
+  const { demoteFailOpenOnV1AddressConflict } = CallRecordingProcessor;
+  const knownCaller = { hasAddress: true, addressLine1: '100 Synthetic St', addressZip: '34202', addressCity: 'Bradenton', addressState: 'FL' };
+  const conflictingV1 = { address_line1: '9 Elsewhere Ln', city: 'Sarasota', state: 'FL', zip: '34231' };
+
+  test('a held call still owes the advisory service card for what the gate waived', () => {
+    const allowed = {
+      allowed: true, flags: ['ambiguous_pest_or_service'], usesOnFileAddress: true,
+      failedOpenFlags: ['caller_phone_missing', 'ambiguous_pest_or_service'],
+      unclearServiceGateAdmitted: true, unclearServiceDemotedFlags: ['ambiguous_pest_or_service'], forceAssessmentService: true,
+    };
+    const held = demoteFailOpenOnV1AddressConflict(allowed, conflictingV1, knownCaller);
+    expect(held).toMatchObject({ allowed: false, reason: 'v1_only_new_address', appointmentBlockingFlags: ['address_unverified'] });
+    expect(held.failedOpenFlags).toEqual(['ambiguous_pest_or_service']);
+    expect(held.unclearServiceDemotedFlags).toEqual(['ambiguous_pest_or_service']);
+    // a held call is not an admission: nothing downstream may act as admitted
+    expect(held.unclearServiceGateAdmitted).toBeUndefined();
+    expect(held.forceAssessmentService).toBeUndefined();
+  });
+
+  test('gate off: the replacement verdict is exactly what it was', () => {
+    const allowed = { allowed: true, flags: [], usesOnFileAddress: true, failedOpenFlags: ['missing_service_address'] };
+    expect(demoteFailOpenOnV1AddressConflict(allowed, conflictingV1, knownCaller)).toEqual({
+      allowed: false, reason: 'v1_only_new_address', flags: [], appointmentBlockingFlags: ['address_unverified'],
+    });
+  });
+});
+
 describe('service resolver vetoes still apply downstream', () => {
   test('a demoted unclear flag reaches the resolver, whose hard vetoes stay un-bookable', () => {
     // canAutoRoute lets the call through under the gate ...
@@ -354,7 +414,7 @@ describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () 
   });
 
   test('KEEPS a recurring program the caller accepted (applyRecurringIntentDefault evidence) (codex r2 P1)', () => {
-    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: modelGuess, transcription: acceptedPlan });
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: modelGuess, transcription: acceptedPlan, inbound: true });
     expect(out).toMatchObject({ applied: false, kept: 'recurring_program', row: quarterlyRow });
   });
 
@@ -364,8 +424,22 @@ describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () 
   });
 
   test('recurring evidence only counts on a lead (same guard as the default itself)', () => {
-    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: { ...modelGuess, is_lead: false }, transcription: acceptedPlan });
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: { ...modelGuess, is_lead: false }, transcription: acceptedPlan, inbound: true });
     expect(out.applied).toBe(true);
+  });
+
+  test('OUTBOUND: the same accepted-plan transcript does NOT keep a model-picked recurring row (untrusted labels) (codex r3 P1)', () => {
+    const args = { serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: modelGuess, transcription: acceptedPlan };
+    expect(forcedAssessmentBooking({ ...args, inbound: true })).toMatchObject({ applied: false, kept: 'recurring_program' });
+    expect(forcedAssessmentBooking({ ...args, inbound: false })).toMatchObject({ applied: true, row: assessRow });
+    // default (no direction handed) is the safe side
+    expect(forcedAssessmentBooking(args)).toMatchObject({ applied: true, row: assessRow });
+  });
+
+  test('outbound still keeps a deterministic re-service row (lane evidence, not transcript labels)', () => {
+    const reService = { id: 'svc-rs', name: 'Pest Re-Service', service_key: 'pest_re_service' };
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: [...catalog, reService], current: reService, extracted: modelGuess, transcription: noIntent, inbound: false });
+    expect(out).toMatchObject({ applied: false, kept: 're_service' });
   });
 
   test('a forced Assessment carries NO treatment quote and NO follow-up signals (codex r2 P1)', () => {

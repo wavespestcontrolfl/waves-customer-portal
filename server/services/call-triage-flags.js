@@ -2225,6 +2225,10 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // field happened to pick (the flag said the service is unclear), and the
     // resolver's unsupported-call veto must read the full transcript.
     ...(unclearServiceDemotedFlags.length ? {
+      // Set whenever this gate admitted the call by waiving EITHER flag: the
+      // processor's full-transcript unsupported-call veto rides this signal, not
+      // the (narrower) forceAssessmentService.
+      unclearServiceGateAdmitted: true,
       unclearServiceDemotedFlags,
       forceAssessmentService: unclearServiceDemotedFlags.includes('ambiguous_pest_or_service'),
     } : {}),

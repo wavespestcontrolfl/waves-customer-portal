@@ -1764,6 +1764,15 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
     reason: 'v1_only_new_address',
     flags: routingResult.flags,
     appointmentBlockingFlags: ['address_unverified'],
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: the held call still owes staff the
+    // advisory service card for the flag(s) the gate waived — the blocked
+    // branch files failedOpenFlags as advisory cards. Only the gate's own
+    // waivers ride along (the on-file address flags stay dropped, as before),
+    // so gate off the replacement verdict is unchanged.
+    ...(routingResult.unclearServiceDemotedFlags?.length ? {
+      failedOpenFlags: [...routingResult.unclearServiceDemotedFlags],
+      unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags],
+    } : {}),
   };
 }
 
@@ -5687,7 +5696,10 @@ async function loadCustomerServiceContext(customerId, conn = db) {
 // Assessment. A service DETERMINISTIC logic settled is kept, because the
 // ambiguity was about the pest, not the program: a covered re-service row (the
 // live lane override) and a recurring pest program the caller voiced or
-// accepted (applyRecurringIntentDefault's own evidence, recurringIntentEvidence).
+// accepted (applyRecurringIntentDefault's own evidence, recurringIntentEvidence)
+// — on INBOUND calls only, the same condition that runs applyRecurringIntentDefault
+// at all: outbound speaker labels are untrusted, so on an outbound call a
+// model-picked recurring row is forced to the Assessment too.
 //
 // A forced Assessment carries NO treatment signals: the returned
 // `extractedPatch` clears the quoted treatment price (so pricing falls back to
@@ -5701,10 +5713,10 @@ async function loadCustomerServiceContext(customerId, conn = db) {
 // row, extractedPatch } with the Assessment row, or { applied:true,
 // unbookable:true } when that row is unavailable (hold; never the concrete
 // service the model flagged as unclear).
-function forcedAssessmentBooking({ serviceResolution, services, current, extracted, transcription }) {
+function forcedAssessmentBooking({ serviceResolution, services, current, extracted, transcription, inbound = false }) {
   if (!(serviceResolution?.ok || serviceResolution?.noMatch === true)) return { applied: false, row: current };
   if (current && isReServiceCatalogRow(current)) return { applied: false, row: current, kept: 're_service' };
-  if (current && extracted?.is_lead === true
+  if (inbound && current && extracted?.is_lead === true
       && RECURRING_PEST_PROGRAMS.has(normalizeServiceKey(current.name))
       && recurringIntentEvidence(transcription)) {
     return { applied: false, row: current, kept: 'recurring_program' };
@@ -9717,6 +9729,9 @@ const CallRecordingProcessor = {
     // Waves Assessment row (never a resolver/model-picked service) and the
     // resolver's unsupported-call veto reads the full transcript.
     let v2ForceAssessmentService = false;
+    // Every call this gate newly admitted (either flag waived): the resolver's
+    // unsupported-call veto reads the full transcript for all of them.
+    let v2UnclearServiceGateAdmitted = false;
     // The customer the on-file PROOF above was computed against, plus the
     // address snapshot compared — Step 3 below may retain or reconcile the
     // call to a DIFFERENT canonical customer than knownCaller (codex P1:
@@ -10414,6 +10429,7 @@ const CallRecordingProcessor = {
             // — and read as an unbooked visit. Demote it in place (open /
             // in-progress rows only, blocking ones only; nothing is resolved).
             v2ForceAssessmentService = routingResult.forceAssessmentService === true;
+            v2UnclearServiceGateAdmitted = routingResult.unclearServiceGateAdmitted === true;
             try {
               await demoteOpenTriageCards(db, call.id, routingResult.unclearServiceDemotedFlags, procToken);
             } catch (demoteErr) {
@@ -15408,7 +15424,7 @@ const CallRecordingProcessor = {
     const timeStr = (extracted.preferred_date_time || '').toLowerCase();
     const hasSpecificTime = /\d{1,2}:\d{2}|\d{1,2}\s*(am|pm|a\.m|p\.m)|noon|midday/i.test(timeStr);
     const customerServiceContext = customerId ? await loadCustomerServiceContext(customerId) : null;
-    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext, fullTranscriptVeto: v2ForceAssessmentService });
+    const serviceResolution = resolveSchedulableCallService(extracted, { transcription, customerServiceContext, fullTranscriptVeto: v2UnclearServiceGateAdmitted });
     // Catalog anchor: the specific bookable service this call maps to, when
     // one resolves. Drives service_type/service_id/price/duration/follow-up on
     // the booking. Also rescues catalog services whose names don't hit the
@@ -15500,6 +15516,9 @@ const CallRecordingProcessor = {
     if (v2ForceAssessmentService && isEnabled('callFailOpenBooking')) {
       const forced = forcedAssessmentBooking({
         serviceResolution, services: bookableCallServices, current: callBookingCatalogRow, extracted, transcription,
+        // The processor's own recurring-intent backstop skips outbound calls
+        // (diarization can label the Waves agent as Caller) — so does this.
+        inbound: !isOutboundCall(call),
       });
       if (forced.applied) {
         if (forced.unbookable) {
