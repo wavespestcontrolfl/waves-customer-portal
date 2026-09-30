@@ -390,7 +390,8 @@ describe('inherited v1 identity keeps the named v2 entry service contract', () =
     // own hazards" test above) — unweakened for all 239 pest entries.
     const audited = catalog.listEntries({ section: 'pest' }).filter((entry) => entry.service.referral
       || entry.safety.protected || entry.risk === 'medical');
-    expect(audited).toHaveLength(59);
+    // 59 approved + shot-hole-borers-ambrosia-beetles (draft, arborist referral).
+    expect(audited).toHaveLength(60);
 
     for (const entry of audited) {
       const built = answerFor(entry.slug, { approved: false });

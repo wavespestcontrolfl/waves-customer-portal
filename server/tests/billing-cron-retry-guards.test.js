@@ -330,6 +330,22 @@ describe('processPaymentRetries — suppression guards', () => {
     );
   });
 
+  test('B10: a retry of a hold-deferred row (ordinary description, or a legacy "— DEFERRED (…)" marker) charges Stripe with the plain monthly description', async () => {
+    const charge = StripeService.charge.mockResolvedValue({ id: 'pay-new', status: 'paid', amount: '33.00', metadata: '{}' });
+    const deferredMeta = JSON.stringify({ type: 'monthly_autopay', billed_month: '2026-06', deferred_reason: 'collection_hold' });
+    for (const description of [
+      'Bronze WaveGuard Monthly — Test Retry', // what the cron writes now
+      'Bronze WaveGuard Monthly — Test Retry — DEFERRED (collections hold)', // a row written with the old marker
+      'Bronze WaveGuard Monthly — Test Retry — DEFERRED (collection lock held elsewhere)',
+    ]) {
+      charge.mockClear();
+      mockFailedPayments = [monthlyFailedPayment({ description, retry_count: 0, metadata: deferredMeta })];
+      await BillingCron.processPaymentRetries();
+      expect(charge).toHaveBeenCalledTimes(1);
+      expect(charge.mock.calls[0][2]).toBe('Bronze WaveGuard Monthly — Test Retry');
+    }
+  });
+
   test('webhook-armed async ACH bounce row (retry_count 0, first rung) is picked up and re-charges its month', async () => {
     // The stripe-webhook payment_failed handler arms exactly this shape for
     // an invoice-less monthly ACH bounce: status failed, retry_count 0,

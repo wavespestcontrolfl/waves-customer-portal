@@ -1,18 +1,23 @@
 #!/usr/bin/env node
 // MUTATES (dry-run default) — reset customer coordinates that lie OUTSIDE the
-// service-area box so the hourly geocoder backstop sweep re-geocodes them.
+// service area — outside the box, or inside the DeSoto exclusion rectangle
+// (owner ruling 2026-09-30, DeSoto is not served) with no served ZIP on the
+// row — so the hourly geocoder backstop sweep re-geocodes them.
 //
 // Why: before PR #3802 the geocoder accepted whatever Google returned, and a
 // garbage or half-written address widens to a ZIP centroid, the wrong city,
 // or a rooftop in another state. Those coordinates sit on customer rows and
 // route optimization treats them as the front door. #3802 stops NEW ones;
-// this script clears the ones already stored. Anything inside the box is
+// this script clears the ones already stored. Anything else inside the box is
 // left alone — a coordinate alone cannot prove a ZIP centroid, and the guard
-// catches those the next time the row is re-geocoded.
+// catches those the next time the row is re-geocoded. A DeSoto-rectangle row
+// whose own ZIP is a served ZIP (the rectangle clips served neighbours) is
+// kept too.
 //
 // What the execute path writes, per customer, in one transaction:
 //   - customers.latitude/longitude -> NULL (guarded: only while the row still
-//     holds the exact coordinates the dry run listed; a raced row is skipped)
+//     holds the exact coordinates AND ZIP the dry run judged; a raced row —
+//     say a ZIP corrected to a served one — is skipped)
 //   - the PRIMARY, active customer_properties row -> NULL when it mirrors
 //     those same coordinates (that row is the customer-row mirror the sweep
 //     re-mirrors after re-geocode; secondary properties are never touched)
@@ -43,7 +48,7 @@
 
 const path = require('path');
 const { Client } = require(path.join(__dirname, '..', '..', 'node_modules', 'pg'));
-const { SERVICE_AREA_BOUNDS, isInServiceAreaBox } = require(
+const { SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, isInServiceAreaBox, isInServiceAreaCoarseBox } = require(
   path.join(__dirname, '..', '..', 'server', 'services', 'service-area'),
 );
 
@@ -59,7 +64,7 @@ async function main() {
   try {
     const b = SERVICE_AREA_BOUNDS;
     const { rows } = await client.query(
-      `SELECT c.id, c.latitude, c.longitude, c.state, c.active, c.pipeline_stage,
+      `SELECT c.id, c.latitude, c.longitude, c.zip, c.state, c.active, c.pipeline_stage,
               btrim(coalesce(c.address_line1, '')) <> '' AS has_street,
               p.id AS primary_property_id,
               (SELECT count(*) FROM scheduled_services s
@@ -72,12 +77,16 @@ async function main() {
           AND p.latitude = c.latitude AND p.longitude = c.longitude
         WHERE c.deleted_at IS NULL
           AND c.latitude IS NOT NULL AND c.longitude IS NOT NULL
-          AND NOT (c.latitude BETWEEN $1 AND $2 AND c.longitude BETWEEN $3 AND $4)
+          AND NOT (c.latitude BETWEEN $1 AND $2 AND c.longitude BETWEEN $3 AND $4
+                   AND NOT (c.latitude BETWEEN $6 AND $7 AND c.longitude BETWEEN $8 AND $9))
         ORDER BY c.active DESC, c.pipeline_stage, c.id`,
-      [b.latMin, b.latMax, b.lngMin, b.lngMax, TERMINAL_VISIT_STATUSES],
+      [b.latMin, b.latMax, b.lngMin, b.lngMax, TERMINAL_VISIT_STATUSES,
+        DESOTO_EXCLUSION.latMin, DESOTO_EXCLUSION.latMax, DESOTO_EXCLUSION.lngMin, DESOTO_EXCLUSION.lngMax],
     );
     // Belt and braces: the JS predicate is the one production uses.
-    const targets = rows.filter((r) => !isInServiceAreaBox(r.latitude, r.longitude));
+    // The DeSoto rectangle clips served neighbours: a row whose own ZIP is a
+    // served ZIP keeps its coordinates.
+    const targets = rows.filter((r) => !isInServiceAreaBox(r.latitude, r.longitude, { zip: r.zip }));
 
     console.log(`${EXECUTE ? 'EXECUTE' : 'DRY RUN'} — box lat ${b.latMin}..${b.latMax}, lng ${b.lngMin}..${b.lngMax}`);
     console.log(`${targets.length} customer row(s) hold out-of-area coordinates:`);
@@ -103,12 +112,13 @@ async function main() {
           `UPDATE customers
               SET latitude = NULL, longitude = NULL, updated_at = NOW()
             WHERE id = $1 AND deleted_at IS NULL
-              AND latitude = $2 AND longitude = $3`,
-          [r.id, r.latitude, r.longitude],
+              AND latitude = $2 AND longitude = $3
+              AND zip IS NOT DISTINCT FROM $4`,
+          [r.id, r.latitude, r.longitude, r.zip],
         );
         if (upd.rowCount !== 1) {
           await client.query('ROLLBACK');
-          console.log(`SKIP ${r.id}: coordinates changed since the dry run`);
+          console.log(`SKIP ${r.id}: coordinates or ZIP changed since the dry run`);
           skipped += 1;
           continue;
         }
@@ -148,7 +158,9 @@ async function main() {
             previous_longitude: r.longitude,
             primary_property_id: propReset ? r.primary_property_id : null,
             scheduled_service_ids: visitUpd.rows.map((v) => v.id),
-            reason: 'outside service-area box; re-geocode through the #3802 guard',
+            reason: isInServiceAreaCoarseBox(r.latitude, r.longitude)
+              ? 'inside the DeSoto exclusion with no served ZIP (DeSoto not served); re-geocode through the #3802 guard'
+              : 'outside service-area box; re-geocode through the #3802 guard',
             source: 'ops/agents/reset-out-of-area-coords.js',
           })],
         );

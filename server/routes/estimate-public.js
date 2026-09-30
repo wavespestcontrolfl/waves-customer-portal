@@ -146,6 +146,7 @@ const {
   savedFloorReplaySignals,
 } = require('../services/estimate-floor-signal-replay');
 const featureGates = require('../config/feature-gates');
+const SignupSingleEmail = require('../services/signup-single-email');
 const { resolveLawnCareRecurringPlanByCount } = require('../services/self-booking-plan-sync');
 
 function lawnCalendarBlock(services) {
@@ -13188,13 +13189,19 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // SKIPPED conversion (converter found nothing to convert) may still
     // return a membershipEmail payload — no membership started, so send
     // nothing for it.
-    if (!annualPrepaySelected
-      && standardConversion?.membershipEmail
-      && standardConversion?.recurringConversionSkipped !== true) {
-      const AccountMembershipEmail = require('../services/account-membership-email');
-      void AccountMembershipEmail.sendMembershipStarted(standardConversion.membershipEmail)
-        .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
-    }
+    // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a standard recurring
+    // signup the combined onboarding email below carries the property and the
+    // plan, so membership.started waits for that send and goes out inline right
+    // after it ONLY when the send did not cover it (decided at send time; owner
+    // ruling 2026-09-30). Gate off: exactly the block below, sent now.
+    const membershipDue = !annualPrepaySelected
+      && !!standardConversion?.membershipEmail
+      && standardConversion?.recurringConversionSkipped !== true;
+    const foldMembership = SignupSingleEmail.signupLaneEligible({ annualPrepaySelected, customerId, standardConversion });
+    const sendMembershipStarted = () => require('../services/account-membership-email')
+      .sendMembershipStarted(standardConversion.membershipEmail)
+      .catch((e) => logger.error(`[estimate-accept] membership.started email failed for customer ${customerId}: ${e.message}`));
+    if (membershipDue && !foldMembership) void sendMembershipStarted();
     // "You're booked — here's what happens next" onboarding email
     // (estimate.accepted_onboarding). Post-commit, fire-and-forget, and
     // idempotent per estimate so an accept retry can't double-send. The
@@ -13225,7 +13232,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           ? String(a?.window_start || '').localeCompare(String(b?.window_start || ''))
           : ad.localeCompare(bd);
       })[0] || null;
-      void sendEstimateAcceptedOnboarding({
+      const onboardingArgs = {
         customerId,
         estimateId: estimate.id,
         acceptanceId: acceptanceRecordId,
@@ -13234,7 +13241,16 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           || (Array.isArray(recurringSvcList) && (recurringSvcList[0]?.name || recurringSvcList[0]?.label))
           || 'service',
         appointment: firstAcceptedAppointment,
-      });
+      };
+      if (foldMembership) {
+        // The combined signup email, then membership.started unless that send
+        // covered it (anything but a covering send, including a throw, sends it).
+        void sendEstimateAcceptedOnboarding({ ...onboardingArgs, signup: { membershipEmail: standardConversion.membershipEmail } })
+          .catch((e) => logger.error(`[estimate-accept] onboarding email failed for customer ${customerId}: ${e.message}`))
+          .then((result) => (result?.coversMembership ? null : sendMembershipStarted()));
+      } else {
+        void sendEstimateAcceptedOnboarding(onboardingArgs);
+      }
     }
     if (customerId) {
       try {
@@ -24784,6 +24800,51 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
   };
 }
 
+// The page's acceptance contract (acceptance.mode: whether the slot picker
+// renders at all) and the inputs /data reads alongside it. ONE resolution,
+// shared with the texting AI's estimate offers (estimate-slots-public
+// offerableEstimateSlots), so SMS offers times only where the page would
+// let the customer pick one.
+async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+  const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
+  const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+  const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estData, {
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  });
+  // Narrow low-confidence commercial recurring estimate (the population whose
+  // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
+  // its accept, whatever the billing mode — invoice-mode holds the first-
+  // invoice mint, non-invoice bills per application after the confirmed visit,
+  // and annual prepay is rejected/hidden until the price is confirmed. Drives
+  // /data's payment copy + deposit overrides AND the no-slot accept mode
+  // (slots return the empty commercial-manual list for every commercial auto
+  // estimate). Matches the accept-handler hold predicate.
+  const siteConfirmationHold = defaultServiceMode !== 'one_time'
+    && (() => {
+      const lc = commercialLowConfidenceRange(estData);
+      return lc.hasLowConfidence && !lc.forceSiteQuote;
+    })();
+  const commercialNoSlotAccept = siteConfirmationHold;
+  // Guarantee-only renewals accept with NO appointment: the acceptance
+  // contract tells the React view to skip the slot picker and offer the
+  // payment-only (invoice) accept. An existing linked appointment keeps
+  // precedence inside the contract — accepting against it works as-is.
+  const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estData);
+  // Accept + deposit-intent reject an invoice-mode estimate with no linked
+  // customer and no customer phone (nothing to bill / deliver the invoice
+  // to) — an email-only renewal must not advertise an accept the server
+  // refuses. Contact-required renewals get the call-office contract.
+  const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
+  const acceptance = buildEstimateAcceptanceContract({
+    quoteRequirement,
+    existingAppointment: linkedAppointment,
+    invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
+    invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
+    commercialNoSlotAccept,
+  });
+  return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance };
+}
+
 function buildEstimateAcceptanceContract({ quoteRequirement = {}, existingAppointment = null, invoiceOnly = false, invoiceOnlyContactRequired = false, commercialNoSlotAccept = false } = {}) {
   if (quoteRequirement.quoteRequired) {
     return {
@@ -27186,27 +27247,11 @@ async function composeEstimateDataPayload(estimate, {
     // risks handing it two different answers (pre-push audit P1).
     const monthlyBilledEstimate = await estimateRendersMonthlyBilling(estimate);
     const pricingBundle = await buildPricingBundle(estimate, { monthlyBilled: monthlyBilledEstimate });
-    const defaultServiceMode = defaultServiceModeForEstimate(estimateDataForIntelligence, estimate);
-    const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
+    const {
+      defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept, acceptance,
+    } = await resolveEstimateAcceptance(estimate, estimateDataForIntelligence, pricingBundle);
     const trenchingReviewBeforeBooking = !quoteRequirement.quoteRequired
       && estimateTrenchingReviewRequired(estimateDataForIntelligence);
-    const linkedAppointment = await findLinkedUpcomingAppointment(estimate, estimateDataForIntelligence, {
-      serviceModes: adoptionServiceModesForContract(estimate, estimateDataForIntelligence),
-    });
-    // Narrow low-confidence commercial recurring estimate (the population whose
-    // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
-    // its accept, whatever the billing mode — invoice-mode holds the first-
-    // invoice mint, non-invoice bills per application after the confirmed visit,
-    // and annual prepay is rejected/hidden until the price is confirmed. Drives
-    // the payment copy + deposit overrides below AND the no-slot accept mode
-    // (slots return the empty commercial-manual list for every commercial auto
-    // estimate). Matches the accept-handler hold predicate.
-    const siteConfirmationHold = defaultServiceMode !== 'one_time'
-      && (() => {
-        const lc = commercialLowConfidenceRange(estimateDataForIntelligence);
-        return lc.hasLowConfidence && !lc.forceSiteQuote;
-      })();
-    const commercialNoSlotAccept = siteConfirmationHold;
     const recurringServicesForIntelligence = recurringServicesWithSupplements(
       estimateDataForIntelligence?.result || estimateDataForIntelligence?.engineResult || estimateDataForIntelligence || {}
     );
@@ -27239,24 +27284,7 @@ async function composeEstimateDataPayload(estimate, {
     // authored-proposal estimate): no line covering the whole estimate, on
     // the page or in Ask Waves, may state them.
     const noEstimateWideGuarantee = !estimateCarriesPlanTerms(estimateDataForIntelligence, pricingBundle);
-    // Guarantee-only renewals accept with NO appointment: the acceptance
-    // contract tells the React view to skip the slot picker and offer the
-    // payment-only (invoice) accept. An existing linked appointment keeps
-    // precedence inside the contract — accepting against it works as-is.
-    const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estimateDataForIntelligence);
     const effectiveInvoiceMode = estimate.bill_by_invoice === true || guaranteeOnlyAccept;
-    // Accept + deposit-intent reject an invoice-mode estimate with no linked
-    // customer and no customer phone (nothing to bill / deliver the invoice
-    // to) — an email-only renewal must not advertise an accept the server
-    // refuses. Contact-required renewals get the call-office contract.
-    const invoiceOnlyBillable = !!(estimate.customer_id || estimate.customer_phone);
-    const acceptance = buildEstimateAcceptanceContract({
-      quoteRequirement,
-      existingAppointment: linkedAppointment,
-      invoiceOnly: guaranteeOnlyAccept && invoiceOnlyBillable,
-      invoiceOnlyContactRequired: guaranteeOnlyAccept && !invoiceOnlyBillable,
-      commercialNoSlotAccept,
-    });
     const intelligence = isRegulatedCertificateSurface
       ? null
       : buildWaveGuardIntelligencePayload(
@@ -28529,6 +28557,7 @@ module.exports.hasRegulatedCertificateServiceMix = hasRegulatedCertificateServic
 module.exports.glassCategoryEligible = glassCategoryEligible;
 module.exports.detectPestRecurring = detectPestRecurring;
 module.exports.buildEstimateAcceptanceContract = buildEstimateAcceptanceContract;
+module.exports.resolveEstimateAcceptance = resolveEstimateAcceptance;
 module.exports.normalizeOneTimeBreakdown = normalizeOneTimeBreakdown;
 module.exports.monthlyForRecurringParts = monthlyForRecurringParts;
 module.exports.monthlyForRecurringPartsExact = monthlyForRecurringPartsExact;

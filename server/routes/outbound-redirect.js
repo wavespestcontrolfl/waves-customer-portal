@@ -14,8 +14,9 @@
  * only a signed attribution context that, when invalid, is ignored.
  *
  * Human clicks are logged fire-and-forget to outbound_link_clicks; known
- * bot/preview/scanner UAs still get the 302 (the link works for everyone)
- * but leave no click row. The route stays live whatever the gate says, so a
+ * bot/preview/scanner UAs and staff (waves_admin marker cookie / WAVES_ADMIN_IPS,
+ * the same shouldRecord filter /l/ uses) still get the 302 (the link works for
+ * everyone) but leave no click row. The route stays live whatever the gate says, so a
  * link already sent keeps working after the gate is turned off.
  */
 
@@ -23,7 +24,7 @@ const express = require('express');
 const router = express.Router();
 const logger = require('../services/logger');
 const { lookupDestination, recordClick, verifyContext, CODE_RE } = require('../services/outlink-tracking');
-const { isBotUserAgent } = require('../utils/bot-ua');
+const { shouldRecord } = require('../services/customer-page-views');
 
 // Every response — 302, 404, 429, 500 — carries the same privacy headers, so
 // they are set BEFORE the limiter (its 429 would otherwise skip them).
@@ -57,9 +58,10 @@ router.get('/:code', async (req, res) => {
     if (!link) return res.status(404).type('html').send(notFoundPage());
 
     // Express routes HEAD through GET: a HEAD probe redirects like any other
-    // request but is never a click.
+    // request but is never a click. shouldRecord is the bot + staff filter /l/
+    // applies, so the customer timeline can treat these rows as engagement.
     const ua = req.headers['user-agent'];
-    if (req.method === 'GET' && !isBotUserAgent(ua)) {
+    if (req.method === 'GET' && shouldRecord(req)) {
       void recordClick({
         link,
         context: verifyContext(req.query, code),

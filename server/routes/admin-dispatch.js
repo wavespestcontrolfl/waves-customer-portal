@@ -2864,57 +2864,11 @@ router.put('/:serviceId/status', async (req, res, next) => {
       // One-time card-on-file hold: a no-show triggers the flat fee against the
       // saved card (dark until ONE_TIME_CARD_HOLD; no-op when no hold exists).
       // Best-effort — never fail the committed status flip. The outcome feeds
-      // the customer notice below so its charge line is truthful.
-      // 'none' | 'charged' | 'review' — charge_review means Stripe MAY have
-      // accepted the fee (ambiguous API error, parked for reconciliation), so
-      // the customer notice must not claim "no charge".
-      let noShowFeeOutcome = 'none';
-      try {
-        const CardHolds = require('../services/estimate-card-holds');
-        const feeResult = await CardHolds.chargeNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
-        // charge_failed is RETRYABLE — the claim reverts to NULL and a
-        // later attempt may still collect (Codex #3153 r24 P0): the
-        // customer notice must use the cautious review copy, never an
-        // unequivocal "no charge".
-        if (feeResult?.charged === true) noShowFeeOutcome = 'charged';
-        else if (['charge_review', 'charge_failed', 'collection_hold'].includes(feeResult?.reason)) noShowFeeOutcome = 'review';
-        // Appointment-card fee rail fallback: visits secured via /secure
-        // carry the disclosed fee on appointment_card_requests instead of a
-        // hold row (mutually exclusive lanes — the rail re-checks). Runs
-        // only when the hold rail saw nothing chargeable for lane reasons
-        // (no hold, or the hold flag itself is off).
-        else if (['no_hold', 'feature_disabled'].includes(feeResult?.reason)) {
-          const ApptCardRequests = require('../services/appointment-card-request');
-          const apptFeeResult = await ApptCardRequests.chargeAppointmentNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
-          if (apptFeeResult?.charged === true) noShowFeeOutcome = 'charged';
-          else if (['charge_review', 'charge_failed', 'collection_hold'].includes(apptFeeResult?.reason)) noShowFeeOutcome = 'review';
-        }
-        if (noShowFeeOutcome === 'review') {
-          try {
-            await require('../services/notification-service').notifyAdmin(
-              'billing',
-              'No-show fee needs review',
-              'The no-show fee did not settle cleanly (declined or parked) — review the customer\'s billing; a retry may still charge.',
-              { link: `/admin/customers?customerId=${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_unsettled' } },
-            );
-          } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
-        }
-      } catch (e) {
-        // A THROWN fee step means lane ownership was never resolved (Codex
-        // #3153 r21 P1) — a retry can still charge, so the customer notice
-        // must use the cautious review copy, never an unequivocal "no
-        // charge", and the office needs to hear about it.
-        noShowFeeOutcome = 'review';
-        logger.error(`[admin-dispatch] no-show card-hold fee charge failed — outcome parked review: ${e.message}`);
-        try {
-          await require('../services/notification-service').notifyAdmin(
-            'billing',
-            'No-show fee needs review',
-            'The no-show fee step errored before lane ownership was resolved — review the customer\'s billing; a fee may still apply.',
-            { link: `/admin/customers?customerId=${svc.customer_id}`, metadata: { scheduledServiceId: svc.id, reason: 'fee_step_error' } },
-          );
-        } catch (notifyErr) { logger.warn(`[admin-dispatch] no-show fee review alert failed: ${notifyErr.message}`); }
-      }
+      // the customer notice below so its charge line is truthful:
+      // 'none' | 'charged' | 'review' | 'held'. See runNoShowFeeStep for the
+      // outcome meanings (review = Stripe MAY have accepted the fee; held = a
+      // collections dispute hold refused it before Stripe was contacted).
+      const noShowFeeOutcome = await require('../services/no-show-fee-step').runNoShowFeeStep({ svc });
 
       // Notify the customer we missed them and invite a reschedule.
       // Best-effort — a Twilio/template failure must not fail the

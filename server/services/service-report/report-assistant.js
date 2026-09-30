@@ -620,8 +620,13 @@ function answerWateringAftercare({ data, weekPlan, aftercare }) {
 }
 
 function answerConditionalWateringPlan({ weekPlan, aftercare }) {
-  const plan = weekPlan?.title ? [weekPlan.title, weekPlan.detail].filter(Boolean).join('. ') : '';
-  return [aftercare.watering, wateringPlanCondition(aftercare, weekPlan), plan].filter(Boolean).join(' ');
+  // A hold with a "not before" overlay (afterHold) states its own ordering, so
+  // the overlay replaces both the generic condition and the raw plan.
+  const shown = renderedWeekPlan(aftercare, weekPlan);
+  const overlay = shown && shown !== weekPlan ? shown : null;
+  const card = overlay || weekPlan;
+  const plan = card?.title ? [card.title, card.detail].filter(Boolean).join('. ') : '';
+  return [aftercare.watering, overlay ? null : wateringPlanCondition(aftercare, weekPlan), plan].filter(Boolean).join(' ');
 }
 
 // AW-06 / codex #4839 round-4 (4109926463): first-match precedence rules,

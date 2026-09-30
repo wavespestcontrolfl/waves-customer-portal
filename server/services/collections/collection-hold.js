@@ -49,6 +49,40 @@ const HOLD_CHECK_FAILED_CODE = 'COLLECTION_HOLD_CHECK_FAILED';
 // In-memory twin of activeDisputeHolds' reason predicate (case-insensitive
 // prefix; ILIKE in SQL).
 const isDisputeHoldReason = (reason) => String(reason || '').toLowerCase().startsWith(DISPUTE_REASON_PREFIX);
+// A dispute that lands on an ACTIVE fallback hold (wrong number / wrong party) shares its
+// row (one active row per customer+flag), so the row is upgraded to the dispute reason and
+// the fallback's own reason rides at the END, inside a fixed trailer:
+//     <dispute reason> [earlier hold: <fallback reason>]
+// Releasing the dispute must put the fallback BACK (the row stays active), never stamp
+// released_at, or the all-channel outreach block the fallback carried would silently drop.
+// priorHoldReasonOf is the one reader of the trailer; embedPriorHoldReason the one writer
+// (SQL twin: embedPriorHoldReasonSql in outbound-voice/flags.js). No column, no migration.
+const PRIOR_HOLD_OPEN = ' [earlier hold: ';
+const PRIOR_HOLD_CLOSE = ']';
+const DISPUTE_TEXT_CAP = 300; // the dispute part is trimmed so the fallback trailer always fits intact
+
+function embedPriorHoldReason(disputeReason, priorReason) {
+  const prior = String(priorReason == null ? '' : priorReason).trim();
+  return `${String(disputeReason).slice(0, DISPUTE_TEXT_CAP)}${PRIOR_HOLD_OPEN}${prior}${PRIOR_HOLD_CLOSE}`;
+}
+
+// null: this is a plain dispute hold (nothing to restore). Otherwise { prior } where prior
+// is the fallback's original reason text, or null when it had none.
+function priorHoldReasonOf(reason) {
+  const text = String(reason || '');
+  if (!isDisputeHoldReason(text) || !text.endsWith(PRIOR_HOLD_CLOSE)) return null;
+  const at = text.lastIndexOf(PRIOR_HOLD_OPEN);
+  if (at < 0) return null;
+  const prior = text.slice(at + PRIOR_HOLD_OPEN.length, text.length - PRIOR_HOLD_CLOSE.length).trim();
+  return { prior: prior || null };
+}
+
+// The dispute part of a reason, trailer removed (a reason with no trailer is returned as is).
+function withoutPriorHoldReason(reason) {
+  const text = String(reason || '');
+  return priorHoldReasonOf(text) ? text.slice(0, text.lastIndexOf(PRIOR_HOLD_OPEN)) : text;
+}
+
 const isCollectionHoldRefusal = (err) => err?.code === HOLD_ACTIVE_CODE || err?.code === HOLD_CHECK_FAILED_CODE;
 
 // Restrict a collections_flags query to ACTIVE DISPUTE holds.
@@ -338,13 +372,20 @@ async function requeueHeldInvoice(invoiceId, { customerId = null } = {}) {
 // the balance endpoint always did. ONE definition, in two shapes:
 //   isNeverAttemptedHoldDeferral(row)             in-memory row filter
 //   excludeNeverAttemptedHoldDeferrals(qb, alias) SQL twin for query builders
-// Only while ARMED and never-attempted: once the sweep disarms the row
-// without superseding, or a real attempt bumps retry_count / stamps a PI,
-// it is visible debt like any other failed row.
+// The placeholder is never a payment at any point of its life: ARMED it is
+// never-attempted, and once the retry sweep COLLECTS it the retry inserts its OWN
+// paid row and the placeholder is left 'failed', disarmed, superseded by that row
+// (retry_count bumped, next_retry_at cleared) - still not a failure and not history.
+// A row a real attempt touched (PI stamped), one the sweep disarmed WITHOUT a
+// replacement, and the orphan-charge marker (superseded by its OWN id: charged at
+// Stripe, ledger row missing) stay visible like any other failed row.
 const HOLD_DEFERRAL_REASON = 'collection_hold';
 
 function isNeverAttemptedHoldDeferral(p) {
-  if (!p || p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
+  if (!p || p.stripe_payment_intent_id) return false;
+  const armed = Number(p.retry_count || 0) === 0 && p.next_retry_at != null;
+  const collected = p.superseded_by_payment_id != null && String(p.superseded_by_payment_id) !== String(p.id);
+  if (!armed && !collected) return false;
   try {
     const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
     return !!(m && m.deferred_reason === HOLD_DEFERRAL_REASON);
@@ -357,10 +398,14 @@ function isNeverAttemptedHoldDeferral(p) {
 // keeps the NOT() NULL-safe for rows with no metadata.
 function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
   return query.whereRaw(
-    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL)`,
+    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id)))`,
     [HOLD_DEFERRAL_REASON],
   );
 }
+
+// Customer-facing payment history (portal) and every failed-payment consumer share the
+// ONE predicate above; this is the name the history readers use.
+const excludeHoldDeferralPlaceholders = excludeNeverAttemptedHoldDeferrals;
 
 module.exports = {
   storedLifecycleEmailHeld,
@@ -374,8 +419,15 @@ module.exports = {
   QUEUE_NOT_SETTLED_CODE,
   HOLD_DEFER_MS,
   isNeverAttemptedHoldDeferral,
+  excludeHoldDeferralPlaceholders,
   excludeNeverAttemptedHoldDeferrals,
   HOLD_DEFERRAL_REASON,
+  PRIOR_HOLD_OPEN,
+  PRIOR_HOLD_CLOSE,
+  DISPUTE_TEXT_CAP,
+  embedPriorHoldReason,
+  priorHoldReasonOf,
+  withoutPriorHoldReason,
   recordHoldOverride,
   activeDisputeHolds,
   disputeHoldExistsSql,

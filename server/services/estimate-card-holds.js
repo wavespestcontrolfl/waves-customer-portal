@@ -1326,8 +1326,9 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
       .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
     // A collections DISPUTE hold (B10) refused the fee before Stripe: the
     // hold returns to 'held', nothing terminal is recorded, no customer
-    // message; callers treat it as an unresolved (review) fee like
-    // charge_failed, reported under its own reason.
+    // message; reported under its own reason. The no-show route treats it as
+    // the definite no-charge 'held' outcome (services/no-show-fee-step.js),
+    // the cancellation rails as an unresolved fee for office review.
     if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
       logger.warn('[estimate-card-holds] no-show fee withheld — customer has an active collections dispute hold; card hold left held', { scheduledServiceId });
       return { charged: false, reason: 'collection_hold', error: err.message };

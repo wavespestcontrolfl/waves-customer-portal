@@ -37,6 +37,8 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({
   notifyAdmin: (...args) => mockNotifyAdmin(...args),
+  // The in-place rewrite writes body + detail together (admin body guard).
+  adminBodyColumns: (_category, body) => ({ body, detail: null }),
 }));
 
 const { notify } = require('../services/estimator-engine/index');
@@ -83,6 +85,8 @@ describe('notify({ updateOnly: true }) — retiring a stale estimator bell (code
     const update = mockNotificationUpdates[0];
     expect(update.title).toBe('Price agreed on call — draft retired');
     expect(update.body).toContain('$300.00');
+    // Body and detail are rewritten together, so "Show full text" never keeps the retired draft's story.
+    expect(update).toHaveProperty('detail', null);
     expect(update.link).toBe('/admin/customers?customerId=cust-1');
     expect(update.read_at).toBeNull();
     const metadata = JSON.parse(update.metadata);

@@ -714,6 +714,8 @@ app.use('/api/documents', documentRoutes);
 app.use('/api/badges', badgeRoutes);
 app.use('/api/client-errors', require('./routes/client-errors'));
 app.use('/api/push', require('./routes/push'));
+// Customer activity beacons (GATE_PORTAL_ACTIVITY, dark) — authenticated, writes analytics rows only.
+app.use('/api/customer/activity', require('./routes/customer-activity'));
 app.use('/api/tracking', trackingRoutes);
 app.use('/api/admin/auth', adminAuthRoutes);
 app.use('/api/admin/push', adminPushRoutes);
@@ -726,6 +728,8 @@ app.use('/api/admin/customers/intelligence', adminCustomerIntelRoutes);
 // Mounted before adminCustomerRoutes so the customer router doesn't
 // shadow the turf-profile sub-routes. Both routers share the
 // /api/admin/customers prefix; Express tries them in mount order.
+app.use('/api/admin/schedule/:serviceId/property-areas', require('./routes/admin-property-service-areas').serviceRouter);
+app.use('/api/admin/customers/:customerId/properties/:propertyId/areas', require('./routes/admin-property-service-areas').propertyRouter);
 app.use('/api/admin/customers', require('./routes/admin-customer-turf-profile'));
 app.use('/api/admin/customers', adminCustomerRoutes);
 app.use('/api/admin/customer-duplicates', require('./routes/admin-customer-duplicates'));

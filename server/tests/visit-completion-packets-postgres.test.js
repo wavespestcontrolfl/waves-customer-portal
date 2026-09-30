@@ -449,14 +449,14 @@ postgres('visit completion packet records on PostgreSQL', () => {
         .whereRaw("metadata->>'scheduledServiceId' = ?", [serviceId]);
       expect(alerts).toHaveLength(1);
       if (lane === 'ordinary') {
-        expect(alerts[0].body).toContain(`setup fee is covered by invoice ${coveringInvoice.invoice_number}`);
-        expect(alerts[0].body).toContain('do NOT re-bill the setup fee');
+        expect(alerts[0].detail || alerts[0].body).toContain(`setup fee is covered by invoice ${coveringInvoice.invoice_number}`);
+        expect(alerts[0].detail || alerts[0].body).toContain('do NOT re-bill the setup fee');
       } else if (feeAmount < 99) {
-        expect(alerts[0].body).toContain('$59.00 remaining');
+        expect(alerts[0].detail || alerts[0].body).toContain('$59.00 remaining');
         expect(alerts[0].metadata.expectedSetupFeeCents).toBe(9900);
       } else {
-        expect(alerts[0].body).not.toContain('ALSO:');
-        expect(alerts[0].body).not.toContain('setup fee');
+        expect(alerts[0].detail || alerts[0].body).not.toContain('ALSO:');
+        expect(alerts[0].detail || alerts[0].body).not.toContain('setup fee');
       }
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(sendCustomerMessage).not.toHaveBeenCalled();

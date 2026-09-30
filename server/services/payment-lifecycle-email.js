@@ -10,6 +10,7 @@ const { invoiceAmountDue } = require('./invoice-helpers');
 const { billingChannelAllowed, explicitBillingChannels } = require('./billing-delivery-channels');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { isDefiniteRejection } = require('./sendgrid-mail');
+const BillingEmailDetails = require('./billing-email-details');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
 const TRANSACTIONAL_GROUP = 'transactional_required';
@@ -131,9 +132,13 @@ async function loadCustomer(customerId) {
     .first();
 }
 
-async function loadPaymentMethod(paymentMethodId) {
+async function loadPaymentMethod(paymentMethodId, ownerCustomerId = null) {
   if (!paymentMethodId) return null;
-  return db('payment_methods').where({ id: paymentMethodId }).first();
+  // With an owner the lookup carries the customer id: a method that belongs to
+  // someone else reads as absent.
+  return db('payment_methods')
+    .where(ownerCustomerId ? { id: paymentMethodId, customer_id: ownerCustomerId } : { id: paymentMethodId })
+    .first();
 }
 
 async function loadPrefs(customerId) {
@@ -606,12 +611,134 @@ async function sendPaymentRetryNotice({
   });
 }
 
+// The card that was declined, from the failed PaymentIntent Stripe just sent
+// (last_payment_error.payment_method — the only place a pay-page failure with
+// no payments row still names the card). '' when it is not a card or carries no
+// last four.
+function failedIntentCardLabel(paymentIntent) {
+  const card = paymentIntent?.last_payment_error?.payment_method?.card;
+  const last4 = clean(card?.last4);
+  if (!last4) return '';
+  return methodParts({
+    card_brand: BillingEmailDetails.cardBrandName(card.brand), last_four: last4,
+  }).label;
+}
+
+// The Stripe customer a PaymentIntent belongs to (id string or expanded object).
+function intentStripeCustomerId(paymentIntent) {
+  const c = paymentIntent?.customer;
+  return clean(typeof c === 'string' ? c : c?.id);
+}
+
+// True only when every owner we can see for this failure is the customer the
+// email goes to: the payments row and the invoice. This alone covers a card the
+// payments row snapshotted or a saved method that row points at (both are read
+// through the customer id). A PaymentIntent's card needs the stricter check
+// below on top of it.
+function paymentOwnershipAgrees({ emailedCustomerId, payment, invoice }) {
+  if (!emailedCustomerId) return false;
+  const emailed = String(emailedCustomerId);
+  if (payment?.customer_id && String(payment.customer_id) !== emailed) return false;
+  if (invoice?.customer_id && String(invoice.customer_id) !== emailed) return false;
+  return true;
+}
+
+// FAIL CLOSED: the failed PaymentIntent's card may be named only when its
+// ownership is positively confirmed, by EITHER
+//  (a) both Stripe customer ids known and equal (the intent's, and the emailed
+//      customer's stripe_customer_id), OR
+//  (b) the intent has NO Stripe customer (createInvoicePaymentIntent leaves
+//      piParams.customer unset unless the payer ticked "save card") and the
+//      server-stamped metadata names the emailed customer: waves_customer_id
+//      (stripe.js, the pay-page PaymentIntent's metadata) equals the emailed
+//      customer, and when waves_invoice_id is stamped too, that invoice belongs
+//      to the emailed customer (looked up customer-scoped).
+// Unknown on either side, a differing id, or a lookup failure is "cannot
+// confirm" and the row stays blank.
+async function intentCardOwnedByCustomer({ emailedCustomerId, paymentIntent }) {
+  if (!emailedCustomerId || !paymentIntent) return false;
+  const intentCustomer = intentStripeCustomerId(paymentIntent);
+  try {
+    if (intentCustomer) {
+      const row = await db('customers').where({ id: emailedCustomerId }).first('stripe_customer_id');
+      const known = clean(row?.stripe_customer_id);
+      return !!known && known === intentCustomer;
+    }
+    const stamped = clean(paymentIntent.metadata?.waves_customer_id);
+    if (!stamped || stamped !== String(emailedCustomerId)) return false;
+    const stampedInvoice = clean(paymentIntent.metadata?.waves_invoice_id);
+    if (stampedInvoice) {
+      const owned = await db('invoices').where({ id: stampedInvoice, customer_id: emailedCustomerId }).first('id');
+      if (!owned) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Positive evidence of a cross-link: the failed intent's Stripe customer and the
+// emailed customer's stripe_customer_id are BOTH known and differ. Then no card
+// label is shown at all, not even an owned snapshot or saved method. A lookup
+// failure counts as a conflict (fail closed).
+async function intentCustomerConflicts({ emailedCustomerId, paymentIntent }) {
+  const intentCustomer = intentStripeCustomerId(paymentIntent);
+  if (!intentCustomer || !emailedCustomerId) return false;
+  try {
+    const row = await db('customers').where({ id: emailedCustomerId }).first('stripe_customer_id');
+    const known = clean(row?.stripe_customer_id);
+    return !!known && known !== intentCustomer;
+  } catch {
+    return true;
+  }
+}
+
+// Two "<brand> ending in <last4>" labels name the same card when the last four
+// match and the brands match once normalized (stored brands arrive as "VISA",
+// "visa" or "Visa"). Anything that is not that shape only matches exactly.
+function sameCardLabel(a, b) {
+  const parse = (label) => {
+    const m = /^(.*) ending in (\S+)$/.exec(clean(label));
+    return m ? { brand: BillingEmailDetails.cardBrandName(m[1]).toLowerCase(), last4: m[2] } : null;
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  if (!pa || !pb) return clean(a) === clean(b);
+  return pa.last4 === pb.last4 && pa.brand === pb.brand;
+}
+
+// The retry the dunning ladder ACTUALLY armed for this failure — a stored
+// payments.next_retry_at (billing-cron's RETRY_DELAYS_DAYS ladder writes it),
+// never a computed guess. A pay-page failure the ladder does not retry has no
+// such row, and the answer is '' (the template drops the row).
+async function armedRetryDate({ payment, invoice }) {
+  if (payment?.next_retry_at) return payment.next_retry_at;
+  if (!invoice?.id) return null;
+  try {
+    const armed = await db('payments')
+      .where({ customer_id: invoice.customer_id, status: 'failed' })
+      .whereNotNull('next_retry_at')
+      .where('next_retry_at', '>', new Date())
+      .whereRaw(`metadata::jsonb ->> 'invoice_id' = ?`, [invoice.id])
+      .orderBy('created_at', 'desc')
+      .first('next_retry_at');
+    return armed?.next_retry_at || null;
+  } catch {
+    return null;
+  }
+}
+
 async function sendPaymentFailed({
   customerId,
   paymentIntentId,
   attemptId,
   invoiceId = null,
   paymentId = null,
+  // GATE_BILLING_EMAIL_DETAILS: the failed PaymentIntent (for the card label)
+  // and when Stripe says the attempt failed (for the attempt date). Unused with
+  // the gate off.
+  paymentIntent = null,
+  failedAt = null,
   // Combined full-balance PI (codex #3427 r7 P2): the caller passes the
   // allocation total so the email names the amount the customer actually
   // attempted, never one arbitrary share's remainder.
@@ -651,6 +778,58 @@ async function sendPaymentFailed({
     retry_date: displayDate(payment?.next_retry_at),
     payment_method_label: method?.last4 ? method.label : '',
   };
+  if (BillingEmailDetails.billingEmailDetailsLive()) {
+    // Card label, attempt date and the ladder's own retry date, each only where
+    // the data exists: the payments row first, then the saved method it points
+    // at, then the failed intent itself.
+    // ANY card label needs the payments row and invoice to agree with the
+    // customer this email goes to, else the row stays blank rather than name
+    // another customer's card. The failed intent's card needs more: both Stripe
+    // customer ids known and equal (intentCardOwnedByCustomer). Known Stripe
+    // ids that DIFFER blank every card label (intentCustomerConflicts).
+    const emailedCustomerId = customerId || invoice?.customer_id || payment?.customer_id || null;
+    if (!paymentOwnershipAgrees({ emailedCustomerId, payment, invoice })
+      || await intentCustomerConflicts({ emailedCustomerId, paymentIntent })) {
+      payload.payment_method_label = '';
+    } else {
+      // Pay-page PaymentIntents are reused after a failed attempt and the
+      // webhook only updates status / failure_reason on the existing payments
+      // row (stripe-webhook.js), so the row's card snapshot and saved-method
+      // pointer can be the PREVIOUS attempt's card. When the current intent
+      // names a card and its ownership is confirmed, that card wins. When it
+      // names a card we cannot confirm and the row's own card differs, either
+      // may be the stale one: blank rather than guess.
+      const intentLabel = failedIntentCardLabel(paymentIntent);
+      const intentOwned = intentLabel
+        ? await intentCardOwnedByCustomer({ emailedCustomerId, paymentIntent })
+        : false;
+      if (intentOwned) {
+        payload.payment_method_label = intentLabel;
+      } else {
+        if (!payload.payment_method_label) {
+          // A lookup blip must never throw out of the webhook: blank row instead.
+          const owner = payment?.customer_id || null;
+          const saved = owner && payment?.payment_method_id
+            ? await loadPaymentMethod(payment.payment_method_id, owner).catch(() => null)
+            : null;
+          const savedParts = saved ? methodParts(saved) : null;
+          if (savedParts?.last4) payload.payment_method_label = savedParts.label;
+        }
+        // Brand AND last four must match the card Stripe reports for this
+        // attempt (a Visa 4242 is not a Mastercard 4242); any difference blanks.
+        if (intentLabel && payload.payment_method_label && !sameCardLabel(payload.payment_method_label, intentLabel)) {
+          payload.payment_method_label = '';
+        }
+      }
+    }
+    if (!payload.failed_payment_date) payload.failed_payment_date = displayDate(failedAt);
+    // The armed retry is read off the invoice's own customer (armedRetryDate
+    // filters by it); an invoice that is not the customer this email goes to
+    // supplies no retry date.
+    if (!payload.retry_date && !(customerId && invoice?.customer_id && String(invoice.customer_id) !== String(customerId))) {
+      payload.retry_date = displayDate(await armedRetryDate({ payment, invoice }));
+    }
+  }
   const effectiveCustomerId = customerId || invoice?.customer_id || payment?.customer_id;
   if (!effectiveCustomerId) return { ok: false, skipped: true, reason: 'customer_not_resolved' };
   const dedupeKey = idempotencyKey

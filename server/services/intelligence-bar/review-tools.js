@@ -499,7 +499,9 @@ async function triggerReviewRequest(input) {
       // The card promised "Send review request" — an unsent SMS surfaces as
       // a warning the card renders, never only a note (GH r9 P2).
       ...(fresh?.sms_sent_at ? {} : {
-        warning: 'The review request was recorded, but the SMS has NOT been sent (queued, blocked, or awaiting retry) — check the request status.',
+        warning: request.sendOutcome?.failed === 'review_link_clicked'
+          ? `${require('../review-click-guard').REVIEW_LINK_CLICKED_REASON} Nothing was sent.`
+          : 'The review request was recorded, but the SMS has NOT been sent (queued, blocked, or awaiting retry) — check the request status.',
       }),
     };
   } catch (err) {

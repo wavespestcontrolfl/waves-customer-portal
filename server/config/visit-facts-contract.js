@@ -1132,6 +1132,7 @@ const UNREGISTERED_INTERNAL_KEYS = Object.freeze({
   reviewScheduledFor: 'Review-ask scheduling bookkeeping (the computed send time).',
   customerRequestedReview: 'Review-ask scheduling bookkeeping (who asked, when, where) — carried through paid-invoice deferral, never itself a report claim.',
   incompleteReason: 'Internal completion-state bookkeeping (why a visit is marked incomplete), not a customer-facing fact.',
+  propertyServiceArea: 'Frozen job-coverage bookkeeping (area treated vs the reviewed property area at completion) for job quantities and product-area math; not rendered on the customer report.',
   visitDriveCostAllocation: 'Drive-cost costing bookkeeping, not a customer report fact.',
   timeOnSiteAdjusted: 'Audit marker for an admin-typed duration override; no reader keys off it (see the field\'s own comment in complete-scheduled-service.js).',
   invoiceAlreadySent: 'Billing bookkeeping flag, not a customer report fact.',

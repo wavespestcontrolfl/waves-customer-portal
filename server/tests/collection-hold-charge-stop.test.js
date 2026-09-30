@@ -67,7 +67,7 @@ describe('collection-hold lookup', () => {
   test.each([
     ['with a summary', 'dispute on call: says the July bill is wrong'],
     ['without a summary', 'dispute raised on call'],
-    ['upgraded over a fallback row', 'dispute on call: x; earlier hold: wrong-number report on billing follow-up call'],
+    ['upgraded over a fallback row', 'dispute on call: x [earlier hold: wrong-number report on billing follow-up call]'],
   ])('an unreleased dispute hold (%s) holds the customer', async (_label, reason) => {
     const m = load({ collections_flags: [{ ...HOLD, reason }] });
     expect(await m.customerHasActiveCollectionHold('cust-1')).toBe(true);

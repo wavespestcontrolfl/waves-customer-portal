@@ -24,7 +24,7 @@
 const db = require('../models/db');
 const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
-const { HOLD_FLAG, isDisputeHoldReason } = require('./collections/collection-hold');
+const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason, priorHoldReasonOf } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 
@@ -947,13 +947,16 @@ async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loser
 // loser's colliding row is a dispute hold, releasing the loser's copy would
 // silently drop the dispute stop — so the winner's surviving row is promoted
 // to the dispute reason first (its who/when history stays; the prior reason is
-// appended for the record). The reverse (winner dispute, loser fallback) needs
-// nothing: the winner's dispute row survives.
+// kept in the trailer). The reverse (winner dispute, loser fallback) carries the
+// loser's fallback into the surviving dispute's trailer the same way: the loser's
+// row is released, so without it releasing that dispute would drop the outreach
+// block the fallback carried. A winner dispute that already has a trailer keeps its own.
 async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loserId) {
   const rows = await trx(table).where(column, loserId).select('id', 'flag', 'reason', 'released_at');
   let moved = 0;
   let released = 0;
   let promoted = 0;
+  let carried = 0;
   for (const { id, flag, reason, released_at: releasedAt } of rows) {
     try {
       await trx.transaction(async (sp) => {
@@ -962,21 +965,38 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null && isDisputeHoldReason(reason)) {
+      if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null) {
         const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').first('id', 'reason');
-        if (winnerRow && !isDisputeHoldReason(winnerRow.reason)) {
-          const prior = String(winnerRow.reason || '').trim();
-          await trx(table).where({ id: winnerRow.id }).update({
-            reason: prior ? `${String(reason).trim()} (merged; prior hold: ${prior})` : String(reason).trim(),
-          });
-          promoted += 1;
+        if (winnerRow) {
+          // Same trailer placeDisputeHold writes: releasing the dispute restores the
+          // fallback hold (collection-hold-admin) instead of dropping its outreach block.
+          // The loser's row is released below, so whatever fallback it carried must end up
+          // on the surviving row. ONE update site: at most one new reason per collision.
+          const loserIsDispute = isDisputeHoldReason(reason);
+          const winnerIsDispute = isDisputeHoldReason(winnerRow.reason);
+          let mergedReason = null;
+          if (loserIsDispute && !winnerIsDispute) {
+            // Loser dispute over the winner's fallback: the winner's row is promoted to the
+            // dispute (a loser dispute that itself carries a trailer keeps only the winner's).
+            mergedReason = embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason);
+            promoted += 1;
+          } else if (winnerIsDispute && !priorHoldReasonOf(winnerRow.reason)) {
+            // Winner's plain dispute: carry the loser's fallback into its trailer, whether the
+            // loser is itself a fallback hold or a dispute that had a fallback under it.
+            const fallback = loserIsDispute ? priorHoldReasonOf(reason) : { prior: reason };
+            if (fallback) {
+              mergedReason = embedPriorHoldReason(winnerRow.reason, fallback.prior);
+              carried += 1;
+            }
+          }
+          if (mergedReason !== null) await trx(table).where({ id: winnerRow.id }).update({ reason: mergedReason });
         }
       }
       await trx(table).where({ id }).update({ [column]: winnerId, released_at: trx.fn.now() });
       released += 1;
     }
   }
-  return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}`;
+  return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}${carried ? `, carried ${carried} fallback hold(s) into the surviving dispute` : ''}`;
 }
 
 const UNIQUE_COLLISION_HANDLERS = {
@@ -1082,6 +1102,13 @@ function promoteWinnerAsPrimaryRule(winner, loser) {
     && loser.account_id === winner.account_id
     && !winner.is_primary_profile,
   );
+}
+
+// Epoch ms of a Date or timestamp string, or null when empty / unparseable.
+function timestampMs(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const ms = value instanceof Date ? value.getTime() : Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null } = {}) {
@@ -1245,6 +1272,22 @@ function predictWinnerBackfills(winner, loser, { derivedStripeCustomerId = null 
     // the r15 fix). The restore pass keeps a literal `false`; only null and
     // undefined priors are skipped.
     winnerPriorValues.termite_stations_rented = false;
+  }
+  // Portal activity stamp (GATE_PORTAL_ACTIVITY): the loser's customer_page_views
+  // rows repoint to the winner, so the winner's customers.last_seen_at must
+  // absorb a newer (or only) loser value — GREATEST(winner, loser). It is not a
+  // BACKFILL_FIELDS candidate: a non-empty older winner value would never be
+  // replaced by the generic fill-if-empty rule. The winner's own prior value is
+  // journaled (when it had one) so the undo restores it; a null prior vacates
+  // to null through the generic clear. Never runs a backwards step: an equal
+  // or older loser value leaves the winner untouched.
+  const loserSeenMs = timestampMs(loser.last_seen_at);
+  if (loserSeenMs !== null) {
+    const winnerSeenMs = timestampMs(winner.last_seen_at);
+    if (winnerSeenMs === null || loserSeenMs > winnerSeenMs) {
+      if (winnerSeenMs !== null) winnerPriorValues.last_seen_at = winner.last_seen_at;
+      backfills.last_seen_at = loser.last_seen_at;
+    }
   }
   return { backfills, winnerPriorValues };
 }
@@ -4942,7 +4985,9 @@ async function revertMerge({ journalId, performedBy, performedById }) {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });
         continue;
       }
-      if (backfillValueUnchanged(winner[field], value)) {
+      // mergeWrittenValueUnchanged also matches a timestamp column read back as a
+      // Date against the journal's ISO string (last_seen_at).
+      if (mergeWrittenValueUnchanged(winner[field], value)) {
         winnerPatch[field] = null;
       } else {
         skipped.push({ key: `customers.${field}`, reason: 'winner_value_changed_since_merge' });

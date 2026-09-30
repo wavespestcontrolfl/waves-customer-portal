@@ -1040,6 +1040,44 @@ describe('CreateProjectModal pre-treatment invoice-first completion', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ['an active dispute hold', () => jsonResponse({ holds: [{ id: 'hold-1', stops_charges: true, reason: 'dispute: synthetic' }] }), /BILLING HOLD: this customer disputed a bill/],
+    ['a failed hold lookup', () => Promise.reject(new TypeError('network down')), /Couldn't check for a billing hold — reload before charging/],
+  ])('the saved-card confirm names the billing hold (%s) before charging', async (_label, holdsReply, expected) => {
+    const confirmSpy = vi.fn(() => false);
+    vi.stubGlobal('confirm', confirmSpy);
+    vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
+      const u = String(url);
+      if (u.includes('/admin/projects/types')) return jsonResponse({ types: PROJECT_TYPES });
+      if (u.includes('/estimates-summary')) return jsonResponse({ customer: customerPayload, estimates: [] });
+      if (u.includes('/admin/customers/9/cards')) {
+        return jsonResponse({ cards: [{ id: 'pm-card', method_type: 'card', brand: 'visa', last_four: '4242' }] });
+      }
+      if (u.includes('/admin/customers/9/collection-holds')) return holdsReply();
+      if (u.includes('/admin/projects/scheduled-service/55/application-prefill')) return jsonResponse({ applications: [] });
+      if (/\/admin\/projects$/.test(u) && opts.method === 'POST') {
+        return jsonResponse({ project: { id: 'cert-1', project_type: 'pre_treatment_termite_certificate' } });
+      }
+      if (u.includes('/admin/projects/cert-1/send-with-invoice')) {
+        return jsonResponse({ prepared: true, invoice: { id: 'inv-card', total: 425, payer_billed: false } });
+      }
+      if (u.includes('/admin/invoices/inv-card/charge-card-quote')) {
+        return jsonResponse({ quote: { base: 425, surcharge: 0, total: 425 } });
+      }
+      return jsonResponse({});
+    }));
+
+    renderCertificateSheet({ onCreated: vi.fn(), onClose: vi.fn() });
+    await screen.findByRole('button', { name: 'Save Certificate' });
+    fireEvent.click(screen.getByRole('button', { name: 'Save Certificate' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Charge Visa •••• 4242 & finish service' }));
+
+    await waitFor(() => expect(confirmSpy).toHaveBeenCalled());
+    expect(confirmSpy.mock.calls[0][0]).toMatch(expected);
+    // the operator declined: nothing was charged
+    expect(fetch.mock.calls.some(([url]) => String(url).endsWith('/charge-card'))).toBe(false);
+  });
+
   it('does not offer an expired saved card as a completion payment method', async () => {
     vi.stubGlobal('fetch', vi.fn((url, opts = {}) => {
       const u = String(url);

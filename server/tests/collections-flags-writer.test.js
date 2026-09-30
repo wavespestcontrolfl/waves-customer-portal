@@ -44,9 +44,19 @@ test('releaseFlag stamps released_at on the active row only — never deletes; i
   expect(await releaseFlag({ customerId: 'c-1' })).toEqual({ ok: false, reason: 'missing_args' });
 });
 
+test('releaseFlag with an id narrows to that exact row (still active-only, same customer + flag)', async () => {
+  const q = chain({ updateResult: 1 }); db.mockImplementation(() => q);
+  expect(await releaseFlag({ customerId: 'c-1', flag: 'collection_hold', id: 'row-9' })).toEqual({ ok: true, released: 1 });
+  expect(q.where).toHaveBeenCalledWith({ customer_id: 'c-1', flag: 'collection_hold', id: 'row-9' });
+  expect(q.whereNull).toHaveBeenCalledWith('released_at');
+  db.mockImplementation(() => chain({ updateResult: 0 }));
+  expect(await releaseFlag({ customerId: 'c-1', flag: 'collection_hold', id: 'stale' })).toEqual({ ok: true, released: 0 });
+});
+
 test('activeFlags lists unreleased rows oldest first', async () => {
   const q = chain({ rows: [{ flag: 'pays_by_check' }] }); db.mockImplementation(() => q);
   expect(await activeFlags('c-1')).toEqual([{ flag: 'pays_by_check' }]);
+  expect(q.select).toHaveBeenCalledWith('id', 'flag', 'reason', 'created_by', 'created_at');
   expect(q.whereNull).toHaveBeenCalledWith('released_at');
   expect(q.orderBy).toHaveBeenCalledWith('created_at', 'asc');
   expect(await activeFlags(null)).toEqual([]);
@@ -103,8 +113,9 @@ describe('placeDisputeHold (B: only DISPUTE holds stop money)', () => {
     expect(res.ok).toBe(true);
     expect(w.inserts).toHaveLength(1);
     expect(w.updates).toHaveLength(1);
-    expect(w.updates[0].reason.sql).toMatch(/earlier hold/);
-    expect(w.updates[0].reason.bindings[0]).toBe('dispute on call: bill is wrong');
+    // The fallback's reason rides in the structured trailer that releasing the dispute reads back.
+    expect(w.updates[0].reason.bindings).toEqual(['dispute on call: bill is wrong', 300, ' [earlier hold: ', ']']);
+    expect(w.updates[0].reason.sql).toMatch(/btrim\(coalesce\(reason, ''\)\)/);
   });
 
   test('RACE 1: the fallback is released between the duplicate insert and the update - the insert is retried and a dispute row lands', async () => {

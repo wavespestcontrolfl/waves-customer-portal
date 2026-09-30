@@ -46,8 +46,8 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const NotificationService = require('./notification-service');
-const { etParts, parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
+const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
+const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
 // inside Monday morning's window even after a full weekend of gated-off or
@@ -348,16 +348,30 @@ async function ringMiss(m, { dedupeKey, repeat }) {
     timeZone: 'America/New_York', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
   });
   const contactPhone = String(m.call.direction || '').startsWith('outbound') ? m.call.to_phone : m.call.from_phone;
-  const created = await NotificationService.notifyAdmin(
+  // Headline and why follow docs/admin-notifications.md; the full sentence (phone
+  // number, direction, call time) stays in `detail`. A spoken day and time, never ISO.
+  const slotAt = parseETDateTime(`${m.slot.dateET}T${slotClock}`);
+  const spokenDay = slotAt.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'America/New_York' }).replace(',', '');
+  const created = await raiseAdminAlert(
     'alert',
-    `${repeat ? 'Still not booked' : 'Confirmed appointment never booked'} — ${m.slot.name}, ${slotET}`,
-    `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${slotET} ` +
-    `on a ${m.call.direction || 'unknown-direction'} call at ${callAtET} ET, but the schedule has no matching appointment ` +
-    `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
-    'Book it in dispatch or call back to reset expectations.' +
-    (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
     {
-      link: '/admin/dispatch',
+      area: 'Schedule',
+      action: `book ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - 'Schedule — book '.length)}`,
+      why: `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenDay} at ${formatETTime(slotAt)} on a call; nothing is on the calendar.`,
+      severity: 'needs-you',
+      // Booking happens on the schedule, so the tap opens the confirmed day there;
+      // the call itself is named in `detail` and in the subject.
+      link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(m.slot.dateET)}`,
+      subject: { type: 'call', id: m.call.id },
+      doneWhen: 'visit_booked',
+      who: 'person',
+    },
+    {
+      detail: `${m.slot.name} (${contactPhone || 'no number'}) confirmed ${m.slot.service || 'a visit'} for ${slotET} ` +
+        `on a ${m.call.direction || 'unknown-direction'} call at ${callAtET} ET, but the schedule has no matching appointment ` +
+        `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
+        'Book it in dispatch or call back to reset expectations.' +
+        (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
       bell: true,
       // Top-level dedupeKey takes notifyAdmin's advisory-locked dedupe path
       // (it writes the key into metadata itself): forever for the first

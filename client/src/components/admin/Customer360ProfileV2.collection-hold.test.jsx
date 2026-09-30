@@ -8,11 +8,11 @@
  */
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Customer360ProfileV2 from './Customer360ProfileV2';
 
-vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null }));
+vi.mock('./StickyActionBar', () => ({ CustomerActionBar: () => null, customerEstimateHref: () => '#' }));
 vi.mock('./AuthenticatedCallAudio', () => ({ default: () => null }));
 vi.mock('./CustomerRequestsPanel', () => ({ default: () => null }));
 vi.mock('./CallBridgeLink', () => ({
@@ -34,7 +34,7 @@ function response(body, status = 200) {
   }));
 }
 
-function customerDetail({ servicePausedAt = null, servicePausedOn = null, servicePauseReason = null } = {}) {
+function customerDetail({ servicePausedAt = null, servicePausedOn = null, servicePauseReason = null, extra = {} } = {}) {
   return {
     customer: {
       id: 'customer-a',
@@ -46,6 +46,7 @@ function customerDetail({ servicePausedAt = null, servicePausedOn = null, servic
       // ET calendar date from the server — what the banner renders.
       servicePausedOn,
       servicePauseReason,
+      ...extra,
     },
     notificationPrefs: {}, preferences: {}, healthScore: {},
     invoices: [], cards: [], paymentMethodConsents: [], contracts: [], photos: [],
@@ -62,6 +63,7 @@ afterEach(() => {
 });
 
 const HOLD = {
+  id: 'hold-1',
   flag: 'collection_hold',
   reason: 'dispute: says the lawn visit was never done',
   created_by: 'voice-agent',
@@ -75,7 +77,9 @@ function setRole(role) {
   localStorage.setItem('waves_admin_user', JSON.stringify({ role }));
 }
 
-function installFetch({ holds = [HOLD], release } = {}) {
+function installFetch({ holds = [HOLD], release, holdsResponse, detailExtra } = {}) {
+  // holds may be a function so a test can change what the next read returns
+  const currentHolds = () => (typeof holds === 'function' ? holds() : holds);
   const fetchMock = vi.fn((url, options) => {
     const path = String(url);
     if (path.endsWith('/admin/payers')) return response({ payers: [] });
@@ -83,8 +87,9 @@ function installFetch({ holds = [HOLD], release } = {}) {
     if (path.endsWith('/collection-holds/release')) {
       return release ? release(options) : response({ released: 1 });
     }
-    if (path.endsWith('/collection-holds')) return response({ holds });
-    if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+    if (path.endsWith('/collection-holds')) return holdsResponse ? holdsResponse() : response({ holds: currentHolds() });
+    if (path.endsWith('/charge-now')) return response({ success: true, payment: { status: 'paid', amount: '100.00' } });
+    if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail({ extra: detailExtra }));
     return response({});
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -145,6 +150,79 @@ describe('Customer 360 collections dispute-hold notice', () => {
     expect(await screen.findByText(/Billing hold released/i)).toBeInTheDocument();
     expect(screen.queryByText(/Billing on hold — customer disputed/i)).not.toBeInTheDocument();
     expect(releaseCalls(fetchMock)).toHaveLength(1);
+    // the release names exactly the hold that was on screen
+    expect(JSON.parse(releaseCalls(fetchMock)[0][1].body)).toEqual({ holdId: 'hold-1' });
+  });
+
+  it('releasing a dispute that sat on a wrong-number/wrong-party hold says the earlier hold stays, and re-reads the holds', async () => {
+    let current = [HOLD];
+    const fetchMock = installFetch({
+      holds: () => current,
+      release: () => {
+        // server downgrades the shared row back to the fallback (still active)
+        current = [{ ...HOLD, reason: 'wrong-party answer on billing follow-up call', stops_charges: false }];
+        return response({
+          released: 1,
+          fallbackRestored: true,
+          message: 'Dispute released; the earlier wrong-number/wrong-party hold stays.',
+        });
+      },
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Release hold/i }));
+
+    expect(await screen.findByText(/Dispute released; the earlier wrong-number\/wrong-party hold stays\./i)).toBeInTheDocument();
+    // the dispute notice is gone (charging resumes) but the holds were re-read, not blanked
+    expect(screen.queryByText(/Billing on hold — customer disputed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Billing hold released/i)).not.toBeInTheDocument();
+    expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/collection-holds'))).toHaveLength(2);
+    expect(releaseCalls(fetchMock)).toHaveLength(1);
+  });
+
+  it('on a 409 (hold changed) shows the conflict inline, re-reads the holds, and releases nothing blind', async () => {
+    let current = [HOLD];
+    const fetchMock = installFetch({
+      holds: () => current,
+      release: () => {
+        // another office session replaced the hold before this click landed
+        current = [{ ...HOLD, id: 'hold-2', reason: 'dispute: second call' }];
+        return response({ error: 'This hold changed — reload' }, 409);
+      },
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Release hold/i }));
+
+    expect(await screen.findByText(/This hold changed — reload/i)).toBeInTheDocument();
+    // re-fetched: the newer hold is now the one shown, and nothing was released
+    expect(await screen.findByText(/second call/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Billing hold released/i)).not.toBeInTheDocument();
+    expect(releaseCalls(fetchMock)).toHaveLength(1);
+    expect(JSON.parse(releaseCalls(fetchMock)[0][1].body)).toEqual({ holdId: 'hold-1' });
+  });
+
+  it('on a 409 where the hold is now gone, the conflict message still shows', async () => {
+    let current = [HOLD];
+    installFetch({
+      holds: () => current,
+      release: () => {
+        current = [];
+        return response({ error: 'This hold changed — reload' }, 409);
+      },
+    });
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /Release hold/i }));
+
+    // the message first shows in the hold box, then moves out of it when the re-read finds no hold
+    await waitFor(() => {
+      expect(screen.queryByText(/Billing on hold — customer disputed/i)).not.toBeInTheDocument();
+      expect(screen.getByText(/This hold changed — reload/i)).toBeInTheDocument();
+    });
   });
 
   it('shows the server error and keeps the hold when the release fails', async () => {
@@ -177,5 +255,75 @@ describe('Customer 360 collections dispute-hold notice', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/collection-holds'))).toBe(false);
     expect(screen.queryByText(/Billing on hold/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Release hold/i })).not.toBeInTheDocument();
+  });
+  describe('beside the manual Charge now control (billing tab, no billing summary)', () => {
+    const MEMBER = { billingMode: 'monthly_membership', monthlyRate: 100 };
+    const chargeNowCalls = (fetchMock) => fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/charge-now'));
+    const openBilling = async () => {
+      const utils = render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="billing" />);
+      const charge = await screen.findByRole('button', { name: /Charge now/i });
+      return { ...utils, charge };
+    };
+
+    it('shows the hold next to Charge now and names it in the confirm, even though the billing summary is not on this tab', async () => {
+      const fetchMock = installFetch({ detailExtra: MEMBER });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const { charge } = await openBilling();
+
+      expect(await screen.findByText(/A charge you make here goes past the hold/i)).toBeInTheDocument();
+      // exactly one read of the hold for this customer, however many surfaces show it
+      expect(fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/collection-holds'))).toHaveLength(1);
+      // Release lives in the summary only; this tab renders no second copy
+      expect(screen.queryByRole('button', { name: /Release hold/i })).not.toBeInTheDocument();
+
+      fireEvent.click(charge);
+      expect(confirmSpy.mock.calls[0][0]).toMatch(/billing hold/i);
+      expect(confirmSpy.mock.calls[0][0]).toMatch(/goes past the hold/i);
+      expect(chargeNowCalls(fetchMock)).toHaveLength(0);
+    });
+
+    it('a failed hold read reads as UNKNOWN, not "no hold": warns beside Charge now and needs an extra confirm', async () => {
+      const fetchMock = installFetch({ detailExtra: MEMBER, holdsResponse: () => response({ error: 'boom' }, 500) });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
+      const { charge } = await openBilling();
+
+      expect(await screen.findByText(/Couldn't check for a billing hold — reload before charging/i)).toBeInTheDocument();
+
+      fireEvent.click(charge);
+      expect(confirmSpy).toHaveBeenCalledTimes(1);
+      expect(confirmSpy.mock.calls[0][0]).toMatch(/Couldn't check for a billing hold/i);
+      expect(chargeNowCalls(fetchMock)).toHaveLength(0);
+
+      // an operator who confirms the extra warning can still charge
+      confirmSpy.mockReturnValue(true);
+      fireEvent.click(charge);
+      await waitFor(() => expect(chargeNowCalls(fetchMock)).toHaveLength(1));
+    });
+
+    it('a network failure on the hold read is also unknown', async () => {
+      installFetch({ detailExtra: MEMBER, holdsResponse: () => Promise.reject(new TypeError('network down')) });
+      await openBilling();
+      expect(await screen.findByText(/Couldn't check for a billing hold — reload before charging/i)).toBeInTheDocument();
+    });
+
+    it('with a verified no-hold the confirm is the ordinary one and no warning shows', async () => {
+      const fetchMock = installFetch({ detailExtra: MEMBER, holds: [] });
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+      const { charge } = await openBilling();
+      await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).endsWith('/collection-holds'))).toBe(true));
+      await waitFor(() => expect(screen.queryByText(/Checking for a billing hold/i)).not.toBeInTheDocument());
+
+      fireEvent.click(charge);
+      expect(confirmSpy.mock.calls[0][0]).toBe('Charge Avery Customer $100.00 now?');
+      expect(screen.queryByText(/goes past the hold/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Couldn't check/i)).not.toBeInTheDocument();
+    });
+
+    it('the embedded billing tab shows the summary (with Release) alongside the charge warning when a hold is active', async () => {
+      installFetch({ detailExtra: MEMBER });
+      render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} initialTab="billing" embedded />);
+      expect(await screen.findByRole('button', { name: /Release hold/i })).toBeInTheDocument();
+      expect(await screen.findByText(/A charge you make here goes past the hold/i)).toBeInTheDocument();
+    });
   });
 });

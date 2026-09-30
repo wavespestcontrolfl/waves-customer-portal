@@ -2989,7 +2989,8 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
       .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
     // A collections DISPUTE hold (B10) refused the fee before Stripe: claim
     // reopened, nothing terminal recorded, no customer message; reported as
-    // an unresolved fee under its own reason.
+    // its own reason (the no-show route: definite no-charge 'held' outcome;
+    // the cancellation rails: unresolved fee for office review).
     if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
       logger.warn(`[appt-card-request] no-show fee withheld (collections dispute hold) for visit ${scheduledServiceId}`);
       return { charged: false, reason: 'collection_hold', error: err.message };

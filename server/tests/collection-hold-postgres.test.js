@@ -57,6 +57,16 @@ describeOrSkip('collection_hold as a money stop — real Postgres', () => {
       created_at timestamptz NOT NULL DEFAULT now(),
       released_at timestamptz
     )`);
+    await db.raw(`CREATE TABLE payments (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      status varchar(20),
+      metadata jsonb,
+      stripe_payment_intent_id text,
+      retry_count int DEFAULT 0,
+      next_retry_at timestamptz,
+      superseded_by_payment_id uuid
+    )`);
     await db.raw('CREATE UNIQUE INDEX collections_flags_active_uniq ON collections_flags (customer_id, flag) WHERE released_at IS NULL');
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -139,9 +149,120 @@ describeOrSkip('collection_hold as a money stop — real Postgres', () => {
     expect(await flags.placeDisputeHold(customerId, { summary: 'bill is wrong' })).toMatchObject({ ok: true });
     const rows = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
     expect(rows).toHaveLength(1);
-    expect(rows[0].reason).toMatch(/^dispute on call: bill is wrong; earlier hold: wrong-party answer/);
+    expect(rows[0].reason).toMatch(/^dispute on call: bill is wrong \[earlier hold: wrong-party answer.*\]$/);
     await stopped();
     await flags.releaseFlag({ customerId, flag: 'collection_hold' });
+    await clear();
+  });
+
+  // Codex P1: releasing the DISPUTE on an upgraded fallback row must put the fallback back
+  // (an active row again, all-channel outreach block intact), under a NEW id so a stale
+  // holdId can never release a later dispute episode.
+  describe.each([
+    ['wrong-number fallback', 'wrongNumberFallback', /^wrong-number report/],
+    ['wrong-party fallback', 'wrongPartyFallback', /^wrong-party answer/],
+  ])('releasing a dispute upgraded over a %s', (_label, which, priorRe) => {
+    const releaseAdmin = () => require('../services/collections/collection-hold-admin');
+    test('retires the dispute row, restores the fallback as a NEW active row, and resumes charging', async () => {
+      await ({ wrongNumberFallback, wrongPartyFallback }[which])();
+      const [fallbackRow] = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
+      await flags.placeDisputeHold(customerId, { summary: 'says the July bill is wrong' });
+      await stopped();
+      const [upgraded] = await releaseAdmin().listCollectionHolds(customerId);
+      expect(upgraded).toMatchObject({ id: fallbackRow.id, stops_charges: true });
+
+      const out = await releaseAdmin().releaseCollectionHold(customerId, { holdId: upgraded.id });
+      expect(out).toEqual({ ok: true, released: 1, fallbackRestored: true });
+
+      // charging resumes ...
+      await clear();
+      // ... the dispute row is released (id retired) and the fallback stands as ONE new active row
+      const all = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
+      expect(all).toHaveLength(2);
+      const retired = all.find((r) => r.id === fallbackRow.id);
+      expect(retired.released_at).not.toBeNull();
+      const active = all.filter((r) => r.released_at === null);
+      expect(active).toHaveLength(1);
+      expect(active[0].id).not.toBe(fallbackRow.id);
+      expect(active[0].reason).toBe(fallbackRow.reason);
+      expect(active[0].reason).toMatch(priorRe);
+      expect(active[0].created_by).toBe(fallbackRow.created_by);
+      expect(new Date(active[0].created_at).getTime()).toBe(new Date(fallbackRow.created_at).getTime());
+      const [listed] = await releaseAdmin().listCollectionHolds(customerId);
+      expect(listed).toMatchObject({ id: active[0].id, stops_charges: false });
+
+      // A repeated release of the SAME (now retired) holdId - double click, a second admin's
+      // stale screen - releases nothing: the route's 409. The outreach block survives.
+      expect(await releaseAdmin().releaseCollectionHold(customerId, { holdId: fallbackRow.id })).toEqual({ ok: true, released: 0 });
+      // ... and so does the fallback's own id (only a dispute is releasable here).
+      expect(await releaseAdmin().releaseCollectionHold(customerId, { holdId: active[0].id })).toEqual({ ok: true, released: 0 });
+      expect(await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at')).toHaveLength(1);
+    });
+
+    test('a NEW dispute on the restored fallback cannot be released by the previous dispute\'s stale holdId', async () => {
+      await ({ wrongNumberFallback, wrongPartyFallback }[which])();
+      await flags.placeDisputeHold(customerId, { summary: 'first dispute' });
+      const [first] = await releaseAdmin().listCollectionHolds(customerId);
+      await releaseAdmin().releaseCollectionHold(customerId, { holdId: first.id });
+      await flags.placeDisputeHold(customerId, { summary: 'first dispute' }); // second episode, same words
+      await stopped();
+      const [second] = await releaseAdmin().listCollectionHolds(customerId);
+      expect(second.id).not.toBe(first.id);
+      // the admin still looking at episode 1 clicks Release: nothing moves, charging stays stopped
+      expect(await releaseAdmin().releaseCollectionHold(customerId, { holdId: first.id })).toEqual({ ok: true, released: 0 });
+      await stopped();
+      // episode 2 releases on its own id and the fallback returns once more
+      expect(await releaseAdmin().releaseCollectionHold(customerId, { holdId: second.id })).toMatchObject({ released: 1, fallbackRestored: true });
+      await clear();
+      expect(await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at')).toHaveLength(1);
+    });
+  });
+
+  test('a long dispute summary never truncates the fallback trailer, and a reason-less fallback restores reason-less', async () => {
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    await db('collections_flags').insert({ customer_id: customerId, flag: 'collection_hold', reason: null, created_by: 'admin:ops' });
+    await flags.placeDisputeHold(customerId, { summary: 'x'.repeat(900) });
+    const [row] = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' });
+    expect(hold.priorHoldReasonOf(row.reason)).toEqual({ prior: null });
+    await stopped();
+    expect(await releaseCollectionHold(customerId, { holdId: row.id })).toMatchObject({ released: 1, fallbackRestored: true });
+    const [after] = await db('collections_flags').where({ id: row.id });
+    expect(after.released_at).not.toBeNull();
+    const active = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at');
+    expect(active).toHaveLength(1);
+    expect(active[0]).toMatchObject({ reason: null, created_by: 'admin:ops' });
+    await clear();
+  });
+
+  test('the customer payment-history predicate hides hold-deferral placeholders (armed AND collected) and nothing else', async () => {
+    const other = randomUUID();
+    const rows = [
+      ['armed', { status: 'failed', metadata: { deferred_reason: 'collection_hold' }, retry_count: 0, next_retry_at: new Date() }],
+      ['collected', { status: 'failed', metadata: { deferred_reason: 'collection_hold', superseded_by_retry: true }, retry_count: 1, next_retry_at: null, superseded_by_payment_id: other }],
+      ['orphan-self', { status: 'failed', metadata: { deferred_reason: 'collection_hold' }, retry_count: 1, next_retry_at: null, self: true }],
+      ['disarmed-unreplaced', { status: 'failed', metadata: { deferred_reason: 'collection_hold' }, retry_count: 1, next_retry_at: null }],
+      ['real-declined', { status: 'failed', metadata: {}, retry_count: 1, next_retry_at: null, stripe_payment_intent_id: 'pi_x' }],
+      ['plain-failed', { status: 'failed', metadata: null, retry_count: 0, next_retry_at: new Date() }],
+      ['paid', { status: 'paid', metadata: { deferred_reason: 'collection_hold' }, retry_count: 0, next_retry_at: null }],
+    ];
+    const ids = {};
+    for (const [name, r] of rows) {
+      const { self, ...cols } = r;
+      const [{ id }] = await db('payments').insert({ customer_id: customerId, ...cols, metadata: cols.metadata == null ? null : JSON.stringify(cols.metadata) }).returning('id');
+      ids[name] = id;
+      if (self) await db('payments').where({ id }).update({ superseded_by_payment_id: id });
+    }
+    const visible = await hold.excludeHoldDeferralPlaceholders(db('payments').where({ customer_id: customerId }), 'payments').select('id');
+    const names = Object.entries(ids).filter(([, id]) => visible.some((v) => v.id === id)).map(([n]) => n).sort();
+    expect(names).toEqual(['disarmed-unreplaced', 'orphan-self', 'paid', 'plain-failed', 'real-declined']);
+  });
+
+  test('a plain dispute (no fallback under it) is released outright', async () => {
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    await flags.placeDisputeHold(customerId, { summary: 'duplicate bill' });
+    const [row] = await db('collections_flags').where({ customer_id: customerId });
+    expect(await releaseCollectionHold(customerId, { holdId: row.id })).toEqual({ ok: true, released: 1 });
+    expect((await db('collections_flags').where({ id: row.id }).first()).released_at).not.toBeNull();
     await clear();
   });
 

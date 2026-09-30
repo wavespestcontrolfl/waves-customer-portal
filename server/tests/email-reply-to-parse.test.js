@@ -49,3 +49,20 @@ describe('parseMessage Reply-To validation', () => {
     expect(parseMessage(msgWith(null)).reply_to).toBeNull();
   });
 });
+
+describe('parseMessage Cc/Bcc capture', () => {
+  const withHeaders = (extra) => ({ ...msgWith(null), payload: { headers: [
+    { name: 'From', value: 'Office <office@example.invalid>' }, { name: 'To', value: 'a@x.example' }, ...extra] } });
+
+  test('captures the raw Cc and Bcc header values', () => {
+    const parsed = parseMessage(withHeaders([{ name: 'Cc', value: 'B <b@x.example>' }, { name: 'Bcc', value: 'c@x.example, d@x.example' }]));
+    expect(parsed.cc_address).toBe('B <b@x.example>');
+    expect(parsed.bcc_address).toBe('c@x.example, d@x.example');
+  });
+
+  test("absent headers are '' (captured, none) — never null", () => {
+    const parsed = parseMessage(withHeaders([]));
+    expect(parsed.cc_address).toBe('');
+    expect(parsed.bcc_address).toBe('');
+  });
+});
