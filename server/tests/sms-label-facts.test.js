@@ -810,6 +810,28 @@ describe('r6: the "safe once dry" idiom needs the AFFIRMATIVE technician-confirm
   });
 });
 
+describe('r7: pre-visit access guidance is scheduling logistics; post-treatment restrictions are still held', () => {
+  const claims = (t) => labelFactsLib.replyClaimsUngroundedLabelTiming(t, '');
+  test('keeping pets in or the gate open FOR the visit is not a label claim', () => {
+    for (const t of [
+      'Please keep your dogs inside before we arrive.', 'Please keep the dogs inside while the tech is there.', 'Please keep the dogs inside for the visit.',
+      'Please keep your dogs inside so the tech can get to the yard.', 'Please keep the gate unlocked and the dogs inside.',
+      'Keep your pets indoors before the technician arrives.', 'Please put the dogs away and leave the gate unlocked for your appointment.',
+      'Please keep the dogs off the lawn before we arrive.',
+    ]) expect([t, claims(t)]).toEqual([t, false]);
+  });
+  test('a post-treatment restriction is held, alone or attached to pre-visit wording, with or without a quantity', () => {
+    for (const t of [
+      'Keep your dogs inside after we spray.', 'Keep your dogs inside until it dries.', 'Keep your dogs inside for the rest of the day.',
+      'Keep your dogs inside for 2 hours before we arrive.', 'Keep dogs inside for a couple of hours before we arrive.',
+      'Keep your dogs inside before we arrive and after we spray.', 'Keep your dogs inside before we arrive, then off the lawn until dry.',
+      'Please keep your dogs inside before we arrive, and keep them off the grass afterwards.', 'Keep dogs off the lawn for the visit and the rest of the day.',
+      'Keep the dogs off the lawn for now.', 'Keep the kids off the grass for the visit and for 24 hours after.', 'Please keep your dogs inside tonight.',
+      'Keep your dogs inside before we arrive. The dogs can go back out after we leave.',
+    ]) expect([t, claims(t)]).toEqual([t, true]);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {

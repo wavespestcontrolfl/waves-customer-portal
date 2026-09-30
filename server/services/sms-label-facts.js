@@ -581,6 +581,15 @@ function isSchedulingClause(clause, { staffCarry, clock, sentence = clause }) {
   return false;
 }
 
+// PRE-visit access guidance ("keep your dogs inside before we arrive", "gate unlocked so the tech can get
+// to the yard") is scheduling logistics, not a re-entry claim. It needs an explicit pre-visit phrase in the
+// sentence AND nothing post-treatment: no after/until/dry/rest-of-the-day wording, no quantity.
+const PRE_VISIT_PHRASE_RE = /\bfor\s+(?:the|our|your)\s+(?:visit|appointment|service|treatment\s+visit)\b|\bwhile\s+(?:we|i|the\s+\w+|our\s+\w+)\s+(?:is|are|will\s+be|'re)\s+(?:there|here|on\s+site|on\s+the\s+property|working|servicing)\b|\bso\s+(?:we|i|the\s+\w+|our\s+\w+)\s+(?:can|could|will)\s+(?:get|reach|access|walk|enter|work)\b|\bgate\s+(?:is\s+|stays\s+|left\s+)?unlocked\b|\bunlock(?:ed)?\s+the\s+gate\b/;
+const POST_TREATMENT_SIGNAL_RE = /\b(?:after\w*|until|till|til|once|then|again|later|tonight|tomorrow|rest\s+of|remainder|following|dr(?:y|ies|ied|ying)|treated|applied|application|wet|damp|overnight|all\s+(?:day|night)|hours?|days?|minutes?)\b/;
+function isPreVisitAccess(sentence) {
+  return (ACCESS_RE.test(sentence) || PRE_VISIT_PHRASE_RE.test(sentence)) && !POST_TREATMENT_SIGNAL_RE.test(sentence) && !hasDuration(sentence) && !hasClockTime(sentence);
+}
+
 const RAIN_REASSURE_RE = /\b(?:won'?t|will\s+not|doesn'?t|does\s+not|wouldn'?t|would\s+not|can'?t|cannot|shouldn'?t|should\s+not)\s+(?:\w+\s+){0,2}?(?:affect|hurt|harm|matter|damage|ruin|undo|change|impact|wash|remove|rinse|dilute|bother|be\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b|\b(?:don'?t\s+worry|no\s+need\s+to\s+worry|nothing\s+to\s+worry|not\s+to\s+worry|(?:isn'?t|is\s+not|not)\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b/;
 // The facts one clause is judged on. `sched(clock)` is the positive-scheduling
 // shape check for this clause, with or without a clock time beside it.
@@ -596,6 +605,7 @@ function clauseFacts({ clause, staffCarry, sentence, question, replyContext, rep
     clock: hasClockTime(clause),
     rain: RAIN_WORD_RE.test(clause),
     rainSentence: RAIN_WORD_RE.test(sentence),
+    preVisit: isPreVisitAccess(sentence),
     sched: (clock) => isSchedulingClause(clause, { staffCarry, clock, sentence }),
   };
 }
@@ -607,7 +617,7 @@ const DAY_CLEARANCE_RE = /\b(?:tonight|tomorrow|today|this\s+(?:evening|afternoo
 const BARE_UNIT_RE = /\b(?:hours|minutes|mins|hrs|overnight)\b/;
 const BARE_LONG_UNIT_RE = /\b(?:days|nights|weeks)\b/;
 const BOOKED_DAY_QUALIFIER_RE = /\b(?:by|until|till|after|once|when|now|already|later|then|soon)\b/;
-const noAccessNoStaff = (x) => !x.staffLed && !ACCESS_RE.test(x.c);
+const noAccessNoStaff = (x) => !x.staffLed && !ACCESS_RE.test(x.c) && !x.preVisit;
 
 // A clause is a label claim when ANY rule holds, evaluated in order. A clause
 // with a duration or a clock time is decided by scheduling alone (first rule,
@@ -615,7 +625,7 @@ const noAccessNoStaff = (x) => !x.staffLed && !ACCESS_RE.test(x.c);
 // follow it.
 const CLAIM_RULES_BEFORE_QUESTION = [
   { name: 'rainfast or until-dry wording', test: (x) => RAINFAST_RE.test(x.c) || UNTIL_DRY_HOLD_RE.test(x.c) },
-  { name: 're-entry / stay-off wording', test: (x) => REENTRY_TOPIC_RE.test(x.c) },
+  { name: 're-entry / stay-off wording', test: (x) => REENTRY_TOPIC_RE.test(x.c) && !x.preVisit },
   { name: 'until a time that is not scheduling', test: (x) => UNTIL_TIME_RE.test(x.c) && !x.sched(true) },
   { name: 'give it time', test: (x) => GIVE_IT_RE.test(x.c) && !x.staffLed },
   { name: 're-entry movement', test: (x) => REENTRY_MOVE_RE.test(x.c) && noAccessNoStaff(x) },
