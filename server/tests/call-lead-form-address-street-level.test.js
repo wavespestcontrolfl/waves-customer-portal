@@ -306,7 +306,7 @@ describe('onFileAddressIsFromWebForm', () => {
 });
 
 
-describe('codex round 1 on #5381', () => {
+describe('area, house number and call-origin provenance', () => {
   test('P1: Google must affirm the area itself — its own ZIP and state, or a service county', async () => {
     gateOn();
     const run = (verdict) => trustValidatedNewLeadAddress(lead(), { validate: async () => verdict, extraction: confirmed(), isFormAddress: yesForm });
@@ -364,7 +364,7 @@ describe('codex round 1 on #5381', () => {
 
 });
 
-describe('codex round 2 on #5381', () => {
+describe('units', () => {
   test('P1: a unit-bearing address is outside the street-level lane, on either side', async () => {
     gateOn();
     const formAddr = { line1: '1234 Sample Newbuild Trl', line2: 'Apt 4', city: 'Parrish', state: 'FL', zip: '34219' };
@@ -392,9 +392,7 @@ describe('codex round 2 on #5381', () => {
   });
 });
 
-describe('codex round 3 on #5381', () => {
-  const src = () => require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-
+describe('county-confirmed and shared-ZIP area proof', () => {
   test('P2: a county Google confirms on the routing allowlist (DeSoto) is the area proof; without a county the ZIP set still governs', () => {
     gateOn();
     const desoto = lead({ city: 'Arcadia', zip: '34266' });
