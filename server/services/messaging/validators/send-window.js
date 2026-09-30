@@ -126,6 +126,7 @@ const CUSTOMER_ACTION_ENTRY_POINTS = new Set([
   'estimate_accept_onetime_booking',
   'estimate_accept_onetime_confirmed',
   'estimate_deposit_receipt',
+  'estimate_service_details_send',
   'lead_response_auto_reply',
   'lead_webhook_auto_reply',
   // Owner ruling 2026-09-28: a caller reaching out to us — a missed call or

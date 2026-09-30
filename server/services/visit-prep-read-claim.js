@@ -28,6 +28,11 @@ function etDayStart(now = new Date()) {
   return parseETDateTime(`${etDateString(now)}T00:00`);
 }
 
+// The cap counts PAID VISION CALLS: a claim adds `weight` to read_attempts —
+// 1 for the pest or plant read, 2 for the combined read (it runs the pest and
+// the plant vision call under one claim; owner ruling 2026-09-30) — so a
+// combo read is charged honestly and the sum below needs no change.
+//
 // Every engine ATTEMPT today, not only the ones that stored a result: an
 // engine call that failed, or whose result was released because the stop
 // changed mid-read, still cost a vision call. Counted on the ET day the
@@ -65,6 +70,9 @@ async function readsToday(conn, now = new Date()) {
  *   read_status 'pending' (a function receives the applicability value)
  * @param {Date} [opts.now]
  * @param {string[]} [opts.expectStatus] statuses the claim may take the row from
+ * @param {number} [opts.weight] vision calls this claim will spend (default 1; a
+ *   combo read passes 2): counted into read_attempts, and the claim is refused
+ *   unless the whole weight fits under the daily cap
  * @returns {Promise<{ claimed: true, value: any } | 'unsupported' | 'refused' | 'taken'>}
  */
 // Runs `body(trx)` with the stop locked: the canonical stop lock
@@ -94,7 +102,7 @@ async function withLockedStop(conn, svc, { body, onGone, onMoved }) {
 }
 
 async function claimReadSlot(conn, submissionId, svc, {
-  applicable, pendingPatch, now = new Date(), expectStatus = UNCLAIMED_STATUSES,
+  applicable, pendingPatch, now = new Date(), expectStatus = UNCLAIMED_STATUSES, weight = 1,
 }) {
   return withLockedStop(conn, svc, {
     onGone: () => 'unsupported',
@@ -108,7 +116,7 @@ async function claimReadSlot(conn, submissionId, svc, {
       // (readsToday), and only the recovery sweep reaches an older one, for
       // a visit that is still upcoming (Codex #5320 r12).
       if (!own) return 'refused';
-      if (await readsToday(trx, now) >= dailyCap()) return 'refused';
+      if (await readsToday(trx, now) + weight > dailyCap()) return 'refused';
       // Claimed only from a status the caller expected (no engine holds the
       // row): a row another engine already claimed is never taken twice
       // (Codex #5320 r1 P2).
@@ -116,7 +124,7 @@ async function claimReadSlot(conn, submissionId, svc, {
         .whereIn('read_status', expectStatus)
         .update({
           read_status: 'pending',
-          read_attempts: (Number(own.read_attempts) || 0) + 1,
+          read_attempts: (Number(own.read_attempts) || 0) + weight,
           // The pending-staleness clock starts at the claim, not the
           // submission (a sweep may claim hours later; Codex #5320 r10).
           read_claimed_at: now,

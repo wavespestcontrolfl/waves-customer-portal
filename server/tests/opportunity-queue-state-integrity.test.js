@@ -155,8 +155,14 @@ describe('claimNext lifetime attempt budget', () => {
     const swept = await queue.sweepExhaustedAttempts();
 
     expect(swept).toBe(2);
-    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("status = 'pending' AND attempt_count >= ?"), [5]);
-    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT EXISTS'), [5]);
+    const bindings = [5, 'named_competitor_review', 'affiliate_review', ...queue._internals.RECONCILIATION_HOLD_REASONS];
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining("status = 'pending' AND attempt_count >= ?"), bindings);
+    expect(q.whereRaw).toHaveBeenCalledWith(expect.stringContaining('NOT EXISTS'), bindings);
+    // Every may-have-published hold survives the sweep, including an
+    // interrupted approval and an unreconciled refresh write.
+    expect(bindings).toEqual(expect.arrayContaining(['named_competitor_publish_interrupted', 'refresh_publish_unreconciled']));
+    const [sql] = q.whereRaw.mock.calls[0];
+    expect((sql.match(/\?/g) || []).length).toBe(bindings.length);
     expect(db.raw).toHaveBeenCalledWith(expect.stringMatching(/CASE WHEN COALESCE[\s\S]+THEN 'skipped' ELSE 'pending_review' END/));
     expect(db.raw).toHaveBeenCalledWith("CASE WHEN status = 'pending_review' THEN COALESCE(skip_reason, 'legacy_review_retired') ELSE 'attempts_exhausted' END");
 

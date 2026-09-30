@@ -420,7 +420,7 @@ Address: ${customer.address_line1 || ''}, ${customer.city || ''}`;
       max_tokens: anthropicMaxTokens(MODELS.FLAGSHIP, 800),
       messages: [{
         role: 'user',
-        content: `Draft an email reply for Waves Pest Control & Lawn Care.
+        content: `Draft an email reply for Waves Pest Control.
 
 THREAD:
 ${threadText}

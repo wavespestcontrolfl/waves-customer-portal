@@ -69,6 +69,16 @@ jobs:
         env:
           DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
         run: npx knex migrate:latest --knexfile server/knexfile.js
+      # Right after the migration, on purpose: the reconcile reads the WHOLE
+      # customer/subscriber tables (its counts assume only migration seeds)
+      # and its write-mode cases would import or link any row another suite
+      # left behind, so it cannot join the shared DB-gated step. It leaves the
+      # database exactly as it found it.
+      - name: Newsletter list reconcile transaction tests
+        working-directory: server
+        env:
+          RECONCILE_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
+        run: npx jest --ci --silent --runInBand tests/newsletter-list-reconcile-postgres.test.js
       - name: Customer 360 SMS read and bell transaction tests
         run: |
           node <<'JS'
@@ -202,7 +212,7 @@ jobs:
         working-directory: server
         env:
           BOOK_CAPACITY_COMMIT_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand tests/booking-capacity-commit-db.test.js tests/booking-account-ownership-postgres.test.js
+        run: npx jest --ci --silent --runInBand tests/booking-capacity-commit-db.test.js tests/multi-tech-confirm-db.test.js tests/booking-account-ownership-postgres.test.js
       - name: Previsit Text provider authority tests
         working-directory: server
         env:
