@@ -105,12 +105,12 @@ describe('estimate conversion agent shadow decisions', () => {
     expect(routed.decision).toMatchObject({
       intent: 'service_scheduling_window_reply',
       confidence: expect.any(Number),
-      suggestedMessage: expect.stringContaining('Wednesday'),
+      suggestedMessage: null,
       metadata: {
         scenarioLabel: 'scheduling_multi_window',
-        offeredWindows: expect.arrayContaining(['Wednesday']),
       },
     });
+    expect(routed.decision.metadata).not.toHaveProperty('offeredWindows');
     expect(routed.decision.recommendedActions).toEqual(expect.arrayContaining([
       'draft_service_scheduling_reply',
       'check_route_availability',
@@ -167,13 +167,13 @@ describe('estimate conversion agent shadow decisions', () => {
 
     expect(timeOnly.workflow).toBe('service_scheduling_sms');
     expect(timeOnly.decision.metadata.scenarioLabel).toBe('scheduling_time_only');
-    expect(timeOnly.decision.suggestedMessage).toContain('9am');
+    expect(timeOnly.decision.suggestedMessage).toBeNull();
     expect(partOfDay.workflow).toBe('service_scheduling_sms');
     expect(partOfDay.decision.metadata.scenarioLabel).toBe('scheduling_time_only');
-    expect(partOfDay.decision.suggestedMessage).toContain('morning');
+    expect(partOfDay.decision.suggestedMessage).toBeNull();
   });
 
-  test('weather reschedule texts get a weather-specific scheduling draft', () => {
+  test('weather reschedule texts route to service scheduling with no template draft', () => {
     const routed = routeEstimateOrCustomerReply('Looks like rain is headed here. Do we need to reschedule?', {
       customer: { id: 'customer-1', first_name: 'Dale' },
       recentSmsThread: [
@@ -185,7 +185,7 @@ describe('estimate conversion agent shadow decisions', () => {
     expect(routed.decision).toMatchObject({
       intent: 'service_reschedule_weather_question',
       metadata: { scenarioLabel: 'rain_reschedule' },
-      suggestedMessage: expect.stringContaining('weather concern'),
+      suggestedMessage: null,
     });
   });
 
