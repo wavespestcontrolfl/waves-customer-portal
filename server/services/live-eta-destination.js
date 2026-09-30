@@ -1,16 +1,23 @@
 'use strict';
 // The destination a live-ETA lookup resolves to for one scheduled_services row,
-// and WHERE that resolution came from (Codex round-21 P2, PR #5334). Pure and
+// and WHERE that resolution came from (Codex round-21/29 P2, PR #5334). Pure and
 // dependency-light so the drafter-side aggregator (which records it in the
 // send-time snapshot) and the send-time freshness check (which re-derives it
-// from current rows) run the SAME resolution:
-//   1. the visit's own stamped pin, when BOTH lat and lng are present
-//      (source 'visit'); else
-//   2. the customer's primary coordinates, when both are present and the
-//      stamped address does not diverge from the customer's ("no pin beats a
-//      wrong pin"; source 'customer'); else
-//   3. nothing (source null) — the caller falls back to status-only.
-// Coordinates are only ever used as a PAIR (round 17).
+// from current rows) run the SAME resolution — and it IS the public tracker's
+// rule (routes/track-public.js, the customer-visible source of truth):
+//     latitude  = COALESCE(visit.lat, CASE WHEN NOT diverges THEN customer.latitude END)
+//     longitude = COALESCE(visit.lng, CASE WHEN NOT diverges THEN customer.longitude END)
+// i.e. EACH coordinate independently falls back to the customer's unless the
+// stamped address diverges from the customer's ("no pin beats a wrong pin").
+// Only a complete resulting pair is usable (else the caller falls back to
+// status-only; the tracker would geocode, the text never guesses). `source`:
+//   'visit'    both coordinates from the visit's stamp
+//   'customer' both from the customer's primary coordinates
+//   'mixed'    one from each — exactly what the tracker shows for a
+//              half-stamped visit, so the text and the tracking page agree
+//   null       no complete pair
+// tests/sms-live-eta.test.js pins the tracker's SQL COALESCE lines so
+// this rule cannot drift from them unnoticed.
 const { stampedAddressDiverges } = require('./stamped-address');
 const { finiteNumber } = require('./customer-tracking-eta');
 
@@ -26,10 +33,17 @@ function resolveLiveEtaDestination(row, customer) {
     customer_zip: customer?.zip,
     customer_city: customer?.city,
   });
-  if (diverges) return { lat: null, lng: null, source: null };
-  const custLat = finiteNumber(customer?.latitude);
-  const custLng = finiteNumber(customer?.longitude);
-  return custLat != null && custLng != null ? { lat: custLat, lng: custLng, source: 'customer' } : { lat: null, lng: null, source: null };
+  const custLat = diverges ? null : finiteNumber(customer?.latitude);
+  const custLng = diverges ? null : finiteNumber(customer?.longitude);
+  const lat = visitLat ?? custLat;
+  const lng = visitLng ?? custLng;
+  if (lat == null || lng == null) return { lat: null, lng: null, source: null };
+  return { lat, lng, source: visitLat == null && visitLng == null ? 'customer' : 'mixed' };
+}
+// Does this resolution depend on the customer's own coordinates (so a
+// re-geocoded customer address changes it)?
+function usesCustomerCoordinates(source) {
+  return source === 'customer' || source === 'mixed';
 }
 
 // Stable, non-reversible fingerprint of a tracker device id (Bouncie IMEI) for
@@ -57,4 +71,4 @@ function calendarDay(value) {
   return m ? m[1] : null;
 }
 
-module.exports = { resolveLiveEtaDestination, deviceFingerprint, calendarDay };
+module.exports = { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay };

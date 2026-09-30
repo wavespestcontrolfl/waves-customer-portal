@@ -1582,6 +1582,19 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
         expect(await runC(cust({ latitude: null }))).toBe('eta_claim_destination_changed');
         expect(await runC(null)).toBe('eta_claim_destination_changed');
       });
+      // Round 29: a half-stamped visit resolves per coordinate like the tracker.
+      describe('mixed destination (visit latitude + customer longitude)', () => {
+        const mixedDest = { id: 'svc-1', propertyId: 'prop-1', lat: 27.4, lng: null, line1: '1 Test St', zip: '34285', resolved: { source: 'mixed', lat: 27.4, lng: -82.2 }, customerId: 'cust-1' };
+        const mSnap = () => snap({ destinations: [mixedDest] });
+        const halfRow = (extra = {}) => row({ lat: '27.4', lng: null, ...extra });
+        const runM = (customer, rows = [halfRow()]) => etaClaimBlockReason({ liveEtaSnapshot: mSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWith(rows, customer) });
+        test('unchanged half + customer coordinate passes', async () => { expect(await runM(cust())).toBeNull(); });
+        test('a re-geocoded customer longitude blocks; the visit later completing its pair blocks', async () => {
+          expect(await runM(cust({ longitude: '-82.9' }))).toBe('eta_claim_destination_changed');
+          expect(await runM(cust(), [row({ lat: '27.4', lng: '-82.2' })])).toBe('eta_claim_destination_changed');
+        });
+        test('the customer row unreadable blocks', async () => { expect(await runM(null)).toBe('eta_claim_destination_changed'); });
+      });
       test('the visit later getting its own pin changes the source and blocks', async () => {
         expect(await runC(cust(), [row({ lat: '27.1', lng: '-82.2' })])).toBe('eta_claim_destination_changed');
       });

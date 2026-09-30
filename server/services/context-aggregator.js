@@ -13,7 +13,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // customer would see on their own tracking link.
 const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
 const { calculateBoundedTrackingEta, finiteNumber, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
-const { resolveLiveEtaDestination, deviceFingerprint, calendarDay } = require('./live-eta-destination');
+const { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay } = require('./live-eta-destination');
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -910,7 +910,7 @@ function liveEtaDestinationIdentity(row, customer = null) {
     zip: row.service_address_zip ?? null,
     city: row.service_address_city ?? null,
     resolved: { source: resolved.source, lat: resolved.lat, lng: resolved.lng },
-    ...(resolved.source === 'customer' && customer?.id != null ? { customerId: customer.id } : {}),
+    ...(usesCustomerCoordinates(resolved.source) && customer?.id != null ? { customerId: customer.id } : {}),
   };
 }
 function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {

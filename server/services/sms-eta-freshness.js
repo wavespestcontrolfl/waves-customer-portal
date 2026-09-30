@@ -421,13 +421,13 @@ function stampedDestinationMatches(recorded, row) {
 async function resolvedDestinationMatches(recorded, row, dbh) {
   const rec = recorded.resolved;
   if (!rec || typeof rec !== 'object') return true; // older snapshot: stamped-field comparison only
+  const { resolveLiveEtaDestination, usesCustomerCoordinates } = require('./live-eta-destination');
   let customer = null;
-  if (rec.source === 'customer') {
+  if (usesCustomerCoordinates(rec.source)) {
     if (recorded.customerId == null) return false;
     customer = await dbh('customers').where({ id: recorded.customerId }).first('latitude', 'longitude', 'address_line1', 'zip', 'city');
     if (!customer) return false;
   }
-  const { resolveLiveEtaDestination } = require('./live-eta-destination');
   const now = resolveLiveEtaDestination({
     service_lat: row.lat, service_lng: row.lng, service_address_line1: row.service_address_line1, service_address_zip: row.service_address_zip, service_address_city: row.service_address_city,
   }, customer);

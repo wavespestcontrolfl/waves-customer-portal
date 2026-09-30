@@ -1147,7 +1147,7 @@ function isNegatedInClause(str, index) {
 function bodyClaimsCompletedArrival(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(COMPLETED_ARRIVAL_RE.source, 'gi'))) {
-    if (!isNegatedInClause(str, m.index)) return true;
+    if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length)) return true;
   }
   return false;
 }
@@ -1166,12 +1166,39 @@ function bodyClaimsCompletedArrival(text) {
 //   - part of a scheduling window (isWindowQuantity).
 const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|(?:head(?:ing|ed)|coming)\s+(?:over|your\s+way|to\s+you|to\s+your\s+\w+)|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:coming|headed|heading|driving|rolling|travell?ing)\b|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:in\s+the\s+(?:truck|van|vehicle)|on\s+the\s+road)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
 const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
+// Does a conditional word GOVERN the status clause (Codex round-29 P2)? Only the
+// text since the last clause boundary counts: "once he's on the way" and "when
+// the tech is en route" are conditional, but an introductory phrase CLOSED by a
+// comma ("After checking, your technician is en route") is not — the status
+// itself is asserted. Uses the same CLAUSE_BREAK_RE as the negation check.
+function isConditionalBefore(before) {
+  let last = 0;
+  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) last = m.index + m[0].length;
+  return CONDITIONAL_BEFORE_RE.test(before.slice(last));
+}
+// Is the match inside an interrogative CLAUSE (Codex round-29 P2)? "Has your
+// technician arrived yet?" asserts nothing. The clause runs from the previous
+// boundary to the next punctuation mark; it is a question when that mark is "?"
+// or it opens with subject-auxiliary inversion (has/have/is/are/did/was/were/
+// will/can/could/would/do/does + ...). A statement clause earlier in the same
+// sentence ("He is en route, is that ok?") is unaffected: its own boundary is
+// the comma.
+const INTERROGATIVE_OPENER_RE = /^\s*(?:has|have|had|is|are|was|were|did|do|does|will|can|could|would|should)\b/i;
+function isInterrogativeAt(str, index, length = 0) {
+  const before = str.slice(0, index);
+  let start = 0;
+  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) start = m.index + m[0].length;
+  if (INTERROGATIVE_OPENER_RE.test(str.slice(start, index + length))) return true;
+  const end = /[.,;:!?\n\u2014\u2013]/.exec(str.slice(index + length));
+  return Boolean(end) && end[0] === '?';
+}
 function bodyMentionsArrival(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(EN_ROUTE_STATUS_RE.source, EN_ROUTE_STATUS_RE.flags))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
-    if (CONDITIONAL_BEFORE_RE.test(before)) continue;
+    if (isConditionalBefore(before)) continue;
     if (isNegatedInClause(str, m.index)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
     return true;
   }
@@ -1207,8 +1234,9 @@ function bodyMentionsVisitStatus(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(VISIT_STATUS_RE.source, VISIT_STATUS_RE.flags))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
-    if (CONDITIONAL_BEFORE_RE.test(before)) continue;
+    if (isConditionalBefore(before)) continue;
     if (isNegatedInClause(str, m.index)) continue;
+    if (isInterrogativeAt(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
     return true;
   }

@@ -1938,6 +1938,44 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-29 P2s (PR #5334): conditional scope + interrogatives.
+describe('round 29 P2s: introductory phrases are not conditionals; questions are not claims', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'After checking, your technician is en route.', 'After we confirmed the address, the tech is on the way.',
+    'Before we head out, your technician is en route.',
+  ])('%p: the status is asserted, so it is a claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    "I'll text you once he's on the way.", "When the tech is en route, I'll let you know.", 'If your technician is en route, call us.',
+    'As soon as the tech is on the way we will text you.',
+  ])('%p: the conditional governs the status clause, so it is not a claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Has your technician arrived yet?', 'Have the crew arrived?', 'Is your technician here?', 'Did the tech arrive? We can check.',
+    'Has the tech arrived yet? We will look into it.',
+  ])('%p is a question, not a completed-arrival claim', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+  });
+  test.each(['Is your technician en route?', 'Is the tech on the way yet?', 'Are they nearby?', 'Is your technician en route yet?'])('%p is a question, not an en-route claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    ['Your technician has arrived, is that ok?', 'completed'], ['Did the tech arrive? He has arrived.', 'completed'],
+  ])('a statement clause beside a question is still a claim: %p', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+  });
+  test('an en-route statement beside a question is still a claim', () => {
+    expect(bodyMentionsArrival(' The tech is en route, is that ok?')).toBe(true);
+    expect(bodyMentionsVisitStatus('The tech is en route, is that ok?')).toBe(true);
+  });
+});
+
 // Codex round-27 P2 (PR #5334): the technician subject must be in the SAME clause.
 describe('round 27 P2: long-duration subject is scoped to its clause', () => {
   test.each([
@@ -1956,19 +1994,49 @@ describe('round 27 P2: long-duration subject is scoped to its clause', () => {
   });
 });
 
-// Codex round-17 P2 (PR #5334): destination coordinates are a PAIR.
-describe('liveEtaDestination — lat/lng are used only as a complete pair (round 17 P2)', () => {
-  test('a visit latitude alone never mixes with the customer longitude', () => {
-    expect(liveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.51 });
-    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: -82.5 }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.51 });
+// Codex round-17 P2 / round-29 P2 (PR #5334): the destination is the PUBLIC
+// TRACKER's rule (routes/track-public.js): each coordinate independently
+// COALESCEs visit -> customer (unless the stamped address diverges), and only a
+// complete resulting pair is usable — so the text and the tracking page agree.
+describe('liveEtaDestination — per-coordinate fallback exactly as the public tracker (round 29 P2)', () => {
+  test('a half-stamped visit mixes its own coordinate with the customer\'s, like the tracker', () => {
+    expect(liveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer())).toEqual({ lat: 27.4, lng: -82.51 });
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: -82.5 }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.5 });
   });
   test('a complete visit pair wins; a complete customer pair is the fallback', () => {
     expect(liveEtaDestination(baseRow(), baseCustomer())).toEqual({ lat: 27.4, lng: -82.5 });
     expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.51 });
   });
-  test('a partial visit pair AND a partial customer pair fails closed', () => {
+  test('the visit half and the customer half can complement each other; otherwise no complete pair fails closed', () => {
     expect(liveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer({ longitude: null }))).toBeNull();
     expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: -82.5 }), baseCustomer({ latitude: null }))).toBeNull();
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer({ latitude: null }))).toBeNull();
+  });
+  test('a diverging stamped address never borrows the customer\'s coordinates, even for one half', () => {
+    const diverged = { service_address_line1: '9 Other Ave', service_address_zip: '99999', service_address_city: 'Elsewhere' };
+    const customer = baseCustomer({ address_line1: '1 Test St', zip: '34285', city: 'Venice' });
+    expect(liveEtaDestination(baseRow({ ...diverged, service_lat: 27.4, service_lng: null }), customer)).toBeNull();
+    expect(liveEtaDestination(baseRow({ ...diverged, service_lat: 27.4, service_lng: -82.5 }), customer)).toEqual({ lat: 27.4, lng: -82.5 });
+  });
+  test('the resolution source is visit / customer / mixed, and customer-dependent sources are flagged', () => {
+    const { resolveLiveEtaDestination, usesCustomerCoordinates } = require('../services/live-eta-destination');
+    expect(resolveLiveEtaDestination(baseRow(), baseCustomer()).source).toBe('visit');
+    expect(resolveLiveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer()).source).toBe('customer');
+    expect(resolveLiveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer()).source).toBe('mixed');
+    expect(resolveLiveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer({ latitude: null })).source).toBeNull();
+    expect(['visit', 'customer', 'mixed', null].map(usesCustomerCoordinates)).toEqual([false, true, true, false]);
+  });
+  test('the tracker\'s own SQL rule is pinned, so this helper cannot drift from it unnoticed', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/track-public.js'), 'utf8');
+    expect(src).toContain("COALESCE(s.lat, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.latitude END) as latitude");
+    expect(src).toContain("COALESCE(s.lng, CASE WHEN NOT ${stampedDivergesSql('s', 'c')} THEN c.longitude END) as longitude");
+  });
+  test('a mixed destination is recorded with its source + customer id so send time re-resolves it', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const customer = { ...baseCustomer(), id: 'cust-1' };
+    const half = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', service_lat: 27.4, service_lng: null };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [half], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
+    expect(g.destinations[0]).toMatchObject({ resolved: { source: 'mixed', lat: 27.4, lng: -82.51 }, customerId: 'cust-1' });
   });
 });
 
