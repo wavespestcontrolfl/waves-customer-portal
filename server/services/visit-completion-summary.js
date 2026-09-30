@@ -222,7 +222,7 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
 // throw after it is the provider outcome and propagates with the mark in place.
 const LINK_CHANGED = 'link_changed';
 
-async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, email = null, pendingRef = null, authorized, dispatch, beforeProvider = null }) {
+async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, email = null, pendingRef = null, authorized, dispatch, beforeProvider = null, lockBeforeVisit = null }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
   // `authorized` answers LINK_CHANGED when a queued body's invoice link went stale under the
   // held rows and it has already put the plain body in its place: not a lost claim, a retry
@@ -256,6 +256,9 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     const liveCustomer = await trx('customers').where({ id: customerId }).whereNull('deleted_at').first();
     if (!liveCustomer) return false;
     const customer = await withAccountPrimaryContact(liveCustomer, { db: trx, forShare: true, rethrow: true });
+    // Bill-To order is customer, then invoice, then visit (the withdrawal locks the invoice and
+    // later updates the visit row): a caller's invoice is taken here, before the visit.
+    if (lockBeforeVisit) await lockBeforeVisit(trx);
     // The visit row is held too: a revocation or status change after the
     // mark committed serializes behind the provider request instead of
     // racing it.
@@ -319,6 +322,7 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
 async function beginDeferredSummarySms(meta, dispatch) {
   return claimDispatchThroughHandoff({ visitId: meta.visit_id, customerId: meta.customer_id, kind: 'completion_sms',
     token: meta.visit_summary_claim_token, scheduled: true, phone: meta.to_phone, dispatch,
+    lockBeforeVisit: (trx) => lockSummaryInvoice(trx, meta.billing_link ? { kind: meta.billing_link.kind, invoiceId: meta.billing_link.invoice_id } : null),
     beforeProvider: () => noteSummaryLinkAttempt(meta.visit_id, meta.billing_link ? { kind: meta.billing_link.kind, invoiceId: meta.billing_link.invoice_id } : null),
     authorized: async (customer, prefs, trx, phase) => {
       if (prefs.sms_enabled === false || prefs.service_completed === false) return false;
@@ -516,6 +520,11 @@ async function recordSummaryLinkTextAccepted(link, database = db) {
   }
 }
 
+// The pay-link invoice is held before the visit row (see claimDispatchThroughHandoff).
+async function lockSummaryInvoice(trx, link) {
+  if (link?.kind === 'pay_link') await trx('invoices').where({ id: link.invoiceId }).forUpdate().first('id');
+}
+
 // What the summary's next provider request will carry, recorded durably BEFORE the request (the
 // packet payload is the system-snapshot store): the link, or nothing for a plain summary. It is
 // the evidence a later pass needs to tell an accepted link text from an accepted plain one.
@@ -599,6 +608,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
             linkStale = true;
             return false;
           },
+          lockBeforeVisit: (trx) => lockSummaryInvoice(trx, link),
           beforeProvider: () => noteSummaryLinkAttempt(visit.id, link),
           dispatch: (trx, onProviderStart) => handoff(trx, async () => { await onProviderStart(); dispatched = true; }) }),
       });

@@ -246,6 +246,11 @@ async function alertCarriedReceiptEmail(job, reason) {
       dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`,
       metadata: { invoice_id: job.invoice_id },
     });
+    // The summary text may have been accepted between the read above and the insert: its
+    // acceptance closes the alert key, which did not exist yet. Read again now that the alert does.
+    if (!accepted && (await db('invoices').where({ id: job.invoice_id }).first('receipt_sms_sent_at'))?.receipt_sms_sent_at) {
+      await require('./admin-alert-episodes').closeAdminAlertKeys(db, [`summary-carried-receipt-email:${job.invoice_id}`], 'summary_text_accepted');
+    }
   } catch (err) {
     logger.warn(`[receipt-delivery-queue] carried-receipt email alert failed for invoice ${job.invoice_id}: ${err.message}`);
   }

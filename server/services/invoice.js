@@ -4132,6 +4132,11 @@ async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
       dedupeKey: `summary-link-undelivered:${invoiceId}`,
       metadata: { invoice_id: invoiceId },
     });
+    // The summary text may have been accepted between the park and this insert: its acceptance
+    // closes the alert key, which did not exist yet. Read again now that the alert does.
+    if ((await db("invoices").where({ id: invoiceId }).first("sms_sent_at"))?.sms_sent_at) {
+      await require("./admin-alert-episodes").closeAdminAlertKeys(db, [`summary-link-undelivered:${invoiceId}`], "summary_text_accepted");
+    }
   } catch (err) {
     logger.warn(`[invoice] summary-link undelivered alert failed for ${invoiceId}: ${err.message}`);
   }

@@ -5959,6 +5959,88 @@ postgres('visit summary recipient recovery', () => {
 
     // The park and the summary's acceptance stamp write the same row: the park is one conditional
     // write, so an acceptance that commits between the worker's check and its park is never lost.
+    // An alert raised just after the summary's acceptance closed its (not yet existing) key must
+    // not stay open: the raiser reads the acceptance again once the alert exists.
+    describe('an undelivered alert raised while the summary text is accepted', () => {
+      const alertRows = (key) => mockPg('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key]);
+      afterEach(async () => { await mockPg('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'summary-%'").del(); });
+      const acceptBeforeInsert = (key, accept) => {
+        const compose = require('../services/admin-alert-compose');
+        const real = compose.raiseAdminAlert;
+        let done = false;
+        return jest.spyOn(compose, 'raiseAdminAlert').mockImplementation(async (...args) => {
+          if (!done && args[2]?.dedupeKey === key) { done = true; await accept(); }
+          return real(...args);
+        });
+      };
+
+      test('the receipt alert closes itself when the acceptance landed before the insert', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        const nextAllowedAt = new Date(Date.now() + 8 * 3600000).toISOString();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt }));
+        await coordinate();
+        const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+        const key = `summary-carried-receipt-email:${invoiceId}`;
+        acceptBeforeInsert(key, async () => {
+          expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
+          await Summary.finalizeDeferredSummarySms(queued.metadata);
+        });
+        require('../services/invoice-email').sendReceiptEmail.mockResolvedValue({ ok: false, error: 'SendGrid 500' });
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() - 1000) });
+          await Queue.processDueReceiptDeliveryJobs();
+        }
+        const rows = await alertRows(key);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata).toMatchObject({ autoCleared: true });
+      });
+
+      test('the pay-link alert closes itself when the acceptance landed before the insert', async () => {
+        const invoiceId = await stop();
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return { sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' };
+        });
+        await coordinate();
+        const key = `summary-link-undelivered:${invoiceId}`;
+        acceptBeforeInsert(key, () => Invoice.markSummaryTextAccepted(invoiceId));
+        require('../services/invoice-email').sendInvoiceEmail.mockResolvedValue({ ok: false, blocked: true, error: 'Suppressed: bounce' });
+        await Invoice.processScheduledSends();
+        const rows = await alertRows(key);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].metadata).toMatchObject({ autoCleared: true });
+      });
+    });
+
+    // The Bill-To withdrawal locks the customer, then the invoice, and later updates the visit row
+    // (billing hold); the summary handoff holds the visit FOR SHARE, so it must take the invoice first.
+    describe('the summary handoff and a Bill-To withdrawal', () => {
+      test('a withdrawal in flight during the handoff completes without a deadlock, and the summary goes plain', async () => {
+        const invoiceId = await stop();
+        let calls = 0;
+        let withdrawal;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          calls += 1;
+          if (calls === 1) {
+            const trx = await mockPg.transaction();
+            await trx('invoices').where({ id: invoiceId }).forUpdate().first('id');
+            // The withdrawal's later write to the visit row (the billing hold), after the handoff has started.
+            withdrawal = new Promise((resolve) => setTimeout(resolve, 500)).then(async () => {
+              await trx('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+              await trx.commit();
+            }).then(() => ({ ok: true }), async (error) => { await trx.rollback().catch(() => {}); return { error }; });
+          }
+          return handoffSender()(input);
+        });
+        await coordinate();
+        expect(await withdrawal).toEqual({ ok: true });
+        expect(sendCustomerMessage.mock.calls.at(-1)[0].body).toBe(plainBody());
+        expect(strayTexts).toEqual([]);
+        expect(await summaryEffect()).toMatchObject({ status: 'sent' });
+      });
+    });
+
     describe('the undelivered-link park races the summary acceptance', () => {
       test('an acceptance that lands between the check and the park finalizes the invoice as sent, with no park, alert or credit reversal', async () => {
         const invoiceId = await stop();
