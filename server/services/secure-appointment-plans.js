@@ -1270,7 +1270,8 @@ async function selectSecurePlan({ token, plan }) {
       const liveVisit = await trx('scheduled_services')
         .where({ id: visit.id })
         .forUpdate()
-        .first('id', 'status', 'scheduled_date', 'estimated_price', 'service_type', 'service_id');
+        .first('id', 'status', 'scheduled_date', 'estimated_price', 'service_type', 'service_id',
+          'recurring_pattern', 'recurring_interval_days', 'is_recurring');
       // Also lock the CUSTOMER row (Codex #2980 r4): resolveForInvoice
       // falls back to customers.payer_id, which staff can change from
       // Customer360 — a default-payer attach must serialize behind this
@@ -1323,7 +1324,11 @@ async function selectSecurePlan({ token, plan }) {
       // this lock would otherwise sell and seed coverage for the OLD service.
       const sameId = (a, b) => (a == null ? null : String(a)) === (b == null ? null : String(b));
       if (!sameId(liveVisit.service_id, visit.service_id)
-        || String(liveVisit.service_type || '') !== String(visit.service_type || '')) {
+        || String(liveVisit.service_type || '') !== String(visit.service_type || '')
+        // Cadence inputs of visitsPerYear / coverageAmount (Codex r4 P1).
+        || String(liveVisit.recurring_pattern || '') !== String(visit.recurring_pattern || '')
+        || !sameId(liveVisit.recurring_interval_days, visit.recurring_interval_days)
+        || !!liveVisit.is_recurring !== !!visit.is_recurring) {
         throw fail('plan_unavailable');
       }
       let payerNow = null;

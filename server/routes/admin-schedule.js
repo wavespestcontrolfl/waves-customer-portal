@@ -17992,31 +17992,37 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
 
   const NO_MONEY_HELD = ['void', 'refunded', 'canceled', 'cancelled'];
   const disputeSuspendedColumn = await conn.schema.hasColumn('annual_prepay_terms', 'dispute_suspended_at');
-  // Every term that has money held at the price it was minted with and
-  // whose canonical coverage decides which visits it stamps: payment_pending
-  // (the /secure pick, not yet paid) AND active / renewal_pending (Codex r2
-  // P1 on #5387). An active term's canonical set is exactly what its next
-  // refreshTermSnapshot stamps — completed visits stay in the sold count
-  // (COVERAGE_EXCLUDED_STATUSES only drops cancelled/no-show/skipped/
-  // rescheduled) — so a visit in it is committed money whether or not it is
-  // stamped yet: mid-activation (the webhook commits active BEFORE linking),
-  // a refresh that threw after the flip, or a repaid dispute whose OLD
-  // links survive while the current set moved on. has_linked_visit decides
-  // only whether the first-activation window slide is projected.
-  let heldTermsQuery = conn('annual_prepay_terms as t')
+  // Every term that holds money at the price it was minted with, whose
+  // canonical coverage decides which visits it stamps:
+  //  - an UNPAID pick (payment_pending with a live prepay invoice), minus
+  //    dispute-suspended terms — suspendActiveTermsForDisputedInvoice flips
+  //    those BACK to payment_pending on purpose so their visits bill per
+  //    application during the dispute (Codex r3 P1 on #5387);
+  //  - every term with PAID coverage live today, read through the canonical
+  //    coveredTermsAsOf (active / renewal_pending, paid-pending, and decided
+  //    lapses such as an end_at_term cancel riding out its paid window —
+  //    Codex r4 P1), never a status list of this route's own.
+  // A term's canonical set is exactly what its next refreshTermSnapshot
+  // stamps (completed visits stay in the sold count), so a visit in it is
+  // committed money whether or not it is stamped yet: mid-activation, a
+  // refresh that threw after the flip, or a repaid dispute whose OLD links
+  // survive while the current set moved on. has_linked_visit decides only
+  // whether the first-activation window slide is projected.
+  const hasLinkedVisit = conn.raw(
+    'EXISTS (SELECT 1 FROM scheduled_services ss_link WHERE ss_link.annual_prepay_term_id = t.id) AS has_linked_visit',
+  );
+  let unpaidPicksQuery = conn('annual_prepay_terms as t')
     .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
     .whereIn('t.customer_id', customerIds)
-    .whereIn('t.status', ['payment_pending', 'active', 'renewal_pending'])
+    .where('t.status', 'payment_pending')
     .whereNotIn('inv.status', NO_MONEY_HELD);
-  // A dispute-suspended term is flipped BACK to payment_pending on purpose
-  // (suspendActiveTermsForDisputedInvoice) so its visits bill per
-  // application during the dispute — no coverage is held, and those visits
-  // need their price editable (Codex r3 P1 on #5387).
-  if (disputeSuspendedColumn) heldTermsQuery = heldTermsQuery.whereNull('t.dispute_suspended_at');
-  const pendingTerms = await heldTermsQuery
-    .select('t.*', conn.raw(
-      'EXISTS (SELECT 1 FROM scheduled_services ss_link WHERE ss_link.annual_prepay_term_id = t.id) AS has_linked_visit',
-    ));
+  if (disputeSuspendedColumn) unpaidPicksQuery = unpaidPicksQuery.whereNull('t.dispute_suspended_at');
+  const { coveredTermsAsOf } = require('../services/annual-prepay-renewals');
+  const [unpaidPicks, liveTerms] = await Promise.all([
+    unpaidPicksQuery.select('t.*', hasLinkedVisit),
+    coveredTermsAsOf(conn).whereIn('t.customer_id', customerIds).select('t.*', hasLinkedVisit),
+  ]);
+  const pendingTerms = [...new Map([...unpaidPicks, ...liveTerms].map((term) => [String(term.id), term])).values()];
   if (pendingTerms.length === 0) return marks;
 
   const termsByCustomer = new Map();

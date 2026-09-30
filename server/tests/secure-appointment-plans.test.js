@@ -301,14 +301,15 @@ describe('resolveDirectRodentSetupObligation — one resolver for every activati
 
   test('selectSecurePlan re-checks the live price AND service identity under its locks before minting (Codex r3 P1 on #5387)', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'secure-appointment-plans.js'), 'utf8');
-    expect(src).toMatch(/\.first\('id', 'status', 'scheduled_date', 'estimated_price', 'service_type', 'service_id'\);/);
+    expect(src).toMatch(/'recurring_pattern', 'recurring_interval_days', 'is_recurring'\);/);
     const priceAt = src.indexOf('if (cents(liveVisit.estimated_price) !== cents(context.perVisit)) {');
     const serviceAt = src.indexOf('if (!sameId(liveVisit.service_id, visit.service_id)');
     const mintAt = src.indexOf("title: `${coverageServiceType} - Annual Prepay`");
     expect(priceAt).toBeGreaterThan(-1);
     expect(serviceAt).toBeGreaterThan(priceAt);
     expect(mintAt).toBeGreaterThan(serviceAt);
-    expect(src).toMatch(/\|\| String\(liveVisit\.service_type \|\| ''\) !== String\(visit\.service_type \|\| ''\)\) \{\n\s+throw fail\('plan_unavailable'\);/);
+    expect(src).toMatch(/\|\| String\(liveVisit\.service_type \|\| ''\) !== String\(visit\.service_type \|\| ''\)\n/);
+    expect(src).toMatch(/\|\| !!liveVisit\.is_recurring !== !!visit\.is_recurring\) \{\n\s+throw fail\('plan_unavailable'\);/);
   });
 
   test('a CHILD of an ESTIMATE-origin root owes nothing — provenance resolves at the anchor (codex #3591 r47 local P0)', async () => {
