@@ -200,6 +200,22 @@ async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = fa
 }
 
 /**
+ * The ONE customer-row lookup every re-service surface shares (admin composer,
+ * report / photo-ID / cancellation streamline, the SMS FREE RE-SERVICE fact and
+ * send-time recheck): a live, non-deleted, active customer that carries a
+ * reservice_token, else null. loadReserviceEligibility and
+ * loadReserviceLaneAvailability both start here, so the predicate cannot drift
+ * (Codex round-12, PR #5336). Throws on a lookup error; callers fail closed.
+ */
+async function loadReserviceCustomerRow(customerId, dbh = db) {
+  const customer = await dbh('customers')
+    .where({ id: customerId })
+    .whereNull('deleted_at')
+    .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
+  return !customer || customer.active === false || !customer.reservice_token ? null : customer;
+}
+
+/**
  * The customer-row half of the eligibility predicate: a live, non-deleted
  * customer row that carries a reservice_token AND has at least one live
  * lane — the exact predicate the admin composer's /reservice-link route
@@ -222,11 +238,8 @@ async function reserviceLanesForCustomer(customer, dbh = db, { lockCoverage = fa
 async function loadReserviceEligibility(customerId, dbh = db) {
   if (!customerId) return null;
   try {
-    const customer = await dbh('customers')
-      .where({ id: customerId })
-      .whereNull('deleted_at')
-      .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-    if (!customer || customer.active === false || !customer.reservice_token) return null;
+    const customer = await loadReserviceCustomerRow(customerId, dbh);
+    if (!customer) return null;
     const lanes = await reserviceLanesForCustomer(customer, dbh);
     if (!lanes.length) return null;
     return { customer, lanes };
@@ -264,11 +277,8 @@ async function loadReserviceLaneAvailability(customerId, dbh = db) {
   const none = { eligible: [], open: {}, bookable: [] };
   if (!customerId) return none;
   try {
-    const customer = await dbh('customers')
-      .where({ id: customerId })
-      .whereNull('deleted_at')
-      .first('id', 'active', 'waveguard_tier', 'monthly_rate', 'reservice_token');
-    if (!customer || customer.active === false || !customer.reservice_token) return none;
+    const customer = await loadReserviceCustomerRow(customerId, dbh);
+    if (!customer) return none;
     return await reserviceLaneAvailability(customer, dbh);
   } catch (err) {
     logger.warn(`[reservice-scheduler] lane availability loader failed for customer ${customerId}: ${err.message}`);
