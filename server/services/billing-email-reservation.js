@@ -218,7 +218,7 @@ async function stampCustomerDunningEmailDelivered(message, row, identity, databa
   }
 }
 
-async function repairAcceptedCustomerDunningEmails(rows, database) {
+async function repairAcceptedCustomerDunningEmails(rows, database, { readOnly = false } = {}) {
   const pending = new Map();
   for (const row of rows || []) {
     const metadata = metadataOf(row);
@@ -233,6 +233,7 @@ async function repairAcceptedCustomerDunningEmails(rows, database) {
     for (const message of messages) {
       const hit = pending.get(message.idempotency_key);
       if (!hit || !hasAcceptedEvidence(message) || !boundToDunningReservation(message, hit.row, hit.identity)) continue;
+      if (readOnly) { repaired.add(String(hit.row.id)); continue; }
       if (await stampCustomerDunningEmailDelivered(message, hit.row, hit.identity, database)) repaired.add(String(hit.row.id));
     }
   } catch (err) {
@@ -241,9 +242,34 @@ async function repairAcceptedCustomerDunningEmails(rows, database) {
   return repaired;
 }
 
+// The read-only twin of markBillingEmailReservationDelivered's binding: the
+// stored context must name THIS row (customer, channel, source, event key, invoice).
+function acceptedContextMatchesRow(context, row) {
+  const match = reservationMatch(context);
+  let ids = row.invoice_ids;
+  if (typeof ids === 'string') { try { ids = JSON.parse(ids); } catch { ids = []; } }
+  return String(row.customer_id) === String(match.customerId) && row.channel === match.channel
+    && row.source === match.source && metadataOf(row).notificationEventKey === match.notificationEventKey
+    && (!match.invoiceId || (Array.isArray(ids) && ids.map(String).includes(String(match.invoiceId))));
+}
+
+// A read-only view: accepted evidence bound to a reservation counts as delivered
+// for the caller; a terminal refusal or a re-quote release is a write and is left
+// to the repairing caller.
+function readOnlyAcceptedIds(messages, byLedgerId) {
+  const ids = new Set();
+  for (const message of messages) {
+    if (!hasAcceptedEvidence(message)) continue;
+    const context = replayContext(message);
+    const candidate = context && byLedgerId.get(String(context.collections_ledger_id));
+    if (candidate && acceptedContextMatchesRow(context, candidate)) ids.add(String(candidate.id));
+  }
+  return ids;
+}
+
 // Repair a missed post-acceptance stamp from the canonical email ledger. A
 // provider id or handoff phase alone is deliberately insufficient evidence.
-async function repairAcceptedBillingChannelEmails(rows, database) {
+async function repairAcceptedBillingChannelEmails(rows, database, { readOnly = false } = {}) {
   const candidates = (rows || []).filter((row) => {
     const metadata = metadataOf(row);
     return row.channel === 'email' && metadata.notificationEventKey
@@ -260,6 +286,7 @@ async function repairAcceptedBillingChannelEmails(rows, database) {
   try {
     const messages = await database('email_messages').whereIn('idempotency_key', keys);
     const byLedgerId = new Map(candidates.map((row) => [String(row.id), row]));
+    if (readOnly) return readOnlyAcceptedIds(messages, byLedgerId);
     const repaired = new Set();
     for (const message of messages) {
       const accepted = hasAcceptedEvidence(message);
@@ -303,9 +330,9 @@ async function repairAcceptedBillingChannelEmails(rows, database) {
 
 // billing_channel_email reservations (unchanged) plus customer-level dunning
 // email reservations; each repair swallows its own failures.
-async function repairAcceptedBillingEmailReservations(rows, database = db) {
-  const billing = await repairAcceptedBillingChannelEmails(rows, database);
-  const dunning = await repairAcceptedCustomerDunningEmails(rows, database);
+async function repairAcceptedBillingEmailReservations(rows, database = db, options = {}) {
+  const billing = await repairAcceptedBillingChannelEmails(rows, database, options);
+  const dunning = await repairAcceptedCustomerDunningEmails(rows, database, options);
   return new Set([...billing, ...dunning]);
 }
 

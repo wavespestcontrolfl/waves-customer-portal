@@ -656,4 +656,22 @@ postgres('billing Email reservation reconciliation (PostgreSQL)', () => {
     expect(progress.find((e) => e.metadata.notificationEventKey === eventKey).complete).toBe(true);
     expect(progress.find((e) => e.metadata.notificationEventKey === otherKey).complete).toBe(false);
   });
+  test('reminderProgress { repair: false } sees accepted Email as delivered and changes no ledger row; the default repairs it', async () => {
+    const customerId = randomUUID();
+    const invoiceId = randomUUID();
+    const eventKey = `late-payment:${invoiceId}:14`;
+    const accepted = ledger({ customerId, invoiceId, eventKey });
+    await mockDatabase('collections_contact_ledger').insert(accepted);
+    await mockDatabase('email_messages').insert(message(
+      context({ customerId, invoiceId, eventKey, ledgerId: accepted.id }),
+      { sent_at: new Date() },
+    ));
+    const { reminderProgress } = require('../services/billing-reminder-delivery');
+    const readOnly = await reminderProgress(customerId, 'late_payment_checker', ['email'], { repair: false });
+    expect(readOnly.find((event) => event.metadata.notificationEventKey === eventKey)).toMatchObject({ complete: true });
+    expect((await mockDatabase('collections_contact_ledger').where({ id: accepted.id }).first()).metadata.delivered).toBeUndefined();
+    const repairing = await reminderProgress(customerId, 'late_payment_checker', ['email']);
+    expect(repairing.find((event) => event.metadata.notificationEventKey === eventKey)).toMatchObject({ complete: true });
+    expect((await mockDatabase('collections_contact_ledger').where({ id: accepted.id }).first()).metadata.delivered).toBe(true);
+  });
 });

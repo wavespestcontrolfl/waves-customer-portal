@@ -94,6 +94,31 @@ function namedInvoiceIds(event) {
   return [...ids];
 }
 
+/**
+ * The invoices a final notice named, leg by leg: from the delivered
+ * reservations (event entries, including a restored one), or — for a leg
+ * delivered in THIS tick — the set this tick quoted. A delivered leg with
+ * neither is unreadable; the caller must not complete anything for it.
+ */
+function namedForFinal(run, facts) {
+  const ids = new Set();
+  const covered = new Set();
+  for (const entry of facts.event?.entries || []) {
+    if (!facts.delivered.has(entry.channel)) continue;
+    const named = parseIds(entry.invoice_ids);
+    if (!named.length) continue;
+    named.forEach((id) => ids.add(String(id)));
+    covered.add(entry.channel);
+  }
+  const unreadable = [];
+  for (const channel of facts.delivered) {
+    if (covered.has(channel)) continue;
+    if ((facts.deliveredNow || []).includes(channel) && run.memberIds?.length) run.memberIds.forEach((id) => ids.add(String(id)));
+    else unreadable.push(channel);
+  }
+  return { ids: [...ids], unreadable };
+}
+
 async function memberRows(run) {
   if (!run.rows) run.rows = await Schedule.activeMemberRows(run.schedule.customer_id, { database: run.database });
   return run.rows;
@@ -149,8 +174,11 @@ async function finishDelivered(run, facts) {
   const base = { claimStamp: run.claimStamp, deliveredAt, now: run.now, database: run.database };
   let ok;
   if (Schedule.isFinalIndex(run.schedule.step_index)) {
-    const named = namedInvoiceIds(facts.event);
-    const done = await Schedule.completeFinal(run.schedule, { ...base, namedInvoiceIds: named.length ? named : (run.memberIds || []) });
+    const { ids, unreadable } = namedForFinal(run, facts);
+    // Never complete debt on evidence we cannot read: today's membership is not
+    // what a recovered notice named. Held for the office, nothing completed.
+    if (unreadable.length) return hold(run, 'delivered_evidence_unreadable');
+    const done = await Schedule.completeFinal(run.schedule, { ...base, namedInvoiceIds: ids });
     ok = done.completed;
   } else {
     // The next date is driven by the members active NOW: a member paid or
@@ -168,7 +196,8 @@ async function finishDelivered(run, facts) {
 async function decideRecovery(run) {
   let progress;
   try {
-    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels);
+    // The shadow run reads the same view but must not repair (stamp) anything.
+    progress = await reminderProgress(run.schedule.customer_id, SOURCE, run.channels, run.readOnly ? { repair: false } : undefined);
   } catch (err) {
     logger.warn(`[customer-dunning] schedule ${run.schedule.id} held — delivery progress unreadable: ${err.message}`);
     return decision('hold', 'progress_unreadable');
@@ -347,7 +376,18 @@ async function deliveryFacts(run, result) {
   // accepted, crash, resumed 90+ days later): complete with nothing 'delivered'
   // would read as all-terminal and pause a notice that was in fact delivered.
   const delivered = new Set([...(event?.delivered || []), ...(result.delivered || []), ...result.deliveredNow]);
-  const deliveredAt = event?.deliveredAt || (result.deliveredNow.length ? run.now : null);
+  // Legs restored from a reservation older than the progress window: what THAT
+  // reservation recorded (its invoices, its time) is the evidence, attached to
+  // the event so a final notice completes exactly what it named.
+  const restored = (result.restored || []).filter((r) => !(event?.delivered || new Set()).has(r.channel));
+  if (restored.length) {
+    event = {
+      ...(event || { delivered: new Set(), metadata: {} }),
+      entries: [...(event?.entries || []), ...restored.filter((r) => r.invoiceIds).map((r) => ({ channel: r.channel, invoice_ids: r.invoiceIds }))],
+    };
+  }
+  const times = [event?.deliveredAt, ...restored.map((r) => r.deliveredAt)].filter(Boolean).map((t) => new Date(t).getTime());
+  const deliveredAt = times.length ? new Date(Math.max(...times)) : (result.deliveredNow.length ? run.now : null);
   return { event, delivered, deliveredAt, deliveredNow: result.deliveredNow, complete: result.complete, results: result.results };
 }
 
@@ -451,7 +491,7 @@ function allowlisted(rows) {
  * for a schedule that does not exist yet.
  */
 async function judgeShadowSchedule(schedule, set, { now, database, due = null }) {
-  const run = { schedule, now, database, operatorInitiated: false, claimStamp: null };
+  const run = { schedule, now, database, operatorInitiated: false, claimStamp: null, readOnly: true };
   const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
   const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAutopay(run) || await decideSet(run, set);
   if (!stop) {

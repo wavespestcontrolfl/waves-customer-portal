@@ -140,7 +140,7 @@ jest.mock('../models/db', () => {
         }
         return 1;
       },
-      first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : undefined),
+      first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : table === 'collections_contact_ledger' ? mockLedger.find((r) => r.id === target) : undefined),
       then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred) : []),
     };
     return chain;
@@ -815,32 +815,75 @@ describe('shadow runs the live pre-send guards (R2-1)', () => {
   });
 });
 
-describe('a delivery older than the progress window is still a delivery (R2-2)', () => {
-  test('final notice accepted, crash, staff pause, resumed 100 days later: the deduped reservation completes the notice instead of pausing it', async () => {
-    const crypto = require('crypto');
-    setup({ stepIndex: 5, sentDaysAgo: 300 });
-    prefs = { invoice_channels: ['email'] };
-    const key = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;
-    mockLedger.push({
-      id: 'old-final', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer',
-      occurred_at: new Date(Date.now() - 100 * DAY), invoice_ids: ['inv-a', 'inv-b', 'inv-c'],
-      idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${key}`).digest('hex')}:email`,
-      metadata: { notificationEventKey: key, delivered: true, selectedChannels: ['email'] },
-    });
-    const out = await run();
+describe('a delivery older than the progress window is still a delivery, and completes what it NAMED (R2-2 / A2)', () => {
+  const crypto = require('crypto');
+  const finalKey = `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`;
+  const seedOldFinal = (over = {}) => mockLedger.push({
+    id: 'old-final', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer',
+    occurred_at: new Date(Date.now() - 100 * DAY), invoice_ids: ['inv-a', 'inv-b'],
+    idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${finalKey}`).digest('hex')}:email`,
+    metadata: { notificationEventKey: finalKey, delivered: true, selectedChannels: ['email'] },
+    ...over,
+  });
+  const finalNotice = () => { setup({ stepIndex: 5, sentDaysAgo: 300 }); prefs = { invoice_channels: ['email'] }; };
+
+  test('final accepted (naming A and B), crash, resumed 100 days later, today\'s set is A, B AND C: completes A and B with the ORIGINAL time; C is untouched and no second notice goes out', async () => {
+    finalNotice();
+    const old = new Date(Date.now() - 100 * DAY);
+    seedOldFinal({ occurred_at: old });
+    const out = await run(); // live = { A, B, C }
     expect(out.outcome).toBe('completed');
     expect(Schedule.completeFinal).toHaveBeenCalledTimes(1);
+    const args = Schedule.completeFinal.mock.calls[0][1];
+    expect([...args.namedInvoiceIds].sort()).toEqual(['inv-a', 'inv-b']);
+    expect(args.namedInvoiceIds).not.toContain('inv-c');
+    expect(new Date(args.deliveredAt).getTime()).toBe(old.getTime());
     expect(Schedule.markPaused).not.toHaveBeenCalled();
     expect(mockSendTemplate).not.toHaveBeenCalled(); // deduped: never a second final notice
     expect(mockLedger).toHaveLength(1);
   });
 
-  test('the additive `delivered` field of sendReminderChannels lists restored legs too (per-invoice callers ignore it)', async () => {
+  test.each([
+    ['names no invoices', { invoice_ids: [] }],
+    ['has unreadable invoice ids', { invoice_ids: '{not json' }],
+  ])('a restored delivery that %s completes NOTHING: held for the office, never today\'s membership', async (_name, over) => {
+    finalNotice();
+    seedOldFinal(over);
+    const out = await run();
+    expect(out).toMatchObject({ outcome: 'held', reason: 'delivered_evidence_unreadable' });
+    expect(Schedule.completeFinal).not.toHaveBeenCalled();
+    expect(Schedule.markHeld).toHaveBeenCalledWith(expect.anything(), 'delivered_evidence_unreadable', expect.anything());
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('the reservation row itself unreadable is the same hold', async () => {
+    finalNotice();
+    seedOldFinal();
+    const db = require('../models/db');
+    const impl = db.getMockImplementation();
+    // reads: recover-first progress (1), sendReminderChannels progress (2); the reservation row read (3) fails
+    db.mockImplementationOnce(impl); db.mockImplementationOnce(impl); db.mockImplementationOnce(() => { throw new Error('ledger down'); });
+    const out = await run();
+    expect(out).toMatchObject({ outcome: 'held', reason: 'delivered_evidence_unreadable' });
+    expect(Schedule.completeFinal).not.toHaveBeenCalled();
+  });
+
+  test('a non-final step restored from an old reservation still advances (nothing is completed on its say-so)', async () => {
+    setup({ stepIndex: 4, sentDaysAgo: 300, stepStatus: 'held' }); // held: the step is retried, not caught up to the final
+    prefs = { invoice_channels: ['email'] };
+    const key = `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`;
+    seedOldFinal({ metadata: { notificationEventKey: key, delivered: true, selectedChannels: ['email'] },
+      idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${key}`).digest('hex')}:email` });
+    expect((await run()).outcome).toBe('advanced');
+    expect(Schedule.advance).toHaveBeenCalledTimes(1);
+  });
+
+  test('sendReminderChannels reports restored legs with what their reservation recorded (additive; per-invoice callers ignore it)', async () => {
     const { sendReminderChannels } = require('../services/billing-reminder-delivery');
     const key = 'customer-dunning:s:1:d60_reminder';
-    const crypto = require('crypto');
+    const at = new Date(Date.now() - 100 * DAY);
     mockLedger.push({
-      id: 'r1', customer_id: CUSTOMER_ID, channel: 'email', source: 'x', occurred_at: new Date(Date.now() - 100 * DAY), invoice_ids: [],
+      id: 'r1', customer_id: CUSTOMER_ID, channel: 'email', source: 'x', occurred_at: at, invoice_ids: ['inv-a', 'inv-b'],
       idempotency_key: `billing-reminder:${crypto.createHash('sha256').update(`${CUSTOMER_ID}:${key}`).digest('hex')}:email`,
       metadata: { notificationEventKey: key, delivered: true },
     });
@@ -849,6 +892,47 @@ describe('a delivery older than the progress window is still a delivery (R2-2)',
       eventKey: key, channels: ['email'], metadata: {}, send: jest.fn(),
     });
     expect(out).toMatchObject({ complete: true, deliveredNow: [], delivered: ['email'] });
+    expect(out.restored).toEqual([{ channel: 'email', invoiceIds: ['inv-a', 'inv-b'], deliveredAt: at }]);
+  });
+});
+
+describe('the shadow run never repairs (A1)', () => {
+  const logger = require('../services/logger');
+  const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+
+  test('an accepted-but-unstamped email is READ as delivered (would settle) and the ledger is not stamped; the live run then repairs it', async () => {
+    prefs = { invoice_channels: ['email'] };
+    ContactLedger.markDelivered.mockResolvedValueOnce(false); // the crash between acceptance and the stamp
+    await run();
+    expect(mockEmailMessages).toHaveLength(1);
+    expect(rowFor('email').metadata.delivered).toBeUndefined();
+    ContactLedger.markDelivered.mockClear();
+    const emailDb = realRepair();
+
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    const database = shadowDb([{ ...schedule, id: SCHEDULE_ID, status: 'active', step_index: 4, next_touch_at: ago(0) }]);
+    await Runner.shadowRun(NOW, { database });
+    expect(lines()).toMatch(/SHADOW would settle customer=cust-0000-synthetic schedule=sched-0000-synthetic step=d60_reminder reason=already_delivered/);
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(emailDb.transaction).not.toHaveBeenCalled();
+    expect(database.writes).toEqual([]);
+    expect(rowFor('email').metadata.delivered).toBeUndefined(); // still unstamped: shadow did not repair
+
+    // the live path is unchanged: it repairs (stamps) from the same evidence
+    expect((await run()).outcome).toBe('advanced');
+    expect(ContactLedger.markDelivered).toHaveBeenCalled();
+    expect(rowFor('email').metadata.delivered).toBe(true);
+  });
+
+  test('reminderProgress passes the read-only option only when asked (default is the repairing view)', async () => {
+    const reminder = jest.requireActual('../services/billing-reminder-delivery');
+    const Reservation = require('../services/billing-email-reservation');
+    Reservation.repairAcceptedBillingEmailReservations.mockClear();
+    await reminder.reminderProgress(CUSTOMER_ID, 'invoice_followups_customer', ['email']);
+    expect(Reservation.repairAcceptedBillingEmailReservations.mock.calls[0][2]).toBeUndefined();
+    await reminder.reminderProgress(CUSTOMER_ID, 'invoice_followups_customer', ['email'], { repair: false });
+    expect(Reservation.repairAcceptedBillingEmailReservations.mock.calls[1][2]).toEqual({ readOnly: true });
   });
 });
 
@@ -866,25 +950,27 @@ describe('the injected database handle reaches every set resolve (R2-3)', () => 
   });
 });
 
+// the real repair over the in-memory email_messages, on a fake handle; counts any transaction (= write path)
+const realRepair = () => {
+  const actual = jest.requireActual('../services/billing-email-reservation');
+  const emailDb = jest.fn(() => {
+    let keys = null;
+    const q = {
+      whereIn(_col, list) { keys = list; return q; },
+      then: (resolve) => resolve(mockEmailMessages.filter((m) => !keys || keys.includes(m.idempotency_key))),
+    };
+    return q;
+  });
+  emailDb.transaction = jest.fn(async (fn) => fn((table) => {
+    const q = { where() { return q; }, whereNull() { return q; }, forUpdate() { return q; }, first: async () => (table === 'email_messages' ? mockEmailMessages[0] : undefined) };
+    return q;
+  }));
+  mockRepairImpl = (rows, _db, options) => actual.repairAcceptedBillingEmailReservations(rows, emailDb, options);
+  return emailDb;
+};
+
 describe('a crash between provider acceptance and the ledger stamp is recovered, never re-sent (P1)', () => {
   const emailOnly = () => { prefs = { invoice_channels: ['email'] }; };
-  // the real repair over the in-memory email_messages, on a fake handle
-  const useRealRepair = () => {
-    const actual = jest.requireActual('../services/billing-email-reservation');
-    const emailDb = jest.fn(() => {
-      let keys = null;
-      const q = {
-        whereIn(_col, list) { keys = list; return q; },
-        then: (resolve) => resolve(mockEmailMessages.filter((m) => !keys || keys.includes(m.idempotency_key))),
-      };
-      return q;
-    });
-    emailDb.transaction = async (fn) => fn((table) => {
-      const q = { where() { return q; }, whereNull() { return q; }, forUpdate() { return q; }, first: async () => (table === 'email_messages' ? mockEmailMessages[0] : undefined) };
-      return q;
-    });
-    mockRepairImpl = (rows) => actual.repairAcceptedBillingEmailReservations(rows, emailDb);
-  };
   // the process dies after the provider accepted, before markDelivered
   const crashBeforeStamp = () => ContactLedger.markDelivered.mockResolvedValueOnce(false);
 
@@ -899,7 +985,7 @@ describe('a crash between provider acceptance and the ledger stamp is recovered,
     expect(mockEmailMessages[0]).toMatchObject({ idempotency_key: `customer_dunning_email:${SCHEDULE_ID}:1:d60_reminder` });
     expect(JSON.parse(mockEmailMessages[0].payload_snapshot).collections_ledger_id).toBe(rowFor('email').id);
 
-    useRealRepair();
+    realRepair();
     const second = await run();
     expect(second).toMatchObject({ outcome: 'advanced', recovered: true });
     expect(mockSendTemplate).toHaveBeenCalledTimes(1); // still ONE email for the touch
@@ -916,7 +1002,7 @@ describe('a crash between provider acceptance and the ledger stamp is recovered,
     // 1) repair not wired: the old behaviour, held forever, still never a second email
     expect((await run()).outcome).toBe('held');
     // 2) the stored email names a DIFFERENT ledger row: not ours, not stamped
-    useRealRepair();
+    realRepair();
     mockEmailMessages[0].payload_snapshot = JSON.stringify({ collections_ledger_id: 'someone-elses-row' });
     expect((await run()).outcome).toBe('held');
     // 3) recipient is another customer

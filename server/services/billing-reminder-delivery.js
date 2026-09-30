@@ -75,10 +75,16 @@ async function persistPolicyWaivers(rowIds, waived) {
   }
 }
 
-async function reminderProgress(customerId, source, channels) {
+// `repair: false` is a read-only view for a caller that must not write (the
+// customer-dunning shadow run): accepted Email evidence still counts as
+// delivered in the returned events, but no reservation is stamped, resolved or
+// released. Every existing caller keeps the default (repair).
+async function reminderProgress(customerId, source, channels, { repair = true } = {}) {
   const rows = await db('collections_contact_ledger').where({ customer_id: customerId, source })
     .where('occurred_at', '>', new Date(Date.now() - 90 * 86400000));
-  const repaired = await BillingEmailReservation.repairAcceptedBillingEmailReservations(rows, db);
+  const repaired = await BillingEmailReservation.repairAcceptedBillingEmailReservations(
+    rows, db, repair ? undefined : { readOnly: true },
+  );
   const events = new Map();
   for (const row of rows) {
     const metadata = metadataOf(row);
@@ -97,6 +103,26 @@ async function reminderProgress(customerId, source, channels) {
   return [...events.values()].map((event) => ({ ...event,
     complete: legsSettled(channels, event.delivered, event.resolved, event.waived),
   }));
+}
+
+// The invoices and time a delivered reservation recorded, read straight from
+// its row. A delivery restored from a reservation older than reminderProgress'
+// 90-day window has no event to name them, and a caller that completes debt on
+// the strength of it (a final notice) must never substitute today's membership.
+// null fields = unreadable.
+async function restoredDelivery(entry, channel) {
+  try {
+    const row = await db('collections_contact_ledger').where({ id: entry.id }).first('invoice_ids', 'occurred_at');
+    let ids = row?.invoice_ids;
+    if (typeof ids === 'string') ids = JSON.parse(ids);
+    return {
+      channel,
+      invoiceIds: Array.isArray(ids) && ids.length ? ids.map(String) : null,
+      deliveredAt: row?.occurred_at || null,
+    };
+  } catch {
+    return { channel, invoiceIds: null, deliveredAt: null };
+  }
 }
 
 // `send` receives the leg's reservation so a producer can hand its ledger id
@@ -162,6 +188,7 @@ async function sendReminderChannels({
     .find((event) => event.metadata.notificationEventKey === eventKey)
     || { entries: [], delivered: new Set(), resolved: new Set(), waived: new Set() };
   const deliveredNow = [];
+  const restored = []; // legs found already delivered by the keyed reservation, with what it recorded
   const results = {};
   const pending = ['email', 'push', 'sms'].filter((channel) => channels.includes(channel)
     && !delivered.has(channel) && !resolved.has(channel));
@@ -176,7 +203,7 @@ async function sendReminderChannels({
     for (const channel of pending) {
       results[channel] = { sent: false, deliveryHeld: true, retryable: true, code: 'COLLECTIONS_POLICY' };
     }
-    return { complete: false, deliveredNow, results, delivered: [...delivered] };
+    return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
   const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   // Only a durable denial waives its leg; a spacing window keeps it owed.
@@ -196,7 +223,7 @@ async function sendReminderChannels({
         results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_WAIVER_REFRESH_FAILED' };
       }
     }
-    return { complete: false, deliveredNow, results, delivered: [...delivered] };
+    return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
   for (const [index, channel] of pending.entries()) {
     if (!verdictAllows(permitted[index])) { results[channel] = { sent: false, blocked: true, code: 'COLLECTIONS_POLICY' }; continue; }
@@ -212,7 +239,7 @@ async function sendReminderChannels({
     episodeRowIds.add(entry?.id);
     // A retry under the same key re-quotes: its claim refreshes the debt snapshot.
     const claim = await ContactLedger.claimAttempt(entry, reservation);
-    if (claim.delivered) { delivered.add(channel); continue; }
+    if (claim.delivered) { delivered.add(channel); restored.push(await restoredDelivery(entry, channel)); continue; }
     if (!claim.allowed) { results[channel] = { sent: false, deliveryHeld: true, code: 'REMINDER_OUTCOME_UNCONFIRMED' }; continue; }
     const result = await sendLeg(send, channel, entry);
     results[channel] = result;
@@ -224,7 +251,7 @@ async function sendReminderChannels({
     }
   }
   const complete = await settleEpisode(channels, { delivered, resolved, waived }, episodeRowIds);
-  return { complete, deliveredNow, results, delivered: [...delivered] };
+  return { complete, deliveredNow, results, delivered: [...delivered], restored };
 }
 
 // A waiver only settles the episode once it is durable: a reused row keeps
