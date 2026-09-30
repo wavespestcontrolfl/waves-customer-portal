@@ -408,6 +408,21 @@ describe('runPlanHoldLifecycle', () => {
     expect(renderRequiredSmsTemplate).toHaveBeenLastCalledWith('plan_hold_resume_reminder', expect.objectContaining({ resume_date: displayOf(daysOut(5)) }), expect.anything());
   });
 
+  test('no restart text for a hold whose accept has not finished, or one undone just before the send', async () => {
+    holdSeed({ resume_on: daysOut(2), moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false }) }, [lawnVisit('back', daysOut(3))]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
+
+    holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { mockState.tables.plan_holds[0].status = 'cancelled'; return openTrx(cb); };
+    try {
+      await sendDueRestartTexts(['h1']);
+    } finally { db.transaction = openTrx; }
+    expect(mockSms).not.toHaveBeenCalled();
+  });
+
   test('a first visit back that changed between the read and the send is not texted with the stale date', async () => {
     holdSeed({ resume_on: daysOut(2) }, [lawnVisit('back', daysOut(3))]);
     const db = require('../models/db');

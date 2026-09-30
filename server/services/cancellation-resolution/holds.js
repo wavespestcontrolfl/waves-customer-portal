@@ -582,8 +582,12 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   if (next.status === 'completed' || nextOn < today || nextOn > addDays(today, 7)) return 'not_due';
   const sent = await db.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`plan-hold-reminder:${hold.id}`]);
-    const live = await trx('plan_holds').where({ id: hold.id }).first('reminder_sent_at');
+    // Row-locked against cancelHold / the resume CAS: only a standing hold
+    // of a finished accept is texted (a record without the marker predates
+    // it and counts as finished).
+    const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('reminder_sent_at', 'status', 'moved_visits');
     if (!live || live.reminder_sent_at) return null;
+    if (!['active', 'resumed'].includes(live.status) || readRecord(live.moved_visits).acceptCommitted === false) return 'stale';
     // The first visit back is read again, and its row held FOR SHARE for
     // the send: a reschedule or cancel that landed since the read above
     // means the date is stale (the next run names the real one), and one
