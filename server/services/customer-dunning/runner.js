@@ -212,13 +212,21 @@ async function endForSet(run, set) {
 const sendable = (set) => (set.kind === 'multi' || set.kind === 'single') && set.activeCount > 0;
 
 // STAGE: catch up to the calendar, never beyond the final step. Nothing
-// customer-facing happens, so no interaction row.
+// customer-facing happens, so no interaction row. A HELD schedule is the
+// exception: its current stage was due and not delivered (markHeld promises to
+// retry THAT step), so clearing the hold retries it — a Day 60 reminder held
+// past Day 90 goes out as Day 60 first, and the next stage follows on its own
+// spacing — instead of jumping to the final notice by calendar age. Catch-up is
+// for a stage nobody attempted (a late promotion, a cron gap, a resume).
 async function catchUpStage(run, set) {
   run.rows = null;
   const rows = Schedule.rowsInSet(await memberRows(run), set);
   run.rows = rows;
   const oldest = oldestActive(rows);
-  const stage = oldest ? Schedule.stageFor(Followups.sequenceAnchor(oldest), run.now, run.schedule.step_index) : Number(run.schedule.step_index);
+  const attemptedAndHeld = run.schedule.status === 'held';
+  const stage = oldest && !attemptedAndHeld
+    ? Schedule.stageFor(Followups.sequenceAnchor(oldest), run.now, run.schedule.step_index)
+    : Number(run.schedule.step_index);
   if (stage > Number(run.schedule.step_index)) {
     logger.info(`[customer-dunning] stage_catch_up schedule ${run.schedule.id}: ${run.schedule.step_index} -> ${stage}`);
     if (!await Schedule.writeStage(run.schedule, stage, run)) return outcome('stale');
@@ -261,7 +269,7 @@ function attemptSend(run, set) {
   const ctx = {
     schedule: run.schedule, step: run.step, customer: run.customer, set, channels: run.sendChannels,
     explicit: run.explicit, eventKey: run.eventKey, operatorInitiated: run.operatorInitiated,
-    snapshot: Boundary.snapshotOf(run.schedule.customer_id, set), claimStamp: run.claimStamp, database: run.database,
+    snapshot: Boundary.snapshotOf(run.schedule.customer_id, set, { scheduleId: run.schedule.id, claimStamp: run.claimStamp }), claimStamp: run.claimStamp, database: run.database,
   };
   return sendReminderChannels({
     customerId: run.schedule.customer_id,

@@ -36,7 +36,20 @@ jest.mock('../services/email-template-library', () => ({
 
 // The billing email authority: models what the real one does around the
 // handoff — runs the caller's preSendCheck on ITS transaction, then dispatches.
-const MOCK_TRX = { isTransaction: true, tag: 'authority-trx' };
+// The boundary re-reads the schedule row (status + claim stamp) on whatever
+// handle it is given; the pool mock (models/db) and the transaction both serve it.
+let mockScheduleRow = null;
+const mockLocked = [];
+const mockScheduleReader = (table) => {
+  const q = {
+    where() { return q; },
+    select() { return q; },
+    forUpdate() { mockLocked.push(table); return q; },
+    first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : undefined),
+  };
+  return q;
+};
+const MOCK_TRX = Object.assign((...a) => mockScheduleReader(...a), { isTransaction: true, tag: 'authority-trx' });
 const mockLoadContext = jest.fn();
 const mockBlocked = (code, reason, { retryable = false } = {}) => ({
   sent: false, provider: 'email', providerMessageId: null, deliveryOutcome: 'not_sent', blocked: true, code, reason,
@@ -109,6 +122,8 @@ jest.mock('../models/db', () => {
       where(cond) { if (cond && cond.id) target = cond.id; return chain; },
       whereIn() { return chain; },
       whereRaw() { return chain; },
+      select() { return chain; },
+      forUpdate() { mockLocked.push(table); return chain; },
       update: async (patch) => {
         // the only ledger UPDATE this engine issues itself: clearing a stale never_contacted stamp
         if (table === 'collections_contact_ledger' && String(patch?.metadata?.__raw || '').includes("- 'never_contacted'")) {
@@ -117,7 +132,7 @@ jest.mock('../models/db', () => {
         }
         return 1;
       },
-      first: async () => undefined,
+      first: async () => (table === 'customer_dunning_schedules' ? mockScheduleRow : undefined),
       then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger : []),
     };
     return chain;
@@ -191,7 +206,7 @@ function rowsFor(ids, sentDaysAgo = 60, stepIndex = 4) {
   }));
 }
 
-function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-c'] } = {}) {
+function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-c'], stepStatus = 'active' } = {}) {
   customer = { id: CUSTOMER_ID, first_name: 'Pat', email: 'pat@example.test', phone: '+19415550100', deleted_at: null };
   prefs = undefined; // legacy: no explicit billing channels
   smsTemplateRow = { is_active: true };
@@ -204,11 +219,12 @@ function setup({ stepIndex = 4, sentDaysAgo = 60, ids = ['inv-a', 'inv-b', 'inv-
     return q;
   });
   schedule = {
-    id: SCHEDULE_ID, customer_id: CUSTOMER_ID, episode: 1, status: 'active', step_index: stepIndex,
+    id: SCHEDULE_ID, customer_id: CUSTOMER_ID, episode: 1, status: stepStatus, step_index: stepIndex,
     next_touch_at: ago(0), touches_sent: stepIndex, held_since: null, hold_alerted_at: null, link_digest: null, link_url: null,
   };
   memberSeqRows = rowsFor(ids, sentDaysAgo, stepIndex);
   live = makeSet(ids);
+  mockScheduleRow = { id: SCHEDULE_ID, status: stepStatus, touch_claimed_at: NOW };
   Schedule.claim.mockResolvedValue({ schedule: { ...schedule }, claimStamp: NOW, memberSeqIds: [] });
   Schedule.activeMemberRows.mockImplementation(async () => memberSeqRows);
   Schedule.advance.mockResolvedValue(true);
@@ -245,6 +261,7 @@ function acceptingEmail() {
 beforeEach(() => {
   jest.clearAllMocks();
   mockLedger.length = 0;
+  mockLocked.length = 0;
   process.env.GATE_DUNNING_LADDER_90 = 'true';
   delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
   setup();
@@ -471,6 +488,112 @@ describe('the boundary check at every rail (A-1, A-6, A-12, A-13, B-15, B-16, A-
     expect(out.outcome).toBe('advanced');
     const payload = mockSendTemplate.mock.calls.at(-1)[0].payload;
     expect(payload.invoice_count).toBe('2');
+  });
+});
+
+describe('the boundary re-reads the SCHEDULE row: a control write after the claim vetoes the send (P1)', () => {
+  const noDelivery = () => {
+    expect(mockLedger.some((r) => r.metadata.delivered === true)).toBe(false);
+    expect(Schedule.advance).not.toHaveBeenCalled();
+    expect(Schedule.completeFinal).not.toHaveBeenCalled();
+    expect(interactions).toHaveLength(0);
+  };
+  // the admin acts AFTER the claim and the set read, BEFORE the provider call
+  const controlWriteAfterResolve = (patch) => {
+    let n = 0;
+    mockResolve.mockImplementation(async () => {
+      n += 1;
+      if (n === 1) mockScheduleRow = { ...mockScheduleRow, ...patch };
+      return live;
+    });
+  };
+
+  test.each([
+    ['admin pause', { status: 'paused' }],
+    ['admin release', { status: 'released' }],
+    ['closed by another run', { status: 'completed' }],
+    ['autopay hook took it over', { status: 'autopay_hold' }],
+    ['the claim was rotated to a successor', { touch_claimed_at: new Date(NOW.getTime() + 1000) }],
+    ['the claim was cleared', { touch_claimed_at: null }],
+  ])('%s: NOTHING is sent on any leg, the schedule is not advanced, and the refusal is not a set re-render', async (_name, patch) => {
+    controlWriteAfterResolve(patch);
+    const out = await run();
+    expect(out.outcome).toBe('held');
+    noDelivery();
+    // the set authority is never even asked at the boundary once the row is gone from us
+    expect(mockResolve).toHaveBeenCalledTimes(1);
+    expect(mockSendMessage.mock.calls.every(([a]) => a.body)).toBe(true);
+    expect(Schedule.markPaused).not.toHaveBeenCalled();
+  });
+
+  test('the refusal is the retryable DUNNING_SCHEDULE_CHANGED code on the SMS hook, the push/email transaction, and the operator handoff', async () => {
+    mockScheduleRow = { ...mockScheduleRow, status: 'paused' };
+    const check = Boundary.check(Boundary.snapshotOf(CUSTOMER_ID, makeSet(), { scheduleId: SCHEDULE_ID, claimStamp: NOW }));
+    for (const args of [{ channel: 'sms' }, { channel: 'push', database: MOCK_TRX }, { channel: 'email', database: MOCK_TRX }]) {
+      expect(await check(args)).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED, retryable: true });
+    }
+    mockResolve.mockImplementation(async () => live);
+    await run({ operatorInitiated: true, force: true });
+    noDelivery();
+  });
+
+  test('a missing schedule row, or a failing read, is the same refusal (never a send)', async () => {
+    const check = Boundary.check(Boundary.snapshotOf(CUSTOMER_ID, makeSet(), { scheduleId: SCHEDULE_ID, claimStamp: NOW }));
+    mockScheduleRow = undefined;
+    expect(await check({})).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED });
+    mockScheduleRow = { id: SCHEDULE_ID, status: 'active', touch_claimed_at: NOW };
+    mockResolve.mockRejectedValue(new Error('down'));
+    expect(await check({})).toMatchObject({ ok: false });
+  });
+
+  test('control: a still-open, still-ours schedule sends normally; the transaction read locks the row (a control write waits), the pool read does not', async () => {
+    mockResolve.mockImplementation(async () => live);
+    expect((await run()).outcome).toBe('advanced');
+    expect(mockLocked).toContain('customer_dunning_schedules');
+    mockLocked.length = 0;
+    const check = Boundary.check(Boundary.snapshotOf(CUSTOMER_ID, live, { scheduleId: SCHEDULE_ID, claimStamp: NOW }));
+    expect(await check({})).toEqual({ ok: true });
+    expect(mockLocked).toEqual([]);
+    expect(await check({ database: MOCK_TRX })).toEqual({ ok: true });
+    expect(mockLocked).toEqual(['customer_dunning_schedules']);
+  });
+
+  test('a HELD schedule (status held, claim ours) is sendable', async () => {
+    setup({ stepStatus: 'held' });
+    expect((await run()).outcome).toBe('advanced');
+  });
+});
+
+describe('a held stage is retried, not skipped by calendar age (P1)', () => {
+  // step index 4 = Day 60, 5 = Day 90; the debt is now 95 days old
+  test('Day 60 held until after Day 90: on release it sends the Day 60 reminder (no stage write, plain advance); the final notice is a later touch', async () => {
+    setup({ stepIndex: 4, sentDaysAgo: 95, stepStatus: 'held' });
+    const out = await run();
+    expect(out.outcome).toBe('advanced');
+    expect(Schedule.writeStage).not.toHaveBeenCalled();
+    expect(mockSendTemplate.mock.calls.every(([a]) => a.templateKey === 'invoice.followup_combined_60_day')).toBe(true);
+    expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    expect(Schedule.advance).toHaveBeenCalledTimes(1);
+    expect(Schedule.completeFinal).not.toHaveBeenCalled();
+    expect(Schedule.advance.mock.calls[0][0]).toMatchObject({ step_index: 4 });
+  });
+
+  test('the same schedule ACTIVE (a stage nobody attempted: late promotion / cron gap) still catches up to the calendar and sends the final notice', async () => {
+    setup({ stepIndex: 4, sentDaysAgo: 95, stepStatus: 'active' });
+    const out = await run();
+    expect(Schedule.writeStage).toHaveBeenCalledWith(expect.objectContaining({ id: SCHEDULE_ID }), 5, expect.anything());
+    expect(mockSendTemplate.mock.calls.every(([a]) => a.templateKey === 'invoice.followup_combined_90_day')).toBe(true);
+    expect(out.outcome).toBe('completed');
+  });
+
+  test('a held FINAL step keeps retrying the final notice; and the held retry still sends nothing while the hold persists', async () => {
+    setup({ stepIndex: 5, sentDaysAgo: 100, stepStatus: 'held' });
+    live = makeSet(['inv-a', 'inv-b', 'inv-c'], { kind: 'hold', reason: 'member_paused' });
+    expect(await run()).toMatchObject({ outcome: 'held', reason: 'member_paused' });
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    live = makeSet(['inv-a', 'inv-b', 'inv-c']);
+    expect((await run()).outcome).toBe('completed');
+    expect(mockSendTemplate.mock.calls.at(-1)[0].templateKey).toBe('invoice.followup_combined_90_day');
   });
 });
 

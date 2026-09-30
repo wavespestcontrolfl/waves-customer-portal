@@ -25,6 +25,7 @@ const Schedule = require('../services/customer-dunning/schedule');
 const Boundary = require('../services/customer-dunning/boundary');
 const Runner = require('../services/customer-dunning/runner');
 const Send = require('../services/customer-dunning/send');
+const Admin = require('../services/customer-dunning/admin');
 
 const connection = process.env.APP_TEST_DATABASE_URL;
 const postgres = connection ? describe : describe.skip;
@@ -594,6 +595,63 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       const { s, claim } = await claimed({ step_index: 2, link_digest: 'a'.repeat(64), link_url: 'u' });
       expect(await Schedule.writeStage(claim.schedule, 4, { claimStamp: claim.claimStamp, database: app })).toBe(true);
       expect(await fresh(s.id)).toMatchObject({ step_index: 4, link_digest: null, link_url: null });
+    });
+  });
+
+  // ── the boundary re-reads the schedule row (P1: control writes after the claim) ──
+  describe('the send boundary and control writes', () => {
+    async function claimedWithBoundary() {
+      const c = await customer();
+      const m = await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      const claim = await Schedule.claim(s.id, NOW, { database: app });
+      mockResolve.mockImplementation(async () => setFor([m]));
+      const check = Boundary.check(Boundary.snapshotOf(c, setFor([m]), { scheduleId: s.id, claimStamp: claim.claimStamp }));
+      return { c, s, claim, check };
+    }
+    const fresh = (id) => app('customer_dunning_schedules').where({ id }).first();
+
+    test('control: an open schedule under OUR claim passes on the pool and on a transaction', async () => {
+      const { check } = await claimedWithBoundary();
+      expect(await check({ database: app })).toEqual({ ok: true });
+      await app.transaction(async (trx) => { expect(await check({ database: trx })).toEqual({ ok: true }); });
+    });
+
+    test('pause after the claim: the boundary refuses (pool and transaction) and the schedule stays paused', async () => {
+      const { s, check } = await claimedWithBoundary();
+      expect(await Admin.pause(s.id, { database: app })).toEqual({ ok: true });
+      expect(await check({ database: app })).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED, retryable: true });
+      await app.transaction(async (trx) => {
+        expect(await check({ database: trx })).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED });
+      });
+      expect(await fresh(s.id)).toMatchObject({ status: 'paused' });
+    });
+
+    test('release / close after the claim: the boundary refuses and the schedule stays released', async () => {
+      const { s, check } = await claimedWithBoundary();
+      expect(await Admin.release(s.id, { now: NOW, database: app })).toMatchObject({ ok: true });
+      expect(await check({ database: app })).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED });
+      expect(await fresh(s.id)).toMatchObject({ status: 'released' });
+    });
+
+    test('a successor that replaced our claim (TTL expiry) makes our boundary refuse', async () => {
+      const { s, check } = await claimedWithBoundary();
+      await app('customer_dunning_schedules').where({ id: s.id }).update({ touch_claimed_at: new Date(NOW.getTime() + 60000) });
+      expect(await check({ database: app })).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED });
+    });
+
+    test('a pause cannot interleave with a boundary transaction: it waits for the row lock the check took, then lands', async () => {
+      const { s, check } = await claimedWithBoundary();
+      let pauseSettled = false;
+      let pausing;
+      await app.transaction(async (trx) => {
+        expect(await check({ database: trx })).toEqual({ ok: true }); // locks the row FOR UPDATE
+        pausing = Admin.pause(s.id, { database: app }).then((out) => { pauseSettled = true; return out; });
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        expect(pauseSettled).toBe(false); // the dispatch window: the control write is queued behind us
+      });
+      expect(await pausing).toEqual({ ok: true });
+      expect(await fresh(s.id)).toMatchObject({ status: 'paused' });
     });
   });
 
