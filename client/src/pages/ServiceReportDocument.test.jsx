@@ -377,6 +377,26 @@ describe('ServiceReportDocument (PDF work-order layout)', () => {
     expect(text).toContain('That gives today’s treatment time to work.');
   });
 
+  it('hold then water-in: a hero task carrying both banner lines prints each line once', () => {
+    const line1 = 'Skip your turf watering until Thu 3 PM.';
+    const line2 = 'After that, water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.';
+    const line3 = 'Run it even if it is not your usual day.';
+    const data = {
+      ...BASE_DATA,
+      serviceLine: 'lawn',
+      reportV2: {
+        banner: { state: 'hold_then_water_in', lines: [line1, line2, line3], expiresAt: '2999-01-01T00:00:00.000Z' },
+        aftercare: { watering: `${line1} ${line2} ${line3}`, holdTask: `${line1} ${line2}`, wateringHold: true, evidenceSource: 'product_instruction', needsReview: false },
+        snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: `${line1} ${line2}` },
+        insights: [{ category: 'water', headline: 'Water', customerAction: line2 }],
+      },
+    };
+    const { container } = render(<ServiceReportDocument data={data} token="tok123" />);
+    const text = container.textContent;
+    expect(text.split(line1)).toHaveLength(2);
+    expect(text.split(line2)).toHaveLength(2);
+  });
+
   it('without a banner the recommendations list is unchanged', () => {
     const line1 = 'Skip your turf watering until Thu 3 PM.';
     const data = { ...BASE_DATA, serviceLine: 'lawn', reportV2: { aftercare: { watering: line1 }, snapshot: { overallScore: 86, statusHeadline: 'Lawn looking strong', customerAction: 'Water the front strip by hand.' } } };

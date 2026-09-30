@@ -504,7 +504,8 @@ function buildAftercare(applications, opts = {}) {
       waterInRequired: true,
       wateringHold: false,
       creditableWaterIn: false,
-      waterInTask: instruction.lines[1].replace(/^After that, water in/, 'Water in'),
+      // The banner's own water-in line, verbatim (the PDF strips banner lines).
+      waterInTask: instruction.lines[1],
     });
   }
   if (phase) {

@@ -869,7 +869,8 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(resolveLawnAftercare(during.aftercare, during.water.weekPlan).verdict).toBe('hold');
     const after = at('2026-10-01T19:00:00Z'); // hold end, Thu 3 PM
     expect(after.aftercare).toMatchObject({ wateringHold: false, creditableWaterIn: false, waterInRequired: true });
-    expect(after.aftercare.waterInTask).toBe('Water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.');
+    expect(after.aftercare.waterInTask).toBe('After that, water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.');
+    expect(after.aftercare.waterInTask).toBe(instruction.lines[1]);
     expect(resolveLawnAftercare(after.aftercare, after.water.weekPlan).verdict).toBe('none');
     expect(after.snapshot.customerAction).toContain(after.aftercare.waterInTask);
     expect(after.snapshot.customerAction).not.toContain('Skip your turf watering');

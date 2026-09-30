@@ -776,14 +776,15 @@ export default function ServiceReportDocument({ data, token }) {
   if (hasActualTreatment) pushRec(data.reportV2?.aftercare?.watering);
   // A visit with a server watering instruction (banner: hold / water-in) prints
   // it ONCE, through aftercare.watering above. The hero task, follow-up and
-  // insight actions restate the banner's first line verbatim, so that sentence
-  // is stripped from them (any other advice in the same action stays).
-  const bannerLine = hasActualTreatment
+  // insight actions restate banner lines verbatim (a hold-then-water-in hero
+  // carries both steps, and the water-in step alone once the hold ends), so
+  // every banner line is stripped from them (any other advice stays).
+  const bannerLines = hasActualTreatment
     && ['hold', 'water_in', 'hold_then_water_in'].includes(data.reportV2?.banner?.state)
-    ? data.reportV2.banner.lines?.[0] : null;
+    ? (data.reportV2.banner.lines || []).filter((line) => typeof line === 'string' && line) : [];
   const pushAction = (text) => {
-    if (!bannerLine) { pushRec(text); return; }
-    pushRec(String(text || '').split(bannerLine).join(' ').replace(/\s+/g, ' '));
+    if (!bannerLines.length) { pushRec(text); return; }
+    pushRec(bannerLines.reduce((acc, line) => acc.split(line).join(' '), String(text || '')).replace(/\s+/g, ' '));
   };
   pushRec(v2NextMove);
   pushRec(termiteNextMove);
