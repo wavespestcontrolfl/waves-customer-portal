@@ -405,23 +405,35 @@ const ROUTE_DECISION_REFRESH_COLUMNS = [
   'created_at',
 ];
 
-// Query builder (await it). Insert-or-refresh on the recording-keyed unique
-// index. `fence` ({ callLogId, processingToken }) scopes the REFRESH to the
-// pass that still owns the call's processing_token, exactly like the
-// processor's other ownership fences — a superseded worker can insert the
-// first row for a key but never overwrite a newer pass's decision.
-function upsertRouteDecision(conn, decision, fence = null) {
-  const query = conn('route_decisions')
-    .insert(decision)
-    .onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid'])
-    .merge(ROUTE_DECISION_REFRESH_COLUMNS);
+// Insert-or-refresh in two statements, so the INSERT stays TARGETLESS
+// (ON CONFLICT DO NOTHING names no constraint: tolerant of BOTH the legacy
+// three-column constraint and the recording-keyed index during a rolling
+// deploy, Codex #3736 r9 P1 — Postgres cannot do a targetless DO UPDATE):
+//   1. INSERT ... ON CONFLICT DO NOTHING (the first pass for a key lands here);
+//   2. a keyed UPDATE of the refresh columns (a later pass lands here).
+// `fence` ({ callLogId, processingToken }) scopes the REFRESH to the pass that
+// still owns the call's processing_token, exactly like the processor's other
+// ownership fences — a superseded worker can insert a first row for a key but
+// never overwrite a newer pass's decision. Returns a promise (await it).
+async function upsertRouteDecision(conn, decision, fence = null) {
+  await conn('route_decisions').insert(decision).onConflict().ignore();
+  const refresh = {};
+  for (const col of ROUTE_DECISION_REFRESH_COLUMNS) refresh[col] = decision[col];
+  const update = conn('route_decisions')
+    .where({
+      call_log_id: decision.call_log_id,
+      decision_version: decision.decision_version,
+      mode: decision.mode,
+      recording_sid: decision.recording_sid,
+    })
+    .update(refresh);
   if (fence && fence.callLogId && fence.processingToken) {
-    query.whereRaw(
+    update.whereRaw(
       'EXISTS (SELECT 1 FROM call_log WHERE call_log.id = ? AND call_log.processing_token = ?)',
       [fence.callLogId, fence.processingToken],
     );
   }
-  return query;
+  return update;
 }
 
 function buildRouteDecision({

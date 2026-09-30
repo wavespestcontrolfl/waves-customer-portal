@@ -545,27 +545,48 @@ describe('the effective gate needs BOTH switches (codex r2 P1)', () => {
 });
 
 describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => {
+  // A recording conn: captures each statement's SQL so the shape is asserted
+  // without a database (the PostgreSQL suite proves the behavior).
   const knex = require('knex')({ client: 'pg' });
-  const decision = { call_log_id: 'c1', decision_version: 'v2-1.50.0', mode: 'enforce', recording_sid: 'RE1', final_action_taken: 'auto_route' };
+  const decision = buildRouteDecision({ callLogId: 'c1', extraction: extraction(), routingResult: { allowed: true }, action: 'auto_route', recordingSid: 'RE1' });
+  function recordingConn() {
+    const sqls = [];
+    const conn = (table) => {
+      const qb = knex(table);
+      qb.then = (res, rej) => { sqls.push(qb.toSQL()); return Promise.resolve([]).then(res, rej); };
+      return qb;
+    };
+    return { conn, sqls };
+  }
 
-  test('insert-or-refresh on the recording-keyed index; decision columns and created_at only', () => {
-    const q = upsertRouteDecision(knex, decision, { callLogId: 'c1', processingToken: 'tok' }).toSQL();
-    expect(q.sql).toMatch(/on conflict \("call_log_id", "decision_version", "mode", "recording_sid"\) do update set/i);
-    for (const col of ROUTE_DECISION_REFRESH_COLUMNS) expect(q.sql).toContain(`"${col}" = excluded."${col}"`);
+  test('a TARGETLESS insert (rolling-deploy safe) then a keyed refresh of decision columns and created_at only', async () => {
+    const { conn, sqls } = recordingConn();
+    await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
+    expect(sqls).toHaveLength(2);
+    expect(sqls[0].sql).toMatch(/insert into "route_decisions"[\s\S]*on conflict do nothing/i);
+    expect(sqls[0].sql).not.toMatch(/on conflict \(/i);
+    const upd = sqls[1].sql;
+    expect(upd).toMatch(/^update "route_decisions" set/i);
+    for (const col of ROUTE_DECISION_REFRESH_COLUMNS) expect(upd).toContain(`"${col}" = ?`);
     // outcome linkage is never refreshed
-    expect(q.sql).not.toMatch(/"created_scheduled_service_id" = excluded/);
-    expect(q.sql).not.toMatch(/"sms_enqueued" = excluded/);
+    expect(upd).not.toContain('created_scheduled_service_id');
+    expect(upd).not.toContain('sms_enqueued');
+    // keyed on call / version / mode / recording
+    for (const col of ['call_log_id', 'decision_version', 'mode', 'recording_sid']) expect(upd).toContain(`"${col}" = ?`);
     expect(ROUTE_DECISION_REFRESH_COLUMNS).toContain('created_at');
   });
 
-  test('the refresh is fenced to the pass that owns the processing token', () => {
-    const q = upsertRouteDecision(knex, decision, { callLogId: 'c1', processingToken: 'tok' }).toSQL();
-    expect(q.sql).toMatch(/where EXISTS \(SELECT 1 FROM call_log WHERE call_log\.id = \? AND call_log\.processing_token = \?\)/i);
-    expect(q.bindings.slice(-2)).toEqual(['c1', 'tok']);
+  test('the refresh is fenced to the pass that owns the processing token', async () => {
+    const { conn, sqls } = recordingConn();
+    await upsertRouteDecision(conn, decision, { callLogId: 'c1', processingToken: 'tok' });
+    expect(sqls[1].sql).toMatch(/EXISTS \(SELECT 1 FROM call_log WHERE call_log\.id = \? AND call_log\.processing_token = \?\)/i);
+    expect(sqls[1].bindings.slice(-2)).toEqual(['c1', 'tok']);
   });
 
-  test('no fence handed: unfenced refresh (audit/backfill callers)', () => {
-    expect(upsertRouteDecision(knex, decision).toSQL().sql).not.toMatch(/EXISTS/);
+  test('no fence handed: unfenced refresh (audit/backfill callers)', async () => {
+    const { conn, sqls } = recordingConn();
+    await upsertRouteDecision(conn, decision);
+    expect(sqls[1].sql).not.toMatch(/EXISTS/);
   });
 
   test('both processor lanes write through it and nothing writes a route decision with a bare ignore', () => {
