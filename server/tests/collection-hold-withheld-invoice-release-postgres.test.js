@@ -3,13 +3,14 @@
  * invoice whose pay link the hold withheld, at once, through the normal
  * scheduled-send queue.
  *
- * Real Postgres (COLLECTION_HOLD_TEST_DATABASE_URL, a private migrated
- * nonproduction database; skipped without it). Synthetic names only.
+ * Real Postgres (COLLECTION_HOLD_TEST_DATABASE_URL, else CI's
+ * REPAIR_TEST_DATABASE_URL — a migrated nonproduction database; skipped
+ * without either). Synthetic names only.
  */
-const connection = process.env.COLLECTION_HOLD_TEST_DATABASE_URL;
+const connection = process.env.COLLECTION_HOLD_TEST_DATABASE_URL || process.env.REPAIR_TEST_DATABASE_URL;
 
 jest.mock('../models/db', () => require('knex')({
-  client: 'pg', connection: process.env.COLLECTION_HOLD_TEST_DATABASE_URL, pool: { min: 0, max: 4 },
+  client: 'pg', connection: process.env.COLLECTION_HOLD_TEST_DATABASE_URL || process.env.REPAIR_TEST_DATABASE_URL, pool: { min: 0, max: 4 },
 }));
 jest.mock('../models/marker-db', () => () => require('../models/db'));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -162,7 +163,8 @@ run('collections dispute hold: withheld-invoice marker and release send (postgre
       const holdId = await placeHold(c);
       const marked = await newInvoice(c, { scheduled_send_error: MARKER });
       await db.raw(`CREATE OR REPLACE FUNCTION b10_fail_queue() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'queue down (synthetic)'; END $$ LANGUAGE plpgsql`);
-      await db.raw("CREATE TRIGGER b10_fail_queue_trg BEFORE UPDATE ON invoices FOR EACH ROW WHEN (OLD.status = 'draft' AND NEW.status = 'scheduled') EXECUTE FUNCTION b10_fail_queue()");
+      // Scoped to this test's invoice: CI shares the database across workers.
+      await db.raw(`CREATE TRIGGER b10_fail_queue_trg BEFORE UPDATE ON invoices FOR EACH ROW WHEN (OLD.id = '${marked}' AND OLD.status = 'draft' AND NEW.status = 'scheduled') EXECUTE FUNCTION b10_fail_queue()`);
       try {
         const res = await Admin.releaseCollectionHold(c);
         expect(res).toMatchObject({ ok: true, released: 1, withheldSend: { ok: false, queued: [] } });
