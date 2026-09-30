@@ -1792,9 +1792,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // RESERVICE_LANE_WORD_PATTERNS — pass the actual export through so this
     // mock stays byte-identical to the real module on everything this suite
     // doesn't itself stub out.
-    const { RESERVICE_LANE_WORD_PATTERNS } = jest.requireActual('../services/reservice-scheduler');
+    // Codex round-7 (PR #5336): reserviceExcludedSpecialtyInPromise reads the
+    // real reportedReserviceExcludedSpecialty the same way.
+    const { RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty } = jest.requireActual('../services/reservice-scheduler');
     jest.doMock('../services/reservice-scheduler', () => ({
-      reserviceSelfServeEnabled: () => selfServe, loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS,
+      reserviceSelfServeEnabled: () => selfServe, loadEligibleReserviceLanes, RESERVICE_LANE_WORD_PATTERNS, reportedReserviceExcludedSpecialty,
     }));
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
@@ -1934,6 +1936,50 @@ describe('free re-service is an entitlement resolved through the existing mechan
         customerId: 'cust-1',
         promisedLanes: ['pest'],
       })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+    });
+
+    // Codex round-7 (PR #5336) P2 #1: a reviewer edits a valid pest draft into
+    // an excluded-specialty promise. That names no pest/lawn lane, so the
+    // recheck used to fall back to the ['pest'] snapshot and pass.
+    test.each([
+      "We'll send your free termite re-service link.",
+      'Good news — your free rodent re-service is covered; we will text the link now.',
+      'Your free mosquito re-service is on us, link coming.',
+    ])('an edit into an excluded-specialty promise is blocked even when the snapshot lane is live-eligible: %s', async (outgoingBody) => {
+      const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['pest'] });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody, customerId: 'cust-1', promisedLanes: ['pest'],
+      })).resolves.toMatch(/excluded specialty/);
+      expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
+    });
+
+    // Codex round-7 (PR #5336) P2 #2: lane words in the acknowledgement are not
+    // part of the offer — only the promise clause names the lane.
+    test('a location word in the acknowledgement ("yard") never adds a lawn lane; the promise clause decides', async () => {
+      const { drafter } = loadWith({ lanes: ['pest'] }); // pest-only customer
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: "Sorry the ants are back in your yard. Your free pest re-service is covered; we'll text the link now.",
+        customerId: 'cust-1',
+        promisedLanes: ['pest'],
+      })).resolves.toBeNull();
+    });
+
+    test('a promise clause naming no lane still falls back to the snapshot even when the acknowledgement names another lane', async () => {
+      const { drafter } = loadWith({ lanes: ['lawn'] }); // pest no longer eligible
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: "Sorry the ants are back in your yard, we'll send your free re-service link now.",
+        customerId: 'cust-1',
+        promisedLanes: ['pest'],
+      })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+    });
+
+    test('"free lawn re-service" still resolves to lawn (blocked when only pest is live-eligible)', async () => {
+      const { drafter } = loadWith({ lanes: ['pest'] });
+      await expect(drafter.reservicePromiseStillEligible({
+        outgoingBody: "Sorry the ants are back. We'll send your free lawn re-service link now.",
+        customerId: 'cust-1',
+        promisedLanes: ['pest'],
+      })).resolves.toMatch(/no longer eligible for a free lawn re-service/);
     });
   });
 
@@ -2451,6 +2497,32 @@ describe('round-7 deterministic guards (gate on)', () => {
     expect(drafter.validateReserviceOffer({
       reply: 'Good news — free weed-treatment re-service link is on its way.', factsBlock: pestOnly, intendedActions: sendLink,
     }).ok).toBe(false);
+  });
+
+  // Codex round-7 (PR #5336) P2 #2: the lane is read from the re-service
+  // PROMISE clause, not every lane word in the reply — "yard" in the
+  // acknowledgement is a location, not a lawn offer.
+  test('validateReserviceOffer: an acknowledgement naming "yard" does not turn a pest promise into a pest+lawn one', () => {
+    const pestOnly = `X\n${drafter.reserviceFactLine(['pest'])}\nBILLING:`;
+    const lawnOnly = `X\n${drafter.reserviceFactLine(['lawn'])}\nBILLING:`;
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    const reply = "Sorry the ants are back in your yard. Your free pest re-service is covered; we'll text the link now.";
+    const ok = drafter.validateReserviceOffer({ reply, factsBlock: pestOnly, inboundMessage: 'ants are back in the yard', intendedActions: sendLink });
+    expect(ok.ok).toBe(true);
+    expect(ok.promisedLanes).toEqual(['pest']);
+    // ...and a lawn-only customer is still refused a PEST promise by that same clause.
+    expect(drafter.validateReserviceOffer({ reply, factsBlock: lawnOnly, intendedActions: sendLink }).ok).toBe(false);
+  });
+
+  test('validateReserviceOffer: "free lawn re-service" still names lawn; a promise clause naming an excluded specialty is rejected', () => {
+    const both = `X\n${drafter.reserviceFactLine(['pest', 'lawn'])}\nBILLING:`;
+    const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+    const lawn = drafter.validateReserviceOffer({ reply: 'Sorry about the ants. We can come back for a free lawn re-service.', factsBlock: both, intendedActions: sendLink });
+    expect(lawn.ok).toBe(true);
+    expect(lawn.promisedLanes).toEqual(['lawn']);
+    const termite = drafter.validateReserviceOffer({ reply: "We'll send your free termite re-service link.", factsBlock: both, intendedActions: sendLink });
+    expect(termite.ok).toBe(false);
+    expect(termite.violations.join(' ')).toMatch(/excluded specialty/);
   });
 
   test('replyQuotesUngroundedAmount: a FAILED or pending payment does not back "your payment went through"', () => {

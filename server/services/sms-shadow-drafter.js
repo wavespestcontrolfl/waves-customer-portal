@@ -554,20 +554,57 @@ function eligibleReserviceLanes(factsBlock) {
   if (!line) return [];
   return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane}\\b`).test(line.slice(RESERVICE_FACT_LABEL.length).split('(')[0]));
 }
-// The lane(s) an SMS body EXPLICITLY names — shared by validateReserviceOffer
-// (the drafted reply) and reservicePromiseStillEligible (the actual outgoing
-// body, which a human may have edited after drafting) so the two never run
-// different named-lane logic on text that is supposed to mean the same
-// thing. Codex round-6 P1: reuses reservice-scheduler's OWN lane-word
-// vocabulary (RESERVICE_LANE_WORD_PATTERNS) — the SAME words
+// The clause(s) of an SMS body that actually CARRY the re-service promise.
+// Codex round-7 (PR #5336): lane words used to be scanned over the WHOLE
+// body, so a pest-only customer's "Sorry the ants are back in your yard.
+// Your free pest re-service is covered; we'll text the link now." read as
+// promising pest AND lawn ("yard" is a lawn word) and was rejected — round
+// after round of lane-vocabulary patches never fixed that, because the
+// acknowledgement is not the offer. Structural fix: split the body into
+// clauses and derive lanes / excluded specialties ONLY from the clause(s)
+// isReserviceOfferPromise itself recognizes as the promise. Granularity
+// narrows only as far as it must: clause (split on , ; : and dashes) first,
+// then sentence, then — when the promise straddles those breaks — the whole
+// body (the old behavior, so nothing the detector accepts is ever left with
+// no text to classify).
+function reservicePromiseClauses(text) {
+  const t = String(text || '');
+  const splitters = [/[.?!\n]+|[,;:]|\s[-\u2013\u2014]+\s|[\u2013\u2014]/, /[.?!\n]+/];
+  for (const splitter of splitters) {
+    const hits = t.split(splitter).filter((c) => c.trim() && isReserviceOfferPromise(c));
+    if (hits.length) return hits;
+  }
+  return [t];
+}
+// The lane(s) an SMS body EXPLICITLY names IN ITS RE-SERVICE PROMISE — shared
+// by validateReserviceOffer (the drafted reply) and reservicePromiseStillEligible
+// (the actual outgoing body, which a human may have edited after drafting) so
+// the two never run different named-lane logic on text that is supposed to
+// mean the same thing. Codex round-6 P1: reuses reservice-scheduler's OWN
+// lane-word vocabulary (RESERVICE_LANE_WORD_PATTERNS) — the SAME words
 // reportedReserviceLane classifies a customer's inbound report with —
 // instead of a separate, narrower ad hoc list here (the old list matched
 // only bare "pest" and "lawn|turf|grass", so a reply naming "weed-treatment"
-// or a pest species word named no lane at all).
+// or a pest species word named no lane at all). Codex round-7 (PR #5336):
+// scoped to the promise clause(s) (reservicePromiseClauses) — a lane word in
+// the acknowledgement ("ants ... in your yard") is not part of the offer.
 function namedReserviceLanesInText(text) {
-  const t = String(text || '');
+  const promise = reservicePromiseClauses(text).join(' ');
   const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
-  return RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(t)).map(([lane]) => lane);
+  return RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(promise)).map(([lane]) => lane);
+}
+// Codex round-7 (PR #5336): a promise clause that names an excluded
+// specialty ("we'll send your free termite re-service link" — a reviewer's
+// edit of a valid pest draft) is a promise the link can never keep, since
+// reservice-scheduler excludes termite/rodent/mosquito/tree & shrub from the
+// self-bookable lanes. namedReserviceLanesInText recognizes none of those
+// words, so without this check the send-time fallback silently reused the
+// draft-time ['pest'] snapshot and the promise passed. Same promise-clause
+// scoping as namedReserviceLanesInText, so an incidental mention elsewhere
+// in the acknowledgement never trips it.
+function reserviceExcludedSpecialtyInPromise(text) {
+  const { reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
+  return reservicePromiseClauses(text).some((c) => reportedReserviceExcludedSpecialty(c));
 }
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
@@ -604,6 +641,9 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   const { reportedReserviceLane, reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
   if (reportedReserviceExcludedSpecialty(inboundMessage)) {
     return { ok: false, violations: ['the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'] };
+  }
+  if (reserviceExcludedSpecialtyInPromise(text)) {
+    return { ok: false, violations: ['the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'] };
   }
   const reportedLane = reportedReserviceLane(inboundMessage);
   // Codex r7: eligibility is per service line — a pest-only customer must
@@ -686,6 +726,12 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
 async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes }) {
   const body = String(outgoingBody || '');
   if (!isReserviceOfferPromise(body)) return null;
+  // Codex round-7 (PR #5336): checked BEFORE the snapshot fallback below — an
+  // edit that swaps the promised service for an excluded specialty names no
+  // pest/lawn lane, so it would otherwise inherit the draft-time snapshot.
+  if (reserviceExcludedSpecialtyInPromise(body)) {
+    return 're-service promise names an excluded specialty (termites/rodents/mosquitoes/tree & shrub) the link cannot book';
+  }
   const snapshotLanes = Array.isArray(promisedLanes) ? promisedLanes.filter((l) => l === 'pest' || l === 'lawn') : [];
   const namedLanes = namedReserviceLanesInText(body);
   const lanes = namedLanes.length ? namedLanes : snapshotLanes;
