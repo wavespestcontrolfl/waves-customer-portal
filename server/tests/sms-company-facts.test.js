@@ -85,12 +85,12 @@ describe('gate on', () => {
     expect(system).toContain('COMPANY FACTS:\n- The COMPANY FACTS section');
     expect(system).not.toMatch(/general pest knowledge/i);
     expect(system).toContain('COMPANY FACTS section in the context block is owner-approved and authoritative');
-    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, the thread');
+    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, the thread');
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers_cf');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers_cf');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers_cfl');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers_cfl');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
