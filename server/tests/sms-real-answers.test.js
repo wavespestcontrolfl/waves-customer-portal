@@ -118,6 +118,19 @@ describe('GATE_SMS_REAL_ANSWERS off — byte-identical to v11', () => {
       .toContain('- Recent payments: $120.00 paid Saturday, Sep 12 via card; $45.00 processing Thursday, Sep 10 via Zelle');
   });
 
+  // Codex round-16 P1: a partial refund keeps payments.status = 'paid'; gate-on facts render it, gate-off is unchanged.
+  test('partially refunded row: gate-on renders the refund, gate-off stays byte-identical to v11', () => {
+    const context = {
+      summary: 'Test customer',
+      billing: { outstandingBalance: 0, recentPayments: [{ amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', refund_status: 'partial', refund_amount: 30 }] },
+    };
+    clearGates();
+    expect(buildFactsBlock(context).split('\n').filter((l) => l.startsWith('- Recent payments:'))).toEqual(['- Recent payments: $120.00 paid Saturday, Sep 12']);
+    process.env[GATE] = 'true';
+    expect(buildFactsBlock(context, { now: new Date('2026-09-29T15:00:00Z') }))
+      .toContain('- Recent payments: $120.00 paid Saturday, Sep 12 via card (partially refunded $30.00)');
+  });
+
   test('PROMPT_VERSION export stays house_voice_v11 (the live/default cohort identity)', () => {
     expect(PROMPT_VERSION).toBe('house_voice_v11');
     expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers_cf_pf');

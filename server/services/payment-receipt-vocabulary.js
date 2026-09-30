@@ -93,6 +93,32 @@ function paymentAckPatternSource() {
 //                ("isn't showing", "haven't received", …). Its rowStatuses are the
 //                statuses that CONTRADICT the claim: the claim is valid only when no
 //                matching row of those statuses exists NOW (Codex round-8 P1).
+// Codex round-16 P1: ONE list of the completed-payment EVENT verbs ("your payment cleared / posted /
+// went through / was successful / is complete"). The drafter's positive event grammar
+// (PAYMENT_EVENT_STATUS_RE) and the NEGATED denials ("did not clear", "wasn't successful") are BOTH
+// derived from it, so a stem can never be recognized as a claim but missing from the denial side.
+//   pattern  regex source for the positive verb form (used in PAYMENT_EVENT_STATUS_RE)
+//   base/past  the verb, for "did not <base>" / "has not <past>"; adjective  for "was not <adjective>"
+const EVENT_STATUS_STEMS = Object.freeze([
+  Object.freeze({ pattern: 'clear(?:ed|s)?', base: 'clear', past: 'cleared' }),
+  Object.freeze({ pattern: 'post(?:ed|s)?', base: 'post', past: 'posted' }),
+  // "didn't / did not go through" is already the FAILED family's own phrase (needs a failed row), so its base forms are not repeated here.
+  Object.freeze({ pattern: 'went\\s+through', base: 'go through', past: 'gone through', denialIsFailure: true }),
+  Object.freeze({ pattern: "(?:was|is|'s)\\s+successful", adjective: 'successful' }),
+  Object.freeze({ pattern: "(?:was|is|'s)\\s+complete", adjective: 'complete', base: 'complete', past: 'completed' }),
+  // "processed" is a pending-family phrase: its negations ("wasn't processed") already classify as a
+  // negated status claim and fail closed, so the stem needs no denial phrases of its own.
+  Object.freeze({ pattern: "(?:was|is|'s)\\s+processed" }),
+]);
+const EVENT_STATUS_VERB_PATTERN = EVENT_STATUS_STEMS.map((st) => st.pattern).join('|');
+const NEGATED_EVENT_PHRASES = Object.freeze([...new Set(EVENT_STATUS_STEMS.flatMap((st) => {
+  const out = [];
+  if (st.base && !st.denialIsFailure) out.push(`did not ${st.base}`, `didn't ${st.base}`, `does not ${st.base}`, `doesn't ${st.base}`);
+  if (st.past) out.push(`has not ${st.past}`, `hasn't ${st.past}`, `have not ${st.past}`, `haven't ${st.past}`, `never ${st.past}`, `not ${st.past}`, `was not ${st.past}`, `wasn't ${st.past}`, `is not ${st.past}`, `isn't ${st.past}`);
+  if (st.adjective) out.push(`was not ${st.adjective}`, `wasn't ${st.adjective}`, `is not ${st.adjective}`, `isn't ${st.adjective}`, `not ${st.adjective}`);
+  return out;
+}))]);
+
 const ANY_STATUS = '*';
 const PAYMENT_STATUS_VOCABULARY = Object.freeze({
   paid: Object.freeze({
@@ -159,6 +185,9 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
       // so a paid row contradicts them exactly like "haven't received".
       "didn't get", 'did not get', "didn't receive", 'did not receive', "haven't gotten", 'have not gotten',
       "haven't got", 'have not got', "haven't seen", 'have not seen', 'never received', 'never got',
+      // Codex round-16 P1: negated event-status verbs, generated from the SAME stem list that builds the
+      // positive event grammar ("did not clear", "wasn't successful", "hasn't posted", ...).
+      ...NEGATED_EVENT_PHRASES,
     ]),
   }),
 });
@@ -325,6 +354,9 @@ function mayAssertPaymentStatus(text) {
 }
 
 module.exports = {
+  EVENT_STATUS_STEMS,
+  EVENT_STATUS_VERB_PATTERN,
+  NEGATED_EVENT_PHRASES,
   PAID_STATUS_PHRASES,
   SETTLEMENT_PHRASES,
   SETTLEMENT_PHRASE_RE,

@@ -407,3 +407,84 @@ describe('round-18: every pair of claim kinds is validated independently (no sho
 function drafterEnumerate(text) {
   return require('../services/sms-shadow-drafter').enumeratePaymentClaims(text, {}).claims;
 }
+
+// Codex round-16 P1: every event-status stem the positive grammar recognizes has its negated denial forms,
+// generated from the SAME stem list (EVENT_STATUS_STEMS).
+describe('round-16: negated event-status verbs are denials of receipt (one stem list)', () => {
+  const { EVENT_STATUS_STEMS, NEGATED_EVENT_PHRASES, PAYMENT_STATUS_VOCABULARY } = V;
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c) => replyQuotesUngroundedAmount(r, c, { byMeaning: true });
+  const paidRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const drafter = require('../services/sms-shadow-drafter');
+
+  test('every stem yields denial phrases, and every denial phrase is a not_received phrase', () => {
+    for (const st of EVENT_STATUS_STEMS) {
+      const word = st.past || st.adjective;
+      if (!word) continue; // "processed": negations are negated pending-family claims (fail closed already)
+      expect({ word, has: NEGATED_EVENT_PHRASES.some((p) => p.endsWith(word)) }).toEqual({ word, has: true });
+    }
+    for (const p of NEGATED_EVENT_PHRASES) expect(PAYMENT_STATUS_VOCABULARY.not_received.phrases).toContain(p);
+  });
+
+  test('each denial: a PAID row makes it false (ungrounded); a truthful denial (no paid row) is grounded', () => {
+    const failures = [];
+    for (const phrase of NEGATED_EVENT_PHRASES) {
+      const sentence = `Your payment ${phrase}.`;
+      if (!rq(sentence, ctx([paidRow]))) failures.push(`paid row: ${sentence}`);
+      if (!rq(sentence, ctx([{ ...paidRow, status: 'refunded' }]))) failures.push(`refunded row: ${sentence}`);
+      if (rq(sentence, ctx([]))) failures.push(`no rows (truthful) blocked: ${sentence}`);
+      if (rq(sentence, ctx([{ ...paidRow, status: 'failed' }]))) failures.push(`failed row (truthful) blocked: ${sentence}`);
+    }
+    expect(failures).toEqual([]);
+  });
+
+  test('the auditor phrasings, by name', () => {
+    for (const s of ['Your payment did not clear.', "Your payment didn't clear.", 'Your payment was not successful.', "Your payment wasn't successful.",
+      "Your payment didn't complete.", "Your payment hasn't gone through.", "Your payment didn't post."]) {
+      expect({ s, paid: rq(s, ctx([paidRow])) }).toEqual({ s, paid: true });
+    }
+    expect(rq("Your payment didn't go through.", ctx([paidRow]))).toBe(true); // failed-family claim, no failed row
+  });
+
+  test('positive event grammar still recognizes every stem as a receipt claim', () => {
+    for (const s of ['Your payment cleared.', 'Your payment posted.', 'Your payment went through.', 'Your payment was successful.', 'Your payment is complete.', 'Your payment was processed.']) {
+      expect({ s, claims: drafter.enumeratePaymentClaims(s, {}).claims.length > 0 }).toEqual({ s, claims: true });
+    }
+  });
+});
+
+// Codex round-16 P1: partial refunds keep status 'paid' (+ refund_status 'partial', refund_amount).
+describe('round-16: a partially refunded row is not a plain paid payment', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const base = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const partial = { ...base, refund_status: 'partial', refund_amount: 30 };
+
+  test('plain paid / received claims do not bind to a partially refunded row (conservative)', () => {
+    expect(rq('We received your $120 payment from Sep 12.', ctx([base]))).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12.', ctx([partial]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 is paid.', ctx([partial]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 is paid.', ctx([base]))).toBe(false);
+    // detected by refund_amount < amount too, and by the flag alone
+    expect(rq('We received your $120 payment from Sep 12.', ctx([{ ...base, refund_status: null, refund_amount: 30 }]))).toBe(true);
+    expect(rq('We received your $120 payment from Sep 12.', ctx([{ ...base, refund_status: 'partial', refund_amount: null }]))).toBe(true);
+  });
+
+  test('a REFUNDED claim IS grounded by it (by the payment amount, or the refunded amount)', () => {
+    expect(rq('Your $120 payment from Sep 12 was partially refunded.', ctx([partial]))).toBe(false);
+    expect(rq('Your $120 payment from Sep 12 was partially refunded.', ctx([base]))).toBe(true);
+    expect(rq('Your $30 refund from Sep 12 was refunded.', ctx([partial]))).toBe(false);
+    expect(rq('Your $120 payment from Sep 12 was partially refunded.', ctx([{ ...partial, payment_date: '2026-09-01' }]))).toBe(true);
+  });
+
+  test('it still contradicts absence / unpaid claims (money was received)', () => {
+    expect(rq("We haven't received your $120 payment from Sep 12.", ctx([partial]))).toBe(true);
+    expect(rq("We don't see a $120 payment from Sep 12.", ctx([partial]))).toBe(true);
+  });
+
+  test('a fully refunded row (status refunded) is unchanged: refunded claim ok, paid claim not', () => {
+    const full = { ...base, status: 'refunded', refund_status: 'full', refund_amount: 120 };
+    expect(rq('Your $120 payment from Sep 12 was refunded.', ctx([full]))).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12.', ctx([full]))).toBe(true);
+  });
+});

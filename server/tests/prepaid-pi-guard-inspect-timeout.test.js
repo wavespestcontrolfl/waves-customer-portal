@@ -15,7 +15,8 @@ beforeEach(() => jest.clearAllMocks());
 test('inspectOnly bounds the Stripe read (timeout, no SDK retries)', async () => {
   Stripe.retrievePaymentIntent.mockResolvedValue({ id: 'pi_1', status: 'requires_payment_method' });
   await expect(guardOpenPaymentIntentForPrepaid({ id: 'i', stripe_payment_intent_id: 'pi_1' }, { inspectOnly: true })).resolves.toMatchObject({ ok: true });
-  expect(Stripe.retrievePaymentIntent).toHaveBeenCalledWith('pi_1', { timeout: 5000, maxNetworkRetries: 0 });
+  // params (2nd arg) and REQUEST options (3rd arg) are separate — the timeout must never ride as retrieve params
+  expect(Stripe.retrievePaymentIntent).toHaveBeenCalledWith('pi_1', {}, { timeout: 5000, maxNetworkRetries: 0 });
 });
 
 test('a Stripe timeout on the inspect fails closed (payment_session_unverifiable)', async () => {
@@ -26,5 +27,6 @@ test('a Stripe timeout on the inspect fails closed (payment_session_unverifiable
 test('the mutating path keeps the unbounded default read', async () => {
   Stripe.retrievePaymentIntent.mockResolvedValue({ id: 'pi_1', status: 'canceled' });
   await guardOpenPaymentIntentForPrepaid({ id: 'i', stripe_payment_intent_id: 'pi_1' });
-  expect(Stripe.retrievePaymentIntent).toHaveBeenCalledWith('pi_1', undefined);
+  expect(Stripe.retrievePaymentIntent).toHaveBeenCalledWith('pi_1');
 });
+

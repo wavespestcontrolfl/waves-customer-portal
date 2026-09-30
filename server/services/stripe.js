@@ -1115,10 +1115,14 @@ const StripeService = {
     return res?.data || [];
   },
 
-  async retrievePaymentIntent(paymentIntentId, options = {}) {
+  // `options` = Stripe retrieve PARAMS (e.g. { expand: [...] }); `requestOptions` = Stripe REQUEST options
+  // (timeout, maxNetworkRetries, idempotencyKey, ...), the SDK's third argument. Existing callers pass
+  // neither/only params and keep the exact two-argument call.
+  async retrievePaymentIntent(paymentIntentId, options = {}, requestOptions = undefined) {
     if (!paymentIntentId) return null;
     const stripe = getStripe();
     if (!stripe) return null;
+    if (requestOptions) return stripe.paymentIntents.retrieve(paymentIntentId, options, requestOptions);
     return stripe.paymentIntents.retrieve(paymentIntentId, options);
   },
 

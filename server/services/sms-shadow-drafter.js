@@ -1241,7 +1241,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1307,7 +1307,7 @@ function hasAffirmativePaymentAck(text) {
 // "your Zelle transfer cleared" / "your charge posted" are event claims too.
 const PAYMENT_SETTLEMENT_STATUS_RE = SETTLEMENT_PHRASE_RE;
 const PAYMENT_EVENT_STATUS_RE = new RegExp(
-  `\\b${PAYMENT_EVENT_SUBJECT}\\b[^.\\n]{0,25}\\b(?:clear(?:ed|s)?|post(?:ed|s)?|went\\s+through|(?:was|is|'s)\\s+(?:successful|complete|processed))\\b`
+  `\\b${PAYMENT_EVENT_SUBJECT}\\b[^.\\n]{0,25}\\b(?:${EVENT_STATUS_VERB_PATTERN})\\b`
   + `|\\b(?:clear(?:ed|s)?|post(?:ed|s)?)\\b[^.\\n]{0,25}\\b${PAYMENT_EVENT_SUBJECT}\\b`
   + `|\\bwe\\s+have\\s+your\\s+${PAYMENT_EVENT_SUBJECT}\\b`,
   'i',
@@ -1573,20 +1573,40 @@ function paymentDateMatchesClaim(p, claimed) {
 // null amountCents = an amount-free claim (any row); else the row's amount in cents must equal it.
 const rowAmountMatches = (p, amountCents) => amountCents == null
   || (Number.isFinite(Number(p.amount)) && Math.round(Number(p.amount) * 100) === amountCents);
+// Codex round-16 P1: a PARTIAL refund leaves payments.status = 'paid' and records refund_status='partial'
+// + refund_amount (stripe.js / stripe-webhook.js). Such a row is NOT a plain fully-paid payment.
+function partialRefundCents(p) {
+  if (!p || String(p.status || '').toLowerCase() !== 'paid') return 0;
+  const refunded = Math.round(Number(p.refund_amount) * 100);
+  const total = Math.round(Number(p.amount) * 100);
+  const flagged = String(p.refund_status || '').toLowerCase() === 'partial';
+  if (!Number.isFinite(refunded) || refunded <= 0) return flagged ? -1 : 0; // flagged but amount unreadable: still partial
+  return flagged || (Number.isFinite(total) && refunded < total) ? refunded : 0;
+}
+const isPartiallyRefunded = (p) => partialRefundCents(p) !== 0;
 // Rows of the family's status(es) that agree on amount (and date when claimed).
 // Codex round-15 P1: a row with NO status (legacy / imported / partially reconciled) is
 // found-but-UNKNOWN evidence. It contradicts an ABSENCE claim ("isn't showing", "not
 // received", "unpaid") — it might be the payment — and never grounds a positive one.
+// Round-16 P1: a partially-refunded paid row grounds a REFUNDED (partial) claim — by the payment's
+// amount or the refunded amount — and never a plain PAID claim ("your payment is paid" is conservative-false).
 const ABSENCE_FAMILIES = new Set(['not_found', 'not_received', 'unpaid']);
 function paymentRowCandidates({ family, amountCents, claimedDate, rows }) {
   const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
   const anyStatus = wanted.has(ANY_STATUS);
   const unknownCounts = ABSENCE_FAMILIES.has(family);
-  return rows.filter((p) => (
-    p && (anyStatus || wanted.has(String(p.status || '').toLowerCase()) || (unknownCounts && !String(p.status || '').trim()))
-      && rowAmountMatches(p, amountCents)
-      && (!claimedDate || paymentDateMatchesClaim(p, claimedDate))
-  ));
+  const reversalFamily = family === 'refunded' || family === 'reversed';
+  return rows.filter((p) => {
+    if (!p) return false;
+    const partial = isPartiallyRefunded(p);
+    const statusOk = (anyStatus || wanted.has(String(p.status || '').toLowerCase()) || (unknownCounts && !String(p.status || '').trim()))
+      && !(family === 'paid' && partial);
+    const partialOk = partial && reversalFamily;
+    if (!statusOk && !partialOk) return false;
+    const amountOk = rowAmountMatches(p, amountCents)
+      || (partialOk && amountCents != null && partialRefundCents(p) === amountCents);
+    return amountOk && (!claimedDate || paymentDateMatchesClaim(p, claimedDate));
+  });
 }
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
@@ -2119,7 +2139,7 @@ COMPANY FACTS:
   const paymentMoneyExtra = realAnswersOn
     ? `
 - Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. ${paymentStatusPromptLine()} A line marked failed means it did NOT go through — never say it was received. A line marked refunded or disputed WAS received and then reversed — say refunded for a refunded line and disputed for a disputed line, never that it failed and never that it is still paid. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
+- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. ${paymentStatusPromptLine()} A line marked failed means it did NOT go through — never say it was received. A line marked refunded or disputed WAS received and then reversed — say refunded for a refunded line and disputed for a disputed line, never that it failed and never that it is still paid. A paid line tagged "(partially refunded $X)" is NOT fully paid — say $X of it was refunded; never call it simply paid or received in full. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
     : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
@@ -2522,7 +2542,11 @@ function buildFactsBlock(context, extras = {}) {
       // only amount/date then, never guess the method).
       // Gate-off (v11) facts are byte-identical to before this revision: the suffix (and the prompt
       // rule that pairs with it) exist only under GATE_SMS_REAL_ANSWERS — the prompt identity (_pf).
-      return tender && gateEnvValue('GATE_SMS_REAL_ANSWERS') ? `${base} via ${tender}` : base;
+      if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return base;
+      // Round-16 P1: a partial refund keeps status 'paid'; render it so the row is never read as plain paid.
+      const refunded = partialRefundCents(p);
+      const refundNote = refunded ? ` (partially refunded${refunded > 0 ? ` $${(refunded / 100).toFixed(2)}` : ''})` : '';
+      return `${base}${tender ? ` via ${tender}` : ''}${refundNote}`;
     }).join('; ')}`);
   }
   const card = context.billing?.cardOnFile;

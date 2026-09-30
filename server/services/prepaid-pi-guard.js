@@ -35,6 +35,8 @@ const PI_MONEY_IN_FLIGHT_STATUSES = ['processing', 'succeeded', 'requires_captur
 // awaiting 3DS in `requires_action`, a method attached in
 // `requires_confirmation`): an external transfer beside an active attempt
 // collects twice, and no later guard can undo the transfer (pre-push P0).
+// Stripe REQUEST options (the SDK's third argument, not retrieve params): bound the read, no SDK retries.
+const INSPECT_REQUEST_OPTIONS = Object.freeze({ timeout: 5000, maxNetworkRetries: 0 });
 async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false } = {}) {
   const piId = invoice && invoice.stripe_payment_intent_id ? invoice.stripe_payment_intent_id : null;
   if (!piId) return { ok: true, piId: null };
@@ -44,7 +46,7 @@ async function guardOpenPaymentIntentForPrepaid(invoice, { inspectOnly = false }
     // inspectOnly serves read-only surfaces (the public pay page): bound the Stripe
     // read (no SDK retries) so a slow Stripe cannot stall it; a timeout throws and
     // lands in the fail-closed branch below.
-    pi = await StripeService.retrievePaymentIntent(piId, inspectOnly ? { timeout: 5000, maxNetworkRetries: 0 } : undefined);
+    pi = await StripeService.retrievePaymentIntent(piId, ...(inspectOnly ? [{}, INSPECT_REQUEST_OPTIONS] : []));
   } catch (e) {
     logger.warn(`[prepaid-pi-guard] PI verify failed for ${piId}: ${e.message}`);
     return { ok: false, reason: 'payment_session_unverifiable', piId, detail: e.message };
