@@ -226,11 +226,12 @@ function hasAttrSpreadAfter(attrs, from = 0) {
     const c = s[i];
     if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
     if (c !== '{') continue;
-    // Attribute position unless it is a value (`name={…}`): JSX needs no
-    // whitespace before a spread (`verdict="x"{...y}`), and quoted values
-    // and expressions are skipped whole above (#5380 r1).
-    const attrPos = !/=\s*$/.test(s.slice(0, i));
-    if (attrPos && /^\{(?:\s|\/\*[\s\S]*?\*\/)*\.\.\./.test(s.slice(i))) return true;
+    // Quoted values and expressions are skipped whole, so a { reached here
+    // is a value (`name={…}`) or at attribute position — and there JSX
+    // allows only a spread (anything else fails the MDX build). It counts as
+    // one with no whitespace before it and whatever trivia (block or line
+    // comments) precedes the ellipsis (#5380 r1, r2).
+    if (!/=\s*$/.test(s.slice(0, i))) return true;
     const e = closeOfExpressionAt(s, i);
     if (e < 0) return true;
     i = e;
