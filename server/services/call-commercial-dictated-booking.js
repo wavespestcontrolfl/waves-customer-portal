@@ -49,6 +49,10 @@
 
 const { groundNewBookingAgreement, groundingTools } = require('./call-reschedule-agreement');
 const { resolveCallAgreedPrice } = require('../utils/call-agreed-price');
+// The same validation appointment creation applies to the quoted total
+// (resolveCallBookingPrice drops one outside its bounds and books at the
+// catalog price or none): reuse it, never copy the bounds.
+const { sanitizeQuotedCallPrice } = require('./call-booking-catalog');
 
 const { parseTurns, turnsHolding } = groundingTools;
 
@@ -109,6 +113,11 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt } = {
   // amount ever reaching the appointment, so it is not enough.
   const quoted = v2.service_request?.quoted_price_usd;
   if (typeof quoted !== 'number' || !(quoted > 0) || agreed.amount !== quoted) return fail('no_quoted_total');
+  // The booking path discards a total outside its accepted range (or with
+  // sub-cent precision) and books at the catalog price or none, so the
+  // caller's accepted amount would never reach the appointment: the office
+  // books it instead.
+  if (sanitizeQuotedCallPrice(quoted) !== quoted) return fail('quoted_total_not_bookable');
   const grounding = groundNewBookingAgreement({ v2, transcript, callStartedAt });
   if (!grounding.ok) return fail(grounding.reason);
   const priceFailure = priceGrounded(v2, transcript, quoted);

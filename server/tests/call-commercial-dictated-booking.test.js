@@ -297,6 +297,24 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
     expect(grounded(single).ok).toBe(true);
   });
 
+  test('a total the booking path would discard (sanitizeQuotedCallPrice) fails closed (codex #5377 r4 P1)', () => {
+    const at = (amount) => {
+      const t = TRANSCRIPT.split('$150').join(`$${amount}`);
+      const ex = extraction({ service: { quoted_price_usd: amount } });
+      ex.evidence = ex.evidence.map((e) => ({ ...e, quote: e.quote.split('$150').join(`$${amount}`) }));
+      return { ex, t };
+    };
+    for (const amount of [19, 20500]) {
+      const { ex, t } = at(amount);
+      expect([amount, grounded(ex, t)]).toEqual([amount, { ok: false, reason: 'quoted_total_not_bookable' }]);
+      expect(route(ex, { transcript: t }).allowed).toBe(false);
+    }
+    // The bounds are inclusive at the low end and a valid amount books.
+    const { ex, t } = at(275);
+    expect(grounded(ex, t).ok).toBe(true);
+    expect(route(ex, { transcript: t }).allowed).toBe(true);
+  });
+
   test('an accepted price entry without quoted_price_usd is not enough: booking stamps only the accepted total', () => {
     const entry = extraction({ service: { quoted_price_usd: null, price: { amount_usd: 150, accepted: true, caller_response: 'accepted', unit: 'per_quarter' } } });
     expect(grounded(entry)).toEqual({ ok: false, reason: 'no_quoted_total' });
@@ -552,5 +570,94 @@ describe('callCommercialDictatedBookingLive (GATE_CALL_COMMERCIAL_DICTATED_BOOKI
     }
     process.env.GATE_CALL_COMMERCIAL_DICTATED_BOOKING = 'true';
     expect(gates.callCommercialDictatedBookingLive()).toBe(true);
+  });
+});
+
+// A force-reprocess after the gate flips (codex #5377 r4 P1): the first pass
+// (gate off) filed an open BLOCKING commercial_requires_quote card; the booking
+// pass's advisory insert is ON CONFLICT DO NOTHING, so the blocking card would
+// stay red on a booked visit. The gate-agnostic gateDemotedFlags list (shared
+// with GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT) rides canAutoRoute's verdict and the
+// processor demotes whatever it holds through the ONE fenced, verified path.
+describe('reprocess after the flip: the open blocking commercial card is demoted (codex #5377 r4 P1)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+  const Processor = require('../services/call-recording-processor');
+  const { demoteOpenTriageCards } = Processor._test;
+  const { demoteFailOpenOnV1AddressConflict } = Processor;
+
+  test('gate ON books and reports the flag it waived; gate OFF has no such key at all (byte-identical)', () => {
+    const on = route(extraction());
+    expect(on).toMatchObject({ allowed: true, failedOpenFlags: ['commercial_requires_quote'], gateDemotedFlags: ['commercial_requires_quote'] });
+    // The unclear-service-only force logic is not triggered by a commercial waiver.
+    expect(on.unclearServiceDemotedFlags).toBeUndefined();
+    expect(on.forceAssessmentService).toBeUndefined();
+    const off = route(extraction(), { commercialDictatedBooking: false });
+    expect(off.allowed).toBe(false);
+    expect('gateDemotedFlags' in off).toBe(false);
+  });
+
+  test('the processor demotes whatever the shared list holds, fenced, and holds/abandons on failure', () => {
+    const at = src.indexOf('const demoted = await demoteOpenTriageCards(');
+    const call = src.slice(at, at + 600);
+    expect(call).toMatch(/routingResult\.gateDemotedFlags, procToken,/);
+    expect(call).toMatch(/\(routingResult\.gateDemotedFlags \|\| \[\]\)\.map\(\(f\) => buildTriageItem\(/);
+    expect(src.slice(at, at + 1400)).toMatch(/if \(demoted === null\) return abandonToPeer\(/);
+    expect(src.slice(at - 150, at)).not.toMatch(/try \{\s*$/);
+  });
+
+  // A recording fake of the fenced transaction.
+  function fakeConn({ owner = true, blockingRows = 1 } = {}) {
+    const calls = [];
+    const builder = (table) => {
+      const chain = {
+        where(...a) { calls.push([table, 'where', ...a]); return chain; },
+        whereIn(...a) { calls.push([table, 'whereIn', ...a]); return chain; },
+        forUpdate() { return chain; },
+        first() { return Promise.resolve(table === 'call_log' && owner ? { id: 'call-1' } : undefined); },
+        update(u) { calls.push([table, 'update', u]); return Promise.resolve(blockingRows); },
+        insert(row) { calls.push([table, 'insert', row]); return chain; },
+        onConflict() { return chain; },
+        ignore() { return Promise.resolve([]); },
+        select() { return Promise.resolve([{ reason_code: 'commercial_requires_quote' }]); },
+      };
+      return chain;
+    };
+    builder.fn = { now: () => 'NOW' };
+    builder.raw = () => Promise.resolve({ rows: [] });
+    return { conn: { transaction: async (fn) => fn(builder) }, calls };
+  }
+
+  test('an open blocking commercial_requires_quote card becomes advisory in place, under the owning token', async () => {
+    const { conn, calls } = fakeConn();
+    const item = { call_log_id: 'call-1', reason_code: 'commercial_requires_quote', severity: 'advisory' };
+    expect(await demoteOpenTriageCards(conn, 'call-1', ['commercial_requires_quote'], 'tok-1', [item])).toBe(1);
+    expect(calls).toEqual(expect.arrayContaining([
+      ['call_log', 'where', 'processing_token', 'tok-1'],
+      ['triage_items', 'where', { call_log_id: 'call-1', severity: 'blocking' }],
+      ['triage_items', 'whereIn', 'reason_code', ['commercial_requires_quote']],
+      ['triage_items', 'update', { severity: 'advisory', updated_at: 'NOW' }],
+      ['triage_items', 'insert', item],
+    ]));
+  });
+
+  test('a lost claim reports null (the pass abandons instead of booking)', async () => {
+    const { conn } = fakeConn({ owner: false });
+    expect(await demoteOpenTriageCards(conn, 'call-1', ['commercial_requires_quote'], 'stale', [])).toBeNull();
+  });
+
+  test('a call held by the V1 address-conflict demotion still files the commercial advisory card', () => {
+    const allowed = {
+      allowed: true, flags: [], usesOnFileAddress: true,
+      failedOpenFlags: ['commercial_requires_quote', 'missing_service_address'],
+      gateDemotedFlags: ['commercial_requires_quote'],
+    };
+    const held = demoteFailOpenOnV1AddressConflict(
+      allowed,
+      { address_line1: '9 Elsewhere Ln', city: 'Sarasota', state: 'FL', zip: '34231' },
+      { hasAddress: true, addressLine1: '100 Synthetic St', addressZip: '34202', addressCity: 'Bradenton', addressState: 'FL' },
+    );
+    expect(held).toMatchObject({ allowed: false, reason: 'v1_only_new_address', appointmentBlockingFlags: ['address_unverified'] });
+    expect(held.failedOpenFlags).toEqual(['commercial_requires_quote']);
+    expect(held.gateDemotedFlags).toEqual(['commercial_requires_quote']);
   });
 });

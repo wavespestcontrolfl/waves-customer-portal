@@ -405,6 +405,45 @@ const ROUTE_DECISION_REFRESH_COLUMNS = [
   'created_at',
 ];
 
+// REVISIONS of a reviewed decision. A row a human has reviewed is never
+// refreshed (below), but a later pass that decides DIFFERENTLY (a dark gate
+// flipped, a rule changed) must still leave its verdict as the newest decision
+// for the call — with the reviewed row alone the booking would stand while the
+// only decision row still recorded the earlier hold (codex #5377 r4 P1). That
+// pass writes a NEW row under a distinct audit key: the base version plus
+// '+r<n>' (varchar(30) safe). The reviewed rows stay exactly as judged; the
+// verdict attaches to whichever row is newest, as before. Bounded so every
+// revision version is enumerable for the history-spanning readers
+// (V2_DECISION_VERSIONS_WITH_REVISIONS); a pass beyond the cap leaves the
+// reviewed history standing. route_feedback is unique per call (one current
+// verdict, re-review repoints it), so at most ONE row of a decision's family is
+// reviewed at a time and the base row plus one revision always suffice: when
+// the verdict sits on the base row the revision is the one refreshed, and when
+// a re-review repoints it to the revision the (now unreviewed) base row is.
+// Independent of any one gate.
+const ROUTE_DECISION_MAX_REVISIONS = 1;
+const routeDecisionRevisionVersion = (baseVersion, n) => `${baseVersion}+r${n}`;
+const routeDecisionRevisionVersions = (baseVersion) => Array.from(
+  { length: ROUTE_DECISION_MAX_REVISIONS }, (_, i) => routeDecisionRevisionVersion(baseVersion, i + 1),
+);
+// A decision version and every revision of it (the processor's same-run outcome
+// update: only the pass's own unreviewed row in the family is ever updated).
+const routeDecisionFamilyVersions = (baseVersion) => [baseVersion, ...routeDecisionRevisionVersions(baseVersion)];
+const V2_DECISION_VERSIONS_WITH_REVISIONS = V2_DECISION_VERSIONS.flatMap(routeDecisionFamilyVersions);
+
+// Do two decision rows record the same verdict? (jsonb columns come back
+// parsed from the database and as strings from buildRouteDecision.)
+const routeVerdictJson = (v) => {
+  try { return JSON.stringify(typeof v === 'string' ? JSON.parse(v) : (v ?? null)); } catch { return String(v); }
+};
+function sameRouteVerdict(a, b) {
+  return !!a && !!b
+    && a.validator_recommendation === b.validator_recommendation
+    && a.final_action_taken === b.final_action_taken
+    && routeVerdictJson(a.blocked_reasons) === routeVerdictJson(b.blocked_reasons)
+    && routeVerdictJson(a.allowed_reasons) === routeVerdictJson(b.allowed_reasons);
+}
+
 // Every write to an existing route_decisions row (the refresh above and the
 // processor's same-run outcome update) skips a row a human has reviewed:
 // route_feedback points at the row by id and calibration joins the row's
@@ -423,13 +462,22 @@ function excludeReviewedDecisions(query, conn) {
   });
 }
 
+// A scope value that is an ARRAY matches any of its members (the processor's
+// outcome update names a decision's whole revision family).
+function applyRouteDecisionScope(query, scope) {
+  for (const [col, val] of Object.entries(scope)) {
+    if (Array.isArray(val)) query.whereIn(col, val); else query.where(col, val);
+  }
+  return query;
+}
+
 // Lock the route_decisions rows matching `scope`, then update those of them a
 // human has not reviewed. Must run inside a transaction (`trx`) so the lock
 // spans both statements; the second statement takes a fresh READ COMMITTED
 // snapshot after the lock is granted, so a verdict committed while this waited
 // is seen by the NOT EXISTS predicate. Returns rows updated.
 async function updateUnreviewedRouteDecisions(trx, scope, patch) {
-  const locked = await trx('route_decisions').where(scope).forUpdate().select('id');
+  const locked = await applyRouteDecisionScope(trx('route_decisions'), scope).forUpdate().select('id');
   if (!locked.length) return 0;
   return excludeReviewedDecisions(
     trx('route_decisions').whereIn('id', locked.map((r) => r.id)).update(patch),
@@ -478,12 +526,33 @@ async function upsertRouteDecision(conn, decision, fence = null) {
     // points at a decision row by id and calibration joins that row's CURRENT
     // action / reasons to the human's verdict, so mutating a reviewed row would
     // re-attach an old verdict to a decision the reviewer never saw.
-    return updateUnreviewedRouteDecisions(c, {
+    const key = {
       call_log_id: decision.call_log_id,
       decision_version: decision.decision_version,
       mode: decision.mode,
       recording_sid: decision.recording_sid,
-    }, refresh);
+    };
+    const refreshed = await updateUnreviewedRouteDecisions(c, key, refresh);
+    // Nothing refreshed = the base row is REVIEWED (the insert above guarantees
+    // it exists). A pass that decided differently records a revision row instead
+    // of being silently skipped: refresh the family's unreviewed revision if
+    // there is one, else append the next revision unless the verdict is the one
+    // already judged.
+    if (refreshed !== 0) return refreshed;
+    let previous = await c('route_decisions').where(key).first();
+    for (let n = 1; n <= ROUTE_DECISION_MAX_REVISIONS; n += 1) {
+      const revisionKey = { ...key, decision_version: routeDecisionRevisionVersion(decision.decision_version, n) };
+      const existing = await c('route_decisions').where(revisionKey).first();
+      if (!existing) {
+        if (sameRouteVerdict(previous, decision)) return 0;
+        await c('route_decisions').insert({ ...decision, decision_version: revisionKey.decision_version }).onConflict().ignore();
+        return 1;
+      }
+      const updated = await updateUnreviewedRouteDecisions(c, revisionKey, refresh);
+      if (updated > 0) return updated;
+      previous = existing;
+    }
+    return 0;
   };
   if (!fence) return conn.transaction(write);
   if (!fence.callLogId || !fence.processingToken) return null;
@@ -968,4 +1037,8 @@ module.exports = {
   buildTriageItem,
   V2_DECISION_VERSION,
   V2_DECISION_VERSIONS,
+  V2_DECISION_VERSIONS_WITH_REVISIONS,
+  ROUTE_DECISION_MAX_REVISIONS,
+  routeDecisionRevisionVersion,
+  routeDecisionFamilyVersions,
 };

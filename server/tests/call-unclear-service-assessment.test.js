@@ -195,7 +195,7 @@ describe('the V1 address-conflict hold keeps the gate\'s waived-flag cards (code
     const allowed = {
       allowed: true, flags: ['ambiguous_pest_or_service'], usesOnFileAddress: true,
       failedOpenFlags: ['caller_phone_missing', 'ambiguous_pest_or_service'],
-      unclearServiceGateAdmitted: true, unclearServiceDemotedFlags: ['ambiguous_pest_or_service'], forceAssessmentService: true,
+      unclearServiceGateAdmitted: true, unclearServiceDemotedFlags: ['ambiguous_pest_or_service'], gateDemotedFlags: ['ambiguous_pest_or_service'], forceAssessmentService: true,
     };
     const held = demoteFailOpenOnV1AddressConflict(allowed, conflictingV1, knownCaller);
     expect(held).toMatchObject({ allowed: false, reason: 'v1_only_new_address', appointmentBlockingFlags: ['address_unverified'] });
@@ -282,6 +282,9 @@ describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () 
   test('canAutoRoute marks the ambiguous demotion and names the flags it waived', () => {
     const r = canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
     expect(r).toMatchObject({ allowed: true, forceAssessmentService: true, unclearServiceDemotedFlags: ['ambiguous_pest_or_service'] });
+    // ...and joins the gate-agnostic list the processor demotes open cards from
+    // (shared with GATE_CALL_COMMERCIAL_DICTATED_BOOKING).
+    expect(r.gateDemotedFlags).toEqual(['ambiguous_pest_or_service']);
   });
 
   test('gate off: no marker at all', () => {
@@ -289,6 +292,7 @@ describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () 
     expect(r.allowed).toBe(true);
     expect(r.forceAssessmentService).toBeUndefined();
     expect(r.unclearServiceDemotedFlags).toBeUndefined();
+    expect('gateDemotedFlags' in r).toBe(false);
   });
 
   const catalog = [
@@ -522,7 +526,7 @@ describe('the advisory card is PROVEN before the Assessment books (codex #5371 r
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
     const at = src.indexOf('const demoted = await demoteOpenTriageCards(');
     const call = src.slice(at, at + 500);
-    expect(call).toMatch(/routingResult\.unclearServiceDemotedFlags, procToken,/);
+    expect(call).toMatch(/routingResult\.gateDemotedFlags, procToken,/);
     expect(call).toMatch(/buildTriageItem\(\{\s*callLogId: call\.id, flag: f, extraction: v2Extraction, severity: 'advisory'/);
     expect(src.slice(at - 150, at)).not.toMatch(/try \{\s*$/);
   });

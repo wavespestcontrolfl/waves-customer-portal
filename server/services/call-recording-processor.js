@@ -133,7 +133,7 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, updateUnreviewedRouteDecisions, buildTriageItem, V2_DECISION_VERSION, routeDecisionFamilyVersions } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 
@@ -1762,9 +1762,10 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
     // branch files failedOpenFlags as advisory cards. Only the gate's own
     // waivers ride along (the on-file address flags stay dropped, as before),
     // so gate off the replacement verdict is unchanged.
-    ...(routingResult.unclearServiceDemotedFlags?.length ? {
-      failedOpenFlags: [...routingResult.unclearServiceDemotedFlags],
-      unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags],
+    ...(routingResult.gateDemotedFlags?.length ? {
+      failedOpenFlags: [...routingResult.gateDemotedFlags],
+      gateDemotedFlags: [...routingResult.gateDemotedFlags],
+      ...(routingResult.unclearServiceDemotedFlags?.length ? { unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags] } : {}),
     } : {}),
   };
 }
@@ -5818,7 +5819,7 @@ async function demoteOpenTriageCards(conn, callLogId, flags, procToken, advisory
     const have = new Set((present || []).map((r) => r.reason_code));
     const missing = flags.filter((f) => !have.has(f));
     if (missing.length) {
-      throw new Error(`unclear-service advisory card missing for: ${missing.join(', ')}`);
+      throw new Error(`gated advisory card missing for: ${missing.join(', ')}`);
     }
     return demoted;
   });
@@ -10236,12 +10237,10 @@ const CallRecordingProcessor = {
             // of the labels. Also needs GATE_CALL_AGENT_COMMIT_BOOKING, the
             // kill switch of the commercial exception. Read at call time
             // (like the GATE_CALL_PROPERTY_ROLE reads); off = false.
-            // TODO(decision version, codex #5377 r2 P1): this demotion changes
-            // a routing decision, so it must stamp a gated decision tag 'c'
-            // (V2_GATED_DECISION_TAGS / resolveDecisionVersion, introduced by
-            // #5371) only while this gate AND GATE_CALL_AGENT_COMMIT_BOOKING
-            // are on, never a plain V2_DECISION_VERSION bump. Register it after
-            // #5371 merges; until then the flip must not happen.
+            // Decision key: a force-reprocess whose verdict differs from a
+            // REVIEWED decision row records a '+r<n>' revision row
+            // (upsertRouteDecision, gate-agnostic; codex #5377 r4 P1) — no
+            // per-gate version is needed.
             commercialDictatedBooking: isEnabled('callAgentCommitBooking') && !isOutboundCall(call)
               && require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
             // Slot binding needs the call time: a spoken weekday only names a
@@ -10567,9 +10566,12 @@ const CallRecordingProcessor = {
             // call (null = claim lost: abandon), the call is NOT booked — a
             // blocking card left standing on a booked visit is what invites a
             // duplicate booking.
+            // The same fenced, verified demotion serves EVERY gated waiver
+            // (gateDemotedFlags: unclear-service and commercial dictated
+            // booking alike; codex #5377 r4 P1).
             const demoted = await demoteOpenTriageCards(
-              db, call.id, routingResult.unclearServiceDemotedFlags, procToken,
-              (routingResult.unclearServiceDemotedFlags || []).map((f) => buildTriageItem({
+              db, call.id, routingResult.gateDemotedFlags, procToken,
+              (routingResult.gateDemotedFlags || []).map((f) => buildTriageItem({
                 callLogId: call.id, flag: f, extraction: v2Extraction, severity: 'advisory', addressValidation, onFileAddress,
               })),
             );
@@ -19038,9 +19040,12 @@ const CallRecordingProcessor = {
         await db.transaction((trx) => updateUnreviewedRouteDecisions(trx,
           // Same-run outcome update: targets the row THIS process wrote
           // moments ago, so the CURRENT version only (a reprocess writes —
-          // and updates — its own fresh v2-1.1.0 row). A row a human has
-          // reviewed keeps the outcome that review judged.
-          { call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' },
+          // and updates — its own fresh v2-1.1.0 row) — plus its revisions:
+          // when the base row was reviewed, this pass's verdict lives in a
+          // '+r<n>' revision row (upsertRouteDecision; codex #5377 r4 P1). A
+          // row a human has reviewed keeps the outcome that review judged, so
+          // only the family's one unreviewed row is ever updated.
+          { call_log_id: call.id, decision_version: routeDecisionFamilyVersions(V2_DECISION_VERSION), mode: 'enforce', recording_sid: call.recording_sid || '' },
           {
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),

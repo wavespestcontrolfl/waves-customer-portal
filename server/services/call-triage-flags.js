@@ -1959,6 +1959,11 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // processor forces the Waves Assessment row for an ambiguous demotion and
   // demotes an already-open blocking card for each (reprocess).
   const unclearServiceDemotedFlags = [];
+  // EVERY flag a gated demotion took out of the blocking set (this gate's and
+  // GATE_CALL_COMMERCIAL_DICTATED_BOOKING's), gate-agnostic: the processor
+  // demotes an already-open blocking card for each on a reprocess, whichever
+  // gate waived it (codex #5377 r4 P1). Empty with every gate off.
+  const gateDemotedFlags = [];
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -2000,7 +2005,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
       // one). Anything less keeps the hold. The service resolver's own vetoes
       // (unsupported / administrative-only) still run downstream and are not
       // touched here.
-      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); return false; }
+      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); unclearServiceDemotedFlags.push(f); gateDemotedFlags.push(f); return false; }
       return true;
     });
   }
@@ -2098,7 +2103,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
         v2: extraction, transcript: opts.transcript, callStartedAt: opts.callStartedAt,
       }).ok) {
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
-      if (f === 'commercial_requires_quote') { failedOpenFlags.push(f); return false; }
+      if (f === 'commercial_requires_quote') { failedOpenFlags.push(f); gateDemotedFlags.push(f); return false; }
       return true;
     });
   }
@@ -2222,6 +2227,7 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // book the Waves Assessment row, never a service the resolver or a model
     // field happened to pick (the flag said the service is unclear), and the
     // resolver's unsupported-call veto must read the full transcript.
+    ...(gateDemotedFlags.length ? { gateDemotedFlags } : {}),
     ...(unclearServiceDemotedFlags.length ? {
       // Set whenever this gate admitted the call by waiving EITHER flag: the
       // processor's full-transcript unsupported-call veto rides this signal, not

@@ -43,7 +43,7 @@ const CONFLICT_RECOVERY_REASONS = new Set([
 ]);
 // History-spanning review queue: rows from BOTH decision versions must stay
 // visible (pre-bump v2-1.0.0 rows + current v2-1.1.0 rows).
-const { V2_DECISION_VERSIONS, withLockedRouteDecisions } = require('../services/call-routing-gates');
+const { V2_DECISION_VERSIONS_WITH_REVISIONS, withLockedRouteDecisions } = require('../services/call-routing-gates');
 
 // A deny rejects the call's UNIT evidence only when it is a whole-call deny
 // (no wrong_fields) or names the address — a field-scoped deny (service,
@@ -2206,7 +2206,16 @@ router.get('/auto-routed', async (req, res) => {
     const rows = await db('route_decisions')
       .leftJoin('call_log', 'route_decisions.call_log_id', 'call_log.id')
       .leftJoin('customers', 'call_log.customer_id', 'customers.id')
-      .leftJoin('route_feedback', 'route_decisions.call_log_id', 'route_feedback.call_log_id')
+      // A verdict shows against the decision it judged: one that points at an
+      // EARLIER decision row of the call (a reviewed hold this row supersedes as
+      // a '+r<n>' revision) is not this booking's verdict. Legacy verdicts with
+      // no decision link still show.
+      .leftJoin('route_feedback', function feedbackJoin() {
+        this.on('route_decisions.call_log_id', 'route_feedback.call_log_id')
+          .andOn(function linked() {
+            this.onNull('route_feedback.route_decision_id').orOn('route_feedback.route_decision_id', 'route_decisions.id');
+          });
+      })
       // One row per call: a reprocessed call carries BOTH decision versions;
       // only its NEWEST supported enforce decision represents current state.
       // Calls that only have a pre-bump v2-1.0.0 row keep appearing (the
@@ -2214,7 +2223,7 @@ router.get('/auto-routed', async (req, res) => {
       // decision never duplicates or shadows the fresh one.
       .whereIn('route_decisions.id', db('route_decisions')
         .select(db.raw('DISTINCT ON (call_log_id) id'))
-        .whereIn('decision_version', V2_DECISION_VERSIONS)
+        .whereIn('decision_version', V2_DECISION_VERSIONS_WITH_REVISIONS)
         .where('mode', 'enforce')
         .orderByRaw('call_log_id, created_at DESC'))
       .where('route_decisions.final_action_taken', 'auto_route')
