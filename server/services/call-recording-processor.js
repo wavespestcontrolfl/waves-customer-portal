@@ -113,7 +113,7 @@ function callExtractionV2PrimaryEnabled() {
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
-const { SERVICE_AREA_COUNTY_ZIPS, LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
+const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -866,7 +866,6 @@ const CONFIRM_REASON_TEXT = {
   address_unverified: 'service address could not be verified — read it back to the caller',
   missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
-  address_readback_form_street: "the address on file (typed into the web form) was booked on a street-level match only — Google could not confirm the house number; read it back to the caller",
   out_of_service_area: 'address resolves outside the service area — verify the county',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
@@ -1529,22 +1528,30 @@ function judgedAddressMatches(judged, knownCaller) {
 // address never earned on-file trust and an agreed time went unbooked. When
 // the address on file was typed into the lead's own web form and the call
 // does not repeat or replace it, that form address is booked anyway — and the
-// office gets an address read-back card (reason code address_readback_form_street).
+// office gets an admin bell.
 // Narrow on every side: form-sourced only, a house number on file, the same
 // street Google resolved, an in-area ZIP, and a verdict that is street-level
 // (never "the street does not exist", never out of area).
 const STREET_LEVEL_FORM_STATUS = 'street_level_form_accept';
-// The read-back card's OWN reason code (not the shared address_readback, which
-// means "Google accepted a full premise but the model heard the street with low
-// confidence"): its copy, upsert target and version-bound handling are this
-// lane's alone. Mirrored in client/src/lib/addressAsks.js and admin-triage.js.
-const STREET_LEVEL_READBACK_REASON = 'address_readback_form_street';
-// Served ZIPs whose county the ZIP ALONE can prove: a ZIP that also appears on
-// an unserved county's list (33921 is Charlotte and Lee) straddles the line, so
-// with no county from Google it fails closed — only a served county from Google
-// clears it.
-const UNSERVED_COUNTY_ZIP5 = new Set([...LEE_ZIPS, ...COLLIER_ZIPS]);
-const SERVICE_AREA_ZIP5 = new Set(Object.values(SERVICE_AREA_COUNTY_ZIPS).flat().filter((z) => !UNSERVED_COUNTY_ZIP5.has(z)));
+// Served ZIPs that lie WHOLLY in one served county — the only ZIPs whose county
+// the ZIP alone can prove when Google returns no county. A ZIP on any shared
+// set (ai-property-lookup's Manatee/Sarasota/Charlotte shared sets, imported
+// not copied, plus the service-area map's own multi-county ZIPs: 33921, 33955,
+// 34228, 34243 ...) needs Google's own county. Lazy: ai-property-lookup is a
+// large module the call pipeline should not load until a street-level match
+// actually needs it.
+let wholeCountyZip5Cache = null;
+function wholeCountyZip5() {
+  if (!wholeCountyZip5Cache) {
+    const lookup = require('./property-lookup/ai-property-lookup');
+    const shared = new Set([
+      ...lookup.MANATEE_SHARED_ZIPS, ...lookup.SARASOTA_SHARED_ZIPS, ...lookup.CHARLOTTE_SHARED_ZIPS,
+      ...require('../config/address-county').SHARED_SERVICE_AREA_ZIPS,
+    ]);
+    wholeCountyZip5Cache = new Set(Object.values(SERVICE_AREA_COUNTY_ZIPS).flat().filter((z) => !shared.has(z)));
+  }
+  return wholeCountyZip5Cache;
+}
 function streetLevelFormAddressGateOn() {
   const reader = require('../config/feature-gates').callLeadFormAddressStreetLevelLive;
   return typeof reader === 'function' && reader() === true;
@@ -1649,9 +1656,10 @@ function streetLevelMatch(knownCaller, verdict) {
   const zip = zip5Of(knownCaller.addressZip);
   // Google's county on the canonical call-routing allowlist (inServiceArea
   // === true, DeSoto included) is the area proof by itself. With no county,
-  // the on-file ZIP must be one we serve AND Google must return that ZIP.
+  // the on-file ZIP must lie wholly in one served county (never a shared ZIP)
+  // AND Google must return that ZIP.
   const countyConfirmed = verdict.inServiceArea === true;
-  if (!zip || (!countyConfirmed && !SERVICE_AREA_ZIP5.has(zip))) return null;
+  if (!zip || (!countyConfirmed && !wholeCountyZip5().has(zip))) return null;
   const n = verdict.normalized || {};
   const formName = streetNameKey(line1);
   if (!formName || formName !== streetNameKey(n.street_line_1)) return null;
@@ -1682,65 +1690,45 @@ function applyStreetLevelFormVerdict(knownCaller, verdict) {
   knownCaller.addressState = String(verdict.address.state || SERVICE_STATE).toUpperCase();
   return knownCaller;
 }
-// The advisory read-back card for a street-level web-form booking: null unless
-// the booking really dispatches to that on-file address. Existing reason code
-// address_readback_form_street (address_review lane), advisory — its own reason
-// so it never shares the low-confidence address_readback's copy or open-row upsert.
-function buildStreetLevelReadbackItem({ knownCaller, routingResult, callLogId, extraction, onFileAddress = null } = {}) {
+// The visit-level hold for a street-level web-form booking: null unless the
+// booking really dispatches to that on-file address. The hold is the visit
+// itself (status pending, source_action call_street_level_review) plus ONE
+// admin bell per visit — no call-scoped triage card, whose lifecycle the call
+// keeps resolving, moving or losing.
+function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
   if (routingResult?.usesOnFileAddress !== true || !knownCaller?.onFileStreetLevel) return null;
-  return buildTriageItem({
-    callLogId, flag: STREET_LEVEL_READBACK_REASON, extraction, severity: 'advisory', onFileAddress,
-    extraPayload: {
-      address_source: 'web_form_on_file',
-      address_on_file: [knownCaller.addressLine1, knownCaller.addressLine2, knownCaller.addressCity, knownCaller.addressState, knownCaller.addressZip]
-        .map((v) => String(v || '').trim()).filter(Boolean).join(', '),
-      google_granularity: knownCaller.onFileStreetLevel.granularity,
-      google_street: knownCaller.onFileStreetLevel.route,
-      confirmation_question: 'Google confirmed the street but not the house number (new-build street?). Read the address on file back to the caller before the visit.',
+  return {
+    address_on_file: [knownCaller.addressLine1, knownCaller.addressLine2, knownCaller.addressCity, knownCaller.addressState, knownCaller.addressZip]
+      .map((v) => String(v || '').trim()).filter(Boolean).join(', '),
+    google_street: knownCaller.onFileStreetLevel.route || null,
+    customer_name: knownCaller.name || null,
+  };
+}
+// The one admin bell for a held visit (NotificationService.notifyAdmin,
+// bell:true, deduped on the visit id). No existing bell fires for a pending
+// office-review call booking (voice-agent rows file an outbound_booking_review
+// triage card instead), so this is the only one.
+function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDate, windowStart }) {
+  const when = [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
+  const who = hold.customer_name || 'New lead';
+  return {
+    category: 'schedule',
+    title: 'Confirm address before dispatch',
+    body: `${who}, ${hold.address_on_file}${when ? `, ${when}` : ''}. Google confirmed only the street, not the house number. `
+      + 'Confirm the address with the customer, then confirm the visit (or correct its address, or cancel). It stays pending until then.',
+    opts: {
+      icon: '📍',
+      link: `/admin/schedule?serviceId=${encodeURIComponent(visitId)}`,
+      bell: true,
+      dedupeKey: `street-level-address-hold:${visitId}`,
+      metadata: { scheduledServiceId: visitId, callSid, address_on_file: hold.address_on_file, google_street: hold.google_street },
     },
-  });
+  };
 }
-// Which booked visits may carry the street-level read-back card: this call's
-// own AI booking (an EXPLICIT booking_source 'phone_call' — a null source is a
-// human booking a call attached to, since the attach query accepts null) that
-// has not started (pending or confirmed; en_route, on_site, completed,
-// cancelled, rescheduled, skipped and no_show all make a pre-visit read-back
-// moot). Exported for tests.
-function streetLevelReadbackEligibleRow(row) {
-  return !!row?.id
-    && row.booking_source === 'phone_call'
-    && ['pending', 'confirmed'].includes(String(row.status || ''));
-}
-// Writes the street-level read-back card INSIDE the booking transaction and
-// throws unless a row ends up describing THIS booking. A force-reprocess can
-// find this lane's open address_readback_form_street row from an earlier pass: the conflict target
-// is the open-card partial index, and on conflict the open row's payload is
-// refreshed with the current card (booked visit id and the house-number
-// warning included) rather than ignored, so the surviving card is never stale.
-// A card someone already resolved or dismissed is not open, so a fresh one is
-// inserted. Exported for the reprocess tests.
-function buildStreetLevelReadbackWrite(conn, item, scheduledServiceId) {
-  const payload = JSON.stringify({ ...JSON.parse(item.payload), scheduled_service_id: scheduledServiceId });
-  return conn('triage_items')
-    .insert({ ...item, payload })
-    .onConflict(conn.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
-    .merge({
-      payload: conn.raw("COALESCE(triage_items.payload, '{}'::jsonb) || excluded.payload"),
-      updated_at: conn.fn.now(),
-    })
-    .returning('id');
-}
-async function recordStreetLevelReadback(conn, item, scheduledServiceId, { callLogId = item?.call_log_id } = {}) {
-  // The shared per-call triage lock, the same protocol admin-triage's
-  // transitions take FIRST: an operator's concurrent resolution either lands
-  // before this write (so a fresh card is inserted) or after the fully
-  // refreshed task. Re-entrant within the booking transaction.
-  await lockTriageCall(conn, callLogId);
-  const rows = await buildStreetLevelReadbackWrite(conn, item, scheduledServiceId);
-  if (!Array.isArray(rows) || rows.length === 0) {
-    throw new Error('street-level address read-back card was not recorded');
-  }
-  return rows[0];
+function dateOnlyISO(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  return String(v).slice(0, 10);
 }
 function applyOnFileAddressVerdict(knownCaller, verdict) {
   if (!knownCaller) return knownCaller;
@@ -2020,6 +2008,7 @@ function resolveOnFileAddressAuthority({ usesOnFileAddress, proofCustomerId, pro
 // decision and the successor-inheritance gate can never drift apart. The
 // definitions (NON_LEAD_CALL_TYPES + isNonLeadCallContent) moved verbatim to
 // the util; semantics unchanged.
+const { CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION, isStreetLevelAddressHold } = require('./call-booking-source-actions');
 const { NON_LEAD_CALL_TYPES, isNonLeadCallContent } = require('../utils/non-lead-call-content');
 
 // A stale worker that lost its processing_token claim must not record or
@@ -4986,6 +4975,10 @@ async function notifyNewCallLead({ leadId, phone, extracted, leadSourceId, leadS
 // confirm hook — agrees on what an assessment is.
 async function convertCallLeadOnPhoneBooking(trx, { leadId, customerId, scheduledServiceId, callSid, keepOpenForQuote = false, booking = null }) {
   if (!leadId) return false;
+  // A street-level web-form booking holds pending for the office's address
+  // confirmation; the lead converts when the office confirms the visit
+  // (runOfficeConfirmActivation), like every pending office-review booking.
+  if (booking && isStreetLevelAddressHold(booking)) return false;
   try {
     return await trx.transaction(async (inner) => {
       const keepOpenForAssessment = !!booking
@@ -9843,8 +9836,9 @@ const CallRecordingProcessor = {
     let v2VetoDefinitiveRejection = false;
     let v2ApprovedExtraction = null;
     let v2UsesOnFileAddress = false;
-    let v2StreetLevelReadbackItem = null;
-    let streetLevelReadbackFiled = false;
+    let v2StreetLevelHold = null;
+    // The booked visit, when it landed pending under the street-level hold.
+    let streetLevelHeldVisit = null;
     // The customer the on-file PROOF above was computed against, plus the
     // address snapshot compared — Step 3 below may retain or reconcile the
     // call to a DIFFERENT canonical customer than knownCaller (codex P1:
@@ -10497,15 +10491,10 @@ const CallRecordingProcessor = {
             // adopted above (both branches adopt it now).
             // Street-level web-form address (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL):
             // the visit books to the address the lead typed into their form,
-            // which Google confirmed only to the street — the office reads
-            // the house number back before the visit. Existing reason code
-            // address_readback_form_street (advisory, address_review lane). Only BUILT here;
-            // it is written inside the booking transaction, with the visit it
-            // warns about, so it can never outlive a booking that did not land
-            // and a booking can never land without it.
-            v2StreetLevelReadbackItem = buildStreetLevelReadbackItem({
-              knownCaller, routingResult, callLogId: call.id, extraction: v2Extraction, onFileAddress,
-            });
+            // which Google confirmed only to the street. The hold is the
+            // visit itself (pending, call_street_level_review) — decided here,
+            // applied at the insert, announced by one admin bell after commit.
+            v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
             // them as ADVISORY review items so the office confirms the field
@@ -16518,30 +16507,6 @@ const CallRecordingProcessor = {
                       call_sms_cleared_recipient: null,
                     });
                 };
-                // Street-level web-form address: the read-back card commits
-                // with the visit it warns about — on a fresh insert AND when a
-                // reprocess reuses the booking (recording replacement or
-                // adoption resolves address_readback_form_street, so a created-only write
-                // would never refile it). Deliberately NOT caught: a card that
-                // cannot be recorded rolls the booking back (held for review
-                // through the approved-but-unbooked fallback), so the
-                // unvalidated house never dispatches without its warning.
-                // Only this call's own AI booking qualifies (never an attached
-                // human booking, never a cancelled/rescheduled/skipped row),
-                // and only while the on-file proof binds to the booked customer.
-                const recordStreetLevelReadbackFor = async (row) => {
-                  if (!v2StreetLevelReadbackItem || !row?.id) return;
-                  if (!streetLevelReadbackEligibleRow(row)) return;
-                  const authority = resolveOnFileAddressAuthority({
-                    usesOnFileAddress: v2UsesOnFileAddress,
-                    proofCustomerId: v2OnFileAddressProofCustomerId,
-                    proofAddress: v2OnFileAddressProofSnapshot,
-                    canonicalCustomerId: customerId,
-                  });
-                  if (!authority.useOnFileAddress) return;
-                  await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem, row.id, { callLogId: call.id });
-                  streetLevelReadbackFiled = true;
-                };
                 const existing = await findExistingCallAppointment({
                   customerId,
                   call,
@@ -16552,7 +16517,6 @@ const CallRecordingProcessor = {
                 });
                 if (existing) {
                   reusedExistingSchedule = true;
-                  await recordStreetLevelReadbackFor(existing);
                   // An ATTACHED human booking resurfacing through the linked
                   // (source_call_log_id) lookup keeps its attach semantics on
                   // reprocess (Codex #2771 r5): no AI follow-up child on a
@@ -16719,6 +16683,9 @@ const CallRecordingProcessor = {
                   proofAddress: v2OnFileAddressProofSnapshot,
                   canonicalCustomerId: customerId,
                 });
+                // The street-level hold applies only while the on-file proof
+                // binds to the customer this booking finally resolves to.
+                const streetLevelHoldApplies = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;
                 const propertyLinkage = await resolveCallBookingPropertyLinkage(customerId, bookingV2Authority
                   ? {
                     ...extracted,
@@ -17175,9 +17142,12 @@ const CallRecordingProcessor = {
                     customer_request: callBookingCustomerRequest,
                     ...(callBookingCustomerRequest ? { customer_request_source: 'call' } : {}),
                   } : {}),
-                  status: 'confirmed',
-                  customer_confirmed: true,
-                  confirmed_at: new Date(),
+                  // A street-level web-form booking is born PENDING (the hold
+                  // is the visit itself): unconfirmed until the office confirms
+                  // its address.
+                  status: streetLevelHoldApplies ? 'pending' : 'confirmed',
+                  customer_confirmed: !streetLevelHoldApplies,
+                  confirmed_at: streetLevelHoldApplies ? null : new Date(),
                   notes: [
                     // Customer-visible (GET /api/schedule returns notes verbatim):
                     // keep it customer-safe. The office review cue lives in
@@ -17215,7 +17185,7 @@ const CallRecordingProcessor = {
                   ].filter(Boolean).join(' ') || null,
                   booking_source: 'phone_call',
                   source_call_log_id: call.id,
-                  source_action: 'ai_call_pipeline',
+                  source_action: streetLevelHoldApplies ? CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',
                   idempotency_key: computeAppointmentIdempotencyKey({
                     callLogId: call.id,
                     schedulingStatus: extracted.appointment_confirmed ? 'confirmed' : 'none',
@@ -17293,7 +17263,6 @@ const CallRecordingProcessor = {
                   .ignore()
                   .returning('*');
                 if (created) {
-                  await recordStreetLevelReadbackFor(created);
                   // Visit groups (visit-group-scope.md §2): stamp at
                   // scheduling — a confirmed phone booking never passes
                   // through the job-status pending→confirmed regroup hook.
@@ -17353,7 +17322,6 @@ const CallRecordingProcessor = {
                 }
                 if (existingByKey) {
                   reusedExistingSchedule = true;
-                  await recordStreetLevelReadbackFor(existingByKey);
                   logger.info(`[call-proc] Idempotency conflict for ${callSid}; reusing existing scheduled service ${existingByKey.id}`);
                   // Same as the reuse path above: the appointment exists, so
                   // the lead must still convert (idempotent, ownership-guarded) —
@@ -17383,12 +17351,6 @@ const CallRecordingProcessor = {
                 }
                 throw new Error('Idempotency conflict but no existing row found by key — unexpected state');
               });
-              // The street-level read-back card committed with this booking:
-              // open the call-level review state like address_recovered does
-              // (consumed at finalization into needs_confirmation / review_status).
-              if (streetLevelReadbackFiled && svc && !svc.__held && !bridgeNeedsConfirmation.includes(STREET_LEVEL_READBACK_REASON)) {
-                bridgeNeedsConfirmation.push(STREET_LEVEL_READBACK_REASON);
-              }
               if (svc && svc.__held) {
                 // Booking held for human review (same-day duplicate or a
                 // previously-cancelled auto-booking). No schedule row, no SMS,
@@ -17462,6 +17424,23 @@ const CallRecordingProcessor = {
                 }
               }
               scheduledServiceId = svc.id;
+              // Street-level hold: the visit landed pending. One admin bell per
+              // visit (deduped on the visit id, so a reprocess never rings
+              // twice) tells the office what to do; no customer text goes out
+              // (the confirmation section below skips a held visit). Best
+              // effort — the pending status is the hold, the bell is the cue.
+              if (isStreetLevelAddressHold(svc)) {
+                streetLevelHeldVisit = svc;
+                try {
+                  const alert = buildStreetLevelHoldAlert({
+                    hold: v2StreetLevelHold || { address_on_file: [svc.service_address_line1, svc.service_address_city, svc.service_address_state, svc.service_address_zip].filter(Boolean).join(', '), google_street: null, customer_name: null },
+                    visitId: svc.id, callSid, scheduledDate: svc.scheduled_date, windowStart: svc.window_start,
+                  });
+                  await require('./notification-service').notifyAdmin(alert.category, alert.title, alert.body, alert.opts);
+                } catch (notifyErr) {
+                  logger.warn(`[call-proc] street-level address-hold admin bell failed for ${maskSid(callSid)}: ${notifyErr.message}`);
+                }
+              }
               // Tech-facing "new visit" cards (tech-visit-notifications.js):
               // a phone booking inserts its assigned rows directly, bypassing
               // assignDispatchJob, so it tells the tech itself — the fresh
@@ -17691,7 +17670,12 @@ const CallRecordingProcessor = {
                 // this rail: a failed repair logs, and a re-delivered
                 // replay (or the visit's own next edit) re-runs it.
                 let replaySlotVerified = false;
-                try {
+                // A street-level held visit gets no confirmation repair of any
+                // kind on a replay: replaySlotVerified stays false, so both
+                // repair branches below stand down until the office confirms.
+                if (isStreetLevelAddressHold(svc)) {
+                  logger.info(`[call-proc] replay of ${svc.id}: street-level address hold — no confirmation repair`);
+                } else try {
                   const { verifyReminderSlotAfterRegistration } = require('./outbound-review-confirm');
                   replaySlotVerified = await verifyReminderSlotAfterRegistration(db, {
                     serviceId: svc.id,
@@ -18109,7 +18093,7 @@ const CallRecordingProcessor = {
           // smsRecipient. Sends cleared by explicit sms_consent_given or by
           // the legacy V2-off path go to the resolved customer phone.)
           const holdImpliedSmsLeg = v2SmsClearedByImpliedConsent && !smsTargetIsInboundAni && !redirectImpliedToAni;
-          if (scheduledServiceId && !v2SmsBlocked && holdImpliedSmsLeg) {
+          if (scheduledServiceId && !streetLevelHeldVisit && !v2SmsBlocked && holdImpliedSmsLeg) {
             logger.info(`[call-proc] Holding confirmation SMS leg for ${callSid}: implied consent doesn't cover non-ANI recipient and the ANI is undialable (email leg unaffected)`);
             appointmentResult = { ...(appointmentResult || {}), smsSent: false, smsBlockedReason: 'implied_consent_non_ani_recipient' };
             // The appointment BOOKED with no confirmation TEXT and the number
@@ -18229,7 +18213,13 @@ const CallRecordingProcessor = {
           // row EXISTS, and dropping the id made the downstream
           // approved-but-unbooked audit read this as a skipped booking,
           // starving the assessment pre-draft hook.
-          if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
+          if (scheduledServiceId && streetLevelHeldVisit) {
+            // No customer confirmation (SMS or email) until the office
+            // confirms the address: the office confirm is what arms the
+            // customer-facing legs (runOfficeConfirmActivation).
+            logger.info(`[call-proc] Skipping confirmation for ${callSid}: street-level address hold — nothing goes to the customer until the office confirms`);
+            appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsSkippedReason: 'street_level_address_hold' };
+          } else if (scheduledServiceId && v2SmsBlocked && v2EmailBlocked) {
             logger.info(`[call-proc] Skipping confirmation for ${callSid}: v2 TCPA gate blocked (SMS + email)`);
             appointmentResult = { ...(appointmentResult || {}), scheduledServiceId, smsSent: false, smsBlockedReason: 'v2_tcpa_gate' };
           } else if (scheduledServiceId) {
@@ -21139,10 +21129,8 @@ CallRecordingProcessor._test = {
   applyOnFileAddressVerdict,
   onFileAddressIsFromWebForm,
   streetLevelMatch,
-  buildStreetLevelReadbackItem,
-  buildStreetLevelReadbackWrite,
-  recordStreetLevelReadback,
-  streetLevelReadbackEligibleRow,
+  buildStreetLevelHold,
+  buildStreetLevelHoldAlert,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,

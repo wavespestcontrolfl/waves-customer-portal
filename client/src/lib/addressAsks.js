@@ -16,7 +16,6 @@ export const ADDRESS_ASK_REASONS = new Set([
 export const ADDRESS_READBACK_REASONS = new Set([
   'address_recovered',
   'address_readback',
-  'address_readback_form_street',
 ]);
 
 const VALIDATION_NOTICE = {
@@ -57,12 +56,6 @@ const NOTICE_BY_REASON = new Map([
     unitOnly: false,
     readbackOnly: true,
     reason: 'the street validated, but it was heard with low confidence and has not been read back',
-  }],
-  ['address_readback_form_street', {
-    rank: 1,
-    unitOnly: false,
-    readbackOnly: true,
-    reason: 'the address on file came from the web form and only the street was confirmed, so the house number has not been read back',
   }],
 ]);
 

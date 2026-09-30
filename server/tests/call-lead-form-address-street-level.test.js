@@ -1,8 +1,8 @@
 // GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL (owner ruling 2026-09-30): a web-form
 // lead whose on-file address came from their own form, who does not repeat it
 // on the call, books to that form address even when Google confirms only the
-// STREET (a new-build street in Parrish / Lakewood Ranch). The office gets an
-// address_readback_form_street card. Synthetic names and addresses only.
+// STREET (a new-build street in Parrish / Lakewood Ranch). The visit itself holds
+// pending for the office's address confirmation, with one admin bell. Synthetic names and addresses only.
 const CallRecordingProcessor = require('../services/call-recording-processor');
 const { canAutoRoute } = require('../services/call-triage-flags');
 const { callLeadFormAddressStreetLevelLive } = require('../config/feature-gates');
@@ -14,10 +14,8 @@ const {
   buildFailOpenRoutingContext,
   onFileAddressIsFromWebForm,
   streetLevelMatch,
-  buildStreetLevelReadbackItem,
-  buildStreetLevelReadbackWrite,
-  recordStreetLevelReadback,
-  streetLevelReadbackEligibleRow,
+  buildStreetLevelHold,
+  buildStreetLevelHoldAlert,
 } = CallRecordingProcessor._test;
 
 const GATE = 'GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL';
@@ -90,7 +88,7 @@ describe('gate off: nothing changes', () => {
 });
 
 describe('gate on: street-level match on a web-form address', () => {
-  test('books to the form address: trusted address-only, evidence persisted, routes on file, read-back card filed', async () => {
+  test('books to the form address: trusted address-only, evidence persisted, routes on file, hold built', async () => {
     gateOn();
     const out = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
     expect(yesForm).toHaveBeenCalledTimes(1);
@@ -111,14 +109,11 @@ describe('gate on: street-level match on a web-form address', () => {
     expect(routing.allowed).toBe(true);
     expect(routing.usesOnFileAddress).toBe(true);
 
-    // ...and the office gets the existing read-back card, advisory, address lane.
-    const item = buildStreetLevelReadbackItem({ knownCaller: out, routingResult: routing, callLogId: 'call-1', extraction: confirmed() });
-    expect(item).toMatchObject({ call_log_id: 'call-1', reason_code: 'address_readback_form_street', severity: 'advisory', category: 'address_review' });
-    expect(JSON.parse(item.payload)).toMatchObject({
-      flag: 'address_readback_form_street', address_source: 'web_form_on_file',
-      address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219',
-      google_granularity: 'ROUTE', google_street: 'Sample Newbuild Trail',
-    });
+    // ...and the booking is held: the visit itself is the hold.
+    const hold = buildStreetLevelHold({ knownCaller: out, routingResult: routing });
+    expect(hold).toMatchObject({ address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', google_street: 'Sample Newbuild Trail', customer_name: 'Form' });
+    expect(buildStreetLevelHold({ knownCaller: out, routingResult: { allowed: true } })).toBeNull();
+    expect(buildStreetLevelHold({ knownCaller: lead(), routingResult: routing })).toBeNull();
   });
 
   test('the persisted verdict replays as trusted for the offline audits; a moved record does not', () => {
@@ -155,7 +150,7 @@ describe('gate on: every other case keeps its existing path', () => {
     expect(out).toMatchObject({ addressTrusted: true, addressOnly: true, onFileAddressVerdict: { status: 'validated_accept' } });
     expect(out.onFileStreetLevel).toBeUndefined();
     expect(yesForm).not.toHaveBeenCalled();
-    expect(buildStreetLevelReadbackItem({ knownCaller: out, routingResult: { usesOnFileAddress: true }, callLogId: 'c' })).toBeNull();
+    expect(buildStreetLevelHold({ knownCaller: out, routingResult: { usesOnFileAddress: true } })).toBeNull();
   });
 
   test('a caller who states a different address takes the normal validation path: no lookup at all', async () => {
@@ -310,16 +305,6 @@ describe('onFileAddressIsFromWebForm', () => {
   });
 });
 
-describe('buildStreetLevelReadbackItem', () => {
-  test('no card unless the booking really dispatches to the street-level on-file address', async () => {
-    gateOn();
-    const out = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
-    expect(buildStreetLevelReadbackItem({ knownCaller: out, routingResult: { allowed: true }, callLogId: 'c' })).toBeNull();
-    expect(buildStreetLevelReadbackItem({ knownCaller: out, routingResult: { usesOnFileAddress: false }, callLogId: 'c' })).toBeNull();
-    expect(buildStreetLevelReadbackItem({ knownCaller: lead(), routingResult: { usesOnFileAddress: true }, callLogId: 'c' })).toBeNull();
-    expect(buildStreetLevelReadbackItem({ knownCaller: null, routingResult: null, callLogId: 'c' })).toBeNull();
-  });
-});
 
 describe('codex round 1 on #5381', () => {
   test('P1: Google must affirm the area itself — its own ZIP and state, or a service county', async () => {
@@ -377,18 +362,6 @@ describe('codex round 1 on #5381', () => {
     expect(await onFileAddressIsFromWebForm(known, conn([{ first_contact_channel: 'website_quote', extracted_data: { stage: 'quote_calculated', address: formAddr } }]))).toBe(true);
   });
 
-  test('P1: the card is built for the booking transaction, not written at approval', () => {
-    const fs = require('fs');
-    const src = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-    // The only writer of the item is inside the scheduled_services transaction, unguarded, after the visit insert.
-    const writes = src.split('v2StreetLevelReadbackItem').length - 1;
-    expect(src).toMatch(/v2StreetLevelReadbackItem = buildStreetLevelReadbackItem\(/);
-    const insertAt = src.indexOf('await recordStreetLevelReadbackFor(created);');
-    const visitInsertAt = src.indexOf(".insert(insertData)");
-    expect(insertAt).toBeGreaterThan(visitInsertAt);
-    expect(src).not.toMatch(/db\('triage_items'\)\s*\.insert\(streetLevelReadback\)/);
-    expect(writes).toBeGreaterThanOrEqual(4);
-  });
 });
 
 describe('codex round 2 on #5381', () => {
@@ -417,44 +390,6 @@ describe('codex round 2 on #5381', () => {
     const customer = { id: 'lead-1', pipeline_stage: 'new_lead', address_line1: '1234 Sample Newbuild Trl', address_line2: 'Apt 5', city: 'Parrish', state: 'FL', zip: '34219' };
     expect(buildFailOpenRoutingContext({ call: { direction: 'inbound' }, customer, failOpenEnabled: true, onFileAddressVerdict: verdict }).options.knownCustomer).toBeNull();
   });
-
-  describe('P1: the read-back card refreshes an open row on a reprocess', () => {
-    const knex = require('knex')({ client: 'pg' });
-    const item = () => {
-      const routing = { usesOnFileAddress: true };
-      return trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm })
-        .then((k) => buildStreetLevelReadbackItem({ knownCaller: k, routingResult: routing, callLogId: 'call-1', extraction: confirmed() }));
-    };
-
-    test('the write is an upsert on the open-card index that merges the current payload and returns the row', async () => {
-      gateOn();
-      const q = buildStreetLevelReadbackWrite(knex, await item(), 'visit-9').toSQL();
-      const sql = q.sql.replace(/\s+/g, ' ');
-      expect(sql).toMatch(/insert into "triage_items"/);
-      expect(sql).toMatch(/on conflict \(call_log_id, reason_code\) WHERE status IN \('open', 'in_progress'\) do update set/i);
-      expect(sql).toMatch(/"payload" = COALESCE\(triage_items\.payload, '\{\}'::jsonb\) \|\| excluded\.payload/);
-      expect(sql).not.toMatch(/do nothing/i);
-      expect(sql).toMatch(/returning "id"/);
-      const payload = JSON.parse(q.bindings.find((b) => typeof b === 'string' && b.includes('address_source')));
-      expect(payload).toMatchObject({ scheduled_service_id: 'visit-9', address_source: 'web_form_on_file', address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219' });
-      expect(payload.confirmation_question).toMatch(/house number/);
-    });
-
-    test('a landed row is returned; nothing landing throws so the booking rolls back', async () => {
-      gateOn();
-      const conn = (rows) => Object.assign(() => ({ insert: () => ({ onConflict: () => ({ merge: () => ({ returning: async () => rows }) }) }) }), { raw: (x) => x, fn: { now: () => 'now' } });
-      expect(await recordStreetLevelReadback(conn([{ id: 7 }]), await item(), 'visit-9')).toEqual({ id: 7 });   // insert OR update of the open row
-      await expect(recordStreetLevelReadback(conn([]), await item(), 'visit-9')).rejects.toThrow(/not recorded/);
-      await expect(recordStreetLevelReadback(conn(undefined), await item(), 'visit-9')).rejects.toThrow(/not recorded/);
-    });
-
-    test('the booking transaction uses the helper, unguarded', () => {
-      const src = require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-      expect(src).toContain('await recordStreetLevelReadback(trx, v2StreetLevelReadbackItem, row.id, { callLogId: call.id });');
-      expect(src).toContain('await recordStreetLevelReadbackFor(created);');
-      expect(src).not.toMatch(/\.\.\.v2StreetLevelReadbackItem,[\s\S]{0,200}\.ignore\(\)/);
-    });
-  });
 });
 
 describe('codex round 3 on #5381', () => {
@@ -477,101 +412,127 @@ describe('codex round 3 on #5381', () => {
     // Manatee with no county still works through the ZIP path.
     expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_zip' });
   });
+});
 
-  test('P1: the upsert takes the shared per-call triage lock first', async () => {
-    gateOn();
-    const order = [];
-    const conn = Object.assign(() => ({ insert: () => ({ onConflict: () => ({ merge: () => ({ returning: async () => { order.push('upsert'); return [{ id: 1 }]; } }) }) }) }), {
-      raw: (sql, bindings) => { if (/advisory/.test(sql)) order.push(['lock', sql, bindings]); return sql; },
-      fn: { now: () => 'now' },
-    });
-    const k = await trustValidatedNewLeadAddress(lead(), { validate: async () => routeLevel(), extraction: confirmed(), isFormAddress: yesForm });
-    const item = buildStreetLevelReadbackItem({ knownCaller: k, routingResult: { usesOnFileAddress: true }, callLogId: 'call-1', extraction: confirmed() });
-    await recordStreetLevelReadback(conn, item, 'visit-9');
-    expect(order[0][0]).toBe('lock');
-    expect(order[0][1]).toMatch(/pg_advisory_xact_lock/);
-    expect(order[0][2]).toEqual(['triage-call-review', 'call-1']);
-    expect(order[1]).toBe('upsert');
+describe('visit hold (owner ruling 2026-09-30)', () => {
+  const fs = require('fs');
+  const read = (rel) => fs.readFileSync(require.resolve(rel), 'utf8');
+  const sa = require('../services/call-booking-source-actions');
+  const held = { source_action: 'call_street_level_review', status: 'pending', customer_confirmed: false };
+
+  test('the marker is a pending office-review, dispatch-owned source action within varchar(30)', () => {
+    expect(sa.CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION).toBe('call_street_level_review');
+    expect(sa.CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION.length).toBeLessThanOrEqual(30);
+    expect(sa.OFFICE_REVIEW_PENDING_SOURCE_ACTIONS).toContain('call_street_level_review');
+    expect(sa.DISPATCH_OWNED_PENDING_SOURCE_ACTIONS).toContain('call_street_level_review');
   });
 
-  test('P1: a reprocess that reuses the booking (call-linked reuse and idempotency reuse) refiles the card too', () => {
-    const s = src();
-    const calls = s.split('await recordStreetLevelReadbackFor(').length - 1;
-    expect(calls).toBe(3);   // fresh insert, findExistingCallAppointment reuse, idempotency-conflict reuse
-    expect(s).toMatch(/if \(existing\) \{\s*reusedExistingSchedule = true;\s*await recordStreetLevelReadbackFor\(existing\);/);
-    expect(s).toMatch(/if \(existingByKey\) \{\s*reusedExistingSchedule = true;\s*await recordStreetLevelReadbackFor\(existingByKey\);/);
-    expect(s).toMatch(/await recordStreetLevelReadbackFor\(created\);/);
-    // Only this call's own AI booking, never an attached human booking or a dead row; proof must bind.
-    const helper = s.slice(s.indexOf('const recordStreetLevelReadbackFor'), s.indexOf('const existing = await findExistingCallAppointment'));
-    expect(helper).toContain('streetLevelReadbackEligibleRow(row)');
-    expect(helper).toContain('authority.useOnFileAddress');
-    // the street-level code stays out of SUPERSEDE_KEPT_REASON_CODES: the AV low-confidence read-back keeps its replace-on-new-recording semantics.
-    expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).not.toContain('address_readback_form_street');
-    expect(require('../services/call-routing-gates').SUPERSEDE_KEPT_REASON_CODES).not.toContain('address_readback');
+  test('isStreetLevelAddressHold: only this marker, still pending, unconfirmed; and it is not a field-confirmable review booking', () => {
+    expect(sa.isStreetLevelAddressHold(held)).toBe(true);
+    for (const patch of [{ status: 'confirmed' }, { status: 'cancelled' }, { customer_confirmed: true }, { source_action: 'voice_agent' }, { source_action: 'ai_call_pipeline' }]) {
+      expect(sa.isStreetLevelAddressHold({ ...held, ...patch })).toBe(false);
+    }
+    expect(sa.isStreetLevelAddressHold(null)).toBe(false);
+    expect(sa.isPendingOutboundReviewBooking(held)).toBe(false);   // tech-track dispatch-implies-confirm never confirms it
+    expect(sa.isPendingOutboundReviewBooking({ ...held, source_action: 'voice_agent' })).toBe(true);
   });
 
-  test('P2: the call-level review state opens once the card has committed with the booking', () => {
-    const s = src();
-    expect(s).toMatch(/if \(streetLevelReadbackFiled && svc && !svc\.__held && !bridgeNeedsConfirmation\.includes\(STREET_LEVEL_READBACK_REASON\)\) \{\s*bridgeNeedsConfirmation\.push\(STREET_LEVEL_READBACK_REASON\);/);
-    // The push comes after the booking transaction resolved, never inside it.
-    expect(s.indexOf("bridgeNeedsConfirmation.push(STREET_LEVEL_READBACK_REASON)")).toBeGreaterThan(s.indexOf('const svc = await db.transaction(async (trx) => {'));
-    expect(s.indexOf("bridgeNeedsConfirmation.push(STREET_LEVEL_READBACK_REASON)")).toBeGreaterThan(s.indexOf('await recordStreetLevelReadbackFor(existingByKey)'));
+  test('the booking insert holds the visit pending, unconfirmed and marked, only while the on-file proof binds', () => {
+    const src = read('../services/call-recording-processor.js');
+    expect(src).toContain("const streetLevelHoldApplies = !!v2StreetLevelHold && onFileAuthority.useOnFileAddress;");
+    expect(src).toContain("status: streetLevelHoldApplies ? 'pending' : 'confirmed',");
+    expect(src).toContain('customer_confirmed: !streetLevelHoldApplies,');
+    expect(src).toContain('confirmed_at: streetLevelHoldApplies ? null : new Date(),');
+    expect(src).toContain("source_action: streetLevelHoldApplies ? CALL_STREET_LEVEL_REVIEW_SOURCE_ACTION : 'ai_call_pipeline',");
+    // The default (gate off / no hold) insert is unchanged in effect: confirmed, customer_confirmed, ai_call_pipeline.
+    expect(src).toContain("v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });");
+  });
+
+  test('NO customer text or email at booking for a held visit, and none from a replay repair', () => {
+    const src = read('../services/call-recording-processor.js');
+    // The confirmation section skips both channels before any send branch.
+    const skipAt = src.indexOf("if (scheduledServiceId && streetLevelHeldVisit) {");
+    const sendAt = src.indexOf('} else if (scheduledServiceId) {', skipAt);
+    expect(skipAt).toBeGreaterThan(0);
+    expect(sendAt).toBeGreaterThan(skipAt);
+    expect(src.slice(skipAt, sendAt)).toContain("smsSkippedReason: 'street_level_address_hold'");
+    expect(src.slice(skipAt, sendAt)).not.toMatch(/deliverConfirmationByChannel|smsAttempt/);
+    // The implied-consent hold card is not filed for a held visit either.
+    expect(src).toContain('if (scheduledServiceId && !streetLevelHeldVisit && !v2SmsBlocked && holdImpliedSmsLeg) {');
+    // A replay's confirmation repairs stand down (replaySlotVerified stays false).
+    expect(src).toMatch(/if \(isStreetLevelAddressHold\(svc\)\) \{\s*logger\.info\(`\[call-proc\] replay of \$\{svc\.id\}: street-level address hold — no confirmation repair`\);\s*\} else try \{/);
+    // Lead conversion waits for the office confirm.
+    expect(src).toMatch(/if \(booking && isStreetLevelAddressHold\(booking\)\) return false;/);
+  });
+
+  test('the one admin bell per visit: notifyAdmin, bell:true, deduped on the visit id, says what to do, links to the visit', () => {
+    const hold = { address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', google_street: 'Sample Newbuild Trail', customer_name: 'Form Lead' };
+    const a = buildStreetLevelHoldAlert({ hold, visitId: 'visit-9', callSid: 'CA1', scheduledDate: '2026-10-05T00:00:00.000Z', windowStart: '13:00:00' });
+    expect(a.category).toBe('schedule');
+    expect(a.title).toBe('Confirm address before dispatch');
+    expect(a.body).toContain('Form Lead, 1234 Sample Newbuild Trl, Parrish, FL, 34219, 2026-10-05 13:00');
+    expect(a.body).toMatch(/confirm the visit \(or correct its address, or cancel\)/i);
+    expect(a.opts).toMatchObject({ bell: true, dedupeKey: 'street-level-address-hold:visit-9', link: '/admin/schedule?serviceId=visit-9' });
+    expect(a.opts.metadata).toMatchObject({ scheduledServiceId: 'visit-9', callSid: 'CA1' });
+    // Same dedupe key on a reprocess of the same visit; a different visit rings separately.
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-9' }).opts.dedupeKey).toBe(a.opts.dedupeKey);
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-10' }).opts.dedupeKey).not.toBe(a.opts.dedupeKey);
+    // Wired through the shared notifyAdmin, after the booking committed.
+    const src = read('../services/call-recording-processor.js');
+    expect(src).toMatch(/notifyAdmin\(alert\.category, alert\.title, alert\.body, alert\.opts\)/);
+  });
+
+  test('only the office confirm, cancel or skip leave the hold: every other transition and any reschedule is refused', () => {
+    const js = read('../services/job-status.js');
+    expect(js).toMatch(/isStreetLevelAddressHold\(legacyRow\)\s*&& !\['pending', 'confirmed'\]\.includes\(String\(toStatus \|\| ''\)\)/);
+    expect(js).toContain("code: 'STREET_LEVEL_ADDRESS_HOLD'");
+    // The guard sits inside the block that cancel/skip bypass.
+    expect(js.indexOf("const legacyRow = await t('scheduled_services')")).toBeLessThan(js.indexOf("code: 'STREET_LEVEL_ADDRESS_HOLD'"));
+    const rb = read('../services/rebooker.js');
+    expect(rb.split('refuseStreetLevelAddressHold(service);').length - 1).toBe(2);   // rescheduleOnce + rescheduleSeries
+    const oc = read('../services/outbound-review-confirm.js');
+    expect(oc).toMatch(/isStreetLevelAddressHold\(row\)\) \{\s*return false;/);   // no lazy activation of a held row
+  });
+
+  test('the triage-card machinery is gone', () => {
+    const src = read('../services/call-recording-processor.js');
+    for (const gone of ['address_readback_form_street', 'recordStreetLevelReadback', 'buildStreetLevelReadbackWrite', 'buildStreetLevelReadbackItem', 'streetLevelReadbackEligibleRow', 'v2StreetLevelReadbackItem']) {
+      expect(src).not.toContain(gone);
+    }
+    expect(read('../routes/admin-triage.js')).not.toContain('address_readback_form_street');
+    expect(read('../services/call-routing-gates.js')).not.toContain('address_readback_form_street');
   });
 });
 
-describe('codex round 4 on #5381', () => {
-  const STREET_LEVEL_READBACK_REASON = 'address_readback_form_street';
-  const src = () => require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-  const adminTriage = () => require('fs').readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
+describe('shared ZIPs need Google\'s own county (owner ruling 2026-09-30)', () => {
+  const lookup = require('../services/property-lookup/ai-property-lookup');
+  const n = (zip, city = 'Boca Grande') => ({ street_line_1: 'Sample Newbuild Trail', city, state: 'FL', postal_code: zip });
 
-  test('P2: only this call\'s own explicit AI booking that has not started gets the card', () => {
-    const ok = { id: 'v1', booking_source: 'phone_call', status: 'confirmed' };
-    expect(streetLevelReadbackEligibleRow(ok)).toBe(true);
-    expect(streetLevelReadbackEligibleRow({ ...ok, status: 'pending' })).toBe(true);
-    // null / other sources are human or attached bookings.
-    for (const booking_source of [null, undefined, '', 'admin', 'manual']) expect(streetLevelReadbackEligibleRow({ ...ok, booking_source })).toBe(false);
-    // started or dead visits: a pre-visit read-back is moot.
-    for (const status of ['en_route', 'on_site', 'completed', 'cancelled', 'rescheduled', 'skipped', 'no_show', null, '']) expect(streetLevelReadbackEligibleRow({ ...ok, status })).toBe(false);
-    expect(streetLevelReadbackEligibleRow(null)).toBe(false);
-    expect(streetLevelReadbackEligibleRow({ booking_source: 'phone_call', status: 'confirmed' })).toBe(false);
-  });
-
-  test('P1: a ZIP that also belongs to an unserved county fails closed without a Google county', () => {
+  test('33955 and 33921 (Charlotte / Lee) fail closed with no county, and clear only with a served county', () => {
     gateOn();
-    // 33921 is on both the Charlotte and Lee lists.
-    const boca = lead({ city: 'Boca Grande', zip: '33921' });
-    const n = { street_line_1: 'Sample Newbuild Trail', city: 'Boca Grande', state: 'FL', postal_code: '33921' };
-    expect(streetLevelMatch(boca, routeLevel({ inServiceArea: null, normalized: n }))).toBeNull();
-    // A served county from Google still clears it.
-    expect(streetLevelMatch(boca, routeLevel({ inServiceArea: true, county: 'Charlotte County', normalized: n }))).toMatchObject({ areaBasis: 'google_county' });
-    // A Lee county from Google never does.
-    expect(streetLevelMatch(boca, routeLevel({ inServiceArea: false, county: 'Lee County', normalized: n }))).toBeNull();
-    // Every Lee and Collier ZIP is out of the ZIP-only path; an unambiguous served ZIP still works.
-    const { LEE_ZIPS, COLLIER_ZIPS } = require('../config/county-zips');
-    for (const zip of [...LEE_ZIPS, ...COLLIER_ZIPS]) {
-      expect(streetLevelMatch(lead({ zip }), routeLevel({ inServiceArea: null, normalized: { ...n, postal_code: zip } }))).toBeNull();
+    for (const zip of ['33955', '33921']) {
+      const k = lead({ city: 'Punta Gorda', zip });
+      expect(streetLevelMatch(k, routeLevel({ inServiceArea: null, normalized: n(zip) }))).toBeNull();
+      expect(streetLevelMatch(k, routeLevel({ inServiceArea: true, county: 'Charlotte County', normalized: n(zip) }))).toMatchObject({ areaBasis: 'google_county' });
+      expect(streetLevelMatch(k, routeLevel({ inServiceArea: false, county: 'Lee County', normalized: n(zip) }))).toBeNull();
     }
+  });
+
+  test('every ZIP on the imported shared sets, and the service-area map\'s multi-county ZIPs, needs a county', () => {
+    gateOn();
+    const { SHARED_SERVICE_AREA_ZIPS } = require('../config/address-county');
+    const shared = new Set([...lookup.MANATEE_SHARED_ZIPS, ...lookup.SARASOTA_SHARED_ZIPS, ...lookup.CHARLOTTE_SHARED_ZIPS, ...SHARED_SERVICE_AREA_ZIPS]);
+    expect(shared.has('33955') && shared.has('33921') && shared.has('34228')).toBe(true);
+    for (const zip of shared) {
+      expect(streetLevelMatch(lead({ zip }), routeLevel({ inServiceArea: null, normalized: n(zip, 'Parrish') }))).toBeNull();
+    }
+    // The sets are imported from ai-property-lookup, not copied.
+    expect(require('fs').readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8')).toContain("require('./property-lookup/ai-property-lookup')");
+  });
+
+  test('an unambiguous served ZIP still works on the ZIP path', () => {
+    gateOn();
     expect(streetLevelMatch(lead(), routeLevel())).toMatchObject({ areaBasis: 'google_zip' });
-  });
-
-  test('P2: the lane has its own reason code, known everywhere reason codes are mapped, and no migration is needed', () => {
-    const CODE = 'address_readback_form_street';
-    const item = buildStreetLevelReadbackItem({ knownCaller: { ...lead(), onFileStreetLevel: { granularity: 'ROUTE', route: 'X' } }, routingResult: { usesOnFileAddress: true }, callLogId: 'c', extraction: confirmed() });
-    expect(item.reason_code).toBe(CODE);
-    expect(item.category).toBe('address_review');
-    expect(CODE.length).toBeLessThanOrEqual(60);   // triage_items.reason_code is varchar(60); no CHECK constraint exists
-    expect(adminTriage()).toMatch(/'address_readback', 'address_readback_form_street'/);   // address-confirmation inbox filter
-    // The low-confidence address_readback is untouched (its own flag, category and copy).
-    expect(require('../services/call-triage-flags').ADVISORY_TRIAGE_FLAGS.has('address_readback')).toBe(true);
-    expect(src()).not.toMatch(/address_readback: ['"]the address on file/);
-  });
-
-  test('P1: the street-level card is version-bound on both admin triage paths and survives another card\'s call verdict', () => {
-    const a = adminTriage();
-    // single-card resolve/dismiss (transitionCore)
-    expect(a).toMatch(/item\.reason_code === 'address_readback_form_street'\s*\/\/ …and email review cards/);
-    // call-level verdict: own version check and excluded from the sibling sweep unless it is the clicked card
-    expect(a).toMatch(/if \(item\.reason_code === 'address_readback_form_street'\) \{\s*const liveStreetCard/);
-    expect(a).toMatch(/item\.reason_code !== 'address_readback_form_street' \? \['address_readback_form_street'\] : \[\]/);
+    expect(streetLevelMatch(lead({ city: 'Venice', zip: '34292' }), routeLevel({ normalized: n('34292', 'Venice') }))).toMatchObject({ areaBasis: 'google_zip' });
   });
 });

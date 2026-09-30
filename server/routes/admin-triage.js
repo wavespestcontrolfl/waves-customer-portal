@@ -27,7 +27,7 @@ const ADDRESS_CONFIRMATION_REASONS = [
   'missing_unit_number', 'address_unverified', 'missing_service_address',
   'low_confidence_address', 'address_validation_unavailable',
   'address_unverifiable', 'address_not_validated', 'on_file_proof_customer_mismatch',
-  'address_recovered', 'address_readback', 'address_readback_form_street', 'on_file_house_number_conflict',
+  'address_recovered', 'address_readback', 'on_file_house_number_conflict',
 ];
 
 // Decision-support feedback (Phase 1). Captured from the triage inbox and the
@@ -417,10 +417,6 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
       // address, retained visit) — a stale click must not close the newer
       // obligation (codex r30 P1).
       || item.reason_code === 'auto_booking_skipped_after_approval'
-      // …and the street-level web-form read-back, whose payload (booked visit,
-      // house-number warning) a force-reprocess refreshes in place: a stale
-      // click must not close the refreshed warning unseen.
-      || item.reason_code === 'address_readback_form_street'
       // …and email review cards (codex round-3 P1): the client already
       // sends expected_updated_at on every resolve/dismiss, so a stale view
       // of a card whose evidence has since changed refuses instead of
@@ -1862,18 +1858,6 @@ router.post('/:id/verdict', async (req, res) => {
           return;
         }
       }
-      // The street-level web-form read-back is version-bound the same way
-      // (own block, same refusal): a force-reprocess refreshes its payload in
-      // place, and the verdict must not close what the operator never saw.
-      if (item.reason_code === 'address_readback_form_street') {
-        const liveStreetCard = await trx('triage_items').where({ id }).first('updated_at');
-        const expectedStreetUpdatedAt = req.body?.expected_updated_at || null;
-        if (!liveStreetCard || !expectedStreetUpdatedAt
-          || new Date(expectedStreetUpdatedAt).getTime() !== new Date(liveStreetCard.updated_at).getTime()) {
-          staleConflictVersion = true;
-          return;
-        }
-      }
       if (item.reason_code === 'on_file_house_number_conflict' || item.reason_code === 'auto_booking_skipped_after_approval') {
         const liveCard = await trx('triage_items').where({ id }).first('updated_at', 'payload');
         const expectedUpdatedAt = req.body?.expected_updated_at || null;
@@ -1984,9 +1968,6 @@ router.post('/:id/verdict', async (req, res) => {
         .whereNotIn('reason_code', [
           'email_bounce_reverify', 'property_role_confirm', 'reschedule_link_promise', 'attached_booking_followup_unbooked',
           ...(item.reason_code !== 'auto_booking_skipped_after_approval' ? ['auto_booking_skipped_after_approval'] : []),
-          // The street-level read-back survives another card's call verdict
-          // (it has no version to bind to); it settles on its own click.
-          ...(item.reason_code !== 'address_readback_form_street' ? ['address_readback_form_street'] : []),
           ...(emailReviewCard ? [] : EMAIL_REVIEW_REASON_CODES),
         ])
         .modify((q) => { if (conflictLeftForOwnVerdict) q.whereNot({ id: heldConflict.id }); })

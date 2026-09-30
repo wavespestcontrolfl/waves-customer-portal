@@ -250,13 +250,6 @@ describe('read-back cards', () => {
     expect(result.reason).not.toMatch(/pieced back together/);
   });
 
-  it('describes the web-form street-level read-back on its own, never as low confidence', () => {
-    const result = notice(ask('address_readback_form_street'));
-    expect(result).toMatchObject({ readbackOnly: true });
-    expect(result.reason).toMatch(/web form and only the street was confirmed/);
-    expect(result.reason).not.toMatch(/low confidence|pieced back together/);
-  });
-
   it('describes a recovered street explicitly', () => {
     expect(notice(ask('address_recovered')).reason)
       .toMatch(/pieced back together from a garbled recording/);
@@ -278,7 +271,7 @@ describe('read-back cards', () => {
     expect(filterAddressAsks(items).map((i) => i.reason_code)).toEqual(['address_unverified']);
     expect(filterAddressConfirmations(items).map((i) => i.reason_code))
       .toEqual(['address_unverified', 'address_recovered']);
-    expect([...ADDRESS_READBACK_REASONS]).toEqual(['address_recovered', 'address_readback', 'address_readback_form_street']);
+    expect([...ADDRESS_READBACK_REASONS]).toEqual(['address_recovered', 'address_readback']);
   });
 });
 
