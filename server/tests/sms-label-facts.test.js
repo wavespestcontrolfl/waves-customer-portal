@@ -1114,7 +1114,7 @@ describe('r13: an allowlist for the sentences of a reply to a label question; th
 
   test('visit through the thread: an elliptical follow-up inherits the thread\'s other-visit reference; a self-contained message does not', () => {
     const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
-    const forInbound = (texts) => labelFactsLib.labelFactsForInbound(facts, texts);
+    const forInbound = (texts) => labelFactsLib.labelFactsForInbound(facts, texts, '2026-09-30'); // explicit ET today: a weekday word only reaches 6 days back
     expect(forInbound(['Is it okay now?', 'What about the May treatment?'])).toBeNull();
     expect(forInbound(['What about now?', 'And the first visit?'])).toBeNull();
     expect(forInbound(['Is it okay now?', 'Can the dogs go out after the September 29 spray?'])).toBe(facts);

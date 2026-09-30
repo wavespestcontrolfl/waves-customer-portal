@@ -1037,12 +1037,12 @@ const VISIT_REFERENCES = [
  * The facts a draft may render for `inboundText`: null (none on file) when the
  * text points at another visit or is not in English (the sentences are English).
  */
-function labelFactsForInbound(labelFacts, inbound) {
+function labelFactsForInbound(labelFacts, inbound, today = etDateString()) {
   if (!labelFacts) return null;
   const texts = Array.isArray(inbound) ? inbound : [inbound];
   // a short follow-up ("is it okay now?") is about whatever the thread was, so the thread's visit references count too
   const refs = inboundIsElliptical(texts) ? texts : texts.slice(0, 1);
-  const otherVisit = refs.some((text) => inboundRefersToOtherVisit(text, labelFacts.serviceDate));
+  const otherVisit = refs.some((text) => inboundRefersToOtherVisit(text, labelFacts.serviceDate, today));
   return otherVisit || looksNonEnglish(texts[0]) ? null : labelFacts;
 }
 
