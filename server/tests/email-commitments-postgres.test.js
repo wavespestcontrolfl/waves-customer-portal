@@ -159,7 +159,7 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
-  // Coordinator diagnostic, 2026-09-29 (the "Corinne" miss): email intake
+  // Coordinator diagnostic, 2026-09-29: email intake
   // always passed properties: [] to the extractor, so property_id could
   // never ground and an unscoped send_estimate ask could never be closed by
   // a delivered estimate (scopedToProperty refuses an unscoped one for that
