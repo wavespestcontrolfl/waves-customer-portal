@@ -897,7 +897,11 @@ const RESERVICE_DENIAL_SCAN_RE = new RegExp(RESERVICE_DENIAL_RE.source, 'gi');
 // "free re-service / retreat / follow-up visit / callback".
 const RESERVICE_OTHER_PRODUCT_RE = new RegExp(
   '\\bwaves\\s+assessments?(?:\\s+(?:visit|appointment|inspection))?\\b'
-  + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))',
+  + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))'
+  // Codex round-28 P2: a TERMINAL callback reference — completed / canceled / missed / expired — is factual history,
+  // not a new offer. Only the reference itself is blanked, so a separate new offer in the same reply still counts.
+  + '|\\b(?:(?:your|the|our|that|this|a)\\s+)?(?:(?:free|complimentary|no[- ]charge|pest|lawn|previous|last|earlier|original|scheduled|booked)\\s+){0,3}(?:re-?service|re-?treat(?:ment)?|call-?back|revisit|follow-?up)(?:\\s+(?:visit|appointment|treatment))?\\s+(?:was|were|has\\s+been|have\\s+been|had\\s+been|got|is\\s+now)\\s+(?:already\\s+)?(?:canceled|cancelled|completed|missed|skipped|closed|resolved|finished|done|expired|rescheduled|no-?showed)\\b'
+  + '|\\b(?:we|our\\s+(?:tech|technician|team))\\s+(?:already\\s+)?(?:completed|finished|cancell?ed|closed|missed)\\s+(?:your|the|our)\\s+(?:(?:free|complimentary|no[- ]charge|pest|lawn)\\s+){0,3}(?:re-?service|re-?treat(?:ment)?|call-?back|revisit|follow-?up)(?:\\s+(?:visit|appointment|treatment))?\\b',
   'gi',
 );
 // Codex round-26 (PR #5336): a GENERIC free inspection / assessment is a re-service offer only for a customer who
@@ -1254,6 +1258,14 @@ function reserviceOfferOwed({ inboundMessage, lanes, context }) {
 function reserviceReplyHasOfferWording(text) {
   return reserviceBodyPrescreen(text) || /\blink\b/i.test(String(text || ''));
 }
+// Does the re-service lane decide the reply (an active pest report on a bookable or already-booked lane)? Then normal
+// OPEN TIMES work is skipped (Codex round-28 P2).
+function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
+  if (!reserviceState || !gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context)) return false;
+  const { reportedReserviceLane } = require('./reservice-scheduler');
+  const lane = reportedReserviceLane(inboundMessage) || pronounOnlyReportLane(inboundMessage, context);
+  return Boolean(lane) && (reserviceState.lanes.includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
+}
 function bookedReserviceLanes(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
   return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane} already booked\\b`).test(line));
@@ -1441,7 +1453,19 @@ function reserviceBookedDayNames(info) {
 // same sentence (a re-service-specific noun) that does not name only ANOTHER lane. "Your regular lawn
 // treatment is already scheduled for Thursday" is an ordinary visit, not the callback — a moved pest
 // callback must not block it.
-function reserviceBodyRefersToBooked(body, info, lane) {
+// Relative day words are resolved against the CURRENT ET date at send time (Codex round-28 P2): "Your pest
+// re-service is tomorrow" must recheck, and a scheduled card that crosses midnight must not send a stale
+// "tomorrow" that is now "today".
+const RESERVICE_RELATIVE_DAY_RE = /\b(tomorrow|today|tonight)\b/i;
+function reserviceEtDates() {
+  const { etDateString } = require('../utils/datetime-et');
+  const today = etDateString();
+  const next = new Date(`${today}T12:00:00Z`);
+  next.setUTCDate(next.getUTCDate() + 1);
+  return { today, tomorrow: next.toISOString().slice(0, 10) };
+}
+// What the body claims about the booked callback: { refers, relative: Set('today'|'tomorrow') }.
+function reserviceBookedClaims(body, info, lane) {
   const named = reserviceBookedDayNames(info).map((n) => new RegExp(`\\b${n.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i'));
   const { RESERVICE_LANE_WORD_PATTERNS } = require('./reservice-scheduler');
   const contextRe = new RegExp(`\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})`, 'i');
@@ -1450,18 +1474,39 @@ function reserviceBodyRefersToBooked(body, info, lane) {
   // already scheduled for Thursday". A plain "your visit is scheduled" still does not.
   const qualifiedVisitRe = /\b(?:free|complimentary|no[- ]charge|at\s+no\s+(?:additional\s+)?(?:charge|cost)|follow-?up|call-?back)\b/i;
   const visitNounRe = /\b(?:visit|appointment|treatment|service|trip)s?\b/i;
-  return String(body).split(/[.!?\n]+/).some((sentence) => {
-    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || named.some((rx) => rx.test(sentence)))) return false;
-    if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) return false;
+  const claims = { refers: false, relative: new Set() };
+  for (const sentence of String(body).split(/[.!?\n]+/)) {
+    const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
+    if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
+    if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) continue;
     const lanesNamed = RESERVICE_LANE_WORD_PATTERNS.filter(([, rx]) => rx.test(sentence)).map(([l]) => l);
-    return !lanesNamed.length || lanesNamed.includes(lane);
-  });
+    if (lanesNamed.length && !lanesNamed.includes(lane)) continue;
+    claims.refers = true;
+    if (relative) claims.relative.add(relative[1].toLowerCase() === 'tomorrow' ? 'tomorrow' : 'today');
+  }
+  return claims;
+}
+// Codex round-22 P2 (PR #5336): a sentence refers to the booked callback only when it (a) carries an
+// existing-appointment marker, a relative day, or the callback's stored day/date/time AND (b) has RE-SERVICE
+// context in the same sentence that does not name only ANOTHER lane. "Your regular lawn treatment is already
+// scheduled for Thursday" is an ordinary visit, not the callback — a moved pest callback must not block it.
+function reserviceBodyRefersToBooked(body, info, lane) {
+  return reserviceBookedClaims(body, info, lane).refers;
 }
 async function reserviceBookedReferenceBlock({ body, customerId, booked }) {
-  const entries = Object.entries(reserviceBookedSnapshot(booked)).filter(([lane, info]) => reserviceBodyRefersToBooked(body, info, lane));
+  const entries = Object.entries(reserviceBookedSnapshot(booked))
+    .map(([lane, info]) => [lane, info, reserviceBookedClaims(body, info, lane)])
+    .filter(([, , claims]) => claims.refers);
   if (!entries.length || !customerId) return null;
   const { open } = await liveReserviceLaneState(customerId);
-  const moved = entries.filter(([lane, info]) => !open[lane] || String(open[lane].date).slice(0, 10) !== info.date || (info.windowStart && String(open[lane].windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5)));
+  const now = entries.some(([, , claims]) => claims.relative.size) ? reserviceEtDates() : null;
+  const relativeStale = (lane, claims) => {
+    const live = open[lane] && String(open[lane].date).slice(0, 10);
+    return [...claims.relative].some((rel) => live !== (rel === 'tomorrow' ? now.tomorrow : now.today));
+  };
+  const moved = entries.filter(([lane, info, claims]) => !open[lane] || String(open[lane].date).slice(0, 10) !== info.date
+    || (info.windowStart && String(open[lane].windowStart || '').slice(0, 5) !== String(info.windowStart).slice(0, 5))
+    || relativeStale(lane, claims));
   return moved.length ? `reservice_booking_changed — the already-booked ${moved.map(([lane]) => lane).join(' and ')} re-service appointment was cancelled or moved since this reply was drafted` : null;
 }
 // decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that
@@ -3173,7 +3218,15 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // city under GATE_SMS_OFFERS_SCHEDULER: the scheduler path locates the visit
   // from the visit row itself; the zone finder still needs a city and returns
   // nothing without one.
-  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes
+  // Codex round-28 P2: the re-service lane state is resolved FIRST. For an active pest report whose lane is bookable
+  // (offer the covered free re-service) or already booked (refer to the appointment), a converged reply may NOT use
+  // normal OPEN TIMES — so the service-identity provider call, the catalog read and the availability build are
+  // skipped outright. Frozen replays (presetFactsBlock) keep their own facts and never reach this.
+  // Frozen replays keep their own FREE RE-SERVICE line (or none); a live draft resolves eligibility through the
+  // existing re-service mechanism.
+  const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
+  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage, context });
+  const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const identity = willFetchOpenTimes && !estimateId
@@ -3200,12 +3253,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const { block: openTimesBlock, days: openTimesDays } = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
-      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain, estimateId: pricingEstimateId, serviceType,
+      city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
       ...(offersFromScheduler ? { offersFromScheduler: true, scheduledServiceId } : {}),
     });
-  // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
-  // draft resolves eligibility through the existing re-service mechanism.
-  const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the

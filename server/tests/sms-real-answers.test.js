@@ -1052,6 +1052,59 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
     expect(result.factsBlock).toContain('OPEN TIMES (real, bookable slots, ET');
   });
 
+  // Codex round-28 P2 (PR #5336): the re-service lane is resolved FIRST; a bookable or already-booked reported lane
+  // never reaches the normal-slot work (service identity provider call, catalog read, availability build).
+  describe('re-service lane decides the reply: normal-slot work is skipped', () => {
+    afterEach(() => {
+      jest.dontMock('../services/reservice-scheduler'); // doMock registrations outlive resetModules
+      jest.resetModules();
+    });
+    const run = async ({ availability, inboundMessage = 'the ants are back', context, schedulingIntent = true }) => {
+      process.env[GATE] = 'true';
+      const getAvailableSlots = jest.fn(async () => ({ zone: 'Venice Zone', days: [{ date: '2026-09-29', fullDate: 'Tuesday, September 29', slots: [{ startTime24: '09:00' }] }] }));
+      mockDraftDeps({ getAvailableSlots });
+      const loadBookableCallServices = jest.fn(async () => []);
+      jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices }));
+      const actual = jest.requireActual('../services/reservice-scheduler');
+      jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => availability }));
+      jest.resetModules();
+      const drafter = require('../services/sms-shadow-drafter');
+      const result = await drafter.generateGroundedDraft({
+        client: {}, context: context || { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], serviceHistory: [{ type: 'General Pest Control' }] },
+        inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent, city: 'Venice', voiceProfile: null,
+      });
+      return { result, getAvailableSlots, loadBookableCallServices };
+    };
+
+    test('eligible pest report: no identity/catalog work, no availability build, no OPEN TIMES section', async () => {
+      const { result, getAvailableSlots, loadBookableCallServices } = await run({ availability: { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true } });
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+      expect(loadBookableCallServices).not.toHaveBeenCalled();
+      expect(result.factsBlock).toContain('FREE RE-SERVICE: eligible for pest');
+      expect(result.factsBlock).not.toContain('OPEN TIMES');
+    });
+
+    test('already-booked pest lane (and a pronoun-only report): also skipped', async () => {
+      const booked = { eligible: ['pest'], open: { pest: { date: '2026-10-08', windowStart: '09:00' } }, bookable: [], verified: true };
+      let out = await run({ availability: booked });
+      expect(out.getAvailableSlots).not.toHaveBeenCalled();
+      expect(out.result.factsBlock).toContain('pest already booked');
+      out = await run({ availability: { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true }, inboundMessage: "they're back" });
+      expect(out.getAvailableSlots).not.toHaveBeenCalled();
+    });
+
+    test('behavior otherwise identical: not eligible, a non-pest question, or a termite report still gets the normal-slot work', async () => {
+      const none = { eligible: [], open: {}, bookable: [], verified: true };
+      let out = await run({ availability: none });
+      expect(out.getAvailableSlots).toHaveBeenCalled();
+      expect(out.result.factsBlock).toContain('OPEN TIMES');
+      out = await run({ availability: { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true }, inboundMessage: 'can I move my visit to Friday?' });
+      expect(out.getAvailableSlots).toHaveBeenCalled();
+      out = await run({ availability: { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true }, inboundMessage: 'the termites are back' });
+      expect(out.getAvailableSlots).toHaveBeenCalled();
+    });
+  });
+
   test('gate on: a bare pronoun return ("they\'re back") with NO pest relationship on file does not fetch OPEN TIMES', async () => {
     process.env[GATE] = 'true';
     const getAvailableSlots = jest.fn();
@@ -2962,6 +3015,37 @@ describe('free re-service is an entitlement resolved through the existing mechan
       });
 
       // Codex round-22 P2: the recheck needs re-service context (and the matching lane) in the same sentence.
+      // Codex round-28 P2: relative days resolve against the CURRENT ET date at send time.
+      test('"tomorrow" / "today" references recheck the live callback against the current ET date', async () => {
+        const dt = require('../utils/datetime-et');
+        const realEt = dt.etDateString;
+        try {
+          const setToday = (iso) => { dt.etDateString = jest.fn(() => iso); };
+          const tomorrowBooked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+          const mkMeta = (bookedCallbacks) => ({ promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks });
+          const send = async (open, body) => {
+            jest.resetModules();
+            const actual = jest.requireActual('../services/reservice-scheduler');
+            jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open, bookable: open.pest ? [] : ['pest'], verified: true }) }));
+            const dt2 = require('../utils/datetime-et');
+            dt2.etDateString = dt.etDateString;
+            const drafter = require('../services/sms-shadow-drafter');
+            return drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: mkMeta(tomorrowBooked) });
+          };
+          const body = 'Your pest re-service is tomorrow.';
+          setToday('2026-10-07'); // tomorrow = 2026-10-08 = the live callback date → still true
+          await expect(send({ pest: { date: '2026-10-08', windowStart: '09:00' } }, body)).resolves.toBeNull();
+          await expect(send({}, body)).resolves.toMatch(/reservice_booking_changed/); // cancelled after drafting
+          setToday('2026-10-08'); // the card crossed midnight: "tomorrow" is now today
+          await expect(send({ pest: { date: '2026-10-08', windowStart: '09:00' } }, body)).resolves.toMatch(/reservice_booking_changed/);
+          await expect(send({ pest: { date: '2026-10-08', windowStart: '09:00' } }, 'Your pest re-service is today at 9.')).resolves.toBeNull();
+          // no re-service context → an ordinary "tomorrow" is untouched
+          await expect(send({}, 'See you tomorrow!')).resolves.toBeNull();
+        } finally {
+          dt.etDateString = realEt;
+        }
+      });
+
       test('an unrelated scheduled visit is NOT held up by a moved/cancelled pest callback', async () => {
         const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
         loadWith({ lanes: ['pest'] }); // the pest callback is gone
@@ -3134,6 +3218,11 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["I'm free at 3 if you want to talk.", false, []],
   ["Free on Thursday after 5, we can send a tech.", false, []],
   ["The re-service is free Tuesday.", true, []],
+  ["Your free pest re-service was canceled.", false, []],
+  ["We completed your free re-service Tuesday.", false, []],
+  ["The no-charge callback was missed.", false, []],
+  ["Your free re-service was canceled, but we can send a new free re-service link.", true, []],
+  ["We completed your free re-service Tuesday and will send another free re-service link now.", true, []],
   ["Interior treatment is included with your re-service.", false, []],
   ["The inside spray is included in a re-service.", false, []],
   ["The interior spray is covered during the re-service.", false, []],
