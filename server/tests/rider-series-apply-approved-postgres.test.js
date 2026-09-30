@@ -339,6 +339,21 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     expect(res.pairs[0]).toMatchObject({ status: 'would_apply' });
   });
 
+  test('rollback refuses a row that picked up lifecycle evidence after the move (never rewinds)', async () => {
+    const pair = await buildPair();
+    const approved = await approvedFor(pair);
+    const out = rollbackPath();
+    await applyApproved(trx, approved, { apply: true, rollbackOut: out });
+    const doc = JSON.parse(fs.readFileSync(out, 'utf8'));
+    const [stale] = doc.moves;
+    await trx('scheduled_services').where({ id: stale.id }).update({ en_route_at: new Date() });
+    const before = await snapshot();
+
+    const res = await rollbackApplied(trx, { ...doc, moves: [stale] }, { apply: true });
+    expect(res.results[0]).toMatchObject({ status: 'skipped', reason: 'row_has_lifecycle_evidence' });
+    expect(await snapshot()).toBe(before);
+  });
+
   test('rollback refuses a row that gained an invoice, a customer confirmation, or whose original date is now near-term', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);

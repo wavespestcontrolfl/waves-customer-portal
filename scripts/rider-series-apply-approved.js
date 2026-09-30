@@ -535,7 +535,7 @@ function composeForwardUpdates(sp, row, { to, target, cols }) {
 //   expect: { rowId, customerId, pestParentId, recurringParentId?, fromDate }
 //   target: { windowStart, windowEnd, technicianId, tech, restore? }
 //           restore = the recorded snapshot to write verbatim (rollback; no
-//           stamp, no rewind); absent = the forward composition above.
+//           stamp, no rewind; a row needing a rewind is refused); absent = the forward composition above.
 //   exemptIds: rows that may share the window (the row itself, the host lawn row)
 async function planMove(sp, ctx, {
   expect, to, target, exemptIds,
@@ -559,6 +559,11 @@ async function planMove(sp, ctx, {
   let updates;
   let rewind = false;
   if (target.restore) {
+    // Rollback never rewinds: a row that picked up tracker/lifecycle evidence
+    // after the forward move (en_route_at, track_sms_sent_at, ...) is refused
+    // rather than carried back onto the original date (Codex #5400 r3).
+    const { needsLifecycleRewind } = require('../server/services/rebooker');
+    if (needsLifecycleRewind(row)) throw new PairSkip('row_has_lifecycle_evidence', row.id);
     updates = {
       scheduled_date: to,
       window_start: target.windowStart,
