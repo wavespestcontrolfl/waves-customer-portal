@@ -927,4 +927,79 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
     const reason = await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody, now: NOW });
     expect(reason).toBeNull();
   });
+
+  // Codex round-11 P2 (PR #5334): a snapshot entry carries the instant its
+  // GPS fix goes stale to the public tracker; a minutes claim expires at
+  // min(15-minute draft window, that instant).
+  describe('GPS-fix expiry rides in the snapshot entry (round 11 P2)', () => {
+    const rows = [{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }];
+    const entry = (extra) => ({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], ...extra }] });
+
+    test('a minutes claim inside the 15-minute draft window is refused once the GPS fix has expired', async () => {
+      const reason = await etaClaimBlockReason({
+        liveEtaSnapshot: entry({ fixExpiresAtMs: NOW.getTime() - 1000 }),
+        factsGeneratedAt: FRESH, outgoingBody: 'The tech is 12 minutes away.', now: NOW, dbh: fakeDb(rows),
+      });
+      expect(reason).toBe('eta_claim_stale_facts');
+    });
+
+    test('a vague timed claim expires with the fix too', async () => {
+      const reason = await etaClaimBlockReason({
+        liveEtaSnapshot: entry({ fixExpiresAtMs: NOW.getTime() - 1000 }),
+        factsGeneratedAt: FRESH, outgoingBody: 'He is about half an hour away.', now: NOW, dbh: fakeDb(rows),
+      });
+      expect(reason).toBe('eta_claim_stale_facts');
+    });
+
+    test('a still-fresh fix leaves the claim to the normal checks (passes while en_route)', async () => {
+      const reason = await etaClaimBlockReason({
+        liveEtaSnapshot: entry({ fixExpiresAtMs: NOW.getTime() + 60 * 1000 }),
+        factsGeneratedAt: FRESH, outgoingBody: 'The tech is 12 minutes away.', now: NOW, dbh: fakeDb(rows),
+      });
+      expect(reason).toBeNull();
+    });
+
+    test('an older entry with no fixExpiresAtMs keeps the draft-window-only rule', async () => {
+      const ok = await etaClaimBlockReason({
+        liveEtaSnapshot: entry({}), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 12 minutes away.', now: NOW, dbh: fakeDb(rows),
+      });
+      expect(ok).toBeNull();
+      const stale = await etaClaimBlockReason({
+        liveEtaSnapshot: entry({}), factsGeneratedAt: new Date(NOW.getTime() - 16 * 60 * 1000).toISOString(),
+        outgoingBody: 'The tech is 12 minutes away.', now: NOW, dbh: fakeDb(rows),
+      });
+      expect(stale).toBe('eta_claim_stale_facts');
+    });
+
+    test('the draft window still applies when the fix expiry is later than it', async () => {
+      const reason = await etaClaimBlockReason({
+        liveEtaSnapshot: entry({ fixExpiresAtMs: NOW.getTime() + 60 * 60 * 1000 }),
+        factsGeneratedAt: new Date(NOW.getTime() - 16 * 60 * 1000).toISOString(),
+        outgoingBody: 'The tech is 12 minutes away.', now: NOW, dbh: fakeDb(rows),
+      });
+      expect(reason).toBe('eta_claim_stale_facts');
+    });
+
+    test('status-only copy is NOT aged out by the fix expiry (rechecked against the tracker state instead)', async () => {
+      const reason = await etaClaimBlockReason({
+        liveEtaSnapshot: entry({ fixExpiresAtMs: NOW.getTime() - 1000 }),
+        factsGeneratedAt: FRESH, outgoingBody: 'He is on the way and should be there in a few.', now: NOW, dbh: fakeDb(rows),
+      });
+      expect(reason).toBeNull();
+    });
+  });
+
+  test('an unconvertible number word ("a thousand minutes away") with no snapshot is blocked (round 11 P2)', async () => {
+    const reason = await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: 'The tech is a thousand minutes away.', now: NOW });
+    expect(reason).toBe('eta_claim_no_snapshot');
+  });
+
+  test('"one hundred twenty minutes away" binds as 120 — unbound against a live 20', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 20, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody: 'The tech is one hundred twenty minutes away.', now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
 });

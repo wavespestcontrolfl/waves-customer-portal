@@ -37,7 +37,7 @@ const {
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
-  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords,
 } = require('../services/sms-shadow-drafter');
 const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 
@@ -104,6 +104,8 @@ describe('resolveLiveEtaFact — fail-closed data source', () => {
       minutes: 14,
       asOf: expect.stringContaining('ET'),
       trackUrl: expect.stringContaining('/track/abc123token'),
+      // Codex round-11 P2: the GPS fix's own tracker-staleness deadline.
+      fixExpiresAtMs: expect.any(Number),
     });
     expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1' }));
     expect(calculateBoundedTrackingEta).toHaveBeenCalledWith(expect.objectContaining({
@@ -112,6 +114,15 @@ describe('resolveLiveEtaFact — fail-closed data source', () => {
       customerLat: 27.4,
       customerLng: -82.5,
     }));
+  });
+
+  test('the result carries the fix\'s tracker-staleness deadline: fix time + STALE_TECH_STATUS_MS (Codex round-11 P2)', async () => {
+    process.env[GATE] = 'true';
+    const fixAt = Date.now() - 60 * 1000;
+    resolveFreshTechPosition.mockResolvedValue({ ...FRESH_POSITION, lastReportedAt: new Date(fixAt).toISOString() });
+    calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
+    const out = await resolveLiveEtaFact(baseRow(), baseCustomer());
+    expect(out.fixExpiresAtMs).toBe(fixAt + STALE_TECH_STATUS_MS);
   });
 
   test('no technician assigned: null, no lookups', async () => {
@@ -1079,6 +1090,45 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     });
   });
 
+  // Codex round-11 P2 (PR #5334): "one hundred twenty minutes away" used to
+  // read as "1 hundred 20 minutes", so only the trailing 20 was validated.
+  describe('written-out hundreds are ONE value (round 11 P2)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      ['one hundred twenty minutes away', 120],
+      ['a hundred and twenty minutes away', 120],
+      ['one hundred and twenty minutes away', 120],
+      ['hundred-twenty minutes away', 120],
+      ['one hundred twenty-five minutes out', 125],
+      ['a hundred minutes away', 100],
+    ])('%p is exactly %p — accepted only against that live figure', (phrase, minutes) => {
+      const reply = `The tech is ${phrase}.`;
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(minutes) }).ok).toBe(true);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(20) }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(25) }).ok).toBe(false);
+      expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual([minutes]);
+    });
+
+    test('normalizeNumberWords reads the whole compound', () => {
+      expect(normalizeNumberWords('one hundred twenty minutes')).toBe('120 minutes');
+      expect(normalizeNumberWords('twenty-five and twelve')).toBe('25 and 12');
+    });
+
+    test.each([
+      'The tech is a thousand minutes away.',
+      'The tech is a dozen minutes away.',
+      'The tech is hundreds of minutes away.',
+    ])('%p — a number word it cannot convert next to a time unit fails closed, live ETA or not', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 12 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' }).ok).toBe(false);
+    });
+
+    test('a hundred of something that is not a time is untouched', () => {
+      expect(validateLiveEtaMinutes({ reply: 'We serve over a hundred neighbors. The tech is on the way!', factsBlock: facts(12) }))
+        .toEqual({ ok: true, violations: [] });
+    });
+  });
+
   describe('normalizeTimeQuantities — every hour quantity is read WITH its unit (Codex round-9 P2)', () => {
     test.each([
       ['about 2 hours out', 'about 120 minutes out'],
@@ -1187,6 +1237,20 @@ describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (indep
   test('carries the exact groups context-aggregator collected, filtering out nullish ids', () => {
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1', null, 'svc-2'] }] }))
       .toEqual({ entries: [{ minutes: 12, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: [] }] });
+  });
+
+  // Codex round-11 P2 (PR #5334): the GPS-fix expiry rides into the persisted
+  // entry so send time can expire the claim with its fix.
+  test('carries a finite fixExpiresAtMs into the entry, and omits it when unknown (older-shape entries unchanged)', () => {
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [
+      { minutes: 12, scheduledServiceIds: ['svc-1'], fixExpiresAtMs: 1780000000000 },
+      { minutes: 9, scheduledServiceIds: ['svc-2'], fixExpiresAtMs: undefined },
+      { minutes: 7, scheduledServiceIds: ['svc-3'], fixExpiresAtMs: NaN },
+    ] })).toEqual({ entries: [
+      { minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: [], fixExpiresAtMs: 1780000000000 },
+      { minutes: 9, scheduledServiceIds: ['svc-2'], trackTokens: [] },
+      { minutes: 7, scheduledServiceIds: ['svc-3'], trackTokens: [] },
+    ] });
   });
 
   test('two distinct stops (different technicians/destinations) persist as two separate entries', () => {

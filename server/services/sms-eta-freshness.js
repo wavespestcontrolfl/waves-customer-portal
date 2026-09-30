@@ -168,7 +168,10 @@ function classifyEtaBody({ outgoingBody, snapshotHasEntries }) {
   // is a timed claim even beside a real minutes figure, once a live ETA
   // context exists to hold the body to.
   const unreadHours = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true });
-  const timedArrivalClaim = (!claims.length && unreadTimed) || unreadHours;
+  // Codex round-11 P2: a number word that could not be converted to digits
+  // ("a thousand minutes") is a timed claim on every path.
+  const unreadNumbers = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unconvertedNumbersOnly: true });
+  const timedArrivalClaim = (!claims.length && unreadTimed) || unreadHours || unreadNumbers;
   // Backstop (audit P1, round 4): a body that talks about the tech arriving
   // is checked whenever the draft carried a LIVE ETA, or whenever it
   // mentions minutes at all.
@@ -195,11 +198,16 @@ function entriesForTokens(entries, tokens) {
 }
 
 // A stated timeframe ages out: the draft's facts must be within the
-// freshness window (null when fresh).
-function draftFreshnessReason(factsGeneratedAt, now) {
+// freshness window AND (Codex round-11 P2) the GPS fix behind the entry's
+// figure must still be fresh to the public tracker — the snapshot entry's
+// `fixExpiresAtMs` (fix time + the tracker's staleness window). An entry
+// without the field (an older snapshot) keeps the draft-window-only rule.
+// null when fresh.
+function draftFreshnessReason(factsGeneratedAt, now, entry = null) {
   const draftedAt = parseDraftedAt(factsGeneratedAt);
   if (!draftedAt) return 'eta_claim_no_facts_time';
-  return now.getTime() - draftedAt.getTime() > ETA_FRESHNESS_WINDOW_MS ? 'eta_claim_stale_facts' : null;
+  if (now.getTime() - draftedAt.getTime() > ETA_FRESHNESS_WINDOW_MS) return 'eta_claim_stale_facts';
+  return Number.isFinite(entry?.fixExpiresAtMs) && now.getTime() > entry.fixExpiresAtMs ? 'eta_claim_stale_facts' : null;
 }
 
 // Phase 2a — status-only claim ("the tech is on the way"): no minutes figure
@@ -216,10 +224,10 @@ function bindStatusClaim(claim, entries) {
 // entry's minutes; a vague/unread timed claim has no exact number to bind, so
 // it fails closed as unbound after passing the same freshness window.
 function bindTimedOrMinutesClaim(claim, entries, { factsGeneratedAt, now }) {
-  const staleReason = draftFreshnessReason(factsGeneratedAt, now);
+  const [entry] = entries;
+  const staleReason = draftFreshnessReason(factsGeneratedAt, now, entry);
   if (staleReason) return { reason: staleReason };
   if (claim.timedArrivalClaim) return { reason: 'eta_claim_unbound' };
-  const [entry] = entries;
   return claim.claims.every((c) => c.minutes === entry.minutes) ? { entries: [entry] } : { reason: 'eta_claim_unbound' };
 }
 

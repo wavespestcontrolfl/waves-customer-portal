@@ -759,6 +759,12 @@ async function resolveLiveEtaFact(row, customer) {
     minutes: minutesFact.minutes,
     asOf: minutesFact.asOf,
     trackUrl: liveEtaTrackUrl(row),
+    // When the GPS fix behind this figure goes stale to the public tracker
+    // (fix time + STALE_TECH_STATUS_MS) — Codex round-11 P2, PR #5334. Carried
+    // into the persisted snapshot entry so send-time revalidation
+    // (sms-eta-freshness.js) rejects a minutes claim once min(15-minute
+    // draft window, this instant) passes, never only the draft window.
+    fixExpiresAtMs: minutesFact.fixAtMs + STALE_TECH_STATUS_MS,
   };
 }
 
@@ -1125,6 +1131,8 @@ class ContextAggregator {
           // outgoing body must belong to a snapshot visit, never a
           // stray/old link.
           trackTokens: members.map((s) => s.track_view_token).filter(Boolean),
+          // GPS-fix expiry (Codex round-11 P2): see resolveLiveEtaFact.
+          fixExpiresAtMs: liveEtaResultByKey.get(key).fixExpiresAtMs,
         };
       });
 

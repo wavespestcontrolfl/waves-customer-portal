@@ -630,16 +630,39 @@ function sentenceSpans(str) {
 }
 // Written-out minutes ("twelve minutes away", "twenty-five mins") are read
 // as digits before claim detection (audit P1, round 4), so a spelled number
-// is checked exactly like "12 minutes".
+// is checked exactly like "12 minutes". Hundreds are ONE value (Codex round-11
+// P2, PR #5334): "one hundred twenty minutes away" used to read as "1 hundred
+// 20 minutes", so only the trailing 20 was validated. A number phrase is now
+// `[<1-9>|a|an] hundred [and] [<under-100>]` (also "hundred-twenty") or a
+// plain under-100 number, converted as a single figure. Anything it cannot
+// fully convert ("a thousand", "a dozen", "hundreds") is left as a word and
+// rejected next to a time unit by bodyHasUnconvertedNumberWord below.
 const NUMBER_WORD_UNITS = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
 const NUMBER_WORD_TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
-const NUMBER_WORD_RE = new RegExp(`\\b(?:(${Object.keys(NUMBER_WORD_TENS).join('|')})(?:[\\s-]+(${Object.keys(NUMBER_WORD_UNITS).slice(0, 9).join('|')}))?|(${Object.keys(NUMBER_WORD_UNITS).join('|')}))\\b`, 'gi');
-function normalizeNumberWords(text) {
-  return String(text || '').replace(NUMBER_WORD_RE, (m, tens, unit, single) => {
-    if (single) return String(NUMBER_WORD_UNITS[single.toLowerCase()]);
-    return String(NUMBER_WORD_TENS[tens.toLowerCase()] + (unit ? NUMBER_WORD_UNITS[unit.toLowerCase()] : 0));
-  });
+const NW_TENS = Object.keys(NUMBER_WORD_TENS).join('|');
+const NW_DIGITS = Object.keys(NUMBER_WORD_UNITS).slice(0, 9).join('|');
+const NW_UNDER_TWENTY = Object.keys(NUMBER_WORD_UNITS).join('|');
+const NUMBER_WORD_RE = new RegExp(
+  `\\b(?:(?:(?:(${NW_DIGITS}|an?)[\\s-]+)?hundred(?:(?:[\\s-]+and)?[\\s-]+(?:(${NW_TENS})(?:[\\s-]+(${NW_DIGITS}))?|(${NW_UNDER_TWENTY})))?)`
+  + `|(?:(${NW_TENS})(?:[\\s-]+(${NW_DIGITS}))?|(${NW_UNDER_TWENTY})))\\b`, 'gi');
+function lookupNumberWord(table, word) {
+  return word ? table[word.toLowerCase()] : 0;
 }
+function numberWordValue(m, hundredsWord, tens1, digit1, under20a, tens2, digit2, under20b) {
+  const isHundred = /hundred/i.test(m);
+  const multiplier = /^an?$/i.test(hundredsWord || '') || !hundredsWord ? 1 : lookupNumberWord(NUMBER_WORD_UNITS, hundredsWord);
+  const tens = lookupNumberWord(NUMBER_WORD_TENS, isHundred ? tens1 : tens2);
+  const digit = lookupNumberWord(NUMBER_WORD_UNITS, isHundred ? digit1 : digit2);
+  const under20 = lookupNumberWord(NUMBER_WORD_UNITS, isHundred ? under20a : under20b);
+  return (isHundred ? multiplier * 100 : 0) + tens + digit + under20;
+}
+function normalizeNumberWords(text) {
+  return String(text || '').replace(NUMBER_WORD_RE, (m, ...groups) => String(numberWordValue(m, ...groups.slice(0, 7))));
+}
+// A number word normalizeNumberWords cannot convert, right next to a time
+// unit ("a thousand minutes", "a dozen minutes", "hundreds of minutes") —
+// fail closed instead of letting the figure go unread.
+const UNCONVERTED_NUMBER_WORD_RE = /\b(?:hundreds|thousands?|millions?|dozens?|score)\b[\s\w-]{0,20}?\b(?:min(?:ute)?s?|hours?|hrs?)\b/gi;
 // Structural time-quantity normalization (Codex round-9 P2, PR #5334): every
 // earlier round of this PR found ANOTHER way a customer-visible ETA could
 // slip past the exact-minutes comparison, and round 9 found the newest —
@@ -710,22 +733,26 @@ function normalizeTimeQuantities(text) {
 // so "the treatment needs about half an hour to dry" never false-positives.
 // Only meaningful — and only called — where there is a LIVE ETA to compare a
 // claim against; see validateLiveEtaMinutes and etaClaimBlockReason.
-function bodyHasUnnormalizedHourWord(text) {
-  const str = normalizeTimeQuantities(normalizeNumberWords(text));
+// The shared sentence rule for a duration word the parser left unread: an
+// arrival trigger in the sentence; a strong trigger wins; a weak "out"
+// consults the dry-time/wait-before duration exclusions.
+function unreadDurationInArrivalSentence(str, wordRe) {
   const spans = sentenceSpans(str);
-  const re = /\b(?:hours?|hrs?)\b/gi;
-  let m;
-  while ((m = re.exec(str))) {
-    const span = spans.find(([s, e]) => m.index >= s && m.index < e) || spans[spans.length - 1];
-    const sentence = str.slice(span[0], span[1]);
+  const re = new RegExp(wordRe.source, wordRe.flags);
+  for (const m of str.matchAll(re)) {
+    const sentence = sentenceAt(str, spans, m.index);
     if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
-    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
-    const after = str.slice(m.index + m[0].length, m.index + m[0].length + 30);
-    const before = str.slice(Math.max(0, m.index - 30), m.index);
-    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) continue;
-    return true;
+    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)) return true;
   }
   return false;
+}
+function bodyHasUnnormalizedHourWord(text) {
+  return unreadDurationInArrivalSentence(normalizeTimeQuantities(normalizeNumberWords(text)), /\b(?:hours?|hrs?)\b/gi);
+}
+// Codex round-11 P2 (PR #5334): a number word the converter could not turn
+// into digits next to a time unit is rejected outright, live ETA or not.
+function bodyHasUnconvertedNumberWord(text) {
+  return unreadDurationInArrivalSentence(normalizeNumberWords(text), UNCONVERTED_NUMBER_WORD_RE);
 }
 // Does the body talk about the tech arriving at all? The send-time freshness
 // check uses this as a backstop for ETA wording the claim parser can't read.
@@ -754,8 +781,9 @@ const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of
 // could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
 // Routed through this one already-shared entry point so every send seam's
 // existing import of the drafter keeps working unchanged.
-function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false } = {}) {
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false } = {}) {
   if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text);
+  if (unconvertedNumbersOnly) return bodyHasUnconvertedNumberWord(text);
   const str = normalizeNumberWords(text);
   const spans = sentenceSpans(str);
   const sentenceFor = (index) => {
@@ -1031,6 +1059,11 @@ function buildLiveEtaSnapshot(context) {
       minutes: g.minutes,
       scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null),
       trackTokens: Array.isArray(g.trackTokens) ? g.trackTokens.filter(Boolean) : [],
+      // The instant the GPS fix behind this figure goes stale to the public
+      // tracker (Codex round-11 P2, PR #5334); sms-eta-freshness.js expires a
+      // minutes claim at min(15-minute draft window, this). Omitted when
+      // unknown, so an entry without it keeps the draft-window-only rule.
+      ...(Number.isFinite(g.fixExpiresAtMs) ? { fixExpiresAtMs: g.fixExpiresAtMs } : {}),
     }))
     .filter((g) => g.scheduledServiceIds.length);
   return entries.length ? { entries } : null;
@@ -1064,6 +1097,9 @@ function validateLiveEtaMinutes({ reply, factsBlock }) {
   // to a real minutes figure ("about an hour out, 2 minutes") would otherwise
   // ride the numeric claim through — reject it outright once there is a LIVE
   // ETA to hold the reply to.
+  if (bodyHasUnconvertedNumberWord(reply)) {
+    return { ok: false, violations: ['the reply states an arrival time in number words that cannot be read as an exact figure — state the EXACT LIVE ETA minutes as digits, or drop the timeframe and say the tech is on the way'] };
+  }
   if (factsMinutes.size && bodyHasUnnormalizedHourWord(reply)) {
     return { ok: false, violations: ['the reply gives an hour-based arrival time instead of the EXACT LIVE ETA minutes figure — state that exact number of minutes, or drop the timeframe and say the tech is on the way'] };
   }
@@ -3253,6 +3289,7 @@ module.exports = {
   findGroundedMinutesFigures,
   normalizeTimeQuantities,
   bodyHasUnnormalizedHourWord,
+  bodyHasUnconvertedNumberWord,
   replyClaimsEtaMinutes,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,
