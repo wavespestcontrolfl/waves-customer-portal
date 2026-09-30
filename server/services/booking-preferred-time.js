@@ -29,6 +29,7 @@ const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 
 const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
+const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
 
 const LEAD_TYPE = 'book_preferred_time';
 // When the customer last asked: the submit-only stamp in extracted_data, falling
@@ -203,20 +204,58 @@ async function lockPhone(trx, phone) {
  */
 async function reconcileBookingSince(db, { phone, since }) {
   try {
-    const booked = await db('self_booked_appointments as sba')
+    const bookings = await db('self_booked_appointments as sba')
       .leftJoin('customers as c', 'sba.customer_id', 'c.id')
       .whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone])
       .where('sba.created_at', '>=', since)
       .whereNot('sba.status', 'cancelled')
       .orderBy('sba.created_at', 'desc')
-      .first('sba.id', 'sba.customer_id');
+      .limit(10)
+      .select('sba.id', 'sba.customer_id');
+    // A free re-service callback is a warranty visit, not an acquisition:
+    // createSelfBooking (normal + replay paths) skips the lead conversion for a
+    // callbackVisit, so this recovery path must too. Take the newest booking
+    // whose visit is NOT a callback (a booking with no visit row yet still
+    // counts, as before).
+    let booked = null;
+    let service = null;
+    for (const candidate of bookings || []) {
+      const row = await db('scheduled_services').where({ self_booking_id: candidate.id }).first();
+      if (row && row.is_callback) continue;
+      booked = candidate;
+      service = row || null;
+      break;
+    }
     if (!booked) return false;
-    const service = await db('scheduled_services').where({ self_booking_id: booked.id }).first();
-    const out = await convertPreferredTimeLeadsOnBooking(db, { customerId: booked.customer_id, booking: service || null });
+    const out = await convertPreferredTimeLeadsOnBooking(db, { customerId: booked.customer_id, booking: service });
     return out.converted > 0;
   } catch (err) {
     logger.warn(`[booking:preferred-time] booking reconcile failed: ${err.message}`);
     return false;
+  }
+}
+
+/**
+ * True unless the lead is PROVABLY settled (converted, closed, deleted or gone).
+ * Read immediately before the new_lead bell so a booking that converted the
+ * lead after the reconcile lookup — or a concurrent booking that beat the
+ * reconcile helper to it, which then finds no open lead and reports
+ * converted:0 — does not ring for an already-won request. A failed read is
+ * ambiguous, not settled: it returns true so the bell still rings (the
+ * best-effort convention above: on any failure the lead simply rings).
+ */
+async function leadStillOpen(db, leadId) {
+  try {
+    const row = await db('leads')
+      .where({ id: leadId })
+      .whereNull('deleted_at')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      .first('id', 'status');
+    return !!row;
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] bell open-check failed for lead ${leadId}: ${err.message}`);
+    return true;
   }
 }
 
@@ -323,7 +362,21 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
           extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(requestFields)]),
           updated_at: trx.fn.now(),
         });
-      if (refreshed) return { leadId: existing.id, created: false };
+      if (refreshed) {
+        // The lead's funnel row was classified from the FIRST request's
+        // service; a refresh that changes service_interest must reclassify it
+        // (same classifier the stamp uses), in this transaction, or a later
+        // booking conversion reports the wrong service line. Only the
+        // classification moves — stage, source and dedupe scope are untouched.
+        await trx('ad_service_attribution')
+          .where({ lead_id: existing.id })
+          .update({
+            service_line: inferServiceLine(serviceLabel),
+            specific_service: inferSpecificService(serviceLabel),
+            service_bucket: inferServiceBucket(serviceLabel),
+          });
+        return { leadId: existing.id, created: false };
+      }
     }
     const [row] = await trx('leads').insert({
       first_name: value.firstName,
@@ -361,7 +414,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   // the bell. Best-effort: on any failure the lead simply stays open and rings.
   const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt });
 
-  if (created && notify && !alreadyBooked) {
+  if (created && notify && !alreadyBooked && await leadStillOpen(db, leadId)) {
     try {
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('new_lead', {

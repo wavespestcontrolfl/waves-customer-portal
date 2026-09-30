@@ -17,6 +17,9 @@ let mockCustomer = null;       // what customers .first() returns
 let mockOpenLeads = [];        // what an awaited leads select() resolves to
 let mockLeadUpdateRows = 1;    // rows a conditional leads UPDATE matches (0 = staff closed it since the lookup)
 let mockRetireError = null;    // makes the booking_intents suppression UPDATE throw
+let mockLeadSettled = false;    // the bell's just-before re-read finds the lead already converted/closed
+let mockBookedList = null;     // when set, the reconcile's multi-booking lookup resolves this list
+let mockScheduledService = null; // what the reconcile's scheduled_services lookup returns (null = derived from mockBookedSince)
 let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
 
@@ -32,12 +35,19 @@ function builder(table) {
     orWhereRaw: () => b,
     leftJoin: () => b,
     orderBy: () => b,
+    limit: () => b,
     select: () => b,
-    then: (resolve, reject) => Promise.resolve(table === 'leads' ? mockOpenLeads : []).then(resolve, reject),
-    first: () => Promise.resolve(
-      table === 'leads' ? mockExistingLead
+    then: (resolve, reject) => Promise.resolve(
+      table === 'leads' ? mockOpenLeads
+        : table === 'self_booked_appointments as sba' ? (mockBookedList || (mockBookedSince ? [mockBookedSince] : []))
+          : [],
+    ).then(resolve, reject),
+    first: (...cols) => Promise.resolve(
+      table === 'leads' && cols.includes('status') ? (mockLeadSettled ? null : { id: 'lead-1', status: 'new' })
+      : table === 'leads' ? mockExistingLead
         : table === 'customers' ? mockCustomer
           : table === 'self_booked_appointments as sba' ? mockBookedSince
+            : table === 'scheduled_services' && mockScheduledService ? mockScheduledService
             : table === 'scheduled_services' && mockBookedSince ? { id: 'ss-1', self_booking_id: mockBookedSince.id }
               : null,
     ),
@@ -164,6 +174,9 @@ beforeEach(() => {
   mockLeadUpdateRows = 1;
   mockRetireError = null;
   mockBookedSince = null;
+  mockLeadSettled = false;
+  mockBookedList = null;
+  mockScheduledService = null;
   mockOrder.length = 0;
   mockMarkConverted.mockClear();
   mockMarkConverted.mockResolvedValue(true);
@@ -470,6 +483,39 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(r.status).toBe(200);
     expect(mockMarkConverted).not.toHaveBeenCalled();
     expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('a booking that converted the lead BEFORE the reconcile ran (helper finds nothing open, converted:0): the bell re-checks the lead and stays silent', async () => {
+    mockLeadSettled = true; // the just-before-the-bell re-read finds the lead already won
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a free callback visit inside the reconcile window is not an acquisition: no conversion, the lead stays open and rings', async () => {
+    mockBookedSince = { id: 'sba-1', customer_id: 'cust-1' };
+    mockScheduledService = { id: 'ss-1', self_booking_id: 'sba-1', is_callback: true };
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('a refresh that changes the service reclassifies the linked funnel row in the same transaction', async () => {
+    mockExistingLead = { id: 'lead-existing' };
+    const r = await post(baseUrl, { ...validBody(), service_type: 'lawn_care', capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    const lead = mockOps.find((o) => o.table === 'leads' && o.op === 'update');
+    const funnel = mockOps.find((o) => o.table === 'ad_service_attribution' && o.op === 'update');
+    expect(funnel).toBeDefined();
+    expect(mockOrder.indexOf('update:ad_service_attribution')).toBeGreaterThan(mockOrder.indexOf('update:leads'));
+    const { inferServiceLine } = require('../utils/service-line-infer');
+    expect(funnel.arg.service_line).toBe(inferServiceLine(lead.arg.service_interest));
+    expect(funnel.arg.service_line).toBe('lawn');
+    expect(Object.keys(funnel.arg).sort()).toEqual(['service_bucket', 'service_line', 'specific_service']);
+    expect(mockOps.filter((o) => o.table === 'leads' && o.op === 'insert')).toHaveLength(0);
   });
 
   test('no booking since the request began: nothing is converted and the bell rings', async () => {

@@ -16,7 +16,10 @@
  *   - a refresh MERGES its request fields into extracted_data (first-touch keys
  *     survive, a staff-added key survives);
  *   - a booking that committed while the submit was in flight converts the
- *     just-filed lead post-commit (no bell).
+ *     just-filed lead post-commit (no bell);
+ *   - a booking that already converted the lead (helper reports converted:0)
+ *     leaves the bell silent; a callback visit is never reconciled as a win;
+ *   - a refresh that changes the service reclassifies the linked funnel row.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -75,7 +78,8 @@ jest.setTimeout(60000);
     await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text)', [schema]);
     await database.raw(`CREATE TABLE ??.self_booked_appointments (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status text DEFAULT 'confirmed', created_at timestamptz DEFAULT now())`, [schema]);
-    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid)', [schema]);
+    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid, is_callback boolean DEFAULT false)', [schema]);
+    await database.raw('CREATE TABLE ??.ad_service_attribution (lead_id uuid PRIMARY KEY, service_line text, specific_service text, service_bucket text, funnel_stage text DEFAULT \'lead\')', [schema]);
     ({ recordPreferredTimeRequest } = require('../services/booking-preferred-time'));
     ({ _internals: { withLockedRecoveryIntent } } = require('../services/booking-abandon-recovery'));
   });
@@ -88,6 +92,7 @@ jest.setTimeout(60000);
     await database('leads').del();
     await database('booking_intents').del();
     await database('funnel_rows').del();
+    await database('ad_service_attribution').del();
     await database('self_booked_appointments').del();
     await database('scheduled_services').del();
     await database('customers').del();
@@ -226,5 +231,70 @@ jest.setTimeout(60000);
     await recordPreferredTimeRequest(database, value(), { notify: true });
     expect(mockConvert).not.toHaveBeenCalled();
     expect(triggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('a concurrent booking that already converted the lead (the helper then reports converted:0) leaves the bell silent', async () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    triggerNotification.mockClear();
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    // The booking's own conversion wins the lead just before our helper's write: our call reports nothing converted.
+    mockConvert.mockImplementation(async ({ leadId }) => {
+      await database('leads').where({ id: leadId }).update({ status: 'converted', converted_at: new Date() });
+      return { converted: false };
+    });
+    const out = await recordPreferredTimeRequest(database, value(), { notify: true });
+    expect(out.created).toBe(true);
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a callback visit is not reconciled as a win: the lead stays open and rings; an older real booking still converts', async () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    triggerNotification.mockClear();
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const cb = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
+    await database('scheduled_services').insert({ self_booking_id: cb[0].id, is_callback: true });
+    mockConvert.mockResolvedValue({ converted: true });
+    const out = await recordPreferredTimeRequest(database, value(), { notify: true });
+    expect(mockConvert).not.toHaveBeenCalled();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
+    expect(out.created).toBe(true);
+
+    // An older, real booking in the same window still reconciles (the callback is skipped, not the whole lookup).
+    triggerNotification.mockClear();
+    await database('leads').del();
+    await database('self_booked_appointments').del();
+    await database('scheduled_services').del();
+    const real = await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() - 20000) }).returning('id');
+    await database('scheduled_services').insert({ self_booking_id: real[0].id, is_callback: false });
+    const cb2 = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
+    await database('scheduled_services').insert({ self_booking_id: cb2[0].id, is_callback: true });
+    await recordPreferredTimeRequest(database, value(), { notify: true });
+    expect(mockConvert).toHaveBeenCalledTimes(1);
+    expect(mockConvert.mock.calls[0][0].booking).toMatchObject({ self_booking_id: real[0].id });
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a refresh that changes the service reclassifies the linked funnel row (line + bucket), in the same transaction, and rolls back with it', async () => {
+    mockStamp.mockImplementation(async (handle, lead) => {
+      await handle('ad_service_attribution').insert({ lead_id: lead.id, service_line: 'pest', specific_service: 'general_pest', service_bucket: 'recurring_entry', funnel_stage: 'lead' });
+    });
+    const first = await recordPreferredTimeRequest(database, value(), { serviceLabel: 'Pest Control', notify: false });
+    expect(await database('ad_service_attribution').where({ lead_id: first.leadId }).first()).toMatchObject({ service_line: 'pest' });
+    const second = await recordPreferredTimeRequest(database, value(), { serviceLabel: 'Lawn Care', notify: false });
+    expect(second).toMatchObject({ created: false, leadId: first.leadId });
+    const row = await database('ad_service_attribution').where({ lead_id: first.leadId }).first();
+    const { inferServiceLine, inferSpecificService, inferServiceBucket } = require('../utils/service-line-infer');
+    expect(row).toMatchObject({
+      service_line: 'lawn',
+      specific_service: inferSpecificService('Lawn Care'),
+      service_bucket: inferServiceBucket('Lawn Care'),
+      funnel_stage: 'lead',
+    });
+    expect(inferServiceLine('Lawn Care')).toBe('lawn');
   });
 });
