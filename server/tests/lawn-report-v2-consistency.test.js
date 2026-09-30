@@ -1048,6 +1048,10 @@ describe('watering instruction drives the aftercare through the existing verdict
       expect(banned(text)).toEqual([]);
       expect(reentrySafetyClaimFinding(text)).toBeFalsy();
     }
+    // A timed hold that also waits for drying: the banner never ends at the clock time.
+    const timedDry = buildWateringInstruction({ rules: [dry, HOLD_RULE], completedAt: COMPLETED });
+    expect(timedDry.holdUntil).toBe('2026-10-01T19:00:00.000Z');
+    expect(buildWateringBanner(timedDry).expiresAt).toBeNull();
     // Banner: no clock time and no clock expiry (dryness is a condition).
     expect(buildWateringBanner(instruction)).toEqual({
       state: 'hold', lines: instruction.lines, holdUntil: null, waterInBy: null, expiresAt: null, ruleSource: 'label',

@@ -3644,7 +3644,10 @@ function buildWateringBanner(instruction, weekPlan = null) {
     }),
     holdUntil: instruction.holdUntil,
     waterInBy: instruction.waterInBy,
-    expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || instruction.waterInBy || instruction.holdUntil || null),
+    // The instruction's own expiry is authoritative (instructionPhaseAt reads
+    // the same field): a hold that waits for drying has none, and falling back
+    // to holdUntil would end its banner at the clock time.
+    expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || null),
     ruleSource: instruction.ruleSource,
   };
 }
