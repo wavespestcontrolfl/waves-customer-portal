@@ -423,6 +423,12 @@ const isCombinedPiMetadata = (piMetadata) => !!piMetadata?.combined_allocation;
  */
 async function memberCollectionPending(inv, { database = db } = {}) {
   const { isCollectionPendingFenceError } = require('./invoice-helpers');
+  if (!inv?.id) return { reason: 'not_collectible' };
+  // Always vet the FULL, current invoice row: sibling rows from
+  // openBalanceInvoices carry no customer_id / payer_id / payer_statement_id /
+  // withdrawal stamp, so checking the passed row would silently skip the
+  // ownership checks (pre-push audit P1). A read failure throws (caller holds).
+  inv = await database('invoices').where({ id: inv.id }).first();
   if (!inv) return { reason: 'not_collectible' };
   if (!isInvoiceCollectibleStatus(inv.status)) return { reason: 'not_collectible' };
   if (inv.payer_id || inv.payer_statement_id) return { reason: 'payer_billed' };

@@ -93,12 +93,19 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
 
   // Behavioural half: every 'predicate:<reason>' row above is actually produced.
   const base = () => ({ id: 'i1', invoice_number: 'INV-1', customer_id: 'c1', status: 'overdue', total: '10.00', payer_id: null, payer_statement_id: null, scheduled_send_error: null, scheduled_service_id: null });
-  const database = { tag: 'db' };
-  const run = (inv) => PayCombined.memberCollectionPending(inv, { database });
+  // The predicate re-reads the FULL current row by id on `database`; `stored`
+  // is what that read returns (default: the row under test).
+  let stored;
+  let readError = null;
+  const database = jest.fn(() => ({
+    where: () => ({ first: async () => { if (readError) throw readError; return stored; } }),
+  }));
+  const run = (inv) => { stored = inv; return PayCombined.memberCollectionPending(inv, { database }); };
   const pending = (code, extra = {}) => Object.assign(new Error(code), { code, ...extra });
 
   beforeEach(() => {
     jest.clearAllMocks();
+    readError = null;
     mockResolveForInvoice.mockResolvedValue({ payerId: null });
     mockDeposit.mockResolvedValue(undefined);
     mockRecon.mockResolvedValue(undefined);
@@ -120,6 +127,27 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     expect(await run({ ...base(), ...over })).toEqual({ reason });
     expect(mockResolveForInvoice).not.toHaveBeenCalled();
     expect(mockDeposit).not.toHaveBeenCalled();
+  });
+
+  test('it vets the FULL current row, not the row it was handed: a sparse row (open-balance shape) is judged by the stored payer / withdrawal columns', async () => {
+    const sparse = { id: 'i1', invoice_number: 'INV-1', status: 'overdue', total: '10.00' }; // no customer_id / payer columns
+    stored = { ...base(), payer_id: 'p1' };
+    expect(await PayCombined.memberCollectionPending(sparse, { database })).toEqual({ reason: 'payer_billed' });
+    stored = { ...base(), scheduled_send_error: 'payer_billed:p1' };
+    expect(await PayCombined.memberCollectionPending(sparse, { database })).toEqual({ reason: 'withdrawn' });
+    stored = { ...base(), customer_id: 'cust-real' };
+    expect(await PayCombined.memberCollectionPending(sparse, { database })).toBeNull();
+    expect(mockResolveForInvoice.mock.calls.at(-1)[0].customerId).toBe('cust-real');
+    expect(mockDeposit.mock.calls.at(-1)[1]).toMatchObject({ customer_id: 'cust-real' });
+  });
+
+  test('a row that has vanished is not_collectible; a failed re-read THROWS (caller holds)', async () => {
+    stored = undefined;
+    expect(await PayCombined.memberCollectionPending({ id: 'gone' }, { database })).toEqual({ reason: 'not_collectible' });
+    expect(await PayCombined.memberCollectionPending({}, { database })).toEqual({ reason: 'not_collectible' });
+    stored = base();
+    readError = new Error('connection terminated');
+    await expect(PayCombined.memberCollectionPending({ id: 'i1' }, { database })).rejects.toThrow('connection terminated');
   });
 
   test('payer_billed from the LIVE resolve', async () => {

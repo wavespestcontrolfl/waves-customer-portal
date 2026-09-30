@@ -41,6 +41,17 @@ const sib = (id, over = {}) => ({
 });
 
 let reasons;
+let fullRows;
+const defaultFullRow = (id) => ({ id, invoice_number: `INV-${id}`, customer_id: 'cust-1', status: 'overdue', payer_id: null, payer_statement_id: null, scheduled_send_error: null });
+const serveFullRow = (table) => ({
+  where: (cond) => ({
+    first: async () => {
+      // the real deposit check reads the visit's provenance: same customer, no estimate
+      if (table === 'scheduled_services') return { id: cond.id, customer_id: 'cust-real', source_estimate_id: null };
+      return fullRows.has(cond.id) ? fullRows.get(cond.id) : defaultFullRow(cond.id);
+    },
+  }),
+});
 const opts = (extra = {}) => ({ onDegrade: (r) => reasons.push(r), ...extra });
 
 beforeEach(() => {
@@ -52,6 +63,10 @@ beforeEach(() => {
   mockStopped.mockResolvedValue(new Set());
   mockOpenBalance.mockResolvedValue([sib('s1')]);
   mockReconcile.mockResolvedValue(undefined);
+  // The readOnly member predicate re-reads each sibling's FULL invoice row by
+  // id (openBalanceInvoices rows carry no customer/payer columns).
+  fullRows = new Map();
+  db.mockImplementation(serveFullRow);
 });
 
 describe('onDegrade reasons — each null return names why, and the return value is unchanged', () => {
@@ -172,7 +187,7 @@ describe('unchanged behavior', () => {
 
 describe('the caller\'s database handle reaches the payer resolve', () => {
   test('resolveForInvoice and the open read receive the SAME handle', async () => {
-    const handle = jest.fn();
+    const handle = jest.fn(serveFullRow);
     await PayCombined.combinedEligibleSiblings(anchor({ scheduled_service_id: 'visit-1' }), { database: handle });
     expect(mockResolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({
       database: handle, customerId: 'cust-1', scheduledServiceId: 'visit-1', throwOnError: true,
@@ -184,7 +199,7 @@ describe('the caller\'s database handle reaches the payer resolve', () => {
   });
 
   test('readOnly reaches the sibling reconciliation fence', async () => {
-    const handle = jest.fn();
+    const handle = jest.fn(serveFullRow);
     await PayCombined.combinedEligibleSiblings(anchor(), { database: handle, readOnly: true });
     expect(mockReconcile).toHaveBeenCalledWith('s1', handle, { readOnly: true });
   });
@@ -253,3 +268,59 @@ describe('readOnly sibling fence: recognised pending states exclude, anything el
   });
 });
 
+describe('readOnly siblings arrive in the REAL openBalanceInvoices column shape', () => {
+  // The select list of open-balance.js openInvoiceQuery, read from its source
+  // so a column added or dropped there changes this fixture: those rows carry
+  // NO customer_id / payer_id / payer_statement_id / scheduled_send_error.
+  const fs = require('fs');
+  const path = require('path');
+  const openSrc = fs.readFileSync(path.join(__dirname, '../services/open-balance.js'), 'utf8');
+  const listStart = openSrc.indexOf('function openInvoiceQuery');
+  const selectBody = openSrc.slice(openSrc.indexOf('.select(', listStart), openSrc.indexOf(');', openSrc.indexOf('.select(', listStart)));
+  const realColumns = [...selectBody.matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).filter((c) => c !== 'is_overdue');
+  const openShaped = (id, over = {}) => {
+    const row = Object.fromEntries(realColumns.map((c) => [c, null]));
+    return { ...row, id, invoice_number: `INV-${id}`, status: 'overdue', total: '50.00', credit_applied: 0, ...over };
+  };
+
+  test('fixture sanity: the real select list has no ownership columns', () => {
+    expect(realColumns).toEqual(expect.arrayContaining(['id', 'status', 'total', 'scheduled_service_id']));
+    for (const c of ['customer_id', 'payer_id', 'payer_statement_id', 'scheduled_send_error']) expect(realColumns).not.toContain(c);
+  });
+
+  test('the payer resolve receives the sibling\'s REAL customer_id (from the full row), never undefined', async () => {
+    mockOpenBalance.mockResolvedValue([openShaped('s1', { scheduled_service_id: 'visit-9' })]);
+    fullRows.set('s1', { ...openShaped('s1', { scheduled_service_id: 'visit-9' }), customer_id: 'cust-real', payer_id: null, payer_statement_id: null, scheduled_send_error: null });
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
+    expect(out.map((i) => i.id)).toEqual(['s1']);
+    const siblingResolve = mockResolveForInvoice.mock.calls.map((c) => c[0]).find((a) => a.scheduledServiceId === 'visit-9');
+    expect(siblingResolve).toMatchObject({ customerId: 'cust-real', throwOnError: true });
+    expect(siblingResolve.customerId).not.toBe('undefined');
+  });
+
+  test.each([
+    ['payer_id', { payer_id: 'payer-1' }],
+    ['payer_statement_id', { payer_statement_id: 'stmt-1' }],
+    ['a withdrawal stamp', { scheduled_send_error: 'payer_billed:payer-1' }],
+    ['no longer collectible', { status: 'void' }],
+  ])('a sibling whose FULL row shows %s is excluded even though the open row did not', async (_l, over) => {
+    mockOpenBalance.mockResolvedValue([openShaped('s1'), openShaped('s2')]);
+    fullRows.set('s1', { ...openShaped('s1'), customer_id: 'cust-1', payer_id: null, payer_statement_id: null, scheduled_send_error: null, ...over });
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
+    expect(out.map((i) => i.id)).toEqual(['s2']);
+  });
+
+  test('a sibling row that vanished between the open read and the check is excluded', async () => {
+    mockOpenBalance.mockResolvedValue([openShaped('s1'), openShaped('s2')]);
+    fullRows.set('s1', undefined);
+    const out = await PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }));
+    expect(out.map((i) => i.id)).toEqual(['s2']);
+  });
+
+  test('a failed full-row read degrades the selection to incomplete (the resolver holds)', async () => {
+    mockOpenBalance.mockResolvedValue([openShaped('s1')]);
+    db.mockImplementation(() => ({ where: () => ({ first: async () => { throw new Error('connection terminated'); } }) }));
+    await expect(PayCombined.combinedEligibleSiblings(anchor(), opts({ readOnly: true }))).resolves.toBeNull();
+    expect(reasons).toEqual(['incomplete']);
+  });
+});

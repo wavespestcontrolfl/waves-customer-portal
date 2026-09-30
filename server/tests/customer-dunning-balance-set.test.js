@@ -511,3 +511,36 @@ describe('deterministic anchor on equal created_at', () => {
     expect((await resolve()).anchor.id).toBe('Z');
   });
 });
+
+describe('the open read returns SPARSE rows (no customer / payer columns): members are vetted on their full current row', () => {
+  const OWNERSHIP = ['customer_id', 'payer_id', 'payer_statement_id', 'scheduled_send_error'];
+  const sparse = (row) => Object.fromEntries(Object.entries(row).filter(([k]) => !OWNERSHIP.includes(k)));
+  beforeEach(() => {
+    const full = mockOpenBalance.getMockImplementation();
+    mockOpenBalance.mockImplementation(async (...a) => (await full(...a)).map(sparse));
+  });
+
+  test('every member\'s payer resolve carries the real customer id, never "undefined"', async () => {
+    const set = await resolve();
+    expect(set.kind).toBe('multi');
+    const customerIds = mockResolveForInvoice.mock.calls.map((c) => c[0].customerId);
+    expect(customerIds.length).toBeGreaterThanOrEqual(3); // anchor + both siblings at least
+    expect(new Set(customerIds)).toEqual(new Set([CUSTOMER]));
+  });
+
+  test.each([
+    ['payer_id', { payer_id: 'p1' }],
+    ['payer_statement_id', { payer_statement_id: 's1' }],
+    ['a withdrawal stamp', { scheduled_send_error: 'payer_billed:p1' }],
+  ])('a sibling whose full row carries %s is excluded although the open row hid it', async (_l, over) => {
+    Object.assign(state.invoices[1], over); // B
+    const set = await resolve();
+    expect(ids(set)).toEqual(['A', 'C']);
+  });
+
+  test('the anchor is still judged on its full row (payer on the anchor holds)', async () => {
+    state.invoices[0].payer_id = 'p1';
+    expect(await resolve()).toMatchObject({ kind: 'hold', reason: 'payer_anchor' });
+  });
+});
+
