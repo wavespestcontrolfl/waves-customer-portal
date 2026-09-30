@@ -742,6 +742,74 @@ describe('complete-sentence matching: an authorized sentence with anything attac
   });
 });
 
+describe('r6: a suffix or trailing modifier fragment on a copied sentence is never authorized', () => {
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const core = reentry.replace(/\.$/, '');
+  const claim = (body) => labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences(body, section));
+  test('"or sooner", "or earlier", "at the latest" attached to the sentence leave no copy and are held', () => {
+    for (const body of [`${core} or sooner.`, `${core} or earlier.`, `${core} at the latest.`, `${core} at the earliest.`, `${core}, or sooner.`, `${core} or sooner`]) {
+      expect(labelFactsLib.labelSentencesCopiedIn(body, section)).toEqual([]);
+      expect(labelFactsLib.stripLabelSentences(body, section)).not.toContain('labelsentence');
+      expect(claim(body)).toBe(true);
+    }
+  });
+  test('the same modifier as a trailing fragment after the period is not a new sentence either', () => {
+    for (const tail of ['Or sooner.', 'At the latest.', 'Unless it rains.', 'Max.', 'Maybe less.', 'Give or take.']) {
+      expect(labelFactsLib.labelSentencesCopiedIn(`${reentry} ${tail}`, section)).toEqual([]);
+      expect(claim(`${reentry} ${tail}`)).toBe(true);
+    }
+    expect(claim(`${reentry} Or sooner.`)).toBe(true);
+  });
+  test('send time: the same modifiers are unauthorized', async () => {
+    const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [reentry] };
+    const boom = () => { throw new Error('must not read'); };
+    for (const body of [`${core} or sooner.`, `${core} or earlier.`, `${core} at the latest.`, `${reentry} Or sooner.`]) {
+      await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body, conn: boom })).resolves.toBe('label_facts_unauthorized_claim');
+    }
+  });
+});
+
+describe('r6: the "safe once dry" idiom needs the AFFIRMATIVE technician-confirms-timing clause', () => {
+  const sanction = labelFactsLib.sanctionSafeOnceDry;
+  const sanctioned = (t) => sanction(t) !== t;
+  test('the sanctioned wording is exempted', () => {
+    for (const t of [
+      'It is safe once dry, and your technician will confirm the timing.',
+      'It is safe once dry, and your technician will confirm the timing at the visit.',
+      'It is safe once dry. Your technician will confirm timing for your yard.',
+      'It is safe once dry, and the technician confirms timing.',
+    ]) expect(sanctioned(t)).toBe(true);
+  });
+  test('a negated, hedged or conditional confirmation is not the idiom and stays held', () => {
+    for (const t of [
+      'It is safe once dry, but the technician cannot confirm timing.',
+      "It is safe once dry, and the technician can't confirm the timing.",
+      "It is safe once dry, and the technician won't confirm the timing.",
+      'It is safe once dry, and the technician is unable to confirm the timing.',
+      'It is safe once dry, but the technician may not confirm the timing.',
+      'It is safe once dry, and the technician might confirm the timing.',
+      "It is safe once dry, though I'm unsure the technician will confirm the timing.",
+      'It is safe once dry, and no technician will confirm the timing.',
+      'It is safe once dry, and the technician will never confirm the timing.',
+      'It is safe once dry, and the technician probably will confirm the timing.',
+      'It is safe once dry, and the technician will confirm the timing, or not.',
+      'It is safe once dry, unless the technician will confirm the timing.',
+      'It is safe once dry. The technician cannot confirm timing.',
+    ]) {
+      expect(sanctioned(t)).toBe(false);
+      expect(hasBannedCustomerCopy(t, { rainTimeGuard: true, labelFactsText: '' })).toBe(true);
+    }
+  });
+  test('a negated idiom is not exempted either', () => {
+    expect(sanctioned('It is not safe once dry, and your technician will confirm the timing.')).toBe(false);
+  });
+  test('an unrelated sentence with a negation beside the idiom does not spoil it', () => {
+    expect(sanctioned('No worries! It is safe once dry, and your technician will confirm the timing.')).toBe(true);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
@@ -1154,6 +1222,37 @@ describe('C: the section is for the latest visit only - a text about another vis
     expect(other('You came Monday, dogs ok?', V, T)).toBe(true); // not the visit's weekday
     expect(other('', V, T)).toBe(false);
     expect(other('tomorrow', 'not-a-date', T)).toBe(false);
+  });
+
+  test('r6: a month-name date carries its year - a different year is another visit', () => {
+    const V26 = '2026-09-29';
+    const T26 = '2026-10-05';
+    const o = (text) => other(text, V26, T26);
+    for (const text of [
+      'the September 29, 2025 treatment - is it ok for dogs?', 'the Sept 29 2025 spray, rain?', 'Sep. 29th, 2025 visit - kids ok?', 'the 29 September 2025 treatment',
+      "the Sep 29 '25 visit", 'the 29th of September 2024 visit, pets?', 'you sprayed 9/29/25, is it dry', 'the 9/29/2025 visit', 'the 2025-09-29 treatment', 'on 9-29-25 you sprayed',
+      'the 29 August visit - rain?', 'the 30 September treatment', 'the Sept 28 spray',
+    ]) expect(o(text)).toBe(true);
+    for (const text of [
+      'the September 29, 2026 treatment - is it ok?', 'the Sept 29 2026 spray, rain?', 'Sep. 29th visit - kids ok?', 'the 29 September 2026 treatment', "the Sep 29 '26 visit",
+      'the 29th of September visit', 'you sprayed 9/29/26, is it dry', 'the 9/29 visit', 'the 2026-09-29 treatment', 'on 9-29-26 you sprayed', 'the 29 Sept treatment',
+      'Sept 29 - how long for 2 hours of rain?', 'wait 5 decisions', 'it took 3 days',
+    ]) expect(o(text)).toBe(false);
+  });
+
+  test('r6: past-tense "when you did/came/sprayed/treated/were here" is the visit that happened, not a future one', () => {
+    // visit Fri Jun 5, today Wed Jun 10
+    expect(other('When you did the treatment yesterday, how long before the pets can go out?', '2026-06-09', T)).toBe(false); // yesterday == visit date
+    expect(other('When you did the treatment yesterday, how long before the pets can go out?', V, T)).toBe(true); // yesterday != visit date
+    for (const text of [
+      'When you did the treatment, how long before the pets can go out?', 'when you came, the dogs were out - is it ok?', 'when you sprayed, was it dry?',
+      'when you treated the yard, rain?', 'when you were here, did it rain', 'when you were out, can pets go back out',
+    ]) expect(other(text)).toBe(false);
+    expect(other('when you did the treatment last week, rain?')).toBe(true);
+    for (const text of [
+      'when you come, how long before pets go out', 'when you come out, is it ok', 'when you do the next one, can we water', 'when you get here, pets?', 'when the tech comes tomorrow, rain?',
+      'when you are here next week', 'when you show up, do we keep the dogs in',
+    ]) expect(other(text)).toBe(true);
   });
 
   describe('through the drafter', () => {

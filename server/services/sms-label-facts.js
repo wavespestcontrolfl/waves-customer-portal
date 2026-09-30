@@ -405,12 +405,16 @@ function canonText(text) {
 // "... for 4 hours or less.", "... for 4 hours, unless it rains." and
 // "... for 4 hours. or so" are therefore not copies and are never stripped.
 // Copying, stripping and the send-time recheck all use this one matcher.
+// A fragment that reopens the copied sentence ("... for 4 hours. Or sooner.",
+// ". At the latest.", ". Unless it rains.") is a modifier, so it is no new sentence.
+const MODIFIER_FRAGMENT_RE = /^(?:or|unless|at\s+(?:the\s+)?(?:most|least|latest|earliest)|max|maybe|perhaps|roughly|approx\w*|give\s+or\s+take|sooner|earlier|though|but|however|usually|typically|sometimes|depending|weather)\b/i;
+const copyEndsCleanly = (rest) => rest === '' || (/^\s+(?![a-z])/.test(rest) && !MODIFIER_FRAGMENT_RE.test(rest.trim()));
 // [{ start, end }] over `canon` (canonText output).
 function completeCopies(canon, sentence) {
   const out = [];
   for (const m of canon.matchAll(new RegExp(escapeRegex(canonText(sentence)), 'gi'))) {
     const end = m.index + m[0].length;
-    if ((m.index === 0 || !/[\p{L}\p{N}]/u.test(canon[m.index - 1])) && /^(?:$|\s+(?![a-z]))/.test(canon.slice(end))) out.push({ start: m.index, end });
+    if ((m.index === 0 || !/[\p{L}\p{N}]/u.test(canon[m.index - 1])) && copyEndsCleanly(canon.slice(end))) out.push({ start: m.index, end });
   }
   return out;
 }
@@ -722,10 +726,19 @@ function nonEnglishTimingWords(text) {
 // idiom: it carries no timing modifier, so it is swapped for a neutral token
 // before the guard reads the reply (unless it names a time: "safe once dry in 30 minutes").
 const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-\u2013\u2014,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
-const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
+// The confirmation must be the AFFIRMATIVE sanctioned clause ("your technician
+// will confirm the timing"), ending its sentence or trailing only "at the
+// visit" / "for your yard". A negated or hedged form ("cannot confirm timing",
+// "may not", "unsure") is not the idiom, and neither is any negation or hedge
+// in the sentence that carries the idiom or the clause.
+const CONFIRM_TIMING_RE = /(?<![\w'-])(?:(?:your|the|our)\s+(?:technician|tech|office|team)|we)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?\s*(?:[.!]|$)/i;
+const NEGATION_HEDGE_RE = /\b(?:not|no|never|nothing|nobody|cannot|without|unable|unsure|uncertain|unclear|unknown|may|might|maybe|perhaps|possibly|probably|hopefully|depends?|depending|but|however|unless|although|though|except|neither|nor|hardly|barely)\b|\bcan\s+not\b|n't\b/i;
 function sanctionSafeOnceDry(text) {
   const t = String(text || '');
-  return SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t) ? t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ') : t;
+  const canon = canonText(t);
+  if (!SANCTIONED_SAFE_RE.test(t) || !CONFIRM_TIMING_RE.test(canon)) return t;
+  const hedged = canon.split(/(?<=[.!?])\s+/).some((sentence) => (SANCTIONED_SAFE_RE.test(sentence) || CONFIRM_TIMING_RE.test(sentence)) && NEGATION_HEDGE_RE.test(sentence));
+  return hedged ? t : t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
 }
 
 /** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine). */
@@ -791,7 +804,7 @@ async function labelFactsSendBlockReason({ snapshot, body, conn = db, today } = 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
 const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
-const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do|did)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
+const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
 const OLDER_VISIT_RE = /\b(?:previous|prior|earlier|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
 
 function isoAddDays(iso, days) {
@@ -802,10 +815,23 @@ function isoAddDays(iso, days) {
 const YESTERDAY_RE = /\byesterday\b/g;
 const DAYS_AGO_RE = /\b(\d{1,3}|a|one|two|three|four|five|six|seven)\s+days?\s+ago\b/g;
 const DAYS_AGO_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
-const MONTH_DATE_RE = new RegExp(`\\b(${MONTH_NAMES.map((n) => n.slice(0, 3)).join('|')})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'g');
+const MONTH_SRC = MONTH_NAMES.map((n) => n.slice(0, 3)).join('|');
+// Day-first dates ("29 September 2025") need a real month word: "5 decisions" is no date.
+const MONTH_WORD_SRC = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+// An optional year after a month-name date: "2025", ", 2025" or "'25" (a bare two-digit number is an hour count, not a year).
+const YEAR_TAIL_SRC = "(?:\\s*,?\\s*(?:((?:19|20)\\d{2})\\b|['\u2019](\\d{2})\\b))?";
+const MONTH_DATE_RE = new RegExp(`\\b(${MONTH_SRC})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b${YEAR_TAIL_SRC}`, 'g');
+const DAY_MONTH_DATE_RE = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_WORD_SRC})\\b\\.?${YEAR_TAIL_SRC}`, 'g');
 const NUMERIC_DATE_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g;
+const DASHED_DATE_RE = /(?<![\d./-])(\d{1,2})[-.](\d{1,2})[-.](\d{2}|\d{4})(?![\d/-])/g;
+const ISO_DATE_RE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
 const FUTURE_OR_OLDER_RE = new RegExp(`${FUTURE_VISIT_RE.source}|${OLDER_VISIT_RE.source}`, 'g');
 const yearOf = (m, vy) => (m ? (m.length === 2 ? 2000 + Number(m) : Number(m)) : vy);
+const monthNumber = (name) => MONTH_NAMES.findIndex((n) => n.startsWith(name.slice(0, 3))) + 1;
+// True when month/day/year (year undefined = the visit's own) name a date other than the visit's.
+const otherYmd = (v, month, day, year) => month !== v.month || day !== v.day || yearOf(year, v.year) !== v.year;
+// Year captured after a month-name date: a four-digit year (group a) or an apostrophe'd two-digit one (group b).
+const tailYear = (a, b) => a || b;
 
 // Every way a message can point at a visit: a pattern, and a resolver that says
 // whether ONE match names a visit other than the facts' own. The message refers
@@ -825,8 +851,12 @@ const VISIT_REFERENCES = [
     },
   },
   // an explicit date ("Sep 29", "September 29th", "9/29", "9/29/26") must be the visit's date
-  { re: MONTH_DATE_RE, differs: (m, v) => MONTH_NAMES.findIndex((n) => n.startsWith(m[1])) + 1 !== v.month || Number(m[2]) !== v.day },
-  { re: NUMERIC_DATE_RE, differs: (m, v) => Number(m[1]) !== v.month || Number(m[2]) !== v.day || yearOf(m[3], v.year) !== v.year },
+  // (a year written after the date must match too: "September 29, 2025" is not the 2026 visit)
+  { re: MONTH_DATE_RE, differs: (m, v) => otherYmd(v, monthNumber(m[1]), Number(m[2]), tailYear(m[3], m[4])) },
+  { re: DAY_MONTH_DATE_RE, differs: (m, v) => otherYmd(v, monthNumber(m[2]), Number(m[1]), tailYear(m[3], m[4])) },
+  { re: NUMERIC_DATE_RE, differs: (m, v) => otherYmd(v, Number(m[1]), Number(m[2]), m[3]) },
+  { re: DASHED_DATE_RE, differs: (m, v) => otherYmd(v, Number(m[1]), Number(m[2]), m[3]) },
+  { re: ISO_DATE_RE, differs: (m, v) => otherYmd(v, Number(m[2]), Number(m[3]), m[1]) },
 ];
 
 /**
