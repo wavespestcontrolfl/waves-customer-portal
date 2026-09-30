@@ -546,8 +546,13 @@ invoice clears `payPageZelleVisibility` (`pay-v2.js`; PR #5331) — the ONE
 function this route, the SMS drafter's draft-time eligibility fetch, and
 the send-time recheck all call, so none of them can quietly disagree. The two
 CUSTOMER-SMS callers (they text the homeowner) additionally pass
-`customerFacing: true`, which rejects any invoice stamped with a `payer_id` or
-`payer_statement_id` — including one stamped after the reply was drafted;
+`customerFacing: true`, which runs ONE dedicated ownership step that always
+executes, independent of `payIncludeBalance` / combined-balance gating: a
+stamped `payer_id` or `payer_statement_id` (including one stamped after the
+reply was drafted) rejects as `payer_owned`; otherwise the LIVE payer resolver
+is called directly (`throwOnError`), a resolved third-party payer on an
+UNSTAMPED invoice rejects as `payer_owned`, and a resolver error or an invoice
+with no customer rejects as `payer_unverifiable` (fail closed);
 `GET /api/pay/:token` never passes it, so the payer-facing pay page keeps its
 behavior byte-for-byte.
 Exhaustively, every condition it applies: the invoice is collectible, not

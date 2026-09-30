@@ -443,6 +443,45 @@ describe('payPageZelleVisibility (round 5, findings 3 & 4)', () => {
     const payerFacing = await payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', payer_id: 'payer-1' }) });
     expect(payerFacing.reason).not.toBe('payer_owned');
   });
+
+  // Codex round-6 pre-push audit P1 (third variant): the customer-SMS boundary
+  // verifies LIVE ownership in its own step, independent of the combined-
+  // balance flag (combinedEligibleSiblings returns null before resolving when
+  // payIncludeBalance is off, and on resolver errors).
+  describe('customerFacing live payer ownership is independent of payIncludeBalance', () => {
+    const PayerService = require('../services/payer');
+    beforeEach(() => {
+      PayerService.resolveForInvoice.mockClear();
+      process.env.ZELLE_RECIPIENT = 'pay@example.com';
+      db.mockImplementation(() => chain({ first: { billing_mode: null, monthly_rate: null } }));
+    });
+    const unstamped = () => invoiceData({ status: 'overdue' });
+
+    test('payIncludeBalance OFF + an UNSTAMPED invoice that live-resolves to a payer ⇒ payer_owned', async () => {
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: 'payer-1' });
+      await expect(payPageZelleVisibility({ invoice: unstamped(), customerFacing: true })).resolves.toEqual({ visible: false, reason: 'payer_owned' });
+      expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ throwOnError: true }));
+    });
+
+    test('resolver throws ⇒ payer_unverifiable (fail closed, never read as self-pay)', async () => {
+      PayerService.resolveForInvoice.mockRejectedValueOnce(new Error('lookup down'));
+      await expect(payPageZelleVisibility({ invoice: unstamped(), customerFacing: true })).resolves.toEqual({ visible: false, reason: 'payer_unverifiable' });
+    });
+
+    test('an invoice with no customer_id cannot be verified ⇒ payer_unverifiable', async () => {
+      await expect(payPageZelleVisibility({ invoice: invoiceData({ status: 'overdue', customer_id: null }), customerFacing: true })).resolves.toEqual({ visible: false, reason: 'payer_unverifiable' });
+    });
+
+    test('no live payer ⇒ still eligible', async () => {
+      PayerService.resolveForInvoice.mockResolvedValueOnce({ payerId: null });
+      await expect(payPageZelleVisibility({ invoice: unstamped(), customerFacing: true })).resolves.toEqual({ visible: true, reason: null });
+    });
+
+    test('the pay page (no customerFacing) never calls the dedicated resolver step', async () => {
+      await payPageZelleVisibility({ invoice: unstamped() });
+      expect(PayerService.resolveForInvoice).not.toHaveBeenCalled();
+    });
+  });
 });
 
 // GATE_PAY_PAGE_FAQ — the FAQ accordion flag rides the same GET payload.
