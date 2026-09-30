@@ -45,11 +45,17 @@
  *     scheduling.moved_appointment_relative_date_used (moved appointment)
  *     must each be a boolean. False: the day words name the date by the
  *     nearest-date rule above, and any disagreement fails closed. True (a
- *     pinned quote required): the words are a bare weekday, the extraction's
- *     resolved date has that weekday, is after the call's day and within
- *     RELATIVE_DATE_HORIZON_DAYS, and is NOT the nearest such weekday (a
- *     relative phrase that lands on the nearest date is ambiguous: "next
- *     Thursday"); the code never falls back to the nearest date.
+ *     pinned quote required): the resolved date is after the call's day and
+ *     within RELATIVE_DATE_HORIZON_DAYS, and agrees with the words. A bare
+ *     weekday must match the date's weekday; only a relative form WITHOUT an
+ *     exact computed offset ("next/this/the following Thursday") must also
+ *     not be the nearest such weekday. A pinned clause with an exact
+ *     closed-set offset (in N days/weeks, N days/weeks from now/today/away/
+ *     out, tomorrow, the day after tomorrow) is computed here and the date
+ *     must agree (a weekday: its first occurrence on or after the offset
+ *     date). Weekday-less phrases must be exactly one such form. Any
+ *     offset-shaped span the code cannot compute, and any bound or
+ *     alternative around an offset ("at least", "or three"), fails closed.
  * Which words are the final agreed ones (corrections, approximations,
  * ranges) is the extraction's judgement, as the owner ruled. A quote shorter
  * than three words must be the speaker's whole turn ("Yes."), never a
@@ -324,31 +330,59 @@ const RELATIVE_DATE_HORIZON_DAYS = 60;
 // now/today (N digits, "a"/"one", or a number word two to eight). Anything else
 // ("sometime next month", "a few days") stays manual.
 const OFFSET_NUMBER_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8 };
-const OFFSET_N = String.raw`(\d{1,2}|${Object.keys(OFFSET_NUMBER_WORDS).join('|')})`;
-const countedDays = ([, n, unit]) => (OFFSET_NUMBER_WORDS[n] ?? Number(n)) * (unit.startsWith('week') ? 7 : 1);
-const OFFSET_PATTERNS = [
-  { src: String.raw`(?:the )?day after tomorrow`, days: () => 2 },
-  { src: 'tomorrow', days: () => 1 },
-  { src: String.raw`in ${OFFSET_N} (days?|weeks?)`, days: countedDays },
-  { src: String.raw`${OFFSET_N} (days?|weeks?) from (?:now|today)`, days: countedDays },
+const isOffsetCount = (t) => /^\d+$/.test(t) || hourNumber(t) != null || Object.hasOwn(OFFSET_NUMBER_WORDS, t);
+const isNumberLike = (t) => /^\d+$/.test(t) || hourNumber(t) != null || (Object.hasOwn(OFFSET_NUMBER_WORDS, t) && t !== 'a');
+const closedOffsetCount = (t) => (/^\d{1,2}$/.test(t) && Number(t) > 0) || Object.hasOwn(OFFSET_NUMBER_WORDS, t);
+// THE detector of day/week counts ("in 3 weeks", "eight days from now",
+// "two weeks away", "three days later", "for two days"): it drives both the
+// hour scan (its numbers are date, never a clock hour) and the parser. A
+// span is computable only in the closed set: in N days/weeks, N days/weeks
+// from now/today, N days/weeks away/out (N digits, "a"/"one", or two to
+// eight); every other span (later, hence, a bare count, a larger word, half
+// a day) has days null and rejects wherever the parser meets it.
+function offsetSpans(toks) {
+  const spans = [];
+  toks.forEach((t, k) => {
+    if (!isOffsetCount(t) || !/^(?:days?|weeks?)$/.test(toks[k + 1] || '')) return;
+    const lead = toks[k - 1] === 'in';
+    let to = k + 2;
+    let tail = null;
+    if (toks[to] === 'from' && /^(?:now|today)$/.test(toks[to + 1] || '')) { tail = 'from'; to += 2; }
+    else if (/^(?:away|out)$/.test(toks[to] || '')) { tail = 'away'; to += 1; }
+    else if (/^(?:later|hence)$/.test(toks[to] || '')) { tail = 'later'; to += 1; }
+    const from = lead ? k - 1 : k;
+    const half = toks[from - 1] === 'half' || (toks[from - 1] === 'of' && toks[from - 2] === 'half');
+    const computable = closedOffsetCount(t) && !half && (tail === 'from' || tail === 'away' || (lead && !tail));
+    spans.push({ from, to, days: computable ? (OFFSET_NUMBER_WORDS[t] ?? Number(t)) * (toks[k + 1].startsWith('week') ? 7 : 1) : null });
+  });
+  return spans;
+}
+const DAY_OFFSET_FORMS = [
+  { src: '(?:the )?day after tomorrow', days: 2 },
+  { src: 'tomorrow', days: 1 },
 ];
-// Quantity-bound modifiers directly around a recorded offset phrase make it
-// a range, not a date ("at least two days from now", "within two days").
-// A finite closed set of English bound words, looked for in the three words
-// before the phrase and directly after it.
+// Quantity-bound modifiers around an offset phrase make it a range, not a
+// date ("at least two days from now", "within two days", "two or three days
+// from now", "two days from now or three"). Before it: a finite closed set of
+// bound words within three words, an "or" after a number, and (for the
+// counted forms) a number right before. After it: "or", and for the counted
+// forms "to"/"through" or a number right after.
 const BOUND_BEFORE = [
   'at least', 'at most', 'more than', 'less than', 'fewer than', 'over', 'under', 'within', 'by', 'up to', 'about',
   'around', 'roughly', 'approximately', 'no later than', 'no sooner than', 'before', 'after',
 ];
-const BOUND_AFTER = ['or so', 'or more', 'or two'];
 function boundedPhrase(quote, phrase) {
   const toks = normalize(quote).split(' ');
   const said = normalize(phrase).split(' ');
+  const counted = isOffsetCount(said[0]) || said[0] === 'in';
   for (let i = 0; i + said.length <= toks.length; i += 1) {
     if (said.every((w, k) => toks[i + k] === w)) {
       const before = ` ${toks.slice(Math.max(0, i - 3), i).join(' ')} `;
-      const after = ` ${toks.slice(i + said.length, i + said.length + 2).join(' ')} `;
-      if (BOUND_BEFORE.some((m) => before.includes(` ${m} `)) || BOUND_AFTER.some((m) => after.startsWith(` ${m} `))) return true;
+      const next = toks[i + said.length];
+      if (BOUND_BEFORE.some((m) => before.includes(` ${m} `))) return true;
+      if (toks[i - 1] === 'or' && isNumberLike(toks[i - 2] || '')) return true;
+      if (next === 'or') return true;
+      if (counted && (isNumberLike(toks[i - 1] || '') || next === 'to' || next === 'through' || isNumberLike(next || ''))) return true;
     }
   }
   return false;
@@ -358,26 +392,34 @@ function boundedPhrase(quote, phrase) {
 // or "by the day after tomorrow" name none.
 function phraseOffsetDays(phrase) {
   const text = normalize(phrase);
-  for (const { src, days } of OFFSET_PATTERNS) {
-    const m = text.match(new RegExp(`^${src}$`));
-    if (m) return days(m);
-  }
-  return null;
+  const fixed = DAY_OFFSET_FORMS.find(({ src }) => new RegExp(`^${src}$`).test(text));
+  if (fixed) return fixed.days;
+  const toks = text.split(' ');
+  const [span, ...rest] = offsetSpans(toks);
+  return span && !rest.length && span.from === 0 && span.to === toks.length ? span.days : null;
 }
-// Every offset form the quote states, with the words that stated it.
+// Every offset form the quote states, with the words that stated it, and
+// whether any offset-shaped span in it is one the parser cannot compute.
 function quoteOffsets(quote) {
   const found = [];
+  let uncomputed = false;
   let text = normalize(quote);
-  for (const { src, days } of OFFSET_PATTERNS) {
-    text = text.replace(new RegExp(String.raw`(?<!half )\b${src}\b`, 'g'), (...m) => { found.push({ days: days(m), text: m[0] }); return ' '; });
+  for (const { src, days } of DAY_OFFSET_FORMS) {
+    text = text.replace(new RegExp(String.raw`\b${src}\b`, 'g'), (m) => { found.push({ days, text: m }); return ' '; });
   }
-  return found;
+  const toks = text.split(/\s+/).filter(Boolean);
+  offsetSpans(toks).forEach(({ from, to, days }) => {
+    if (days === null) uncomputed = true;
+    else found.push({ days, text: toks.slice(from, to).join(' ') });
+  });
+  return { found, uncomputed };
 }
 // One number when every form agrees, else null: a second, different form
-// anywhere in the quote is ambiguity.
+// anywhere in the quote, or a span the parser cannot compute, is ambiguity.
 function quoteOffsetDays(quote) {
-  const offsets = quoteOffsets(quote).map((o) => o.days);
-  return offsets.length && offsets.every((o) => o === offsets[0]) ? offsets[0] : null;
+  const { found, uncomputed } = quoteOffsets(quote);
+  const offsets = found.map((o) => o.days);
+  return !uncomputed && offsets.length && offsets.every((o) => o === offsets[0]) ? offsets[0] : null;
 }
 function namesRelativeDate(words, date, started, relativeQuotes = []) {
   const said = statedDateComponents(String(words).replace(NEAREST_LEAD, ''), started);
@@ -402,10 +444,11 @@ function namesRelativeDate(words, date, started, relativeQuotes = []) {
   // "next Thursday", "this Thursday", "the following Thursday" and looser
   // counts are ambiguous. A bound modifier on any offset rejects.
   return relativeQuotes.some((q) => {
-    const offsets = quoteOffsets(q);
-    if (!offsets.length) return nearestDate(said, started) !== date;
+    const { found, uncomputed } = quoteOffsets(q);
+    if (uncomputed) return false;
+    if (!found.length) return nearestDate(said, started) !== date;
     const days = quoteOffsetDays(q);
-    if (days === null || offsets.some((o) => boundedPhrase(q, o.text))) return false;
+    if (days === null || found.some((o) => boundedPhrase(q, o.text))) return false;
     return date >= etDateString(addETDays(started, days)) && date < etDateString(addETDays(started, days + 7));
   });
 }
@@ -590,18 +633,6 @@ function exactHourAt(toks, [ha, end], dayIdx, explained, callerTurn) {
 }
 
 const ABBREVIATED_MONTH_PERIOD_RE = /\b(jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.(?=\s*\d)/g;
-// The token indexes of a day/week count and its tail: "eight days from now",
-// "two weeks away", "in 3 weeks".
-function relativeOffsetIndexes(toks) {
-  const out = [];
-  toks.forEach((t, k) => {
-    if (!(/^\d+$/.test(t) || hourNumber(t) != null || OFFSET_NUMBER_WORDS[t]) || !/^(?:days?|weeks?)$/.test(toks[k + 1] || '')) return;
-    out.push(k, k + 1);
-    if (toks[k + 2] === 'from' && /^(?:now|today)$/.test(toks[k + 3] || '')) out.push(k + 2, k + 3);
-    else if (/^(?:away|out|later|hence)$/.test(toks[k + 2] || '')) out.push(k + 2);
-  });
-  return out;
-}
 function hourExactIn(text, words, callerTurn = false, relative = false) {
   // Tokens keeping clause punctuation, so "at two, a tech will call" ends
   // the hour at the comma.
@@ -618,7 +649,7 @@ function hourExactIn(text, words, callerTurn = false, relative = false) {
     .flatMap(([a, b]) => Array.from({ length: b - a }, (_, k) => a + k)));
   // A flagged relative date's offset ("eight days from now", "two weeks away")
   // is date, not a second clock hour.
-  if (relative) relativeOffsetIndexes(toks).forEach((k) => dayIdx.add(k));
+  if (relative) offsetSpans(toks).forEach(({ from, to }) => { for (let k = from; k < to; k += 1) dayIdx.add(k); });
   const at = spans(toks, words.hour).filter(([a]) => !dayIdx.has(a));
   const explained = new Set(dayIdx);
   const exact = at.length > 0 && at.every((span) => exactHourAt(toks, span, dayIdx, explained, callerTurn));

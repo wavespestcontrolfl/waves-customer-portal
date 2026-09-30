@@ -587,7 +587,6 @@ describe('groundRescheduleAgreement', () => {
         'We will see you Thursday eight days from now at two PM.',
         'We will see you Thursday after this one at two PM.',
         'We will see you Thursday next week at two PM.',
-        'We will see you a week from Thursday at two PM.',
       ]) {
         expect([said, judged({ said, slot: NEXT_THURSDAY_2PM, flags: relativeTrue }).ok]).toEqual([said, true]);
       }
@@ -687,6 +686,50 @@ describe('groundRescheduleAgreement', () => {
     // The offset's number is part of the date, never a second clock hour.
     // A weekday with an exact offset is that weekday's first occurrence on or
     // after the offset date; an extraction date in any other week contradicts it.
+    // One span detector drives both the hour scan and the parser: "N days/weeks
+    // away|out" compute like "from now", and any offset-shaped span the parser
+    // cannot compute in the pinned clause rejects.
+    test('away/out compute exactly, and any uncomputed offset span in the clause fails closed', () => {
+      const oct = (d) => `2026-10-${d}T14:00:00-04:00`;
+      const weekday = (said, slot) => judged({ said, slot, flags: relativeTrue }).ok;
+      expect(weekday('We will see you Thursday eight days away at two PM.', oct('01'))).toBe(true);
+      expect(weekday('We will see you Thursday eight days away at two PM.', oct('08'))).toBe(false);
+      expect(weekday('We will see you Thursday eight days out at two PM.', oct('08'))).toBe(false);
+      expect(weekday('We will see you Thursday two weeks out at two PM.', oct('08'))).toBe(true);
+      expect(weekday('We will see you Thursday two weeks away at two PM.', oct('15'))).toBe(false);
+      const bare = (said, day, slot) => judged({ said, slot, words: { day, hour: 'two', period: 'PM' }, flags: relativeTrue }).ok;
+      expect(bare('We will see you eight days away at two PM.', 'eight days away', oct('01'))).toBe(true);
+      expect(bare('We will see you two weeks out at two PM.', 'two weeks out', oct('07'))).toBe(true);
+      expect(bare('We will see you eight days away at two PM.', 'eight days away', oct('08'))).toBe(false);
+      // Spans the parser does not compute reject even with a weekday to fall back on.
+      for (const said of [
+        'We will see you Thursday two weeks later at two PM.',
+        'We will see you Thursday two weeks hence at two PM.',
+        'We will see you Thursday nine days from now at two PM.',
+        'We will see you Thursday for two days at two PM.',
+        'We will see you Thursday half a day from now at two PM.',
+        'We will see you Thursday half of a day from now at two PM.',
+        'We will see you a week from Thursday at two PM.',
+        'We will see you Thursday in a week or two at two PM.',
+      ]) expect([said, weekday(said, oct('08'))]).toEqual([said, false]);
+    });
+
+    test('a range or alternative around an offset fails, after or before it', () => {
+      const bare = (said, day) => judged({ said, slot: '2026-09-25T14:00:00-04:00', words: { day, hour: 'two', period: 'PM' }, flags: relativeTrue }).ok;
+      expect(bare('We will see you in two days at two PM.', 'in two days')).toBe(true);
+      for (const [said, day] of [
+        ['We will see you two days from now or three at two PM.', 'two days from now'],
+        ['We will see you two days from now or 3 at two PM.', 'two days from now'],
+        ['We will see you two days from now to three days at two PM.', 'two days from now'],
+        ['We will see you in two to three days at two PM.', 'in two'],
+        ['We will see you two or three days from now at two PM.', 'three days from now'],
+        ['We will see you 2 or 3 days from now at two PM.', '3 days from now'],
+        ['We will see you two days from now through four at two PM.', 'two days from now'],
+        ['We will see you two three days from now at two PM.', 'three days from now'],
+        ['We will see you tomorrow or the day after at two PM.', 'tomorrow'],
+      ]) expect([said, bare(said, day)]).toEqual([said, false]);
+    });
+
     test('a weekday with an exact offset must agree with the offset', () => {
       const said = 'We will see you Thursday eight days from now at two PM.';
       expect(judged({ said, slot: '2026-10-01T14:00:00-04:00', flags: relativeTrue }).ok).toBe(true);
