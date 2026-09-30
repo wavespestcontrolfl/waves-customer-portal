@@ -1505,6 +1505,56 @@ describe('Codex round-6 (PR #5331): inbound-bound confirmations, unavailable bil
     expect(replyQuotesUngroundedAmount(reply, ctxWith([zelleRow]), { byMeaning: true, inboundMessage })).toBe(false);
   });
 
+  // Codex round-6 pre-push audit P1: "check" is a verb far more often than a
+  // tender, and a text naming several tenders must never resolve to the first.
+  test('replyClaimedTender: check counts only in payment-method context; several distinct tenders are ambiguous', () => {
+    const { replyClaimedTender, TENDER_AMBIGUOUS } = require('../services/sms-shadow-drafter');
+    expect(replyClaimedTender('Can you check whether my Zelle payment from Sep 12 arrived?')).toBe('Zelle');
+    expect(replyClaimedTender('please check my account')).toBeNull();
+    expect(replyClaimedTender('can you check on that for me')).toBeNull();
+    expect(replyClaimedTender('I mailed a check')).toBe('Check');
+    expect(replyClaimedTender('I paid by check #1043')).toBe('Check');
+    expect(replyClaimedTender("it was a cashier's check")).toBe('Check');
+    expect(replyClaimedTender('I sent Zelle, not a check')).toBe(TENDER_AMBIGUOUS);
+    expect(replyClaimedTender('Zelle or Venmo, one of them')).toBe(TENDER_AMBIGUOUS);
+    expect(replyClaimedTender('paid with ACH from my bank account')).toBe('bank/ACH');
+    expect(replyClaimedTender('')).toBeNull();
+  });
+
+  test('"check whether my Zelle payment arrived": a generic confirmation binds to the Zelle row, never an unrelated check row', () => {
+    const reply = 'Yes, we received your $120.00 payment from Sep 12.';
+    const inboundMessage = 'Can you check whether my Zelle payment from Sep 12 arrived?';
+    const checkRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-2 — check (#1043)' };
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([checkRow]), { byMeaning: true, inboundMessage })).toBe(true);
+    expect(replyQuotesUngroundedAmount(reply, ctxWith([zelleRow]), { byMeaning: true, inboundMessage })).toBe(false);
+  });
+
+  test('a genuine check inbound still binds to the check row ("I mailed a check", "paid by check #1043")', () => {
+    const reply = 'Yes, we received your $120.00 payment from Sep 12.';
+    const checkRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-2 — check (#1043)' };
+    for (const inboundMessage of ['I mailed a check, did you get it?', 'I paid by check #1043 - did it come through?']) {
+      expect(replyQuotesUngroundedAmount(reply, ctxWith([checkRow]), { byMeaning: true, inboundMessage })).toBe(false);
+      expect(replyQuotesUngroundedAmount(reply, ctxWith([cardRow]), { byMeaning: true, inboundMessage })).toBe(true);
+    }
+  });
+
+  test('an AMBIGUOUS inbound ("sent Zelle not a check") never authorizes a generic confirmation; an explicit outgoing tender still decides', () => {
+    const generic = 'Yes, we received your $120.00 payment from Sep 12.';
+    const inboundMessage = 'I sent Zelle, not a check - did it arrive?';
+    const checkRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', description: 'Invoice INV-2 — check' };
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([zelleRow]), { byMeaning: true, inboundMessage })).toBe(true);
+    expect(replyQuotesUngroundedAmount(generic, ctxWith([checkRow]), { byMeaning: true, inboundMessage })).toBe(true);
+    expect(replyQuotesUngroundedAmount('Yes, we received your $120.00 Zelle payment from Sep 12.', ctxWith([zelleRow]), { byMeaning: true, inboundMessage })).toBe(false);
+    // an ambiguous OUTGOING clause fails closed too
+    expect(replyQuotesUngroundedAmount('We received your $120.00 Zelle payment, not a check, from Sep 12.', ctxWith([zelleRow]), { byMeaning: true })).toBe(true);
+  });
+
+  test('manual-row tender parsing stays token-exact ("check" needs no context there)', () => {
+    const { paymentTenderLabel } = require('../services/sms-shadow-drafter');
+    expect(paymentTenderLabel({ description: 'Invoice INV-2 — check (mailed)' })).toBe('Check');
+    expect(paymentTenderLabel({ description: 'Invoice INV-2 — check' })).toBe('Check');
+  });
+
   test('the date the customer named in the inbound message also binds a date-less confirmation', () => {
     const reply = 'Yes, we received your $120.00 payment.';
     expect(replyQuotesUngroundedAmount(reply, ctxWith([cardRow]), { byMeaning: true, inboundMessage: 'Did my $120 from Aug 1 go through?' })).toBe(true);

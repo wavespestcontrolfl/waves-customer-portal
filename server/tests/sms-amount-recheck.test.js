@@ -217,7 +217,7 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
     await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }) }))
       .resolves.toEqual({ eligible: false, reason: 'zelle_invoice_ineligible' });
-    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: invoiceRow, dbh: expect.any(Function), customerFacing: true });
+    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: invoiceRow, dbh: expect.any(Function) });
   });
 
   test('the invoice resolves and is still eligible', async () => {

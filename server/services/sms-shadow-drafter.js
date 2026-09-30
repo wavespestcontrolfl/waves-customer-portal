@@ -441,7 +441,7 @@ async function fetchZelleEligibilityLookup({ customerId, openInvoiceId } = {}) {
       // and credit-pending fixes so this draft-time fact can never offer
       // Zelle in a case the pay page itself would withhold it.
       const { payPageZelleVisibility } = require('../routes/pay-v2');
-      return Boolean((await payPageZelleVisibility({ invoice: row, customerFacing: true })).visible);
+      return Boolean((await payPageZelleVisibility({ invoice: row })).visible);
     })();
     return await Promise.race([work, timeout]);
   } catch (err) {
@@ -1186,14 +1186,42 @@ const tenderLabelForWord = (word) => (
 );
 const tenderVocabPattern = (filter) => TENDER_VOCABULARY.filter(filter).map((t) => t.word).join('|');
 
-// The tender a REPLY claims, canonicalized through the SAME vocabulary
-// paymentTenderLabel (below) derives labels from. Bare "bank"/"ACH"/"bank
-// transfer"/"bank account" all read as 'bank/ACH'. null when the clause
-// names no tender at all.
-const REPLY_TENDER_RE = new RegExp(`\\b(${tenderVocabPattern(() => true)})\\b`, 'i');
-function replyClaimedTender(clauseText) {
-  const m = REPLY_TENDER_RE.exec(String(clauseText || ''));
-  return m ? tenderLabelForWord(m[1]) : null;
+// The tender a text (a REPLY clause or the customer's INBOUND message) claims,
+// canonicalized through the SAME vocabulary paymentTenderLabel (below) derives
+// labels from. Bare "bank"/"ACH"/"bank transfer"/"bank account" all read as
+// 'bank/ACH'. null when the text names no tender at all.
+//
+// Codex round-6 pre-push audit P1 (PR #5331): two structural rules.
+//  1. "check" is also an everyday VERB ("Can you check whether my Zelle
+//     payment arrived?"), so it counts as the payment TENDER only in
+//     payment-method context (CHECK_TENDER_CONTEXT_RE) — never as a bare word.
+//  2. First-match-wins silently picked one tender out of a text that named
+//     several ("sent Zelle not a check"). More than one DISTINCT tender label
+//     now returns TENDER_AMBIGUOUS, which every caller must treat as unknown:
+//     a confirmation is never bound to a guessed tender (replyQuotes-
+//     UngroundedAmount fails closed on it).
+// paymentTenderLabel's manual-row parsing is a different job (one fixed
+// token, no free text) and deliberately does NOT use this context rule.
+const TENDER_AMBIGUOUS = 'ambiguous';
+const NON_CHECK_TENDER_RE = new RegExp(`\\b(${tenderVocabPattern((t) => t.word !== 'check')})\\b`, 'gi');
+const CHECK_TENDER_CONTEXT_RE = new RegExp([
+  // by/with/via/using/in/as [a|my|the] check
+  "\\b(?:by|with|via|using|in|as)\\s+(?:(?:a|my|the|paper|personal|business|cashier'?s?|certified)\\s+)*check\\b",
+  // a/my/the/paper/... check
+  "\\b(?:a|my|the|paper|personal|business|cashier'?s?|certified)\\s+check\\b",
+  // check #1043 / check no. 1043 / check number 1043 / check 1043
+  '\\bcheck\\s*(?:#|no\\.?\\s*|number\\s*)\\d+',
+  '\\bcheck\\s+\\d{3,}\\b',
+  // mailed/sent/wrote/... a check
+  "\\b(?:mailed|sent|wrote|written|dropped\\s+off|deposited|cut)\\s+(?:(?:you|y'?all|them)\\s+)?(?:(?:a|my|the|paper)\\s+)?check\\b",
+].join('|'), 'i');
+function replyClaimedTender(text) {
+  const str = String(text || '');
+  const labels = new Set();
+  for (const m of str.matchAll(NON_CHECK_TENDER_RE)) labels.add(tenderLabelForWord(m[1]));
+  if (CHECK_TENDER_CONTEXT_RE.test(str)) labels.add('Check');
+  if (labels.size > 1) return TENDER_AMBIGUOUS;
+  return labels.size ? [...labels][0] : null;
 }
 
 // The SETTLED ('paid') Recent payments rows backing one specific amount —
@@ -1444,7 +1472,13 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
       // ONLY when the outgoing clause is silent on that point — a generic
       // confirmation that omits the tender the customer asked about must
       // still bind against that tender, not slip through unchecked.
-      const claimedTender = replyClaimedTender(text) || (inboundText && replyClaimedTender(inboundText)) || null;
+      // Codex round-6 pre-push audit P1: an AMBIGUOUS tender (several distinct
+      // tenders named in one text) is unknown, never a guess — fail closed.
+      // The inbound is consulted only when the outgoing clause names none, so
+      // an ambiguous inbound cannot authorize a generic confirmation.
+      let claimedTender = replyClaimedTender(text);
+      if (claimedTender == null && inboundText) claimedTender = replyClaimedTender(inboundText);
+      if (claimedTender === TENDER_AMBIGUOUS) return true;
       const claimedDate = parseClaimedPaymentDate(text) || (inboundText && parseClaimedPaymentDate(inboundText)) || null;
       if (amounts.some((a) => !bindPaidPaymentRow({ amountCents: a, context, claimedTender, claimedDate }))) return true;
     }
@@ -3073,6 +3107,7 @@ module.exports = {
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
   replyClaimedTender,
+  TENDER_AMBIGUOUS,
   bindPaidPaymentRow,
   parseClaimedPaymentDate,
   TENDER_VOCABULARY,

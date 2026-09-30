@@ -373,10 +373,10 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
   return true;
 }
 
-// Live payer-ownership verdict for the CUSTOMER-SMS boundary (see
-// payPageZelleVisibility's `customerFacing`): null when the invoice is
+// Live payer-ownership verdict for Zelle visibility (see
+// payPageZelleVisibility): null when the invoice is
 // verifiably the homeowner's to pay, else the rejection reason.
-async function customerSmsPayerOwnership(inv, dbh) {
+async function zellePayerOwnership(inv, dbh) {
   if (inv.payer_id || inv.payer_statement_id) return 'payer_owned';
   if (!inv.customer_id) return 'payer_unverifiable';
   try {
@@ -388,7 +388,7 @@ async function customerSmsPayerOwnership(inv, dbh) {
     });
     return resolved?.payerId ? 'payer_owned' : null;
   } catch (err) {
-    logger.warn(`[pay-v2] customer-SMS payer ownership check failed for invoice ${inv.id}: ${err.message}; treating as unverifiable`);
+    logger.warn(`[pay-v2] Zelle payer ownership check failed for invoice ${inv.id}: ${err.message}; treating as unverifiable`);
     return 'payer_unverifiable';
   }
 }
@@ -409,34 +409,24 @@ async function customerSmsPayerOwnership(inv, dbh) {
 async function payPageZelleVisibility({
   invoiceId = null, invoice = null, dbh = db,
   creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive,
-  // Codex round-6 pre-push audit P1 (PR #5331): the CUSTOMER-SMS boundary
-  // (draft-time fetchZelleEligibility, send-time zelleInvoiceStillEligible)
-  // texts the HOMEOWNER, so an invoice already stamped to a third-party payer
-  // (payer_id) or a monthly payer statement (payer_statement_id) — including
-  // one stamped AFTER the reply was drafted — is never theirs to pay: reject
-  // it outright. isZelleTransferEligible itself deliberately skips payer
-  // resolution and the saved-method / credit probes for a payer-stamped
-  // invoice (the payer-facing pay page keeps that behavior), so that branch
-  // cannot be relied on here. GET /:token never passes this.
-  customerFacing = false,
 } = {}) {
   if (!manualPayOptionsFromEnv()) return { visible: false, reason: 'not_configured' };
   const inv = invoice || (invoiceId ? await dbh('invoices').where({ id: invoiceId }).first() : null);
   if (!inv) return { visible: false, reason: 'invoice_not_found' };
-  if (customerFacing) {
-    // ONE dedicated ownership step (Codex round-6 pre-push audit P1, third
-    // variant), always run and independent of combined-balance gating:
-    // combinedEligibleSiblings returns null BEFORE resolving a payer when
-    // payIncludeBalance is off, and on any resolver error — neither fires
-    // onPayerResolved — so relying on it let an UNSTAMPED invoice now owned by
-    // a third-party payer through. Stamped payer_id / payer_statement_id ->
-    // reject; otherwise call the live resolver directly (the same one
-    // combinedEligibleSiblings uses, with throwOnError so an outage is not
-    // misread as self-pay). A payer -> 'payer_owned'; a throw or an invoice
-    // with no customer to resolve for -> 'payer_unverifiable' (fail closed).
-    const ownership = await customerSmsPayerOwnership(inv, dbh);
-    if (ownership) return { visible: false, reason: ownership };
-  }
+  // ONE dedicated ownership step, ALWAYS run for every caller — GET /:token
+  // (the pay page), the drafter's draft-time fetch and the send-time recheck —
+  // independent of payIncludeBalance / combined-balance gating (Codex round-6
+  // pre-push audit P1, owner-approved to cover the pay page too):
+  // combinedEligibleSiblings returns null BEFORE resolving a payer when
+  // payIncludeBalance is off, and on any resolver error — neither fires
+  // onPayerResolved — so relying on it let an UNSTAMPED invoice now owned by a
+  // third-party payer through. Stamped payer_id / payer_statement_id ->
+  // reject; otherwise the LIVE payer resolver is called directly (the same one
+  // combinedEligibleSiblings uses, with throwOnError so an outage is not
+  // misread as self-pay). A payer -> 'payer_owned'; a throw or an invoice with
+  // no customer to resolve for -> 'payer_unverifiable' (fail closed).
+  const ownership = await zellePayerOwnership(inv, dbh);
+  if (ownership) return { visible: false, reason: ownership };
   const eligible = await isZelleTransferEligible(inv, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive });
   if (!eligible) return { visible: false, reason: 'not_eligible' };
   // Finding 4: any positive projected account credit (invoiceProjectedCreditApplied

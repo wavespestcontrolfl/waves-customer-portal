@@ -200,7 +200,7 @@ async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db 
       return { eligible: false, reason: 'zelle_invoice_ineligible' };
     }
     const { payPageZelleVisibility } = require('../routes/pay-v2');
-    const visibility = await payPageZelleVisibility({ invoice: invoiceRow, dbh, customerFacing: true });
+    const visibility = await payPageZelleVisibility({ invoice: invoiceRow, dbh });
     return visibility.visible ? { eligible: true } : { eligible: false, reason: 'zelle_invoice_ineligible' };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] Zelle eligibility recheck failed for customer ${customerId}: ${err.message}; blocking send`);
