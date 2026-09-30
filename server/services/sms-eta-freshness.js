@@ -324,8 +324,12 @@ function bindEtaClaim(claim, entries, freshness) {
   // Two distinct live ETAs (Codex r3): a minutes/timed claim can't be tied
   // to the right visit deterministically, so even the right number fails
   // closed.
-  if (entries.length > 1) return { reason: 'eta_claim_ambiguous' };
-  return bindTimedOrMinutesClaim(claim, entries, freshness);
+  // Only EN-ROUTE stops can be the subject of an ETA figure — an on_property
+  // (on-site) group can't — so ambiguity is counted over those alone.
+  const enRouteEntries = entries.filter((e) => e.state !== 'on_property');
+  if (enRouteEntries.length > 1) return { reason: 'eta_claim_ambiguous' };
+  if (!enRouteEntries.length) return { reason: 'eta_claim_unbound' };
+  return bindTimedOrMinutesClaim(claim, enRouteEntries, freshness);
 }
 
 /**
@@ -382,11 +386,16 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
 // checked too, never inferred from the visit's status/track_state alone, so
 // an expired (or unexpectedly missing) token blocks the send even while its
 // row still reads en_route/on_property.
+function technicianChanged(boundEntries, rows) {
+  const techById = new Map(rows.map((row) => [row.id, row.technician_id]));
+  return boundEntries.some((entry) => entry.technicianId != null
+    && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)));
+}
 async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
-    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at');
+    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id');
     // requireOnSite (Codex round-13 P2): a completed-arrival claim ("has
     // arrived") holds only once the tracker says the tech is on the property.
     const liveStates = new Set(requireOnSite ? ['on_property'] : (allowOnSite ? ['en_route', 'on_property'] : ['en_route']));
@@ -406,6 +415,11 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite 
       ? boundEntries.every((entry) => entry.scheduledServiceIds.some((id) => liveById.get(id)))
       : boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => liveById.get(id)));
     if (!allBoundEntriesLive) return 'eta_claim_no_longer_en_route';
+    // Round-18 P2: a reassignment keeps the visit en route but changes WHO is
+    // coming — a claim about the drafted technician is then false. Only
+    // entries that recorded a technicianId are checked (older snapshots keep
+    // the previous behavior); a link-only share names no technician.
+    if (!allowOnSite && technicianChanged(boundEntries, rows)) return 'eta_claim_tech_changed';
 
     if (trackTokensToVerify.length) {
       const rowByToken = new Map(rows.filter((row) => row.track_view_token).map((row) => [row.track_view_token, row]));

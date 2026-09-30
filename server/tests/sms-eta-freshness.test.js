@@ -1386,3 +1386,74 @@ describe('round 17 P2s: link URL parsing, on-site wording, long durations on eve
     expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, now: NOW })).toBe('eta_claim_no_snapshot');
   });
 });
+
+// Codex round-18 P2s (PR #5334).
+describe('round 18 P2s: on-site arrival recheck, technician reassignment', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const row = (over) => ({ id: 'svc-1', status: 'on_site', track_state: 'on_property', technician_id: 'tech-1', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...over });
+  const onSiteSnapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'on_property', technicianId: 'tech-1' }] };
+  const run = (body, rows, snapshot) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+
+  test('an on-site status group rechecks "has arrived": still on_property passes; completed / cancelled block', async () => {
+    expect(await run('The technician has arrived.', [row()], onSiteSnapshot)).toBeNull();
+    expect(await run('The technician has arrived.', [row({ status: 'completed', track_state: 'complete' })], onSiteSnapshot)).toBe('eta_claim_no_longer_en_route');
+    expect(await run('The technician has arrived.', [row({ status: 'cancelled', track_state: 'cancelled' })], onSiteSnapshot)).toBe('eta_claim_no_longer_en_route');
+  });
+
+  const enRouteSnapshot = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], technicianId: 'tech-1' }] };
+  const enRoute = (over) => row({ status: 'en_route', track_state: 'en_route', ...over });
+  test('a reassigned en-route visit (technician_id changed) is refused for both a minutes claim and status copy', async () => {
+    expect(await run('The tech is 9 minutes away.', [enRoute()], enRouteSnapshot)).toBeNull();
+    expect(await run('The tech is 9 minutes away.', [enRoute({ technician_id: 'tech-2' })], enRouteSnapshot)).toBe('eta_claim_tech_changed');
+    expect(await run('The tech is on the way.', [enRoute({ technician_id: 'tech-2' })], enRouteSnapshot)).toBe('eta_claim_tech_changed');
+    expect(await run('The tech is on the way.', [enRoute({ technician_id: null })], enRouteSnapshot)).toBe('eta_claim_tech_changed');
+  });
+  test('an older snapshot entry without technicianId keeps the previous behavior', async () => {
+    const old = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'] }] };
+    expect(await run('The tech is 9 minutes away.', [enRoute({ technician_id: 'tech-2' })], old)).toBeNull();
+  });
+  test('a link-only share is not a claim about the technician', async () => {
+    expect(await run('Track: portal.wavespestcontrol.com/track/tok-1', [enRoute({ technician_id: 'tech-2' })], enRouteSnapshot)).toBeNull();
+  });
+});
+
+// Numeric ambiguity counts only en-route entries (on_property can't be the subject of an ETA figure).
+describe('numeric binding ignores on-site entries; status claims still see them', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const enRoute = { minutes: 12, scheduledServiceIds: ['svc-a'], trackTokens: ['tok-a'], state: 'en_route' };
+  const onSite = { minutes: null, scheduledServiceIds: ['svc-b'], trackTokens: ['tok-b'], state: 'on_property' };
+  const rows = [
+    { id: 'svc-a', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', track_token_expires_at: FUTURE },
+    { id: 'svc-b', status: 'on_site', track_state: 'on_property', track_view_token: 'tok-b', track_token_expires_at: FUTURE },
+  ];
+  const run = (body, entries, dbRows = rows) => etaClaimBlockReason({ liveEtaSnapshot: { entries }, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(dbRows) });
+
+  test('en-route(12) + on-site: "12 minutes away" binds to the en-route stop; a wrong figure is unbound', async () => {
+    expect(await run('The tech is 12 minutes away.', [enRoute, onSite])).toBeNull();
+    expect(await run('The tech is 9 minutes away.', [enRoute, onSite])).toBe('eta_claim_unbound');
+  });
+  test('two en-route stops are still ambiguous for a numeric claim', async () => {
+    const other = { ...enRoute, scheduledServiceIds: ['svc-c'], trackTokens: ['tok-c'] };
+    expect(await run('The tech is 12 minutes away.', [enRoute, other], [...rows, { id: 'svc-c', status: 'en_route', track_state: 'en_route' }])).toBe('eta_claim_ambiguous');
+  });
+  test('only on-site entries: a numeric claim has nothing to bind to', async () => {
+    expect(await run('The tech is 12 minutes away.', [onSite])).toBe('eta_claim_unbound');
+  });
+  test('status / completed-arrival claims still consider every group: en-route + on-site with no link is ambiguous', async () => {
+    expect(await run('The tech is on the way.', [enRoute, onSite])).toBe('eta_claim_ambiguous');
+    expect(await run('The tech is on the way: portal.wavespestcontrol.com/track/tok-a', [enRoute, onSite])).toBeNull();
+    expect(await run('The technician has arrived: portal.wavespestcontrol.com/track/tok-b', [enRoute, onSite])).toBeNull();
+  });
+});

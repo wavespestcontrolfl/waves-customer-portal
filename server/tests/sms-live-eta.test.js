@@ -37,7 +37,7 @@ const {
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
-  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, bodyHasTimedArrivalPhrase, bodyMentionsArrival, bodyClaimsCompletedArrival, findGroundedMinutesFigures,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, countEnRouteEtaStops, bodyHasTimedArrivalPhrase, bodyMentionsArrival, bodyClaimsCompletedArrival, findGroundedMinutesFigures,
 } = require('../services/sms-shadow-drafter');
 const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 
@@ -1595,11 +1595,11 @@ describe('round 16 P2s: Nm, slash fractions, status-only groups, distinct stops'
       const rows = [svc('a'), svc('b'), svc('c', { technician_id: null })];
       const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: ['k1', 'k1', null], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', null]]), includeLiveEta: true });
       expect(groups).toEqual([
-        { minutes: null, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'] },
-        { minutes: null, scheduledServiceIds: ['c'], trackTokens: ['tok-c'] },
+        { minutes: null, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], state: 'en_route', technicianId: 'tech-1' },
+        { minutes: null, scheduledServiceIds: ['c'], trackTokens: ['tok-c'], state: 'en_route' },
       ]);
       const resolved = buildLiveEtaGroups({ upcomingServices: rows.slice(0, 2), liveEtaKeys: ['k1', 'k1'], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', { minutes: 9, fixExpiresAtMs: 5 }]]), includeLiveEta: true });
-      expect(resolved).toEqual([{ minutes: 9, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], fixExpiresAtMs: 5 }]);
+      expect(resolved).toEqual([{ minutes: 9, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], state: 'en_route', technicianId: 'tech-1', fixExpiresAtMs: 5 }]);
     });
     test('includeLiveEta false or a non-live row: no groups', () => {
       expect(buildLiveEtaGroups({ upcomingServices: [svc('a')], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: false })).toEqual([]);
@@ -1626,6 +1626,58 @@ describe('counted day/week/month durations need a tech subject (round-17 follow-
   });
   test.each(['The tech is 2 days away.', 'He will arrive in 3 weeks.'])('%p is rejected', (reply) => {
     expect(validateLiveEtaMinutes({ reply, factsBlock: facts }).ok).toBe(false);
+  });
+});
+
+// Codex round-18 P2s (PR #5334).
+describe('round 18 P2s: decimals, driving, on-site groups, technician identity', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+
+  test.each([
+    'He will be there in 12.5.', 'The tech should make it in 12.5', "He'll be by in 12.5", 'ETA 12.5', 'ETA: 12.50', 'ETA is 12.5 max',
+    '12.5min away', '12.5 min away', 'The tech is 12.5 out',
+  ])('%p is ONE decimal claim (12.5) — never the prefix 12 or suffix 5, and never equal to an integer live ETA', (reply) => {
+    const claims = [...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes);
+    expect(claims.length).toBeGreaterThan(0);
+    for (const c of claims) expect(c).toBe(12.5);
+    for (const live of [12, 5, 13]) expect(validateLiveEtaMinutes({ reply, factsBlock: facts(live) }).ok).toBe(false);
+  });
+
+  test.each([
+    'The technician is driving to your house now.', "He's driving over.", 'The tech is in the truck.', 'The crew is on the road.',
+  ])('%p is an affirmative en-route status', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(true);
+  });
+  test.each(['The tech is not driving over today.', 'We are driving to a training.'])('%p is not', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(false);
+  });
+
+  test('numeric ambiguity counts only EN-ROUTE stops: en-route(12) + on-site allows "12 minutes away"; two en-route do not', () => {
+    const oneEnRouteOneOnSite = { liveEtaGroups: [{ minutes: 12, state: 'en_route' }, { minutes: null, state: 'on_property' }] };
+    const twoEnRoute = { liveEtaGroups: [{ minutes: 12, state: 'en_route' }, { minutes: 12, state: 'en_route' }] };
+    expect(countEnRouteEtaStops(oneEnRouteOneOnSite)).toBe(1);
+    expect(countEnRouteEtaStops(twoEnRoute)).toBe(2);
+    expect(countEnRouteEtaStops({})).toBeNull();
+    const reply = 'The tech is 12 minutes away.';
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(12), liveEtaStopCount: countEnRouteEtaStops(oneEnRouteOneOnSite) }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts(12), liveEtaStopCount: countEnRouteEtaStops(twoEnRoute) }).ok).toBe(false);
+  });
+
+  describe('buildLiveEtaGroups — on-site visits and technician identity', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, technician_id: 'tech-1', ...extra });
+    test('an on_property visit becomes a minutes-null status group recorded as on_property; a scheduled one does not', () => {
+      const rows = [svc('a', { status: 'on_site', track_state: 'on_property' }), svc('b', { track_state: 'scheduled' })];
+      expect(buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true }))
+        .toEqual([{ minutes: null, scheduledServiceIds: ['a'], trackTokens: ['tok-a'], state: 'on_property', technicianId: 'tech-1' }]);
+    });
+    test('the snapshot carries technicianId and state through', () => {
+      expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 9, scheduledServiceIds: ['a'], technicianId: 'tech-1', state: 'en_route' }] }))
+        .toEqual({ entries: [{ minutes: 9, scheduledServiceIds: ['a'], trackTokens: [], technicianId: 'tech-1', state: 'en_route' }] });
+    });
   });
 });
 

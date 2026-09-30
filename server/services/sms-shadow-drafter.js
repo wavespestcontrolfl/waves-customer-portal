@@ -671,7 +671,7 @@ const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)
 // Round 8 (Codex P2, PR #5334): "the tech should make it in 20" — "make it
 // (there|here|to you)? in N" is the same shape (a fixed phrase right before
 // "in N") and joins this same alternation.
-const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here|with\s+you)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up|due|reach(?:ing)?\s+you|get(?:ting)?\s+to\s+you|make\s+it(?:\s+(?:there|here|to\s+you))?)\s+in\s+(?:about\s+)?(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|place|property)|there|here|with\s+you)|show(?:ing)?\s+up|arriv\w*|pull(?:ing)?\s+up|due|reach(?:ing)?\s+you|get(?:ting)?\s+to\s+you|make\s+it(?:\s+(?:there|here|to\s+you))?)\s+in\s+(?:about\s+)?(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
 // "He'll be by in 20" / "the tech will swing by in 20" / "they should be
 // there in 20" (Codex round-8 P2): the number sits after ARBITRARY words a
 // fixed phrase list can never enumerate, but "tech/he/she/they" + a
@@ -680,7 +680,7 @@ const IMPLICIT_MINUTES_ARRIVAL_RE = /\b(?:be\s+(?:at\s+your\s+(?:house|home|plac
 // later bare "in N" in that span is claimed the same way, no unit word
 // required. Scoped to a short (<=30-char) gap so an unrelated later "in N"
 // elsewhere in a long sentence never false-positives.
-const FUTURE_ARRIVAL_IN_MINUTES_RE = /\b(?:tech|he|she|they)(?:'ll|\s+(?:will|should))\b[^.?!\n]{0,30}?\bin\s+(?:about\s+)?(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
+const FUTURE_ARRIVAL_IN_MINUTES_RE = /\b(?:tech|he|she|they)(?:'ll|\s+(?:will|should))\b[^.?!\n]{0,30}?\bin\s+(?:about\s+)?(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|seconds?|hours?|days?|weeks?|months?|years?))/gi;
 // Bare-integer ETA claims (Codex round-6 P2, PR #5334): "ETA: 20", "his ETA
 // is 20", "ETA 20", "eta ~20" carry no "minutes"/"in" wording at all — every
 // pass above requires SOME unit or connector word, so these skipped number
@@ -693,7 +693,7 @@ const FUTURE_ARRIVAL_IN_MINUTES_RE = /\b(?:tech|he|she|they)(?:'ll|\s+(?:will|sh
 // Numbers already carrying a unit word are left to the passes above (the
 // negative lookahead here just keeps this pass from re-judging them under a
 // different rule).
-const BARE_ETA_NUMBER_RE = /\b(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|hrs?|days?|weeks?|months?|years?|%|st|nd|rd|th)\b)/gi;
+const BARE_ETA_NUMBER_RE = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)(?!\s*(?:min(?:ute)?s?|sec(?:ond)?s?|hours?|hrs?|days?|weeks?|months?|years?|%|st|nd|rd|th)\b)/gi;
 // "<N> out" with no unit and no OTHER trigger at all (round 6): the bare
 // "out" idiom ("20 out", "5 out") states an ETA exactly like "20 minutes
 // out" even though findEtaMinutesClaims has no unit to key off — the phrase
@@ -703,7 +703,7 @@ const BARE_ETA_NUMBER_RE = /\b(\d{1,3})\b(?!\s*(?:min(?:ute)?s?|sec(?:ond)?s?|ho
 // retirement") never claims; "of" is excluded outright, and "from" is left
 // to the STRONG-trigger pass above ("out from" is already its own trigger
 // phrase there).
-const BARE_MINUTES_OUT_RE = /\b(\d{1,3})\s+out\b(?!\s+(?:of|from))/gi;
+const BARE_MINUTES_OUT_RE = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)\s+out\b(?!\s+(?:of|from))/gi;
 // A bare integer that reads as a time of day (preceded by at/by/around, or
 // followed by am/pm/a colon-minutes/an "and <N> am/pm" range) or an
 // address/phone-like token (a street name right after it, or a digit group
@@ -1088,7 +1088,7 @@ function bodyClaimsCompletedArrival(text) {
 //   - a conditional ("I'll text you once he's on the way", "when the tech
 //     is en route"), or
 //   - part of a scheduling window (isWindowQuantity).
-const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|(?:head(?:ing|ed)|coming)\s+(?:over|your\s+way|to\s+you|to\s+your\s+\w+)|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:coming|headed|heading)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
+const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|(?:head(?:ing|ed)|coming)\s+(?:over|your\s+way|to\s+you|to\s+your\s+\w+)|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:coming|headed|heading|driving|rolling|travell?ing)\b|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:in\s+the\s+(?:truck|van|vehicle)|on\s+the\s+road)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
 const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
 function bodyMentionsArrival(text) {
   const str = String(text || '');
@@ -1311,12 +1311,12 @@ function findGroundedMinutesFigures(text) {
   // duration exclusion those passes already settled (a trailing "minutes"
   // word reads here as an ordinary trailing noun either way, so the verdict
   // agrees).
-  const bareRe = /\b(\d{1,3})\b/g;
+  const bareRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?!\d|\.\d)/g;
   let bm2;
   while ((bm2 = bareRe.exec(str))) {
     if (consumed.some(([s, e]) => bm2.index >= s && bm2.index < e)) continue;
     if (claims.some((c) => c.index === bm2.index)) continue;
-    const minutes = parseInt(bm2[1], 10);
+    const minutes = Number(bm2[1]);
     if (minutes < 1 || minutes > 180) continue;
     if (classifyBareEtaNumber(str, bm2.index, bm2[0].length) === 'claim') {
       claims.push({ minutes, index: bm2.index });
@@ -1328,11 +1328,11 @@ function findGroundedMinutesFigures(text) {
   // this tiny dedicated pass is the only way to catch it. Always a timed
   // approximation once findGroundedMinutesFigures runs at all; no exclusion
   // category applies to an "-ish" suffix.
-  const ishRe = /\b(\d{1,3})ish\b/gi;
+  const ishRe = /(?<![\d.])(\d{1,3}(?:\.\d+)?)(?=ish\b)ish\b/gi;
   let ishm;
   while ((ishm = ishRe.exec(str))) {
     if (claims.some((c) => c.index === ishm.index)) continue;
-    const minutes = parseInt(ishm[1], 10);
+    const minutes = Number(ishm[1]);
     if (minutes >= 1 && minutes <= 180) claims.push({ minutes, index: ishm.index });
   }
 
@@ -1358,7 +1358,7 @@ function bodyHasUnclassifiedArrivalDigit(text) {
   const str = normalizeTimeQuantities(normalizeNumberWords(text));
   const spans = sentenceSpans(str);
   const claims = findEtaMinutesClaims(text);
-  const digitRe = /\d{1,3}/g;
+  const digitRe = /(?<![\d.])\d{1,3}(?:\.\d+)?(?!\d|\.\d)/g;
   return spans.some(([s, e]) => {
     const sentence = str.slice(s, e);
     if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return false;
@@ -1408,6 +1408,10 @@ function buildLiveEtaSnapshot(context) {
       minutes: g.minutes,
       scheduledServiceIds: g.scheduledServiceIds.filter((id) => id != null),
       trackTokens: Array.isArray(g.trackTokens) ? g.trackTokens.filter(Boolean) : [],
+      // Which technician the figure/status was about (Codex round-18 P2);
+      // sms-eta-freshness refuses at send when a reassignment changed it.
+      ...(g.technicianId != null ? { technicianId: g.technicianId } : {}),
+      ...(typeof g.state === 'string' ? { state: g.state } : {}),
       // The instant the GPS fix behind this figure goes stale to the public
       // tracker (Codex round-11 P2, PR #5334); sms-eta-freshness.js expires a
       // minutes claim at min(15-minute draft window, this). Omitted when
@@ -1425,6 +1429,12 @@ function buildLiveEtaSnapshot(context) {
 // mode where no verifier would catch it at all. Any ETA-style minutes claim
 // must equal the LIVE ETA minutes the facts block actually carries, and must
 // not appear at all when the facts carry no LIVE ETA line.
+// Distinct EN-ROUTE stops in the context (the unit the send-time snapshot binds
+// a numeric ETA over): an on_property (on-site) group can't be the subject of
+// an ETA figure, so it is not counted. null when the context has no groups.
+function countEnRouteEtaStops(context) {
+  return Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.filter((g) => g && g.state !== 'on_property').length : null;
+}
 function validateLiveEtaMinutes({ reply, factsBlock, liveEtaStopCount = null }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   // Codex round-13 P2: a completed-arrival claim ("has arrived") with an
@@ -3194,7 +3204,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.length : null });
+    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context) });
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
@@ -3738,6 +3748,7 @@ module.exports = {
   AMOUNT_MASK_RE,
   PAYMENT_ACK_RE,
   validateLiveEtaMinutes,
+  countEnRouteEtaStops,
   findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival,
   bodyHasTimedArrivalPhrase,
   bodyHasUnclassifiedArrivalDigit,

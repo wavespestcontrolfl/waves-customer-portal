@@ -892,20 +892,35 @@ async function loadUpcomingServices(customer, includeLiveEta) {
 // rechecked against the visit's current tracker state at send time. Grouped
 // siblings sharing one physical stop share one group; each keeps its own
 // /track/ token (round-4) and the GPS-fix expiry rides along (round-11).
-function liveEtaGroupFor(members, result) {
+function liveEtaGroupFor(members, result, state = 'en_route') {
+  const technicianId = members.find((s) => s.technician_id != null)?.technician_id;
   return {
     minutes: result ? result.minutes : null,
     scheduledServiceIds: members.map((s) => s.id),
     trackTokens: members.map((s) => s.track_view_token).filter(Boolean),
+    // The tracker state this group was drafted under (Codex round-18 P2): an
+    // on-site group lets a completed-arrival claim ("has arrived") be
+    // rechecked at send time too.
+    state,
+    // Which technician the ETA/status was about (round-18 P2): send time
+    // refuses when a reassignment changed the row's technician_id.
+    ...(technicianId != null ? { technicianId } : {}),
     ...(result && result.fixExpiresAtMs != null ? { fixExpiresAtMs: result.fixExpiresAtMs } : {}),
   };
+}
+function liveEtaOnSite(row, todayStr = etDateString()) {
+  const { customerTrackState } = require('./track-transitions');
+  return Boolean(row) && calendarDay(row.scheduled_date) === todayStr && customerTrackState(row) === 'on_property';
 }
 function buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta }) {
   if (!includeLiveEta) return [];
   const keyed = uniqueLiveEtaKeys.map((key) => liveEtaGroupFor(upcomingServices.filter((s, i) => liveEtaKeys[i] === key), liveEtaResultByKey.get(key)));
   // Live rows with no dedupe key (no technician / destination): singleton groups.
   const keyless = upcomingServices.filter((s, i) => liveEtaKeys[i] == null && liveEtaEligible(s)).map((s) => liveEtaGroupFor([s], null));
-  return [...keyed, ...keyless];
+  // On-site (on_property) visits today: status-only groups, so a completed
+  // arrival claim is rechecked against the visit's state at send time.
+  const onSite = upcomingServices.filter((s) => liveEtaOnSite(s)).map((s) => liveEtaGroupFor([s], null, 'on_property'));
+  return [...keyed, ...keyless, ...onSite];
 }
 
 // Test-only: clears the cross-request memo so unrelated test cases sharing a
