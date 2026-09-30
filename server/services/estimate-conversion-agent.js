@@ -603,8 +603,9 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
       // prompt would tell the model to offer times it was never given.
       // Same customer row + convention draftShadowReply uses.
       city: customer?.city || null,
-      // Live, sendable draft: a visit-backed offer may run with no city
-      // (GATE_SMS_OFFERS_SCHEDULER; replay/backfill callers never pass this).
+      // Live, sendable draft: an offer whose picker locates the job itself (a
+      // visit, an estimate page, the customer's booking pin) may run with no
+      // city (GATE_SMS_OFFERS_SCHEDULER; replay/backfill callers never pass this).
       liveOpenTimes: true,
       // Pre-push audit P2: the ALREADY-RESOLVED estimate (resolveEstimateContext,
       // above this call in processInboundSms) so the offered slots reflect

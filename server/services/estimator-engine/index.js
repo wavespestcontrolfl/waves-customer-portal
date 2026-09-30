@@ -637,7 +637,9 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             .whereRaw("metadata->>'estimateId' = ?", [bell.estimateId])
             .update({
               title,
-              body,
+              // body + detail together: "Show full text" must never keep the
+              // story this rewrite replaces (admin body guard).
+              ...require('../notification-service').adminBodyColumns('lead', body),
               link,
               metadata: JSON.stringify({ ...bell.meta, ...metadata }),
               read_at: null,
@@ -696,7 +698,9 @@ async function notify({ call, context, title, body, lane, estimateId = null, quo
             .where({ id: existing.id })
             .update({
               title,
-              body,
+              // body + detail together: "Show full text" must never keep the
+              // story this rewrite replaces (admin body guard).
+              ...require('../notification-service').adminBodyColumns('lead', body),
               link,
               metadata: JSON.stringify({ ...existingMeta, ...metadata }),
               // The content changed materially — an already-read bell must
