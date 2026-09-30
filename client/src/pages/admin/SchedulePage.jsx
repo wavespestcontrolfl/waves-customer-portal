@@ -15352,7 +15352,11 @@ export function CompletionPanel({
       protocolCompletionDefaultsSnapshotRef.current = savedDraft.protocolCompletionDefaultsSnapshot;
     }
     setLawnAreaOverride(savedDraft.lawnAreaOverride);
-    setLawnAreaOverrideFor(typeof savedDraft.lawnAreaOverrideFor === "string" ? savedDraft.lawnAreaOverrideFor : null);
+    // A restored override with no recorded property (an older draft, or one
+    // saved before the areas answered) cannot be verified: withheld whenever
+    // shared areas load, applied only when none do.
+    setLawnAreaOverrideFor(typeof savedDraft.lawnAreaOverrideFor === "string" ? savedDraft.lawnAreaOverrideFor
+      : savedDraft.lawnAreaOverride !== undefined ? "unverified-draft" : null);
     // A draft that never recorded it (older) is read as default-derived.
     bedCoverageSeenRef.current = Object.hasOwn(savedDraft, "bedCoverageSeen") ? savedDraft.bedCoverageSeen
       : savedDraft.findingsValues?.bed_sqft_serviced != null ? String(savedDraft.findingsValues.bed_sqft_serviced) : null;
@@ -16541,7 +16545,7 @@ export function CompletionPanel({
       // The suggestion stays editable and is still the tech's actual to
       // confirm; a label with no per-1k rate prefills nothing, as before.
       row = planned || { ...row, applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
-        lawnAreaDefault: row.areaUnit === "sqft" && (!currentPropertyAreas || productUsesPropertyArea(catalogProduct)),
+        lawnAreaDefault: row.areaUnit === "sqft" && (!currentPropertyAreas || productUsesPropertyArea(catalogProduct, row.applicationMethod)),
         lawnAmountReason: row.totalAmount !== ""
           ? "Suggested from the label rate for the visit area. Confirm the actual amount."
           : "Enter the actual amount for this application." };
@@ -16564,8 +16568,11 @@ export function CompletionPanel({
   }
 
   // Palm feeds (and bed-only products on a lawn visit) never take the shared
-  // property area — on any path that seeds or follows it.
-  function productUsesPropertyArea(product) {
+  // property area — on any path that seeds or follows it. The lawn area is a
+  // whole-lawn broadcast quantity: only a broadcast method takes it; any other
+  // method on a lawn visit (a soil drench, spot work) stays manual.
+  function productUsesPropertyArea(product, applicationMethod) {
+    if (propertyAreaKey === "lawn" && !["granular_broadcast", "broadcast_spray"].includes(applicationMethod)) return false;
     return !!propertyAreaKey
       && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
       && !(propertyAreaKey === "lawn" && /snapshot|landscape bed/i.test([product.name, ...(Array.isArray(product.target_pests) ? product.target_pests : [])].join(" ")));
@@ -16581,7 +16588,7 @@ export function CompletionPanel({
     // completion-defaults seed only; every other caller is unaffected.
     const applicationMethod = applicationMethodOverride
       || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
-    const productUsesServiceArea = productUsesPropertyArea(product);
+    const productUsesServiceArea = productUsesPropertyArea(product, applicationMethod);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea, false, !!currentPropertyAreas && productUsesServiceArea,

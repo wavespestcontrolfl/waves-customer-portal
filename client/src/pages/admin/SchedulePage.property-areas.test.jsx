@@ -351,3 +351,24 @@ it.each([['property-1|old-address', 2000], ['property-1|new-address', 4200]])('a
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(shownBefore));
 });
+
+it('a restored lawn override with no recorded property is withheld once shared areas load', async () => {
+  measurements = { ...measurements, addressKey: 'new-address', areas: { ...measurements.areas, lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' } } };
+  localStorage.setItem('waves_completion_draft_visit-1', JSON.stringify({
+    serviceId: 'visit-1', savedAt: Date.now(), notes: 'Fixture notes', selectedProducts: [], lawnAreaOverride: '2000',
+  }));
+  mount('Lawn Care');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(4200));
+});
+
+it('on a pure lawn visit a bed soil drench never takes the shared lawn area', async () => {
+  measurements = { ...measurements, areas: { ...measurements.areas, lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' } } };
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Lawn Care', scheduledDate: '2026-09-27',
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: [], nextStepChips: [] } }}
+    products={[...products, sequestar]} onClose={() => {}} onSubmit={vi.fn()} />);
+  await screen.findByRole('button', { name: 'Review areas' });
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Sequestar' } });
+  fireEvent.click(screen.getByText('Sequestar'));
+  expect(screen.queryByDisplayValue('4200')).toBe(screen.getByLabelText('Area treated today (sq ft)'));
+});
