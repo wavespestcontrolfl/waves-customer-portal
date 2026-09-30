@@ -364,14 +364,15 @@ async function paidPaymentForInvoice(invoice) {
 
 // True only for free text that reads as a street address: the shared address
 // parser's street line starts with a house number followed by a street name
-// ("123 Main St", "5A Palm Ave"). A nickname such as "Rental 2", "Property #2"
-// or "Unit 4" is not one, even though it carries a digit.
+// ("123 Main St", "5A Palm Ave") or a numbered street ("100 4th Ave E",
+// "20 21st St W"). A nickname such as "Rental 2", "Property #2" or "Unit 4"
+// is not one, even though it carries a digit.
 function isStreetShapedAddress(value) {
   const text = clean(value);
   if (!text) return false;
   try {
     const { line1 } = parseRawAddress(text);
-    return /^\d+[A-Za-z]?(?:-\d+)?\s+[A-Za-z]/.test(clean(line1));
+    return /^\d+[A-Za-z]?(?:-\d+)?\s+(?:[A-Za-z]|\d+(?:st|nd|rd|th)\b)/i.test(clean(line1));
   } catch {
     return false;
   }
