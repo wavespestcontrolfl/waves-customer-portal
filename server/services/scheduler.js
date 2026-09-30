@@ -1597,38 +1597,30 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // WEEKLY AGENT GAP DIGEST — Monday 8:15am ET — owner ACT email ONLY when the
-  // Intelligence Bar recorded a gap report (missing capability, tool failure,
-  // or blocked action) in the last 7 days; a clean week sends nothing.
+  // WEEKLY BOOKING-LINK TEXT CHECK — Monday 8:13am ET (owner 2026-09-29: a
+  // concise admin notification every 7 days while GATE_CALL_BOOKING_LINK_TEXT
+  // is on — sent count, top skips, or what needs a look). Minute 13 is free
+  // in every schedule here, step patterns included; :19/:49 belong to the
+  // DB/LLM-heavy previsit sweep (codex #5358 r2 P1).
   // =========================================================================
-  cron.schedule('15 8 * * 1', async () => {
+  cron.schedule('13 8 * * 1', async () => {
     const tickStartedAt = Date.now();
     try {
-      const lockRes = await runExclusive('agent-gap-digest', async () => {
-        const { runAgentGapDigest } = require('./agent-gap-digest');
-        const result = await runAgentGapDigest();
-        logger.info(`[agent-gap-digest] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, count: result.count ?? null })}`);
-        // A delivery-blocking skip (mailer unconfigured / non-internal
-        // recipient) or a failed send must still read as a FAILED run in
-        // job_health, mirroring the turf-variance digest block above.
+      const lockRes = await runExclusive('call-booking-link-weekly', async () => {
+        const { runCallBookingLinkWeeklyCheck } = require('./call-booking-link-weekly-check');
+        const result = await runCallBookingLinkWeeklyCheck();
+        logger.info(`[call-booking-link-weekly] cron run: ${JSON.stringify({ sent: result.sent || false, skipped: result.skipped || null, problem: result.problem ?? null })}`);
         if (result?.skipped === 'query_failed' || result?.error
             || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
-          throw new Error(`agent gap digest did not complete (${result.skipped || 'send_failed'})`);
+          throw new Error(`booking-link weekly check did not complete (${result.skipped || 'send_failed'})`);
         }
       });
-      // A tick that got no DB connection returns { skipped } without running
-      // the job, and on the connection-acquire path without any job_health
-      // write: record the missed weekly run. recordMissedTick only writes when
-      // no start or success for this occurrence is already recorded within its
-      // 60 s tick window, so the slot-timeout path (which already recorded
-      // it) is not counted twice. lease_held means another instance ran this
-      // tick, which is not a miss.
       if (lockRes?.skipped && lockRes.reason !== 'lease_held') {
-        await recordMissedTick('agent-gap-digest', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
-        throw new Error(`agent gap digest tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordMissedTick('call-booking-link-weekly', tickStartedAt, `tick skipped: ${lockRes.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`booking-link weekly check tick skipped: ${lockRes.reason || 'no_connection'}`);
       }
     } catch (err) {
-      logger.error(`Weekly agent gap digest failed: ${err.message}`);
+      logger.error(`Weekly booking-link check failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -1726,6 +1718,34 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Customers blocked on the staff address-review queue (geocode-review-alert.js,
+  // kill: GEOCODE_REVIEW_ALERT_DISABLED=1): every 15 minutes. One rolling bell
+  // that rings only when a new customer joins; inert while GATE_GEOCODE_REVIEW
+  // is off. Best effort: a failed or skipped tick never throws out of here.
+  cron.schedule('0 7,22,37,52 * * * *', async () => {
+    if (!gateEnvValue('GATE_GEOCODE_REVIEW')) return;
+    try {
+      const lockRes = await runExclusive('geocode-review-alert', async () => {
+        const { runGeocodeReviewAlert } = require('./geocode-review-alert');
+        const result = await runGeocodeReviewAlert();
+        if (result?.skipped === 'query_failed' || result?.error
+            || result?.skipped === 'unconfigured' || result?.skipped === 'recipient') {
+          throw new Error(`geocode review alert did not complete (${result.skipped || 'send_failed'})`);
+        }
+      });
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`geocode review alert tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('geocode-review-alert').catch(() => {});
+        await recordJobEnd('geocode-review-alert', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[geocode-review-alert] tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
@@ -1747,6 +1767,33 @@ function initScheduledJobs() {
       }
     } catch {
       logger.error('[sms-operations] commitment watcher did not complete');
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Email intake and its own (simpler, non-watermarked) follow-up loop, same
+  // five-minute cadence as the SMS lane above (comms-promises-plan-20260928.md
+  // PR 1; coordinator correction #5, 2026-09-29).
+  cron.schedule('0 */5 * * * *', async () => {
+    if (!gateEnvValue('GATE_EMAIL_OPERATIONAL_ACTIONS')) return;
+    try {
+      const { runEmailOperationalActions } = require('./email-operational-actions');
+      await runEmailOperationalActions();
+    } catch {
+      logger.error('[email-operations] intake did not complete');
+    }
+    try {
+      const { refreshEmailCommitments } = require('./email-operational-actions');
+      const lockRes = await runExclusive('email-commitment-fulfillment', () => refreshEmailCommitments());
+      if (lockRes?.skipped === true && lockRes.reason !== 'lease_held') {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Email fulfillment tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('email-commitment-fulfillment').catch(() => {});
+        await recordJobEnd('email-commitment-fulfillment', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch {
+      logger.error('[email-operations] commitment watcher did not complete');
     }
   }, { timezone: 'America/New_York' });
 

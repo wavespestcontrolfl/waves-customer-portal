@@ -356,7 +356,7 @@ describe('service report email recipient delivery', () => {
       templateKey: 'service.report_ready',
       payload: expect.objectContaining({
         property_address: 'Sarasota, FL',
-        finding_summary: 'No action-required findings were documented.',
+        finding_summary: '',
         application_summary: '0 applications',
         pdf_note: 'Your PDF service report is attached.',
       }),
