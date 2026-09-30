@@ -564,11 +564,60 @@ const RESERVICE_COVERAGE_RE = new RegExp(
   + `|\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b[^.?!\\n]{0,60}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b`,
   'i',
 );
+// PR #5336 pre-push audit P1: an eligibility DENIAL names the same words as
+// a promise ("You are not eligible for a free re-service", "We cannot offer a
+// free pest re-service") but promises nothing — it is the truthful answer to
+// an ineligible customer, and the unconditional send-time check used to
+// reject it (an immediate send retired the reviewed decision, a scheduled one
+// was blocked). A clause whose promise is GOVERNED by a negator is a denial:
+// not eligible/covered/included/able, isn't/aren't covered/included/eligible,
+// can't/cannot/won't (be able to)/unable to offer|send|schedule|provide|
+// book|give, no longer eligible/qualifies/covered, doesn't/don't include|
+// cover|qualify|offer|provide|come with. Deliberately NOT a bare "won't" /
+// "no" / "not": the negation inside the price word itself ("we won't charge
+// you for the visit", "no charge") is still a promise, so each alternative
+// pairs the negator with the offer/eligibility verb it governs.
+const RESERVICE_DENIAL_RE = new RegExp(
+  '\\b(?:'
+  + 'not\\s+(?:currently\\s+|presently\\s+)?(?:eligible|covered|included|qualified|able\\s+to)'
+  + "|(?:isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+)?(?:covered|included|eligible)"
+  + "|(?:can['’]?t|cannot|can\\s+not|won['’]?t\\s+be\\s+able\\s+to|will\\s+not\\s+be\\s+able\\s+to|unable\\s+to|not\\s+able\\s+to)\\s+(?:to\\s+)?(?:offer|send|schedule|provide|book|give|do|arrange)"
+  + '|no\\s+longer\\s+(?:eligible|qualif(?:y|ies|ied)|covered|included)'
+  + "|(?:doesn['’]?t|does\\s+not|don['’]?t|do\\s+not)\\s+(?:currently\\s+)?(?:include|cover|qualify|offer|provide|come\\s+with)"
+  + ')',
+  'i',
+);
+function isReserviceDenialClause(clause) {
+  return RESERVICE_DENIAL_RE.test(String(clause || ''));
+}
+function rawReserviceOfferMatch(text) {
+  const t = String(text || '');
+  return FREE_RESERVICE_OFFER_RE.test(t) || RESERVICE_COVERAGE_RE.test(t);
+}
+// The AFFIRMATIVE promise clause(s) of an SMS body — the clauses the two
+// detectors above match that are not eligibility denials. Granularity narrows
+// only as far as it must: clause (split on , ; : and dashes) first, then
+// sentence, then — when the promise straddles those breaks — the whole body.
+// The first granularity that finds any detector hit decides: hits that are all
+// denials mean NO promise ("You are not eligible for a free re-service"),
+// while a denial clause beside a separate affirmative promise clause
+// ("...not eligible for a free re-service, but your free lawn re-service is
+// covered") leaves the promise. Codex round-7 (PR #5336) used the clause split
+// for lane scoping; this is the same split, shared, so detection and lane
+// derivation can never disagree about which text is the promise.
+function affirmativeReservicePromiseClauses(text) {
+  const t = String(text || '');
+  const splitters = [/[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]/, /[.?!\n]+/];
+  for (const splitter of splitters) {
+    const hits = t.split(splitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
+    if (hits.length) return hits.filter((c) => !isReserviceDenialClause(c));
+  }
+  return rawReserviceOfferMatch(t) && !isReserviceDenialClause(t) ? [t] : [];
+}
 // The single entry point every caller below uses — never test either regex
 // alone, or a caller could drift out of sync with the other.
 function isReserviceOfferPromise(text) {
-  const t = String(text || '');
-  return FREE_RESERVICE_OFFER_RE.test(t) || RESERVICE_COVERAGE_RE.test(t);
+  return affirmativeReservicePromiseClauses(text).length > 0;
 }
 function eligibleReserviceLanes(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(`${RESERVICE_FACT_LABEL} eligible for `));
@@ -583,19 +632,12 @@ function eligibleReserviceLanes(factsBlock) {
 // after round of lane-vocabulary patches never fixed that, because the
 // acknowledgement is not the offer. Structural fix: split the body into
 // clauses and derive lanes / excluded specialties ONLY from the clause(s)
-// isReserviceOfferPromise itself recognizes as the promise. Granularity
-// narrows only as far as it must: clause (split on , ; : and dashes) first,
-// then sentence, then — when the promise straddles those breaks — the whole
-// body (the old behavior, so nothing the detector accepts is ever left with
-// no text to classify).
+// isReserviceOfferPromise itself recognizes as the promise
+// (affirmativeReservicePromiseClauses, which also drops denial clauses).
+// A body with no promise clause falls back to the whole text.
 function reservicePromiseClauses(text) {
-  const t = String(text || '');
-  const splitters = [/[.?!\n]+|[,;:]|\s[-\u2013\u2014]+\s|[\u2013\u2014]/, /[.?!\n]+/];
-  for (const splitter of splitters) {
-    const hits = t.split(splitter).filter((c) => c.trim() && isReserviceOfferPromise(c));
-    if (hits.length) return hits;
-  }
-  return [t];
+  const clauses = affirmativeReservicePromiseClauses(text);
+  return clauses.length ? clauses : [String(text || '')];
 }
 // The lane(s) an SMS body EXPLICITLY names IN ITS RE-SERVICE PROMISE — shared
 // by validateReserviceOffer (the drafted reply) and reservicePromiseStillEligible

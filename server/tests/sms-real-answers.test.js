@@ -2269,6 +2269,63 @@ describe('free re-service is an entitlement resolved through the existing mechan
         .resolves.toMatch(/excluded specialty/);
     });
 
+    // PR #5336 pre-push audit P1: a truthful eligibility DENIAL names the same
+    // words as a promise but promises nothing.
+    const DENIALS = [
+      'You are not eligible for a free re-service.',
+      'We cannot offer a free pest re-service.',
+      "Unfortunately we can't send a free re-service.",
+      'Your plan no longer qualifies for a free re-service.',
+      "A free re-service isn't covered under your plan.",
+      "Your plan doesn't include a free re-service.",
+      'We are not able to offer a complimentary visit.',
+    ];
+    test.each(DENIALS)('%s → a denial, NOT a promise', (text) => {
+      expect(isReserviceOfferPromise(text)).toBe(false);
+    });
+
+    test.each([
+      "We won't charge you for the visit.",
+      'No charge for the visit.',
+      'Sorry, you are not eligible for a free re-service, but your free lawn re-service is covered.',
+      'You are not eligible for a free pest re-service. However, a complimentary visit is on us.',
+    ])('%s → still a promise (price-word negation / separate affirmative clause)', (text) => {
+      expect(isReserviceOfferPromise(text)).toBe(true);
+    });
+
+    test.each(DENIALS.slice(0, 2))('%s → passes draft validation for an ineligible customer (nothing to validate)', (reply) => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage: 'still have ants', intendedActions: [] }).ok).toBe(true);
+    });
+
+    // Both send paths (agent-decision-send-checks for the immediate /sms send
+    // and the /schedule-sms verification; scheduler.js's queued-send recheck)
+    // delegate to reservicePromiseStillEligible, so the ineligible /
+    // no-snapshot customer is exercised through it and through the real
+    // agentDecisionSendBlockReason.
+    test.each(DENIALS)('%s → sends for an ineligible customer with no snapshot (both send paths)', async (outgoingBody) => {
+      const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: [] });
+      await expect(drafter.reservicePromiseStillEligible({ outgoingBody, customerId: 'cust-1', promisedLanes: null })).resolves.toBeNull();
+      const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+      await expect(agentDecisionSendBlockReason({
+        decision: { id: 'd1', customer_id: 'cust-1', suggested_message: outgoingBody, input_snapshot: null, prompt_version: 'older' },
+        outgoingBody,
+      })).resolves.toBeNull();
+      expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
+    });
+
+    test("\"We won't charge you for the visit.\" is still blocked for an ineligible customer (both send paths)", async () => {
+      const outgoingBody = "We won't charge you for the visit.";
+      const { drafter } = loadWith({ lanes: [] });
+      await expect(drafter.reservicePromiseStillEligible({ outgoingBody, customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/no longer eligible/);
+      const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+      await expect(agentDecisionSendBlockReason({
+        decision: { id: 'd1', customer_id: 'cust-1', suggested_message: outgoingBody, input_snapshot: JSON.stringify({ reservice_lanes_snapshot: ['pest'] }), prompt_version: 'older' },
+        outgoingBody,
+      })).resolves.toMatch(/re-service promise unsendable/);
+    });
+
     test('a genuine re-service promise still counts, with each of the specific nouns', () => {
       expect(isReserviceOfferPromise('We will come back out for free.')).toBe(true);
       expect(isReserviceOfferPromise('A complimentary callback visit is on us.')).toBe(true);
