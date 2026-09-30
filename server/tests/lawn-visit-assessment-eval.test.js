@@ -210,6 +210,14 @@ describe('scoring', () => {
       { reason: 'no_key' }, { reason: 'no_route' }, { reason: 'unsupported_pdf_provider' },
       { reason: 'timeout_budget_exhausted' }, { reason: 'unknown_provider_example' },
     ] })).toEqual([]);
+    // A referee leg that failed before dispatch (no key) was never billed (Codex #5362 r1).
+    expect(evalLib.billedLegs({ status: 'unavailable', failures: [], referee: {
+      secondOpinion: { called: true, model: 'gpt-6-sol', reason: 'no_key', usage: null },
+      triggered: true, referee: { model: 'claude-fable-model', reason: 'no_key' }, usage: null,
+    } })).toEqual([]);
+    expect(evalLib.billedLegs({ status: 'unavailable', failures: [], referee: {
+      secondOpinion: { called: true, model: 'gpt-6-sol', reason: 'timeout', usage: null },
+    } })).toHaveLength(1);
   });
 
   test('summary: MAE + bias per metric, undeterminable and unavailable rates, provider mix, percentiles, cost, repeat variance', () => {

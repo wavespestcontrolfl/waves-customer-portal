@@ -186,9 +186,10 @@ function costUsd(model, usage) {
 // Exclude only failures known to occur before dispatch. Executed requests
 // without token metadata may be billed, so their cost must remain unknown.
 const BEFORE_DISPATCH_FAILURES = new Set(['no_key', 'no_route', 'unsupported_pdf_provider', 'timeout_budget_exhausted']);
+const wasDispatched = (leg) => !!(leg && (leg.usage || leg.validator
+  || (!BEFORE_DISPATCH_FAILURES.has(leg.reason) && !String(leg.reason).startsWith('unknown_provider_'))));
 function billedLegs(analysis) {
-  const failed = (analysis.failures || []).filter((leg) => leg && (leg.usage || leg.validator
-    || (!BEFORE_DISPATCH_FAILURES.has(leg.reason) && !String(leg.reason).startsWith('unknown_provider_'))))
+  const failed = (analysis.failures || []).filter(wasDispatched)
     .map((leg) => ({ provider: leg.provider || null, model: leg.model || null, reason: leg.reason || null, usage: leg.usage || null }));
   const won = analysis.status === 'complete'
     ? [{ provider: analysis.provider || null, model: analysis.model || null, reason: null, usage: analysis.usage || null }]
@@ -198,7 +199,7 @@ function billedLegs(analysis) {
   const extra = [
     referee.secondOpinion?.called ? { provider: null, model: referee.secondOpinion.model || null, reason: referee.secondOpinion.reason || null, usage: referee.secondOpinion.usage || null } : null,
     referee.triggered ? { provider: 'anthropic', model: referee.referee?.model || null, reason: referee.referee?.reason || null, usage: referee.usage || null } : null,
-  ].filter(Boolean);
+  ].filter(wasDispatched); // a referee leg that failed before dispatch (no_key …) was never billed
   return [...failed, ...won, ...extra];
 }
 

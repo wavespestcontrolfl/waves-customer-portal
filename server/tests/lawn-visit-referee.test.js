@@ -8,9 +8,9 @@
 jest.mock('../services/logger', () => ({
   warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
-jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn(), dispatch: jest.fn() }));
+jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn(), dispatch: jest.fn(), rejectCall: jest.fn() }));
 
-const { dispatchWithFallback, dispatch } = require('../services/llm/call');
+const { dispatchWithFallback, dispatch, rejectCall } = require('../services/llm/call');
 const { analyzeVisit } = require('../services/lawn-visit-assessment');
 const input = require('../services/lawn-visit-input');
 const referee = require('../services/lawn-visit-referee');
@@ -49,6 +49,7 @@ const cleanGemini = () => answer({
 beforeEach(() => {
   dispatchWithFallback.mockReset();
   dispatch.mockReset();
+  rejectCall.mockReset();
   delete process.env[GATE];
 });
 
@@ -165,6 +166,9 @@ describe('agreement, and a second opinion that cannot help, never draw Fable', (
     const result = await analyzeVisit({ photos });
     expect(dispatch).toHaveBeenCalledTimes(1);
     expect(result.referee).toMatchObject({ triggered: false, outcome: 'skipped', reason: 'second_opinion_failed', secondOpinion: { called: true, ok: false, reason } });
+    // Only an answer the adapter filed as ok is flipped in the call ledger (Codex #5362 r1).
+    if (solResult.ok) expect(rejectCall).toHaveBeenCalledWith(solResult, 'schema_invalid:second_opinion');
+    else expect(rejectCall).not.toHaveBeenCalled();
     expect(strip(result)).toEqual(strip(await withGateOff(g)));
   });
 
@@ -269,6 +273,8 @@ describe('a name disagreement draws Fable', () => {
     const result = await analyzeVisit({ photos });
     expect(strip(result)).toEqual(strip(baseline));
     expect(result.referee).toMatchObject({ triggered: true, outcome, reason });
+    if (reason === 'schema_invalid') expect(rejectCall).toHaveBeenCalledWith(fable, 'schema_invalid:referee');
+    else expect(rejectCall).not.toHaveBeenCalledWith(expect.anything(), 'schema_invalid:referee');
   });
 
   test('a thrown Fable dispatch is contained', async () => {

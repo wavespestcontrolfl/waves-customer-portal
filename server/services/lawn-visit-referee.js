@@ -23,7 +23,7 @@
  */
 const MODELS = require('../config/models');
 const logger = require('./logger');
-const { dispatch } = require('./llm/call');
+const { dispatch, rejectCall } = require('./llm/call');
 const { PROMPT_VERSION, GRASS_TYPES, buildUserText } = require('./lawn-visit-input');
 const { validateAssessmentJson } = require('./lawn-visit-result');
 const { safeConditionLabel } = require('./lawn-diagnostic-report');
@@ -316,7 +316,11 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
     const solResult = await boundedDispatch(solRoute, { ...solPayload, promptVersion: `${PROMPT_VERSION}:second-opinion` }, SECOND_OPINION_MAX_MS);
     const solInfo = { called: true, reasons, ...legInfo(solResult, solRoute) };
     const solValid = solResult.ok && validateAssessmentJson(solResult, visit.photoCount) === null;
-    if (solResult.ok && !solValid) { solInfo.ok = false; solInfo.reason = 'malformed_assessment'; }
+    if (solResult.ok && !solValid) {
+      solInfo.ok = false; solInfo.reason = 'malformed_assessment';
+      // The adapter filed this leg as a success; flip its ledger row (Codex #5362 r1).
+      rejectCall(solResult, 'schema_invalid:second_opinion');
+    }
     if (!solValid) {
       return { json: geminiJson, referee: { ...skipped('second_opinion_failed'), secondOpinion: solInfo, usage: null } };
     }
@@ -337,6 +341,7 @@ async function refereeVisit({ policy, payload, geminiJson, visit }) {
       promptVersion: `${PROMPT_VERSION}:referee`,
     }, REFEREE_MAX_MS);
     const picks = result.ok ? usablePicks(result.json, disputes) : null;
+    if (result.ok && !picks) rejectCall(result, 'schema_invalid:referee');
     const refereeInfo = { triggered: true, ...base, referee: legInfo(result, route), usage: result.usage || null };
     if (!picks) {
       return { json: geminiJson, referee: { ...refereeInfo, outcome: 'unavailable', reason: result.ok ? 'schema_invalid' : (result.reason || 'error') } };
