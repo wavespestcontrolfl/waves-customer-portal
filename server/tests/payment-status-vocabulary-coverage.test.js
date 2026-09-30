@@ -527,7 +527,7 @@ describe('round-17: the customer\'s named tender decides the row, including bare
     expect(rq(REPLY, ctx([bank]), ask(how))).toBe(false);
     expect(rq(REPLY, ctx([card, bank]), ask(how))).toBe(false); // the bank row is the one that binds
   });
-  test.each(['with Apple Pay', 'with Google Pay', 'by wire transfer', 'by money order', 'with a gift card', 'via Western Union', 'in bitcoin'])('non-card tender "%s" can never bind a card or bank row', (how) => {
+  test.each(['by wire transfer', 'by money order', 'with a gift card', 'via Western Union', 'in bitcoin', 'with Cash App'])('non-card tender "%s" can never bind a card or bank row', (how) => {
     expect(rq(REPLY, ctx([card]), ask(how))).toBe(true);
     expect(rq(REPLY, ctx([bank]), ask(how))).toBe(true);
   });
@@ -725,5 +725,121 @@ describe('round-19: rows with the same identity but conflicting statuses make a 
   test('absence claims are not affected (any matching row contradicts them anyway)', () => {
     expect(rq("We haven't received your $120 card payment from Sep 12.", ctx([row('failed'), row('paid')]))).toBe(true);
     expect(rq("We haven't received your $120 card payment from Sep 12.", ctx([row('failed')]))).toBe(false);
+  });
+});
+
+// Codex round-20 P1: wallets settle as CARD payments (Stripe paymentMethod='card'); genuinely non-Stripe tenders stay non-card.
+describe('round-20: Apple / Google / Samsung Pay carry the card identity', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const card = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', metadata: { payment_method: 'card' } };
+  const bank = { ...card, payment_method_type: 'us_bank_account', metadata: { payment_method: 'us_bank_account' } };
+  const { paymentIdentityFromText } = require('../services/sms-shadow-drafter');
+  test.each(['Apple Pay', 'Google Pay', 'Samsung Pay'])('%s: a receipt binds the card row (inbound or reply names it), never a bank row', (wallet) => {
+    const ask = `Did you get my $120 payment? I paid with ${wallet}.`;
+    expect(paymentIdentityFromText(ask).tender).toBe('card');
+    expect(rq('We received your $120 payment from Sep 12.', ctx([card]), ask)).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12.', ctx([bank]), ask)).toBe(true);
+    expect(rq(`We received your $120 ${wallet} payment from Sep 12.`, ctx([card]))).toBe(false);
+    expect(rq(`We received your $120 ${wallet} payment from Sep 12.`, ctx([bank]))).toBe(true);
+  });
+  test('absence: "we don\'t see your Apple Pay payment" is contradicted by a card row (it is not passed through)', () => {
+    const ask = 'Did you get my $120 Apple Pay payment from Sep 12?';
+    expect(rq("We don't see a $120 payment from Sep 12.", ctx([card]), ask)).toBe(true);
+    expect(rq("We don't see a $120 payment from Sep 12.", ctx([bank]), ask)).toBe(false);
+    expect(rq("We haven't received your $120 payment from Sep 12.", ctx([card]), ask)).toBe(true);
+  });
+  test('genuinely non-Stripe tenders stay non-card: Cash App, wire, money order, crypto, gift card', () => {
+    for (const how of ['with Cash App', 'by wire transfer', 'by money order', 'in bitcoin', 'with a gift card']) {
+      const ask = `Did you get my $120 payment? I paid ${how}.`;
+      expect({ how, card: rq('We received your $120 payment from Sep 12.', ctx([card]), ask) }).toEqual({ how, card: true });
+    }
+  });
+});
+
+// Codex round-20 P1: refund-subject completion forms are refunded-family claims (derived from the shared event stems).
+describe('round-20: "Your refund was processed / posted / went through / was issued / completed"', () => {
+  const V2 = require('../services/payment-receipt-vocabulary');
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const base = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const full = { ...base, status: 'refunded', refund_status: 'full', refund_amount: 120 };
+  const partial = { ...base, refund_status: 'partial', refund_amount: 30 };
+  const FORMS = ['was processed', 'has been processed', 'posted', 'went through', 'was issued', 'has been issued', 'completed', 'was completed', 'is complete', 'cleared', 'was successful', 'was sent'];
+
+  test('every completion form is recognized as a refunded claim (one shared stem list)', () => {
+    for (const f of FORMS) {
+      const m = V2.paymentStatusPhraseMatches(`Your refund ${f}.`, false);
+      expect({ f, families: [...new Set(m.matches.map((x) => x.family))], negated: m.negated }).toEqual({ f, families: ['refunded'], negated: false });
+    }
+    // the event stems the payment grammar uses also derive the refund forms
+    for (const st of V2.EVENT_STATUS_STEMS.filter((x) => x.past)) {
+      expect({ st: st.past, re: V2.REFUND_COMPLETION_RE.test(`refund ${st.past}`) || V2.REFUND_COMPLETION_RE.test(`refund ${st.pattern.replace(/\\s\+/g, ' ')}`) }).toEqual({ st: st.past, re: true });
+    }
+  });
+  test('binds a CURRENT refunded row; nothing else grounds it', () => {
+    for (const f of FORMS) {
+      const r = `Your refund ${f}.`;
+      expect({ f, full: rq(r, ctx([full])) }).toEqual({ f, full: false });
+      expect({ f, paid: rq(r, ctx([base])) }).toEqual({ f, paid: true });
+      expect({ f, none: rq(r, ctx([])) }).toEqual({ f, none: true });
+      expect({ f, failed: rq(r, ctx([{ ...base, status: 'failed' }])) }).toEqual({ f, failed: true });
+    }
+  });
+  test('amounts: the figure is the REFUNDED amount — a partial refund matches its refund amount, a full one its total', () => {
+    expect(rq('Your $120 refund was issued.', ctx([full]))).toBe(false);
+    expect(rq('Your $30 refund was issued.', ctx([partial]))).toBe(false);
+    expect(rq('Your refund of $30 went through.', ctx([partial]))).toBe(false);
+    expect(rq('Your $120 refund was issued.', ctx([partial]))).toBe(true); // that isn't what was refunded
+    expect(rq('Your $30 refund was issued.', ctx([full]))).toBe(true);
+    expect(rq('Your refund was processed.', ctx([partial]))).toBe(true); // unqualified => full refunds only
+    expect(rq('Your refund was partially processed.', ctx([partial]))).toBe(false);
+  });
+  test('a DENIAL ("hasn\'t posted") stays a denial, not a completion claim', () => {
+    expect(V2.paymentStatusPhraseMatches("Your refund hasn't posted yet.", false).matches.map((m) => m.family)).toEqual(['not_received']);
+    expect(rq("Your refund hasn't posted yet.", ctx([]))).toBe(false);
+    expect(rq("Your refund hasn't posted yet.", ctx([full]))).toBe(true);
+  });
+  test('unrelated refund wording is not a completion claim', () => {
+    expect(V2.paymentStatusPhraseMatches('You can request a refund by replying here.', false).matches).toEqual([]);
+  });
+});
+
+// Codex round-20 P1: invoice / bill status statements bind to the authoritative INVOICE status.
+describe('round-20: "Your invoice is still processing / failed / pending", "your bill is paid"', () => {
+  const rq = (r, list, inboundMessage) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: [], invoiceStatuses: list } }, { byMeaning: true, inboundMessage });
+  const inv = (status, over = {}) => ({ id: `i-${status}`, invoiceNumber: 'WPC-2026-0101', status, total: 120, amountDue: status === 'sent' ? 120 : 0, ...over });
+  const other = inv('sent', { id: 'i-2', invoiceNumber: 'WPC-2026-0202', total: 45, amountDue: 45 });
+
+  test('a status statement binds to the invoice status, not a payments row', () => {
+    expect(rq('Your invoice is still processing.', [inv('processing')])).toBe(false);
+    expect(rq('Your invoice is pending.', [inv('processing')])).toBe(false);
+    expect(rq('Your invoice is still processing.', [inv('sent')])).toBe(true);
+    expect(rq('Your bill is paid.', [inv('paid')])).toBe(false);
+    expect(rq('Your bill is paid.', [inv('prepaid')])).toBe(false);
+    expect(rq('Your bill is paid.', [inv('sent')])).toBe(true);
+    expect(rq('Your invoice was refunded.', [inv('refunded')])).toBe(false);
+    expect(rq('Your invoice was refunded.', [inv('paid')])).toBe(true);
+  });
+  test('"failed" is never an invoice status: it is ungrounded whatever the invoice', () => {
+    for (const status of ['processing', 'sent', 'paid', 'overdue', 'void']) expect({ status, r: rq('Your invoice failed.', [inv(status)]) }).toEqual({ status, r: true });
+  });
+  test('identification: by number, then by amount; several candidates with no identifier is ambiguous; unknown state fails closed', () => {
+    const list = [inv('processing'), other];
+    expect(rq('Your invoice is still processing.', list)).toBe(true); // which one?
+    expect(rq('Your invoice WPC-2026-0101 is still processing.', list)).toBe(false);
+    expect(rq('Your $120 invoice is still processing.', list)).toBe(false);
+    expect(rq('Your $45 invoice is still processing.', list)).toBe(true);
+    expect(rq('Your invoice is still processing.', list, 'Is invoice 0101 still processing?')).toBe(false); // the customer's own reference
+    expect(rq('Your invoice WPC-2026-0999 is still processing.', list)).toBe(true); // names none
+    expect(rq('Your invoice is still processing.', undefined)).toBe(true);
+    expect(rq('Your invoice is still processing.', null)).toBe(true);
+    expect(rq('Your invoice is still processing.', [])).toBe(true);
+  });
+  test('a payment-subject clause is unchanged (still binds a payments row)', () => {
+    const paymentsCtx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [inv('sent')] } });
+    const processing = { amount: 120, status: 'processing', payment_date: '2026-09-12', payment_method_type: 'card' };
+    expect(replyQuotesUngroundedAmount('Your $120 payment for the invoice is still processing.', paymentsCtx([processing]), { byMeaning: true })).toBe(false);
+    expect(replyQuotesUngroundedAmount('Your $120 payment for the invoice is still processing.', paymentsCtx([]), { byMeaning: true })).toBe(true);
   });
 });

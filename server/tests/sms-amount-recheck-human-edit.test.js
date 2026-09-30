@@ -175,3 +175,44 @@ describe('a valid reply about an older referenced payment is not blocked at send
     await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: "We don't see a $120 payment from June 12.", strict: true, dbh, inboundMessage: ASK })).resolves.toEqual({ stale: false });
   });
 });
+
+// Codex round-20 P1: refund-completion and invoice-status statements are rechecked against CURRENT state at send time.
+describe('refund-completion and invoice-status replies are rechecked at send time', () => {
+  const { outgoingAmountsStale, amountFreeStatusClaimStale, bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
+  const STALE = { stale: true, reason: 'amount_no_longer_authorized' };
+  const fullRefund = { ...paid, amount: 120, status: 'refunded', refund_status: 'full', refund_amount: 120 };
+
+  test('"Your refund was processed." — true at draft (refunded row); the refund later failed and the row is back to paid => stale', async () => {
+    const body = 'Your refund was processed.';
+    expect(bodyNeedsPaymentRecheck(body)).toBe(true);
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([fullRefund]));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ ...paid, amount: 120 }])); // refund failed: unwound
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual(STALE);
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([]));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual(STALE);
+  });
+  test('"Your $120 refund was issued." goes through the strict binder with the figure', async () => {
+    const body = 'Your $120 refund was issued.';
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([fullRefund]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ ...paid, amount: 120 }]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual(STALE);
+  });
+
+  const invoiceCtx = (list) => ({ billing: { outstandingBalance: 0, recentPayments: [], invoiceStatuses: list } });
+  const inv = (status) => ({ id: 'i1', invoiceNumber: 'WPC-2026-0101', status, total: 120, amountDue: status === 'sent' ? 120 : 0 });
+  test.each([['Your invoice is still processing.', 'processing', 'sent'], ['Your bill is paid.', 'paid', 'sent'], ['Your invoice is pending.', 'processing', 'paid']])(
+    '%s — grounded on the invoice status at draft; stale once it changed', async (body, goodStatus, badStatus) => {
+      expect(bodyNeedsPaymentRecheck(body)).toBe(true);
+      ContextAggregator.getContextForCustomer.mockResolvedValue(invoiceCtx([inv(goodStatus)]));
+      await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual({ stale: false });
+      ContextAggregator.getContextForCustomer.mockResolvedValue(invoiceCtx([inv(badStatus)]));
+      await expect(amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh })).resolves.toEqual(STALE);
+    },
+  );
+  test('unknown invoice state at send time fails closed', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([]));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your invoice is still processing.', strict: true, dbh })).resolves.toEqual(STALE);
+  });
+});

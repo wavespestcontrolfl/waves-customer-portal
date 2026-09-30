@@ -586,6 +586,9 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const ContextAggregator = require('./context-aggregator');
     const { hasSchedulingIntent } = require('./sms-intent');
     const context = await ContextAggregator.getContextForCustomer(customer);
+    // Same as draftShadowReply (Codex round-20 P2): a question about an OLDER payment reaches the model with
+    // that row in the facts, not only rejected after the fact.
+    await require('./payment-history').surfaceReferencedPayments(context, body);
 
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });

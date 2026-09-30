@@ -24,23 +24,50 @@ function invoiceNumbersNamed(text) {
 }
 const stripZeros = (s) => String(s).replace(/^0+/, '') || '0';
 
+// Dollar amounts the customer ties to an INVOICE/BILL ("the $95 invoice", "invoice for $210") — the only
+// amounts strong enough to contradict the sole open invoice (a bare "$50" may be anything).
+function invoiceAmountsNamed(text) {
+  const t = String(text || '');
+  const out = [];
+  for (const m of t.matchAll(/\$\s?\d[\d,]*(?:\.\d{1,2})?/g)) {
+    // same SENTENCE only ("Zelle invoice X. I sent $95 last month" ties nothing)
+    const before = t.slice(Math.max(0, m.index - 30), m.index).split(/[.!?;]\s/).pop();
+    const after = t.slice(m.index + m[0].length, m.index + m[0].length + 30).split(/[.!?;]\s/)[0];
+    if (/\b(?:invoice|bill|statement)\b/i.test(`${before} ${after}`)) out.push(centsOf(m[0]));
+  }
+  return [...new Set(out)];
+}
+
 function resolveZelleTargetInvoice(billing, inboundMessage) {
   const open = Array.isArray(billing?.openInvoices) && billing.openInvoices.length
     ? billing.openInvoices
     : (billing?.openInvoice?.id ? [billing.openInvoice] : []);
   if (open.length === 0) return { invoiceId: null, reason: 'no_open_invoice' };
-  if (open.length === 1) return { invoiceId: open[0].id, reason: 'single_open' };
 
+  // Explicit references are parsed FIRST — even with a single open invoice, a message that names a
+  // DIFFERENT (or already settled) invoice is not about the open one (Codex round-20 P1).
   const named = invoiceNumbersNamed(inboundMessage);
-  const byNumber = open.filter((inv) => {
+  const namesNumber = named.full.length > 0 || named.tail.length > 0;
+  const namedAmounts = invoiceAmountsNamed(inboundMessage);
+  const byNumber = namesNumber ? open.filter((inv) => {
     const num = String(inv.invoiceNumber || '').toUpperCase();
     if (!num) return false;
     if (named.full.includes(num)) return true;
     const last = num.split('-').pop();
     return named.tail.some((t) => stripZeros(t) === stripZeros(last));
-  });
-  if (byNumber.length === 1) return { invoiceId: byNumber[0].id, reason: 'invoice_number' };
+  }) : [];
+  if (namesNumber && byNumber.length === 0) return { invoiceId: null, reason: 'named_invoice_not_open' };
   if (byNumber.length > 1) return { invoiceId: null, reason: 'ambiguous_invoice_number' };
+  if (byNumber.length === 1) {
+    const inv = byNumber[0];
+    if (namedAmounts.length && !namedAmounts.includes(Math.round(Number(inv.amountDue) * 100))) return { invoiceId: null, reason: 'reference_conflict' };
+    return { invoiceId: inv.id, reason: 'invoice_number' };
+  }
+
+  if (open.length === 1) {
+    if (namedAmounts.length && !namedAmounts.includes(Math.round(Number(open[0].amountDue) * 100))) return { invoiceId: null, reason: 'named_amount_differs' };
+    return { invoiceId: open[0].id, reason: 'single_open' };
+  }
 
   const amounts = [...new Set((String(inboundMessage || '').match(AMOUNT_RE) || []).map(centsOf))];
   if (amounts.length) {

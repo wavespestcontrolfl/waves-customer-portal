@@ -198,7 +198,26 @@ const phrasePattern = (list) => list.map((v) => v.replace(/\s+/g, '\\s+').replac
 // request" are not.
 const PAYMENT_NOUN_RE = /\b(?:payments?|transfers?|deposits?|charges?|zelle|ach|paid|unpaid|refund(?:ed|s)?|disputed?|chargeback|(?:your|the|our|a)\s+check)\b/i;
 const familyRe = (family) => new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY[family].phrases)})\\b`, 'i');
+// Codex round-20 P1: subject-aware REFUND completion ("Your refund was processed / posted / went through /
+// was issued / completed"). Derived from the SAME event-status stems as the payment event grammar
+// (EVENT_STATUS_VERB_PATTERN) plus the refund-specific "issued / processed / completed / sent" passive
+// forms, so it cannot drift. A negator inside the span ("hasn't posted") is a DENIAL the not_received
+// family already owns, so the span may not contain one. Binds like the refunded family: a current refunded
+// row (or a partially refunded paid row when the amount is the refunded amount / the wording is partial).
+const REFUND_COMPLETION_VERB_PATTERN = `${EVENT_STATUS_VERB_PATTERN}|(?:(?:was|has\\s+been|is|'s)\\s+)?(?:processed|issued|completed|posted|cleared|sent)`;
+const REFUND_COMPLETION_RE = new RegExp(
+  `\\brefunds?\\b(?:(?!not\\b|n['\u2019]t\\b|never\\b)[^.\\n]){0,25}\\b(?:${REFUND_COMPLETION_VERB_PATTERN})\\b`,
+  'i',
+);
+// Codex round-20 P1: a clause whose status subject is the INVOICE / BILL (no payment noun of its own).
+// The invoice / bill must be the GRAMMATICAL SUBJECT of a status word — "Your invoice is / was / has ... /
+// failed" ("Your $120 invoice is ...", "invoice WPC-2026-0101 is ...") — so "we're processing your invoice
+// request" and "invoice processing takes two days" assert nothing.
+const INVOICE_SUBJECT_RE = /\b(?:invoices?|bills?)\b(?:\s+[#\w-]+){0,2}?\s+(?:is|was|has|have|are|were|got|still|isn['\u2019]t|wasn['\u2019]t|hasn['\u2019]t|failed|declined)\b|\b(?:invoices?|bills?)['\u2019]s\s+(?:been\s+)?(?:paid|failed)\b/i;
+const PAYMENT_OBJECT_RE = /\b(?:payments?|transfers?|deposits?|charges?|checks?|refunds?|zelle|ach)\b/i;
+const invoiceSubjectClause = (text) => INVOICE_SUBJECT_RE.test(String(text || '')) && !PAYMENT_OBJECT_RE.test(String(text || ''));
 const STATUS_PHRASE_RES = Object.freeze([
+  ['refunded', REFUND_COMPLETION_RE],
   ['not_found', familyRe('not_found')],
   ['not_received', familyRe('not_received')],
   ['unpaid', familyRe('unpaid')],
@@ -244,7 +263,7 @@ function insideQuestion(text, index) {
 // negator (or a negated stem) — fail closed, the binder cannot judge it.
 function paymentStatusPhraseMatches(clause, namesPayment = false) {
   const text = String(clause || '');
-  if (!namesPayment && !PAYMENT_NOUN_RE.test(text)) return { negated: false, matches: [] };
+  if (!namesPayment && !PAYMENT_NOUN_RE.test(text) && !invoiceSubjectClause(text)) return { negated: false, matches: [] };
   const matches = [];
   let negated = false;
   for (const [family, re] of STATUS_PHRASE_RES) {
@@ -354,6 +373,8 @@ function mayAssertPaymentStatus(text) {
 }
 
 module.exports = {
+  REFUND_COMPLETION_RE,
+  invoiceSubjectClause,
   EVENT_STATUS_STEMS,
   EVENT_STATUS_VERB_PATTERN,
   NEGATED_EVENT_PHRASES,

@@ -1330,7 +1330,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1484,14 +1484,16 @@ const TENDER_VOCABULARY = [
   // labelled this, so a Cash App claim can never bind (Codex round-10 P2).
   { word: 'cash app', label: 'Cash App', manual: false },
   { word: 'cash', label: 'Cash', manual: true },
-  // Codex round-17 P1: tenders a customer names that are NOT a card must never let a card row bind. Words
-  // with no paid-row equivalent get their OWN labels here (like Cash App): a claim naming one can never
+  // Codex round-17 P1: tenders a customer names that are NOT a card must never let a card row bind. Genuinely
+  // non-Stripe tenders (no paid-row equivalent) get their OWN labels here (like Cash App): a claim naming one can never
   // bind, and — because they resolve to a non-card label — a card row conflicts with them. Multi-word
   // entries come first so the alternation never reads "gift card" as card or "wire transfer" as bank.
   { word: 'gift card', label: 'Gift card', manual: false },
-  { word: 'apple pay', label: 'Apple Pay', manual: false },
-  { word: 'google pay', label: 'Google Pay', manual: false },
-  { word: 'samsung pay', label: 'Samsung Pay', manual: false },
+  // Apple / Google / Samsung Pay are wallets over a CARD: Stripe settles them as paymentMethod='card'
+  // (stripe-webhook.js), so a wallet-named claim has the card identity — it binds, and contradicts, card rows.
+  { word: 'apple pay', label: 'card', manual: false },
+  { word: 'google pay', label: 'card', manual: false },
+  { word: 'samsung pay', label: 'card', manual: false },
   { word: 'wire transfer', label: 'Wire', manual: false },
   { word: 'wire', label: 'Wire', manual: false },
   { word: 'money order', label: 'Money order', manual: false },
@@ -1715,7 +1717,7 @@ const ABSENCE_FAMILIES = new Set(['not_found', 'not_received', 'unpaid']);
 // payment was refunded", "$30 of your $120 payment was refunded").
 const PARTIAL_REFUND_WORDING_RE = /\b(?:partial(?:ly)?|part\s+of|portion\s+of|some\s+of)\b|\$\s?\d[\d,]*(?:\.\d+)?\s+of\s+(?:your|the|this|it|that)\b/i;
 const partialRefundWording = (text) => PARTIAL_REFUND_WORDING_RE.test(String(text || ''));
-function paymentRowCandidates({ family, amountCents, claimedDate, rows, partialWording = false, allowPartialPaid = false }) {
+function paymentRowCandidates({ family, amountCents, claimedDate, rows, partialWording = false, allowPartialPaid = false, refundSubject = false }) {
   const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
   const anyStatus = wanted.has(ANY_STATUS);
   const unknownCounts = ABSENCE_FAMILIES.has(family);
@@ -1728,7 +1730,10 @@ function paymentRowCandidates({ family, amountCents, claimedDate, rows, partialW
     const statusOk = (anyStatus || wanted.has(String(p.status || '').toLowerCase()) || (unknownCounts && !String(p.status || '').trim()))
       && !(family === 'paid' && partial && !allowPartialPaid)
       && !(reversalFamily && partialWording);
-    const partialOk = partial && reversalFamily && partialWording;
+    // "Your $30 refund was processed": the figure of a REFUND-subject claim is the refunded amount, which is
+    // what identifies a partial refund (no partial wording needed when it equals the recorded refund amount).
+    const partialOk = partial && reversalFamily
+      && (partialWording || (refundSubject && amountCents != null && partialRefundCents(p) === amountCents));
     if (!statusOk && !partialOk) return false;
     const amountOk = rowAmountMatches(p, amountCents)
       || (partialOk && amountCents != null && partialRefundCents(p) === amountCents);
@@ -1760,7 +1765,7 @@ function identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows 
 }
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
-  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false,
+  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false, refundSubject = false,
 }) {
   if (requireDate && !claimedDate) return null;
   const allRows = rows || context?.billing?.recentPayments || [];
@@ -1770,7 +1775,7 @@ function bindPaymentRow({
   // NEITHER row (filtering to the asserted family first would let "your payment failed" pick the failed one).
   if (amountCents != null && PRESENCE_STATUS_FAMILIES.has(family) && identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows: allRows }).size > 1) return onAmbiguous;
   const candidates = paymentRowCandidates({
-    family, amountCents, claimedDate, rows: allRows, partialWording, allowPartialPaid,
+    family, amountCents, claimedDate, rows: allRows, partialWording, allowPartialPaid, refundSubject,
   });
   // Codex round-6 pre-push audit P1 (reverse direction): the customer's message
   // is about a payment but NO tender could be extracted from it or the reply,
@@ -1943,8 +1948,17 @@ function enumerateMaskedClaims(masked, hasAmounts, env) {
   const d = detectPaymentClaims(masked, hasAmounts, env);
   const claims = [...d.claims];
   const amountConsumed = claims.some((c) => c.kind === 'status' || c.kind === 'absence' || c.kind === 'unpaid');
+  // Codex round-20 P1: when the clause's subject is the INVOICE / BILL (no payment noun), its status words
+  // ("still processing", "failed", "is paid") are claims about the INVOICE's own status — tagged here, bound
+  // to the authoritative invoice status by validateInvoiceStatusClaim, never to a payments row.
+  const invoiceSubject = invoiceSubjectClause(masked);
+  if (invoiceSubject) {
+    for (const c of claims) if (c.kind === 'status') c.subject = 'invoice';
+  }
   if (d.ackPol === 'negated') {
     claims.push({ kind: 'negated_ack' });
+  } else if (d.receiptShaped && invoiceSubject) {
+    claims.push({ kind: 'status', family: 'paid', subject: 'invoice' }); // "Your invoice is paid"
   } else if (d.receiptShaped) {
     claims.push(hasAmounts ? classifyAmountClause(masked, d.ackPol, d.hasEvent ? 'event' : null, env) : { kind: 'ack' });
   } else if (hasAmounts && !amountConsumed) {
@@ -2047,6 +2061,7 @@ function validateStatusClaim(c, env) {
   const partialWording = partialRefundWording(c.text);
   return bindAllTargets(claimTargets(c.amounts, env), env, (a) => bindPaymentRow({
     family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false, partialWording,
+    refundSubject: /\brefunds?\b/i.test(c.text),
   }));
 }
 // Absence ("isn't showing", "haven't received"): judged against the
@@ -2135,6 +2150,35 @@ function validateAnaphoricClaim(claim, text, env) {
   if (claim.kind === 'ack') return paymentRowCandidates({ family: 'paid', amountCents: null, claimedDate: null, rows: [row] }).length === 0;
   return true; // absence / unpaid / negated ack cannot be asserted about an inherited row
 }
+// Codex round-20 P1: an invoice / bill STATUS statement ("Your invoice is still processing", "your bill is
+// paid") is judged against the authoritative INVOICE status (billing.invoiceStatuses), never a payments row.
+// The invoice is identified by the number named in the clause or the customer's message, then by an amount
+// (the invoice total or amount due); with nothing to go on it must be the ONLY recent invoice. Unknown
+// invoice state, no match, or several candidates all fail closed.
+const INVOICE_STATUS_FAMILY = { paid: 'paid', prepaid: 'paid', processing: 'pending', refunded: 'refunded' };
+function validateInvoiceStatusClaim(claim, text, amounts, env) {
+  const list = env.context?.billing?.invoiceStatuses;
+  if (!Array.isArray(list)) return true; // invoice state unavailable => fail closed
+  const { invoiceNumbersNamed } = require('./zelle-target-invoice');
+  let pool = list;
+  const named = [text, env.inboundText].map(invoiceNumbersNamed);
+  const fullNames = named.flatMap((n) => n.full);
+  const tails = named.flatMap((n) => n.tail);
+  if (fullNames.length || tails.length) {
+    const strip = (x) => String(x).replace(/^0+/, '') || '0';
+    pool = pool.filter((inv) => {
+      const num = String(inv.invoiceNumber || '').toUpperCase();
+      return num && (fullNames.includes(num) || tails.some((t) => strip(t) === strip(num.split('-').pop())));
+    });
+  } else {
+    const figures = amounts.length ? amounts : amountCentsIn(env.inboundText);
+    if (figures.length) {
+      pool = pool.filter((inv) => figures.includes(Math.round(Number(inv.total) * 100)) || figures.includes(Math.round(Number(inv.amountDue) * 100)));
+    }
+  }
+  if (pool.length !== 1) return true; // none / ambiguous
+  return INVOICE_STATUS_FAMILY[String(pool[0].status).toLowerCase()] !== claim.family;
+}
 function clauseUngrounded(clause, env) {
   const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
   // Price grammar left once readable figures (and any zero-balance span) are masked is a price the
@@ -2148,6 +2192,10 @@ function clauseUngrounded(clause, env) {
     if (claim.kind === 'negated') return true;
     if (anaphoric && ANAPHORIC_KINDS.has(claim.kind)) {
       if (validateAnaphoricClaim(claim, text, env)) return true;
+      continue;
+    }
+    if (claim.subject === 'invoice') {
+      if (validateInvoiceStatusClaim(claim, text, amounts, env)) return true;
       continue;
     }
     const figures = claim.kind === 'owed_figures' ? owedFigureCents(masked, amounts) : null;

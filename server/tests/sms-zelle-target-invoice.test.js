@@ -36,8 +36,8 @@ describe('resolveZelleTargetInvoice', () => {
     expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE]), 'Can I Zelle $500?').invoiceId).toBeNull();
     expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE]), 'Can I Zelle invoice WPC-2026-0999?').invoiceId).toBeNull();
   });
-  test('a number outranks an amount that would point elsewhere', () => {
-    expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE]), 'Zelle invoice WPC-2026-0202 — the $95 one').invoiceId).toBe('inv-2');
+  test('a number outranks a BARE amount that would point elsewhere (an invoice-tied conflicting amount abstains, below)', () => {
+    expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE]), 'Zelle invoice WPC-2026-0202. I sent $95 last month').invoiceId).toBe('inv-2');
   });
 });
 
@@ -129,5 +129,32 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
   test('the named invoice fails the pay page\'s Zelle check: not persisted either', async () => {
     const { zelleInvoiceId, factsBlock } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open, visible: false });
     expect(zelleInvoiceId).toBe(null);
+  });
+});
+
+// Codex round-20 P1: explicit references are parsed FIRST — the single-open fast path does not swallow them.
+describe('resolveZelleTargetInvoice with ONE open invoice', () => {
+  const only = billing([MIDDLE]); // WPC-2026-0202, $120
+  test('no explicit reference (or one that AGREES): that invoice, as before', () => {
+    expect(resolveZelleTargetInvoice(only, 'Can I pay by Zelle?').invoiceId).toBe('inv-2');
+    expect(resolveZelleTargetInvoice(only, 'Can I Zelle invoice WPC-2026-0202?').invoiceId).toBe('inv-2');
+    expect(resolveZelleTargetInvoice(only, 'Zelle for invoice 202?').invoiceId).toBe('inv-2');
+    expect(resolveZelleTargetInvoice(only, 'Can I Zelle the $120 invoice?').invoiceId).toBe('inv-2');
+    expect(resolveZelleTargetInvoice(only, 'I paid $50 last time — can I Zelle this time?').invoiceId).toBe('inv-2'); // a bare unrelated amount
+  });
+  test('a DIFFERENT (or settled) invoice number => abstain', () => {
+    expect(resolveZelleTargetInvoice(only, 'Can I Zelle invoice WPC-2026-0101?')).toEqual({ invoiceId: null, reason: 'named_invoice_not_open' });
+    expect(resolveZelleTargetInvoice(only, 'zelle for invoice #0999').invoiceId).toBeNull();
+    expect(resolveZelleTargetInvoice(only, 'Zelle wpc-2026-0101 please').invoiceId).toBeNull();
+  });
+  test('a DIFFERENT invoice amount => abstain', () => {
+    expect(resolveZelleTargetInvoice(only, 'Can I Zelle the $95 invoice?')).toEqual({ invoiceId: null, reason: 'named_amount_differs' });
+    expect(resolveZelleTargetInvoice(only, 'Zelle for the invoice of $210?').invoiceId).toBeNull();
+  });
+  test('several open: a named number matching NONE abstains even when an amount would pick one', () => {
+    expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE]), 'Zelle invoice WPC-2026-0999 — the $95 one')).toEqual({ invoiceId: null, reason: 'named_invoice_not_open' });
+  });
+  test('a number that matches but an invoice-tied amount that contradicts it => abstain', () => {
+    expect(resolveZelleTargetInvoice(billing([NEWEST, MIDDLE]), 'Zelle invoice WPC-2026-0202, the $95 invoice')).toEqual({ invoiceId: null, reason: 'reference_conflict' });
   });
 });

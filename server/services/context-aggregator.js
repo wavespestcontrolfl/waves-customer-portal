@@ -682,6 +682,15 @@ class ContextAggregator {
     const openInvoices = ownInvoices.filter((inv) => invoiceAmountDue(inv) > 0).slice(0, 10).map((inv) => ({
       id: inv.id, invoiceNumber: inv.invoice_number || null, status: inv.status, amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
     }));
+    // The status of the customer's recent own invoices (drafts excluded — never shown to the customer), for
+    // "your invoice is paid / processing" statements (Codex round-20 P1). null = billing unavailable (unknown).
+    const invoiceStatuses = billingUnavailable ? null : invoiceRows
+      .filter((inv) => !inv.payer_id && String(inv.status) !== 'draft')
+      .slice(0, 8)
+      .map((inv) => ({
+        id: inv.id, invoiceNumber: inv.invoice_number || null, status: String(inv.status || ''),
+        total: Number(inv.total), amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
+      }));
     const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
     // The BILLING LANE, resolved once and carried as an explicit FACT. The
     // per-application copy rule lets a monthly amount be spoken only when the
@@ -831,6 +840,7 @@ class ContextAggregator {
           dueDate: openInvoice.due_date || null,
         } : null,
         openInvoices,
+        invoiceStatuses,
         payerBilledInvoice: hasPayerBilledOpen,
         // v10: payment method on file — brand/bank + last4 only, never a
         // full number. ACH methods store bank last4 with a null card_brand

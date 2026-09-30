@@ -265,6 +265,36 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(generateGroundedDraft).toHaveBeenCalledWith(expect.objectContaining({ estimateId: 'estimate-42' }));
   });
 
+  // Codex round-20 P2: same as draftShadowReply — the referenced OLDER payment is surfaced into the facts
+  // BEFORE the grounded draft is generated.
+  test('surfaces the payment the customer asked about into the context before generateGroundedDraft', async () => {
+    const paymentHistory = require('../services/payment-history');
+    const older = { id: 'p-old', amount: 120, status: 'paid', payment_date: '2026-06-12' };
+    const context = { summary: 'ctx', flags: [], billing: { recentPayments: [] } };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(context);
+    const spy = jest.spyOn(paymentHistory, 'surfaceReferencedPayments').mockImplementation(async (ctx) => {
+      ctx.billing.recentPayments.push(older);
+      return ctx;
+    });
+    let seenAtDraft = null;
+    generateGroundedDraft.mockImplementation(async (args) => {
+      seenAtDraft = args.context.billing.recentPayments.map((p) => p.id);
+      return { parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null }, passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v8' };
+    });
+    try {
+      await _test.generateLlmReviewDraft({
+        customer: CUSTOMER,
+        body: 'Did you get my $120 payment from June 12?',
+        decision: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
+        estimate: null,
+      });
+      expect(spy).toHaveBeenCalledWith(context, 'Did you get my $120 payment from June 12?');
+      expect(seenAtDraft).toEqual(['p-old']); // the row was in the context the drafter received
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('no estimate resolved: estimateId is null, not undefined or omitted', async () => {
     generateGroundedDraft.mockResolvedValue({
       parsed: { reply: 'ok', intended_actions: [], auto_send_safe: true, missing_info: null },
