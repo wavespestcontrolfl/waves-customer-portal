@@ -24,6 +24,12 @@ jest.mock('../services/logger', () => ({
 jest.mock('../middleware/admin-auth', () => ({
   adminAuthenticate: (req, res, next) => {
     const token = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+    if (token === 'tech') {
+      req.technician = { id: 'tech-1', role: 'technician' };
+      req.technicianId = 'tech-1';
+      req.techRole = 'technician';
+      return next();
+    }
     if (token !== 'admin') return res.status(401).json({ error: 'Admin authentication required' });
     req.technician = { id: 'admin-1', role: 'admin' };
     req.technicianId = 'admin-1';
@@ -2716,6 +2722,77 @@ describe('Communications review ask serialization', () => {
     });
     expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(reservations().some(row => row.metadata?.review_ask_reservation === true)).toBe(false);
+  });
+
+  describe('reviewSpacingOverride — the owner resends inside the 72-hour window', () => {
+    const activityRows = () => db.mock.calls.filter(([table]) => table === 'activity_log').length;
+    const insertedActivity = () => db.mock.results
+      .filter((_r, i) => db.mock.calls[i][0] === 'activity_log')
+      .flatMap(r => r.value.insert.mock.calls.map(([row]) => row));
+
+    test('an admin with a reason sends past the spacing and the override is recorded on activity_log', async () => {
+      const lastAt = new Date(Date.now() - 86400000);
+      history.lastManualAskAt.mockResolvedValue(lastAt);
+      await withServer(async baseUrl => {
+        const refused = await send(baseUrl);
+        expect(refused.status).toBe(409);
+        expect((await refused.json()).code).toBe('REVIEW_ASK_SPACING');
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        const res = await send(baseUrl, { reviewSpacingOverride: { reason: '  first link did not open  ' } });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ sent: true, reviewSpacingOverridden: { by: 'admin-1', reason: 'first link did not open', lastAskAt: lastAt.toISOString() } });
+      });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(insertedActivity()).toEqual([expect.objectContaining({
+        customer_id: 'cust-A', admin_user_id: 'admin-1', action: 'review_ask_spacing_overridden',
+        description: 'Review request resent inside the 72-hour window by staff: first link did not open',
+        metadata: expect.objectContaining({ reason: 'first link did not open', last_ask_at: lastAt.toISOString(), provider_message_id: 'SM-test' }),
+      })]);
+    });
+
+    test('no audit row when the override was not needed', async () => {
+      await withServer(async baseUrl => {
+        expect((await send(baseUrl, { reviewSpacingOverride: { reason: 'resend' } })).status).toBe(200);
+      });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(activityRows()).toBe(0);
+    });
+
+    test('a missing reason is refused before the provider', async () => {
+      history.lastManualAskAt.mockResolvedValue(new Date());
+      await withServer(async baseUrl => {
+        for (const value of [true, {}, { reason: '   ' }]) {
+          const res = await send(baseUrl, { reviewSpacingOverride: value });
+          expect(res.status).toBe(400);
+          expect((await res.json()).error).toMatch(/why/i);
+        }
+      });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('a technician cannot override — 403, never a silent downgrade', async () => {
+      history.lastManualAskAt.mockResolvedValue(new Date());
+      await withServer(async baseUrl => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST', headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', customerId: 'cust-A', messageType: 'manual', body: 'Please review us: https://g.page/r/example/review', reviewSpacingOverride: { reason: 'resend' } }),
+        });
+        expect(res.status).toBe(403);
+      });
+      expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    test('on a text that is not a review ask the flag is inert', async () => {
+      await withServer(async baseUrl => {
+        const res = await fetch(`${baseUrl}/admin/communications/sms`, {
+          method: 'POST', headers: { Authorization: 'Bearer tech', 'Content-Type': 'application/json' },
+          body: JSON.stringify({ to: '+15551234567', customerId: 'cust-A', messageType: 'manual', body: 'Running ten minutes late, sorry!', reviewSpacingOverride: { reason: 'resend' } }),
+        });
+        expect(res.status).toBe(200);
+      });
+      expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(activityRows()).toBe(0);
+    });
   });
 
   test('bare staff ask holds the lock through delivery; overlapping cadence and staff asks cannot dispatch', async () => {

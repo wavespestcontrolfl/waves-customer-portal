@@ -37,7 +37,8 @@ beforeEach(() => {
   localStorage.setItem("waves_admin_token", "test-token");
   vi.stubGlobal("fetch", vi.fn(async (url) => {
     const value = responses[String(url).replace(/^\/api/, "")];
-    return response(typeof value === "function" ? await value() : value || {});
+    const resolved = typeof value === "function" ? await value() : value;
+    return resolved instanceof Response ? resolved : response(resolved || {});
   }));
   vi.stubGlobal("URL", class extends URL {
     static createObjectURL = vi.fn(() => "blob:qa-preview");
@@ -252,4 +253,43 @@ it("clears a stale reply context when the compose target diverges, and always on
   // compose session never inherits it from a completed one.
   // The conversation-scoped draft now owns both body and reply context.
   expect(src).toContain("clearDraft(draftRevision)");
+});
+
+it("offers the owner a reasoned resend after the 72-hour review spacing refuses a send, and sends the override on the retry", async () => {
+  const { Outlet, Route, Routes } = await import("react-router-dom");
+  let smsCalls = 0;
+  responses["/admin/communications/sms"] = () => {
+    smsCalls += 1;
+    if (smsCalls === 1) {
+      return new Response(JSON.stringify({ error: "A recent or unresolved review request is still inside the 72-hour window.", code: "REVIEW_ASK_SPACING", outcome: "blocked" }), { status: 409, headers: { "Content-Type": "application/json" } });
+    }
+    return { sent: true, providerMessageId: "SMaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+  };
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "owner-1", role: "admin" } }} />}><Route path="*" element={<SmsTab active customer={customer} customerMessages={customerMessages} />} /></Route></Routes></MemoryRouter>);
+  const field = screen.getByRole("textbox", { name: "Text message" });
+  expect(screen.queryByLabelText(/Customer asked for the link again/)).not.toBeInTheDocument();
+  fireEvent.change(field, { target: { value: "Here is that review link again: https://g.page/r/example/review" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByText(/Failed: A recent or unresolved review request/)).toBeInTheDocument();
+  expect(bodyOf("/admin/communications/sms").reviewSpacingOverride).toBeUndefined();
+
+  const box = screen.getByLabelText(/Customer asked for the link again/);
+  fireEvent.click(box);
+  // Armed without a reason: the send waits for one.
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  fireEvent.change(screen.getByRole("textbox", { name: "Why the review request is being resent" }), { target: { value: " first link did not open " } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  await waitFor(() => expect(smsCalls).toBe(2));
+  expect(JSON.parse(requests("/admin/communications/sms")[1][1].body).reviewSpacingOverride).toEqual({ reason: "first link did not open" });
+  await waitFor(() => expect(screen.queryByLabelText(/Customer asked for the link again/)).not.toBeInTheDocument());
+});
+
+it("never offers the spacing override to a technician", async () => {
+  const { Outlet, Route, Routes } = await import("react-router-dom");
+  responses["/admin/communications/sms"] = () => new Response(JSON.stringify({ error: "Inside the 72-hour window.", code: "REVIEW_ASK_SPACING" }), { status: 409, headers: { "Content-Type": "application/json" } });
+  render(<MemoryRouter><Routes><Route element={<Outlet context={{ user: { id: "tech-1", role: "technician" } }} />}><Route path="*" element={<SmsTab active customer={customer} customerMessages={customerMessages} />} /></Route></Routes></MemoryRouter>);
+  fireEvent.change(screen.getByRole("textbox", { name: "Text message" }), { target: { value: "Please review us: https://g.page/r/example/review" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  expect(await screen.findByText(/Failed: Inside the 72-hour window/)).toBeInTheDocument();
+  expect(screen.queryByLabelText(/Customer asked for the link again/)).not.toBeInTheDocument();
 });

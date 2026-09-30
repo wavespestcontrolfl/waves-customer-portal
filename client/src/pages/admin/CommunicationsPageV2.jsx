@@ -136,10 +136,12 @@ function adminFetch(path, options = {}) {
   }).then(async (r) => {
     if (!r.ok) {
       let serverMsg = "";
+      let serverCode;
       try {
         const body = await r.clone().json();
         serverMsg =
           body?.error || body?.reason || body?.message || body?.code || "";
+        serverCode = typeof body?.code === "string" ? body.code : undefined;
       } catch {
         try {
           serverMsg = (await r.text()).trim();
@@ -149,6 +151,7 @@ function adminFetch(path, options = {}) {
       }
       const err = new Error(serverMsg || `HTTP ${r.status}`);
       err.status = r.status;
+      err.code = serverCode;
       throw err;
     }
     if (r.status === 204) return null;
@@ -1148,6 +1151,21 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
   });
   previousSenderRef.current = fromNumber;
   const [sending, setSending] = useState(false);
+  // The 72-hour review-ask spacing refused the last send. The owner can
+  // resend anyway ("the customer asked for the link again") with a reason;
+  // the server (admin-only) records it. Cleared on the next accepted send.
+  const [reviewSpacingBlocked, setReviewSpacingBlocked] = useState(false);
+  const [reviewSpacingOverride, setReviewSpacingOverride] = useState(false);
+  const [reviewSpacingReason, setReviewSpacingReason] = useState("");
+  const reviewSpacingOverrideOffered = reviewSpacingBlocked && smsIsAdminRole && sendTiming === "now";
+  const reviewSpacingOverrideArmed = reviewSpacingOverrideOffered && reviewSpacingOverride;
+  // The refusal was about THIS recipient: a new number or customer starts
+  // clean, so a block on one customer never arms a resend to another.
+  useEffect(() => {
+    setReviewSpacingBlocked(false);
+    setReviewSpacingOverride(false);
+    setReviewSpacingReason("");
+  }, [toNumber, selectedCustomerId]);
   // Mirrors `sending` for async code that must not act mid-send: canceling
   // a review row while its /sms is in flight can land before the server's
   // delivered-marking and suppress an ask the customer actually received.
@@ -1945,6 +1963,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             // A freshly inserted contract signing link is unwritten until
             // this send activates it — the server needs the contract it names.
             contractId: insertedCustomerLinks.contract?.contractId || undefined,
+            // Owner resend inside the 72-hour review spacing (see above).
+            reviewSpacingOverride: reviewSpacingOverrideArmed ? { reason: reviewSpacingReason.trim() } : undefined,
           }),
         });
         if (!isAcceptedSms(sent)) {
@@ -1953,6 +1973,9 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
         setSendResult({ ok: true, text: `Provider accepted; delivery is not yet confirmed.${reviewEmailNote(sent?.reviewEmail)}` });
       }
       notifyUnreadChanged();
+      setReviewSpacingBlocked(false);
+      setReviewSpacingOverride(false);
+      setReviewSpacingReason("");
       const { cleared, persisted } = clearDraft(draftRevision);
       if (cleared && persisted) {
         setToNumber(customer?.phone || "");
@@ -1971,6 +1994,7 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
       else await loadData(smsSearch.trim(), { refresh: true });
     } catch (e) {
       setSendResult({ ok: false, text: `Failed: ${e.message}` });
+      if (e?.code === "REVIEW_ASK_SPACING") setReviewSpacingBlocked(true);
     } finally {
       sendInFlightRef.current = false;
       setSending(false);
@@ -3567,7 +3591,8 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
               insertingReservice ||
               !!insertingCustomerLink ||
               !toNumber.trim() ||
-              (!msgBody.trim() && attachments.length === 0)
+              (!msgBody.trim() && attachments.length === 0) ||
+              (reviewSpacingOverrideArmed && !reviewSpacingReason.trim())
             }
           >
             {sending
@@ -3641,6 +3666,34 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
             )}
           >
             {sendResult.text}
+          </div>
+        )}
+        {reviewSpacingOverrideOffered && (
+          <div className="mt-2.5 border-hairline border-zinc-300 rounded-sm p-3 bg-white">
+            <Checkbox
+              id="review-spacing-override"
+              label="Customer asked for the link again — send anyway"
+              checked={reviewSpacingOverride}
+              disabled={sending}
+              onChange={(e) => setReviewSpacingOverride(e.target.checked)}
+            />
+            <div className="mt-1 text-ui-label text-zinc-500">
+              Skips the 72-hour review spacing for this one text. Who sent it and why is recorded on the customer.
+            </div>
+            {reviewSpacingOverride && (
+              <Input
+                aria-label="Why the review request is being resent"
+                placeholder="Why? (e.g. first link did not open)"
+                value={reviewSpacingReason}
+                maxLength={200}
+                disabled={sending}
+                onChange={(e) => setReviewSpacingReason(e.target.value)}
+                className={cn(
+                  "mt-2 w-full bg-white border-hairline border-zinc-300 rounded-sm py-2 px-3 text-16 md:text-ui-body text-zinc-900 min-h-[44px] md:min-h-0",
+                  "focus:outline-none focus:ring-2 focus:ring-zinc-900 focus:border-zinc-900",
+                )}
+              />
+            )}
           </div>
         )}
         </fieldset>

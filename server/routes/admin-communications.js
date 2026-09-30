@@ -464,6 +464,10 @@ router.post('/sms', async (req, res, next) => {
       // Composer Quick Links: a pending inline review_requests row whose link
       // rides in this body — marked delivered after a real send (below).
       reviewRequestId,
+      // Composer "Customer asked for the link again": an owner decision to
+      // resend a review ask inside the 72-hour spacing window (a dead link,
+      // a lost text). Admin-only; the reason is recorded on activity_log.
+      reviewSpacingOverride,
       // Composer Insert Link: the contract a freshly inserted (unwritten)
       // signing link belongs to — activated before the provider call.
       contractId,
@@ -552,6 +556,18 @@ router.post('/sms', async (req, res, next) => {
         return res.status(409).json({ error: 'Select the customer receiving this review request before sending.' });
       }
       trustedCustomerId = customer.id;
+    }
+    // The spacing override applies only to a send the review-ask fence
+    // would judge; on any other text it is inert. It waives the SPACING
+    // refusal alone — dispatchReviewAsk keeps its click guard and its
+    // fail-closed history read — and it is the owner's call: a technician
+    // gets a 403, not a silent downgrade to an ordinary send.
+    let spacingOverride = null;
+    if (reviewLooking && reviewSpacingOverride) {
+      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Admin access required to resend a review request inside the 72-hour window' });
+      const overrideReason = typeof reviewSpacingOverride === 'object' && reviewSpacingOverride !== null ? String(reviewSpacingOverride.reason || '').trim() : '';
+      if (!overrideReason) return res.status(400).json({ error: 'Say why the review request is being resent inside the 72-hour window' });
+      spacingOverride = { by: req.technicianId, reason: overrideReason.slice(0, 200) };
     }
 
     // Provider coordination must publish the same From endpoint the SDK will
@@ -1291,7 +1307,7 @@ router.post('/sms', async (req, res, next) => {
       };
       return reviewLooking
         ? require('../services/review-ask-dispatch').dispatchReviewAsk(trustedCustomerId, sendAndSettle,
-          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId })
+          { excludeRequestId: claimedReviewRequestId, excludeReservationId: lockedReviewReservationId, spacingOverride })
         : sendAndSettle();
     };
     const result = prepLinkSends
@@ -1542,6 +1558,30 @@ router.post('/sms', async (req, res, next) => {
     // Accepted evidence stays linked until every known decision has durably
     // settled. Recovery can finish any partial bookkeeping from this row.
     if (realProviderSend && linkedDecisionSettlementComplete) await clearManualReservation();
+
+    // The 72-hour spacing was overridden and the text really went to the
+    // provider (a suppressed sentinel send never did): record who, why, and
+    // the ask it stepped over. Fail-soft — the audit row never unsends.
+    if (result.reviewSpacingOverridden && realProviderSend) {
+      const overridden = result.reviewSpacingOverridden;
+      try {
+        await db('activity_log').insert({
+          customer_id: trustedCustomerId,
+          admin_user_id: req.technicianId || null,
+          action: 'review_ask_spacing_overridden',
+          description: `Review request resent inside the 72-hour window by staff: ${overridden.reason}`,
+          metadata: {
+            reason: overridden.reason,
+            last_ask_at: overridden.lastAskAt,
+            next_allowed_at: overridden.nextAllowedAt,
+            provider_message_id: result.providerMessageId || null,
+            source: 'admin_communications_manual_sms',
+          },
+        });
+      } catch (auditErr) {
+        logger.warn(`[communications] review spacing override audit row failed (customerId=${trustedCustomerId}): ${auditErr.message}`);
+      }
+    }
 
     res.json(reviewEmailOutcome ? { ...result, reviewEmail: reviewEmailOutcome } : result);
   } catch (err) {

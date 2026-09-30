@@ -18,7 +18,15 @@ async function clickGate(reviewRequestId) {
 
 // The callback includes provider delivery and its durable delivery stamp.
 // Callers retain their recipient, consent, claim and outcome handling.
-async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null } = {}) {
+// spacingOverride: an explicit owner decision to resend inside the 72-hour
+// window ("the customer asked for the link again" — a dead link, a lost
+// text). Only the SPACING refusal is waived: the click guard still refuses
+// a customer who already tapped, and an unreadable history still holds
+// (the override waives a known prior ask, never an unknown one). The
+// override is recorded on the returned result (`reviewSpacingOverridden`)
+// only when it actually changed the verdict, so the caller can write the
+// audit row for a send that really rode it.
+async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null, excludeReservationId = null, clickAskId = null, spacingOverride = null } = {}) {
   if (!customerId) return { sent: false, blocked: true, code: 'REVIEW_CUSTOMER_REQUIRED',
     reason: 'Select the customer receiving this review request before sending.', httpStatus: 409 };
   const result = await runExclusive(`review-send:${customerId}`, async () => {
@@ -47,8 +55,14 @@ async function dispatchReviewAsk(customerId, dispatch, { excludeRequestId = null
     const lastAt = Math.max(pipelineAt?.getTime() || 0, manualAt?.getTime() || 0);
     const nextAt = new Date(lastAt + history.ASK_SPACING_MS);
     if (lastAt && nextAt.getTime() > Date.now()) {
-      return { sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', nextAllowedAt: nextAt.toISOString(),
-        reason: `A recent or unresolved review request is still inside the 72-hour window. The next ask can be sent after ${formatETDate(nextAt)} at ${formatETTime(nextAt)} Eastern.`, httpStatus: 409 };
+      if (!spacingOverride) {
+        return { sent: false, blocked: true, code: 'REVIEW_ASK_SPACING', nextAllowedAt: nextAt.toISOString(),
+          reason: `A recent or unresolved review request is still inside the 72-hour window. The next ask can be sent after ${formatETDate(nextAt)} at ${formatETTime(nextAt)} Eastern.`, httpStatus: 409 };
+      }
+      const overridden = { lastAskAt: new Date(lastAt).toISOString(), nextAllowedAt: nextAt.toISOString(), by: spacingOverride.by || null, reason: spacingOverride.reason || null };
+      logger.info(`[review-ask] 72-hour spacing overridden by staff (customerId=${customerId} by=${overridden.by} lastAskAt=${overridden.lastAskAt})`);
+      const result = await dispatch();
+      return result && typeof result === 'object' ? { ...result, reviewSpacingOverridden: overridden } : result;
     }
     return dispatch();
   }, { recordHealth: false, waitForSlot: false });

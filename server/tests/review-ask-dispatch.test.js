@@ -76,6 +76,38 @@ describe('review ask dispatch boundary', () => {
     expect(provider).not.toHaveBeenCalled();
   });
 
+  describe('spacingOverride (owner resend inside the 72-hour window)', () => {
+    const override = { by: 'admin-1', reason: 'first link did not open' };
+
+    test('waives only the spacing refusal and stamps the overridden ask on the result', async () => {
+      const lastAt = new Date(now.getTime() - 86400000);
+      history.lastManualAskAt.mockResolvedValue(lastAt);
+      const provider = jest.fn(async () => ({ sent: true, providerMessageId: 'SM1' }));
+      expect(await dispatchReviewAsk('customer', provider)).toMatchObject({ code: 'REVIEW_ASK_SPACING' });
+      expect(await dispatchReviewAsk('customer', provider, { spacingOverride: override })).toEqual({
+        sent: true, providerMessageId: 'SM1',
+        reviewSpacingOverridden: { lastAskAt: lastAt.toISOString(), nextAllowedAt: new Date(lastAt.getTime() + history.ASK_SPACING_MS).toISOString(), by: 'admin-1', reason: 'first link did not open' },
+      });
+      expect(provider).toHaveBeenCalledTimes(1);
+    });
+
+    test('outside the window the override changes nothing and stamps nothing', async () => {
+      const provider = jest.fn(async () => ({ sent: true }));
+      expect(await dispatchReviewAsk('customer', provider, { spacingOverride: override })).toEqual({ sent: true });
+    });
+
+    test('never waives the click guard or an unreadable history', async () => {
+      const provider = jest.fn();
+      history.lastManualAskAt.mockResolvedValue(new Date(now.getTime() - 86400000));
+      guard.askIdSuppressedByClick.mockResolvedValue(true);
+      expect(await dispatchReviewAsk('customer', provider, { clickAskId: 'rr-1', spacingOverride: override })).toMatchObject({ code: 'REVIEW_LINK_CLICKED' });
+      guard.askIdSuppressedByClick.mockResolvedValue(false);
+      history.lastManualAskAt.mockRejectedValue(new Error('unavailable'));
+      expect(await dispatchReviewAsk('customer', provider, { spacingOverride: override })).toMatchObject({ code: 'REVIEW_HISTORY_UNAVAILABLE' });
+      expect(provider).not.toHaveBeenCalled();
+    });
+  });
+
   test('excludeReservationId reaches lastManualAskAt so a caller\'s own pre-reserved row cannot self-block it', async () => {
     const provider = jest.fn(async () => ({ sent: true }));
     expect(await dispatchReviewAsk('customer', provider, { excludeReservationId: 'own-reservation' }))

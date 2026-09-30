@@ -170,6 +170,13 @@ timeout → reconcile, never a second send.
    measured from the previous ask's actual send, re-checked at dispatch. With no
    prior ask the first one goes at its computed time. The existing 30-day
    cooldown between campaigns and the 3-ask/180-day cap are unchanged.
+   **Owner override (2026-09-30):** when the customer asks for the link
+   again (a dead link, a lost text), the owner can resend from the
+   Communications composer inside the 3-day window — admin role only, a
+   reason required, recorded as an `activity_log` row
+   (`review_ask_spacing_overridden`). Only the spacing refusal is waived:
+   the click guard and the fail-closed history read still apply, and the
+   resend anchors the next 3-day window like any staff ask.
 
 Other corrections:
 - The bare-link change already landed in #4074: `stripSmsUrlScheme`
