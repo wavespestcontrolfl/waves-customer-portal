@@ -8,7 +8,7 @@ const { selectReportCopyPrompt, writerRulesInScope } = require('../services/serv
 const {
   OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned, bookedReasonBlock,
 } = require('../services/service-report/report-writer-rules');
-const { redactAccessCodes } = require('../services/context-aggregator');
+const { scrubCustomerText } = require('../services/completion-comms-context');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
 
 // The real v4 hard constraints, sliced from the route source. Only template
@@ -380,15 +380,16 @@ describe('pest re-service callback guidance', () => {
 });
 
 describe('bookedReasonBlock', () => {
-  test('labels the source, attributes the words, scrubs codes and lists the picked pests', () => {
+  test('labels the source, attributes the words, drops access details and lists the picked pests', () => {
     const block = bookedReasonBlock({
-      customer_request: 'Ants by the sink again. Gate code 4821.',
+      customer_request: 'Ants by the sink again. Gate code is blue. Roaches in unit A12B too. Please come after lunch.',
       customer_request_source: 'picker',
       customer_request_pests: ['ants', 'german_roaches'],
-    }, redactAccessCodes);
+    }, scrubCustomerText);
     expect(block).toContain('typed on the re-service page');
     expect(block).toContain('never a finding');
-    expect(block).toContain('Reason: Ants by the sink again. Gate code [redacted].');
+    expect(block).toContain('Reason: Ants by the sink again. Roaches in unit [redacted] too.');
+    expect(block).not.toMatch(/gate code|blue|A12B|after lunch/i);
     expect(block).toContain('Pests picked: ants, german roaches');
     expect(block).not.toContain('4821');
   });
@@ -398,16 +399,21 @@ describe('bookedReasonBlock', () => {
       customer_request: 'Customer says roaches in the kitchen at night.',
       customer_request_source: 'call',
       customer_request_pests: '["roaches"]',
-    });
+    }, scrubCustomerText);
     expect(block).toContain('an AI summary of what they said');
     expect(block).toContain('Pests picked: roaches');
   });
 
-  test('caps the reason and adds nothing when there is nothing recorded', () => {
-    const long = bookedReasonBlock({ customer_request: 'x'.repeat(400), customer_request_source: 'text' });
-    expect(long).toContain(`Reason: ${'x'.repeat(300)}`);
-    expect(long).not.toContain('x'.repeat(301));
-    expect(bookedReasonBlock(null)).toBe('');
-    expect(bookedReasonBlock({ customer_request: '  ', customer_request_pests: [] })).toBe('');
+  test('keeps the whole reason and adds nothing when there is nothing recorded', () => {
+    // The re-service page and call bookings store up to 400 characters.
+    const long = bookedReasonBlock({ customer_request: `${'Ants on the counter. '.repeat(19)}Ants in the garage too.`, customer_request_source: 'text' }, scrubCustomerText);
+    expect(long).toContain('Ants in the garage too.');
+    expect(bookedReasonBlock({ customer_request: 'Please come after lunch.', customer_request_pests: [] }, scrubCustomerText)).toBe('');
+    expect(bookedReasonBlock(null, scrubCustomerText)).toBe('');
+    expect(bookedReasonBlock({ customer_request: '  ', customer_request_pests: [] }, scrubCustomerText)).toBe('');
+  });
+
+  test('without a scrub the reason is left out, never passed on raw', () => {
+    expect(bookedReasonBlock({ customer_request: 'Gate code 4821. Ants again.', customer_request_pests: ['ants'] })).toBe('');
   });
 });

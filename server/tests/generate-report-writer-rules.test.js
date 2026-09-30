@@ -24,6 +24,7 @@ jest.mock('../services/service-report/report-copy-context', () => ({ buildReport
 jest.mock('../services/completion-comms-context', () => ({
   buildCompletionCommsContext: (...args) => mockComms(...args),
   buildCustomerWordsContext: (...args) => mockCustomerWords(...args),
+  scrubCustomerText: jest.requireActual('../services/completion-comms-context').scrubCustomerText,
 }));
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
@@ -357,8 +358,8 @@ describe('booked reason', () => {
     expect(res.statusCode).toBe(200);
     const { text, system } = mockProvider.mock.calls[0][0];
     expect(text).toContain('BOOKED REASON (why the customer booked this visit, typed on the re-service page');
-    expect(text).toContain('Reason: Ants on the kitchen counter again. Gate code [redacted].');
-    expect(text).not.toContain('4821');
+    expect(text).toContain('Reason: Ants on the kitchen counter again.');
+    expect(text).not.toMatch(/Gate code|4821/);
     expect(system).toContain('CROSS-SERVICE MODIFIER — CALLBACK / RESERVICE');
   });
 

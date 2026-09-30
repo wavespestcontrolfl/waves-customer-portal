@@ -168,8 +168,11 @@ const BOOKED_REASON_SOURCES = Object.freeze({
   call: 'from a phone call; an AI summary of what they said, not their exact words',
   office: 'taken down by the office',
 });
-const MAX_BOOKED_REASON_CHARS = 300;
-function bookedReasonBlock(row, redact = (text) => text) {
+// The customer typed this, so it gets the customer-words scrub (pest talk
+// only, access details dropped); without a scrub it is left out, never
+// passed on raw.
+function bookedReasonBlock(row, scrub) {
+  if (typeof scrub !== 'function') return '';
   let pests = row?.customer_request_pests;
   if (typeof pests === 'string') {
     try { pests = JSON.parse(pests); } catch { pests = []; }
@@ -177,7 +180,7 @@ function bookedReasonBlock(row, redact = (text) => text) {
   const pestWords = (Array.isArray(pests) ? pests : [])
     .map((pest) => String(pest || '').replace(/[_-]+/g, ' ').trim())
     .filter(Boolean);
-  const text = redact(String(row?.customer_request || '').trim()).slice(0, MAX_BOOKED_REASON_CHARS).trim();
+  const text = scrub(String(row?.customer_request || '').trim()).trim();
   if (!text && !pestWords.length) return '';
   const source = Object.hasOwn(BOOKED_REASON_SOURCES, row?.customer_request_source)
     ? BOOKED_REASON_SOURCES[row.customer_request_source]

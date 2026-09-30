@@ -25158,7 +25158,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       try {
         const booked = await db('scheduled_services').where({ id: scheduledServiceId })
           .first('customer_request', 'customer_request_source', 'customer_request_pests');
-        const block = bookedReasonBlock(booked, redactAccessCodes);
+        const { scrubCustomerText } = require('../services/completion-comms-context');
+        const block = bookedReasonBlock(booked, scrubCustomerText);
         if (block) bookedReason = `\n\n${block}`;
       } catch { /* no booked reason: the paragraph leads with the work */ }
     }
