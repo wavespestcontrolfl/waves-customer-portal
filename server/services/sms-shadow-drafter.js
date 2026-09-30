@@ -501,7 +501,7 @@ const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*ro
 // away" is 12.5, never a fractional suffix "5" read on its own — a non-
 // integer claim can never equal an integer live-ETA minutes fact, so it is
 // rejected at both draft time and send time.
-const ETA_MINUTES_TOKEN_RE = /\b(\d{1,5}(?:\.\d+)?)\s*(?:min(?:ute)?s?)\b/gi;
+const ETA_MINUTES_TOKEN_RE = /\b(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
 const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
 const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it|lasts?)\b[^.?!\n]{0,20}$/i;
 // A bare "in <number>" with no minutes unit at all ("be at your place in
@@ -589,7 +589,9 @@ const PERCENT_SIGN_AFTER_RE = /^\s*%/;
 const MONTH_NAME_RE = /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/i;
 const DATE_SLASH_AFTER_RE = /^\s*\/\s*\d{1,4}\b/;
 const DATE_SLASH_BEFORE_RE = /\d{1,4}\s*\/\s*$/;
-const WORD_AFTER_RE = /^\s*[A-Za-z]+\b/;
+// A hyphenated word right after the figure ("2-hour", "3-bug") reads as its
+// unit/noun too, except "-ish" (a timed approximation).
+const WORD_AFTER_RE = /^(?:\s*|-(?!ish\b))[A-Za-z]+\b/i;
 function classifyBareEtaNumber(str, index, length) {
   const before = str.slice(Math.max(0, index - 15), index);
   const after = str.slice(index + length, index + length + 24);
@@ -730,14 +732,14 @@ function normalizeHourMinuteCompounds(text) {
   // bodyHasUnnormalizedHourWord to reject.
   out = replaceQuantity(out, /(?<!half\s)(?<!quarter\s)(?<!of\s)\ban?\s+(?:hour|hr)\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?)\b/gi,
     (m, mins) => `${HOURS_TO_MINUTES + parseInt(mins, 10)} minutes`);
-  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h(?=\d|\b))\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?|m)\b/gi,
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h(?=\d|\b))\s*(?:,|and|&)?\s*(\d{1,3})\s*(?:min(?:ute)?s?|m)\b/gi,
     (m, n, mins) => `${hoursToMinutes(n) + parseInt(mins, 10)} minutes`);
   return out;
 }
 function normalizeTimeQuantities(text) {
   let out = String(text || '');
   // "1 to 2 hours" / "1-2 hours" / "1 or 2 hours" — both bounds scale.
-  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)\s*(?:hours?|hrs?)\b/gi,
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d+(?:\.\d+)?)[\s-]*(?:hours?|hrs?)\b/gi,
     (m, a, b) => `${hoursToMinutes(a)}-${hoursToMinutes(b)} minutes`);
   // "2 and a half hours" / "2 hours and a half" / "an hour and a half".
   out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)\s+and\s+a\s+half\s+(?:hours?|hrs?)\b/gi,
@@ -746,7 +748,7 @@ function normalizeTimeQuantities(text) {
     (m, n) => `${hoursToMinutes(n || 1) + 30} minutes`);
   out = normalizeHourMinuteCompounds(out);
   // "2 hours", "2h", "1.5 hrs".
-  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:\s*(?:hours?|hrs?)\b|h\b)/gi,
+  out = replaceQuantity(out, /\b(\d+(?:\.\d+)?)(?:[\s-]*(?:hours?|hrs?)\b|h\b)/gi,
     (m, n) => `${hoursToMinutes(n)} minutes`);
   return out;
 }
@@ -843,8 +845,8 @@ function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconv
 // alike — they share one clause ("takes 10-12 minutes to dry" excludes both,
 // "10-12 minutes out" includes both) — and the span is marked `consumed` so
 // the single-number pass never double-claims the bound already covered.
-const RANGE_MINUTES_RE = /\b(\d{1,5}(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d{1,5}(?:\.\d+)?)\s*(?:min(?:ute)?s?)\b/gi;
-const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,5}(?:\.\d+)?)\s+and\s+(\d{1,5}(?:\.\d+)?)\s*(?:min(?:ute)?s?)\b/gi;
+const RANGE_MINUTES_RE = /\b(\d{1,5}(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
+const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,5}(?:\.\d+)?)\s+and\s+(\d{1,5}(?:\.\d+)?)[\s-]*(?:min(?:ute)?s?)\b/gi;
 // ONE ordered tokenizer over the normalized text (Codex round-10 P2, PR #5334;
 // replaces six successive passes with overlapping dedupe/consume rules — the
 // shape every "one more ETA phrasing" round kept extending). Each token spec
@@ -2943,9 +2945,14 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // this is one of the two SMS drafting paths that actually renders the
     // fact into the prompt (buildFactsBlock, below via generateGroundedDraft),
     // so it opts in explicitly.
+    // Codex round-12 P2: a gratitude-only "thanks" (gratitudeCandidate, known
+    // above) is answered with the fixed approved reply, so a LIVE ETA could
+    // never affect delivery — skip the GPS + paid Distance Matrix lookup a
+    // "thanks" from an en-route customer would otherwise trigger.
+    const includeLiveEta = !gratitudeCandidate;
     const context = customer
-      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta: true })
-      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: true });
+      ? await ContextAggregator.getContextForCustomer(customer, { includeLiveEta })
+      : await ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta });
     // LIVE ETA send-time freshness snapshot input — see buildLiveEtaSnapshot.
     const liveEtaSnapshot = buildLiveEtaSnapshot(context);
 

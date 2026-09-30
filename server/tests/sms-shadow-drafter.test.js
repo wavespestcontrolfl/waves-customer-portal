@@ -828,7 +828,7 @@ describe('sealed-lane dispatch budget (08-15 tuning, raised again 2026-09-26)', 
 });
 
 describe('auto-send fallback publication', () => {
-  async function runDraft(autoSendResult) {
+  async function runDraft(autoSendResult, draftArgs = {}) {
     jest.resetModules();
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
@@ -897,6 +897,7 @@ describe('auto-send fallback publication', () => {
       customer: { id: 'customer-1' },
       smsLogId: 'sms-1',
       intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 },
+      ...draftArgs,
     });
     return { id, insertedRows, maybeAutoSend, publishSuggestion, supersedeStaleSuggestions, resolveDeliveryMode, getContextForCustomer };
   }
@@ -935,6 +936,27 @@ describe('auto-send fallback publication', () => {
     try {
       const { getContextForCustomer } = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
       expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true });
+    } finally {
+      if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
+      else process.env.SHADOW_DRAFT_VERIFY = priorVerify;
+      if (priorFewshot === undefined) delete process.env.SHADOW_FEWSHOT;
+      else process.env.SHADOW_FEWSHOT = priorFewshot;
+    }
+  });
+
+  // Codex round-12 P2 (PR #5334): a gratitude-only "thanks" is answered with
+  // the fixed approved reply — a LIVE ETA (GPS + paid Distance Matrix) could
+  // never affect delivery, so the lookup must not run for it.
+  test('a gratitude candidate does NOT request the LIVE ETA lookup', async () => {
+    const priorVerify = process.env.SHADOW_DRAFT_VERIFY;
+    const priorFewshot = process.env.SHADOW_FEWSHOT;
+    try {
+      const { getContextForCustomer } = await runDraft(
+        { sent: false, reason: 'provider_uncertain', ambiguous: true },
+        { inboundMessage: 'Thank you!', source: 'live_webhook', customer: { id: 'customer-1', first_name: 'Test' } },
+      );
+      expect(getContextForCustomer).toHaveBeenCalledTimes(1);
+      expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false });
     } finally {
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
       else process.env.SHADOW_DRAFT_VERIFY = priorVerify;

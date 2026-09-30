@@ -1138,6 +1138,8 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     test.each([
       'Your arrival window is 2 hours.',
       'Your 2 hour arrival window starts at 9.',
+      'Your tech will arrive within the 2-hour arrival window.',
+      'Your 2-hour window starts at 9.',
       'Your arrival window: 1 to 2 hours.',
       'Your arrival window is half an hour.',
       'Your arrival window is a quarter of an hour.',
@@ -1155,6 +1157,28 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
       'Your arrival window is 2 hours, and the tech is 2 hours away.',
     ])('%p is still rejected against a live 2-minute ETA', (reply) => {
       expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+
+    // Codex round-12 P2: a hyphenated window ("the 2-hour arrival window")
+    // used to read as a bare "2 minutes" claim — checked against a live figure
+    // that is NOT 2, so the coincidence above cannot hide it.
+    test.each([
+      'Your tech will arrive within the 2-hour arrival window.',
+      'Your 2-hour window starts at 9.',
+      'Your tech will arrive within the 2 hour arrival window.',
+    ])('%p passes against a live 12-minute ETA', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(12) })).toEqual({ ok: true, violations: [] });
+    });
+
+    test.each([
+      ['The tech is 2-hour away.', 12],
+      ['The tech is 12-minute away.', 9],
+    ])('a hyphenated real ETA %p is still checked against live %p', (reply, live) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(live) }).ok).toBe(false);
+    });
+
+    test('a hyphenated minutes ETA matching the live figure is accepted', () => {
+      expect(validateLiveEtaMinutes({ reply: 'The tech is 12-minute away.', factsBlock: facts(12) }).ok).toBe(true);
     });
 
     test('the normalizer and the leftover-word checks agree on windows', () => {
