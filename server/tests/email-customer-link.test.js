@@ -29,6 +29,12 @@ describe('extractEmailAddresses', () => {
     expect(extractEmailAddresses('')).toEqual([]);
     expect(extractEmailAddresses('Jamie Fixture')).toEqual([]);
   });
+
+  test('an email-shaped display name is not a recipient — only the mailbox address counts', () => {
+    expect(extractEmailAddresses('"customer@example.invalid" <office@wavespestcontrol.com>')).toEqual(['office@wavespestcontrol.com']);
+    expect(extractEmailAddresses('Team: a.fixture@example.invalid, b.fixture@example.invalid;'))
+      .toEqual(['a.fixture@example.invalid', 'b.fixture@example.invalid']);
+  });
 });
 
 describe('personSentFilter', () => {

@@ -1,5 +1,7 @@
 'use strict';
 
+const addressparser = require('nodemailer/lib/addressparser');
+
 // Shared customer-linkage helper for a Gmail SENT row (a person's reply, not
 // an automated send — email-sync.js never classifies or links these at sync
 // time; see upsertEmail's outbound branch). Used by BOTH email-operational-
@@ -41,13 +43,17 @@ function personSentFilter(alias) {
 // address — "Jamie Fixture <jamie@example.invalid>", or a comma-separated
 // list for multiple recipients (owner diagnostic, 2026-09-29: 23 SENT rows
 // to gmail.com resolved to no one because of this — the raw value was
-// compared directly against customers.email). Pull every email-shaped
-// substring out, regardless of a display name or how many recipients —
-// this also naturally ignores a display name that happens to contain a
-// comma ("Fixture, Jamie <jamie@example.invalid>").
+// compared directly against customers.email). Parse it as an RFC 5322
+// address list (nodemailer's parser: display names, quoted commas, groups)
+// and keep only the mailbox addresses — never an email-shaped display name
+// ('"customer@example.invalid" <office@wavespestcontrol.com>' is a send to
+// the office, not to that customer; pre-push audit, 2026-09-30).
 function extractEmailAddresses(raw) {
-  const matches = String(raw || '').match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/g) || [];
-  return [...new Set(matches.map((a) => a.toLowerCase()))];
+  const flat = (list) => list.flatMap((entry) => (entry.group ? flat(entry.group) : [entry.address]));
+  const addresses = flat(addressparser(String(raw || '')))
+    .map((a) => String(a || '').trim().toLowerCase())
+    .filter((a) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a));
+  return [...new Set(addresses)];
 }
 
 // A send in the customer's thread counts as reaching THAT customer only
