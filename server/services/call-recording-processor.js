@@ -868,6 +868,7 @@ const CONFIRM_REASON_TEXT = {
   missing_unit_number: 'address is a multi-unit building (condo/townhome) given without a unit — ask which unit number before dispatch',
   address_recovered: 'street name was garbled in transcription — matched to a single validated address; read it back to the caller',
   out_of_service_area: 'address resolves outside the service area — verify the county',
+  service_area_unverified: 'the address on file could not be read to check the service area — confirm the address and county before booking',
   caller_not_authorized: 'caller is arranging service for someone else — confirm the account holder',
   missing_last_name: "no last name captured — get the account holder's full name",
   rental_or_tenant_occupied: 'rental / tenant-occupied property — confirm property access and whether to tag it a rental',
@@ -1290,7 +1291,10 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 //   4. when the call states NO locality at all (a known customer confirming a
 //      time without repeating the address), the booking uses the on-file
 //      address, so its city/ZIP — and stored coordinates that sit in the
-//      DeSoto rectangle with no served ZIP — are judged the same way.
+//      DeSoto rectangle with no served ZIP — are judged the same way. If that
+//      on-file read FAILED (onFile.lookupFailed), the booking fails closed to
+//      review (reason on_file_address_unavailable) instead of passing on no
+//      evidence.
 function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
   const av = addressValidation || null;
   const svc = v2Extraction?.property?.service_address || null;
@@ -1304,6 +1308,9 @@ function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, e
   let coordsInDesoto = false;
   // Stated locality wins; the on-file address stands in only when the call
   // gave none.
+  if (!cities.length && !zips.length && !statedCounty && onFile?.lookupFailed) {
+    return { reason: 'on_file_address_unavailable', county: null };
+  }
   if (!cities.length && !zips.length && !statedCounty && onFile) {
     cities = [lower(onFile.city)].filter(Boolean);
     zips = [zip5(onFile.zip)].filter(Boolean);
@@ -15507,6 +15514,9 @@ const CallRecordingProcessor = {
         onFileGeo = await db('customers').where({ id: customerId }).first('city', 'zip', 'latitude', 'longitude');
       } catch (geoErr) {
         logger.warn(`[call-proc] on-file address read for geographic veto failed for ${maskSid(callSid)}: ${geoErr.message}`);
+        // Fail closed: with no stated locality, an unread on-file address
+        // must hold the booking for review, not pass as "no evidence".
+        onFileGeo = { lookupFailed: true };
       }
       legacyGeoVeto = legacyGeographicVeto({
         addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
@@ -15527,19 +15537,24 @@ const CallRecordingProcessor = {
       // survives V2-off and V2-shadow routing, where nothing else stops a
       // confirmed booking on an out-of-area address. The customer + lead are
       // kept; only the visit is withheld, and the call is left for human review.
+      // An unreadable on-file address is held under its own reason, not
+      // mislabelled as out of area.
+      const geoSkipReason = legacyGeoVeto.reason === 'on_file_address_unavailable'
+        ? 'service_area_unverified'
+        : 'out_of_service_area';
       appointmentResult = {
         service: serviceResolution.service || extracted.matched_service || extracted.requested_service || null,
         dateTime: extracted.preferred_date_time,
         scheduleCreated: false,
         smsSent: false,
-        skippedReason: 'out_of_service_area',
+        skippedReason: geoSkipReason,
       };
-      logger.warn(`[call-proc] Skipping appointment auto-create for ${maskSid(callSid)}: out of service area (${legacyGeoVeto.reason}, county=${legacyGeoVeto.county || 'unknown'})`);
-      if (!bridgeNeedsConfirmation.includes('out_of_service_area')) bridgeNeedsConfirmation.push('out_of_service_area');
+      logger.warn(`[call-proc] Skipping appointment auto-create for ${maskSid(callSid)}: ${geoSkipReason} (${legacyGeoVeto.reason}, county=${legacyGeoVeto.county || 'unknown'})`);
+      if (!bridgeNeedsConfirmation.includes(geoSkipReason)) bridgeNeedsConfirmation.push(geoSkipReason);
       if (!(CALL_EXTRACTION_V2_DRIVES_ROUTING && CALL_EXTRACTION_V2_ENABLED)) {
         await fileSkippedBookingCard({
           call, procToken, customerId, extraction: v2CanonicalExtraction || undefined,
-          skippedReason: 'out_of_service_area',
+          skippedReason: geoSkipReason,
           preferredDateTime: extracted.preferred_date_time,
           serviceType: appointmentResult.service, bridgeNeedsConfirmation, callSid,
         });

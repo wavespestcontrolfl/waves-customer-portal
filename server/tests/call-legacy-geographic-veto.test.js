@@ -40,6 +40,22 @@ describe('legacyGeographicVeto', () => {
     },
   );
 
+  test('no stated locality and the on-file read failed: held for review', () => {
+    expect(legacyGeographicVeto({
+      addressValidation: null, v2Extraction: null,
+      extracted: { address_line1: null, city: null, zip: null },
+      onFile: { lookupFailed: true },
+    })).toEqual({ reason: 'on_file_address_unavailable', county: null });
+  });
+
+  test('a stated served locality is judged on its own even when the on-file read failed', () => {
+    expect(legacyGeographicVeto({
+      addressValidation: null, v2Extraction: null,
+      extracted: { address_line1: '100 Example St', city: 'Venice', zip: '34285' },
+      onFile: { lookupFailed: true },
+    })).toBeNull();
+  });
+
   test('DeSoto ZIP alone (city missing) is vetoed', () => {
     expect(legacyGeographicVeto({ extracted: { zip: '34266-1234' } })).not.toBeNull();
   });
@@ -155,6 +171,12 @@ describe('legacy booking branch wiring', () => {
     expect(source.slice(callAt - 900, callAt)).toContain("db('customers').where({ id: customerId }).first('city', 'zip', 'latitude', 'longitude')");
   });
 
+  test('a failed on-file read fails closed instead of passing as no evidence', () => {
+    const callAt = source.indexOf('legacyGeoVeto = legacyGeographicVeto({');
+    const catchBlock = source.slice(callAt - 700, callAt);
+    expect(catchBlock).toContain('onFileGeo = { lookupFailed: true };');
+  });
+
   test('the geographic veto sits ahead of the booking branch and is not keyed on any V2 mode', () => {
     const vetoAt = source.indexOf('&& legacyGeoVeto) {');
     expect(vetoAt).toBeGreaterThan(-1);
@@ -164,8 +186,11 @@ describe('legacy booking branch wiring', () => {
     expect(branchHead).toContain('canCreateAppointmentFromCall');
     expect(branchHead).not.toMatch(/CALL_EXTRACTION_V2_(ENABLED|DRIVES_ROUTING)/);
     const branch = source.slice(vetoAt, bookAt);
-    expect(branch).toContain("skippedReason: 'out_of_service_area'");
-    expect(branch).toContain("bridgeNeedsConfirmation.push('out_of_service_area')");
+    expect(branch).toContain("legacyGeoVeto.reason === 'on_file_address_unavailable'");
+    expect(branch).toContain("? 'service_area_unverified'");
+    expect(branch).toContain(": 'out_of_service_area'");
+    expect(branch).toContain('skippedReason: geoSkipReason');
+    expect(branch).toContain('bridgeNeedsConfirmation.push(geoSkipReason)');
     expect(branch).toContain('await fileSkippedBookingCard({');
     expect(branch).not.toContain('db(\'scheduled_services\')');
   });

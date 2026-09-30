@@ -24,4 +24,17 @@ describe('reset-out-of-area-coords includes the DeSoto exclusion', () => {
     expect(isInServiceAreaBox(27.2159, -81.8584, { zip: '34240' })).toBe(true);
     expect(DESOTO_EXCLUSION.latMin).toBeLessThan(27.2159);
   });
+
+  test('the write re-checks the ZIP the decision used (Codex r4 P2)', () => {
+    expect(src).toContain('AND zip IS NOT DISTINCT FROM $4');
+    expect(src).toContain('[r.id, r.latitude, r.longitude, r.zip]');
+  });
+
+  test('the declared scope and audit reason name the DeSoto exclusion (Codex r4 P2)', () => {
+    expect(src).toContain('inside the DeSoto exclusion rectangle');
+    expect(src).toContain("'inside the DeSoto exclusion with no served ZIP (DeSoto not served); re-geocode through the #3802 guard'");
+    expect(src).not.toMatch(/Anything inside the box is\n\/\/ left alone/);
+    const readme = fs.readFileSync(path.join(__dirname, '..', '..', 'ops', 'agents', 'README.md'), 'utf8');
+    expect(readme).toContain('Other pins inside the box are never touched.');
+  });
 });
