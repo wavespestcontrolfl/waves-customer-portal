@@ -911,11 +911,13 @@ const gates = {
   // text → explicit opt-in in EVERY env.
   reviewAskPersonalized: process.env.GATE_REVIEW_ASK_PERSONALIZED === 'true',
 
-  // Review asks link STRAIGHT to the Google review form (via the tracked
-  // /api/rate/:token/go redirect) instead of the 1-10 rate page. Kill switch
-  // for the direct-link rollout: off = every ask body resolves {review_url}
-  // to the tokenized /rate/<token> NPS page exactly as before. The /rate page
-  // itself stays live either way (old links, fallback for unknown locations).
+  // Review ask texts/emails link STRAIGHT to the tracked /api/rate/:token/go
+  // redirect (which 302s to the Google review form) instead of the /rate/<token>
+  // thank-you page. Off = every ask body resolves {review_url} to /rate/<token>.
+  // This gate decides ONLY that link target: /go itself always runs the tracked
+  // flow (click stamp, cadence stop, referral invite), and the /rate page's Open
+  // Google button always points at /go (the 1-10 rating is retired, so there is
+  // no old flow to roll back to).
   reviewDirectLink: process.env.GATE_REVIEW_DIRECT_LINK === 'true',
 
   // Day-0 review-ask contextual topic (recurring customers only): stores a
