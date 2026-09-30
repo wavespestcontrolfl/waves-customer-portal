@@ -183,10 +183,40 @@ describe('emitEstimateExpired expires_on (the per-expiry idempotency input)', ()
   });
 });
 
+describe('emitEstimateExpired with no expires_at (Rule 1 aged-out estimates)', () => {
+  const flip = '2026-09-21T02:30:00.000Z'; // 10:30 PM ET on Sep 20
+  const keyOf = () => AutomationExecutor.processTrigger.mock.calls.map(([args]) => args.payload.expires_on);
+
+  test('the flip\'s own ET date stands in; a direct emit (row.updated_at) and a replay (marker flipped_at) give the SAME value', async () => {
+    const base = { id: 'est-9', customer_id: 'cust-1', customer_email: 'sam@example.com', expires_at: null };
+    await emitEstimateExpired({ ...base, updated_at: new Date(flip) });
+    await emitEstimateExpired({ ...base, flipped_at: flip });
+    expect(keyOf()).toEqual(['2026-09-20', '2026-09-20']);
+    // The key template the automations use renders from it (no 400, no burnt replays).
+    const { renderIdempotencyKey } = jest.requireActual('../services/email-template-automation-executor');
+    const payload = AutomationExecutor.processTrigger.mock.calls[0][0].payload;
+    expect(renderIdempotencyKey('nurture.expired_1:{estimate_id}:{expires_on}', payload)).toBe('nurture.expired_1:est-9:2026-09-20');
+  });
+
+  test('an explicit expires_at still wins over the flip time', async () => {
+    await emitEstimateExpired({
+      id: 'est-9', customer_email: 'sam@example.com', expires_at: '2026-09-18T16:00:00.000Z', updated_at: flip,
+    });
+    expect(keyOf()).toEqual(['2026-09-18']);
+  });
+
+  test('neither an expiry nor a flip time: settled unrecoverable on the first look, never replayed', async () => {
+    const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
+    await emitEstimateExpired({ id: 'est-9', customer_email: 'sam@example.com', expires_at: null }, 'intent-1');
+    expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
+    expect(rows[0]).toMatchObject({ status: 'unrecoverable', last_error: 'marker payload has neither an expiry nor a flip time' });
+  });
+});
+
 describe('gate off is a blanket no-op', () => {
   test('every emitter no-ops without calling the executor or the db', async () => {
     isEnabled.mockReturnValue(false);
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' });
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' });
     await emitReviewLinked5Star({ reviewId: 'rev-1', customerId: 'cust-1', starRating: 5 });
     expect(AutomationExecutor.processTrigger).not.toHaveBeenCalled();
     expect(db).not.toHaveBeenCalled();
@@ -207,7 +237,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
   test('a successful emit settles its marker to processed', async () => {
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0].status).toBe('processed');
   });
@@ -216,7 +246,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockRejectedValueOnce(new Error('connection reset'));
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', attempts: 2 }]);
 
-    const result = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    const result = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(result).toBeNull();
     expect(rows[0].status).toBe('pending');
@@ -230,10 +260,10 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockRejectedValue(new Error('Connection terminated unexpectedly'));
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', attempts: MAX_INTENT_ATTEMPTS - 2 }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: MAX_INTENT_ATTEMPTS - 1 });
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
     expect(rows[0]).toMatchObject({ status: 'unrecoverable', attempts: MAX_INTENT_ATTEMPTS });
     expect(rows[0].last_error).toContain('Connection terminated');
     expect(MAX_INTENT_ATTEMPTS).toBeGreaterThan(1);
@@ -249,7 +279,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     ));
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0].last_error).toContain('duplicate key value');
     expect(rows[0].last_error).not.toContain('sam@example.com');
@@ -310,7 +340,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0]).toMatchObject({ status: 'unrecoverable', attempts: 1, last_error: message });
   });
@@ -327,7 +357,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
     expect(rows[0].last_error).toContain('a.broken');
@@ -345,7 +375,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
   });
@@ -362,7 +392,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0].status).toBe('unrecoverable');
   });
@@ -373,7 +403,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockRejectedValueOnce(err);
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: 1 });
   });
@@ -402,7 +432,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     });
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', attempts: 0 }]);
 
-    const result = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    const result = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(result).toBeNull();
     expect(rows[0]).toMatchObject({ status: 'pending', attempts: 0 });
@@ -413,7 +443,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     AutomationExecutor.processTrigger.mockResolvedValueOnce({ trigger_event_key: 'estimate.expired', automation_count: 0, results: [] });
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0].status).toBe('processed');
   });
@@ -429,9 +459,9 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     isEnabled.mockImplementation((gate) => realGates.isEnabled(gate));
     emailTemplateAutomationsMode.mockImplementation(() => realGates.emailTemplateAutomationsMode());
     try {
-      const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', trigger_event_key: 'estimate.expired', occurred_at: new Date('2026-01-01T00:00:00Z'), payload: { id: 'est-1', customer_email: 'sam@example.com' } }]);
+      const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending', trigger_event_key: 'estimate.expired', occurred_at: new Date('2026-01-01T00:00:00Z'), payload: { id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' } }]);
 
-      const direct = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+      const direct = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
       const sweep = await sweepMissedLifecycleEvents();
 
       expect(direct).toBeNull();
@@ -452,7 +482,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
     isEnabled.mockReturnValue(false);
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
 
-    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' }, 'intent-1');
+    await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' }, 'intent-1');
 
     expect(rows[0].status).toBe('pending');
     expect(db).not.toHaveBeenCalled();
@@ -461,7 +491,7 @@ describe('marker settlement (emitTrigger / settleIntent)', () => {
   test('no intentId (a caller with no marker) settles nothing and never queries the db', async () => {
     mockIntentsTable([]);
 
-    const result = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com' });
+    const result = await emitEstimateExpired({ id: 'est-1', customer_email: 'sam@example.com', expires_at: '2026-09-21T16:00:00.000Z' });
 
     expect(result).not.toBeNull();
     expect(db).not.toHaveBeenCalled();
@@ -566,13 +596,13 @@ describe('sweepMissedLifecycleEvents / retryPendingIntents', () => {
         id: 'intent-2',
         trigger_event_key: 'estimate.expired',
         occurred_at: new Date('2026-01-01T00:10:00Z'),
-        payload: JSON.stringify({ id: 'est-2', customer_email: 'later@example.com' }),
+        payload: JSON.stringify({ id: 'est-2', customer_email: 'later@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
       {
         id: 'intent-1',
         trigger_event_key: 'estimate.expired',
         occurred_at: new Date('2026-01-01T00:00:00Z'),
-        payload: JSON.stringify({ id: 'est-1', customer_email: 'earlier@example.com' }),
+        payload: JSON.stringify({ id: 'est-1', customer_email: 'earlier@example.com', expires_at: '2026-09-21T16:00:00.000Z' }),
       },
     ]);
 
@@ -646,13 +676,13 @@ describe('sweepMissedLifecycleEvents / retryPendingIntents', () => {
       id: `stuck-${i}`,
       trigger_event_key: 'estimate.expired',
       occurred_at: new Date(Date.UTC(2026, 0, 1, 0, i)),
-      payload: { id: `est-stuck-${i}`, customer_email: 'stuck@example.com' },
+      payload: { id: `est-stuck-${i}`, customer_email: 'stuck@example.com', expires_at: '2026-09-21T16:00:00.000Z' },
     }));
     const fresh = {
       id: 'fresh-1',
       trigger_event_key: 'estimate.expired',
       occurred_at: new Date('2026-01-02T00:00:00Z'),
-      payload: { id: 'est-fresh', customer_email: 'fresh@example.com' },
+      payload: { id: 'est-fresh', customer_email: 'fresh@example.com', expires_at: '2026-09-21T16:00:00.000Z' },
     };
     const rows = mockIntentsTable([...failing, fresh]);
     AutomationExecutor.processTrigger.mockImplementation(async ({ entityId }) => {
@@ -711,7 +741,7 @@ describe('sweepMissedLifecycleEvents / retryPendingIntents', () => {
       id: 'intent-1',
       trigger_event_key: 'estimate.expired',
       occurred_at: new Date('2026-01-01T00:00:00Z'),
-      payload: JSON.stringify({ id: 'est-1', customer_email: '' }),
+      payload: JSON.stringify({ id: 'est-1', customer_email: '', expires_at: '2026-09-21T16:00:00.000Z' }),
     }]);
 
     const first = await sweepMissedLifecycleEvents();

@@ -122,6 +122,7 @@ function defaultDeps() {
     inferEstimateServiceInterest: (...args) => require('../estimate-service-lines').inferEstimateServiceInterest(...args),
     inferEstimateServiceLines: (...args) => require('../estimate-service-lines').inferEstimateServiceLines(...args),
     parsePestsNamed: (...args) => require('./visit-products').parsePestsNamed(...args),
+    linkedLeadIdFor: (...args) => require('../estimate-consultation-offer').linkedLeadIdFor(...args),
     detectServiceLine: (...args) => require('../service-report/service-line-configs').detectServiceLine(...args),
     now: () => new Date(),
   };
@@ -487,10 +488,18 @@ const GENERIC_PROBLEM_BY_LINE = Object.freeze({
   pest: 'pest problem', lawn: 'lawn problem', mosquito: 'mosquito problem', tree_shrub: 'tree and shrub problem', rodent: 'rodent problem',
 });
 
+function parsedEstimateData(value) {
+  if (value && typeof value === 'object') return value;
+  try { return JSON.parse(value); } catch { return null; }
+}
+
 function pestOrProblemNamed(estimate, lead, deps) {
   // A pest the customer themselves named (canonical names only — the same
   // keyword list the visit reader uses); else the quoted line's plain label.
-  const text = [estimate.service_interest, lead?.service_interest, lead?.lead_synopsis, estimate.notes].map(clean).join(' ');
+  // Customer-authored service-interest fields ONLY: a model-written summary
+  // (lead_synopsis) names a pest even when it negates it, and staff notes are not
+  // the customer's words.
+  const text = [estimate.service_interest, lead?.service_interest].map(clean).join(' ');
   const pests = deps.parsePestsNamed(text).slice(0, 2);
   if (pests.length) return listSentence(pests);
   const line = deps.inferEstimateServiceLines({ ...estimate, estimateData: estimate.estimate_data })[0];
@@ -537,8 +546,13 @@ async function buildExpiredNurture({
   if (!run.recipient_id) return skip('no customer record on the estimate (the ledger needs one)', 'no_customer');
   const customer = await loadCustomer(conn, run.recipient_id);
   if (!customer) return skip('customer not found', 'customer_missing');
-  const lead = await conn('leads').where({ customer_id: customer.id }).whereNull('deleted_at')
-    .orderBy('created_at', 'desc').first('service_interest', 'lead_synopsis');
+  // The lead THIS estimate belongs to, by the estimate's own linkage (the same
+  // rule the consultation offer uses) — never "the customer's newest lead",
+  // which can be about something else entirely.
+  const leadId = await deps.linkedLeadIdFor(estimate.id, parsedEstimateData(estimate.estimate_data), conn);
+  const lead = leadId
+    ? await conn('leads').where({ id: leadId }).whereNull('deleted_at').first('service_interest')
+    : null;
 
   const serviceQuoted = clean(deps.inferEstimateServiceInterest({ ...estimate, estimateData: estimate.estimate_data }));
   let estimateLink = `https://portal.wavespestcontrol.com/estimate/${estimate.token}`;

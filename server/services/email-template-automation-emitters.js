@@ -170,11 +170,26 @@ async function emitTrigger(eventKey, args, intentId = null) {
 // estimate.expired — fired once per row estimate-expiration.js's
 // flipExpiredBatch flips, immediately after that row's own transaction
 // (which also recorded the intent marker below) commits.
-async function emitEstimateExpired({ id, customer_id: customerId, customer_email: customerEmail, category, service_interest: serviceInterest, expires_at: expiresAt } = {}, intentId = null) {
+async function emitEstimateExpired({
+  id, customer_id: customerId, customer_email: customerEmail, category, service_interest: serviceInterest, expires_at: expiresAt,
+  flipped_at: flippedAt, updated_at: updatedAt,
+} = {}, intentId = null) {
   if (!id) {
     // A marker whose payload can never be dispatched is settled, never left
     // pending to pin the sweep batch.
     await settleUndispatchable(intentId, 'marker payload has no estimate id');
+    return null;
+  }
+  // The expiry's own ET date. An estimate aged out by Rule 1 can have NO
+  // expires_at: the flip's own instant stands in (the marker stores it as
+  // flipped_at; a direct emit reads the flipped row's updated_at, the same
+  // instant), so the direct emit and a replay derive the same key. Neither
+  // present: the per-expiry run key cannot be built, and no replay could change
+  // that — settled, not retried.
+  const expiryInstant = expiresAt || flippedAt || updatedAt || null;
+  const expiresOn = expiryInstant ? etDateString(new Date(expiryInstant)) : '';
+  if (!expiresOn) {
+    await settleUndispatchable(intentId, 'marker payload has neither an expiry nor a flip time');
     return null;
   }
   return emitTrigger('estimate.expired', {
@@ -189,11 +204,9 @@ async function emitEstimateExpired({ id, customer_id: customerId, customer_email
       category: category || '',
       service_interest: serviceInterest || '',
       expires_at: expiresAt || null,
-      // The expiry's own ET date: one nurture touch per (estimate, expiry), so
-      // a run skipped because the estimate was extended never consumes the key
-      // of the NEXT expiry. Derived from expires_at the same way on a direct
-      // emit and on an intent-marker replay (both carry the stored instant).
-      expires_on: expiresAt ? etDateString(new Date(expiresAt)) : '',
+      // One nurture touch per (estimate, expiry): a run skipped because the
+      // estimate was extended never consumes the key of the NEXT expiry.
+      expires_on: expiresOn,
     },
   }, intentId);
 }

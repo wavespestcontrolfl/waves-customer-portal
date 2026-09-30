@@ -112,6 +112,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
       await db('service_products').whereIn('service_record_id', visits).del();
       await db('service_records').whereIn('id', visits).del();
     }
+    if (customers.length) await db('leads').whereIn('customer_id', customers).del();
     if (customers.length) await db('scheduled_services').whereIn('customer_id', customers).del();
     if (estimates.length) await db('estimates').whereIn('id', estimates).del();
     if (customers.length) {
@@ -910,6 +911,35 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const plain = await makeEstimate(customer.id, customer.email, { service_interest: 'Quarterly pest control' });
         const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', plain, customer), mode: 'shadow', deps: consultDeps() });
         expect(r2.payload.pest_or_problem_named).toBe('pest problem');
+      });
+
+      test('the pest comes from the lead THIS estimate belongs to: a newer unrelated lead on the same customer never changes the email, and a lead summary is never mined', async () => {
+        const customer = await makeCustomer();
+        const estimateId = await makeEstimate(customer.id, customer.email, { service_interest: 'Quarterly pest control' });
+        // The estimate's own lead (leads.estimate_id) — customer-authored interest names no pest.
+        await db('leads').insert({ customer_id: customer.id, estimate_id: estimateId, service_interest: 'Quarterly pest control', created_at: new Date('2026-09-01T12:00:00Z') });
+        // A NEWER, unrelated lead on the same customer, mentioning rats, with a model summary that names another pest.
+        await db('leads').insert({
+          customer_id: customer.id, service_interest: 'rats in the attic', lead_synopsis: 'Caller did not mention fire ants.', created_at: new Date('2026-09-20T12:00:00Z'),
+        });
+        const result = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', estimateId, customer), mode: 'shadow', deps: consultDeps() });
+        expect(result.ok).toBe(true);
+        expect(result.payload.pest_or_problem_named).toBe('pest problem');
+
+        // The linked lead's own words DO count.
+        const named = await makeEstimate(customer.id, customer.email, { service_interest: 'Pest control' });
+        await db('leads').insert({ customer_id: customer.id, estimate_id: named, service_interest: 'Ghost ants in the kitchen' });
+        const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', named, customer), mode: 'shadow', deps: consultDeps() });
+        expect(r2.payload.pest_or_problem_named).toBe('ghost ants');
+
+        // Two live leads pointing at one estimate are ambiguous: neither is read.
+        const ambiguous = await makeEstimate(customer.id, customer.email, { service_interest: 'Pest control' });
+        await db('leads').insert([
+          { customer_id: customer.id, estimate_id: ambiguous, service_interest: 'fire ants' },
+          { customer_id: customer.id, estimate_id: ambiguous, service_interest: 'termites' },
+        ]);
+        const r3 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', ambiguous, customer), mode: 'shadow', deps: consultDeps() });
+        expect(r3.payload.pest_or_problem_named).toBe('pest problem');
       });
 
       test('skips an estimate that is no longer expired, and one with no customer record', async () => {

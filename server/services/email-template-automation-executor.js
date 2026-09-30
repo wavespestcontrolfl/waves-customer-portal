@@ -1946,7 +1946,7 @@ function deferForPrepLock(run, attemptNumber, now) {
 }
 
 // A live ledger reservation (another attempt of this run's own send, e.g. a
-// crashed worker's) holds the send: wait for it the way a held prep lease waits — attempt restored, nothing
+// crashed worker's, or a live once-per-customer / estimate sibling) holds the send: wait for it the way a held prep lease waits — attempt restored, nothing
 // spent. Bounded: the reservation lease (RESERVATION_LIFETIME_MS) is the most
 // any one reservation can stay live, and the deferral count is capped at the
 // number of delays that fit in it (plus slack); past the cap the normal
@@ -1954,7 +1954,7 @@ function deferForPrepLock(run, attemptNumber, now) {
 const LEDGER_DEFER_MS = 2 * 60 * 1000;
 const LEDGER_DEFER_MESSAGE = 'Deferred: email division reservation outstanding';
 const LEDGER_MAX_DEFERRALS = Math.ceil(RESERVATION_LIFETIME_MS / LEDGER_DEFER_MS) + 2;
-const LEDGER_DEFER_CODES = new Set(['LEDGER_RESERVATION_OUTSTANDING']);
+const LEDGER_DEFER_CODES = new Set(['LEDGER_RESERVATION_OUTSTANDING', 'LEDGER_SIBLING_IN_FLIGHT']);
 async function deferForLedger(run, attemptNumber, now, err) {
   const used = await db('email_template_automation_run_events')
     .where({ run_id: run.id, event_type: 'retry_scheduled' })
