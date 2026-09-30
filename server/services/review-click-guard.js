@@ -70,11 +70,19 @@ async function reviewLinkClickedSince(customerId, since, database = db) {
 // visit is the one the ask is about.
 async function newestCompletedVisitAnchor(customerId, database = db) {
   if (!customerId) return null;
-  const row = await database('service_records')
-    .where({ customer_id: customerId, status: 'completed' })
-    .orderBy('service_date', 'desc')
-    .first('service_date');
-  return etMidnight(row?.service_date);
+  // The LATEST of the newest completed service record and the newest completed
+  // scheduled visit (a completed appointment can exist with no service record).
+  // Same predicates as sendGatedAsk's visit-context lookup: scheduled_services
+  // status 'completed' ordered by scheduled_date desc; service_records
+  // status 'completed' ordered by service_date desc.
+  const [record, visit] = await Promise.all([
+    database('service_records').where({ customer_id: customerId, status: 'completed' })
+      .orderBy('service_date', 'desc').first('service_date'),
+    database('scheduled_services').where({ customer_id: customerId, status: 'completed' })
+      .orderBy('scheduled_date', 'desc').first('scheduled_date'),
+  ]);
+  const dates = [etMidnight(record?.service_date), etMidnight(visit?.scheduled_date)].filter(Boolean);
+  return dates.length ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null;
 }
 
 // The guard for an ask described by a review_requests row (sendSMS, follow-ups,

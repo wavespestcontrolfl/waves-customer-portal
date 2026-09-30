@@ -586,6 +586,23 @@ describe('portal review card link + stopFutureAsks (real states)', () => {
       expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
     });
 
+    test('a /go click stops only cadences whose REMAINING steps are all asks; one with a later private check-in stays active', async () => {
+      const askCheckin = JSON.stringify([{ day: 0, templateKey: 'friendly_ask' }, { day: 3, templateKey: 'resolution_check' }]);
+      const asksOnly = JSON.stringify([{ day: 0, templateKey: 'friendly_ask' }, { day: 3, templateKey: 'soft_reminder' }]);
+      let state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ plan: askCheckin, current_step: 0 })], review_requests: [live('a', 2)] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state)).toMatchObject({ status: 'active' });
+
+      state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ plan: asksOnly, current_step: 0 })], review_requests: [live('a', 2)] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+
+      // Past the check-in only an ask remains: it stops.
+      state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ plan: askCheckin.replace('resolution_check', 'soft_reminder'), current_step: 1 })], review_requests: [live('a', 2)] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state).status).toBe('stopped');
+    });
+
     test('a parked series final (deferred) is stopped', async () => {
       const state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ status: 'deferred' })], review_requests: [live('a', 2)] });
       await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });

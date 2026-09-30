@@ -7102,6 +7102,78 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
     expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
   });
 
+  test('a completed visit with NO service record (scheduled_services only) anchors an operator one-off: a click after it suppresses, a click from before it does not', async () => {
+    const visit = { id: 'ss-1', customer_id: 'clk-1', status: 'completed', scheduled_date: VISIT.toISOString().slice(0, 10) };
+    let mock = makeMock({ customers: [customer], scheduled_services: [visit], review_requests: [click({ sms_sent_at: null })] });
+    db.mockImplementation(mock);
+    let out = await ReviewService.sendOutreachTouch({ customer, channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'admin', manageRetryVia: 'cron' });
+    expect(out).toMatchObject({ ok: false, reason: 'review_link_clicked', terminal: true });
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+
+    mock = makeMock({ customers: [customer], scheduled_services: [visit], review_requests: [click({ sms_sent_at: null, redirected_at: new Date(VISIT.getTime() - 10 * 86400000) })] });
+    db.mockImplementation(mock);
+    out = await ReviewService.sendOutreachTouch({ customer, channel: 'sms', templateId: 'friendly_ask', triggeredBy: 'admin', manageRetryVia: 'cron' });
+    expect(out).toMatchObject({ ok: true, sent: true });
+  });
+
+  describe('a click ends link-bearing ASKS, never private no-link check-ins', () => {
+    const askThenCheckin = JSON.stringify([
+      { day: 0, channel: 'sms', templateKey: 'friendly_ask' },
+      { day: 3, channel: 'sms', templateKey: 'resolution_check' },
+      { day: 8, channel: 'sms', templateKey: 'soft_reminder' },
+    ]);
+    const runDue = async (mock) => { mock.__state.rows.review_sequences[0].next_run_at = new Date(Date.now() - 60000); return ReviewService.processReviewSequences(); };
+
+    test('a direct check-in touch after a click still sends (the guard applies to asks only)', async () => {
+      db.mockImplementation(makeMock({ customers: [customer], service_records: [{ ...record, status: 'completed' }], review_requests: [click({ sms_sent_at: null })] }));
+      const out = await ReviewService.sendOutreachTouch({ customer, channel: 'sms', templateId: 'resolution_check', triggeredBy: 'admin', manageRetryVia: 'cron' });
+      expect(out).toMatchObject({ ok: true, sent: true });
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('[ask, resolution_check, ask] clicked before step 1: the first ask is skipped uncounted, the check-in sends at its step, the final ask is skipped, and it ends as clicked', async () => {
+      const mock = makeMock({
+        customers: [customer], service_records: [record],
+        review_sequences: [dueSequence({ plan: askThenCheckin })], review_requests: [click({ sms_sent_at: null })],
+      });
+      db.mockImplementation(mock);
+      const seqOf = () => mock.__state.rows.review_sequences[0];
+
+      // Step 0 (an ask): skipped — nothing sent, no touch counted, advanced to the check-in.
+      await ReviewService.processReviewSequences();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(seqOf()).toMatchObject({ status: 'active', current_step: 1, touches_sent: 0 });
+      expect(new Date(seqOf().next_run_at).getTime()).toBeGreaterThan(Date.now());
+
+      // Step 1 (the private check-in): sends normally and is counted.
+      await runDue(mock);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(seqOf()).toMatchObject({ status: 'active', current_step: 2, touches_sent: 1 });
+
+      // Step 2 (the final ask): only asks remain, so it is skipped by stopping as clicked.
+      await runDue(mock);
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+      expect(seqOf()).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+    });
+
+    test('an all-ask cadence clicked is stopped as clicked, as before', async () => {
+      const mock = makeMock({ customers: [customer], service_records: [record], review_sequences: [dueSequence()], review_requests: [click({ sms_sent_at: null })] });
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+    });
+
+    test('the runner backstop (the sequence\'s own row was clicked) also skips an ask but keeps a check-in cadence alive', async () => {
+      const own = { id: 'rr-own', customer_id: 'clk-1', sequence_id: 'seq-clk', channel: 'sms', status: 'opened', sms_sent_at: VISIT, redirected_at: CLICKED, followup_sent: true, token: 'town' };
+      const mock = makeMock({ customers: [customer], service_records: [record], review_sequences: [dueSequence({ plan: askThenCheckin })], review_requests: [own] });
+      db.mockImplementation(mock);
+      await ReviewService.processReviewSequences();
+      expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+      expect(mock.__state.rows.review_sequences[0]).toMatchObject({ status: 'active', current_step: 1, touches_sent: 0 });
+    });
+  });
+
   test('control: with NO click the same queued ask and cadence step really send', async () => {
     let mock = makeMock({ customers: [customer], service_records: [record], review_requests: [queuedAsk()] });
     db.mockImplementation(mock);

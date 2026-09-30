@@ -220,7 +220,6 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     // the click lands can still deliver that one in-flight text.
     try {
       const stop = await require('../services/review-request').stopFutureAsks(request.customer_id, {
-        sequenceId: request.sequence_id || null,
         reason: 'clicked',
       });
       if (!stop || stop.stopped !== true) {

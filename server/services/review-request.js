@@ -2033,7 +2033,7 @@ const ReviewService = {
     // Send-time guard (services/review-click-guard.js): the customer already
     // tapped a tracked review link since this ask's visit (or since it was
     // queued). Every caller holds the review-send lock.
-    if (await ClickGuard.askSuppressedByClick(request)) {
+    if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) {
       await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
       logger.info(`[review] Suppressed request (customerId=${request.customer_id} requestId=${requestId} reason=review_link_clicked)`);
       return { refused: "review_link_clicked" };
@@ -3029,7 +3029,7 @@ const ReviewService = {
       request = await db("review_requests").where({ id: requestId }).first();
       if (!request) return { sent: false, reason: "no_request" };
       // Send-time guard: the customer already tapped a tracked review link.
-      if (await ClickGuard.askSuppressedByClick(request)) return { sent: false, reason: "review_link_clicked" };
+      if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) return { sent: false, reason: "review_link_clicked" };
       const who = await this._inlineEmailRecipient(request);
       if (who.reason) return { sent: false, reason: who.reason };
       const { customer, contact } = who;
@@ -4200,7 +4200,7 @@ const ReviewService = {
             return;
           }
           // Send-time guard: a tracked click since the visit ends the follow-up.
-          if (await ClickGuard.askSuppressedByClick(request)) {
+          if (OUTREACH.isAskTemplate(request.template_key) && await ClickGuard.askSuppressedByClick(request)) {
             await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
             logger.info(`[review] Follow-up suppressed (requestId=${request.id} reason=review_link_clicked)`);
             suppressed++;
@@ -4433,7 +4433,8 @@ const ReviewService = {
     }
     // No visit AND no cadence (an operator one-off: Quick Links, admin,
     // tech-trigger, Intelligence Bar): the customer's newest completed visit.
-    if (await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId, fallbackAnchor, newestVisitFallback: !sequenceId })) {
+    // Asks only: a private no-link check-in is never click-suppressed.
+    if (OUTREACH.isAskTemplate(templateId) && await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId, fallbackAnchor, newestVisitFallback: !sequenceId })) {
       logger.info(`[review] Touch suppressed (customerId=${customer.id} reason=review_link_clicked)`);
       return { ok: false, reason: "review_link_clicked", terminal: true };
     }
@@ -5529,7 +5530,7 @@ const ReviewService = {
    * { stopped, outstanding }; a thrown failure or stopped:false means the caller
    * keeps the customer on the rate page.
    */
-  async stopFutureAsks(customerId, { sequenceId = null, reason = "clicked", lockWaitMs = 2000 } = {}) {
+  async stopFutureAsks(customerId, { reason = "clicked", lockWaitMs = 2000 } = {}) {
     // The stop runs under the SAME per-customer lock every dispatcher takes
     // around a provider handoff (processScheduled, the sequence step runner,
     // dispatchReviewAsk, sendGatedAsk, create): a click can never interleave
@@ -5537,7 +5538,7 @@ const ReviewService = {
     // cannot prove nothing is mid-send, so nothing is claimed stopped.
     const deadline = Date.now() + lockWaitMs;
     for (;;) {
-      const result = await runExclusive(`review-send:${customerId}`, () => this._stopFutureAsksLocked(customerId, { sequenceId, reason }), { recordHealth: false, waitForSlot: false });
+      const result = await runExclusive(`review-send:${customerId}`, () => this._stopFutureAsksLocked(customerId, { reason }), { recordHealth: false, waitForSlot: false });
       if (!wasLockSkipped(result)) return result;
       if (Date.now() >= deadline) return { stopped: false, outstanding: ["lock_timeout"] };
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -5552,20 +5553,48 @@ const ReviewService = {
    * stranded reservation the reconciliation owns; the caller fails closed until
    * it settles.
    */
-  async _stopFutureAsksLocked(customerId, { sequenceId, reason }) {
-    if (sequenceId) await this.stopReviewSequence(sequenceId, reason);
-    const live = await db("review_sequences").where({ customer_id: customerId }).whereIn("status", ["active", "deferred"]).select("id");
-    for (const seq of live) await this.stopReviewSequence(seq.id, reason);
+  async _stopFutureAsksLocked(customerId, { reason }) {
+    // Only cadences whose REMAINING steps are all asks stop: one with a later
+    // private no-link check-in stays active (its ask steps are skipped at send
+    // time by the runner), since a click ends asks, not check-ins.
+    const cadences = await db("review_sequences")
+      .where({ customer_id: customerId })
+      .whereIn("status", ["active", "deferred"])
+      .select("id", "plan", "current_step");
+    for (const seq of cadences) {
+      if (this._clickDisposition(seq) === "stop") await this.stopReviewSequence(seq.id, reason);
+    }
     const Summary = require("./visit-completion-summary");
-    await db("review_sequences")
+    const parked = await db("review_sequences")
       .where({ customer_id: customerId, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON })
-      .update({ stop_reason: reason, updated_at: new Date() });
+      .select("id", "plan", "current_step");
+    const parkedAsksOnly = parked.filter((p) => this._clickDisposition(p) === "stop").map((p) => p.id);
+    if (parkedAsksOnly.length) {
+      await db("review_sequences").whereIn("id", parkedAsksOnly).update({ stop_reason: reason, updated_at: new Date() });
+    }
     await supersedeQueuedAsks(customerId);
     await this._followupPendingBase(db("review_requests").where({ customer_id: customerId }))
       .update({ followup_sent: true, followup_sent_at: new Date() });
     const outstanding = [];
     if (await this._reservedPendingAsk(customerId)) outstanding.push("reserved_send");
     return { stopped: outstanding.length === 0, outstanding };
+  },
+
+  /**
+   * What a tracked click means for a cadence, by its REMAINING steps
+   * (current_step on): "stop" when every remaining step is a link-bearing ask;
+   * otherwise a later private check-in keeps it alive — "proceed" when the
+   * current step is itself a check-in (send it), "skip" when it is an ask
+   * (advance past it without sending).
+   */
+  _clickDisposition(seq, plan = null) {
+    let steps = plan;
+    if (!steps) {
+      try { steps = Array.isArray(seq.plan) ? seq.plan : JSON.parse(seq.plan || "[]"); } catch { steps = []; }
+    }
+    const remaining = steps.slice(Number(seq.current_step) || 0);
+    if (!remaining.some((step) => !OUTREACH.isAskTemplate(step?.templateKey))) return "stop";
+    return OUTREACH.isAskTemplate(remaining[0]?.templateKey) ? "skip" : "proceed";
   },
 
   /** A pending ask with an active send reservation (see activeSendReservation). */
@@ -6460,6 +6489,26 @@ const ReviewService = {
       });
       return { ran: false, stopped: true, reason };
     };
+    // A tracked click ends the link-bearing ASKS only; a private no-link
+    // check-in (resolution_check / satisfaction_confirm) is not a review ask and
+    // still goes out. Returns a runner result, or null to carry on and send the
+    // current step (a check-in).
+    const handleClick = async () => {
+      const disposition = this._clickDisposition(seq, plan);
+      if (disposition === "stop") return stop("clicked");
+      if (disposition === "proceed") return null;
+      // Skip the current ask without sending: advance exactly as after a send
+      // (same schedule), but no touch is counted.
+      const nextStep = seq.current_step + 1;
+      const next_run_at = nextTouchRunAt({ startedAt: seq.started_at, step: plan[nextStep], previousStep: plan[seq.current_step] || null });
+      await db("review_sequences").where({ id: seq.id, status: "active" }).update({
+        current_step: nextStep,
+        next_run_at,
+        decision: sequenceDecision({ reason: "ask_skipped_review_link_clicked", plannedAt: next_run_at, nextEvalAt: next_run_at }),
+        updated_at: new Date(),
+      });
+      return { ran: true, sent: false, skipped: true, step: seq.current_step };
+    };
     // Parking a sequence behind its summary is resumable, so it must never
     // overwrite a stop an operator recorded while this step was running.
     this._parkSequence = async (sequenceId) => {
@@ -6516,8 +6565,23 @@ const ReviewService = {
       .where((b) => b.whereNotNull("redirected_at").orWhere("google_review_clicked", true))
       .first()
       .catch(() => null);
-    if (clicked) return stop("clicked");
+    if (clicked) {
+      const handled = await handleClick();
+      if (handled) return handled;
+    }
     if (seq.current_step >= plan.length) return stop("completed");
+    // The send-time guard also runs BEFORE the spacing / cap holds for an ask
+    // step, so a click ends (or skips) it now instead of leaving it deferred for
+    // days; sendOutreachTouch re-checks at the provider boundary.
+    if (OUTREACH.isAskTemplate(plan[seq.current_step]?.templateKey)
+      && await ClickGuard.touchSuppressedByClick(seq.customer_id, {
+        serviceRecordId: seq.service_record_id,
+        scheduledServiceId: seq.scheduled_service_id,
+        fallbackAnchor: seq.created_at || seq.started_at || null,
+      })) {
+      const handled = await handleClick();
+      if (handled) return handled;
+    }
     // Same-series exemption set, computed once for the cap check AND the
     // supersession check below (codex #3235 r2+r5+r6 P1s): the visit-1 ask
     // of THIS sequence's own series never supersedes or caps its final
@@ -6791,7 +6855,7 @@ const ReviewService = {
     if (outcome.terminal || outcome.blocked) {
       if (outcome.reason === "no_contact") return stop("no_contact");
       if (outcome.reason === "already_reviewed") return stop("reviewed");
-      if (outcome.reason === "review_link_clicked") return stop("clicked");
+      if (outcome.reason === "review_link_clicked") return (await handleClick()) || stop("clicked");
       return stop("opted_out");
     }
 

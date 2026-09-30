@@ -90,7 +90,7 @@ describe.each([true, false])('GATE_REVIEW_DIRECT_LINK=%s (review sequences ON) â
     // Tracked: the click is stamped (first-click claim + open) and the cadence stops.
     expect(db.state.request).toMatchObject({ google_review_clicked: true, redirected_to_google: true, google_location: loc.id });
     expect(db.state.request.redirected_at).toBeInstanceOf(Date);
-    expect(stopFutureAsks).toHaveBeenCalledWith('cust-1', { sequenceId: null, reason: 'clicked' });
+    expect(stopFutureAsks).toHaveBeenCalledWith('cust-1', { reason: 'clicked' });
   });
 
   test('a second click on the same request does not call the invite again (first-click claim already taken)', async () => {
