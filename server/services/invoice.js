@@ -3883,7 +3883,7 @@ async function restoreSendClaim(invoiceId, previousStatus, claimed, consumedQueu
   }
 }
 
-const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = "BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED";
+const { BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED, SUMMARY_TEXT_CARRIED_ERROR } = require("./invoice-helpers");
 
 async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSmsAt) {
   if (!claimToken) return false;
@@ -7056,7 +7056,10 @@ const InvoiceService = {
       }
     }
 
-    const emailMustRetry = !operatorInitiated && email.code === "billing_prefs_unavailable";
+    // A Text leg the visit summary text carries leaves the Email as the customer's path to the
+// link: any failed Email retries, not only an unreadable preference.
+    const carriedBySummary = String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR);
+    const emailMustRetry = !operatorInitiated && (email.code === "billing_prefs_unavailable" || (carriedBySummary && !email.ok));
     const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
     if (emailMustRetry && sms.ok && claimed && !allowClaimed
       && ["draft", "scheduled"].includes(previousStatus)) {
@@ -7814,9 +7817,12 @@ const InvoiceService = {
         REPLAY_HOLD_CODES.includes(result.sms?.code)
         && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
         && result.sms?.nextAllowedAt;
-      const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
-        ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
-        : error;
+      // The carried marker stays through every retry: losing it would text the pay link.
+      const durableSendError = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+        ? `${SUMMARY_TEXT_CARRIED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
+        : result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
+          ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
+          : error;
       let restored = 0;
       if (smsHeld) {
         deferred += 1;
@@ -7889,6 +7895,38 @@ const InvoiceService = {
   // carries the receipt. Manual single-channel operator sends (via='sms')
   // must NOT declare it: the operator explicitly chose the text, and there is
   // no email leg on that route to carry the receipt (codex round 5).
+  // The shortened receipt link a text carries. /receipt/, not /pay/: the pay
+  // page forwards paid invoices to the receipt but renders a refunded one as
+  // a "Refunded" payment page. Empty when the invoice has no token.
+  async receiptSmsUrl(invoice) {
+    const longReceiptUrl = invoice.token
+      ? `${publicPortalUrl()}/receipt/${invoice.token}`
+      : "";
+    return longReceiptUrl
+      ? shortenOrPassthrough(longReceiptUrl, {
+          kind: "receipt",
+          entityType: "invoices",
+          entityId: invoice.id,
+          customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        })
+      : "";
+  },
+
+  // The shortened pay link, minted exactly as sendViaSMS mints it, for the one
+  // other text that may carry it: the combined-visit summary
+  // (visit-completion-summary.js).
+  async payLinkSmsUrl(invoice) {
+    if (!invoice.token) return "";
+    return shortenOrPassthrough(`${publicPortalUrl()}/pay/${invoice.token}`, {
+      kind: "invoice",
+      entityType: "invoices",
+      entityId: invoice.id,
+      customerId: invoice.customer_id,
+      codePrefix: invoiceShortCodePrefix(invoice),
+    });
+  },
+
   /**
    * The customer-facing money facts a payment-receipt text needs: exact
    * amount collected, the " (Visa ending 4242)" card clause, and the
@@ -7903,21 +7941,7 @@ const InvoiceService = {
    * credit). Falls back to amount due when no payment row exists.
    */
   async receiptSmsFacts(invoice) {
-    const domain = publicPortalUrl();
-    // /receipt/, not /pay/: the pay page forwards paid invoices to the
-    // receipt but renders a refunded one as a "Refunded" payment page.
-    const longReceiptUrl = invoice.token
-      ? `${domain}/receipt/${invoice.token}`
-      : "";
-    const receiptUrl = longReceiptUrl
-      ? await shortenOrPassthrough(longReceiptUrl, {
-          kind: "receipt",
-          entityType: "invoices",
-          entityId: invoice.id,
-          customerId: invoice.customer_id,
-          codePrefix: invoiceShortCodePrefix(invoice),
-        })
-      : "";
+    const receiptUrl = await InvoiceService.receiptSmsUrl(invoice);
     const cardLine = formatCardLine(invoice.card_brand, invoice.card_last_four);
     const amount = await InvoiceService.receiptAmountFor(invoice);
     return { amount, cardLine, receiptUrl };

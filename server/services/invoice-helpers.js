@@ -144,6 +144,16 @@ function preserveWithdrawalStamp(database) {
   return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
 }
 
+// The accepted-Text/pending-Email marker on scheduled_send_error (matched everywhere by
+// prefix): the queue's sender treats the Text leg as delivered and sends only the Email.
+// A combined-visit invoice whose link rides the visit summary text is scheduled under it
+// from the start (visit-completion-packets.js).
+const BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED = 'BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED';
+// The same marker for an invoice whose Text leg is carried by the visit summary text: the
+// suffix says the Email is then the customer's only guaranteed path to the link, so a failed
+// Email is retried (the queue's own attempt cap) instead of finalizing the invoice as sent.
+const SUMMARY_TEXT_CARRIED_ERROR = `${BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED}:visit_summary`;
+
 const STALE_SEND_PARK_ERROR = 'Recovered from stale sending claim — delivery unverified; check whether the customer received it, then resend or re-schedule manually';
 
 // The stale-claim review hold, read back from the park above: a row parked
@@ -294,6 +304,8 @@ module.exports = {
   SEND_FINALIZABLE_STATUSES,
   INVOICE_UPDATE_ALLOWED_FIELDS,
   STALE_SEND_PARK_ERROR,
+  BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED,
+  SUMMARY_TEXT_CARRIED_ERROR,
   isStaleClaimReviewHold,
   staleClaimReviewHoldError,
   preserveWithdrawalStamp,

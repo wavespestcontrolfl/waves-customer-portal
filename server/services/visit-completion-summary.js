@@ -4,7 +4,8 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
-const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, getInvoiceEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-helpers');
 const { createDefaultCustomerRows } = require('./customer-default-rows');
 
 const VISIT_SUMMARY_TOKEN_RE = /^[a-f0-9]{64}$/;
@@ -120,7 +121,7 @@ function sameSmsDestination(a, b) {
 
 // Queue ownership and the visit marker commit together. Packet recovery then
 // waits on this row; only the existing scheduled-SMS worker dispatches it.
-async function deferSummarySms({ visit, member, customer, recipient, body, claim, nextAllowedAt }) {
+async function deferSummarySms({ visit, member, customer, recipient, body, plainBody = null, link = null, claim, nextAllowedAt }) {
   await db.transaction(async (trx) => {
     const owned = await trx('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms',
       claim_token: claim.token }).whereIn('status', ['claimed', 'unknown_delivery'])
@@ -135,7 +136,10 @@ async function deferSummarySms({ visit, member, customer, recipient, body, claim
       metadata: JSON.stringify({ entry_point: 'visit_summary_deferred', visit_id: visit.id,
         visit_summary_claim_token: claim.token, summary_token_hash: visit.summary_token_hash,
         customer_id: customer.id, to_phone: recipient.phone, resolve_from_by_customer: true,
-        scheduled_service_id: member?.id || null }),
+        scheduled_service_id: member?.id || null,
+        // The queued text still carries the invoice's link (its own text no longer
+        // exists): re-judged at send, with the plain summary as the replacement.
+        ...(link ? { billing_link: { kind: link.kind, invoice_id: link.invoiceId }, plain_body: plainBody } : {}) }),
     });
   });
 }
@@ -188,7 +192,14 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
       claim_token: meta.visit_summary_claim_token }).update({ status: 'pending', last_error: null, updated_at: database.fn.now() });
     effect.status = 'pending';
   }
-  return { eligible: effect?.status === 'pending', reason: 'visit_summary_claim_unavailable' };
+  if (effect?.status !== 'pending') return { eligible: false, reason: 'visit_summary_claim_unavailable' };
+  // A queued text that carries the invoice's link (quiet hours): if the link is no
+  // longer right to send, the plain summary goes instead (the scheduler swaps the
+  // frozen body and drops the link marker).
+  if (meta.billing_link && !(await summaryLinkStillValid(database, { kind: meta.billing_link.kind, invoiceId: meta.billing_link.invoice_id }, visit.id, meta.to_phone))) {
+    return { eligible: true, replaceBody: meta.plain_body, dropMeta: ['billing_link', 'plain_body'] };
+  }
+  return { eligible: true };
 }
 
 // Recipient authorization, the dispatch claim and the provider request share
@@ -296,8 +307,12 @@ async function beginDeferredSummarySms(meta, dispatch) {
       // The claim phase may return a proven-unsent effect to pending; that
       // write commits with the dispatch mark. The dispatch phase re-judges
       // the visit, the link and the recipient on the freshly held rows.
-      if (phase === 'claim') return (await recheckDeferredSummarySms(meta, trx, { customer })).eligible;
-      return (await deferredSummaryRecipient(meta, trx, { customer })).eligible;
+      const eligible = phase === 'claim'
+        ? (await recheckDeferredSummarySms(meta, trx, { customer })).eligible
+        : (await deferredSummaryRecipient(meta, trx, { customer })).eligible;
+      // A body still carrying the link is judged again under the held rows.
+      return eligible && (!meta.billing_link
+        || summaryLinkStillValid(trx, { kind: meta.billing_link.kind, invoiceId: meta.billing_link.invoice_id }, meta.visit_id, meta.to_phone));
     } });
 }
 
@@ -323,7 +338,75 @@ async function terminalDeferredSummarySms(meta) {
   if (!result.ok) throw new Error('Visit summary terminal state could not be saved');
 }
 
-async function sendSummarySms({ visit, member, customer, summaryUrl, requested }) {
+// The one decision whether the visit summary text carries the visit invoice's pay link
+// (unpaid) or receipt link (paid). Made once, at closeout, by the coordinator before the
+// invoice is scheduled or the receipt job could text: when it folds, the invoice or receipt
+// is set up email-only from the start and this text is the only text carrying the link. If
+// the text then fails the customer has the link by email; nothing texts it again. Everything
+// that could make the invoice or receipt text go to someone else, or to no one, answers no,
+// and today's behavior stays exactly as it was:
+//  - the invoice is not the homeowner's plain self-pay bill (payer, payer statement, billing hold);
+//  - it is not an unpaid draft with a balance, or a paid invoice with an actual payment;
+//  - the invoice text's phone (the account holder's) is not the number the summary text goes to;
+//  - the invoice or receipt Email would not go out (the link must reach the customer by email);
+//  - the canonical senders' own verdict says no text (billingTextVerdict: consent, billing
+//    channel choice, template kill switch, account credit the queue would apply first).
+// The summary token never reaches billing: the link is the invoice's own /pay or /receipt link.
+// A dispute hold on pay links (collection-hold.js shouldWithholdPayLink, when it lands)
+// belongs in this function beside the payer checks.
+async function planSummaryBillingLink(packetId, token, database = db) {
+  try {
+    const context = await summaryDeliveryContext(packetId, token, database);
+    const { visit, customer, prefs, visible, requested, summaryUrl } = context;
+    if (!visible || !requested || !summaryUrl || visit.billing_hold) return null;
+    const recipient = getServiceContactSmsRecipient(customer);
+    if (!recipient?.phone) return null;
+    const invoice = await database('invoices').where({ visit_completion_packet_id: packetId }).first();
+    if (!invoice?.token || invoice.customer_id !== visit.customer_id || invoice.payer_id || invoice.payer_statement_id) return null;
+    if (!(invoiceAmountDue(invoice) > 0)) return null;
+    const kind = invoice.status === 'paid' ? 'receipt' : invoice.status === 'draft' ? 'pay_link' : null;
+    if (!kind) return null;
+    // The email leg carries the link whatever happens to the text: it must exist.
+    const { explicitBillingChannels } = require('./billing-delivery-channels');
+    const explicit = explicitBillingChannels(prefs || {}, kind === 'receipt' ? 'payment_receipt' : 'invoice');
+    if ((explicit && !explicit.includes('email')) || !getInvoiceEmailRecipients(customer, prefs || {}).length) return null;
+    if (!(await summaryLinkSendable(database, invoice, kind, recipient.phone))) return null;
+    return { kind, invoiceId: invoice.id };
+  } catch (err) {
+    require('./logger').warn(`[visit-summary] billing link plan failed for packet ${packetId}: ${err.message}`);
+    return null;
+  }
+}
+
+// Whether the canonical invoice/receipt text would go to the person the summary text goes
+// to: the invoice text's phone (the account holder's) is that number, and billingTextVerdict,
+// the canonical senders' own verdict. Asked at plan time and again at send.
+async function summaryLinkSendable(database, invoice, kind, recipientPhone) {
+  const holder = await database('customers').where({ id: invoice.customer_id }).whereNull('deleted_at').first('phone');
+  if (!holder?.phone || !sameSmsDestination(holder.phone, recipientPhone)) return false;
+  return (await require('./messaging/billing-text-verdict').billingTextVerdict(kind, invoice, { phone: holder.phone, database })).ok;
+}
+
+// What could make the recorded link wrong or unlawful now, judged where the text is sent:
+// a billing hold or payer, an invoice no longer payable (or a receipt no longer paid), and
+// the same consent verdict. False sends the plain summary; the email already carries the link.
+async function summaryLinkStillValid(database, link, visitId, recipientPhone) {
+  const invoice = await database('invoices').where({ id: link.invoiceId }).first();
+  const visit = await database('service_visits').where({ id: visitId }).first('billing_hold');
+  if (!invoice || !visit || visit.billing_hold || invoice.payer_id || invoice.payer_statement_id) return false;
+  if (link.kind === 'receipt' ? invoice.status !== 'paid' : !(isInvoiceCollectibleStatus(invoice.status) && invoiceAmountDue(invoice) > 0)) return false;
+  return summaryLinkSendable(database, invoice, link.kind, recipientPhone);
+}
+
+async function summaryBillingLinkText(link) {
+  const InvoiceService = require('./invoice');
+  const invoice = await db('invoices').where({ id: link.invoiceId }).first();
+  if (!invoice) return null;
+  const url = link.kind === 'receipt' ? await InvoiceService.receiptSmsUrl(invoice) : await InvoiceService.payLinkSmsUrl(invoice);
+  return url ? `${link.kind === 'receipt' ? 'Your receipt' : 'Pay your invoice'}: ${url}` : null;
+}
+
+async function sendSummarySms({ visit, member, customer, summaryUrl, requested, billingLink = null }) {
   const claim = await VisitGroups.claimVisitNotification(member, 'completion_sms');
   if (claim?.state !== 'owner') return;
   const recipient = getServiceContactSmsRecipient(customer);
@@ -333,33 +416,58 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested }
       await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', 'suppressed', new Date(), claim.token);
       return;
     }
-    const body = `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
-    const result = await require('./messaging/send-customer-message').sendCustomerMessage({
-      channel: 'sms', audience: 'customer', purpose: 'service_completion',
-      to: recipient.phone, customerId: customer.id, appointmentId: member.id,
-      body,
-      identityTrustLevel: 'service_contact_authorized', entryPoint: 'visit_closeout_summary',
-      // The bearer link is the message. Both push-routing layers key on the
-      // message type, and the generic service_complete push lands on the
-      // Visits tab without it — so the summary stays an SMS (its deferred
-      // row already carries this type).
-      metadata: { original_message_type: 'visit_summary' },
-      // The sender's locked handoff: a claim that cannot be read throws
-      // before any provider request, which the provider wrapper reports as
-      // a retryable block, so the requested SMS stays retryable.
-      withSmsHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
-        kind: 'completion_sms', token: claim.token, phone: recipient.phone,
-        // Compared by destination identity: a resave of the same number with
-        // different punctuation between resolution and the locked recheck is
-        // not a recipient change.
-        authorized: (current, currentPrefs) => currentPrefs.sms_enabled !== false
-          && currentPrefs.service_completed !== false
-          && sameSmsDestination(getServiceContactSmsRecipient(current).phone, recipient.phone),
-        dispatch: (trx, onProviderStart) => handoff(trx, async () => { await onProviderStart(); dispatched = true; }) }),
-    });
+    const plainBody = `Waves Pest Control: Your visit summary is ready. Review each service and its report: ${summaryUrl}`;
+    let link = billingLink;
+    let linkStale = false;
+    let body = plainBody;
+    const send = async () => {
+      // A link that cannot be minted, or that is no longer right to send at the locked
+      // handoff, falls back to the plain summary (the email already carries it).
+      const linkText = link ? await summaryBillingLinkText(link) : null;
+      if (link && !linkText) link = null;
+      body = linkText ? `${plainBody} ${linkText}` : plainBody;
+      return require('./messaging/send-customer-message').sendCustomerMessage({
+        channel: 'sms', audience: 'customer', purpose: 'service_completion',
+        to: recipient.phone, customerId: customer.id, appointmentId: member.id,
+        body,
+        identityTrustLevel: 'service_contact_authorized', entryPoint: 'visit_closeout_summary',
+        // The bearer link is the message. Both push-routing layers key on the
+        // message type, and the generic service_complete push lands on the
+        // Visits tab without it — so the summary stays an SMS (its deferred
+        // row already carries this type).
+        metadata: { original_message_type: 'visit_summary', ...(link ? { visit_summary_billing_link: link.kind } : {}) },
+        // The sender's locked handoff: a claim that cannot be read throws
+        // before any provider request, which the provider wrapper reports as
+        // a retryable block, so the requested SMS stays retryable.
+        withSmsHandoff: (handoff) => claimDispatchThroughHandoff({ visitId: visit.id, customerId: customer.id,
+          kind: 'completion_sms', token: claim.token, phone: recipient.phone,
+          // Compared by destination identity: a resave of the same number with
+          // different punctuation between resolution and the locked recheck is
+          // not a recipient change.
+          authorized: async (current, currentPrefs, trx) => {
+            const allowed = currentPrefs.sms_enabled !== false
+              && currentPrefs.service_completed !== false
+              && sameSmsDestination(getServiceContactSmsRecipient(current).phone, recipient.phone);
+            if (!allowed || !link) return allowed;
+            // Under the held customer row (payer and consent writers commit under it).
+            if (await summaryLinkStillValid(trx, link, visit.id, recipient.phone)) return true;
+            linkStale = true;
+            return false;
+          },
+          dispatch: (trx, onProviderStart) => handoff(trx, async () => { await onProviderStart(); dispatched = true; }) }),
+      });
+    };
+    let result = await send();
+    if (linkStale && !result.sent) {
+      link = null;
+      dispatched = false;
+      result = await send();
+    }
     if (result.code === 'QUIET_HOURS_HOLD' && result.deferred && result.nextAllowedAt) {
       dispatched = false; // The provider boundary can also prove it held before sending.
-      await deferSummarySms({ visit, member, customer, recipient, body, claim, nextAllowedAt: result.nextAllowedAt });
+      // The queued text carries the link (the invoice's own text no longer exists);
+      // it is judged again when it goes out.
+      await deferSummarySms({ visit, member, customer, recipient, body, plainBody, link, claim, nextAllowedAt: result.nextAllowedAt });
       return;
     }
     // Once handed to a non-idempotent provider, every failure is ambiguous
@@ -961,7 +1069,9 @@ async function reconcileSummaryEmailRecovery(message, database = db) {
   return database.isTransaction ? run(database) : database.transaction(run);
 }
 
-async function deliverVisitCompletionSummary(packetId, token, database = db) {
+// What the delivery and the coordinator's plan both need to know about the summary:
+// who it goes to and whether it was requested.
+async function summaryDeliveryContext(packetId, token, database) {
   const packet = await database('visit_completion_packets').where({ id: packetId }).first();
   const visit = await database('service_visits').where({ id: packet.visit_id }).first();
   // An unreadable account primary is a failed read the coordinator retries,
@@ -977,10 +1087,26 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   const summary = token ? await getVisitCompletionSummary(token, database) : null;
   const visibleMembers = await database('visit_completion_packet_items').where({ packet_id: packet.id })
     .whereIn('service_record_id', (summary?.services || []).map((service) => service.id)).pluck('scheduled_service_id');
-  const context = { visit, member, customer, prefs, database, visible: !archived && Boolean(summary),
+  return { packet, visit, member, customer, prefs, database, visible: !archived && Boolean(summary),
     summaryUrl: token ? portalUrl(`/visit/${token}`) : null,
     requested: !archived && payload.items.some((item) => visibleMembers.includes(item.serviceId) && item.body.sendCompletionSms === true) };
-  await sendSummarySms(context);
+}
+
+async function deliverVisitCompletionSummary(packetId, token, database = db) {
+  const context = await summaryDeliveryContext(packetId, token, database);
+  const { packet, visit } = context;
+  // The coordinator recorded, at closeout, that the invoice or receipt email-only path
+  // relies on this text for its link. Judged again where the text is sent.
+  const recorded = require('./visit-completion-packets').packetPayload(packet).summaryBillingLink;
+  let billingLink = null;
+  if (recorded?.invoiceId) {
+    const recipient = getServiceContactSmsRecipient(context.customer);
+    const link = { kind: recorded.kind, invoiceId: recorded.invoiceId };
+    const valid = context.requested && recipient?.phone
+      && await summaryLinkStillValid(database, link, visit.id, recipient.phone).catch(() => false);
+    if (valid) billingLink = link;
+  }
+  await sendSummarySms({ ...context, billingLink });
   await sendSummaryEmail(context);
   const effects = await database('visit_effects').where({ visit_id: visit.id })
     .whereIn('effect_type', ['completion_sms', 'completion_email']);
@@ -997,7 +1123,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   return { state: pending ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
 }
 
-module.exports = { VISIT_SUMMARY_TOKEN_RE, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
+module.exports = { VISIT_SUMMARY_TOKEN_RE, planSummaryBillingLink, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,

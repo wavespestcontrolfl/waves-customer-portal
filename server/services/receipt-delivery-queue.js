@@ -6,6 +6,10 @@ const logger = require('./logger');
 const QUEUED_STATUSES = ['queued', 'retry_scheduled'];
 const STALE_LOCK_MINUTES = 10;
 const DEFAULT_MAX_ATTEMPTS = 5;
+// The job's Text leg is not owed: the combined-visit summary text carries this receipt's
+// link (visit-completion-summary.js). Set on the still-queued job at closeout, read by the
+// worker like any other expected text skip, and kept through its retries (sms_result).
+const TEXT_CARRIED_BY_SUMMARY = 'carried_by_visit_summary';
 
 function workerId() {
   return `${os.hostname()}:${process.pid}`;
@@ -175,7 +179,7 @@ function actionableSmsFailure(result) {
   // 'sms_suppressed' is a STOP-style opt-out (suppression row or
   // sms_enabled=false) — permanent until the customer texts START, so a
   // retry can never deliver it.
-  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed'].includes(result.reason);
+  return result?.sent === false && !['already-sent', 'no-phone', 'payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed', TEXT_CARRIED_BY_SUMMARY].includes(result.reason);
 }
 
 function actionableEmailFailure(result) {
@@ -293,7 +297,9 @@ async function processReceiptDeliveryJob(job) {
     const InvoiceService = require('./invoice');
     const { sendReceiptEmail } = require('./invoice-email');
 
-    smsResult = await InvoiceService.sendReceipt(invoice.id, {
+    smsResult = job.sms_result?.reason === TEXT_CARRIED_BY_SUMMARY
+      ? { sent: false, reason: TEXT_CARRIED_BY_SUMMARY }
+      : await InvoiceService.sendReceipt(invoice.id, {
       hasEmailLeg: true,
       // Persisted payment provenance (see enqueueReceiptDelivery): a
       // customer-initiated payment's receipt sends at any hour; a machine
@@ -358,7 +364,7 @@ async function processReceiptDeliveryJob(job) {
     // customer whose payment_receipt_channel is email-only, who opted out
     // of receipt texts, or whose SMS is STOP-suppressed — the delivered
     // email receipt IS the receipt.
-    if (['payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed'].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
+    if (['payer_billed', 'channel_email_only', 'receipt_texts_opted_out', 'sms_suppressed', TEXT_CARRIED_BY_SUMMARY].includes(smsResult?.reason) && emailResult?.ok && !invoice.receipt_sent_at) {
       await db('invoices')
         .where({ id: invoice.id })
         .whereNull('receipt_sent_at')
@@ -534,6 +540,13 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
   }
 }
 
+// Set the still-queued job's Text leg as carried by the summary text. A job already
+// running or finished has had its text decided, so nothing is set (returns 0).
+async function markTextCarriedBySummary(invoiceId) {
+  return db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).whereIn('status', QUEUED_STATUSES)
+    .update({ sms_result: JSON.stringify({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY }), updated_at: db.fn.now() });
+}
+
 function scheduleReceiptDeliveryDrain({ delayMs = 0, limit = 10 } = {}) {
   const run = () => {
     processDueReceiptDeliveryJobs({ limit }).catch((err) => {
@@ -556,6 +569,8 @@ module.exports = {
   claimReceiptJobForOperatorSend,
   recordOperatorReceiptDelivered,
   releaseOperatorReceiptClaim,
+  markTextCarriedBySummary,
+  TEXT_CARRIED_BY_SUMMARY,
   _internals: {
     recoverStaleLocks,
     actionableSmsFailure,

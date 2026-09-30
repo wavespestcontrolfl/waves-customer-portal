@@ -10,7 +10,7 @@
  * transaction. A rejected member rolls back the packet and ALL member writes.
  */
 const crypto = require('crypto');
-const { STALE_SEND_PARK_ERROR } = require('./invoice-helpers');
+const { STALE_SEND_PARK_ERROR, SUMMARY_TEXT_CARRIED_ERROR } = require('./invoice-helpers');
 const { validate: isUuid } = require('uuid');
 const db = require('../models/db');
 const { hashCompletionRequest, withoutPhotoBytes, isOperatorTimeOnSite } = require('./completion-attempts');
@@ -831,6 +831,13 @@ async function closeVisitCompletionPacket(database, { packet, memberId, payment,
   return outcome;
 }
 
+// The closeout's decision that the summary text carries the invoice or receipt link,
+// on the packet payload (system snapshots live there beside billingSnapshot).
+async function recordSummaryBillingLink(database, packetId, link) {
+  await database('visit_completion_packets').where({ id: packetId })
+    .update({ payload: database.raw('payload || ?::jsonb', [JSON.stringify({ summaryBillingLink: { kind: link.kind, invoiceId: link.invoiceId } })]) });
+}
+
 /** Run summary and financial effects only after every member is ready. */
 async function runVisitCompletionPacketEffects(packetId, database = db, { actor = null } = {}) {
   if (actor && require('./technician-visit-scope').isTechnicianRequest(actor) && !await packetInTechnicianScope(packetId, actor, database)) {
@@ -850,6 +857,13 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
   // collection (visit-completion-payment.js); a withdrawn invoice comes back
   // as office_required with reason payer_assigned.
   let payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
+  // One text for the stop. Decided once, here, before the invoice is scheduled or the receipt
+  // job could text: when the summary text can carry the invoice's pay link (unpaid) or receipt
+  // link (paid), the invoice or receipt is set up email-only from the start and the summary is
+  // the only text with the link (visit-completion-summary.js planSummaryBillingLink). The
+  // decision is recorded on the packet, so a replay delivers what was decided.
+  const summaryLink = ['payment_needed', 'payment_failed', 'paid'].includes(payment.state)
+    ? await Summary.planSummaryBillingLink(packet.id, token, database) : null;
   // Unpaid invoices use the existing scheduled invoice sender and its
   // durable send claim. Billing contacts receive their financial document;
   // service contacts' summary token never grants access to billing details.
@@ -868,11 +882,16 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
       if (owner && await withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: payment.invoiceId, visit, billed, payerId: owner })) {
         return { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
       }
+      const foldsPayLink = summaryLink?.kind === 'pay_link' && summaryLink.invoiceId === payment.invoiceId;
       const scheduled = await trx('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
         .whereNull('payer_id').whereNull('payer_statement_id').update({
-          status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null,
+          status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0,
+          // The accepted-Text/pending-Email state, from the start: the queue's sender sends
+          // only the email, through retries, and never texts this invoice.
+          scheduled_send_error: foldsPayLink ? SUMMARY_TEXT_CARRIED_ERROR : null,
           updated_at: trx.fn.now(),
         });
+      if (scheduled && foldsPayLink) await recordSummaryBillingLink(trx, packet.id, summaryLink);
       if (scheduled) return payment;
       // Nothing moved. A self-pay invoice already on the send queue is this
       // coordinator's own earlier scheduling (a replay after that commit):
@@ -890,6 +909,12 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
       return payment;
     });
     if (recollect) payment = await require('./visit-completion-payment').collectVisitCompletionInvoice(packet.id, database);
+  }
+  // Paid: the receipt job's Text leg is not owed (its email still sends). Only a job that
+  // has not run is set, and only then does the summary carry the receipt link.
+  if (summaryLink?.kind === 'receipt' && summaryLink.invoiceId === payment.invoiceId
+      && await require('./receipt-delivery-queue').markTextCarriedBySummary(summaryLink.invoiceId)) {
+    await recordSummaryBillingLink(database, packet.id, summaryLink);
   }
   let delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
   await runPacketCompletionCredits(packet.id, database);
