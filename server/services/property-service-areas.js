@@ -16,16 +16,12 @@ const fail = (message, status = 400) => Object.assign(new Error(message), {
 });
 
 // A live lookup is a paid upstream call reachable by any assigned tech. Repeat
-// refreshes for one property inside this window are served from the lookup
-// cache (estimates only) instead of going back upstream.
-const LOOKUP_REFRESH_COOLDOWN_MS = 2 * 60 * 1000;
-const recentLookupRefresh = new Map();
-function claimLookupRefresh(propertyId, now = Date.now()) {
-  for (const [id, at] of recentLookupRefresh) if (now - at >= LOOKUP_REFRESH_COOLDOWN_MS) recentLookupRefresh.delete(id);
-  if (recentLookupRefresh.has(propertyId)) return false;
-  recentLookupRefresh.set(propertyId, now);
-  return true;
-}
+// refreshes for one address inside this window are served from the lookup
+// cache (estimates only) instead of going back upstream. The claim lives on
+// the shared property_lookups row, so it holds across replicas and deploys.
+const LOOKUP_REFRESH_COOLDOWN_SECONDS = 2 * 60;
+const claimLookupRefresh = address => require('./property-lookup/lookup-cache')
+  .claimLiveRefresh(address, LOOKUP_REFRESH_COOLDOWN_SECONDS);
 
 function areaNumber(value) {
   return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 1000000 ? value : null;
@@ -127,16 +123,16 @@ function lookupSuggestions(enriched = {}) {
   return result;
 }
 
-async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lookup } = {}) {
+async function readAreaMeasurements(scope, req, { knex = db, refresh = false, lookup, claimRefresh = claimLookupRefresh } = {}) {
   const property = await loadAreaProperty(scope, req, knex);
   const saved = reviewedAreas(property);
   const lawnSqft = await primaryLawnArea(property, knex);
   const version = areaVersion(property, lawnSqft);
   let estimates = {};
-  // A repeat refresh inside the cooldown reuses the cached lookup.
-  const liveRefresh = refresh && claimLookupRefresh(property.id);
   if (refresh || AREA_KEYS.some(key => !saved[key])) {
     const address = [property.address_line1, property.address_line2, property.city, property.state, property.zip].filter(Boolean).join(', ');
+    // A repeat refresh inside the cooldown reuses the cached lookup.
+    const liveRefresh = refresh && await claimRefresh(address);
     const performLookup = lookup || require('../routes/property-lookup-v2').performPropertyLookup;
     // A missing/offline cache cannot hide already saved measurements or
     // turn a successful review save into an apparent failure.
@@ -229,5 +225,5 @@ async function snapshotVisitArea(input, service, req, knex = db, { treatmentEvid
 
 module.exports = { AREA_KEYS, AREA_SOURCES, propertyServiceAreasEnabled, areaNumber, areaVersion, reviewedAreas,
   validateAreaChanges, lookupSuggestions, loadAreaProperty, readAreaMeasurements, saveAreaMeasurements, snapshotVisitArea,
-  hasAreaMeasurementsColumn, _resetLookupCooldown: () => recentLookupRefresh.clear(),
+  hasAreaMeasurementsColumn,
   _resetAreaColumnCache: () => { areaColumnKnown = false; } };

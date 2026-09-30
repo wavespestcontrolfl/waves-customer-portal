@@ -57,8 +57,6 @@ const fixtureProperty = (extra = {}) => ({
 const scope = { customerId: 'cust-1', propertyId: 'prop-1' };
 
 describe('readAreaMeasurements without a database', () => {
-  beforeEach(() => areas._resetLookupCooldown());
-
   test('falls back to the property recorded lawn area when no turf profile exists', async () => {
     const knex = makeKnex({ customer_properties: [fixtureProperty({ property_sqft: 3100 })] });
     const lookup = jest.fn().mockResolvedValue(null);
@@ -79,10 +77,13 @@ describe('readAreaMeasurements without a database', () => {
   test('a repeat refresh inside the cooldown reuses the cache instead of going upstream', async () => {
     const knex = makeKnex({ customer_properties: [fixtureProperty()] });
     const lookup = jest.fn().mockResolvedValue({ enriched: { estimatedBedAreaSf: 800.5 } });
-    const first = await areas.readAreaMeasurements(scope, admin, { knex, refresh: true, lookup });
+    // The shared claim grants the first refresh and refuses the repeat.
+    const claimRefresh = jest.fn().mockResolvedValueOnce(true).mockResolvedValue(false);
+    const first = await areas.readAreaMeasurements(scope, admin, { knex, refresh: true, lookup, claimRefresh });
     expect(lookup).toHaveBeenLastCalledWith(expect.any(String), { refresh: true });
     expect(first.areas.beds.sqft).toBe(801);
-    await areas.readAreaMeasurements(scope, admin, { knex, refresh: true, lookup });
+    await areas.readAreaMeasurements(scope, admin, { knex, refresh: true, lookup, claimRefresh });
+    expect(claimRefresh).toHaveBeenCalledWith(lookup.mock.calls[0][0]);
     expect(lookup).toHaveBeenLastCalledWith(expect.any(String), { cacheOnly: true, persist: false });
     expect(lookup.mock.calls.filter(([, options]) => options.refresh)).toHaveLength(1);
   });
@@ -90,9 +91,16 @@ describe('readAreaMeasurements without a database', () => {
   test('a failed live refresh returns a fixed message, not the upstream error text', async () => {
     const knex = makeKnex({ customer_properties: [fixtureProperty()] });
     const lookup = jest.fn().mockRejectedValue(new Error('provider https://upstream.example/?key=SECRET timed out'));
-    const failure = await areas.readAreaMeasurements(scope, admin, { knex, refresh: true, lookup }).catch(error => error);
+    const failure = await areas.readAreaMeasurements(scope, admin, { knex, refresh: true, lookup, claimRefresh: async () => true }).catch(error => error);
     expect(failure).toMatchObject({ status: 502, isOperational: true });
     expect(failure.message).not.toMatch(/SECRET|upstream/);
+  });
+
+  test('an ordinary read never claims a live refresh', async () => {
+    const knex = makeKnex({ customer_properties: [fixtureProperty()] });
+    const claimRefresh = jest.fn();
+    await areas.readAreaMeasurements(scope, admin, { knex, lookup: jest.fn().mockResolvedValue(null), claimRefresh });
+    expect(claimRefresh).not.toHaveBeenCalled();
   });
 });
 
