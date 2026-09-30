@@ -120,6 +120,11 @@ router.post('/tech-trigger', async (req, res, next) => {
       serviceRecordId,
       triggeredBy: 'tech',
     });
+    // A tap since the visit suppressed the ask: the same 409 as /trigger, and
+    // no reviewUrl, so the tech app cannot hand the customer another link.
+    if (request.sendOutcome?.failed === 'review_link_clicked') {
+      return res.status(409).json({ error: REVIEW_LINK_CLICKED_REASON, code: 'review_link_clicked' });
+    }
 
     // `sent` is the truth (codex #4141 r3 P2): an immediate ask held by the
     // 3-day rule, the send window or a provider retry is queued, not sent —
@@ -141,9 +146,7 @@ router.post('/tech-trigger', async (req, res, next) => {
     const unsentFields = !unsent ? {}
       : unsent.uncertain
         ? { uncertain: true, message: 'Delivery could not be confirmed — this review text may already be with the customer. Check the SMS delivery log before sending another.' }
-        : unsent.failed === 'review_link_clicked'
-          ? { failed: unsent.failed, message: REVIEW_LINK_CLICKED_REASON }
-          : unsent.failed === 'send_failed_unqueued'
+        : unsent.failed === 'send_failed_unqueued'
           ? { failed: unsent.failed, message: 'The review text could not be sent. Try again in a few minutes.' }
           : unsent.failed
             ? { failed: unsent.failed, message: 'The review text was not sent: this customer cannot receive review texts right now.' }

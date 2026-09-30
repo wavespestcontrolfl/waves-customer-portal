@@ -141,6 +141,17 @@ describe('GET /review-card — tracked links only, never a send', () => {
     expect((await card()).card).toMatchObject({ serviceRecordId: 'rec-pm' });
   });
 
+  test('sibling records of one visit: the card carries the shared visit id and the same sibling wins in any order (Codex #5367 r7 P2)', async () => {
+    const a = { id: 'rec-a', scheduled_service_id: 'ss-1', service_type: 'Pest Control', service_date: '2026-09-25', ended_at: '2026-09-25T14:00:00Z', technician_name: 'Alex' };
+    const b = { ...a, id: 'rec-b' };
+    db.state.visits = [a, b];
+    const first = (await card()).card;
+    db.state.visits = [b, a];
+    const second = (await card()).card;
+    expect(first).toMatchObject({ serviceRecordId: 'rec-a', scheduledServiceId: 'ss-1' });
+    expect(second).toEqual(first);
+  });
+
   test('a same-day record with no ended_at sorts by its linked visit\'s completion instant', async () => {
     db.state.visits = [
       { id: 'rec-am', service_type: 'Pest Control', service_date: '2026-09-25', ended_at: '2026-09-25T14:00:00Z', technician_name: 'Alex' },

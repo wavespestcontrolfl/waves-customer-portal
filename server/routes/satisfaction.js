@@ -68,6 +68,9 @@ router.get('/review-card', async (req, res, next) => {
       .leftJoin('technicians', 'service_records.technician_id', 'technicians.id')
       .select(
         'service_records.id',
+        // The visit's stable id: siblings of one visit share it, so the
+        // client keys its dismissal by it rather than by whichever sibling wins.
+        'service_records.scheduled_service_id',
         'service_records.service_type',
         'service_records.service_date',
         'service_records.ended_at',
@@ -109,7 +112,10 @@ router.get('/review-card', async (req, res, next) => {
       ...(records || []).map((r) => ({ ...r, visitDate: r.service_date, completedMs: instant(r.ended_at || r.linked_actual_end_time || r.linked_check_out_time || r.linked_completed_at) })),
       ...(scheduled || []).map((r) => ({ ...r, visitDate: r.scheduled_date, completedMs: instant(r.actual_end_time || r.check_out_time || r.completed_at) })),
     ];
-    candidates.sort((a, b) => (ymd(b.visitDate).localeCompare(ymd(a.visitDate))) || (b.completedMs - a.completedMs));
+    // Last tie-break on the id, so the same sibling wins on every load.
+    const idOf = (r) => String(r.id || r.scheduled_service_id || '');
+    candidates.sort((a, b) => (ymd(b.visitDate).localeCompare(ymd(a.visitDate))) || (b.completedMs - a.completedMs)
+      || idOf(a).localeCompare(idOf(b)));
     const visit = candidates[0] || null;
     if (!visit) return res.json({ card: null, propertyScope });
 

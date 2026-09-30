@@ -866,7 +866,7 @@ router.post('/sms', async (req, res, next) => {
         const ReviewService = require('../services/review-request');
         const rr = await db('review_requests')
           .where({ id: String(reviewRequestId) })
-          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token', 'service_record_id', 'scheduled_service_id', 'created_at');
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token', 'service_record_id', 'created_at');
         if (!rr || rr.triggered_by !== 'auto_inline') {
           return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }

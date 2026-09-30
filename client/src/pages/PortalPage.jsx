@@ -2673,8 +2673,9 @@ function SavedVisitDetails({ visits }) {
 // this remembers the untracked bare-link tap and dismissals per completed visit
 // in the browser only — no new table.
 const REVIEW_CARD_DONE_KEY = 'waves.googleReviewCardDone';
-// A record-less completed visit is keyed by its scheduled visit id.
-const reviewCardKey = (c) => c.serviceRecordId || c.scheduledServiceId;
+// Keyed by the scheduled visit, which every service record of that visit
+// shares; an unlinked legacy record falls back to its own id.
+const reviewCardKey = (c) => c.scheduledServiceId || c.serviceRecordId;
 function reviewCardDone(serviceRecordId) {
   try { return JSON.parse(localStorage.getItem(REVIEW_CARD_DONE_KEY) || '[]').includes(serviceRecordId); } catch { return false; }
 }
