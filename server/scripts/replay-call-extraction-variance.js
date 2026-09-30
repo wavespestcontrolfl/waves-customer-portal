@@ -1323,6 +1323,8 @@ async function replayCall(call, context) {
     customer: linkedCustomer,
     contactPhone,
     failOpenEnabled: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+    // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+    unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
   });
   // The verdict was computed for the persisted (prior) extraction — it always
   // applies to priorV2 by construction.

@@ -344,6 +344,8 @@ async function main() {
       customer: linkedCustomer,
       contactPhone,
       failOpenEnabled: auditFailOpen,
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the same gate production reads.
+      unclearServiceAssessmentEnabled: process.env.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true',
     });
     const knownCustomer = failOpenOptions.knownCustomer;
     let routing = canAutoRoute(v2, {

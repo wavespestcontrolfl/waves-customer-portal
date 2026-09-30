@@ -8,7 +8,11 @@
 const { canAutoRoute } = require('../services/call-triage-flags');
 const CallRecordingProcessor = require('../services/call-recording-processor');
 
-const { resolveSchedulableCallService, forcedAssessmentBooking, demoteOpenTriageCards } = CallRecordingProcessor._test;
+const {
+  resolveSchedulableCallService, forcedAssessmentBooking, demoteOpenTriageCards,
+  currentDecisionVersion, unclearServiceAssessmentActive,
+} = CallRecordingProcessor._test;
+const { resolveCallBookingPrice, resolveCallFollowUpPlan } = require('../services/call-booking-catalog');
 const { buildRouteDecision, resolveDecisionVersion, V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
 
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
@@ -309,28 +313,73 @@ describe('ambiguous demotion forces the Waves Assessment row (codex r1 P1)', () 
   });
 
   const catalog = [
-    { id: 'svc-pest', name: 'Quarterly Pest Control' },
-    { id: 'svc-assess', name: 'Waves Assessment' },
+    { id: 'svc-pest', name: 'General Pest Control', billing_type: 'one_time' },
+    { id: 'svc-quarterly', name: 'Quarterly Pest Control Service', billing_type: 'recurring' },
+    { id: 'svc-reservice', name: 'Pest Re-Service', service_key: 'pest_re_service' },
+    { id: 'svc-assess', name: 'Waves Assessment', billing_type: 'one_time' },
   ];
+  const [pestRow, quarterlyRow, , assessRow] = catalog;
+  const noIntent = 'Agent: Hi.\nCaller: I saw a bug in the kitchen, not sure what it is, can someone come Tuesday at ten?\n';
+  const acceptedPlan = 'Agent: We can put you on quarterly pest control.\nCaller: Yes, that works, sign me up.\n';
+  const modelGuess = { is_lead: true, matched_service: 'General Pest Control', quoted_price: 189, follow_up_visit_mentioned: true, follow_up_date_time: '2026-10-16T10:00' };
 
-  test('a concrete resolved service is overridden by the Assessment row', () => {
-    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: catalog[0] });
-    expect(out).toEqual({ applied: true, row: catalog[1] });
+  test('a model-guessed concrete service is overridden by the Assessment row', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: pestRow, extracted: modelGuess, transcription: noIntent });
+    expect(out).toMatchObject({ applied: true, row: assessRow });
   });
 
   test('an unresolved (noMatch) service also lands on the Assessment row', () => {
-    const out = forcedAssessmentBooking({ serviceResolution: { ok: false, noMatch: true }, services: catalog, current: null });
-    expect(out.row).toBe(catalog[1]);
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: false, noMatch: true }, services: catalog, current: null, extracted: modelGuess, transcription: noIntent });
+    expect(out.row).toBe(assessRow);
   });
 
   test('a resolver hard veto is left alone (still un-bookable)', () => {
-    const out = forcedAssessmentBooking({ serviceResolution: { ok: false, reason: 'unsupported_service' }, services: catalog, current: null });
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: false, reason: 'unsupported_service' }, services: catalog, current: null, extracted: modelGuess, transcription: noIntent });
     expect(out.applied).toBe(false);
   });
 
   test('no Assessment row available: hold, never the flagged concrete service', () => {
-    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: [catalog[0]], current: catalog[0] });
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: [pestRow], current: pestRow, extracted: modelGuess, transcription: noIntent });
     expect(out).toMatchObject({ applied: true, unbookable: true });
+    expect(out.extractedPatch).toBeUndefined();
+  });
+
+  test('KEEPS a deterministic re-service row (codex r2 P1)', () => {
+    const reService = { id: 'svc-rs', name: 'Pest Re-Service', service_key: 'pest_re_service' };
+    const isRe = require('../services/call-booking-catalog').isReServiceCatalogRow;
+    // guard: the fixture really is a re-service row by the catalog's own predicate
+    expect(isRe(reService)).toBe(true);
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: [...catalog, reService], current: reService, extracted: modelGuess, transcription: noIntent });
+    expect(out).toMatchObject({ applied: false, kept: 're_service', row: reService });
+  });
+
+  test('KEEPS a recurring program the caller accepted (applyRecurringIntentDefault evidence) (codex r2 P1)', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: modelGuess, transcription: acceptedPlan });
+    expect(out).toMatchObject({ applied: false, kept: 'recurring_program', row: quarterlyRow });
+  });
+
+  test('a recurring program the MODEL guessed (no caller intent) is still forced to the Assessment', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: modelGuess, transcription: noIntent });
+    expect(out).toMatchObject({ applied: true, row: assessRow });
+  });
+
+  test('recurring evidence only counts on a lead (same guard as the default itself)', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: quarterlyRow, extracted: { ...modelGuess, is_lead: false }, transcription: acceptedPlan });
+    expect(out.applied).toBe(true);
+  });
+
+  test('a forced Assessment carries NO treatment quote and NO follow-up signals (codex r2 P1)', () => {
+    const out = forcedAssessmentBooking({ serviceResolution: { ok: true, service: 'General Pest Control' }, services: catalog, current: pestRow, extracted: modelGuess, transcription: noIntent });
+    const booking = { ...modelGuess, ...out.extractedPatch };
+    expect(booking.quoted_price).toBeNull();
+    expect(booking.follow_up_visit_mentioned).toBe(false);
+    expect(booking.follow_up_date_time).toBeNull();
+    // What the booking then computes from it:
+    expect(resolveCallBookingPrice({ quotedPrice: booking.quoted_price, catalogRow: { ...assessRow, base_price: 0, pricing_type: 'variable' } }).price).toBeNull();
+    expect(resolveCallFollowUpPlan({ extracted: booking, catalogRow: assessRow, parentDate: '2026-10-02', parentWindowStart: '10:00' })).toBeNull();
+    // ...whereas the un-patched extraction would have created both.
+    expect(resolveCallFollowUpPlan({ extracted: modelGuess, catalogRow: assessRow, parentDate: '2026-10-02', parentWindowStart: '10:00' })).not.toBeNull();
+    expect(resolveCallBookingPrice({ quotedPrice: modelGuess.quoted_price, catalogRow: assessRow }).price).toBe(189);
   });
 });
 
@@ -369,36 +418,98 @@ describe('full-transcript unsupported veto (codex r1 P1)', () => {
   });
 });
 
-describe('an open blocking card is demoted on reprocess (codex r1 P1)', () => {
-  function fakeConn() {
+describe('an open blocking card is demoted on reprocess, fenced to the owning pass (codex r1 + r2 P1)', () => {
+  function fakeConn({ owner = true } = {}) {
     const calls = [];
-    const chain = {
-      where(a) { calls.push(['where', a]); return chain; },
-      whereIn(c, v) { calls.push(['whereIn', c, v]); return chain; },
-      update(u) { calls.push(['update', u]); return Promise.resolve(2); },
+    const builder = (table) => {
+      const chain = {
+        where(a, b) { calls.push([table, 'where', b === undefined ? a : [a, b]]); return chain; },
+        whereIn(c, v) { calls.push([table, 'whereIn', c, v]); return chain; },
+        forUpdate() { calls.push([table, 'forUpdate']); return chain; },
+        first() { calls.push([table, 'first']); return Promise.resolve(table === 'call_log' && owner ? { id: 'call-1' } : undefined); },
+        update(u) { calls.push([table, 'update', u]); return Promise.resolve(2); },
+      };
+      return chain;
     };
-    const conn = (table) => { calls.push(['table', table]); return chain; };
-    conn.fn = { now: () => 'NOW' };
+    builder.fn = { now: () => 'NOW' };
+    // lockTriageCall issues a raw advisory lock on the trx.
+    builder.raw = (...a) => { calls.push(['raw', ...a]); return Promise.resolve({ rows: [] }); };
+    const conn = { transaction: async (fn) => fn(builder) };
     return { conn, calls };
   }
 
-  test('updates only open/in-progress BLOCKING rows of the waived flags to advisory', async () => {
+  test('under the triage lock, still owning the processing token: demotes only open/in-progress BLOCKING rows of the waived flags', async () => {
     const { conn, calls } = fakeConn();
-    const n = await demoteOpenTriageCards(conn, 'call-1', ['ambiguous_pest_or_service']);
+    const n = await demoteOpenTriageCards(conn, 'call-1', ['ambiguous_pest_or_service'], 'tok-1');
     expect(n).toBe(2);
-    expect(calls).toEqual([
-      ['table', 'triage_items'],
-      ['where', { call_log_id: 'call-1', severity: 'blocking' }],
-      ['whereIn', 'reason_code', ['ambiguous_pest_or_service']],
-      ['whereIn', 'status', ['open', 'in_progress']],
-      ['update', { severity: 'advisory', updated_at: 'NOW' }],
-    ]);
+    expect(calls.some((c) => c[0] === 'raw')).toBe(true); // the per-call triage lock
+    expect(calls).toEqual(expect.arrayContaining([
+      ['call_log', 'where', { id: 'call-1' }],
+      ['call_log', 'where', ['processing_token', 'tok-1']],
+      ['triage_items', 'where', { call_log_id: 'call-1', severity: 'blocking' }],
+      ['triage_items', 'whereIn', 'reason_code', ['ambiguous_pest_or_service']],
+      ['triage_items', 'whereIn', 'status', ['open', 'in_progress']],
+      ['triage_items', 'update', { severity: 'advisory', updated_at: 'NOW' }],
+    ]));
   });
 
-  test('gate off / nothing waived: no query', async () => {
+  test('a superseded worker (processing token no longer held) demotes nothing', async () => {
+    const { conn, calls } = fakeConn({ owner: false });
+    expect(await demoteOpenTriageCards(conn, 'call-1', ['ambiguous_pest_or_service'], 'stale-tok')).toBe(0);
+    expect(calls.some((c) => c[0] === 'triage_items')).toBe(false);
+  });
+
+  test('gate off / nothing waived: no transaction at all', async () => {
     const { conn, calls } = fakeConn();
-    expect(await demoteOpenTriageCards(conn, 'call-1', undefined)).toBe(0);
-    expect(await demoteOpenTriageCards(conn, 'call-1', [])).toBe(0);
+    conn.transaction = () => { throw new Error('no transaction expected'); };
+    expect(await demoteOpenTriageCards(conn, 'call-1', undefined, 'tok')).toBe(0);
+    expect(await demoteOpenTriageCards(conn, 'call-1', [], 'tok')).toBe(0);
     expect(calls).toEqual([]);
+  });
+});
+
+describe('the version tag needs BOTH gates (codex r2 P1)', () => {
+  const on = (...names) => (g) => names.includes(g);
+  test('unclear-service alone (fail-open off): no tag, plain base version', () => {
+    const e = on('callUnclearServiceAssessment');
+    expect(unclearServiceAssessmentActive(e)).toBe(false);
+    expect(currentDecisionVersion(e)).toBe('v2-1.50.0');
+  });
+  test('fail-open alone: no tag', () => {
+    expect(currentDecisionVersion(on('callFailOpenBooking'))).toBe('v2-1.50.0');
+  });
+  test('both gates on: tagged', () => {
+    const e = on('callUnclearServiceAssessment', 'callFailOpenBooking');
+    expect(unclearServiceAssessmentActive(e)).toBe(true);
+    expect(currentDecisionVersion(e)).toBe('v2-1.50.0+u');
+  });
+  test('neither: plain', () => {
+    expect(currentDecisionVersion(on())).toBe('v2-1.50.0');
+  });
+});
+
+describe('the offline production-parity audits carry the same effective gate (codex r2 P1)', () => {
+  const { buildFailOpenRoutingContext } = CallRecordingProcessor;
+  test('both gates on: the audit options carry it and canAutoRoute then lets the flag through', () => {
+    const { options } = buildFailOpenRoutingContext({ call: {}, customer: null, contactPhone: '+19415550100', failOpenEnabled: true, unclearServiceAssessmentEnabled: true });
+    expect(options.unclearServiceAssessment).toBe(true);
+    const r = canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), { addressValidation: AV_CLEAN, ...options });
+    expect(r.allowed).toBe(true);
+  });
+  test('gate on but fail-open off: NOT carried (the two-gate predicate)', () => {
+    const { options } = buildFailOpenRoutingContext({ call: {}, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, unclearServiceAssessmentEnabled: true });
+    expect(options).not.toHaveProperty('unclearServiceAssessment');
+  });
+  test('gate off: the options shape is byte-identical to before', () => {
+    const { options } = buildFailOpenRoutingContext({ call: {}, customer: null, contactPhone: '+19415550100', failOpenEnabled: true });
+    expect(Object.keys(options).sort()).toEqual(['callerAni', 'failOpen', 'knownCustomer']);
+  });
+  test('the three audit scripts pass the gate into the context builder', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const f of ['v2-promotion-readiness.js', 'replay-call-extraction-variance.js', 'verify-v2-shadow-path.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '../scripts', f), 'utf8');
+      expect(src).toMatch(/unclearServiceAssessmentEnabled:\s*process\.env\.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true'/);
+    }
   });
 });
