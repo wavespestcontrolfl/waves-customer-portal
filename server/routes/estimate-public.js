@@ -12784,23 +12784,23 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // delivered pay link exactly like today).
     let recurringCardEnrollmentResult = null;
     // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL, dark): a standard recurring
-    // signup's combined onboarding email carries the plan and the Auto Pay
-    // authorization, so the two separate emails (membership.started and the Auto
-    // Pay confirmation) become DURABLE owed records — written now, before
-    // enrollment; the Auto Pay one inside the enrollment transaction itself —
-    // resolved after the combined send by one delivery-time check (also swept
-    // every 10 minutes if this process dies): satisfied when a delivered
-    // combined email carried that exact section, otherwise sent exactly as
-    // today. Annual prepay sends no membership email today and stays out. Gate
-    // off, or a failed write of the membership record: nothing is owed and every
-    // email fires inline as before.
+    // signup's combined onboarding email carries the property and the plan, so
+    // membership.started becomes a DURABLE owed record — written now, resolved
+    // after the combined send by one delivery-time check (also swept every 10
+    // minutes if this process dies): satisfied when a delivered combined email
+    // carried that exact section, otherwise sent exactly as today. The "Auto Pay
+    // is set up" confirmation is NOT part of this: it stays its own email, sent
+    // inline by enrollment exactly as before (owner 2026-09-30). Annual prepay
+    // sends no membership email today and stays out. Gate off, or a failed write
+    // of the membership record: nothing is owed and every email fires inline as
+    // before.
     const signupEligible = SignupSingleEmail.signupLaneEligible({
       annualPrepaySelected,
       customerId,
       standardConversion: txResult.standardConversion,
     });
     // The key the combined email sends under (one per acceptance); the owed
-    // rows carry it so the delivery-time check finds that message.
+    // row carries it so the delivery-time check finds that message.
     const signupOnboardingKey = signupEligible
       ? require('../services/estimate-accepted-email').acceptedOnboardingKey(estimate.id, acceptanceRecordId)
       : null;
@@ -12812,9 +12812,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         membershipEmail: txResult.standardConversion.membershipEmail,
       })
       : null;
-    const signupLane = signupOwedMembershipId
-      ? { eligible: true, owedContext: { estimateId: estimate.id, onboardingKey: signupOnboardingKey } }
-      : { eligible: false, owedContext: null };
+    const signupLane = { eligible: !!signupOwedMembershipId };
     if (recurringCardPolicy.required && recurringCardVerification?.ok && customerId) {
       // Payer re-check against the RESOLVED customer (Codex #2668 round-3 P1):
       // an unlinked estimate resolves/creates its customer INSIDE the accept
@@ -12871,7 +12869,6 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           // the checkbox the customer saw even when the quote step degraded.
           consentVariant: annualPrepaySelected && recurringCardLaneActive
             && RecurringCards.isPrepayCardAndChargeEnabled() ? 'prepay_card' : null,
-          ...(signupLane.owedContext ? { signupOwed: signupLane.owedContext } : {}),
         }).catch(() => null);
       }
     } else if (recurringCardPolicy.exemptReason === 'saved_method_consented'
@@ -12909,18 +12906,13 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
           scheduledServiceId: postCommitPayerScopeSsId,
           // Post-acknowledgement opt-outs win (Codex r17).
           authorizedAt: acceptAuthorizedAt,
-          ...(signupLane.owedContext ? { signupOwed: signupLane.owedContext } : {}),
         });
         // A refused enrollment (method removed/unenrollable between the
         // policy check and here) must not fail silently — this accepted
         // plan would lose its card-on-file protection (Codex #2680). Same
         // office exception the fresh-capture path raises.
         if (enrollment.enrolled || enrollment.reason === 'already_enrolled') {
-          recurringCardEnrollmentResult = {
-            enrolled: true,
-            paymentMethodRowId: recurringCardPolicy.savedMethodRowId,
-            ...(enrollment.owedEmailId ? { owedEmailId: enrollment.owedEmailId, confirmationMethodRowId: enrollment.methodId } : {}),
-          };
+          recurringCardEnrollmentResult = { enrolled: true, paymentMethodRowId: recurringCardPolicy.savedMethodRowId };
         }
         if (!enrollment.enrolled && enrollment.reason !== 'already_enrolled') {
           await require('../services/notification-service').notifyAdmin(
@@ -13226,7 +13218,7 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
     // return a membershipEmail payload — no membership started, so send
     // nothing for it.
     // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): for a signup the combined
-    // onboarding email below carries the plan and the Auto Pay authorization,
+    // onboarding email below carries the property and the plan,
     // so membership.started is a durable owed record (signupLane above), resolved
     // after that send: satisfied when the delivered email carried the plan,
     // otherwise sent exactly as here. Gate off: the block below is unchanged.
@@ -13280,27 +13272,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
       };
       if (signupLane.eligible) {
         // The combined signup email, then the delivery-time resolution of the
-        // owed rows (also run by the scheduler sweep if this process dies here).
-        const owedIds = [signupOwedMembershipId, recurringCardEnrollmentResult?.owedEmailId].filter(Boolean);
+        // owed membership row (also run by the scheduler sweep if this process
+        // dies here).
         void (async () => {
           try {
             await sendEstimateAcceptedOnboarding({
               ...onboardingArgs,
               signup: {
                 membershipEmail: standardConversion.membershipEmail,
-                // Only a fresh enrollment whose own confirmation would have gone
-                // out (the enrolled method IS the one in charge) has an
-                // authorization to fold in.
-                paymentMethodRowId: recurringCardEnrollmentResult?.owedEmailId
-                  ? (recurringCardEnrollmentResult.confirmationMethodRowId || null)
-                  : null,
-                owed: { membershipId: signupOwedMembershipId, autopayId: recurringCardEnrollmentResult?.owedEmailId || null },
+                owed: { membershipId: signupOwedMembershipId },
               },
             });
           } catch (e) {
             logger.error(`[estimate-accept] onboarding email failed for customer ${customerId}: ${e.message}`);
           }
-          for (const id of owedIds) await SignupSingleEmail.resolveOwedEmail(id);
+          await SignupSingleEmail.resolveOwedEmail(signupOwedMembershipId);
         })();
       } else {
         void sendEstimateAcceptedOnboarding(onboardingArgs);

@@ -17,11 +17,11 @@
  * ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL, dark): when the accept route
  * passes `signup`, the email is sent from the gate-on template
  * (estimate.accepted_signup, transactional_required) and also carries the
- * property, the plan (membership.started's values) and the Auto Pay
- * authorization (autopay.enrollment_confirmation's payload). Before sending,
- * the values each section carries are recorded on the durable owed-email rows
- * (signup-single-email.js) so the delivery-time check can tell whether the
- * DELIVERED message covered them. A later acceptance the same ET day for a
+ * property and the plan (membership.started's values). There is NO payment
+ * section: the "Auto Pay is set up" confirmation stays its own email (owner
+ * 2026-09-30). Before sending, the values each section carries are recorded on
+ * the durable owed-email row (signup-single-email.js) so the delivery-time
+ * check can tell whether the DELIVERED message covered them. A later acceptance the same ET day for a
  * DIFFERENT property gets the short per-property template. Gate off / no
  * `signup`: exactly the email described above, byte for byte.
  */
@@ -146,9 +146,6 @@ async function buildSignupEmail({ customerId, estimateId, appointment, email, si
   const plan = signup.membershipEmail
     ? await safe('plan', () => require('./account-membership-email').buildMembershipStartedSection(signup.membershipEmail))
     : null;
-  const payment = signup.paymentMethodRowId
-    ? await safe('payment', () => require('./card-enrollment-email').buildAutopayPaymentSection({ customerId, paymentMethodRowId: signup.paymentMethodRowId }))
-    : null;
   // A later same-day acceptance for a DIFFERENT property is an added property —
   // but only when the email can name it; otherwise the full email (which names
   // nothing it can't) is the honest one.
@@ -161,11 +158,9 @@ async function buildSignupEmail({ customerId, estimateId, appointment, email, si
     templateKey: short ? SHORT_TEMPLATE_KEY : SIGNUP_TEMPLATE_KEY,
     category: short ? SIGNUP_SHORT_CATEGORY : SIGNUP_FULL_CATEGORY,
     plan,
-    payment,
     variables: {
       ...(property ? { property_heading: 'Property', property_address: property.full, property_street: property.street } : {}),
       ...(plan ? plan.variables : {}),
-      ...(payment ? payment.variables : {}),
     },
   };
 }
@@ -249,8 +244,7 @@ function renderedCarriesAcceptanceCopy(result) {
 
 // `signup` (GATE_SIGNUP_SINGLE_EMAIL only — the accept route passes it for a
 // standard recurring signup): { membershipEmail: <sendMembershipStarted args>,
-// paymentMethodRowId: <the freshly enrolled in-charge method, or null>,
-// owed: { membershipId, autopayId } <the durable owed-email rows> }.
+// owed: { membershipId } <the durable owed-email row> }.
 async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceLabel, appointment, acceptanceId = null, idempotencyKey, signup = null } = {}) {
   try {
     if (!estimateId) return null;
@@ -295,7 +289,6 @@ async function sendEstimateAcceptedOnboarding({ customerId, estimateId, serviceL
       // values (a failure here just leaves the separate email to send itself).
       try {
         await recordExpected(signup.owed?.membershipId, combined.plan ? sectionValues(combined.plan.variables) : []);
-        await recordExpected(signup.owed?.autopayId, combined.payment ? sectionValues(combined.payment.variables) : []);
       } catch (err) {
         logger.warn(`[estimate-accepted-email] could not record signup expectations for estimate ${estimateId}: ${EmailTemplateLibrary.redactEmailAddresses(err.message)}`);
       }

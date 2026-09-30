@@ -13,9 +13,6 @@ jest.mock('../services/account-membership-email', () => ({
   buildMembershipStartedSection: jest.fn(),
   sendMembershipStarted: jest.fn(async () => ({ ok: true })),
 }));
-jest.mock('../services/card-enrollment-email', () => ({
-  buildAutopayPaymentSection: jest.fn(),
-}));
 jest.mock('../services/signup-single-email', () => ({
   ...jest.requireActual('../services/signup-single-email'),
   recordExpected: jest.fn(async () => {}),
@@ -24,12 +21,10 @@ jest.mock('../services/signup-single-email', () => ({
 const db = require('../models/db');
 const EmailTemplates = require('../services/email-template-library');
 const Membership = require('../services/account-membership-email');
-const CardEmail = require('../services/card-enrollment-email');
 const Signup = require('../services/signup-single-email');
 const gates = require('../config/feature-gates');
 const { sendEstimateAcceptedOnboarding } = require('../services/estimate-accepted-email');
 
-const AUTH_TEXT = 'By checking this box, I authorize Waves Pest Control, LLC to save this card and charge it for future service visits.';
 const PLAN = {
   planName: 'WaveGuard Gold',
   variables: {
@@ -37,16 +32,8 @@ const PLAN = {
     plan_rate: '$89.00', plan_billing: 'monthly', plan_services: 'Quarterly Pest Control',
   },
 };
-const PAYMENT = {
-  authorizationText: AUTH_TEXT,
-  variables: {
-    payment_heading: 'Payment', payment_method_label: 'Visa ending 4242',
-    payment_timing_line: 'Your card is charged monthly.', authorization_intro: 'Your Auto Pay authorization, exactly as you agreed to it:',
-    authorization_text: AUTH_TEXT, payment_manage_line: 'You can turn Auto Pay off anytime.',
-  },
-};
 const MEMBERSHIP_ARGS = { customerId: 'cust-1', membershipTier: 'Gold', monthlyRate: 89 };
-const SIGNUP = { membershipEmail: MEMBERSHIP_ARGS, paymentMethodRowId: 'pm-1', owed: { membershipId: 'owed-m', autopayId: 'owed-a' } };
+const SIGNUP = { membershipEmail: MEMBERSHIP_ARGS, owed: { membershipId: 'owed-m' } };
 
 function chain(result) {
   const qb = {};
@@ -88,7 +75,6 @@ beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
   Membership.buildMembershipStartedSection.mockResolvedValue(PLAN);
-  CardEmail.buildAutopayPaymentSection.mockResolvedValue(PAYMENT);
 });
 
 describe('gate reader and lane eligibility', () => {
@@ -144,7 +130,7 @@ describe('the onboarding email itself', () => {
   describe('gate on', () => {
     beforeEach(() => { process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true'; });
 
-    test('the full email rides the transactional_required signup template with property, plan and payment', async () => {
+    test('the full email rides the transactional_required signup template with property and plan, and no payment section', async () => {
       mockDb({ stamped: { service_address_line1: '77 Coral Way', service_address_line2: 'Unit 3', service_address_city: 'Venice', service_address_state: 'FL', service_address_zip: '34285' } });
       EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
       await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
@@ -155,9 +141,11 @@ describe('the onboarding email itself', () => {
         property_heading: 'Property',
         property_address: '77 Coral Way Unit 3, Venice, FL 34285',
         plan_name: 'WaveGuard Gold',
-        payment_method_label: 'Visa ending 4242',
-        authorization_text: AUTH_TEXT,
       });
+      // The Auto Pay confirmation stays its own email: nothing of it rides here.
+      for (const key of ['payment_heading', 'payment_method_label', 'payment_timing_line', 'authorization_intro', 'authorization_text', 'payment_manage_line']) {
+        expect(call.payload[key]).toBeUndefined();
+      }
     });
 
     test('what each section will carry is recorded on the owed rows BEFORE the email is sent', async () => {
@@ -166,12 +154,8 @@ describe('the onboarding email itself', () => {
       Signup.recordExpected.mockImplementation(async (id, values) => { order.push(['expected', id, values]); });
       EmailTemplates.sendTemplate.mockImplementation(async () => { order.push(['send']); return { sent: true }; });
       await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
-      expect(order.map((o) => o[0])).toEqual(['expected', 'expected', 'send']);
+      expect(order.map((o) => o[0])).toEqual(['expected', 'send']);
       expect(order[0].slice(1)).toEqual(['owed-m', ['WaveGuard Gold', 'October 6, 2026', '$89.00', 'monthly', 'Quarterly Pest Control']]);
-      expect(order[1][1]).toBe('owed-a');
-      expect(order[1][2]).toContain(AUTH_TEXT);
-      expect(order[1][2]).toContain('Visa ending 4242');
-      expect(order[1][2]).not.toContain('Payment'); // headings are not values
     });
 
     test('property falls back to the estimate address, then the customer street address, never the nickname', async () => {
@@ -191,17 +175,8 @@ describe('the onboarding email itself', () => {
       expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.property_address).toBe('9 Home St, Sarasota, FL 34236');
     });
 
-    test('no payment method to fold in: no payment section and nothing recorded for it', async () => {
-      mockDb();
-      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
-      await sendEstimateAcceptedOnboarding({ ...base, signup: { ...SIGNUP, paymentMethodRowId: null, owed: { membershipId: 'owed-m', autopayId: null } } });
-      expect(CardEmail.buildAutopayPaymentSection).not.toHaveBeenCalled();
-      expect(EmailTemplates.sendTemplate.mock.calls[0][0].payload.authorization_text).toBeUndefined();
-    });
-
     test('a section that cannot be built, or a builder that throws, never blocks the email', async () => {
       mockDb();
-      CardEmail.buildAutopayPaymentSection.mockResolvedValue(null);
       Membership.buildMembershipStartedSection.mockRejectedValue(new Error('boom'));
       EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
       const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
@@ -213,7 +188,7 @@ describe('the onboarding email itself', () => {
       test('a later acceptance the same ET day for a DIFFERENT property gets the short email, no app section', async () => {
         mockDb({ earlier: [earlierFull()] });
         EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
-        await sendEstimateAcceptedOnboarding({ ...base, acceptanceId: 'acc-2', signup: { ...SIGNUP, paymentMethodRowId: null } });
+        await sendEstimateAcceptedOnboarding({ ...base, acceptanceId: 'acc-2', signup: SIGNUP });
         const call = EmailTemplates.sendTemplate.mock.calls[0][0];
         expect(call.templateKey).toBe('estimate.accepted_additional_property');
         expect(call.categories).toEqual(['estimate_accepted_onboarding', 'signup_short']);

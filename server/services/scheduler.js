@@ -3504,7 +3504,7 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // EVERY 10 MIN — Deliver queued new-recurring welcome texts (and the durable owed signup emails). Booking paths
+  // EVERY 10 MIN — Deliver queued new-recurring welcome texts (and the durable owed signup membership email). Booking paths
   // enqueue the welcome (sms_sequences, ~1h delay) so it never lands
   // back-to-back with the appointment confirmation; this tick sends the ones
   // whose delay has elapsed. runExclusive: overlapping deploy instances
@@ -3519,12 +3519,12 @@ function initScheduledJobs() {
           logger.info(`New-recurring welcome queue: ${result.sent} sent, ${result.skipped} skipped, ${result.errors} errors`);
         }
         // ONE SIGNUP EMAIL (GATE_SIGNUP_SINGLE_EMAIL): the durable owed
-        // membership / Auto Pay emails share this queue and tick. No rows exist
+        // membership email shares this queue and tick. No rows exist
         // while the gate has never been on.
         const { processDueSignupOwedEmails } = require('./signup-single-email');
         const owed = await processDueSignupOwedEmails();
-        if (owed.satisfied > 0 || owed.sent > 0 || owed.errors > 0) {
-          logger.info(`Signup owed emails: ${owed.satisfied} covered by the signup email, ${owed.sent} sent, ${owed.requeued} requeued, ${owed.errors} errors`);
+        if (owed.satisfied > 0 || owed.sent > 0 || owed.errors > 0 || owed.gaveUp > 0) {
+          logger.info(`Signup owed emails: ${owed.satisfied} covered by the signup email, ${owed.sent} sent, ${owed.requeued} requeued, ${owed.gaveUp} gave up, ${owed.errors} errors`);
         }
       });
     } catch (err) {

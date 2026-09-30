@@ -15,7 +15,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({ sendMembershipStarted: jest.fn(async () => ({ ok: true })) }));
-jest.mock('../services/card-enrollment-email', () => ({ sendAutopayEnrollmentConfirmationDetailed: jest.fn(async () => ({ outcome: 'sent', result: { sent: true } })) }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => {}) }));
 const { randomUUID } = require('node:crypto');
 
 postgres('one signup email against migrated PostgreSQL', () => {
@@ -72,7 +72,7 @@ postgres('one signup email against migrated PostgreSQL', () => {
 
   const Signup = require('../services/signup-single-email');
   const Membership = require('../services/account-membership-email');
-  const CardEmail = require('../services/card-enrollment-email');
+  const Notifications = require('../services/notification-service');
 
   describe('added property (same-ET-day short email)', () => {
     const { _private } = require('../services/estimate-accepted-email');
@@ -181,13 +181,13 @@ postgres('one signup email against migrated PostgreSQL', () => {
     const owedRows = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).orderBy('created_at');
     const dueNow = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).update({ next_send_at: new Date(Date.now() - 1000) });
     const membership = () => Signup.recordOwedMembership(trx, { customerId, estimateId, onboardingKey: KEY, membershipEmail: { ...MEMBERSHIP_ARGS, customerId } });
-    const autopay = (handle = trx) => Signup.recordOwedAutopay(handle, { customerId, paymentMethodRowId: 'pm-row-1', estimateId, onboardingKey: KEY });
     const delivered = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, ...overrides });
 
     beforeEach(() => {
       estimateId = randomUUID();
       Membership.sendMembershipStarted.mockClear().mockResolvedValue({ ok: true });
-      CardEmail.sendAutopayEnrollmentConfirmationDetailed.mockClear().mockResolvedValue({ outcome: 'sent', result: { sent: true } });
+      Notifications.notifyAdmin.mockClear();
+      require('../services/logger').error.mockClear();
     });
 
     test('an owed record is written once per email, due a few minutes out', async () => {
@@ -199,42 +199,21 @@ postgres('one signup email against migrated PostgreSQL', () => {
       expect(row.metadata).toMatchObject({ kind: 'membership', onboarding_key: KEY, owed_key: `membership:${estimateId}` });
     });
 
-    test('the Auto Pay record commits and rolls back WITH the enrollment transaction', async () => {
-      await expect(trx.transaction(async (sp) => { await autopay(sp); throw new Error('enrollment rolled back'); })).rejects.toThrow('enrollment rolled back');
-      expect(await owedRows()).toHaveLength(0);
-      await trx.transaction(async (sp) => { await autopay(sp); });
-      expect(await owedRows()).toHaveLength(1);
-    });
-
-    test('a failed write can never abort the enrollment transaction: it returns null and the caller sends inline', async () => {
-      const id = await trx.transaction(async (sp) => {
-        const owed = await Signup.recordOwedAutopay(sp, { customerId: randomUUID(), paymentMethodRowId: 'pm', estimateId, onboardingKey: KEY }); // FK violation
-        expect(owed).toBeNull();
-        expect(await sp('customers').where({ id: customerId }).first('id')).toBeTruthy(); // outer transaction still usable
-        return owed;
-      });
-      expect(id).toBeNull();
-    });
-
-    test('CRASH SAFETY: the process dies right after enrollment (no fast path ever runs); the sweep still sends each owed email exactly as today', async () => {
+    test('CRASH SAFETY: the process dies right after the accept (no fast path ever runs); the sweep still sends the owed email exactly as today', async () => {
       await membership();
-      await autopay();
-      // Nothing is sent, held in memory or timer-driven: only rows exist.
+      // Nothing is sent, held in memory or timer-driven: only the row exists.
       expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-      expect(CardEmail.sendAutopayEnrollmentConfirmationDetailed).not.toHaveBeenCalled();
       expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ sent: 0 }); // not due yet
       await dueNow();
-      expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ sent: 2, satisfied: 0 });
+      expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ sent: 1, satisfied: 0 });
       expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
       const args = Membership.sendMembershipStarted.mock.calls[0][0];
       expect(args).toMatchObject({ customerId, sourceId: 'estimate:est-1', membershipTier: 'Gold', monthlyRate: 89, billingLane: 'monthly_membership', perApplicationAmount: null });
       expect(args.effectiveDate).toEqual(new Date('2026-10-06T16:00:00Z'));
-      expect(CardEmail.sendAutopayEnrollmentConfirmationDetailed).toHaveBeenCalledWith({ customerId, paymentMethodRowId: 'pm-row-1' });
-      expect((await owedRows()).map((r) => r.status)).toEqual(['completed', 'completed']);
+      expect((await owedRows()).map((r) => r.status)).toEqual(['completed']);
       // Idempotent: a second sweep sends nothing more.
       await Signup.processDueSignupOwedEmails();
       expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
-      expect(CardEmail.sendAutopayEnrollmentConfirmationDetailed).toHaveBeenCalledTimes(1);
     });
 
     test('a claim a crashed sweep left in "sending" is recovered and resolved', async () => {
@@ -246,22 +225,16 @@ postgres('one signup email against migrated PostgreSQL', () => {
 
     describe('covered by the delivered combined email', () => {
       const PLAN_VALUES = ['WaveGuard Gold', 'October 6, 2026', '$89.00'];
-      const PAY_VALUES = ['Visa ending 4242', 'AUTHORIZATION TEXT, word for word'];
       let membershipId;
-      let autopayId;
       beforeEach(async () => {
         membershipId = await membership();
-        autopayId = await autopay();
         await Signup.recordExpected(membershipId, PLAN_VALUES);
-        await Signup.recordExpected(autopayId, PAY_VALUES);
       });
 
-      test('a delivered email carrying every value satisfies both: nothing else is sent', async () => {
-        const messageId = await delivered(`${PLAN_VALUES.join('\n')}\n${PAY_VALUES.join('\n')}`);
+      test('a delivered email carrying every value satisfies it: nothing else is sent', async () => {
+        const messageId = await delivered(PLAN_VALUES.join('\n'));
         expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-        expect(await Signup.resolveOwedEmail(autopayId)).toEqual({ satisfied: true });
         expect(Membership.sendMembershipStarted).not.toHaveBeenCalled();
-        expect(CardEmail.sendAutopayEnrollmentConfirmationDetailed).not.toHaveBeenCalled();
         const [row] = await owedRows();
         expect(row).toMatchObject({ status: 'completed' });
         expect(row.metadata.satisfied_by_message).toBe(messageId);
@@ -287,9 +260,8 @@ postgres('one signup email against migrated PostgreSQL', () => {
       });
 
       test('a delivered email missing ONE value does not cover (an edited template that kept only a row)', async () => {
-        await delivered(`${PLAN_VALUES.slice(0, 2).join('\n')}\n${PAY_VALUES.join('\n')}`);
+        await delivered(PLAN_VALUES.slice(0, 2).join('\n'));
         expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ sent: true });
-        expect(await Signup.resolveOwedEmail(autopayId)).toEqual({ satisfied: true }); // its own section is intact
       });
 
       test('no recorded expectation (the combined email never got that far): sent separately', async () => {
@@ -304,23 +276,93 @@ postgres('one signup email against migrated PostgreSQL', () => {
         expect(Membership.sendMembershipStarted).toHaveBeenCalledTimes(1);
       });
 
-      test('the gate turned off between accept and delivery changes nothing: uncovered mail still sends, covered mail is still covered', async () => {
+      test('the gate turned off between accept and delivery changes nothing: covered mail is still covered', async () => {
         delete process.env.GATE_SIGNUP_SINGLE_EMAIL;
         await delivered(PLAN_VALUES.join('\n'));
         expect(await Signup.resolveOwedEmail(membershipId)).toEqual({ satisfied: true });
-        expect(await Signup.resolveOwedEmail(autopayId)).toEqual({ sent: true });
       });
     });
 
-    describe('retries', () => {
-      test('a membership send that fails is retried, then given up after the attempt cap', async () => {
+    describe('retries (durable backoff, never a silent drop)', () => {
+      const failing = () => Membership.sendMembershipStarted.mockResolvedValue({ ok: false, reason: 'provider_down' });
+      const minutesUntilNext = async (id) => Math.round((new Date((await trx('sms_sequences').where({ id }).first()).next_send_at).getTime() - Date.now()) / 60000);
+      const backdate = (id, hours) => trx('sms_sequences').where({ id }).update({ created_at: new Date(Date.now() - hours * 60 * 60 * 1000) });
+
+      test('a failing send backs off 15m, 30m, 1h, 2h, then every 4h, and stays active (attempts past the third are NOT cancelled)', async () => {
         const id = await membership();
-        Membership.sendMembershipStarted.mockResolvedValue({ ok: false, reason: 'prefs_unavailable' });
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ requeued: true });
-        expect((await owedRows())[0]).toMatchObject({ status: 'active' });
-        await trx('sms_sequences').where({ id }).update({ step: 3 });
+        failing();
+        const waits = [];
+        for (let attempt = 1; attempt <= 7; attempt += 1) {
+          await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
+          expect(await Signup.resolveOwedEmail(id)).toEqual({ requeued: true });
+          expect((await owedRows())[0]).toMatchObject({ status: 'active', step: attempt });
+          waits.push(await minutesUntilNext(id));
+        }
+        expect(waits).toEqual([15, 30, 60, 120, 240, 240, 240]);
+        expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
+      });
+
+      test('every attempt from the third on is logged at error level (earlier ones warn)', async () => {
+        const logger = require('../services/logger');
+        const id = await membership();
+        failing();
+        for (let attempt = 1; attempt <= 4; attempt += 1) {
+          logger.warn.mockClear(); logger.error.mockClear();
+          await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
+          await Signup.resolveOwedEmail(id);
+          const loud = logger.error.mock.calls.some(([m]) => String(m).includes('not sent'));
+          expect(loud).toBe(attempt >= 3);
+        }
+      });
+
+      test('a send that recovers after a long outage still goes out (a 45-minute provider outage drops nothing)', async () => {
+        const id = await membership();
+        failing();
+        for (let i = 0; i < 4; i += 1) {
+          await trx('sms_sequences').where({ id }).update({ next_send_at: new Date(Date.now() - 1000) });
+          await Signup.resolveOwedEmail(id);
+        }
+        Membership.sendMembershipStarted.mockResolvedValue({ ok: true });
+        expect(await Signup.resolveOwedEmail(id)).toEqual({ sent: true });
+        expect((await owedRows())[0]).toMatchObject({ status: 'completed' });
+        expect(Notifications.notifyAdmin).not.toHaveBeenCalled();
+      });
+
+      test('past 48 hours it stops: the row is escalated (not cancelled) and ONE actionable operator alert is raised', async () => {
+        const id = await membership();
+        await backdate(id, 49);
+        failing();
+        expect(await Signup.resolveOwedEmail(id)).toEqual({ gaveUp: true });
+        const [row] = await owedRows();
+        expect(row).toMatchObject({ status: 'escalated' });
+        expect(row.metadata).toMatchObject({ gave_up: true, last_error: 'provider_down' });
+        expect(Notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+        const [category, title, body, opts] = Notifications.notifyAdmin.mock.calls[0];
+        expect(category).toBe('alert');
+        expect(title).toMatch(/membership email not delivered/i);
+        expect(body).toMatch(/send it by hand/i);
+        expect(opts).toMatchObject({ link: `/admin/customers?customerId=${customerId}`, dedupeKey: `signup-owed-email-gave-up:${id}` });
+        // Nothing more is claimed or sent.
+        await dueNow();
         expect(await Signup.resolveOwedEmail(id)).toEqual({ skipped: true });
-        expect((await owedRows())[0]).toMatchObject({ status: 'cancelled' });
+        expect(Notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+      });
+
+      test('a sender that THROWS past 48 hours also escalates and alerts', async () => {
+        const id = await membership();
+        await backdate(id, 60);
+        Membership.sendMembershipStarted.mockRejectedValue(new Error('boom'));
+        expect(await Signup.resolveOwedEmail(id)).toMatchObject({ error: true });
+        expect((await owedRows())[0]).toMatchObject({ status: 'escalated' });
+        expect(Notifications.notifyAdmin).toHaveBeenCalledTimes(1);
+      });
+
+      test('the sweep reports a give-up separately from errors', async () => {
+        const id = await membership();
+        await backdate(id, 49);
+        await dueNow();
+        failing();
+        expect(await Signup.processDueSignupOwedEmails()).toMatchObject({ gaveUp: 1, sent: 0 });
       });
 
       test('a sender-decided skip (opt-out, one_time lane) is final', async () => {
@@ -330,25 +372,12 @@ postgres('one signup email against migrated PostgreSQL', () => {
         expect((await owedRows())[0].metadata).toMatchObject({ send_reason: 'email_opted_out' });
       });
 
-      test('an Auto Pay confirmation that FAILED is retried, never completed; a deterministic skip is final', async () => {
-        const id = await autopay();
-        CardEmail.sendAutopayEnrollmentConfirmationDetailed.mockResolvedValue({ outcome: 'failed', result: null });
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ requeued: true });
-        expect((await owedRows())[0]).toMatchObject({ status: 'active' });
-        await trx('sms_sequences').where({ id }).update({ next_send_at: new Date() });
-        CardEmail.sendAutopayEnrollmentConfirmationDetailed.mockResolvedValue({ outcome: 'sent', result: { sent: true } });
-        expect(await Signup.resolveOwedEmail(id)).toEqual({ sent: true });
-        expect((await owedRows())[0]).toMatchObject({ status: 'completed' });
-        const id2 = await Signup.recordOwedAutopay(trx, { customerId, paymentMethodRowId: 'pm-row-2', estimateId, onboardingKey: KEY });
-        CardEmail.sendAutopayEnrollmentConfirmationDetailed.mockResolvedValue({ outcome: 'skipped', result: null });
-        expect(await Signup.resolveOwedEmail(id2)).toEqual({ sent: true });
-      });
-
-      test('a sender that throws releases the claim for the next sweep', async () => {
+      test('a sender that throws releases the claim for the next sweep, on the backoff', async () => {
         const id = await membership();
         Membership.sendMembershipStarted.mockRejectedValue(new Error('boom'));
         expect(await Signup.resolveOwedEmail(id)).toEqual({ error: true });
         expect((await owedRows())[0]).toMatchObject({ status: 'active' });
+        expect(await minutesUntilNext(id)).toBe(15);
       });
     });
   });
@@ -396,6 +425,12 @@ postgres('one signup email against migrated PostgreSQL', () => {
       customer_portal_url: 'https://portal.wavespestcontrol.com/login', company_phone: '(941) 297-5749',
     };
     const template = (key) => trx('email_templates').where({ template_key: key }).first();
+    const third = require('../models/migrations/20260930000000_signup_email_drop_payment_section');
+    const PAYMENT_KEYS = third._private.PAYMENT_VARIABLES;
+    const activeVersion = async (key) => {
+      const t = await template(key);
+      return { t, v: await trx('email_template_versions').where({ id: t.active_version_id }).first() };
+    };
 
     test('the plain onboarding email keeps service_operational and renders byte-identically without the new variables (gate off)', async () => {
       const t = await template('estimate.accepted_onboarding');
@@ -418,18 +453,16 @@ postgres('one signup email against migrated PostgreSQL', () => {
       expect(membershipTemplate.send_stream).toBe('transactional_required');
     });
 
-    test('the signup template previews every section; the no-Auto-Pay fixture drops only Payment', async () => {
+    test('the signup template previews the property, plan and app sections, and NO payment section (the Auto Pay email stays its own email)', async () => {
       const t = await template('estimate.accepted_signup');
       const fixtures = await trx('email_template_fixtures').where({ template_id: t.id });
       const full = fixtures.find((f) => f.is_default);
-      const noPay = fixtures.find((f) => f.name === 'Signup email — no Auto Pay section');
       const r = await lib.renderVersion(t.active_version_id, full.payload);
-      for (const part of ['PROPERTY', 'YOUR PLAN', 'PAYMENT', 'Auto Pay method:', 'exactly as you agreed to it', 'enter your texted code', 'You accepted electronically']) expect(r.text).toContain(part);
+      for (const part of ['PROPERTY', 'YOUR PLAN', 'enter your texted code', 'You accepted electronically']) expect(r.text).toContain(part);
+      for (const gone of ['PAYMENT', 'Auto Pay method:', 'exactly as you agreed to it']) expect(r.text).not.toContain(gone);
       expect(r.validation.ok).toBe(true);
-      const r2 = await lib.renderVersion(t.active_version_id, noPay.payload);
-      expect(r2.text).toContain('YOUR PLAN');
-      expect(r2.text).not.toContain('PAYMENT');
       expect(r.subject).toBe("You're booked, Taylor — here's what happens next");
+      for (const f of fixtures) expect(Object.keys(f.payload).filter((k) => PAYMENT_KEYS.includes(k))).toEqual([]);
     });
 
     test('the short template names the property, has the plan and no app section', async () => {
@@ -450,7 +483,8 @@ postgres('one signup email against migrated PostgreSQL', () => {
       const after = await template('estimate.accepted_signup');
       expect(after.name).toBe('Admin-renamed');
       expect(after.active_version_id).toBe(before.active_version_id);
-      expect(await trx('email_template_versions').where({ template_id: before.id })).toHaveLength(1);
+      // Version 1 from that migration, version 2 from the Payment-drop migration; a re-run adds none.
+      expect(await trx('email_template_versions').where({ template_id: before.id })).toHaveLength(2);
     });
 
     test('a race in the earlier migration (base published WITHOUT the sections) cannot leave gate-on folding nothing: this migration inserts them', async () => {
@@ -465,9 +499,76 @@ postgres('one signup email against migrated PostgreSQL', () => {
       await second.up(trx);
       const rebuilt = await template('estimate.accepted_signup');
       const version = await trx('email_template_versions').where({ id: rebuilt.active_version_id }).first();
-      expect(JSON.stringify(version.blocks)).toContain('{{authorization_text}}');
       expect(JSON.stringify(version.blocks)).toContain('{{plan_name}}');
       expect(rebuilt.send_stream).toBe('transactional_required');
+    });
+
+    describe('20260930000000 drops the Payment section (owner 2026-09-30: Auto Pay stays its own email)', () => {
+      const KEYS = ['estimate.accepted_onboarding', 'estimate.accepted_signup', 'estimate.accepted_additional_property'];
+      const paymentBlocks = third._private.PAYMENT_BLOCKS;
+
+      test('applied: no active version references a payment variable, plan and app sections remain, fixtures carry no payment values', async () => {
+        for (const key of KEYS) {
+          const { t, v } = await activeVersion(key);
+          const text = JSON.stringify(v.blocks);
+          for (const name of PAYMENT_KEYS) expect(text).not.toContain(`{{${name}}}`);
+          expect(text).toContain('{{plan_name}}');
+          const fixtures = await trx('email_template_fixtures').where({ template_id: t.id });
+          expect(fixtures.length).toBeGreaterThan(0);
+          for (const f of fixtures) expect(Object.keys(f.payload).filter((k) => PAYMENT_KEYS.includes(k))).toEqual([]);
+          const r = await lib.renderVersion(t.active_version_id, fixtures.find((f) => f.is_default).payload);
+          expect(r.text).not.toContain('PAYMENT');
+          expect(r.validation.ok).toBe(true);
+        }
+        const { v } = await activeVersion('estimate.accepted_signup');
+        expect(JSON.stringify(v.blocks)).toContain('enter your texted code');
+      });
+
+      test('the redundant with/without fixtures are gone and the added-property preview is named plainly', async () => {
+        const signup = await template('estimate.accepted_signup');
+        const names = (await trx('email_template_fixtures').where({ template_id: signup.id })).map((f) => f.name);
+        expect(names).not.toContain('Signup email — no Auto Pay section');
+        const short = await template('estimate.accepted_additional_property');
+        const shortNames = (await trx('email_template_fixtures').where({ template_id: short.id })).map((f) => f.name);
+        expect(shortNames).toEqual(['Added property']);
+      });
+
+      test('a second run changes nothing (idempotent)', async () => {
+        const before = await Promise.all(KEYS.map(async (k) => (await template(k)).active_version_id));
+        await third.up(trx);
+        const after = await Promise.all(KEYS.map(async (k) => (await template(k)).active_version_id));
+        expect(after).toEqual(before);
+      });
+
+      test('a template whose Payment blocks were reshaped by staff is left whole, not half-patched', async () => {
+        const { t, v } = await activeVersion('estimate.accepted_signup');
+        const blocks = JSON.parse(JSON.stringify(v.blocks));
+        const at = blocks.findIndex((b) => b.type === 'heading' && b.content === '{{plan_heading}}');
+        // Staff re-added a customised payment paragraph (not the seeded run).
+        blocks.splice(at + 2, 0, { type: 'paragraph', content: 'Custom {{payment_manage_line}}' });
+        await trx('email_template_versions').where({ id: v.id }).update({ blocks: JSON.stringify(blocks) });
+        await third.up(trx);
+        const now = await template('estimate.accepted_signup');
+        expect(now.active_version_id).toBe(t.active_version_id);
+        expect(JSON.stringify((await trx('email_template_versions').where({ id: now.active_version_id }).first()).blocks)).toContain('Custom {{payment_manage_line}}');
+      });
+
+      test('the seeded run is removed exactly, wherever it sits, and only it', async () => {
+        const { t, v } = await activeVersion('estimate.accepted_signup');
+        const blocks = JSON.parse(JSON.stringify(v.blocks));
+        const at = blocks.findIndex((b) => b.type === 'heading' && b.content === '{{plan_heading}}');
+        blocks.splice(at + 2, 0, ...JSON.parse(JSON.stringify(paymentBlocks)));
+        await trx('email_template_versions').where({ id: v.id }).update({ blocks: JSON.stringify(blocks) });
+        await trx('email_template_fixtures').where({ template_id: t.id, is_default: true }).update({ payload: JSON.stringify({ first_name: 'Taylor', payment_heading: 'Payment', authorization_text: 'x' }) });
+        await third.up(trx);
+        const now = await template('estimate.accepted_signup');
+        expect(now.active_version_id).not.toBe(t.active_version_id);
+        const next = await trx('email_template_versions').where({ id: now.active_version_id }).first();
+        expect(next.blocks).toEqual(v.blocks);
+        expect((await trx('email_template_versions').where({ id: v.id }).first()).status).toBe('archived');
+        const fixture = await trx('email_template_fixtures').where({ template_id: t.id, is_default: true }).first();
+        expect(fixture.payload).toEqual({ first_name: 'Taylor' });
+      });
     });
 
     test('a lost race is NOT swallowed: the unique violation aborts the migration so it is not recorded as applied', async () => {

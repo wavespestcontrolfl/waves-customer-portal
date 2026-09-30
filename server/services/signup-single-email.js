@@ -3,28 +3,31 @@
  * check, and the DURABLE owed-email records (GATE_SIGNUP_SINGLE_EMAIL, dark;
  * owner-approved 2026-09-29).
  *
- * At a standard recurring signup three emails used to go out separately:
- * "You're booked" (estimate.accepted_onboarding), "Your Waves membership is
- * active" (membership.started) and "Auto Pay is set up" (the Auto Pay
- * confirmation, fired from enrollment). With the gate on, the first one is the
+ * At a standard recurring signup two emails used to go out separately:
+ * "You're booked" (estimate.accepted_onboarding) and "Your Waves membership is
+ * active" (membership.started). With the gate on, the first one is the
  * combined signup email (estimate.accepted_signup, on the same
- * transactional_required stream as the other two, so an unsubscribe can never
- * swallow the plan record or the authorization copy; see
- * estimate-accepted-email.js), and the other two become OWED records:
+ * transactional_required stream as membership.started, so an unsubscribe can
+ * never swallow the plan record; see estimate-accepted-email.js) and it also
+ * carries the property and the plan, so membership.started becomes an OWED
+ * record. The "Auto Pay is set up" confirmation is NOT part of this: it stays
+ * its own email, sent by enrollment exactly as before (owner 2026-09-30).
  *
- *   - a row in sms_sequences (the queue the welcome email already uses, swept
- *     every 10 minutes by the same scheduler tick), written when the email
- *     would otherwise have been sent — the Auto Pay one inside the enrollment
- *     transaction itself, so it commits or rolls back with the enrollment;
+ *   - the owed record is a row in sms_sequences (the queue the welcome email
+ *     already uses, swept every 10 minutes by the same scheduler tick),
+ *     written when the email would otherwise have been sent;
  *   - resolved at delivery time by ONE check: if a DELIVERED combined email
  *     (email_messages status sent/delivered/opened/clicked — never a provider
- *     drop/bounce/block) carries every value the section was built with, the
- *     row is satisfied; otherwise the email is sent exactly as it would have
- *     been (same sender, payload and idempotency key).
+ *     drop/bounce/block) carries every value the plan section was built with,
+ *     the row is satisfied; otherwise the email is sent exactly as it would
+ *     have been (same sender, payload and idempotency key).
  *
  * Nothing lives in process memory: a crash or redeploy at any point leaves the
- * row for the sweep, and every owed email ends up covered or sent. The accept
- * route resolves the rows itself right after the combined send (the fast
+ * row for the sweep, and the owed email ends up covered or sent. A failed send
+ * keeps retrying on a durable backoff (15m, 30m, 1h, 2h, then every 4h) for
+ * MAX_AGE_HOURS; only past that is the row marked escalated and an operator
+ * alert raised — a provider outage never silently drops a required email. The
+ * accept route resolves the row itself right after the combined send (the fast
  * path), which is the same function the sweep runs.
  */
 
@@ -48,12 +51,16 @@ const SIGNUP_APP_MARKER = 'enter your texted code';
 const SENT_ISH = ['sent', 'delivered', 'opened', 'clicked'];
 
 const MEMBERSHIP_TYPE = 'signup_membership';
-const AUTOPAY_TYPE = 'signup_autopay';
-const OWED_TYPES = [MEMBERSHIP_TYPE, AUTOPAY_TYPE];
+const OWED_TYPES = [MEMBERSHIP_TYPE];
 // The fast path runs seconds after the accept; this is the crash safety net.
 const OWED_DELAY_MINUTES = 5;
-const RETRY_MINUTES = 15;
-const MAX_ATTEMPTS = 3;
+// Wait after the 1st, 2nd, 3rd, 4th failed attempt; every later one waits the
+// last value. The row keeps retrying until it is MAX_AGE_HOURS old.
+const RETRY_BACKOFF_MINUTES = [15, 30, 60, 120, 240];
+const MAX_AGE_HOURS = 48;
+// From this attempt on, every failure is logged at error level (the 3rd
+// failure in a row is no longer a blip).
+const LOUD_AFTER_ATTEMPTS = 3;
 const STALE_CLAIM_MINUTES = 30;
 
 // Read at call time. Defensive on the reader itself so a caller whose test
@@ -114,9 +121,7 @@ function parseMeta(row) {
 
 // ── Writing owed records ──────────────────────────────────────────────────
 
-// Insert (once per owed_key) inside a SAVEPOINT of `conn`, so a failure here
-// can never abort the caller's transaction (the Auto Pay one runs inside the
-// enrollment transaction). Returns the row id, or null on any failure — the
+// Insert (once per owed_key). Returns the row id, or null on any failure — the
 // caller then sends that email inline exactly as it always has.
 async function recordOwed(conn, { type, customerId, owedKey, meta }) {
   try {
@@ -154,17 +159,6 @@ function recordOwedMembership(conn, { customerId, estimateId, onboardingKey, mem
   });
 }
 
-// The Auto Pay confirmation for a fresh enrollment. Called by
-// enrollConsentedMethod INSIDE the enrollment transaction.
-function recordOwedAutopay(conn, { customerId, paymentMethodRowId, estimateId, onboardingKey }) {
-  return recordOwed(conn, {
-    type: AUTOPAY_TYPE,
-    customerId,
-    owedKey: `autopay:${paymentMethodRowId}:${estimateId}`,
-    meta: { kind: 'autopay', estimate_id: estimateId, onboarding_key: onboardingKey, payment_method_row_id: paymentMethodRowId },
-  });
-}
-
 // The combined email is about to be sent: durably note what it will carry, so
 // the resolver can check the DELIVERED message against exactly those values.
 // A row with no expectation is simply never "covered" and sends on its own.
@@ -188,25 +182,14 @@ async function deliveredCarrier(meta) {
   return hit ? hit.id : null;
 }
 
-async function sendOwed(meta, customerId) {
-  if (meta.kind === 'membership') {
-    const args = { ...meta.args };
-    if (args.effectiveDate) args.effectiveDate = new Date(args.effectiveDate);
-    const result = await require('./account-membership-email').sendMembershipStarted(args);
-    // A sender-decided skip (one_time lane, opt-out, no email) is final; any
-    // other not-ok result is retried.
-    return { done: !!(result?.ok || result?.skipped), reason: result?.reason || null };
-  }
-  // The same sender as at enrollment. A deterministic skip (gate off, no email,
-  // no agreement of record) is final; a failure is retried like membership's.
-  const { outcome, result } = await require('./card-enrollment-email').sendAutopayEnrollmentConfirmationDetailed({
-    customerId,
-    paymentMethodRowId: meta.payment_method_row_id,
-  });
-  if (outcome === 'failed' || (outcome === 'sent' && result?.sent === false && !result?.blocked)) {
-    return { done: false, reason: 'autopay_email_failed' };
-  }
-  return { done: true, reason: outcome === 'skipped' ? 'autopay_email_skipped' : null };
+// membership.started, sent as it always was. Returns { done, reason }.
+async function sendOwed(meta) {
+  const args = { ...meta.args };
+  if (args.effectiveDate) args.effectiveDate = new Date(args.effectiveDate);
+  const result = await require('./account-membership-email').sendMembershipStarted(args);
+  // A sender-decided skip (one_time lane, opt-out, no email) is final; any
+  // other not-ok result is retried.
+  return { done: !!(result?.ok || result?.skipped), reason: result?.reason || null };
 }
 
 async function settle(rowId, status, extra = {}, next = {}) {
@@ -218,10 +201,55 @@ async function settle(rowId, status, extra = {}, next = {}) {
   });
 }
 
+// Minutes to wait before the next attempt, given how many have been made.
+function retryDelayMinutes(attempts) {
+  const n = Math.max(1, Number(attempts) || 1);
+  return RETRY_BACKOFF_MINUTES[Math.min(n, RETRY_BACKOFF_MINUTES.length) - 1];
+}
+
+// The operator alert for a required email that could not be delivered inside
+// the retry window. Deduped per owed row; never throws.
+async function alertGaveUp(row, meta, reason) {
+  logger.error(`[signup-single-email] GAVE UP on owed ${row.sequence_type} email ${row.id} for customer ${row.customer_id} after ${row.step} attempts (${reason}); needs a manual send`);
+  try {
+    await require('./notification-service').notifyAdmin(
+      'alert',
+      'Signup membership email not delivered',
+      `The "Your Waves membership is active" email for a new signup could not be sent after ${row.step} attempts over ${MAX_AGE_HOURS} hours (last error: ${reason}). It is required for the plan record, so send it by hand or fix the email provider. The customer was not told.`,
+      {
+        link: row.customer_id ? `/admin/customers?customerId=${row.customer_id}` : '/admin/communications',
+        dedupeKey: `signup-owed-email-gave-up:${row.id}`,
+        metadata: { customer_id: row.customer_id || null, sms_sequence_id: row.id, estimate_id: meta?.estimate_id || null, last_error: reason },
+      },
+    );
+  } catch (err) {
+    logger.error(`[signup-single-email] give-up alert for owed email ${row.id} failed: ${err.message}`);
+  }
+}
+
+// A failed attempt: keep the row active on the backoff, or, once it is older
+// than MAX_AGE_HOURS, mark it escalated (a status the table already allows) and
+// alert an operator. Loud (error level) from the LOUD_AFTER_ATTEMPTS-th attempt.
+async function retryOrGiveUp(row, meta, reason) {
+  const attempts = Number(row.step) || 1;
+  const ageMs = Date.now() - new Date(row.created_at || Date.now()).getTime();
+  if (ageMs >= MAX_AGE_HOURS * 60 * 60 * 1000) {
+    await settle(row.id, 'escalated', { gave_up: true, last_error: reason, gave_up_at: new Date().toISOString() });
+    await alertGaveUp(row, meta, reason);
+    return { gaveUp: true };
+  }
+  const delay = retryDelayMinutes(attempts);
+  const line = `[signup-single-email] owed ${row.sequence_type} email ${row.id} not sent (attempt ${attempts}: ${reason}); retrying in ${delay} min`;
+  if (attempts >= LOUD_AFTER_ATTEMPTS) logger.error(line); else logger.warn(line);
+  await settle(row.id, 'active', { last_error: reason }, { next_send_at: new Date(Date.now() + delay * 60 * 1000) });
+  return { requeued: true };
+}
+
 // Claim (active → sending, atomic on status), then: covered → satisfied,
 // else send exactly as today. Never throws.
 async function resolveOwedEmail(rowId) {
   let row = null;
+  let meta = {};
   try {
     [row] = await db('sms_sequences')
       .where({ id: rowId, status: 'active' })
@@ -229,30 +257,29 @@ async function resolveOwedEmail(rowId) {
       .update({ status: 'sending', step: db.raw('COALESCE(step, 0) + 1'), updated_at: new Date() })
       .returning('*');
     if (!row) return { skipped: true };
-    const meta = parseMeta(row);
-    if (Number(row.step) > MAX_ATTEMPTS) {
-      await settle(row.id, 'cancelled', { skip_reason: 'max_attempts' });
-      return { skipped: true };
-    }
+    meta = parseMeta(row);
     const carrier = await deliveredCarrier(meta);
     if (carrier) {
       await settle(row.id, 'completed', { satisfied_by_message: carrier });
       return { satisfied: true };
     }
-    const outcome = await sendOwed(meta, row.customer_id);
+    const outcome = await sendOwed(meta);
     if (outcome.done) {
       await settle(row.id, 'completed', { sent_separately: true, ...(outcome.reason ? { send_reason: outcome.reason } : {}) });
       return { sent: true };
     }
-    await settle(row.id, 'active', { last_error: outcome.reason || 'not_sent' }, { next_send_at: new Date(Date.now() + RETRY_MINUTES * 60 * 1000) });
-    return { requeued: true };
+    return await retryOrGiveUp(row, meta, outcome.reason || 'not_sent');
   } catch (err) {
     logger.error(`[signup-single-email] owed email ${rowId} failed: ${err.message}`);
     if (row?.id) {
-      // Release the claim; the next sweep tries again (attempts are counted).
-      await db('sms_sequences').where({ id: row.id, status: 'sending' })
-        .update({ status: 'active', next_send_at: new Date(Date.now() + RETRY_MINUTES * 60 * 1000), updated_at: new Date() })
-        .catch(() => {});
+      // Release the claim on the same backoff (or escalate past the window).
+      try {
+        const r = await retryOrGiveUp(row, meta, err.message || 'exception');
+        return r.gaveUp ? { gaveUp: true, error: true } : { error: true };
+      } catch (releaseErr) {
+        logger.error(`[signup-single-email] could not release owed email ${row.id}: ${releaseErr.message}`);
+        // Last resort: the stale-claim recovery in the sweep frees it.
+      }
     }
     return { error: true };
   }
@@ -261,7 +288,7 @@ async function resolveOwedEmail(rowId) {
 // Scheduler entry point (the welcome queue's 10-minute tick): recover claims
 // a crash left in 'sending', then resolve every due row.
 async function processDueSignupOwedEmails() {
-  const results = { satisfied: 0, sent: 0, requeued: 0, errors: 0 };
+  const results = { satisfied: 0, sent: 0, requeued: 0, gaveUp: 0, errors: 0 };
   try {
     await db('sms_sequences')
       .whereIn('sequence_type', OWED_TYPES)
@@ -280,6 +307,7 @@ async function processDueSignupOwedEmails() {
       if (r.satisfied) results.satisfied += 1;
       else if (r.sent) results.sent += 1;
       else if (r.requeued) results.requeued += 1;
+      else if (r.gaveUp) results.gaveUp += 1;
       else if (r.error) results.errors += 1;
     }
   } catch (err) {
@@ -298,7 +326,6 @@ module.exports = {
   SIGNUP_APP_MARKER,
   SENT_ISH,
   MEMBERSHIP_TYPE,
-  AUTOPAY_TYPE,
   OWED_TYPES,
   signupGateLive,
   signupLaneEligible,
@@ -306,8 +333,10 @@ module.exports = {
   sectionValues,
   messageCarriesAll,
   recordOwedMembership,
-  recordOwedAutopay,
   recordExpected,
   resolveOwedEmail,
   processDueSignupOwedEmails,
+  RETRY_BACKOFF_MINUTES,
+  MAX_AGE_HOURS,
+  retryDelayMinutes,
 };
