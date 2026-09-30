@@ -228,7 +228,7 @@ const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
 // Services", "Waves Lawn"), or "Waves Pest Control" followed by a
 // capitalized word, "&" or "and Lawn" ("… Services", "… LLC", "… & Lawn
 // Care"). Lowercase business suffixes are caught too.
-const COMPANY_NAME_RE = /\bWaves\s+(?!Pest\s+Control\b)[A-Z&]|\bWaves\s+Pest\s+Control\s+(?:[A-Z&]|and\s+[Ll]awn\b)|\b[Ww]aves\s+(?:pest\s+control\s+)?(?:services?|llc|inc|company|lawn|home|exterminat\w*)\b/;
+const COMPANY_NAME_RE = /\bWaves\s+(?!Pest\s+Control\b)[A-Z&]|\bWaves\s+Pest\s+Control\s+(?:[A-Z&]|and\s+[Ll]awn\b)|\bWaves\s+Pest\s+Control(?:\s*,\s*|\s+)(?:of\s+[A-Z]|L\.?L\.?C\b|Inc\b|Co\b|Corp\b|Company\b)|\b[Ww]aves\s+(?:pest\s+control\s+)?(?:services?|llc|inc|company|lawn|home|exterminat\w*)\b/;
 // Rates and mix strength in words ("at the label rate", "the recorded mix
 // strength", "diluted").
 const RATE_RE = /\brates?\b|\bmix(?:ing)?\s+(?:strength|ratio)\b|\bdilut(?:e|ed|ion)\b|\bconcentrat(?:e|ed|ion)\b|\bper\s+(?:gallon|1,?000)\b/i;

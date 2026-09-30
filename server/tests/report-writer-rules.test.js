@@ -232,6 +232,8 @@ describe('writerRulesRejection', () => {
     ['We used three qts in the backpack.', 'amount'],
     ['Your next visit is in the morning.', 'time'],
     ['We will arrive this afternoon.', 'time'],
+    ['Thanks from Waves Pest Control of Southwest Florida.', 'company_name'],
+    ['Thanks from Waves Pest Control, LLC.', 'company_name'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -262,6 +264,7 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('You mentioned seeing ants for a week.')).toBeNull();
     expect(writerRulesRejection('Mosquitoes will be most active in the evening.')).toBeNull();
     expect(writerRulesRejection('The technician arrived in the morning.')).toBeNull();
+    expect(writerRulesRejection('Waves Pest Control, your technician checked the stations.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();

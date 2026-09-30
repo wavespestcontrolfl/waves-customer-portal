@@ -390,6 +390,33 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.promptHint).not.toContain(utcDay);
   });
 
+  test('customer words: every pest the picker offers counts, and a message in capitals stays readable', async () => {
+    const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
+    const ctx = await buildCustomerWordsContext({
+      customerId: 'c1',
+      scheduledServiceId: 'svc-1',
+      knex: stubKnex({
+        scheduled_services: [
+          { id: 'svc-1', customer_id: 'c1', service_type: 'Pest Control Service', created_at: mk(20) },
+        ],
+        service_completion_profiles: [], call_log: [], emails: [],
+        sms_log: [
+          { created_at: mk(1), direction: 'inbound', message_body: 'Springtails are covering the bathroom floor' },
+          { created_at: mk(2), direction: 'inbound', message_body: 'A mud dauber nest is on the lanai ceiling' },
+          { created_at: mk(3), direction: 'inbound', message_body: 'Booklice in the pantry again' },
+          { created_at: mk(4), direction: 'inbound', message_body: 'ANTS ARE ALL OVER THE KITCHEN' },
+          { created_at: mk(5), direction: 'inbound', message_body: 'ROACHES BY THE POOL, UNIT 4821' },
+        ],
+      }),
+    });
+    expect(ctx.text).toContain('Springtails are covering the bathroom floor');
+    expect(ctx.text).toContain('A mud dauber nest is on the lanai ceiling');
+    expect(ctx.text).toContain('Booklice in the pantry again');
+    expect(ctx.text).toContain('ANTS ARE ALL OVER THE KITCHEN');
+    expect(ctx.text).toContain('ROACHES BY THE POOL, UNIT [redacted]');
+    expect(ctx.text).not.toContain('4821');
+  });
+
   test('customer words: calls with no summary never use up the six kept', async () => {
     const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
     const ctx = await buildCustomerWordsContext({

@@ -38,6 +38,7 @@ const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip
 const ContextAggregator = require('./context-aggregator');
 const { etDateString } = require('../utils/datetime-et');
 const { isSmsReaction } = require('./sms-intent');
+const { PEST_TARGET_SUGGESTIONS } = require('../config/treatment-target-vocabulary');
 
 const { redactAccessCodes } = ContextAggregator;
 
@@ -301,9 +302,15 @@ async function buildCompletionCommsContext({
 // that anchors a bare code ("4821", "BLUE") is often gone here (the Waves
 // question is left out, a quote is stripped, a summary drops the noun), and
 // these lines become "You mentioned…" copy.
-function credentialShaped(token) {
+// A sentence typed in capitals ("ANTS ARE ALL OVER THE KITCHEN") is prose,
+// not a run of codes: only its digit-bearing tokens are masked.
+function credentialShaped(token, shouted = false) {
   if (/\d/.test(token)) return !/^\d{1,2}$/.test(token) && !/^\d+(?:st|nd|rd|th)$/i.test(token);
-  return /^[A-Z][A-Z#*-]{2,}$/.test(token);
+  return !shouted && /^[A-Z][A-Z#*-]{2,}$/.test(token);
+}
+function shoutedSentence(sentence) {
+  const words = sentence.match(/[A-Za-z]{2,}/g) || [];
+  return words.length >= 3 && words.filter((word) => word === word.toUpperCase()).length / words.length >= 0.6;
 }
 // Access details never reach the writer: a sentence about getting in (a
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
@@ -321,14 +328,28 @@ const accessSentence = (sentence) => ACCESS_SENTENCE_RE.test(sentence)
 // phrasing an access detail ("blue works at the side gate") never do.
 // Common Spanish pest words count too.
 const PEST_TALK_RE = /\b(?:pests?|bugs?|insects?|critters?|wildlife|animals?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|webs?|cobwebs?|webbing|rodents?|rats?|mice|mouse|squirrels?|raccoons?|o?possums?|armadillos?|iguanas?|bats?|birds?|snakes?|lizards?|geckos?|frogs?|toads?|termites?|swarm(?:ers?|ing|s)?|wings?|mud\s+tubes?|mosquito(?:e?s)?|no-?see-?ums?|bites?|bitten|itch(?:y|ing)?|fleas?|ticks?|bed\s*bugs?|bees?|wasps?|hornets?|yellow\s*jackets?|nests?|hives?|stings?|stung|silverfish|earwigs?|crickets?|centipedes?|millipedes?|scorpions?|beetles?|moths?|fl(?:y|ies)|gnats?|weevils?|pill\s*bugs?|stink\s*bugs?|love\s*bugs?|whitefl(?:y|ies)|aphids?|mealybugs?|chinch\s*bugs?|grubs?|droppings?|poop|feces|urine|smells?|smelly|odou?rs?|stench|noises?|scratch(?:ing|es)?|chew(?:ed|ing)?|gnaw(?:ed|ing)?|holes?|gaps?|openings?|damaged?|frass|sawdust|eggs?|larvae?|activity|infest\w*|traps?|bait(?:s|ed)?|stations?|dead|crawling|trails?|trailing|hormigas?|cucarachas?|ratas?|ratones?|ara[nñ]as?|termitas?|pulgas?|garrapatas?|chinches?|avispas?|abejas?|bichos?|plagas?)\b/i;
+// Every pest the completion picker offers counts as pest talk too
+// (springtails, booklice, mud daubers, yellowjackets…), singular or plural.
+const singularPest = (word) => (/(?:mice|lice|fish)$/.test(word)
+  ? word
+  : word.replace(/ies$/, 'y').replace(/(ch|sh|x|o)es$/, '$1').replace(/s$/, ''));
+const CANONICAL_PEST_RE = new RegExp(`\\b(?:${[...new Set(PEST_TARGET_SUGGESTIONS
+  .flatMap((target) => target.toLowerCase().split(/\s*[&/()]\s*/))
+  .map((part) => part.trim().split(/[\s-]+/).pop())
+  .flatMap((head) => [head, singularPest(head)])
+  .filter((word) => word && word.length >= 3))].join('|')})\\b`, 'i');
+const pestTalk = (sentence) => PEST_TALK_RE.test(sentence) || CANONICAL_PEST_RE.test(sentence);
 function scrub(text) {
   return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
-    .filter((sentence) => !accessSentence(sentence) && PEST_TALK_RE.test(sentence))
-    .join(' ')
-    .replace(/\S+/g, (word) => {
-      const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
-      return credentialShaped(token) ? `${lead}[redacted]${trail}` : word;
-    });
+    .filter((sentence) => !accessSentence(sentence) && pestTalk(sentence))
+    .map((sentence) => {
+      const shouted = shoutedSentence(sentence);
+      return sentence.replace(/\S+/g, (word) => {
+        const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
+        return credentialShaped(token, shouted) ? `${lead}[redacted]${trail}` : word;
+      });
+    })
+    .join(' ');
 }
 // The communication's calendar day in Eastern time (an 8 PM text is still
 // that day in Florida).
