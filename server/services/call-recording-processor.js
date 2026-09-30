@@ -144,6 +144,17 @@ const { isEnabled } = require('../config/feature-gates');
 function unclearServiceAssessmentActive(enabled = isEnabled) {
   return enabled('callUnclearServiceAssessment') === true && enabled('callFailOpenBooking') === true;
 }
+// GATE_CALL_COMMERCIAL_DICTATED_BOOKING as the canAutoRoute option: INBOUND
+// calls only (outbound speaker labels have swapped) and only with
+// GATE_CALL_AGENT_COMMIT_BOOKING on, the kill switch of the commercial
+// exception; read at call time like the GATE_CALL_PROPERTY_ROLE reads. ONE
+// predicate for both processor lanes AND buildFailOpenRoutingContext (the
+// offline routing audits), so they derive it one way (codex #5377 r6).
+function commercialDictatedBookingActive(call = {}, gates = {}) {
+  const enabled = gates.isEnabled || isEnabled;
+  const live = gates.commercialLive || (() => require('../config/feature-gates').callCommercialDictatedBookingLive?.());
+  return enabled('callAgentCommitBooking') === true && !isOutboundCall(call) && live() === true;
+}
 const { decideDisposition } = require('./call-disposition');
 const { classifyCall, recordVerdict, cnamFromEnvelope } = require('./call-spam-classifier');
 const { enrichFromCall } = require('./call-profile-enrichment');
@@ -1647,6 +1658,9 @@ function callerIdNameForPrompt(call) {
 function buildFailOpenRoutingContext({
   call = {}, customer = null, contactPhone = null, failOpenEnabled = false, onFileAddressVerdict = undefined,
   unclearServiceAssessmentEnabled = false,
+  // The transcript the routing decision is grounded in (default: the row's
+  // own); `gates` lets a test inject the gate reads.
+  transcript = undefined, gates = undefined,
 } = {}) {
   const knownCaller = customer ? summarizeKnownCaller(customer) : null;
   // A new lead's trust comes from the verdict production persisted for this
@@ -1675,6 +1689,17 @@ function buildFailOpenRoutingContext({
       // (the live pass's own two-gate predicate). Absent when off, so the
       // options shape the audits compare is unchanged gate-off.
       ...(failOpenEnabled && unclearServiceAssessmentEnabled ? { unclearServiceAssessment: true } : {}),
+      // GATE_CALL_COMMERCIAL_DICTATED_BOOKING (codex #5377 r6 P1): the processor
+      // lanes' commercial context, derived by the SAME predicate, with the
+      // trusted-label gate, the transcript and the call time the grounding reads
+      // off the call row every audit already has. Absent when the gate is off,
+      // so the options shape the audits compare is unchanged gate-off.
+      ...(commercialDictatedBookingActive(call, gates) ? {
+        commercialDictatedBooking: true,
+        transcriptLabelsTrusted: (gates?.isEnabled || isEnabled)('callAgentCommitTrustedLabels') === true,
+        transcript: transcript !== undefined ? transcript : call.transcription,
+        callStartedAt: call.created_at,
+      } : {}),
     },
   };
 }
@@ -10359,8 +10384,7 @@ const CallRecordingProcessor = {
             // REVIEWED decision row records a '+r<n>' revision row
             // (upsertRouteDecision, gate-agnostic; codex #5377 r4 P1) — no
             // per-gate version is needed.
-            commercialDictatedBooking: isEnabled('callAgentCommitBooking') && !isOutboundCall(call)
-              && require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
+            commercialDictatedBooking: commercialDictatedBookingActive(call),
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: call.created_at,
@@ -19854,8 +19878,7 @@ const CallRecordingProcessor = {
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           // Inbound-only and behind the agent-commit gate, mirroring the
           // enforce lane (owner ruling 2026-09-30; codex #5377 r1 P1).
-          commercialDictatedBooking: isEnabled('callAgentCommitBooking') && !isOutboundCall(call)
-            && require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
+          commercialDictatedBooking: commercialDictatedBookingActive(call),
           callStartedAt: call.created_at,
           // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
           unclearServiceAssessment: unclearServiceAssessmentActive(),
@@ -21370,6 +21393,7 @@ CallRecordingProcessor._test = {
   demoteFailOpenOnV1AddressConflict,
   resolveOnFileAddressAuthority,
   buildFailOpenRoutingContext,
+  commercialDictatedBookingActive,
   resolveKnownCallerCustomer,
   v2IsoToEtWallClock,
   phoneNearMissOfAni,

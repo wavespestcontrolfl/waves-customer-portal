@@ -113,15 +113,15 @@ describe('commercial dictated booking: canAutoRoute', () => {
     expect(r.failedOpenFlags).toEqual(['commercial_requires_quote']);
   });
 
-  test('inbound only: the processor passes the option behind !isOutboundCall AND the agent-commit gate at both call sites', () => {
+  test('inbound only: ONE predicate (behind !isOutboundCall AND the agent-commit gate) feeds both processor call sites and the audit builder', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    const sites = [...src.matchAll(/commercialDictatedBooking: ([^,]*),/gs)].map((m) => m[1]);
-    expect(sites).toHaveLength(2);
-    sites.forEach((expr) => {
-      expect(expr).toContain("isEnabled('callAgentCommitBooking')");
-      expect(expr).toContain('!isOutboundCall(call)');
-      expect(expr).toContain('callCommercialDictatedBookingLive');
-    });
+    const sites = [...src.matchAll(/commercialDictatedBooking: (commercialDictatedBookingActive\([^)]*\))/g)].map((m) => m[1]);
+    expect(sites).toEqual(['commercialDictatedBookingActive(call)', 'commercialDictatedBookingActive(call)']);
+    const at = src.indexOf('function commercialDictatedBookingActive');
+    const body = src.slice(at, src.indexOf('\n}\n', at));
+    expect(body).toContain("enabled('callAgentCommitBooking')");
+    expect(body).toContain('!isOutboundCall(call)');
+    expect(body).toContain('callCommercialDictatedBookingLive');
   });
 
   test('gate off (option absent or false) is the old behavior: the hold stays', () => {
@@ -291,7 +291,7 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
       expect(grounded(r)).toEqual({ ok: false, reason: 'price_unit_not_bookable' });
       expect(route(r).allowed).toBe(false);
     }
-    for (const unit of ['one_time', 'per_application', undefined]) {
+    for (const unit of ['one_time', 'per_application', 'unknown', undefined]) {
       const entry = { amount_usd: 150, accepted: true, caller_response: 'accepted', ...(unit ? { unit } : {}) };
       expect(grounded(extraction({ service: { price: entry, prices: [entry] } })).ok).toBe(true);
     }
@@ -672,5 +672,91 @@ describe('reprocess after the flip: the open blocking commercial card is demoted
     expect(held).toMatchObject({ allowed: false, reason: 'v1_only_new_address', appointmentBlockingFlags: ['address_unverified'] });
     expect(held.failedOpenFlags).toEqual(['commercial_requires_quote']);
     expect(held.gateDemotedFlags).toEqual(['commercial_requires_quote']);
+  });
+});
+
+// The offline routing audits (codex #5377 r6 P1): v2-promotion-readiness,
+// verify-v2-shadow-path and replay-call-extraction-variance all spread
+// buildFailOpenRoutingContext into canAutoRoute, so the commercial context is
+// derived THERE, by the same predicate the processor lanes use.
+describe('the audits derive the commercial context the way the processor does (codex #5377 r6 P1)', () => {
+  const Processor = require('../services/call-recording-processor');
+  const { buildFailOpenRoutingContext } = Processor;
+  const { commercialDictatedBookingActive } = Processor._test;
+  const gatesOf = ({ agentCommit = true, trusted = true, commercial = true } = {}) => ({
+    isEnabled: (g) => ({ callAgentCommitBooking: agentCommit, callAgentCommitTrustedLabels: trusted }[g] === true),
+    commercialLive: () => commercial,
+  });
+  const inbound = { direction: 'inbound', transcription: TRANSCRIPT, created_at: CALL_STARTED_AT };
+  const build = (call = inbound, gates = gatesOf(), extra = {}) => buildFailOpenRoutingContext({
+    call, customer: null, contactPhone: '+19415550100', failOpenEnabled: false, gates, ...extra,
+  }).options;
+
+  test('gate ON, inbound: the option, the trusted-label gate, the transcript and the call time ride along', () => {
+    expect(build()).toMatchObject({
+      commercialDictatedBooking: true, transcriptLabelsTrusted: true, transcript: TRANSCRIPT, callStartedAt: CALL_STARTED_AT,
+    });
+  });
+
+  test('untrusted labels ride as false (the demotion stays dark, exactly as in the processor)', () => {
+    expect(build(inbound, gatesOf({ trusted: false }))).toMatchObject({ commercialDictatedBooking: true, transcriptLabelsTrusted: false });
+  });
+
+  test('every gate-off shape is byte-identical: no commercial keys at all', () => {
+    const base = { failOpen: false, callerAni: '+19415550100', knownCustomer: null };
+    for (const options of [
+      build(inbound, gatesOf({ commercial: false })),
+      build(inbound, gatesOf({ agentCommit: false })),
+      build({ ...inbound, direction: 'outbound-api' }),
+      build({ ...inbound, direction: 'Outbound' }),
+    ]) {
+      expect(options).toEqual(expect.objectContaining(base));
+      expect(Object.keys(options).sort()).toEqual(Object.keys(base).sort());
+    }
+  });
+
+  test('the SAME predicate the processor lanes call (inbound-only, needs GATE_CALL_AGENT_COMMIT_BOOKING)', () => {
+    expect(commercialDictatedBookingActive(inbound, gatesOf())).toBe(true);
+    expect(commercialDictatedBookingActive({ direction: 'outbound' }, gatesOf())).toBe(false);
+    expect(commercialDictatedBookingActive(inbound, gatesOf({ agentCommit: false }))).toBe(false);
+    expect(commercialDictatedBookingActive(inbound, gatesOf({ commercial: false }))).toBe(false);
+    const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src.match(/commercialDictatedBooking: commercialDictatedBookingActive\(call\)/g)).toHaveLength(2);
+    expect(src).not.toMatch(/commercialDictatedBooking: isEnabled\('callAgentCommitBooking'\)/);
+  });
+
+  test('an explicit transcript (a re-transcription) overrides the row\'s own', () => {
+    expect(build(inbound, gatesOf(), { transcript: 'Agent: x' }).transcript).toBe('Agent: x');
+  });
+
+  test('canAutoRoute over the audit context books an admitted commercial call; gate off holds it (the audit no longer misclassifies)', () => {
+    const ex = extraction();
+    const on = canAutoRoute(ex, { contactPhone: '+19415550100', addressValidation: AV_CLEAN, ...build() });
+    expect(on).toMatchObject({ allowed: true, gateDemotedFlags: ['commercial_requires_quote'] });
+    const off = canAutoRoute(ex, { contactPhone: '+19415550100', addressValidation: AV_CLEAN, ...build(inbound, gatesOf({ commercial: false })) });
+    expect(off.allowed).toBe(false);
+  });
+
+  test('replay-call-extraction-variance routes through it, on the transcript the extraction was made from', () => {
+    const { routeForV2, defaultReplayHelpers } = require('../scripts/replay-call-extraction-variance');
+    const helpers = defaultReplayHelpers();
+    const ctx = build();
+    const route = (extra) => routeForV2(extraction(), '+19415550100', helpers, AV_CLEAN, ctx, { demote: (r) => r, transcription: TRANSCRIPT, ...extra });
+    expect(route().allowed).toBe(true);
+    // a fresh extraction from a different (re-)transcription is judged against THAT text
+    const other = TRANSCRIPT.replace(COMMIT, 'We will be there sometime.');
+    expect(route({ transcription: other }).allowed).toBe(false);
+    // gate off: the shared context is unchanged and the replay holds the call
+    expect(routeForV2(extraction(), '+19415550100', helpers, AV_CLEAN, build(inbound, gatesOf({ commercial: false })), { demote: (r) => r, transcription: TRANSCRIPT }).allowed).toBe(false);
+  });
+
+  test('every audit caller already carries the fields the builder reads (no silent no-op)', () => {
+    const readiness = fs.readFileSync(path.join(__dirname, '../scripts/v2-promotion-readiness.js'), 'utf8');
+    expect(readiness).toMatch(/\.select\('id', 'twilio_call_sid', 'transcription',[^)]*'created_at',[^)]*'direction'/);
+    const verify = fs.readFileSync(path.join(__dirname, '../scripts/verify-v2-shadow-path.js'), 'utf8');
+    expect(verify).toMatch(/\.select\('id', 'transcription', 'from_phone', 'to_phone', 'direction', 'metadata', 'source', 'created_at'/);
+    const replay = fs.readFileSync(path.join(__dirname, '../scripts/replay-call-extraction-variance.js'), 'utf8');
+    for (const col of ["'created_at'", "'direction'", "'transcription'"]) expect(replay).toContain(`    ${col},`);
+    for (const src of [readiness, verify, replay]) expect(src).toMatch(/buildFailOpenRoutingContext\(\{\s*call/);
   });
 });

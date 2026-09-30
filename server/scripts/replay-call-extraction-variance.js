@@ -1018,7 +1018,13 @@ function routeForV2(extraction, contactPhone, helpers, addressValidation = null,
   const modelFlags = helpers.suppressAddressFlagsForAV(extraction.triage_flags || [], addressValidation);
   const deterministicFlags = helpers.computeDeterministicTriageFlags(extraction, { contactPhone, addressValidation });
   const flags = helpers.mergeTriageFlags(modelFlags, deterministicFlags);
-  let route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...failOpenContext });
+  // A commercial dictated-booking context (GATE_CALL_COMMERCIAL_DICTATED_BOOKING)
+  // is grounded in the transcript the extraction was made from: a fresh
+  // extraction from a re-transcription must not be judged against the old text.
+  const routeContext = ('transcript' in failOpenContext && conflictCheck?.transcription)
+    ? { ...failOpenContext, transcript: conflictCheck.transcription }
+    : failOpenContext;
+  let route = helpers.canAutoRoute(extraction, { contactPhone, addressValidation, ...routeContext });
   // The live path never stops at canAutoRoute: a fail-open allow whose V1
   // address conflicts with the on-file one is a NEW address and is demoted
   // back to review. Replaying without it over-counts auto-routes.
@@ -1749,4 +1755,6 @@ module.exports = {
   applyFixtureReplayOptions,
   runReplayVariance,
   etScheduleParts,
+  routeForV2,
+  defaultReplayHelpers,
 };

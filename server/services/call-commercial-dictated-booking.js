@@ -115,8 +115,9 @@ function commercialDictatedBookingGrounded({ v2, transcript, callStartedAt } = {
   if (typeof quoted !== 'number' || !(quoted > 0) || agreed.amount !== quoted) return fail('no_quoted_total');
   // The booked row carries one per-visit price. A recurring billing unit
   // ("$150 a month") stamped as that price would lose the recurring term, so
-  // only a one-time / per-application / unitless amount books here.
-  if (agreed.unit && !['one_time', 'per_application'].includes(agreed.unit)) return fail('price_unit_not_bookable');
+  // only a one-time / per-application / unitless amount books here. The
+  // schema records a bare "$150" with unit 'unknown' — that is unitless.
+  if (agreed.unit && !['one_time', 'per_application', 'unknown'].includes(agreed.unit)) return fail('price_unit_not_bookable');
   // The booking path discards a total outside its accepted range (or with
   // sub-cent precision) and books at the catalog price or none, so the
   // caller's accepted amount would never reach the appointment: the office
