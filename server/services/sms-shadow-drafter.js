@@ -1808,7 +1808,12 @@ function reserviceBookedClaims(body, snapshot) {
   const claims = [];
   // Codex round-34 P2: a scheduled Waves Assessment / free inspection is a different product, never a booked re-service claim
   // (and never defaults to the pest lane) — the same carve-out the offer detector uses.
-  for (const sentence of blankOtherProducts(String(body)).split(/[.!?\n]+/)) {
+  // Codex round-41 P2: dotted meridiems ("1 p.m. to 3 p.m.") and common dotted abbreviations must not split a
+  // sentence before its asserted times are read — normalize them first, then split on real sentence ends.
+  const normalizedBody = blankOtherProducts(String(body))
+    .replace(/\b([ap])\.\s?m\.(?=\s|$|[,;!?])/gi, '$1m')
+    .replace(/\b(Mr|Mrs|Ms|Dr|St|Ave|Blvd|Rd|approx|Apt|Ste|No)\./gi, '$1');
+  for (const sentence of normalizedBody.split(/[.!?\n]+/)) {
     const relative = RESERVICE_RELATIVE_DAY_RE.exec(sentence);
     if (!(RESERVICE_EXISTING_APPT_RE.test(sentence) || relative || named.some((rx) => rx.test(sentence)))) continue;
     if (!contextRe.test(sentence) && !(qualifiedVisitRe.test(sentence) && visitNounRe.test(sentence))) continue;

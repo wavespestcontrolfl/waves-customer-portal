@@ -3796,10 +3796,10 @@ describe('free re-service is an entitlement resolved through the existing mechan
         // the live arrival window is 9:00 AM – 11:00 AM
         // Codex round-31 P2: an asserted time must state the FULL live window (a lone time reads as an exact arrival);
         // a day-only reference is fine
-        for (const ok of ['Your pest re-service is scheduled for Thursday.', 'Your pest re-service is scheduled for Thursday, 9-11 AM.', 'Your pest re-service is scheduled for Thursday from 9:00 AM to 11:00 AM.', 'Your pest re-service is scheduled for Thursday between 9 and 11 am.']) {
+        for (const ok of ['Your pest re-service is scheduled for Thursday.', 'Your pest re-service is scheduled for Thursday, 9-11 AM.', 'Your pest re-service is scheduled for Thursday from 9:00 AM to 11:00 AM.', 'Your pest re-service is scheduled for Thursday between 9 and 11 am.', 'Your pest re-service is scheduled for Thursday from 9 a.m. to 11 a.m.']) {
           await expect(send(ok)).resolves.toBeNull();
         }
-        for (const bad of ['Your pest re-service is scheduled for Thursday at 9.', 'Your pest re-service is scheduled for Thursday at 9 AM.', 'Your pest re-service is scheduled for Thursday around 11 AM.', 'Your pest re-service is scheduled for Thursday from 1–3 PM.', 'Your pest re-service is scheduled for Thursday at 1 PM.', 'Your pest re-service is scheduled for Thursday at 2.', 'Your pest re-service is scheduled for Thursday, 9-11 PM.', 'Your pest re-service is scheduled for Thursday between 1 and 3 pm.']) {
+        for (const bad of ['Your pest re-service is scheduled for Thursday at 9.', 'Your pest re-service is scheduled for Thursday at 9 AM.', 'Your pest re-service is scheduled for Thursday around 11 AM.', 'Your pest re-service is scheduled for Thursday from 1–3 PM.', 'Your pest re-service is scheduled for Thursday at 1 PM.', 'Your pest re-service is scheduled for Thursday at 2.', 'Your pest re-service is scheduled for Thursday, 9-11 PM.', 'Your pest re-service is scheduled for Thursday between 1 and 3 pm.', 'Your pest re-service is scheduled Thursday from 1 p.m. to 3 p.m.', 'Your pest re-service is scheduled for Thursday at 1 p.m.']) {
           await expect(send(bad)).resolves.toMatch(/reservice_booking_changed/);
         }
       } finally {
