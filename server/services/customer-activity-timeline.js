@@ -7,6 +7,7 @@
  *   texts    sms_log (sent / delivered / failed, inbound replies)
  *   links    short_code_clicks via short_codes (customer or lead linkage)
  *   emails   email_messages, automation_step_sends, newsletter_send_deliveries
+ *   outside  outbound_link_clicks (prep-guide links to Chewy, Amazon, ...)
  *   pages    customer_page_views, estimate_views, prep_guide_views,
  *            service_records / projects.report_viewed_at,
  *            customer_contracts.viewed_at, price_change_notices
@@ -18,7 +19,9 @@
  *
  *   short_code_clicks     human/bot-filtered at /l/
  *   customer_page_views   filtered by its recorder (incl. a push:open row: a
- *                         server-verified open of that customer's own notification)
+ *                         server-verified open of that customer's own notification,
+ *                         and the portal tab views)
+ *   outbound_link_clicks  bot + staff filtered at /go (same shouldRecord as /l/)
  *   inbound sms replies   non-recruiting
  *
  * Everything else is shown in the feed and NEVER engaged: SendGrid opens AND
@@ -29,8 +32,7 @@
  * newest open (`lastEmailOpenAt`) and newest provider click
  * (`lastProviderClickAt`) as separate informational fields. One tap that
  * produced both a provider click and a short-link click shows once, as the
- * short-link click. Portal-visit and outside-link sources join in a follow-up
- * PR once the PRs that create them have merged. A click on a link delivered to a
+ * short-link click. A click on a link delivered to a
  * third party (a bill-to payer's AP inbox or an operator-named one-off
  * invoice recipient; the code is minted under the homeowner's customer_id)
  * reads "Link clicked by invoice recipient" and is never engaged.
@@ -55,7 +57,9 @@
  * accepted, cosmetic edge for a read-only feed.
  *
  * The summary is computed from per-source MAX() queries, not from the visible
- * page, and only on the first page.
+ * page, and only on the first page. It also carries `lastSeenAt`
+ * (customers.last_seen_at, written only by the portal / app foreground
+ * beacons): informational, never an event and never part of `lastEngagedAt`.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -118,6 +122,14 @@ const PAGE_LABELS = {
 const PUSH_OPEN_PAGE = 'push:open';
 const NOTIFICATION_SUBJECT_RE = /^notification:([0-9a-f-]{36})$/i;
 const PUSH_PLATFORMS = new Set(['web', 'ios', 'android']);
+
+function outlinkHost(url) {
+  try {
+    return new URL(String(url)).hostname.replace(/^www\./i, '') || null;
+  } catch {
+    return null;
+  }
+}
 
 function pageViewTitle(page) {
   const p = String(page || '');
@@ -413,6 +425,30 @@ const SOURCES = [
     }, 'newsletter_send_deliveries'),
   },
   {
+    // Outside-link clicks are bot + staff filtered at /go (shouldRecord): engaged.
+    // Rows recorded before that staff filter (the table went live 09-29
+    // evening) may include a staff click; accepted.
+    name: 'outside link clicks',
+    from: (dbh, ctx) => dbh('outbound_link_clicks as olc')
+      .join('outbound_links as ol', 'ol.id', 'olc.outbound_link_id')
+      .where('olc.customer_id', ctx.customerId),
+    select: ['olc.id', 'olc.clicked_at', 'olc.surface', 'olc.template_key', 'ol.target_url'],
+    ts: ['olc.clicked_at'],
+    engaged: { expr: 'olc.clicked_at' },
+    toEvents: (r) => {
+      // Hostname only: the full URL (path, query, affiliate tags) never reaches the feed.
+      const host = outlinkHost(r.target_url);
+      const template = r.template_key ? String(r.template_key).replace(/[._]/g, ' ') : null;
+      return compact([mk('outlink', r.id, { type: 'outbound_link_click', id: r.id }, {
+        at: r.clicked_at,
+        channel: r.surface === 'email' ? 'email' : 'page',
+        kind: 'clicked',
+        title: 'Clicked an outside link',
+        detail: [host, template].filter(Boolean).join(' · ') || null,
+      })]);
+    },
+  },
+  {
     // customer_page_views is recorded by a bot/staff-filtering recorder: engaged.
     name: 'page views',
     from: (dbh, ctx) => dbh('customer_page_views as pv').where('pv.customer_id', ctx.customerId),
@@ -672,7 +708,7 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
     if (!beforeIso) throw Object.assign(new Error('before must be a valid date'), { status: 400 });
   }
 
-  const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email');
+  const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email', 'last_seen_at');
   if (!customer) return null;
   const emails = [...new Set([String(customer.email || '').trim().toLowerCase()].filter(Boolean))];
   const ctx = {
@@ -701,6 +737,9 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
     try {
       const out = await computeSummary(SOURCES.filter((s) => !unavailableSources.includes(s.name)), ctx);
       summary = out.summary;
+      // Informational only (portal / app foreground beacons): not an event,
+      // and never folded into lastEngagedAt.
+      if (summary) summary.lastSeenAt = iso(customer.last_seen_at);
       for (const name of out.failed) if (!unavailableSources.includes(name)) unavailableSources.push(name);
     } catch (err) {
       logFailure('summary', customer.id, err);

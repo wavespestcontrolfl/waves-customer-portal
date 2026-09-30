@@ -15,7 +15,7 @@ const PUSH_NOTE = '0b6f3c1e-1f6a-4a52-9a7e-2f0f4f0f9a11';
 const pg = url ? describe : describe.skip;
 
 const TEMP_TABLES = `
-  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, deleted_at timestamp);
+  CREATE TEMP TABLE customers (id uuid PRIMARY KEY, email text, deleted_at timestamp, last_seen_at timestamptz);
   CREATE TEMP TABLE leads (id uuid PRIMARY KEY, customer_id uuid);
   CREATE TEMP TABLE sms_log (id uuid PRIMARY KEY, customer_id uuid, direction text, status text, message_type text, message_body text, created_at timestamp, from_phone text, metadata jsonb, twilio_sid text);
   CREATE TEMP TABLE messages (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), twilio_sid text, delivery_status text, updated_at timestamp);
@@ -30,6 +30,8 @@ const TEMP_TABLES = `
   CREATE TEMP TABLE newsletter_subscribers (id int PRIMARY KEY, customer_id uuid, email text);
   CREATE TEMP TABLE newsletter_send_deliveries (id uuid PRIMARY KEY, send_id uuid, subscriber_id int, email text, sent_at timestamp, delivered_at timestamp, opened_at timestamp, clicked_at timestamp, bounced_at timestamp, complained_at timestamp);
   CREATE TEMP TABLE customer_page_views (id uuid PRIMARY KEY, customer_id uuid, page text, subject_type text, subject_id text, viewed_at timestamptz);
+  CREATE TEMP TABLE outbound_links (id uuid PRIMARY KEY, target_url text);
+  CREATE TEMP TABLE outbound_link_clicks (id uuid PRIMARY KEY, outbound_link_id uuid, clicked_at timestamptz, template_key text, surface text, customer_id uuid);
   CREATE TEMP TABLE estimates (id uuid PRIMARY KEY, customer_id uuid, address text);
   CREATE TEMP TABLE estimate_views (id uuid PRIMARY KEY, estimate_id uuid, viewed_at timestamp);
   CREATE TEMP TABLE scheduled_services (id uuid PRIMARY KEY, customer_id uuid);
@@ -56,7 +58,7 @@ pg('getCustomerActivity on Postgres', () => {
     await db.raw(CALL_LOG_DDL);
 
     await db('customers').insert([
-      { id: cust, email: 'Synthetic.Person@example.test' },
+      { id: cust, email: 'Synthetic.Person@example.test', last_seen_at: T(75) },
       { id: other, email: 'other@example.test' },
     ]);
     await db('leads').insert({ id: lead, customer_id: cust });
@@ -151,6 +153,17 @@ pg('getCustomerActivity on Postgres', () => {
       { id: randomUUID(), customer_id: cust, page: 'push:open', subject_type: 'ios', subject_id: `notification:${PUSH_NOTE}`, viewed_at: T(39) },
       { id: randomUUID(), customer_id: other, page: 'track', viewed_at: T(91) },
     ]);
+    // outside-link clicks: the full URL (path, query) never reaches the feed; another customer's click is excluded
+    const olEmail = randomUUID(); const olPage = randomUUID();
+    await db('outbound_links').insert([
+      { id: olEmail, target_url: 'https://www.chewy.com/dp/123?tag=secret&x=1' },
+      { id: olPage, target_url: 'not a url' },
+    ]);
+    await db('outbound_link_clicks').insert([
+      { id: randomUUID(), outbound_link_id: olEmail, clicked_at: T(53), template_key: 'prep.flea', surface: 'email', customer_id: cust },
+      { id: randomUUID(), outbound_link_id: olPage, clicked_at: T(38), template_key: null, surface: 'page', customer_id: cust },
+      { id: randomUUID(), outbound_link_id: olEmail, clicked_at: T(93), template_key: 'prep.flea', surface: 'email', customer_id: other },
+    ]);
     await db('estimates').insert({ id: est, customer_id: cust, address: '1 Synthetic Way' });
     await db('estimate_views').insert({ id: randomUUID(), estimate_id: est, viewed_at: T(42) });
     await db('scheduled_services').insert({ id: visit, customer_id: cust });
@@ -194,8 +207,14 @@ pg('getCustomerActivity on Postgres', () => {
     expect(failed.detail.length).toBeLessThanOrEqual(140);
     expect(r.events.find((e) => e.title === 'Text delivered (reminder)').detail).toBe('Reminder for your visit');
     expect(r.unavailableSources).toEqual([]);
-    // no outside-link or portal-visit source in this PR
-    expect(r.events.some((e) => e.source === 'outlink' || e.source === 'portal')).toBe(false);
+    // outside-link clicks: hostname (+ prep template) only, channel from the surface, other customers' clicks out
+    const outside = r.events.filter((e) => e.source === 'outlink');
+    expect(outside.map((e) => [e.title, e.channel, e.detail, e.engaged, e.at])).toEqual([
+      ['Clicked an outside link', 'email', 'chewy.com · prep flea', true, T(53).toISOString()],
+      ['Clicked an outside link', 'page', null, true, T(38).toISOString()],
+    ]);
+    expect(JSON.stringify(outside)).not.toMatch(/secret|\/dp\/123/);
+    expect(r.events.some((e) => e.source === 'portal')).toBe(false);
   });
 
   test('a read text is a delivered text with a read-receipt title, and it paginates like any other', async () => {
@@ -417,10 +436,10 @@ pg('getCustomerActivity on Postgres', () => {
     expect(short.nextCursor).toBe(short.events[1].at);
   });
 
-  test('engagement: only inbound replies, short-link clicks and recorded page views set lastEngagedAt', async () => {
+  test('engagement: only inbound replies, short-link clicks, outside-link clicks and recorded page views set lastEngagedAt', async () => {
     const r = await run({ limit: 200 });
     const engaged = r.events.filter((e) => e.engaged);
-    expect(new Set(engaged.map((e) => e.source))).toEqual(new Set(['sms', 'link', 'pageview']));
+    expect(new Set(engaged.map((e) => e.source))).toEqual(new Set(['sms', 'link', 'outlink', 'pageview']));
     expect(engaged.every((e) => ['replied', 'clicked', 'viewed', 'opened'].includes(e.kind))).toBe(true);
     // the only engaged 'opened' is the verified push open (an email open never is)
     expect(engaged.filter((e) => e.kind === 'opened').map((e) => [e.source, e.channel, e.ref])).toEqual([['pageview', 'push', { type: 'notification', id: PUSH_NOTE }]]);
@@ -435,6 +454,8 @@ pg('getCustomerActivity on Postgres', () => {
     // unfiltered token-page stamps (T42-T48), the call (T50), an AP-inbox click (T60).
     expect(r.summary.lastEngagedAt).toBe(T(55).toISOString()); // the human short-link click
     expect(r.summary.lastEngagedFrom).toBe('link clicks');
+    // last seen is informational: newer than every engaged event here and still not engagement
+    expect(r.summary.lastSeenAt).toBe(T(75).toISOString());
     expect(r.summary.lastEmailOpenAt).toBe(T(89).toISOString());
     expect(r.summary.lastProviderClickAt).toBe(T(91).toISOString());
     expect(r.summary.lastEmailOpenNote).toMatch(/unreliable/i);
@@ -455,6 +476,16 @@ pg('getCustomerActivity on Postgres', () => {
     expect(r.events).toHaveLength(5);
     expect(r.events.every((e) => e.engaged === false)).toBe(true);
     expect(r.summary).toMatchObject({ lastEngagedAt: null, lastEngagedFrom: null, lastEmailOpenAt: T(2).toISOString(), lastProviderClickAt: T(3).toISOString() });
+  });
+
+  test('an outside-link click alone is engagement; a never-seen customer has lastSeenAt null', async () => {
+    const solo = randomUUID(); const ol = randomUUID();
+    await db('customers').insert({ id: solo, email: 'outside.only@example.test' });
+    await db('outbound_links').insert({ id: ol, target_url: 'https://elanco.com/x' });
+    await db('outbound_link_clicks').insert({ id: randomUUID(), outbound_link_id: ol, clicked_at: T(9), template_key: 'prep.tick', surface: 'email', customer_id: solo });
+    const r = await timeline.getCustomerActivity(solo, {}, db);
+    expect(r.events.map((e) => e.detail)).toEqual(['elanco.com · prep tick']);
+    expect(r.summary).toMatchObject({ lastEngagedAt: T(9).toISOString(), lastEngagedFrom: 'outside link clicks', lastSeenAt: null });
   });
 
   test('summary reads the whole history, not just the visible page', async () => {

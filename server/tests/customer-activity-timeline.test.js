@@ -62,8 +62,8 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     }
   });
 
-  test('the summary has exactly three engaged sources: inbound texts, short-link clicks, recorded page views', () => {
-    expect(SOURCES.filter((s) => s.engaged).map((s) => s.name)).toEqual(['texts', 'link clicks', 'page views']);
+  test('the summary has exactly four engaged sources: inbound texts, short-link clicks, outside-link clicks, recorded page views', () => {
+    expect(SOURCES.filter((s) => s.engaged).map((s) => s.name)).toEqual(['texts', 'link clicks', 'outside link clicks', 'page views']);
     expect(source('texts').engaged.where).toBeTruthy(); // inbound only
     // every other source may only feed the informational open / provider-click fields
     for (const src of SOURCES.filter((s) => !s.engaged)) expect(Object.keys(src)).not.toContain('engaged');
@@ -104,6 +104,8 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
       .toMatchObject({ kind: 'replied', engaged: true, title: 'Replied by text' });
     expect(source('link clicks').toEvents({ id: 'l', clicked_at: t, kind: 'invoice', channel: 'sms' })[0])
       .toMatchObject({ kind: 'clicked', engaged: true, title: 'Clicked the invoice link' });
+    expect(source('outside link clicks').toEvents({ id: 'o', clicked_at: t, surface: 'page', target_url: 'https://www.chewy.com/dp/1?tag=x', template_key: 'prep.flea' })[0])
+      .toMatchObject({ kind: 'clicked', engaged: true, title: 'Clicked an outside link', channel: 'page', source: 'outlink', ref: { type: 'outbound_link_click', id: 'o' } });
     expect(source('page views').toEvents({ id: 'p', page: 'portal:billing', viewed_at: t })[0])
       .toMatchObject({ channel: 'portal', kind: 'viewed', engaged: true, detail: 'billing' });
     expect(source('page views').toEvents({ id: 'p', page: 'appointment', viewed_at: t })[0])
@@ -262,11 +264,10 @@ describe('engagement rule: only first-party, already-filtered evidence is engage
     expect(map({ from_phone: '+19415550100', metadata: '{not json' })).toMatchObject({ channel: 'sms', kind: 'sent' });
   });
 
-  test('the speculative sibling-PR sources are not in this PR', () => {
-    expect(SOURCES.map((s) => s.name)).not.toContain('outside link clicks');
+  test('no speculative table probing and no separate portal-visit source (tab views ride customer_page_views)', () => {
     expect(SOURCES.map((s) => s.name)).not.toContain('portal visits');
     const src = require('fs').readFileSync(require.resolve('../services/customer-activity-timeline'), 'utf8');
-    expect(src).not.toMatch(/outbound_link|last_seen_at|to_regclass|pg_attribute/);
+    expect(src).not.toMatch(/to_regclass|pg_attribute/);
     // and no guessing which sends were the customer's own (round-2 billing-contact rule removed)
     expect(src).not.toMatch(/billing contact|emailNorm|normEmail|BOT_UA/i);
     expect(timeline).not.toHaveProperty('needsPresent');
@@ -357,6 +358,28 @@ describe('getCustomerActivity guards', () => {
     expect(more.events).toHaveLength(2);
     expect(more.hasMore).toBe(true);
     expect(more.nextCursor).toBe(more.events[1].at);
+  });
+
+  test('outside link clicks: hostname-only detail, prep template, email surface maps to the email channel', () => {
+    const t = new Date('2026-09-01T12:00:00Z');
+    const olc = source('outside link clicks');
+    expect(olc.toEvents({ id: 'o', clicked_at: t, surface: 'email', target_url: 'https://www.chewy.com/dp/123?tag=secret&x=1', template_key: 'prep.flea' })[0])
+      .toMatchObject({ channel: 'email', detail: 'chewy.com · prep flea', engaged: true });
+    const page = olc.toEvents({ id: 'p', clicked_at: t, surface: 'page', target_url: 'https://amazon.com/x?y=1', template_key: null })[0];
+    expect(page).toMatchObject({ channel: 'page', detail: 'amazon.com' });
+    expect(olc.toEvents({ id: 'q', clicked_at: t, surface: null, target_url: 'not a url' })[0]).toMatchObject({ channel: 'page', detail: null });
+    // the full URL, path and query never reach the feed
+    expect(JSON.stringify([page])).not.toMatch(/\/x|y=1/);
+    expect(olc.engaged.expr).toBe('olc.clicked_at');
+  });
+
+  test('summary.lastSeenAt is the customer row last_seen_at (informational), null when never seen, absent on cursor pages', async () => {
+    const seen = new Date('2026-09-10T15:00:00Z');
+    const r = await getCustomerActivity('c1', {}, fakeDb({ customer: { id: 'c1', email: 'a@example.test', last_seen_at: seen } }));
+    expect(r.summary.lastSeenAt).toBe(seen.toISOString());
+    expect(r.summary.lastEngagedAt).toBeNull(); // never folded into engagement
+    expect((await getCustomerActivity('c1', {}, fakeDb())).summary.lastSeenAt).toBeNull();
+    expect((await getCustomerActivity('c1', { before: '2026-09-01T00:00:00Z' }, fakeDb())).summary).toBeNull();
   });
 
   test('summary is computed on the first page only', async () => {
