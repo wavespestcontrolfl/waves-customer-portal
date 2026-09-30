@@ -278,6 +278,23 @@ describe('compliance grounding', () => {
     expect(check('Keep the kids off the lawn for two hours.', f).ok).toBe(false);
   });
 
+  test('only a duration attached to the drying/rainfast/re-entry/stay-off wording counts; arrival, window and scheduling times are left alone', () => {
+    // scheduling time + rain / pets wording in the same sentence: passes
+    for (const reply of [
+      "We'll be there in 2 hours, rain is expected.",
+      'The tech arrives in 2 hours, so please keep the dogs in until then.',
+      'We will arrive within a 2-hour window, please keep the dogs inside.',
+      'We can come by in 45 minutes to look at the pets area.',
+    ]) expect(check(reply).ok).toBe(true);
+    // the same wording attached to a label time: ungrounded is held, the grounded whole-visit figure passes
+    expect(check('Keep the kids off the lawn for 6 hours.').ok).toBe(false);
+    expect(check('Keep the kids off the lawn for 4 hours.').ok).toBe(true);
+    expect(check('Wait 6 hours before letting the kids out.').ok).toBe(false);
+    expect(check('Rain within 2 hours will wash it off.').ok).toBe(false);
+    expect(check('Once 3 hours have passed, rain will not wash it off.').ok).toBe(true);
+    expect(check('Keep the kids off the lawn for two hours.').ok).toBe(false);
+  });
+
   test('a spelled-out figure never grounds', () => {
     expect(check('It is rainfast after three hours.').ok).toBe(false);
   });

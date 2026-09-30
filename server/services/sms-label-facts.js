@@ -259,7 +259,6 @@ function groundedTimeKeys(sectionText) {
   return { rain, reentry };
 }
 
-const RAIN_WORD_RE = /\b(?:rain(?:s|ed|ing|fast|y)?|wash(?:es|ed|ing)?|downpour)\b/i;
 // A spelled-out figure ("three hours", "an hour", "half an hour", "a couple of
 // hours") states the same time as digits and never grounds.
 const SPELLED_TIME_RE = /\b(?:an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|forty-five|sixty|ninety|half(?:\s+an?)?|couple(?:\s+of)?|few)\s+(?:more\s+)?(?:minutes?|hours?|hrs?|days?)\b/gi;
@@ -278,7 +277,40 @@ function sentenceAt(text, i) {
     if (ch === '\n' || ch === '!' || ch === '?' || (ch === '.' && !/\d/.test(text[e + 1] || ''))) break;
     e += 1;
   }
-  return text.slice(s, e);
+  return { text: text.slice(s, e), start: s };
+}
+
+// Which KIND of label time a duration is, from the words it is grammatically
+// attached to: the sentence must carry a rainfast / wash-off word (rain kind)
+// or a dry / re-entry / stay-off / go-back-out word (re-entry kind) within a
+// short span of the duration itself; the nearest one wins. A duration next to
+// an arrival, window or appointment word ("we'll be there in 2 hours, rain is
+// expected", "arriving in a 2-hour window, keep the dogs in") is scheduling,
+// not a label time: null.
+const RAIN_TRIGGER_RE = /\brain[-\s]?fast\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this\s+|that\s+|them\s+)?(?:off|away|out)\b/gi;
+const REENTRY_TRIGGER_RE = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\bdr(?:y|ies|ied|ying)\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.!?\n]{0,25}\boff\b|\b(?:stay|stays|staying|keep|keeps|keeping)\s+(?:out|away|inside|indoors)\b|\bwait(?:ing)?\b|\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|on\s+(?:it|the\s+(?:lawn|grass|yard|treated)))\b|\b(?:walk|play|sit|lie|run)(?:ing)?\s+on\b|\bthe\s+(?:kids?|children|dogs?|cats?|pets?)\s+(?:out|outside|back)\b/gi;
+const SCHEDULE_BEFORE_RE = /\b(?:arriv\w*|arrival|be\s+there|be\s+out|be\s+by|come\s+(?:by|out)|coming\s+(?:by|out)|stop(?:ping)?\s+by|between|eta|scheduled?|appointment|technician\s+(?:will|is)|tech\s+(?:will|is))\b[^.!?\n]{0,25}$/i;
+const SCHEDULE_AFTER_RE = /^[^.!?\n]{0,6}\b(?:window|arrival|appointment)\b/i;
+const TRIGGER_SPAN_BEFORE = 45;
+const TRIGGER_SPAN_AFTER = 40;
+function nearestTrigger(re, before, after) {
+  let best = Infinity;
+  re.lastIndex = 0;
+  for (let m = re.exec(before); m; m = re.exec(before)) best = Math.min(best, before.length - (m.index + m[0].length));
+  const a = new RegExp(re.source, re.flags.replace('g', '')).exec(after);
+  if (a) best = Math.min(best, a.index);
+  return best;
+}
+function timeKind(src, index, length) {
+  const { text: sentence, start } = sentenceAt(src, index);
+  const rel = index - start;
+  const before = sentence.slice(Math.max(0, rel - TRIGGER_SPAN_BEFORE), rel);
+  const after = sentence.slice(rel + length, rel + length + TRIGGER_SPAN_AFTER);
+  if (SCHEDULE_BEFORE_RE.test(sentence.slice(Math.max(0, rel - 30), rel)) || SCHEDULE_AFTER_RE.test(sentence.slice(rel + length))) return null;
+  const rain = nearestTrigger(RAIN_TRIGGER_RE, before, after);
+  const reentry = nearestTrigger(REENTRY_TRIGGER_RE, before, after);
+  if (rain === Infinity && reentry === Infinity) return null;
+  return rain <= reentry ? 'rain' : 'reentry';
 }
 
 /**
@@ -297,39 +329,32 @@ function neutralizeGroundedTimes(text, sectionText) {
   if (!rain.size && !reentry.size) return src;
   return src.replace(TIME_EXPR_RE, (whole, _a, _b, _u, offset) => {
     const key = timeKey([whole, _a, _b, _u]);
-    const inRainSentence = RAIN_WORD_RE.test(sentenceAt(src, offset));
-    const grounded = (inRainSentence && rain.has(key)) || (!inRainSentence && reentry.has(key));
+    const kind = timeKind(src, offset, whole.length);
+    const grounded = (kind === 'rain' && rain.has(key)) || (kind !== 'rain' && reentry.has(key));
     return grounded ? 'LABELTIME' : whole;
   });
 }
 
-// A sentence about people/pets going back to a treated area.
-const EXPOSURE_WORD_RE = /\b(?:pets?|dogs?|cats?|kids?|child(?:ren)?|people|family|toddlers?|babies|baby|treated|re-?enter(?:ing)?|walk(?:ing)?|play(?:ing)?|stay(?:ing)?\s+off|keep(?:ing)?\s+off|back\s+(?:out|outside|inside|on)|go(?:ing)?\s+(?:back\s+)?(?:out|outside|on)|dry(?:ing)?|dried)\b/i;
-
 /**
  * The older banned-copy lists screen only dry / re-entry phrasing, so an
  * invented time in other words ("rain won't wash it off after 2 hours", "keep
- * the kids off for 6 hours") needs its own deterministic check: in a sentence
- * about rain, ANY time expression — digits or spelled out — must be a rainfast
- * time the LABEL FACTS section states; in a sentence about people or pets
- * returning to a treated area, a re-entry time it states (same number+unit).
- * No section -> none grounded.
+ * the kids off for 6 hours") needs its own deterministic check. A duration
+ * counts only when it is grammatically the rainfast / drying / re-entry /
+ * stay-off time (see timeKind: attached to those words, never an arrival,
+ * window or scheduling time), and then it must be a figure the LABEL FACTS
+ * section states for that kind (same number+unit). Spelled-out figures never
+ * ground. No section -> none grounded.
  */
 function hasUngroundedLabelTime(text, sectionText) {
   const src = String(text || '');
   const { rain, reentry } = groundedTimeKeys(sectionText);
-  const kind = (index) => {
-    const sentence = sentenceAt(src, index);
-    if (RAIN_WORD_RE.test(sentence)) return 'rain';
-    return EXPOSURE_WORD_RE.test(sentence) ? 'reentry' : null;
-  };
   for (const m of src.matchAll(TIME_EXPR_RE)) {
-    const k = kind(m.index);
+    const k = timeKind(src, m.index, m[0].length);
     if (k === 'rain' && !rain.has(timeKey(m))) return true;
     if (k === 'reentry' && !reentry.has(timeKey(m))) return true;
   }
   for (const m of src.matchAll(SPELLED_TIME_RE)) {
-    if (kind(m.index)) return true;
+    if (timeKind(src, m.index, m[0].length)) return true;
   }
   return false;
 }
