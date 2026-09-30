@@ -397,6 +397,11 @@ async function planSummaryBillingLink(packetId, token, database = db) {
     if (!(invoiceAmountDue(invoice) > 0)) return null;
     const kind = invoice.status === 'paid' ? 'receipt' : invoice.status === 'draft' ? 'pay_link' : null;
     if (!kind) return null;
+    // The ruling is for combined stops: two or more services closed through this packet (the
+    // set the combined invoice is built from). A one-service completion keeps today's behavior.
+    const members = Number((await database('visit_completion_packet_items').where({ packet_id: packetId }).count('* as count').first())?.count || 0);
+    if (members < 2) return null;
+    if (kind === 'receipt' && await summaryReceiptTextHandled(database, invoice)) return null;
     // The email leg carries the link whatever happens to the text: it must be deliverable
     // (recipient, billing choice, template, no suppression), or nothing folds.
     if (!(await require('./messaging/billing-text-verdict').billingEmailDeliverable(kind, invoice, { database }))) return null;
@@ -421,6 +426,23 @@ async function summaryLinkSendable(database, invoice, kind, recipientPhone) {
   return (await require('./messaging/billing-text-verdict').billingTextVerdict(kind, invoice, { phone: holder.phone, database })).ok;
 }
 
+// The receipt's own Text is already handled elsewhere: an operator claimed the receipt job
+// (a first send in flight, read under the job row's lock in a handoff, so an operator claim
+// either lands first and the summary goes plain, or waits for the summary's text and is then
+// a deliberate resend), or a receipt text went or is queued (judged from the text's own event
+// key: receipt_sent_at is also stamped by the worker's email-only completion, so it says
+// nothing here).
+async function summaryReceiptTextHandled(database, invoice) {
+  const jobQuery = database('receipt_delivery_jobs').where({ invoice_id: invoice.id });
+  if (database.isTransaction) jobQuery.forUpdate();
+  const job = await jobQuery.first('status', 'locked_by');
+  if (job?.status === 'running' && String(job.locked_by || '').startsWith('operator:')) return true;
+  return Boolean(await database('sms_log')
+    .where({ customer_id: invoice.customer_id, direction: 'outbound' })
+    .whereRaw("metadata->>'notificationEventKey' = ?", [`invoice:${invoice.id}:receipt`])
+    .whereNotIn('status', ['failed', 'blocked', 'cancelled', 'undelivered']).first('id'));
+}
+
 // What could make the recorded link wrong or unlawful now, judged where the text is sent:
 // a billing hold or payer, an invoice no longer payable (or a receipt no longer paid), and
 // the same consent verdict. False sends the plain summary; the email already carries the link.
@@ -429,6 +451,7 @@ async function summaryLinkStillValid(database, link, visitId, recipientPhone) {
   const visit = await database('service_visits').where({ id: visitId }).first('billing_hold');
   if (!invoice || !visit || visit.billing_hold || invoice.payer_id || invoice.payer_statement_id) return false;
   if (link.kind === 'receipt' ? invoice.status !== 'paid' : !(isInvoiceCollectibleStatus(invoice.status) && invoiceAmountDue(invoice) > 0)) return false;
+  if (link.kind === 'receipt' && await summaryReceiptTextHandled(database, invoice)) return false;
   // The invoice's own text already went or is queued (an operator send-now): the link is
   // not texted a second time. Read from the text's own event key, not sms_sent_at, which
   // the queue's email-only finalization stamps too.

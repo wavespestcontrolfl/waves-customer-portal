@@ -5067,6 +5067,85 @@ postgres('visit summary recipient recovery', () => {
 
     // The decision and the state it depends on are written together: a crash between them
     // must not leave a receipt or invoice whose text nothing carries.
+    describe('only combined stops fold', () => {
+      test.each([['unpaid', {}], ['paid', { status: 'paid' }]])('%s: an eligible single-member packet keeps today\'s behavior', async (kind, options) => {
+        const invoiceId = await stop(options);
+        // One service closed through this packet: the second member is not part of it.
+        await mockPg('visit_completion_packet_items').where({ packet_id: fixture.packetId, scheduled_service_id: fixture.serviceIds[1] }).del();
+        await coordinate();
+        expect(await recorded()).toBeUndefined();
+        for (const [input] of sendCustomerMessage.mock.calls) expect(input.body).not.toMatch(/Pay your invoice|Your receipt/);
+        if (kind === 'paid') {
+          expect((await jobRow(invoiceId)).sms_result).toBeNull();
+          await Queue.processDueReceiptDeliveryJobs();
+          expect(strayTexts).toEqual(['payment_receipt']);
+        } else {
+          expect(String((await invoiceRow(invoiceId)).scheduled_send_error || '')).not.toMatch(/^BILLING_EMAIL_PENDING/);
+        }
+      });
+    });
+
+    // A carried receipt and an operator's first send of that receipt are serialized through the
+    // receipt job row: one receipt text, and never the link twice.
+    describe('a carried receipt and an operator receipt send', () => {
+      const holdSummary = () => {
+        const nextAllowedAt = new Date(Date.now() + 8 * 3600000).toISOString();
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return { sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt };
+        });
+      };
+      const deferredRow = () => mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+      const Replay = () => require('../services/messaging/deferred-replay-registry');
+
+      test('an operator claim while the summary is pending sends the summary plain', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        holdSummary();
+        await coordinate();
+        const queued = await deferredRow();
+        expect(queued.message_body).toMatch(/ Your receipt: /);
+        expect(await Replay().recheckDeferredReplay('visit_summary_deferred', queued.metadata)).toEqual({ eligible: true });
+        const claim = await Queue.claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true });
+        expect(claim.id).toBeTruthy();
+        expect(await Replay().recheckDeferredReplay('visit_summary_deferred', queued.metadata))
+          .toMatchObject({ eligible: true, replaceBody: plainBody() });
+        await Queue.releaseOperatorReceiptClaim(claim, {});
+      });
+
+      test('an operator receipt text that already went sends the summary plain', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        holdSummary();
+        await coordinate();
+        const queued = await deferredRow();
+        await mockPg('sms_log').insert({ customer_id: fixture.customerId, direction: 'outbound', from_phone: '+19415550100', to_phone: '+12025550123',
+          message_body: 'Receipt', message_type: 'receipt', status: 'sent', metadata: JSON.stringify({ notificationEventKey: `invoice:${invoiceId}:receipt` }) });
+        expect(await Replay().recheckDeferredReplay('visit_summary_deferred', queued.metadata))
+          .toMatchObject({ eligible: true, replaceBody: plainBody() });
+      });
+
+      test('an operator claim during the summary send waits for it: the summary carries the link, the operator send is then a deliberate resend', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        let claim;
+        let settledDuringSend = true;
+        summaryProvider = async () => {
+          claim = Queue.claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true });
+          let settled = false;
+          claim.then(() => { settled = true; }, () => { settled = true; });
+          await new Promise((resolve) => setTimeout(resolve, 400));
+          settledDuringSend = settled;
+          return { sent: true };
+        };
+        await coordinate();
+        const claimed = await claim;
+        expect(settledDuringSend).toBe(false);
+        expect(sendCustomerMessage.mock.calls.filter(([input]) => input.purpose === 'service_completion')).toHaveLength(1);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/ Your receipt: /);
+        expect(strayTexts).toEqual([]);
+        expect(claimed.id).toBeTruthy();
+        await Queue.releaseOperatorReceiptClaim(claimed, {});
+      });
+    });
+
     describe('the fold is persisted atomically', () => {
       const failRecordOnce = () => {
         const execute = mockPg.client.constructor.prototype._query;
