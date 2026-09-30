@@ -36,6 +36,7 @@ const { explicitBillingChannels } = require('../billing-delivery-channels');
 const { customerOnAutopay } = require('../autopay-eligibility');
 const {
   reminderProgress, sendReminderChannels, verdictAllows, verdictDurablyDenied, pendingReminderChannels, reminderPolicyVerdicts,
+  findReminderReservation,
 } = require('../billing-reminder-delivery');
 const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
 const { OPEN_STATUSES, SOURCE, eventKey } = require('./constants');
@@ -566,6 +567,7 @@ async function decideShadowPolicy(run, set) {
   const pending = pendingReminderChannels(run.sendChannels, delivered, event?.resolved || new Set());
   run.policyDenied = [];
   run.unclaimable = [];
+  run.deduped = [];
   if (!pending.length) return null;
   const memberIds = set.members.map((m) => m.invoice_id);
   const verdicts = await reminderPolicyVerdicts({
@@ -578,24 +580,30 @@ async function decideShadowPolicy(run, set) {
     const waivable = delivered.size > 0 && denied.every((channel) => verdictDurablyDenied(verdicts[pending.indexOf(channel)]));
     return waivable ? decision('settle', 'policy_waived', { denied }) : decision('hold', 'COLLECTIONS_POLICY', { denied });
   }
-  // A reservation another attempt left neither delivered, resolved nor failed (a worker
-  // that died between the reservation and the handoff) is ambiguous: the live claim
-  // refuses it (REMINDER_OUTCOME_UNCONFIRMED). Judged read-only by the ledger's own claim decision.
+  // The keyed reservation of each owed leg, read by its key with NO time window (live recordContact /
+  // claimAttempt find a reservation of any age; reminderProgress forgets rows past 90 days). Judged by
+  // the ledger's own claim decision, read-only: an ambiguous one (a worker that died between the
+  // reservation and the handoff) is refused live as REMINDER_OUTCOME_UNCONFIRMED; a delivered one is
+  // deduped, not sent again.
   const allowed = pending.filter((channel) => !denied.includes(channel));
-  const unclaimable = allowed.filter((channel) => !claimVerdict(standingReservation(event, channel)).allowed);
-  if (unclaimable.length === allowed.length) return decision('hold', 'REMINDER_OUTCOME_UNCONFIRMED', { denied, unclaimable });
+  const verdictOf = new Map();
+  for (const channel of allowed) verdictOf.set(channel, claimVerdict(await standingReservation(run, channel)));
+  const deduped = allowed.filter((channel) => verdictOf.get(channel).delivered);
+  const unclaimable = allowed.filter((channel) => !verdictOf.get(channel).allowed && !verdictOf.get(channel).delivered);
+  if (unclaimable.length === allowed.length - deduped.length && unclaimable.length) {
+    return decision('hold', 'REMINDER_OUTCOME_UNCONFIRMED', { denied, unclaimable });
+  }
+  if (deduped.length === allowed.length) return decision('settle', 'already_delivered', { denied });
   run.policyDenied = denied; // a partial send: the claimable allowed channels go, these do not
   run.unclaimable = unclaimable;
+  run.deduped = deduped;
   return null;
 }
 
-// The ledger row a channel's keyed reservation already has for this step, shaped as recordContact returns a reused one.
-function standingReservation(event, channel) {
-  const row = (event?.entries || []).find((entry) => entry.channel === channel);
-  if (!row) return { id: 'new', reused: false, metadata: {} };
-  let metadata = row.metadata;
-  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
-  return { id: row.id, reused: true, metadata: metadata || {} };
+// The ledger row a channel's keyed reservation already has, shaped as recordContact returns a reused one.
+async function standingReservation(run, channel) {
+  const row = await findReminderReservation(run.schedule.customer_id, run.eventKey, channel);
+  return row ? { id: row.id, reused: true, metadata: row.metadata } : { id: 'new', reused: false, metadata: {} };
 }
 
 /**
@@ -614,6 +622,7 @@ async function judgeShadowSchedule(schedule, set, { now }) {
       ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents,
       ...(run.policyDenied?.length ? { denied: run.policyDenied.join('+') } : {}),
       ...(run.unclaimable?.length ? { unclaimable: run.unclaimable.join('+') } : {}),
+      ...(run.deduped?.length ? { deduped: run.deduped.join('+') } : {}),
     });
     return 'send';
   }

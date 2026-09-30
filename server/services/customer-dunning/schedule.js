@@ -571,7 +571,11 @@ async function alertHeld(schedule, reason, now, database) {
     customerId: schedule.customer_id,
   });
   if (sent) {
-    await database(TABLE).where({ id: schedule.id }).update({ hold_alerted_at: now, updated_at: database.fn.now() });
+    // Stamp ONLY this held episode. notifyAdmin ran between markHeld and here; if staff resumed or released
+    // the schedule meanwhile (or it advanced), the row is no longer this hold, and writing the stamp back
+    // would carry a stale alert mark into the NEXT hold and swallow its alert.
+    await database(TABLE).where({ id: schedule.id, status: 'held', held_reason: String(reason).slice(0, 80), held_since: since })
+      .update({ hold_alerted_at: now, updated_at: database.fn.now() });
   }
   return sent;
 }
@@ -579,10 +583,10 @@ async function alertHeld(schedule, reason, now, database) {
 /** HELD: retry at the next run; never stale-skipped (A-7, A-15). */
 async function markHeld(schedule, reason, { claimStamp, now = new Date(), database = db }) {
   const heldReason = String(reason).slice(0, 80);
-  // A DIFFERENT reason than the stored one is a new hold: its clock and its
-  // alert start over, so an office hold (account credit, paused member) is
-  // never swallowed by an earlier alert for another reason.
-  const newHold = !!schedule.held_reason && schedule.held_reason !== heldReason;
+  // A new hold starts its clock and its alert over: any transition INTO held from another status (whatever
+  // a stale stamp says), or a DIFFERENT reason than the stored one, so an office hold (account credit,
+  // paused member) is never swallowed by an earlier alert for another reason.
+  const newHold = schedule.status !== 'held' || (!!schedule.held_reason && schedule.held_reason !== heldReason);
   const since = newHold ? now : heldSince(schedule, now);
   const changed = await guardedOpen(database, schedule, claimStamp).update({
     status: 'held', held_reason: heldReason, held_since: since,

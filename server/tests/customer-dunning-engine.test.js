@@ -124,12 +124,12 @@ jest.mock('../services/collections/contact-ledger', () => {
 let mockOpenSchedules = [];
 const mockWrites = [];
 const mockTables = {
-  first: (table, target) => {
+  first: (table, target, targetKey) => {
     if (table === 'customers') return customer;
     if (table === 'notification_prefs') return prefs;
     if (table === 'sms_templates') return smsTemplateRow;
     if (table === 'customer_dunning_schedules') return mockScheduleRow;
-    if (table === 'collections_contact_ledger') return mockLedger.find((r) => r.id === target);
+    if (table === 'collections_contact_ledger') return mockLedger.find((r) => (target && r.id === target) || (targetKey && r.idempotency_key === targetKey));
     return undefined;
   },
   insert: (table, row) => { mockWrites.push(['insert', table, row]); if (table === 'customer_interactions') interactions.push(row); },
@@ -138,10 +138,12 @@ jest.mock('../models/db', () => {
   const fake = jest.fn((table) => {
     fake.tables.push(table);
     let target = null;
+    let targetKey = null; // a keyed-reservation lookup (idempotency_key)
     let minOccurred = null; // reminderProgress' 90-day window
     const chain = {
       where(cond, op, val) {
         if (cond && cond.id) target = cond.id;
+        if (cond && cond.idempotency_key) targetKey = cond.idempotency_key;
         if (cond === 'occurred_at' && op === '>') minOccurred = val;
         return chain;
       },
@@ -161,7 +163,7 @@ jest.mock('../models/db', () => {
         }
         return 1;
       },
-      first: async () => mockTables.first(table, target),
+      first: async () => mockTables.first(table, target, targetKey),
       // copies, as a real query returns: an in-memory view change (a repair's reflected verdict) never edits the stored row
       then: (resolve) => resolve(table === 'collections_contact_ledger' ? mockLedger.filter((r) => !minOccurred || new Date(r.occurred_at) > minOccurred).map((r) => ({ ...r, metadata: { ...r.metadata } })) : table === 'customer_dunning_schedules' ? mockOpenSchedules : []),
     };
@@ -301,6 +303,9 @@ function seedOverdue() {
     return d.promote ? { ...d, seed: { ...d.seed, next_touch_at: new Date(now.getTime() - 1000) } } : d;
   });
 }
+
+// The idempotency key a leg's reservation carries (the one formula sendReminderChannels uses).
+const keyFor = (eventKey, channel) => require('../services/billing-reminder-delivery').reminderReservationKey(CUSTOMER_ID, eventKey, channel);
 
 // The shadow run's world: these are the open schedule rows the db module returns; `writes` is every write anything made.
 function shadowDb(schedules = []) {
@@ -1220,7 +1225,7 @@ describe('shadow models an ambiguous reservation before logging a send (R5-2)', 
   const stepKey = 's-open';
   const reserve = (channel, metadata = {}) => mockLedger.push({
     id: `res-${channel}`, customer_id: CUSTOMER_ID, channel, source: 'invoice_followups_customer', occurred_at: ago(0.1),
-    invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: `k-${channel}`,
+    invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: keyFor(`customer-dunning:${stepKey}:1:d60_reminder`, channel),
     metadata: { notificationEventKey: `customer-dunning:${stepKey}:1:d60_reminder`, selectedChannels: ['email', 'sms'], ...metadata },
   });
   const open = [{ id: stepKey, customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }];
@@ -1273,6 +1278,48 @@ describe('shadow models an ambiguous reservation before logging a send (R5-2)', 
     expect(lines()).not.toMatch(/unclaimable=/);
   });
 
+  describe('old keyed reservations (past the 90-day progress window) are consulted too (R9)', () => {
+    const old = (channel, metadata = {}) => mockLedger.push({
+      id: `old-${channel}`, customer_id: CUSTOMER_ID, channel, source: 'invoice_followups_customer', occurred_at: ago(120),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: keyFor(`customer-dunning:${stepKey}:1:d60_reminder`, channel),
+      metadata: { notificationEventKey: `customer-dunning:${stepKey}:1:d60_reminder`, selectedChannels: ['email', 'sms'], ...metadata },
+    });
+
+    test('a >90-day-old AMBIGUOUS reservation is would-HOLD REMINDER_OUTCOME_UNCONFIRMED (live finds the same keyed row and refuses it)', async () => {
+      prefs = { invoice_channels: ['email'] };
+      old('email');
+      untouched(await shadow());
+      expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=REMINDER_OUTCOME_UNCONFIRMED unclaimable=email/);
+      expect(lines()).not.toMatch(/would send/);
+    });
+
+    test('a >90-day-old DELIVERED reservation is would-SETTLE (deduped, never sent again), not would-send', async () => {
+      prefs = { invoice_channels: ['email'] };
+      old('email', { delivered: true });
+      untouched(await shadow());
+      expect(lines()).toMatch(/SHADOW would settle customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=already_delivered/);
+      expect(lines()).not.toMatch(/would send/);
+    });
+
+    test('a partial: one leg old-delivered (deduped), the other new: the send goes for the new one, naming the deduped', async () => {
+      old('email', { delivered: true });
+      untouched(await shadow());
+      expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi members=3 total_cents=\d+ deduped=email/);
+    });
+
+    test('an old send_failed reservation is claimable (live reopens it); a resolved one is refused like live', async () => {
+      prefs = { invoice_channels: ['email'] };
+      old('email', { send_failed: true });
+      untouched(await shadow());
+      expect(lines()).toMatch(/would send/);
+      logger.info.mockClear();
+      mockLedger.length = 0;
+      old('email', { resolved: true });
+      await shadow();
+      expect(lines()).toMatch(/would hold .* reason=REMINDER_OUTCOME_UNCONFIRMED/);
+    });
+  });
+
   test('the ledger\'s claim decision is one function: claimAttempt and the shadow ask the same verdict', () => {
     const { claimVerdict } = jest.requireActual('../services/collections/contact-ledger');
     expect(claimVerdict({ id: 'x', reused: true, metadata: {} })).toEqual({ allowed: false, held: true });
@@ -1316,7 +1363,7 @@ describe('progress is selected by the CURRENT touch key after the stage is plann
     catchUp();
     mockLedger.push({
       id: 'd60-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
-      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-d60',
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: keyFor('customer-dunning:s-open:1:d60_reminder', 'email'),
       metadata: { notificationEventKey: 'customer-dunning:s-open:1:d60_reminder', selectedChannels: ['email'] },
     });
     Schedule.promotionCandidates.mockResolvedValue([]);

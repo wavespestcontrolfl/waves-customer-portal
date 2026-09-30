@@ -103,6 +103,8 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     });
     await app.schema.createTable('collections_contact_ledger', (t) => {
       t.uuid('id').primary().defaultTo(app.raw('gen_random_uuid()'));
+      t.uuid('customer_id'); t.string('channel', 20); t.string('purpose', 40); t.jsonb('invoice_ids');
+      t.timestamp('occurred_at', { useTz: true }); t.string('source', 60); t.string('idempotency_key', 120).unique();
       t.jsonb('metadata');
     });
     await migration.up(app);
@@ -965,6 +967,56 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(new Date((await fresh(s.id)).held_since).getTime()).toBe(NOW.getTime());
     });
 
+    test('R9-2: staff resume the schedule WHILE notifyAdmin runs: the old hold\'s alert stamp is not written back; the next hold rings', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      const first = await claimAt(s.id, NOW);
+      // the resume lands inside the notification call (it clears the hold fields and reactivates the row)
+      mockNotify.mockImplementationOnce(async () => {
+        await app('customer_dunning_schedules').where({ id: s.id }).update({
+          status: 'active', held_reason: null, held_since: null, hold_alerted_at: null, touch_claimed_at: null, next_touch_at: NOW,
+        });
+        return {};
+      });
+      await Schedule.markHeld(first.schedule, 'account_credit_available', { claimStamp: first.claimStamp, now: NOW, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      const after = await fresh(s.id);
+      expect(after).toMatchObject({ status: 'active', held_reason: null, hold_alerted_at: null }); // nothing written back onto the resumed row
+
+      const later = new Date(NOW.getTime() + 3 * DAY);
+      const second = await claimAt(s.id, later);
+      await Schedule.markHeld(second.schedule, 'account_credit_available', { claimStamp: second.claimStamp, now: later, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(2); // the NEW hold's alert fires
+      expect((await fresh(s.id)).hold_alerted_at).not.toBeNull();
+    });
+
+    test('R9-2: a stale alert stamp on a non-held row does not swallow the next hold: any transition INTO held starts a new hold', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c, { hold_alerted_at: ago(2), held_since: ago(5) }); // active row carrying a stale stamp
+      const claim = await claimAt(s.id, NOW);
+      await Schedule.markHeld(claim.schedule, 'account_credit_available', { claimStamp: claim.claimStamp, now: NOW, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      const row = await fresh(s.id);
+      expect(new Date(row.held_since).getTime()).toBe(NOW.getTime()); // a fresh clock
+      expect(new Date(row.hold_alerted_at).getTime()).toBe(NOW.getTime());
+    });
+
+    test('R9-2: the stamp is written only onto the very hold that rang (status, reason and start all match)', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      const claim = await claimAt(s.id, NOW);
+      // the hold is REPLACED by a different reason while the alert for the first is in flight
+      mockNotify.mockImplementationOnce(async () => {
+        await app('customer_dunning_schedules').where({ id: s.id }).update({ held_reason: 'member_paused', held_since: new Date(NOW.getTime() + 1000) });
+        return {};
+      });
+      await Schedule.markHeld(claim.schedule, 'account_credit_available', { claimStamp: claim.claimStamp, now: NOW, database: app });
+      expect((await fresh(s.id)).hold_alerted_at).toBeNull();
+    });
+
     test('a hold that comes back after a release/resume uses a NEW dedupe key (notifyAdmin dedupes a key for good)', async () => {
       const c = await customer();
       await member(c, { sentDaysAgo: 60, step: 4 });
@@ -1034,6 +1086,47 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect((await app('collections_contact_ledger').where({ id: withFlag.id }).first()).metadata).toEqual({ send_failed: true, keep: 'x' });
       expect((await app('collections_contact_ledger').where({ id: plain.id }).first()).metadata).toEqual({ keep: 'y' });
       expect((await app('collections_contact_ledger').where({ id: nulled.id }).first()).metadata).toBeNull();
+    });
+  });
+
+  // ── the keyed reservation, read with no time window (R9-1) ─────────────
+  describe('findReminderReservation (real SQL)', () => {
+    const { findReminderReservation, reminderReservationKey } = jest.requireActual('../services/billing-reminder-delivery');
+    const reserve = (c, eventKey, channel, metadata, days) => app('collections_contact_ledger').insert({
+      id: randomUUID(), customer_id: c, channel, purpose: 'late_payment', invoice_ids: JSON.stringify([]), occurred_at: ago(days),
+      source: 'invoice_followups_customer', metadata: JSON.stringify({ notificationEventKey: eventKey, ...metadata }),
+      idempotency_key: reminderReservationKey(c, eventKey, channel),
+    });
+
+    test('finds a reservation of any age by its key; none for another customer, event or channel', async () => {
+      const c = await customer();
+      const eventKey = `customer-dunning:${randomUUID()}:1:d60_reminder`;
+      await reserve(c, eventKey, 'email', { delivered: true }, 200);
+      expect(await findReminderReservation(c, eventKey, 'email')).toMatchObject({ metadata: { delivered: true } });
+      expect(await findReminderReservation(c, eventKey, 'sms')).toBeNull();
+      expect(await findReminderReservation(c, `${eventKey}x`, 'email')).toBeNull();
+      expect(await findReminderReservation(await customer(), eventKey, 'email')).toBeNull();
+    });
+
+    test('shadow over real SQL: an old delivered reservation is would-settle, an old ambiguous one would-hold; nothing is written', async () => {
+      const logger = require('../services/logger');
+      const c = await customer();
+      const m = await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c, { next_touch_at: ago(0.05) });
+      mockResolve.mockResolvedValue(setFor([m]));
+      const lines = () => logger.info.mock.calls.map(([x]) => String(x)).filter((x) => x.includes(`schedule=${s.id}`)).join('\n');
+      const eventKey = `customer-dunning:${s.id}:${s.episode}:d60_reminder`;
+      await reserve(c, eventKey, 'email', { delivered: true }, 150);
+      const before = await app('collections_contact_ledger').where({ customer_id: c });
+      await Runner.shadowRun(NOW);
+      expect(lines()).toMatch(/SHADOW would settle .* reason=already_delivered/);
+      await app('collections_contact_ledger').where({ customer_id: c }).del();
+      await reserve(c, eventKey, 'email', {}, 150);
+      logger.info.mockClear();
+      await Runner.shadowRun(NOW);
+      expect(lines()).toMatch(/SHADOW would hold .* reason=REMINDER_OUTCOME_UNCONFIRMED unclaimable=email/);
+      expect(before).toHaveLength(1);
+      expect(await app('collections_contact_ledger').where({ customer_id: c })).toHaveLength(1);
     });
   });
 

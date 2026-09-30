@@ -125,6 +125,25 @@ async function restoredDelivery(entry, channel) {
   }
 }
 
+// The keyed reservation of one leg of an episode: the ONE formula recordContact's idempotency key uses.
+function reminderReservationKey(customerId, eventKey, channel) {
+  const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
+  return `billing-reminder:${digest}:${channel}`;
+}
+
+// The standing row of a leg's keyed reservation, read by that key with no time window (reminderProgress
+// drops rows older than 90 days; recordContact / claimAttempt do not). A READ: the customer-dunning shadow
+// run asks it to judge a leg exactly as the live claim will. null = no reservation yet.
+async function findReminderReservation(customerId, eventKey, channel) {
+  const row = await db('collections_contact_ledger')
+    .where({ idempotency_key: reminderReservationKey(customerId, eventKey, channel) })
+    .first('id', 'metadata');
+  if (!row) return null;
+  let metadata = row.metadata;
+  if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = {}; } }
+  return { id: row.id, metadata: metadata || {} };
+}
+
 // The legs an episode still owes, and the collections-policy verdict for each. Both
 // are READS (collectionsChannelPermitted consults the contact policy and writes
 // nothing), shared with the customer-dunning shadow run so it judges a send by
@@ -221,7 +240,6 @@ async function sendReminderChannels({
     }
     return { complete: false, deliveredNow, results, delivered: [...delivered], restored };
   }
-  const digest = crypto.createHash('sha256').update(`${customerId}:${eventKey}`).digest('hex');
   // Only a durable denial waives its leg; a spacing window keeps it owed.
   // A later allowance revokes the old waiver. Persist that deletion before
   // retrying: claimAttempt refreshes reservation metadata with a JSON merge,
@@ -250,7 +268,7 @@ async function sendReminderChannels({
     };
     const entry = await ContactLedger.recordContact({
       customerId, channel, purpose, invoiceIds: reservation.invoiceIds, source,
-      idempotencyKey: `billing-reminder:${digest}:${channel}`, metadata: reservation.metadata,
+      idempotencyKey: reminderReservationKey(customerId, eventKey, channel), metadata: reservation.metadata,
     });
     episodeRowIds.add(entry?.id);
     // A retry under the same key re-quotes: its claim refreshes the debt snapshot.
@@ -283,5 +301,5 @@ async function settleEpisode(channels, { delivered, resolved, waived }, rowIds) 
 
 module.exports = {
   reminderProgress, sendReminderChannels, isTerminalEmailRefusal, verdictAllows, verdictDurablyDenied,
-  pendingReminderChannels, reminderPolicyVerdicts,
+  pendingReminderChannels, reminderPolicyVerdicts, reminderReservationKey, findReminderReservation,
 };
