@@ -14881,6 +14881,12 @@ const CallRecordingProcessor = {
               smsOutcome = { sent: false, skipped: 'no_usable_ani' };
             } else if (genuineNewProspect && callbackNumberNeededHoldActive) {
               smsOutcome = { sent: false, skipped: 'callback_number_needed' };
+            } else if (genuineNewProspect && v2Result?.extraction?.consent?.sms_declined === true) {
+              // The caller said no to texts on THIS call (owner 2026-09-30).
+              // Read from the live extraction: the row may not carry it yet.
+              // genuineNewProspect already requires a valid V2 result; the
+              // sender checks every earlier call with this number itself.
+              smsOutcome = { sent: false, skipped: 'said_no_texts' };
             } else if (genuineNewProspect) {
               // Inner catch: the review card below MUST still open when the
               // send path throws — a failed text plus no card is exactly the
