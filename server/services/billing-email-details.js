@@ -151,49 +151,51 @@ function receiptTenderLabel({ payment = null, invoice = {} } = {}) {
 // the customer's. Only ever a STREET address: the nickname in profile_label
 // ("Primary", "Rental") is never a fallback here, so a customer with no street
 // line simply gets no Property row.
-const LOOKUP_FAILED = Symbol('lookup-failed');
 
-async function scheduledServiceIdFor(invoice, { failureSentinel = false } = {}) {
-  if (invoice?.scheduled_service_id) return invoice.scheduled_service_id;
-  if (!invoice?.service_record_id) return null;
-  try {
-    const record = await db('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id');
-    return record?.scheduled_service_id || null;
-  } catch {
-    return failureSentinel ? LOOKUP_FAILED : null;
-  }
+// THE one path to a visit / completion record for an invoice. A stamped
+// scheduled_service_id or service_record_id is only a pointer: it can name
+// ANOTHER customer's row (a mislinked or merged record), and everything read
+// through it (service address, service type, date) would then describe someone
+// else's visit. So both rows are read with the OWNING customer id in the query;
+// a pointer that does not resolve to that customer's own row reads as "no
+// visit / no record linked". Throws when a lookup itself fails: callers decide
+// what a failure means (the Property row is omitted, the service falls back).
+async function ownedVisitContext(invoice) {
+  const customerId = invoice?.customer_id;
+  if (!customerId) return { visit: null, record: null };
+  const record = invoice.service_record_id
+    ? (await db('service_records').where({ id: invoice.service_record_id, customer_id: customerId })
+      .first('service_type', 'service_date', 'scheduled_service_id')) || null
+    : null;
+  const scheduledId = invoice.scheduled_service_id || record?.scheduled_service_id || null;
+  const visit = scheduledId
+    ? (await db('scheduled_services').where({ id: scheduledId, customer_id: customerId }).first(
+      'service_type', 'scheduled_date',
+      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
+    )) || null
+    : null;
+  return { visit, record };
 }
 
-// '' = the visit carries no stamped street address; null = the lookup FAILED.
-// The caller must not treat a failure as "no stamp": that would fall back to
-// the primary address and name the wrong property on a secondary-property visit.
-async function stampedVisitAddress(scheduledServiceId) {
-  if (!scheduledServiceId) return '';
-  try {
-    const row = await db('scheduled_services').where({ id: scheduledServiceId }).first(
-      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_state', 'service_address_zip',
-    );
-    if (!row) return '';
-    return propertyStreetAddress({
-      address_line1: row.service_address_line1,
-      address_line2: row.service_address_line2,
-      city: row.service_address_city,
-      state: row.service_address_state,
-      zip: row.service_address_zip,
-    }) || '';
-  } catch (err) {
-    logger.warn(`[billing-email-details] visit address lookup failed for ${scheduledServiceId}: ${err.message}`);
-    return null;
-  }
+// The street address stamped on the visit; '' when it carries none.
+function stampedVisitAddress(visit) {
+  if (!visit) return '';
+  return propertyStreetAddress({
+    address_line1: visit.service_address_line1,
+    address_line2: visit.service_address_line2,
+    city: visit.service_address_city,
+    state: visit.service_address_state,
+    zip: visit.service_address_zip,
+  }) || '';
 }
 
 async function invoicePropertyAddress(invoice, customer) {
   try {
-    const scheduledId = await scheduledServiceIdFor(invoice, { failureSentinel: true });
-    if (scheduledId === LOOKUP_FAILED) return '';
-    const stamped = await stampedVisitAddress(scheduledId);
-    // A failed visit lookup omits the Property row rather than guessing.
-    if (stamped === null) return '';
+    // A failed visit lookup throws into the catch below and omits the Property
+    // row rather than guessing: falling back to the primary address would name
+    // the wrong property on a secondary-property visit.
+    const { visit } = await ownedVisitContext(invoice);
+    const stamped = stampedVisitAddress(visit);
     if (stamped) return stamped;
     let source = customer;
     // A caller's projection may omit the unit line (address_line2) or the whole
@@ -211,16 +213,18 @@ async function invoicePropertyAddress(invoice, customer) {
 }
 
 // A customer (no invoice) — estimate follow-ups whose estimate carries no
-// address text of its own.
+// address text of its own. A saved property is used only when it belongs to
+// THIS customer; another customer's (or an unverifiable one, with no customer
+// id) falls back to the customer's own address.
 async function customerPropertyAddress(customerId, propertyId = null) {
-  if (!customerId && !propertyId) return '';
+  if (!customerId) return '';
   try {
     if (propertyId) {
-      const property = await db('customer_properties').where({ id: propertyId }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
+      const property = await db('customer_properties').where({ id: propertyId, customer_id: customerId })
+        .first('address_line1', 'address_line2', 'city', 'state', 'zip');
       const fromProperty = property ? propertyStreetAddress(property) : null;
       if (fromProperty) return fromProperty;
     }
-    if (!customerId) return '';
     const customer = await db('customers').where({ id: customerId }).first('address_line1', 'address_line2', 'city', 'state', 'zip');
     return (customer && propertyStreetAddress(customer)) || '';
   } catch (err) {
@@ -254,13 +258,10 @@ async function invoiceServiceDetails(invoice) {
       if (names.length) label = names.join(', ');
     }
     if (!label || !date) {
-      const scheduledId = await scheduledServiceIdFor(invoice);
-      const visit = scheduledId
-        ? await db('scheduled_services').where({ id: scheduledId }).first('service_type', 'scheduled_date')
-        : null;
-      const record = (!visit || !visit.service_type) && invoice?.service_record_id
-        ? await db('service_records').where({ id: invoice.service_record_id }).first('service_type', 'service_date')
-        : null;
+      // Both rows come through the ownership-checked path; the completion
+      // record is read whenever EITHER half still needs a fallback, so the
+      // record's own date beats the visit's scheduled date.
+      const { visit, record } = await ownedVisitContext(invoice);
       if (!label) label = clean(visit?.service_type) || clean(record?.service_type);
       if (!date) {
         const raw = record?.service_date || visit?.scheduled_date;
@@ -319,5 +320,5 @@ module.exports = {
   invoiceServiceDetails,
   paidPaymentForInvoice,
   isStreetShapedAddress,
-  _private: { stampedVisitAddress, scheduledServiceIdFor, savedMethodRow, MANUAL_TENDERS },
+  _private: { ownedVisitContext, stampedVisitAddress, savedMethodRow, MANUAL_TENDERS },
 };

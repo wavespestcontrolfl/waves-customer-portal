@@ -280,13 +280,13 @@ describe('service and service date', () => {
 
   test('a blank service and date are read from the visit the invoice bills', async () => {
     mockTables({ scheduled_services: [{ service_type: 'Bi-Monthly Pest Control', scheduled_date: '2026-09-18' }] });
-    expect(await Details.invoiceServiceDetails({ id: 'i', scheduled_service_id: 'ss-1', service_type: null, service_date: null }))
+    expect(await Details.invoiceServiceDetails({ id: 'i', customer_id: 'c', scheduled_service_id: 'ss-1', service_type: null, service_date: null }))
       .toEqual({ label: 'Bi-Monthly Pest Control', date: 'September 18, 2026' });
   });
 
   test('or from the completion record when there is no visit', async () => {
     mockTables({ service_records: [{ service_type: 'Rodent Trapping', service_date: '2026-09-11' }] });
-    expect(await Details.invoiceServiceDetails({ id: 'i', service_record_id: 'sr-1', service_type: '', service_date: null }))
+    expect(await Details.invoiceServiceDetails({ id: 'i', customer_id: 'c', service_record_id: 'sr-1', service_type: '', service_date: null }))
       .toEqual({ label: 'Rodent Trapping', date: 'September 11, 2026' });
   });
 
@@ -305,7 +305,7 @@ describe('service and service date', () => {
 
   test('nothing known is blank and an unreadable lookup does not throw', async () => {
     mockTables({ scheduled_services: new Error('db down') });
-    expect(await Details.invoiceServiceDetails({ id: 'i', scheduled_service_id: 'ss-1' })).toEqual({ label: '', date: '' });
+    expect(await Details.invoiceServiceDetails({ id: 'i', customer_id: 'c', scheduled_service_id: 'ss-1' })).toEqual({ label: '', date: '' });
   });
 });
 
