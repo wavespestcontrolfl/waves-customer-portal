@@ -1940,6 +1940,95 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-33 (PR #5334): the prompt lets the model NAME the technician, so this
+// draft's recorded tech first name(s) are extra status subjects (synthetic names).
+describe('round 33: recorded technician names as status subjects', () => {
+  const { bodyMentionsVisitStatus, techNamesFromContext, sanitizeTechNames } = require('../services/sms-shadow-drafter');
+  const sam = { techNames: ['Sam'] };
+  test.each([
+    'Sam is on the way.', 'Sam is running late.', "Sam's en route.", 'sam is nearby.', 'Sam, the lead, is almost there.', 'Sam will arrive soon.',
+  ])('%p is a status claim when Sam is the snapshot\'s tech', (t) => {
+    expect(bodyMentionsArrival(t, sam)).toBe(true);
+    expect(bodyMentionsVisitStatus(t, sam)).toBe(true);
+    // ...and not without the recorded name (older snapshots keep current behavior)
+    expect(bodyMentionsArrival(t)).toBe(false);
+  });
+  test('"Sam has arrived" is a completed-arrival claim only with the recorded name', () => {
+    expect(bodyClaimsCompletedArrival('Sam has arrived.', sam)).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam just arrived at your home.', sam)).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam has arrived.')).toBe(false);
+    expect(bodyHasTimedArrivalPhrase('Sam has arrived.', { completedArrivalOnly: true, techNames: ['Sam'] })).toBe(true);
+  });
+  test.each(["Dana's order is on the way.", 'Dana is on the way to the store.', 'Samuel is on the way.', 'Your receipt is on the way.'])('%p is NOT a claim (not this draft\'s tech name / word-bounded)', (t) => {
+    expect(bodyMentionsArrival(t, sam)).toBe(false);
+    expect(bodyMentionsVisitStatus(t, sam)).toBe(false);
+    expect(bodyClaimsCompletedArrival(t, sam)).toBe(false);
+  });
+  test('corrections, questions and conditionals keep their exemptions with a name subject', () => {
+    for (const t of ['Sam is not on the way yet.', 'Is Sam on the way?', "I'll text you once Sam is on the way."]) expect(bodyMentionsArrival(t, sam)).toBe(false);
+    expect(bodyClaimsCompletedArrival('Has Sam arrived yet?', sam)).toBe(false);
+  });
+  test('names are sanitized: first token only, word-safe, deduped, no regex injection', () => {
+    expect(sanitizeTechNames(['Sam Rivera', 'sam', 'O\'Neil', '(.*)', 'a', '', null, 'X'.repeat(40)])).toEqual(['Sam', "O'Neil"]);
+    expect(bodyMentionsArrival('Anything is on the way.', { techNames: ['(.*)'] })).toBe(false);
+  });
+  test('draft-time names come from the context (liveEtaGroups + UPCOMING SERVICES tech)', () => {
+    expect(techNamesFromContext({ liveEtaGroups: [{ technicianNames: ['Sam'] }], upcomingServices: [{ tech: 'Alex Test' }] })).toEqual(['Sam', 'Alex']);
+    expect(techNamesFromContext({})).toEqual([]);
+  });
+  test('the draft-time validator uses them: "Sam has arrived" beside an en-route fact is rejected', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'LIVE STATUS: tech marked en route to this visit\nLIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+      expect(validateLiveEtaMinutes({ reply: 'Sam has arrived.', factsBlock: facts, techNames: ['Sam'] }).ok).toBe(false);
+      expect(validateLiveEtaMinutes({ reply: 'Sam has arrived.', factsBlock: facts }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test('groups record the technician first name(s) from the UPCOMING SERVICES row, and the snapshot persists them (names only)', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', technician_name: 'Sam Rivera', track_token_expires_at: new Date(Date.now() + 3600e3).toISOString() };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() });
+    expect(g.technicianNames).toEqual(['Sam']);
+    const snap = buildLiveEtaSnapshot({ liveEtaGroups: [g] });
+    expect(snap.entries[0].technicianNames).toEqual(['Sam']);
+    expect(JSON.stringify(snap)).not.toContain('Rivera');
+    const [noName] = buildLiveEtaGroups({ upcomingServices: [{ ...row, technician_name: null }], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer: baseCustomer() });
+    expect(noName.technicianNames).toBeUndefined();
+  });
+});
+
+// Codex round-32 P2s (PR #5334).
+describe('round 32 P2s: future-day scope is the status clause; running late/ahead are live status', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "Your technician is on the way, and we'll follow up tomorrow.", 'Your tech is on the way but the report will be ready tomorrow.',
+    'Your tech is on the way, however we will call you Friday.', 'Our crew is en route, though the invoice posts next week.',
+  ])('%p: the day belongs to the NEXT clause, so the status stays live', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    'Your technician is coming tomorrow.', 'Your tech, Sam, is coming tomorrow.', 'Tomorrow your tech is on the way.', 'Your tech is running late tomorrow.',
+  ])('%p: the day is in the status clause, so it is scheduling copy', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Your tech is running late.', 'Your technician is running a bit behind.', 'He is running ahead of schedule.', 'The crew is running about 10 minutes late.',
+    'Our team is running ahead.', 'Your tech is behind schedule.', 'The tech is running early today.', 'They are running a few minutes late.',
+  ])('%p (a prompt-sanctioned live-status form) is a status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    'Our office is running late on emails.', 'The tech is not running late.', 'Is your tech running late?', "I'll text you once he's running late.",
+    'Your invoice is behind schedule.',
+  ])('%p is not a status claim (no tech subject / negated / question / conditional)', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+});
+
 // Codex round-31 P2s (PR #5334).
 describe('round 31 P2s: team subjects, explicit future days', () => {
   const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
@@ -1962,7 +2051,7 @@ describe('round 31 P2s: team subjects, explicit future days', () => {
   test.each([
     'Your technician is coming tomorrow.', 'We will be there tomorrow.', 'The tech will be there next week.', 'Your tech is coming next Monday.',
     'Your tech will be there on the 5th.', 'Your technician is coming Oct 5.', 'The tech is on the way on 10/5.', 'Tomorrow your tech is on the way.',
-    'Your tech is coming in 3 days.', 'The tech is coming; your report will be ready tomorrow.'.replace('; your report will be ready tomorrow', ' tomorrow'),
+    'Your tech is coming in 3 days.', 'The tech is coming tomorrow.', 'Your tech is coming tomorrow, not today.', // the day is in the status clause; ", not today" is a corrective aside
     `Your tech will be there ${otherDay}.`,
   ])('%p names a future day: a scheduling statement, not live status', (t) => {
     expect(bodyMentionsArrival(t)).toBe(false);
@@ -1970,7 +2059,7 @@ describe('round 31 P2s: team subjects, explicit future days', () => {
   });
   test.each([
     'Your technician is coming today.', 'Your tech is on the way now.', 'The tech is en route this morning.', 'Your tech is on the way tonight.',
-    `Your tech will be there ${todayName}.`, 'Your tech is coming tomorrow, not today.', 'The tech is on the way; your report will be ready tomorrow.',
+    `Your tech will be there ${todayName}.`, 'The tech is on the way; your report will be ready tomorrow.',
     'Your report is ready tomorrow; your tech is on the way.',
   ])('%p stays live status', (t) => {
     expect(bodyMentionsArrival(t)).toBe(true);

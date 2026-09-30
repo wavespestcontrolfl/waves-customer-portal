@@ -249,6 +249,7 @@ function followupSlaPhrase(now = new Date()) {
 // ./sms-followup-sla (Codex r3) and are re-exported below.
 const followupSla = require('./sms-followup-sla');
 const { stripTrackLinks } = require('./sms-track-links');
+const { sanitizeTechNames } = require('./live-eta-destination');
 
 // The real-answers ALSO-section hand-off bullets: a dynamic HELD-FOR-A-PERSON
 // line (only the categories whose own gate is still off), one instruction
@@ -1144,9 +1145,49 @@ function isNegatedInClause(str, index) {
   for (const m of before.matchAll(CLAUSE_BREAK_RE)) last = m.index + m[0].length;
   return NEGATOR_RE.test(before.slice(last));
 }
-function bodyClaimsCompletedArrival(text) {
+// THIS draft's technician names as extra status subjects. The prompt lets the
+// model NAME the technician ("Sam is on the way", "Sam is running late", "Sam has
+// arrived"), so a status idiom counts behind technician-type words OR one of the
+// technician first names the draft recorded (word-bounded, case-insensitive) —
+// never any capitalized word: "Dana's order is on the way" is not a claim unless
+// Dana is this snapshot's tech. Names only, no other PII; older snapshots carry
+// none and keep the technician-type-only behavior.
+function techNamesFromContext(context) {
+  return sanitizeTechNames([
+    ...(Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.flatMap((g) => g?.technicianNames || []) : []),
+    ...(Array.isArray(context?.upcomingServices) ? context.upcomingServices.map((u) => u?.tech) : []),
+  ]);
+}
+const nameAlt = (names) => sanitizeTechNames(names).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+const statusRegexCache = new Map();
+function statusRegexFor(kind, names) {
+  const alt = nameAlt(names);
+  if (!alt) return kind === 'completed' ? COMPLETED_ARRIVAL_RE : (kind === 'enRoute' ? EN_ROUTE_STATUS_RE : VISIT_STATUS_RE);
+  const key = `${kind}:${alt.toLowerCase()}`;
+  if (!statusRegexCache.has(key)) {
+    if (statusRegexCache.size > 200) statusRegexCache.clear();
+    let re;
+    if (kind === 'completed') {
+      let src = COMPLETED_ARRIVAL_RE.source;
+      for (const g of COMPLETED_ARRIVAL_SUBJECT_GROUPS) src = src.split(g).join(`${g.slice(0, -1)}|${alt})`);
+      re = new RegExp(src, 'i');
+    } else {
+      const subj = `(?:${VISIT_STATUS_SUBJECT.slice(3, -1)}|${alt})`;
+      re = kind === 'enRoute' ? buildEnRouteRe(subj) : buildVisitStatusRe(subj);
+    }
+    statusRegexCache.set(key, re);
+  }
+  return statusRegexCache.get(key);
+}
+const COMPLETED_ARRIVAL_SUBJECT_GROUPS = [
+  '(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)',
+  '(?:tech(?:nician)?s?|he|she|they|drivers?)',
+  '(?:crew|team)',
+  '(?:tech(?:nician)?|he|she|they|driver|crew)',
+];
+function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
   const str = String(text || '');
-  for (const m of str.matchAll(new RegExp(COMPLETED_ARRIVAL_RE.source, 'gi'))) {
+  for (const m of str.matchAll(new RegExp(statusRegexFor('completed', techNames).source, 'gi'))) {
     if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length)) return true;
   }
   return false;
@@ -1177,12 +1218,19 @@ function bodyClaimsCompletedArrival(text) {
 // Same subject list as COMPLETED_ARRIVAL_RE's arrived form (round-31 P2: "Our team is
 // on the way"); "team ... here to help" stays non-status via the lookahead below.
 const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they)";
-const TECH_STATUS_PREFIX = `${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+`;
+function techStatusPrefix(subj) {
+  return `${subj}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+`;
+}
+const TECH_STATUS_PREFIX = techStatusPrefix(VISIT_STATUS_SUBJECT);
 const ROUTE_IDIOM = '(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way)';
 const EN_ROUTE_PREDICATES = [
   ROUTE_IDIOM,
   '(?:head(?:ing|ed)|coming)\\s+(?:over|your\\s+way|to\\s+you|to\\s+your\\s+\\w+)',
   '(?:coming|headed|heading|driving|rolling|travell?ing)\\b',
+  // The system prompt sanctions "running late" / "running ahead" (behind/ahead of
+  // schedule) beside LIVE STATUS, so they are live-status claims like "on the way".
+  'running\\s+(?:(?:(?:a\\s+)?(?:bit|little|touch)|a\\s+few\\s+minutes?|a\\s+couple\\s+(?:of\\s+)?minutes?|slightly|somewhat|(?:about\\s+)?\\d+\\s+minutes?)\\s+)?(?:late|behind|ahead|early)\\b',
+  '(?:behind|ahead\\s+of)\\s+schedule\\b',
   '(?:in\\s+the\\s+(?:truck|van|vehicle)|on\\s+the\\s+road)\\b',
   '(?:just\\s+|already\\s+)?left\\s+(?:for|to\\s+head|to\\s+you)',
   'be\\s+(?:there|here|with\\s+you|at\\s+your\\s+\\w+)(?!\\s+to\\s+(?:help|assist|answer|support|serve))',
@@ -1193,7 +1241,10 @@ const EN_ROUTE_PREDICATES = [
   'get(?:ting)?\\s+(?:there|to\\s+you)',
   'reach(?:ing)?\\s+you',
 ];
-const EN_ROUTE_STATUS_RE = new RegExp(`\\b${TECH_STATUS_PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})\\b`, 'gi');
+const EN_ROUTE_STATUS_RE = buildEnRouteRe();
+function buildEnRouteRe(subj = VISIT_STATUS_SUBJECT) {
+  return new RegExp(`\\b${techStatusPrefix(subj)}(?:${EN_ROUTE_PREDICATES.join('|')})\\b`, 'gi');
+}
 const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
 // Does a conditional word GOVERN the status clause (Codex round-29 P2)? Only the
 // text since the last clause boundary counts: "once he's on the way" and "when
@@ -1226,7 +1277,7 @@ function isInterrogativeAt(str, index, length = 0) {
 // is coming tomorrow", "We will be there Friday", "on the 5th", "next week".
 // "today" / "tonight" / "now" / "this morning|afternoon|evening" keep it live.
 // A weekday counts as future only when it is not TODAY (America/New_York). Read
-// over the sentence the match sits in, so the day word may lead or trail. ONE
+// over the matched status clause, so the day word may lead or trail within it. ONE
 // predicate for bodyMentionsArrival, bodyMentionsVisitStatus and therefore the
 // send-time en-route classifier that uses them.
 const WEEKDAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -1235,27 +1286,35 @@ const FUTURE_DAY_RE = /\b(?:tomorrow|the\s+day\s+after|next\s+(?:week|month|visi
 function todayWeekdayET(now = new Date()) {
   return new Date(now).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' }).toLowerCase();
 }
-function isFutureDayStatus(str, index, now = new Date()) {
-  const spans = sentenceSpans(str);
-  const [from, to] = spans.find(([s, e]) => index >= s && index < e) || [0, str.length];
-  // ";" separates independent statements: only the segment holding the match counts.
-  const segStart = Math.max(from, str.lastIndexOf(';', index - 1) + 1);
-  const nextSemi = str.indexOf(';', index);
-  const sentence = str.slice(segStart, nextSemi === -1 || nextSemi > to ? to : nextSemi);
+function isFutureDayStatus(str, index, length = 0, now = new Date()) {
+  // Bounded to the matched status CLAUSE (Codex round-32 P2), same CLAUSE_BREAK_RE
+  // as isConditionalBefore / hasTechSubjectBefore: "Your technician is on the way,
+  // and we'll follow up tomorrow" keeps its status live because "tomorrow"
+  // belongs to the next clause. The clause starts after the last boundary before
+  // the match and ends at the first boundary after it (boundaries INSIDE the
+  // match, such as "your tech, Sam, is ...", do not end it).
+  const breaks = [...str.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))];
+  let clauseStart = 0;
+  let clauseEnd = str.length;
+  for (const b of breaks) {
+    if (b.index + b[0].length <= index) clauseStart = b.index + b[0].length;
+    else if (b.index >= index + length) { clauseEnd = b.index; break; }
+  }
+  const sentence = str.slice(clauseStart, clauseEnd);
   if (LIVE_DAY_RE.test(sentence)) return false;
   if (FUTURE_DAY_RE.test(sentence)) return true;
   const today = todayWeekdayET(now);
   return WEEKDAY_NAMES.some((day) => day !== today && new RegExp(`\\b${day}\\b`, 'i').test(sentence));
 }
-function bodyMentionsArrival(text) {
+function bodyMentionsArrival(text, { techNames = [] } = {}) {
   const str = String(text || '');
-  for (const m of str.matchAll(new RegExp(EN_ROUTE_STATUS_RE.source, EN_ROUTE_STATUS_RE.flags))) {
+  for (const m of str.matchAll(new RegExp(statusRegexFor('enRoute', techNames).source, 'gi'))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;
     if (isNegatedInClause(str, m.index)) continue;
     if (isInterrogativeAt(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
-    if (isFutureDayStatus(str, m.index)) continue;
+    if (isFutureDayStatus(str, m.index, m[0].length)) continue;
     return true;
   }
   return false;
@@ -1270,7 +1329,9 @@ function bodyMentionsArrival(text) {
 // (vocabulary, not phrasing); the only exemptions are the same non-claims the
 // narrower classifiers already honor: a conditional ("once he's on the way"), a
 // negated correction ("hasn't arrived"), and a scheduling window.
-const VISIT_STATUS_RE = new RegExp(
+function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
+  const PREFIX = techStatusPrefix(SUBJ);
+  return new RegExp(
   // "en route" / "on the way" are technician idioms on their own. Verbal "arrive"
   // forms (round-25 P2: not the noun in "arrival instructions") and coming/headed/
   // driving need a technician-type subject (round-28 audit P1): "Your payment has
@@ -1279,24 +1340,26 @@ const VISIT_STATUS_RE = new RegExp(
   '\\b(?:'
   // Superset of every en-route predicate bodyMentionsArrival classifies, so the
   // default-deny vocabulary can never be narrower than the specific classifier.
-  + `${TECH_STATUS_PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})`
-  + `|${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
+  + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})`
+  + `|${SUBJ}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
   // Positional status forms (here / there / outside / nearby / close / on site /
   // at your door / almost there) count ONLY with a technician-type subject
   // (round-21 P2): "We are here to help" / "we're here" are not a claim.
-  + `|${VISIT_STATUS_SUBJECT}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
+  + `|${SUBJ}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
   // Movement forms (left for / pulled up / showed up) also need a technician-type
   // subject (round-26 P2): "I pulled up your invoice" is not an arrival.
-  + `|${VISIT_STATUS_SUBJECT}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');
-function bodyMentionsVisitStatus(text) {
+  + `|${SUBJ}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');
+}
+const VISIT_STATUS_RE = buildVisitStatusRe();
+function bodyMentionsVisitStatus(text, { techNames = [] } = {}) {
   const str = String(text || '');
-  for (const m of str.matchAll(new RegExp(VISIT_STATUS_RE.source, VISIT_STATUS_RE.flags))) {
+  for (const m of str.matchAll(new RegExp(statusRegexFor('visit', techNames).source, 'gi'))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;
     if (isNegatedInClause(str, m.index)) continue;
     if (isInterrogativeAt(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length)) continue;
-    if (isFutureDayStatus(str, m.index)) continue;
+    if (isFutureDayStatus(str, m.index, m[0].length)) continue;
     return true;
   }
   return false;
@@ -1323,9 +1386,9 @@ const TIMED_ARRIVAL_PHRASE_RE = /\b(?:half\s+an?\s+hour|(?:a\s+)?quarter\s+(?:of
 // could not turn into minutes is present (see bodyHasUnnormalizedHourWord).
 // Routed through this one already-shared entry point so every send seam's
 // existing import of the drafter keeps working unchanged.
-function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false, ignoreSlaPhrases = false } = {}) {
+function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconvertedNumbersOnly = false, completedArrivalOnly = false, unclassifiedSignalOnly = false, ignoreSlaPhrases = false, techNames = [] } = {}) {
   if (unclassifiedSignalOnly) return bodyHasUnclassifiedEtaSignal(text);
-  if (completedArrivalOnly) return bodyClaimsCompletedArrival(text);
+  if (completedArrivalOnly) return bodyClaimsCompletedArrival(text, { techNames });
   if (unnormalizedHoursOnly) return bodyHasUnnormalizedHourWord(text, { ignoreSlaPhrases });
   if (unconvertedNumbersOnly) return bodyHasUnconvertedNumberWord(text);
   const str = normalizeNumberWords(text);
@@ -1665,6 +1728,9 @@ function buildLiveEtaSnapshot(context) {
       // sms-eta-freshness refuses at send when a reassignment changed it.
       ...(g.technicianId != null ? { technicianId: g.technicianId } : {}),
       ...(g.deviceImei ? { deviceImei: g.deviceImei } : {}),
+      // Round-33: the technician first name(s) the draft may have used as a status
+      // subject ("Sam is on the way"); names only. Send time reads them from here.
+      ...(sanitizeTechNames(g.technicianNames).length ? { technicianNames: sanitizeTechNames(g.technicianNames) } : {}),
       ...(typeof g.state === 'string' ? { state: g.state } : {}),
       // Round-20 P2: the destination (property + stamped coordinates) the figure
       // was computed for; send time refuses when the appointment moved.
@@ -1695,7 +1761,7 @@ function buildLiveEtaSnapshot(context) {
 function countEnRouteEtaStops(context) {
   return Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups.filter((g) => g && g.state !== 'on_property').length : null;
 }
-function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount = null }) {
+function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount = null, techNames = [] }) {
   // Round-19 P2: parse the reply without its tracking links (a token's trailing
   // digits are not an ETA) — the same shared step the send-time check uses.
   const reply = stripTrackLinks(rawReply);
@@ -1703,7 +1769,7 @@ function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount 
   // Codex round-13 P2: a completed-arrival claim ("has arrived") with an
   // en-route tech and no on-site fact is false — the facts must say the tech
   // is on site before a reply may say so.
-  if (bodyClaimsCompletedArrival(reply) && /LIVE (?:STATUS: tech marked en route|ETA:)/.test(String(factsBlock || '')) && !/tech marked on site/.test(String(factsBlock || ''))) {
+  if (bodyClaimsCompletedArrival(reply, { techNames }) && /LIVE (?:STATUS: tech marked en route|ETA:)/.test(String(factsBlock || '')) && !/tech marked on site/.test(String(factsBlock || ''))) {
     return { ok: false, violations: ['the reply says the tech has ARRIVED but the facts show the tech is still EN ROUTE — say the tech is on the way (with the exact LIVE ETA if stated), never that they have arrived'] };
   }
   // Every LIVE ETA line, not only the first (audit P1): a customer with two
@@ -3453,7 +3519,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     }
     // Round-19 P2: the deterministic live-ETA guard runs in single-pass mode too
     // (no verifier here would catch a wrong minutes figure).
-    const singlePassLiveEta = validateLiveEtaMinutes({ reply: parsed?.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context) });
+    const singlePassLiveEta = validateLiveEtaMinutes({ reply: parsed?.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
     if (!singlePassLiveEta.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassLiveEta.violations);
@@ -3490,7 +3556,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
-    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context) });
+    const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
     for (const check of [reserviceCheck, complianceCheck, liveEtaCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
@@ -4047,7 +4113,7 @@ module.exports = {
   PAYMENT_ACK_RE,
   validateLiveEtaMinutes,
   countEnRouteEtaStops,
-  findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival, bodyMentionsVisitStatus,
+  findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival, bodyMentionsVisitStatus, sanitizeTechNames, techNamesFromContext,
   bodyHasTimedArrivalPhrase,
   bodyHasUnclassifiedArrivalDigit,
   findGroundedMinutesFigures,

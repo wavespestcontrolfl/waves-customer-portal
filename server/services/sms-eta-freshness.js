@@ -83,6 +83,7 @@ const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { stripTrackLinks, sendTimeTrackTokenLive } = require('./sms-track-links');
 const { etDateString } = require('../utils/datetime-et');
+const { sanitizeTechNames } = require('./live-eta-destination');
 
 // 15 minutes: long enough that an ordinary reviewer accept/edit cycle (a
 // human reading a composer card and clicking Send) never gets blocked by
@@ -234,7 +235,7 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
   return (!claims.length && unreadTimed) || unreadHours || unreadNumbers;
 }
 
-function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries }) {
+function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries, techNames = [] }) {
   const drafter = require('./sms-shadow-drafter');
   const trackTokens = extractTrackTokens(fullBody);
   // The link itself is not prose: a token like "a-12-b" must never read as a
@@ -251,15 +252,15 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries }) {
   // tech IS on site — a different fact from "on the way" status copy, so it
   // requires the on-site tracker state at send. Only meaningful (and only
   // checked) where a live snapshot/link says which visit it is about.
-  const arrivedClaim = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true });
+  const arrivedClaim = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { completedArrivalOnly: true, techNames });
   // Backstop (audit P1, round 4): a body that talks about the tech arriving
   // is checked whenever the draft carried a LIVE ETA, or whenever it
   // mentions minutes at all.
   const mentionsMinutes = snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || ''));
-  const unparsedStatusClaim = !claims.length && !timedArrivalClaim && !arrivedClaim && drafter.bodyMentionsArrival(outgoingBody) && mentionsMinutes;
+  const unparsedStatusClaim = !claims.length && !timedArrivalClaim && !arrivedClaim && drafter.bodyMentionsArrival(outgoingBody, { techNames }) && mentionsMinutes;
   // Round-20: broad default-deny — any visit-status vocabulary at all (see
   // bodyMentionsVisitStatus), whether or not a narrower classifier read it.
-  const visitStatusMention = liveContext && drafter.bodyMentionsVisitStatus(outgoingBody);
+  const visitStatusMention = liveContext && drafter.bodyMentionsVisitStatus(outgoingBody, { techNames });
   const classified = claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim;
   // Round-16 structural backstop: nothing above read a claim, yet a number sits
   // beside a time unit / arrival word — hold it to the status-claim checks.
@@ -348,7 +349,10 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // Codex round-13 P2: any /track/ link that is not the canonical origin's exact
   // token path is refused outright, claim or not.
   if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';
-  const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0 });
+  // This draft's recorded technician names ride as extra status subjects (persisted
+  // in the snapshot: no extra DB read). Older snapshots carry none.
+  const techNames = sanitizeTechNames((liveEtaSnapshot?.entries || []).flatMap((e) => (Array.isArray(e?.technicianNames) ? e.technicianNames : [])));
+  const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0, techNames });
   const entries = usableSnapshotEntries(liveEtaSnapshot);
   // Round-20 structural rule: wording classification decides WHICH claim to
   // verify, never WHETHER to recheck. A draft that carries a live-ETA/on-site

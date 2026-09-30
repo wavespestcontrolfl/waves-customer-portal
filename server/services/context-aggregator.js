@@ -916,6 +916,8 @@ function liveEtaDestinationIdentity(row, customer = null) {
 function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
   const technicianId = members.find((s) => s.technician_id != null)?.technician_id;
   const deviceImei = deviceFingerprint(members.find((s) => s.tech_bouncie_imei)?.tech_bouncie_imei);
+  // Technician first name(s) as shown in UPCOMING SERVICES (tech.name) — names only.
+  const technicianNames = [...new Set(members.map((s) => String(s.technician_name || '').trim().split(/\s+/)[0]).filter(Boolean))];
   return {
     minutes: result ? result.minutes : null,
     scheduledServiceIds: members.map((s) => s.id),
@@ -930,6 +932,7 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
     // Round-22 P2: the tracker device (Bouncie IMEI) the ETA was read from.
     // Send time refuses when an admin re-pointed the technician at another vehicle.
     ...(deviceImei ? { deviceImei } : {}),
+    ...(technicianNames.length ? { technicianNames } : {}),
     // Round-20 P2: WHERE the ETA/status was about — each member's property id +
     // the coordinates/address stamp the destination came from. Send time
     // refuses when staff moved the appointment to another property.

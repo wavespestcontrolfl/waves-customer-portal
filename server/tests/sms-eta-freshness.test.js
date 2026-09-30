@@ -1807,3 +1807,51 @@ describe('future-day status copy is not live status at send time', () => {
     expect(await run(body)).toBe('eta_claim_no_longer_en_route');
   });
 });
+
+// Codex round-32 P2 (PR #5334): "running late/ahead" are prompt-sanctioned live
+// status, so they are rechecked at send time like "on the way".
+describe('running late / ahead are live status at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const snapshot = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  const row = (extra) => [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const run = (body, rows) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+  test.each(['Your technician is running late.', 'The crew is running ahead of schedule.', 'Your tech is running a bit behind.'])('%p: passes while en route, blocked once the visit is done', async (body) => {
+    expect(await run(body, row())).toBeNull();
+    expect(await run(body, row({ status: 'completed', track_state: 'completed' }))).toBe('eta_claim_no_longer_en_route');
+  });
+  test('a status clause with a trailing future-day clause is still rechecked', async () => {
+    expect(await run("Your technician is on the way, and we'll follow up tomorrow.", row({ status: 'completed', track_state: 'completed' }))).toBe('eta_claim_no_longer_en_route');
+  });
+});
+
+// Codex round-33 (PR #5334): a recorded technician name is a status subject at send
+// time, read from the persisted snapshot (no extra DB read). Synthetic names.
+describe('recorded technician names are status subjects at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const named = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', technicianNames: ['Sam'] }] };
+  const unnamed = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  const rows = (extra) => [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const done = { status: 'completed', track_state: 'completed' };
+  const run = (body, snapshot, extra) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows(extra)) });
+  test.each(['Sam is on the way.', 'Sam is running late.', "Sam's en route."])('%p is rechecked: passes en route, blocked once the visit is done', async (body) => {
+    expect(await run(body, named)).toBeNull();
+    expect(await run(body, named, done)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('"Sam has arrived." is a completed-arrival claim: needs the on-site state', async () => {
+    expect(await run('Sam has arrived.', named)).toBe('eta_claim_no_longer_en_route'); // still en route, not on property
+    expect(await run('Sam has arrived.', named, { status: 'on_site', track_state: 'on_property' })).toBeNull();
+  });
+  test('an older snapshot without names keeps the current behavior (the name is not a subject)', async () => {
+    expect(await run('Sam is on the way.', unnamed, done)).toBeNull();
+  });
+  test('another first name is not a status subject: "Dana\'s order is on the way." is untouched', async () => {
+    expect(await run("Dana's order is on the way.", named, done)).toBeNull();
+    expect(await run('Dana is on the way to the store.', named, done)).toBeNull();
+  });
+});

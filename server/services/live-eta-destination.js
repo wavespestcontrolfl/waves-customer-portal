@@ -71,4 +71,15 @@ function calendarDay(value) {
   return m ? m[1] : null;
 }
 
-module.exports = { resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay };
+// Technician first name(s) recorded in the send-time snapshot as extra status
+// subjects (Codex round-33): word-safe tokens only, deduped, capped; names only.
+function sanitizeTechNames(names) {
+  const out = [];
+  for (const n of Array.isArray(names) ? names : []) {
+    const first = String(n ?? '').trim().split(/\s+/)[0];
+    if (/^[A-Za-z][A-Za-z'’-]{1,30}$/.test(first) && !out.some((x) => x.toLowerCase() === first.toLowerCase())) out.push(first);
+  }
+  return out.slice(0, 5);
+}
+
+module.exports = { sanitizeTechNames, resolveLiveEtaDestination, usesCustomerCoordinates, deviceFingerprint, calendarDay };
