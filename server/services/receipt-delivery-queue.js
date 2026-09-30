@@ -224,12 +224,20 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
 // backs it up did not go (or the job gave up): the office is told, one alert per invoice.
 async function alertCarriedReceiptEmail(job, reason) {
   try {
-    await require('./notification-service').notifyAdmin(
-      'alert',
-      'Receipt email did not go out',
-      `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`,
-      { link: '/admin/invoices', metadata: { dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`, invoice_id: job.invoice_id } },
-    );
+    await require('./admin-alert-compose').raiseAdminAlert('alert', {
+      area: 'Billing',
+      action: 'confirm the customer got the receipt',
+      why: 'The receipt link went out by text only, and the receipt email did not go.',
+      severity: 'needs-you',
+      link: `/admin/invoices?invoice=${job.invoice_id}`,
+      subject: { type: 'invoice', id: String(job.invoice_id) },
+      doneWhen: 'receipt_delivered',
+      who: 'person',
+    }, {
+      detail: `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`,
+      dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`,
+      metadata: { invoice_id: job.invoice_id },
+    });
   } catch (err) {
     logger.warn(`[receipt-delivery-queue] carried-receipt email alert failed for invoice ${job.invoice_id}: ${err.message}`);
   }
@@ -458,6 +466,10 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       // locked below): whatever delivered it had already stamped the invoice.
       const stampedSinceRead = async () => sawUnsent
         && Boolean((await trx('invoices').where({ id: invoiceId }).first('receipt_sent_at'))?.receipt_sent_at);
+      // The visit summary's receipt text started or was accepted while this request waited for
+      // the job row (the summary's handoff holds it through its send): a request that read the
+      // receipt unsent is refused as already sent, never a deliberate resend.
+      const summaryTextStarted = async () => sawUnsent && await require('./visit-completion-summary').summaryReceiptTextStarted(trx, invoiceId);
       const inserted = await trx('receipt_delivery_jobs')
         .insert({
           invoice_id: invoiceId,
@@ -487,7 +499,7 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       // delivers only the legs that operator chose, so it is no promise that
       // this caller's receipt goes out.
       if (job.status === 'running') return { inFlight: true, byOperator: String(job.locked_by || '').startsWith('operator:') };
-      if (await stampedSinceRead()) return { alreadySent: true };
+      if (await stampedSinceRead() || await summaryTextStarted()) return { alreadySent: true };
       // A completed or failed job sends nothing more: no claim to hold.
       if (!QUEUED_STATUSES.includes(job.status)) return { id: null };
 

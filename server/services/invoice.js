@@ -4082,26 +4082,46 @@ function cancelVoidAmountsMatch(a, b) {
 // did not go: the office is told (one alert per invoice, the existing admin feed).
 async function alertSummaryCarriedEmailFailed(invoiceId, invoiceNumber, reason) {
   try {
-    await require("./notification-service").notifyAdmin(
-      "alert",
-      "Invoice email did not go out",
-      `Invoice ${invoiceNumber || invoiceId}: its pay link was sent only in the visit summary text, and the invoice email did not go (${reason}). Check that the customer has the link, or resend the invoice.`,
-      { link: "/admin/invoices", metadata: { dedupeKey: `summary-carried-email:${invoiceId}`, invoice_id: invoiceId } },
-    );
+    await require("./admin-alert-compose").raiseAdminAlert("alert", {
+      area: "Billing",
+      action: "confirm the customer got the invoice link",
+      why: "The link went out by text only, and the invoice email did not go.",
+      severity: "needs-you",
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: "invoice", id: String(invoiceId) },
+      doneWhen: "invoice_link_confirmed",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceNumber || invoiceId}: its pay link was sent only in the visit summary text, and the invoice email did not go (${reason}). Check that the customer has the link, or resend the invoice.`,
+      dedupeKey: `summary-carried-email:${invoiceId}`,
+      metadata: { invoice_id: invoiceId },
+    });
   } catch (err) {
     logger.warn(`[invoice] summary-carried email alert failed for ${invoiceId}: ${err.message}`);
   }
 }
 
+// The text a parked invoice's error carries when neither the visit summary text nor the invoice
+// email carried its link (the summary's acceptance later finalizes it).
+const SUMMARY_LINK_PARK_TEXT = "the visit summary text did not carry the link";
+
 // Neither the visit summary text nor the invoice email carried the link: parked for the office.
 async function alertSummaryLinkUndelivered(invoiceId, invoiceNumber, reason) {
   try {
-    await require("./notification-service").notifyAdmin(
-      "alert",
-      "Invoice link not delivered",
-      `Invoice ${invoiceNumber || invoiceId}: the visit summary text did not carry its pay link and the invoice email did not go (${reason}). It is parked for review: send the link to the customer.`,
-      { link: "/admin/invoices", metadata: { dedupeKey: `summary-link-undelivered:${invoiceId}`, invoice_id: invoiceId } },
-    );
+    await require("./admin-alert-compose").raiseAdminAlert("alert", {
+      area: "Billing",
+      action: "send the customer their invoice link",
+      why: "Neither the visit summary text nor the invoice email carried it.",
+      severity: "needs-you",
+      link: `/admin/invoices?invoice=${invoiceId}`,
+      subject: { type: "invoice", id: String(invoiceId) },
+      doneWhen: "invoice_link_delivered",
+      who: "person",
+    }, {
+      detail: `Invoice ${invoiceNumber || invoiceId}: the visit summary text did not carry its pay link and the invoice email did not go (${reason}). It is parked for review: send the link to the customer.`,
+      dedupeKey: `summary-link-undelivered:${invoiceId}`,
+      metadata: { invoice_id: invoiceId },
+    });
   } catch (err) {
     logger.warn(`[invoice] summary-link undelivered alert failed for ${invoiceId}: ${err.message}`);
   }
@@ -7911,7 +7931,7 @@ const InvoiceService = {
             status: "scheduled",
             scheduled_send_at: null,
             scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
-            scheduled_send_error: `${require("./invoice-helpers").STALE_SEND_PARK_ERROR} — the visit summary text did not carry the link and the invoice email did not go: ${error}`,
+            scheduled_send_error: `${require("./invoice-helpers").STALE_SEND_PARK_ERROR} — ${SUMMARY_LINK_PARK_TEXT} and the invoice email did not go: ${error}`,
             updated_at: new Date(),
           });
           await alertSummaryLinkUndelivered(inv.id, inv.invoice_number, error);
@@ -8038,12 +8058,23 @@ const InvoiceService = {
   // recorded as delivered, and a planned invoice is promoted to the accepted-channel marker
   // (the sender then counts the leg as delivered, and never texts it).
   async markSummaryTextAccepted(invoiceId) {
-    return db("invoices").where({ id: invoiceId }).update({
+    const updated = await db("invoices").where({ id: invoiceId }).update({
       sms_sent_at: db.raw("COALESCE(sms_sent_at, NOW())"),
       scheduled_send_error: db.raw("CASE WHEN scheduled_send_error LIKE ? THEN ? ELSE scheduled_send_error END",
         [`${SUMMARY_TEXT_PLANNED_ERROR}%`, SUMMARY_TEXT_CARRIED_ERROR]),
       updated_at: new Date(),
     });
+    // An invoice the office was asked to review because neither the summary text nor the email
+    // carried its link (SUMMARY_LINK_PARK_TEXT) now has the link delivered: finalize it as sent
+    // through the ordinary path (lead conversion, dunning) and resolve the alert.
+    const row = await db("invoices").where({ id: invoiceId }).first("status", "scheduled_send_at", "scheduled_send_error");
+    if (row?.status === "scheduled" && !row.scheduled_send_at
+      && String(row.scheduled_send_error || "").includes(SUMMARY_LINK_PARK_TEXT)) {
+      await this.markDeliverySent(invoiceId, { source: "summary_text_accepted", summaryCarried: true });
+      await require("./admin-alert-episodes").closeAdminAlertKeys(db, [`summary-link-undelivered:${invoiceId}`], "summary_text_accepted")
+        .catch((err) => logger.warn(`[invoice] could not resolve the undelivered-link alert for ${invoiceId}: ${err.message}`));
+    }
+    return updated;
   },
 
   async payLinkSmsUrl(invoice) {

@@ -432,6 +432,19 @@ async function summaryLinkSendable(database, invoice, kind, recipientPhone) {
 // a deliberate resend), or a receipt text went or is queued (judged from the text's own event
 // key: receipt_sent_at is also stamped by the worker's email-only completion, so it says
 // nothing here).
+// The summary's receipt-link text started (the provider request began) or was accepted: the
+// completion_sms effect is sent, or unknown with its pre-provider marker cleared. Read by the
+// operator receipt claim after it acquires the job row, which the summary's handoff holds through
+// its send, so the acceptance is visible before that lock is released.
+async function summaryReceiptTextStarted(database, invoiceId) {
+  const row = await database('invoices as i').join('visit_completion_packets as p', 'p.id', 'i.visit_completion_packet_id')
+    .where('i.id', invoiceId).first('p.visit_id', 'p.payload');
+  const recorded = row && require('./visit-completion-packets').packetPayload(row).summaryBillingLink;
+  if (recorded?.kind !== 'receipt' || recorded.invoiceId !== invoiceId) return false;
+  const effect = await database('visit_effects').where({ visit_id: row.visit_id, effect_type: 'completion_sms' }).first('status', 'last_error');
+  return effect?.status === 'sent' || (effect?.status === 'unknown_delivery' && !VisitGroups.isHandoffPending(effect.last_error));
+}
+
 async function summaryReceiptTextHandled(database, invoice) {
   const jobQuery = database('receipt_delivery_jobs').where({ invoice_id: invoice.id });
   if (database.isTransaction) jobQuery.forUpdate();
@@ -1207,7 +1220,7 @@ async function deliverVisitCompletionSummary(packetId, token, database = db) {
   return { state: pending ? 'delivery_pending' : unknown ? 'delivery_review' : 'delivered' };
 }
 
-module.exports = { VISIT_SUMMARY_TOKEN_RE, planSummaryBillingLink, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
+module.exports = { VISIT_SUMMARY_TOKEN_RE, planSummaryBillingLink, summaryReceiptTextStarted, ensureVisitSummaryToken, packetHasPublishableSummary, getVisitCompletionSummary,
   deliverVisitCompletionSummary, reconcileSummaryEmailBounce, reconcileSummaryEmailRecovery, summaryRetryAuthorized,
   recheckDeferredSummarySms, beginDeferredSummarySms, finalizeDeferredSummarySms, terminalDeferredSummarySms,
   retrySummaryThroughHandoff, parkVisitReviewOutreach, resumeVisitReviewOutreach, visitSummaryUncertainForRecord,

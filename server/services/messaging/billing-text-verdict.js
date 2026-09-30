@@ -22,7 +22,7 @@
 const { loadContactState, checkConsentForPurpose } = require('./validators/consent');
 const { loadSuppressionState, checkSuppression } = require('./validators/suppression');
 const { resolvePolicy } = require('./policy');
-const { explicitBillingChannels } = require('../billing-delivery-channels');
+const { billingChannelsPayload } = require('../billing-delivery-channels');
 
 const SENDER_SHAPE = Object.freeze({
   pay_link: { purpose: 'payment_link', messageType: 'invoice', category: 'invoice' },
@@ -44,7 +44,14 @@ async function billingTextVerdict(kind, invoice, { phone, database }) {
     const verdict = await check(input, policy, state);
     if (!verdict.ok) return { ok: false, reason: verdict.code || 'blocked' };
   }
-  if ((explicitBillingChannels(state.prefs || {}, shape.category) || []).includes('push')) return { ok: false, reason: 'app_leg_selected' };
+  // The channels the senders route this notice to: the explicit choice, or the legacy channel
+  // column mapped exactly as billingChannelsPayload does (with the customer's real email
+  // availability). An App leg beside Text, or a resolution that has no Text, is not folded.
+  const emailAvailable = Boolean(state.prefs?.billing_email || state.customer?.email);
+  const payload = billingChannelsPayload(state.prefs || {}, { emailAvailable });
+  const routed = shape.category === 'invoice' ? payload.invoiceChannels : payload.paymentConfirmationChannels;
+  if (routed.includes('push')) return { ok: false, reason: 'app_leg_selected' };
+  if (!routed.includes('sms')) return { ok: false, reason: 'text_not_selected' };
   if (!(await require('../../routes/admin-sms-templates').isTemplateActive(shape.messageType, { database, requireRow: true }))) {
     return { ok: false, reason: 'template_inactive' };
   }
