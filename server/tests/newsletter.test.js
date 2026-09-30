@@ -927,6 +927,13 @@ describe('newsletter computeNewsletterEventUpdates', () => {
       const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null }), now);
       expect(u.subscriberAction).toBeNull();
     });
+    test('a merge-cleared subscriber_id still bounce-counts a Gmail mailbox (codex #5413 r3)', () => {
+      const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null, email: 'john.doe@gmail.com' }), now);
+      expect(u.subscriberAction).toBe('bounce_increment');
+      for (const email of ['old@example.test', 'john@gmail.com@invalid.test', '.john@gmail.com']) {
+        expect(computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ subscriber_id: null, email }), now).subscriberAction).toBeNull();
+      }
+    });
     test('idempotent — already-bounced row is a no-op', () => {
       const u = computeNewsletterEventUpdates({ event: 'bounce' }, fresh({ bounced_at: now }), now);
       expect(u).toBeNull();

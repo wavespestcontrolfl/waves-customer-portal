@@ -78,4 +78,30 @@ pg('subscriberRowsForBounce on Postgres', () => {
       'johndoe@gmail.com': 1, '.johndoe@gmail.com': 0, 'johndoe.@gmail.com': 0, 'john..doe@gmail.com': 0, 'john.doe+x@gmail.com': 1,
     });
   });
+
+  test('a stored value with a second @ is not read as the Gmail mailbox (codex #5413 r3)', async () => {
+    await seed(['johndoe@gmail.com', 'johndoe@gmail.com@invalid.test', 'john.doe@gmail.com@x.test']);
+    expect(await bounce(1, 'johndoe@gmail.com')).toBe(1);
+    expect(await counts()).toEqual({
+      'johndoe@gmail.com': 1, 'johndoe@gmail.com@invalid.test': 0, 'john.doe@gmail.com@x.test': 0,
+    });
+  });
+
+  test('a mailed value with a second @ keeps the exact fence', async () => {
+    await seed(['johndoe@gmail.com', 'johndoe@gmail.com@invalid.test']);
+    expect(await bounce(2, 'johndoe@gmail.com@invalid.test')).toBe(1);
+    expect(await counts()).toEqual({ 'johndoe@gmail.com': 0, 'johndoe@gmail.com@invalid.test': 1 });
+  });
+
+  test('a delivery whose subscriber id a merge cleared still bounce-counts the Gmail mailbox (codex #5413 r3)', async () => {
+    await seed(['johndoe@gmail.com']);
+    expect(await bounce(null, 'john.doe@gmail.com')).toBe(1);
+    expect(await counts()).toEqual({ 'johndoe@gmail.com': 1 });
+  });
+
+  test('…but a cleared id on a non-Gmail address updates nothing', async () => {
+    await seed(['same@example.test']);
+    expect(await bounce(null, 'same@example.test')).toBe(0);
+    expect(await bounce(null, null)).toBe(0);
+  });
 });

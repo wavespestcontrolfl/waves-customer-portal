@@ -119,25 +119,57 @@ function suppressionCoversColumnSql(suppressionColumn, recipientColumn) {
  */
 function subscriberRowsForBounce(query, subscriberId, mailedEmail) {
   const mailed = String(mailedEmail || '').trim().toLowerCase();
-  const { googleMailboxIdentity, GOOGLE_MAILBOX_SQL } = require('./customer-comms-lock');
-  // A malformed Gmail local part (.john@, john.@, jo..hn@) is not an alias
-  // of the valid mailbox; Gmail rejects it, which is often why it bounced.
-  // It keeps the exact-address fence below.
-  const mailbox = mailed && validDotPlacement(mailed) ? googleMailboxIdentity(mailed) : null;
+  const { GOOGLE_MAILBOX_SQL } = require('./customer-comms-lock');
+  // A malformed Gmail address (.john@, jo..hn@, two '@') is not an alias of
+  // the valid mailbox; Gmail rejects it, which is often why it bounced. It
+  // keeps the exact-address fence below.
+  const mailbox = bounceMailbox(mailed);
   if (mailbox) {
     const column = 'TRIM(email)';
     return query.whereRaw(
-      // Same dot-placement rule on the stored side: a malformed stored
+      // The same well-formedness rule on the stored side: a malformed stored
       // spelling is not an alias of the valid mailbox either.
       `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?
-        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '.%'
-        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '%.'
-        AND POSITION('..' IN SPLIT_PART(LOWER(${column}), '@', 1)) = 0)`,
+        AND ${wellFormedAddressSql(column)})`,
       [mailbox.split('@')[0]],
     );
   }
+  // No subscriber id (the delivery lost it in a merge) and no Gmail mailbox
+  // to match by: nothing to bounce-count.
+  if (!subscriberId) return query.whereRaw('FALSE');
   const byId = query.where({ id: subscriberId });
   return mailed ? byId.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : byId;
 }
 
-module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, subscriberRowsForBounce, GOOGLE_DOT_INSENSITIVE_DOMAINS };
+// ONE rule for "a well-formed address the Gmail widening may apply to",
+// JS and SQL kept together: exactly one '@', and a local part with no
+// leading, trailing or consecutive dots. Anything else — ".john@",
+// "jo..hn@", "john@gmail.com@invalid.test" — is not an alias of a valid
+// mailbox and keeps the exact-address fence (codex #5413 r1-r3).
+function wellFormedAddress(email) {
+  const value = String(email || '');
+  return value.split('@').length === 2 && validDotPlacement(value);
+}
+
+function wellFormedAddressSql(column) {
+  const local = `SPLIT_PART(LOWER(${column}), '@', 1)`;
+  return `(LENGTH(${column}) - LENGTH(REPLACE(${column}, '@', '')) = 1
+        AND ${local} <> ''
+        AND ${local} NOT LIKE '.%'
+        AND ${local} NOT LIKE '%.'
+        AND POSITION('..' IN ${local}) = 0)`;
+}
+
+/**
+ * The Gmail mailbox a bounce for this mailed address widens to, or null
+ * (exact-address fence). Callers use it to decide whether a delivery whose
+ * subscriber id was cleared by a merge can still reach the surviving row.
+ */
+function bounceMailbox(mailedEmail) {
+  const mailed = String(mailedEmail || '').trim().toLowerCase();
+  if (!mailed || !wellFormedAddress(mailed)) return null;
+  const { googleMailboxIdentity } = require('./customer-comms-lock');
+  return googleMailboxIdentity(mailed);
+}
+
+module.exports = { gmailCanonicalMailbox, sameGmailInbox, suppressionCoversEmail, suppressionCoversColumnSql, subscriberRowsForBounce, bounceMailbox, GOOGLE_DOT_INSENSITIVE_DOMAINS };
