@@ -281,9 +281,9 @@ function failLedgerAccess(nth, message = 'ledger down') {
   });
 }
 
-// A promotion whose seeded first touch is due NOW (a catch-up seed): the promotion decision as it is, with the
-// seed dated at `now`, so the projected schedule is one the live due scan could process this run.
-function seedDueNow() {
+// A promotion whose seeded first touch is already OVERDUE (a catch-up seed): the promotion decision as it is, with
+// the seed dated before `now`. Shadow still reports only the promotion for it.
+function seedOverdue() {
   const actual = jest.requireActual('../services/customer-dunning/schedule');
   return jest.spyOn(Schedule, 'promotionDecision').mockImplementation((set, rows, now) => {
     const d = actual.promotionDecision(set, rows, now);
@@ -752,28 +752,44 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
     const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
     const emptyTableDb = (schedules = []) => shadowDb(schedules);
 
-    test('C6: shadow-only (empty table): a promotion whose first touch is DUE NOW also logs the schedule\'s would-send, and a held one logs would-hold; nothing is written', async () => {
-      const seed = seedDueNow();
+    test('C6: shadow-only (empty table): a customer who would be PROMOTED is reported as a promotion only; a customer already held is judged; nothing is written', async () => {
+      Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID, 'cust-held']);
+      memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
+      mockResolve.mockImplementation(async (id) => (id === 'cust-held'
+        ? makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'account_credit_available' })
+        : makeSet(['inv-a', 'inv-b', 'inv-c'])));
+      const database = emptyTableDb();
+      const tally = await Runner.shadowRun(NOW, { database });
+      const out = lines();
+      expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic members=3 active=3 step=d60_reminder next=/);
+      expect(out).toMatch(/SHADOW would absorb customer=cust-0000-synthetic/);
+      expect(out).not.toMatch(/customer=cust-0000-synthetic [^\n]*schedule=/); // no judgment of a schedule that does not exist
+      expect(out).not.toMatch(/would (send|pause|close|settle)/);
+      expect(out).toMatch(/SHADOW would hold customer=cust-held reason=account_credit_available/); // the promotion decision's own hold
+      expect(tally).toMatchObject({ promote: 1, send: 0, hold: 1, pause: 0, close: 0, settle: 0, failed: 0 });
+      expect(database.writes).toEqual([]);
+      for (const writer of ['claim', 'markHeld', 'markPaused', 'alertStaff', 'close']) expect(Schedule[writer]).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+    });
+
+    test('an OVERDUE seed is promote-only too: nothing about autopay, preferences, policy or templates is judged for it', async () => {
+      const seed = seedOverdue();
       try {
-        Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID, 'cust-held']);
+        Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
         memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
-        mockResolve.mockImplementation(async (id) => (id === 'cust-held'
-          ? makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'account_credit_available' })
-          : makeSet(['inv-a', 'inv-b', 'inv-c'])));
+        mockOnAutopay.mockResolvedValue(true);
         const database = emptyTableDb();
         const tally = await Runner.shadowRun(NOW, { database });
-        const out = lines();
-        expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
-        expect(out).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=projected step=\w+ kind=multi members=3 total_cents=\d+ due=\d{4}-/);
-        expect(out).toMatch(/SHADOW would hold customer=cust-held reason=account_credit_available/);
-        expect(tally).toMatchObject({ promote: 1, send: 1, hold: 1, failed: 0 });
+        expect(lines()).toMatch(/SHADOW would promote customer=cust-0000-synthetic members=3 active=3 step=d60_reminder next=2026-10-06T14:15:59\.000Z/);
+        expect(lines()).not.toMatch(/would (send|hold|pause|close|settle)/);
+        expect(mockOnAutopay).not.toHaveBeenCalled();
+        expect(mockPolicy).not.toHaveBeenCalled();
+        expect(tally).toMatchObject({ promote: 1, send: 0, hold: 0, pause: 0, close: 0, settle: 0 });
         expect(database.writes).toEqual([]);
-        for (const writer of ['claim', 'markHeld', 'markPaused', 'alertStaff', 'close']) expect(Schedule[writer]).not.toHaveBeenCalled();
-        expect(mockNotify).not.toHaveBeenCalled();
       } finally { seed.mockRestore(); }
     });
 
-    test('R6-1: a promotion seeded for a FUTURE run logs only the promotion (step and next), with no send / hold judgment today', async () => {
+    test('a promotion seeded for a FUTURE run logs only the promotion (step and next), with no send / hold judgment', async () => {
       Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
       memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
       mockOnAutopay.mockResolvedValue(true); // today's autopay state must not be judged for a touch that is not yet due
@@ -846,19 +862,17 @@ describe('shadow runs the live pre-send guards (R2-1)', () => {
     expect(lines()).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=s-open step=d60_reminder kind=multi/);
   });
 
-  test('an autopay customer is a would-hold (autopay_hold), not a send — including a customer that would be PROMOTED', async () => {
+  test('an autopay customer with a schedule is a would-hold (autopay_hold), not a send; a customer who would only be PROMOTED is not judged', async () => {
     mockOnAutopay.mockResolvedValue(true);
     noWrites(await shadow());
     expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=s-open step=d60_reminder reason=autopay_hold/);
     logger.info.mockClear();
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
-    const seed = seedDueNow(); // a projection the due scan could process now
     const database = shadowDb();
-    try { await Runner.shadowRun(NOW, { database }); } finally { seed.mockRestore(); }
+    await Runner.shadowRun(NOW, { database });
     expect(lines()).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
-    expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=projected step=\w+ reason=autopay_hold/);
-    expect(lines()).not.toMatch(/would send/);
+    expect(lines()).not.toMatch(/autopay_hold|would send/); // a customer with no schedule row is not judged
     noWrites(database);
   });
 
@@ -1141,9 +1155,7 @@ describe('every helper in the runner path uses the injected handle, never the de
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
     const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }]);
-    const seed = seedDueNow();
-    try { await withPoolPoisoned(async () => { await Runner.shadowRun(NOW, { database }); }); } finally { seed.mockRestore(); }
-    expect(lines()).toMatch(/would send .*schedule=projected/);
+    await withPoolPoisoned(async () => { await Runner.shadowRun(NOW, { database }); });
     expect(lines()).toMatch(/would send .*schedule=s-open/);
     expect(mockOnAutopay.mock.calls.every(([, o]) => o.db === database)).toBe(true);
     expect(mockPolicy.mock.calls.every(([a]) => a.database === database)).toBe(true);

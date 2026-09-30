@@ -18,6 +18,14 @@
  * null or a decision, and a write half (`applyDecision`). The live run calls
  * both; the shadow run calls only the decide halves, so its verdicts can
  * never drift from the live path's.
+ *
+ * SHADOW SCOPE: shadow gives full verdicts (would send / hold / pause / close /
+ * settle) ONLY for customers already on a customer_dunning_schedules row. For a
+ * customer who is not yet promoted it reports only the promotion and its first due
+ * date (`would promote ... step=<id> next=<iso>`, plus `would absorb`): no send,
+ * hold or pause is judged for a schedule that does not exist. Send evidence for
+ * unpromoted customers comes from the one-customer allowlist canary (owner
+ * rollout plan D12), not from shadow.
  */
 
 const db = require('../../models/db');
@@ -587,10 +595,9 @@ function standingReservation(event, channel) {
  * What the live run would do with a schedule: the SAME read-only guards
  * runClaimed runs (customer, preferences, recover-first, autopay, then the set,
  * stage and template checks), and only their decide halves — nothing is applied.
- * `schedule` is a stored row or, for a promotion, the projected one; `due` is set
- * for a schedule that does not exist yet.
+ * `schedule` is always a STORED row (shadow never judges a schedule that does not exist).
  */
-async function judgeShadowSchedule(schedule, set, { now, database, due = null }) {
+async function judgeShadowSchedule(schedule, set, { now, database }) {
   const run = { schedule, now, database, operatorInitiated: false, claimStamp: null, readOnly: true };
   const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
   const stop = await decideCustomer(run) || await decideRecovery(run) || await decideAfterSet(run, set)
@@ -599,7 +606,7 @@ async function judgeShadowSchedule(schedule, set, { now, database, due = null })
     line('send', {
       ...fields, step: run.step?.id, kind: set.kind, members: set.members.length, total_cents: set.totalCents,
       ...(run.policyDenied?.length ? { denied: run.policyDenied.join('+') } : {}),
-      ...(run.unclaimable?.length ? { unclaimable: run.unclaimable.join('+') } : {}), ...(due ? { due: iso(due) } : {}),
+      ...(run.unclaimable?.length ? { unclaimable: run.unclaimable.join('+') } : {}),
     });
     return 'send';
   }
@@ -611,11 +618,10 @@ async function judgeShadowSchedule(schedule, set, { now, database, due = null })
   return verb;
 }
 
-// The set resolve makes Stripe calls (pay-combined's live PaymentIntent check),
-// so it runs on the pool with NO transaction held (a pinned connection would
-// starve DB_POOL_MAX=2, as in promotion). It is a documented pure read; only
-// the member-row read below sits inside the READ ONLY transaction. The guards
-// that follow are plain reads on the pool as well.
+// A customer with no schedule row yet: the promotion decision and its first due date, nothing more.
+// The set resolve makes Stripe calls (pay-combined's live PaymentIntent check), so it runs on the
+// pool with NO transaction held (a pinned connection would starve DB_POOL_MAX=2, as in promotion).
+// It is a documented pure read; only the member-row read below sits inside the READ ONLY transaction.
 async function shadowPromote(customerId, now, database) {
   const set = await resolveDunnableSet(customerId, { database, now });
   const rows = await Schedule.inReadOnlyTransaction(database, (trx) => Schedule.activeMemberRows(customerId, { database: trx }));
@@ -628,15 +634,9 @@ async function shadowPromote(customerId, now, database) {
   for (const row of d.absorbed) {
     line('absorb', { customer: customerId, seq: row.id, invoice: row.invoice_id, step: STEPS[row.step_index]?.id, next: iso(row.next_touch_at) });
   }
-  // In a shadow-only rollout no schedule row is ever written, so the schedule
-  // decisions would never be seen: model the schedule this promotion WOULD
-  // create (in memory, never stored) and judge it the way the live run would —
-  // but only once the live due scan could process it. A seed dated in the future
-  // (the normal case: promotion never sends in its own run) is not judged today: its
-  // preferences, autopay state, policy and templates are read on the day it is due.
-  if (new Date(d.seed.next_touch_at).getTime() > now.getTime()) return ['promote'];
-  const projected = { id: 'projected', customer_id: customerId, episode: 1, status: 'active', step_index: d.seed.step_index, touches_sent: d.seed.touches_sent };
-  return ['promote', await judgeShadowSchedule(projected, set, { now, database, due: d.seed.next_touch_at })];
+  // Promotion is all shadow says about a customer with no schedule row yet: what the first touch
+  // would be and when it is due. The schedule it would create is not judged (see SHADOW SCOPE).
+  return ['promote'];
 }
 
 async function shadowSchedule(schedule, now, database) {
@@ -649,6 +649,11 @@ async function shadowSchedule(schedule, now, database) {
  * mint, reservation, send, or alert. Table reads go through a READ ONLY
  * transaction (PostgreSQL itself refuses a write); the set resolve is a pure
  * read outside it. It only logs `[customer-dunning] SHADOW would ...` lines.
+ *
+ * Scope: full verdicts only for customers already on a customer_dunning_schedules row
+ * (shadowSchedule); for a customer not yet promoted, only the promotion and its first
+ * due date (shadowPromote). Send evidence for unpromoted customers comes from the
+ * one-customer allowlist canary (owner rollout plan D12).
  */
 async function shadowRun(now = new Date(), { database = db } = {}) {
   const tally = { promote: 0, hold: 0, send: 0, pause: 0, settle: 0, close: 0, failed: 0 };
