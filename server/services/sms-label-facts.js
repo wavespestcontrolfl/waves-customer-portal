@@ -794,8 +794,8 @@ const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:
 
 // A short follow-up with no topic word ("is it ok now?", "what about now", "and outside?") asks whatever the
 // thread was about; with nothing classifiable in the thread it is treated as asking both kinds (fail closed).
-const ELLIPTICAL_RE = /^(?:(?:and|so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this)|are\s+(?:they|we)|can\s+(?:they|we|i|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
-const NOT_ELLIPTICAL_RE = new RegExp([BUSINESS_RE.source, SCHEDULE_WORD_RE.source, /\b(?:arrive|arrives|come|coming|call|text|schedule|reschedule|appointment)\b/.source].join('|'));
+const ELLIPTICAL_RE = /^and\s+\w+|^(?:(?:so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this)|are\s+they|can\s+(?:they|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
+const NOT_ELLIPTICAL_RE = new RegExp([BUSINESS_RE.source, SCHEDULE_WORD_RE.source, /\b(?:arrive|arrives|come|coming|call|text|schedule|reschedule|appointment|book|booking|visit|pay|price|cost|service)\b/.source].join('|'));
 function isEllipticalInbound(text) {
   return text.split(/\s+/).length <= 8 && ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text);
 }
@@ -808,46 +808,89 @@ function askedKindsOf(inboundText) {
 }
 
 /**
- * ['reentry' | 'rain'] asked by the inbound message, or by any of the customer's recent messages when an
- * array is given (the FIRST is the current one). [] = no label question; an elliptical current message
- * with nothing classifiable anywhere in the thread asks both.
+ * ['reentry' | 'rain'] the inbound message asks about. With an array (the customer's recent messages, the
+ * CURRENT one first) an ELLIPTICAL current message ("is it okay now?") inherits the thread's kinds; a
+ * self-contained current message classifies on its own. [] = no label question; an elliptical current
+ * message with nothing classifiable anywhere in the thread asks both.
  */
 function askedLabelKinds(inbound) {
   const reads = (Array.isArray(inbound) ? inbound : [inbound]).map(askedKindsOf);
-  const kinds = ['reentry', 'rain'].filter((k) => reads.some((r) => r.kinds.includes(k)));
+  const sources = reads[0]?.elliptical ? reads : reads.slice(0, 1);
+  const kinds = ['reentry', 'rain'].filter((k) => sources.some((r) => r.kinds.includes(k)));
   return !kinds.length && reads[0]?.elliptical ? ['reentry', 'rain'] : kinds;
 }
 
-const ANSWER_LEAD_RE = /^(?:(?:hi|hello|hey|thanks|thank\s+you|great\s+question|good\s+question)[^a-z]*\s*)?(?:yes|no|yeah|yep|yup|nope|sure|ok|okay|fine|alright|absolutely|definitely|certainly|of\s+course|correct|right|go\s+ahead|not\s+yet|not\s+really|not\s+quite)\b/;
+/** True when the current (first) message is a short follow-up that only makes sense with the thread. */
+function inboundIsElliptical(inbound) {
+  return askedKindsOf(Array.isArray(inbound) ? inbound[0] : inbound).elliptical;
+}
+
+const ANSWER_LEAD_RE = /^(?:yes|no|yeah|yep|yup|nope|sure|ok|okay|fine|alright|absolutely|definitely|certainly|of\s+course|correct|right|go\s+ahead|not\s+yet)\b/;
 const ANSWER_BODY_RE = new RegExp([
   /\b(?:go\s+ahead|you'?re\s+good|you\s+are\s+good|not\s+yet|(?:they|you|he|she|everyone|everybody|it)\s+(?:can|could|may)|(?:it'?s|it\s+is|that'?s|that\s+is|is|are|be)\s+(?:safe|ok|okay|fine|good|alright)|hold\s+off|wait|all\s+clear|good\s+to\s+go)\b/.source,
   PRONOUN_CLEARANCE_RE.source, PLACE_CLEARANCE_RE.source, DAY_CLEARANCE_RE.source,
 ].join('|'));
-const DEFERRAL_RE = /\b(?:i|we|i'll|we'll|let\s+me|let\s+us|the\s+office|our\s+office|your\s+technician|the\s+technician|a\s+teammate|someone|our\s+team|the\s+team)\b[^.]{0,60}\b(?:confirm|check|follow\s+up|get\s+back|look\s+into|find\s+out|reach\s+out|verify|ask|text\s+you|call\s+you|let\s+you\s+know)\b/;
-const WAIT_FOR_STAFF_RE = /\bwait(?:ing)?\s+(?:for|on)\s+(?:your|the|our)\s+(?:tech\w*|office|team)\b/;
-const COMPANY_RAIN_LINE_RE = /\bdr(?:y|ied)\s+and\s+bond(?:ed)?\b[^.]*\bholds?\s+up\s+to\s+weather\b/;
+const hasAnswerForce = (text) => ANSWER_LEAD_RE.test(text) || ANSWER_BODY_RE.test(text);
 
-function answerShapedSentence(sentence) {
-  const t = sentence.replace(WAIT_ALLOWED_RE, ' ').replace(WAIT_FOR_STAFF_RE, ' ').trim();
-  const body = ANSWER_BODY_RE.test(t);
-  if (!body && !ANSWER_LEAD_RE.test(t)) return false;
-  if (COMPANY_RAIN_LINE_RE.test(t)) return false;
-  return body || !DEFERRAL_RE.test(t);
+// ALLOWLIST: once a label question was asked, EVERY non-question sentence of the reply (copy or no copy) must be
+// one of these types; anything else - "Go for it!", "Feel free", "Absolutely", "No worries, let them out" -
+// is held without having to name it.
+const wordsOf = (text) => text.match(/[a-z]+/g) || [];
+const allIn = (words, set) => words.every((w) => set.has(w));
+const wordSet = (list) => new Set(list.split(/\s+/));
+// (a) an authorized copy (stripLabelSentences left its marker)
+const isCopyMarker = (sentence) => sentence === 'labelsentence';
+// (b) the sanctioned "safe once dry" (sanctionSafeOnceDry left its token), optionally with the technician confirming timing
+const SANCTIONED_SENTENCE_RE = /^(?:(?:(?:it|that|this|they|everything)(?:'s|'re|\s+(?:is|are|will\s+be))|(?:pets|people|kids|dogs)(?:\s+and\s+(?:pets|people|kids|dogs))?\s+(?:are|will\s+be))\s+)?sanctioned_idiom\s*[,;-]?\s*(?:and\s+)?(?:(?:(?:your|the|our)\s+(?:technician|tech|office|team)|we)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?)?$/;
+const isSanctionedSentence = (sentence) => SANCTIONED_SENTENCE_RE.test(sentence);
+// (c) the COMPANY FACTS rain line, for a rain question (pre-marked before the sentences are split)
+const COMPANY_RAIN_LINE_RE = /(?:a|the)\s+treatment\s+needs\s+to\s+dry\s+and\s+bond\s+to\s+surfaces\s*[;,.]?\s*(?:and\s+)?after\s+that,?\s+it\s+holds\s+up\s+to\s+weather/g;
+const isCompanyLine = (sentence) => sentence === 'companyline';
+// (d) a hand-off: a staff subject, a deferral verb, and nothing but neutral words
+const DEFERRAL_HEAD_RE = /^(?:(?:sure|ok|okay|thanks|thank\s+you|absolutely|of\s+course|happy\s+to\s+help|great\s+question|good\s+question)(?:[,!]|\s[-\u2013\u2014])?\s+)?(?:i'll|we'll|i\s+will|we\s+will|i\s+can|we\s+can|i|we|let\s+me|let\s+us|the\s+office|our\s+office|your\s+technician|the\s+technician|our\s+technician|a\s+teammate|someone|our\s+team|the\s+team|a\s+manager|the\s+owner)\b/;
+const DEFERRAL_VERB_RE = /\b(?:confirm|confirms|check|follow\s+up|get\s+back|look\s+into|find\s+out|reach\s+out|verify|ask|text\s+you|call\s+you|let\s+you\s+know)\b/;
+const DEFERRAL_WORDS = wordSet('sure ok okay thanks thank you absolutely of course happy to help great good question i ll we let me us the our your a an office technician tech team teammate someone manager owner dispatch will would can have has be confirm confirms check follow up get back look into find out reach verify ask text call know with on about that this it timing time details shortly soon today later as possible right away and more info information then just quickly at visit appointment next for');
+const isDeferral = (sentence) => DEFERRAL_HEAD_RE.test(sentence) && DEFERRAL_VERB_RE.test(sentence) && !hasAnswerForce(sentence.replace(DEFERRAL_HEAD_RE, ' ')) && allIn(wordsOf(sentence), DEFERRAL_WORDS);
+// (e) a greeting, thanks or sign-off with no other content
+const SIGNOFF_HEAD_RE = /^(?:thanks|thank\s+you|(?:good|great)\s+question|have\s+a\s+(?:great|good|wonderful|nice|lovely)|take\s+care|talk\s+soon|best|regards|let\s+us\s+know|please\s+let\s+us\s+know|please\s+don'?t\s+hesitate|happy\s+to\s+help|glad\s+to\s+help|we\s+appreciate|i\s+appreciate|hope\s+(?:this|that)\s+helps)\b/;
+const SIGNOFF_WORDS = wordSet('thanks thank you so much for reaching out contacting asking your message waves pest control have a great good wonderful nice lovely day evening morning afternoon weekend take care best regards talk to soon happy help anytime appreciate it we us let know if need anything else questions any other more please do not don t hesitate reach hope this that helps glad hear from our team is here question');
+const isGreetingOrSignoff = (sentence) => {
+  const words = wordsOf(sentence);
+  if (/^(?:hi|hello|hey|hiya|greetings)$/.test(words[0] || '')) return words.length <= 3;
+  return SIGNOFF_HEAD_RE.test(sentence) && allIn(words, SIGNOFF_WORDS);
+};
+// (f) off-topic scheduling / billing with no answer force and no label word, clause by clause
+const isOffTopicScheduling = (sentence) => {
+  const clauses = clausesOf(sentence);
+  return clauses.length > 0 && clauses.every((c) => isGreetingOrSignoff(c.clause) || (!hasAnswerForce(c.clause)
+    && isSchedulingClause(c.clause, { staffCarry: c.staffCarry, clock: hasClockTime(c.clause), sentence: c.sentence })));
+};
+const ALLOWED_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isDeferral, isGreetingOrSignoff, isOffTopicScheduling];
+
+// The non-question sentences of a stripped reply (stripLabelSentences output, sanctioned idiom swapped out),
+// with the COMPANY FACTS rain line pre-marked for a rain question.
+function replySentences(strippedText, asked) {
+  const text = canonText(strippedText).toLowerCase();
+  const parts = (asked.includes('rain') ? text.replace(COMPANY_RAIN_LINE_RE, ' . companyline . ') : text).split(/([!?\n;]+|\.(?!\d))/);
+  const out = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const sentence = parts[i].trim();
+    if (sentence && !/\?/.test(parts[i + 1] || '')) out.push(sentence);
+  }
+  return out;
 }
 
 /**
- * True when `strippedText` (stripLabelSentences output, sanctioned idiom already swapped out) still
- * ANSWERS a label question the customer asked (`asked` from askedLabelKinds): an answer-shaped
- * sentence that is not a question, a hand-off or the COMPANY FACTS rain line.
+ * True when a label question was asked (`asked` from askedLabelKinds) and the stripped reply holds a
+ * sentence that is not an allowed type. With `asked` === null (the question is unknown: no snapshot, no
+ * stored inbound) only an answer-shaped sentence that is not a hand-off / sanctioned / company line is held.
  */
 function answersAskedLabelQuestion(strippedText, asked) {
-  if (!Array.isArray(asked) || !asked.length) return false;
-  const parts = canonText(strippedText).toLowerCase().split(/([!?\n;]+|\.(?!\d))/);
-  for (let i = 0; i < parts.length; i += 2) {
-    if (/\?/.test(parts[i + 1] || '')) continue;
-    if (answerShapedSentence(parts[i].trim())) return true;
+  if (asked === null) {
+    return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !ALLOWED_SENTENCE_TYPES.slice(0, 4).some((allowed) => allowed(sentence)));
   }
-  return false;
+  if (!Array.isArray(asked) || !asked.length) return false;
+  return replySentences(strippedText, asked).some((sentence) => !ALLOWED_SENTENCE_TYPES.some((allowed) => allowed(sentence)));
 }
 
 /** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine), or answers a label question in `asked` without one. */
@@ -889,10 +932,10 @@ function labelFactsSnapshotFor({ labelFacts, reply, sectionText, asked = [] }) {
  * Returns null when it may go out, else a short reason.
  */
 // The label kinds the customer asked, for the send-time answer check: the snapshot's own record, else the
-// decision's stored inbound text, else unknown (both kinds: only an answer-shaped reply is then held).
+// decision's stored inbound text, else unknown (null: only an answer-shaped reply is then held).
 function askedForSend(snapshot, inbound) {
   if (snapshot && Array.isArray(snapshot.asked)) return snapshot.asked;
-  return typeof inbound === 'string' || Array.isArray(inbound) ? askedLabelKinds(inbound) : ['reentry', 'rain'];
+  return typeof inbound === 'string' || Array.isArray(inbound) ? askedLabelKinds(inbound) : null;
 }
 
 async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, today } = {}) {
@@ -994,9 +1037,13 @@ const VISIT_REFERENCES = [
  * The facts a draft may render for `inboundText`: null (none on file) when the
  * text points at another visit or is not in English (the sentences are English).
  */
-function labelFactsForInbound(labelFacts, inboundText) {
+function labelFactsForInbound(labelFacts, inbound) {
   if (!labelFacts) return null;
-  return inboundRefersToOtherVisit(inboundText, labelFacts.serviceDate) || looksNonEnglish(inboundText) ? null : labelFacts;
+  const texts = Array.isArray(inbound) ? inbound : [inbound];
+  // a short follow-up ("is it okay now?") is about whatever the thread was, so the thread's visit references count too
+  const refs = inboundIsElliptical(texts) ? texts : texts.slice(0, 1);
+  const otherVisit = refs.some((text) => inboundRefersToOtherVisit(text, labelFacts.serviceDate));
+  return otherVisit || looksNonEnglish(texts[0]) ? null : labelFacts;
 }
 
 /**
@@ -1042,6 +1089,7 @@ module.exports = {
   sanctionSafeOnceDry,
   replyClaimsUngroundedLabelTiming,
   askedLabelKinds,
+  inboundIsElliptical,
   answersAskedLabelQuestion,
   looksNonEnglish,
   nonEnglishTimingWords,

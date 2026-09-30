@@ -1051,6 +1051,80 @@ describe('r12: asked kinds over the thread, framing around a copy, and ordinal v
   });
 });
 
+describe('r13: an allowlist for the sentences of a reply to a label question; thread visit references; self-contained asks', () => {
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [rain, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, labelFactsLib.askedLabelKinds(inbound));
+  const RE_Q = 'Can the dogs go out now?';
+  const RAIN_Q = 'Will rain wash it off?';
+
+  test('every answer-like sentence is held, alone or beside the authorized copy - no phrase list to extend', () => {
+    for (const reply of [
+      'Go for it!', 'Feel free!', 'Have at it.', 'Knock yourself out.', 'Absolutely.', 'Of course.', 'Definitely.', 'You bet.', 'No worries, let them out.', 'Sounds good.',
+      'Yes.', 'Yep!', "It's okay.", 'Yes, they can.', 'Sure, go ahead.', 'No, not yet.', 'Whenever you like.', 'Do what you like.', 'Totally fine by us.', 'Be my guest.',
+      'Go for it, Tuesday works.', "I'll check, go for it.", 'Sure, let them out.', 'Thanks, go ahead.',
+    ]) {
+      expect([reply, guard(reply, RE_Q)]).toEqual([reply, true]);
+      expect([reply, guard(`${reply} ${reentry}`, RE_Q)]).toEqual([reply, true]);
+      expect([reply, guard(`${reentry} ${reply}`, RE_Q)]).toEqual([reply, true]);
+      expect([reply, guard(reply, RAIN_Q)]).toEqual([reply, true]);
+    }
+    expect(guard(`Yes! ${reentry}`, RE_Q)).toBe(true);
+    expect(guard(`Go for it. ${reentry}`, RE_Q)).toBe(true);
+  });
+  test('the allowed shapes pass: copy, sanctioned idiom, company rain line, hand-off, greeting / thanks / sign-off, off-topic scheduling', () => {
+    for (const reply of [
+      reentry, `Hi Jane, ${reentry} Thanks!`, `Hi Jane,\n${reentry}\nHave a great day!`, `Good question! ${reentry} Let us know if you need anything else.`, `${rain} ${reentry}`,
+      `Thanks for reaching out! ${reentry} Your technician can answer anything else.`.replace('Your technician can answer anything else.', "We'll see you Thursday between 8 and 10 AM."),
+      'It is safe once dry, and your technician will confirm the timing.', 'It is safe once dry. Your technician will confirm the timing at the visit.',
+      "I'll have the office confirm and get back to you.", 'Let me check with your technician and get back to you.', 'Someone will get back to you shortly.',
+      "I'll have your technician follow up.", 'Sure, let me check with your technician.', "Thanks for reaching out! I'll have the office confirm the timing.",
+      'Hi Jane, thanks for reaching out!', 'Have a great day!', "We'll see you Thursday between 8 and 10 AM.", 'Your next visit is in 3 weeks.', 'Do you have pets that stay outside?',
+    ]) expect([reply, guard(reply, RE_Q)]).toEqual([reply, false]);
+    for (const reply of [rain, `Hi Jane, ${rain} Thanks!`, 'A treatment needs to dry and bond to surfaces; after that it holds up to weather.', "I'll have the office confirm."]) {
+      expect([reply, guard(reply, RAIN_Q)]).toEqual([reply, false]);
+    }
+    // the company rain line answers a RAIN question only
+    expect(guard('A treatment needs to dry and bond to surfaces; after that it holds up to weather.', RE_Q)).toBe(true);
+    // no label question: nothing is checked by the allowlist
+    expect(guard('Sounds good, Tuesday works.', 'Can you come Tuesday?')).toBe(false);
+  });
+  test('unknown question at send time: only an answer-shaped body is held (no allowlist)', async () => {
+    const boom = () => { throw new Error('must not read'); };
+    const send = (body) => labelFactsLib.labelFactsSendBlockReason({ snapshot: null, body, conn: boom });
+    await expect(send('Sounds good, see you Thursday.')).resolves.toBeNull();
+    await expect(send('Yes, they can.')).resolves.toBe('label_facts_unauthorized_claim');
+    await expect(send("It's okay.")).resolves.toBe('label_facts_unauthorized_claim');
+    await expect(send("I'll have the office confirm.")).resolves.toBeNull();
+  });
+
+  test('inheritance: only an elliptical current message takes the thread\'s kinds; a self-contained one classifies alone', () => {
+    const asked = labelFactsLib.askedLabelKinds;
+    expect(asked(['Can you come Tuesday?', 'Can the dogs go out?'])).toEqual([]);
+    expect(asked(['Can I pay online?', 'Will rain wash it off?'])).toEqual([]);
+    expect(asked(['Can the kids play on it?', 'Will rain wash it off?'])).toEqual(['reentry']);
+    expect(asked(['Is it okay now?', 'Will rain wash it off?'])).toEqual(['rain']);
+    expect(asked(['And the kids?', 'Will rain wash it off?'])).toEqual(['reentry', 'rain']);
+    expect(labelFactsLib.inboundIsElliptical(['Is it okay now?'])).toBe(true);
+    expect(labelFactsLib.inboundIsElliptical(['Can you come Tuesday?'])).toBe(false);
+    expect(guard('Yes, Tuesday works.', ['Can you come Tuesday?', 'Can the dogs go out?'])).toBe(false);
+    expect(guard('Yes, Tuesday works.', ['Is it okay now?', 'Can the dogs go out?'])).toBe(true);
+  });
+
+  test('visit through the thread: an elliptical follow-up inherits the thread\'s other-visit reference; a self-contained message does not', () => {
+    const facts = { serviceDate: '2026-09-29', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [] };
+    const forInbound = (texts) => labelFactsLib.labelFactsForInbound(facts, texts);
+    expect(forInbound(['Is it okay now?', 'What about the May treatment?'])).toBeNull();
+    expect(forInbound(['What about now?', 'And the first visit?'])).toBeNull();
+    expect(forInbound(['Is it okay now?', 'Can the dogs go out after the September 29 spray?'])).toBe(facts);
+    expect(forInbound(['Is it okay now?'])).toBe(facts);
+    expect(forInbound(['Can the dogs go out now?', 'What about the May treatment?'])).toBe(facts); // self-contained: resolves on its own
+    expect(forInbound(['Is it okay now?', 'Can you come Tuesday?'])).toBe(facts);
+    expect(forInbound('Is it okay now?')).toBe(facts);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {
@@ -1546,6 +1620,17 @@ describe('C: the section is for the latest visit only - a text about another vis
       expect(r.factsBlock).not.toContain('keep people and pets off');
       expect(r.converged).toBe(false);
       expect(r.labelFactsSnapshot ?? null).toBeNull();
+    });
+
+    test('r13: an elliptical follow-up after a question about another visit gets none on file, and the sentence is then held', async () => {
+      const ago = (h) => new Date(Date.now() - h * 3600000).toISOString();
+      const thread = [{ direction: 'inbound', body: 'What about the May treatment?', date: ago(1) }];
+      const r = await run('Is it okay now?', [draft(RE), draft(RE), draft(RE)], thread);
+      expect(r.factsBlock).toContain('LABEL FACTS (none on file for the last visit):');
+      expect(r.converged).toBe(false);
+      const own = await run('Can the dogs go out now?', [draft(RE)], thread);
+      expect(own.factsBlock).toContain(`- ${RE}`);
+      expect(own.converged).toBe(true);
     });
 
     test('r12: a follow-up like "is it okay now?" inherits the label kind of the recent thread; a bare "Yes." is held', async () => {

@@ -2346,8 +2346,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // The label sentences are English: a text in another language gets none on
   // file too (a paraphrase in that language would slip past the English guard;
   // the guard also holds that language's timing words, sms-label-facts).
-  const labelFacts = labelFactsLib.labelFactsForInbound(fetchedLabelFacts, inboundMessage);
   const askedTexts = recentInboundTexts(context, inboundMessage);
+  const labelFacts = labelFactsLib.labelFactsForInbound(fetchedLabelFacts, askedTexts);
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
