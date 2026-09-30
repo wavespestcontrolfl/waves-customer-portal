@@ -1909,7 +1909,9 @@ router.post('/:id/charge-card', requireAdmin, async (req, res, next) => {
     const result = await StripeService.chargeInvoiceWithSavedCard(
       req.params.id,
       paymentMethodId,
-      { expectedTotal },
+      // Staff ordered this charge explicitly: exempt from the default
+      // collections dispute-hold guard (an operator may override a hold).
+      { expectedTotal, operatorOverride: true },
     );
     res.json({ success: true, ...result });
   } catch (err) {

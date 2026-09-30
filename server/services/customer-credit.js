@@ -11,7 +11,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { customerHasActiveCollectionHoldLocked } = require('./collections/collection-hold');
+const { customerHasActiveCollectionHoldChecked } = require('./collections/collection-hold');
 
 const VALID_SOURCES = Object.freeze([
   'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
@@ -262,20 +262,14 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
-    // Active collections collection_hold (dispute raised on a collections
-    // call, B10) stops credit consumption too — implied by
-    // refuseWhenDunningStopped, or asked for alone via
-    // refuseWhenCollectionHold. LOCK ORDER (B10 P1): this MUST come before
-    // the customers-row lock below. The hold writer takes the exclusive
-    // advisory lock and then inserts collections_flags, whose customer_id FK
-    // needs a key-share lock on the customers row; taking the customer row
-    // FOR UPDATE first and the advisory lock second would deadlock against
-    // it and could abort the dispute-hold write. Advisory lock first, then
-    // any customers/invoices row lock (see collections/collection-hold.js).
-    // The invoice row lock above is safe — the writer never touches
-    // invoices. A lookup failure throws (fail closed — nothing consumed).
+    // An active collections DISPUTE hold (collection-hold.js) stops credit
+    // consumption too — implied by refuseWhenDunningStopped, or asked for
+    // alone via refuseWhenCollectionHold (the completion route's automatic
+    // apply). Customer- and operator-requested applies never pass either.
+    // A lookup failure throws COLLECTION_HOLD_CHECK_FAILED (fail closed —
+    // nothing consumed).
     if ((refuseWhenDunningStopped || refuseWhenCollectionHold)
-      && await customerHasActiveCollectionHoldLocked(t, invoice.customer_id)) {
+      && await customerHasActiveCollectionHoldChecked(invoice.customer_id, t)) {
       return { applied: 0, skipped: 'dunning_stopped' };
     }
     // The customer's opt-in gates every AUTOMATIC apply (owner ruling

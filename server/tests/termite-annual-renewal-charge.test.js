@@ -1554,7 +1554,7 @@ describe('termite annual renewal charge', () => {
       const { conn, deferredUpdate } = makeClaimConn();
       const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
 
-      expect(outcome).toEqual({ status: 'deferred', reason: 'collection_hold' });
+      expect(outcome).toMatchObject({ status: 'deferred', reason: expect.stringContaining('collections dispute hold') });
       expect(quoteInvoiceSavedCardCharge).not.toHaveBeenCalled();
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
       expect(deferredUpdate).toHaveBeenCalled();
@@ -1575,7 +1575,7 @@ describe('termite annual renewal charge', () => {
       const { conn } = makeClaimConn();
       const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
 
-      expect(outcome).toEqual({ status: 'deferred', reason: 'collection_hold' });
+      expect(outcome).toMatchObject({ status: 'deferred', reason: expect.stringContaining('collections dispute hold') });
       expect(chargeInvoiceWithSavedCard).not.toHaveBeenCalled();
     });
 
@@ -1931,8 +1931,102 @@ describe('termite annual renewal charge', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
+    describe('F: a collections dispute hold DEFERS every renewal action — never a pay link, never a withdrawal — even past the grace window', () => {
+      const pastGraceSuccessor = () => baseSuccessor({ renewed_from_term_id: null, term_start: '2020-01-01', created_at: '2020-01-01T00:00:00Z' });
+
+      function loadWithHold(held) {
+        mockCommon();
+        mockGraceHelpers({ graceDays: 30 });
+        jest.doMock('../services/collections/collection-hold', () => ({
+          ...jest.requireActual('../services/collections/collection-hold'),
+          customerHasActiveCollectionHold: jest.fn(async () => { if (held === 'throws') throw new Error('flags unreadable'); return held; }),
+        }));
+        return require('../services/termite-annual-renewal-charge')._private;
+      }
+
+      test('recovery (leg 7b / the crash + failed-fence-release case): held -> defer, retire:false — no pay link — even when the grace window has closed', async () => {
+        const p = loadWithHold(true);
+        const conn = jest.fn((table) => { if (table === 'customers') return liveCustomerQuery(); throw new Error(`unexpected ${table}`); });
+        const refusal = await p.successorRecoveryRefusal(pastGraceSuccessor(), conn);
+        expect(refusal).toMatchObject({ retire: false, reason: expect.stringContaining('collections dispute hold') });
+      });
+
+      test('recovery: no hold + past grace is still the durable retire it always was', async () => {
+        const p = loadWithHold(false);
+        const conn = jest.fn((table) => { if (table === 'customers') return liveCustomerQuery(); throw new Error(`unexpected ${table}`); });
+        expect(await p.successorRecoveryRefusal(pastGraceSuccessor(), conn)).toMatchObject({ retire: true, reason: 'past_grace_deadline' });
+      });
+
+      test('recovery: a hold-lookup failure reads as held (fail closed) — deferred, not retired', async () => {
+        const p = loadWithHold('throws');
+        const conn = jest.fn((table) => { if (table === 'customers') return liveCustomerQuery(); throw new Error(`unexpected ${table}`); });
+        expect(await p.successorRecoveryRefusal(pastGraceSuccessor(), conn)).toMatchObject({ retire: false });
+      });
+
+      test('actOnRecoveryRefusal on a hold refusal bells + rotates ("deferred") and never withdraws (no void, no pay link)', async () => {
+        const p = loadWithHold(true);
+        const notifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+        jest.doMock('../services/notification-service', () => ({ notifyAdmin }));
+        const sendViaSMSAndEmail = jest.fn();
+        const voidInvoice = jest.fn();
+        jest.doMock('../services/invoice', () => ({ sendViaSMSAndEmail, voidInvoice }));
+        const rotate = jest.fn().mockResolvedValue(1);
+        const conn = jest.fn((table) => {
+          if (table === 'customers') return liveCustomerQuery();
+          if (table === 'annual_prepay_terms') return { where: jest.fn(() => ({ update: rotate })) };
+          throw new Error(`unexpected ${table}`);
+        });
+        const successor = pastGraceSuccessor();
+        const refusal = await p.successorRecoveryRefusal(successor, conn);
+        expect(await p.actOnRecoveryRefusal(successor, refusal, conn, 'the pay link could not be sent')).toBe('deferred');
+        expect(notifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.any(String), expect.objectContaining({
+          dedupeKey: expect.stringContaining(':ineligible'),
+        }));
+        expect(rotate).toHaveBeenCalledWith({ renewal_sweep_deferred_at: expect.any(Date) });
+        expect(voidInvoice).not.toHaveBeenCalled();
+        expect(sendViaSMSAndEmail).not.toHaveBeenCalled();
+      });
+
+      test('the charge pre-check (successorActionBlocker) defers on a hold BEFORE the grace check — a hold that outlived grace is not a withdrawal', async () => {
+        const p = loadWithHold(true);
+        const successor = pastGraceSuccessor();
+        const conn = jest.fn((table) => {
+          if (table === 'annual_prepay_terms') return { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ ...successor, status: 'payment_pending', renewal_charge_attempted_at: null, dispute_suspended_at: null }) })) };
+          throw new Error(`unexpected ${table}`);
+        });
+        expect(await p.successorActionBlocker(conn, successor.id)).toMatchObject({ defer: true, reason: expect.stringContaining('collections dispute hold') });
+      });
+
+      test('without a hold the same past-grace successor retires (rule unchanged)', async () => {
+        const p = loadWithHold(false);
+        const successor = pastGraceSuccessor();
+        const invoiceQuery = { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ status: 'sent' }) })) };
+        const conn = jest.fn((table) => {
+          if (table === 'annual_prepay_terms') return { where: jest.fn(() => ({ first: jest.fn().mockResolvedValue({ ...successor, status: 'payment_pending', renewal_charge_attempted_at: null, dispute_suspended_at: null }) })) };
+          if (table === 'invoices') return invoiceQuery;
+          throw new Error(`unexpected ${table}`);
+        });
+        expect(await p.successorActionBlocker(conn, successor.id)).toMatchObject({ retire: true, reason: 'past_grace_deadline' });
+      });
+
+      test('the grace-lapse candidate scan excludes customers with an active DISPUTE hold in SQL (never lapsed, voided or retrieved)', async () => {
+        mockCommon();
+        mockGraceHelpers({ graceDays: 30 });
+        const p = require('../services/termite-annual-renewal-charge')._private;
+        const calls = [];
+        const q = {};
+        for (const m of ['leftJoin', 'whereNotNull', 'where', 'whereNull', 'whereNotExists', 'whereExists', 'whereRaw', 'orderByRaw', 'select', 'limit']) {
+          q[m] = jest.fn((...args) => { calls.push([m, args]); if (typeof args[0] === 'function') args[0].call({ select: () => ({ from: () => ({ whereRaw: () => ({ where: () => ({ whereNull: () => ({ whereRaw: () => null }) }) }) }) }) }); return q; });
+        }
+        q.then = (resolve) => resolve([]);
+        const conn = jest.fn(() => q);
+        await p.processGraceLapses({ conn, limit: 5, counts: {} });
+        expect(calls.some(([m]) => m === 'whereNotExists')).toBe(true);
+      });
+    });
+
     test.each([
-      ['a hold that lands AFTER the preflight (binding refusal)', 'INVOICE_COLLECTION_STOPPED'],
+      ['a hold that lands AFTER the preflight (binding refusal)', 'COLLECTION_HOLD_ACTIVE'],
       ['a locked hold check that FAILS after a good preflight', 'COLLECTION_HOLD_CHECK_FAILED'],
     ])('B10: %s is RETRYABLE — fence handed back, no decline, no payer refusal, no pay link, not stamped handled', async (_label, code) => {
       mockCommon();
@@ -1960,7 +2054,9 @@ describe('termite annual renewal charge', () => {
 
       expect(outcome).toEqual({ status: 'deferred', reason: 'collection_hold' });
       expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
-      expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ refuseWhenCollectionHold: true });
+      // the primitive's default-on guard is what refused: the renewal is NOT a customer/operator-initiated charge
+      expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ customerInitiated: false });
+      expect(chargeInvoiceWithSavedCard.mock.calls[0][2].operatorOverride).toBeUndefined();
       // fence + write-ahead outcome handed back so leg 7a re-decides after release
       expect(fenceReleaseUpdate).toHaveBeenCalledWith(expect.objectContaining({
         renewal_charge_attempted_at: null, renewal_charge_failure_kind: null, renewal_charge_failure_handled_at: null,

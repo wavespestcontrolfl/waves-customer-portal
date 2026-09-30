@@ -473,11 +473,12 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     await db('collections_flags').where({ customer_id: ids.customerId }).update({ released_at: db.fn.now() });
     expect(await run({ trigger: 'sweep' })).toMatchObject({ status: 'paid', deliverPayLink: false });
     expect(chargeInvoiceWithSavedCard).toHaveBeenCalledTimes(1);
-    expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ refuseWhenCollectionHold: true });
+    // machine-initiated: NOT customerInitiated, so the primitive's default hold guard applies
+    expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ customerInitiated: false });
   });
 
   test.each([
-    ['INVOICE_COLLECTION_STOPPED', 'a hold that lands BETWEEN the preflight and the submission (binding refusal)'],
+    ['COLLECTION_HOLD_ACTIVE', 'a hold that lands BETWEEN the preflight and the submission (binding refusal)'],
     ['COLLECTION_HOLD_CHECK_FAILED', 'a locked hold check that FAILS after a good preflight'],
   ])('B10: %2$s (%1$s) RELEASES the claim — not terminal, no pay link; the sweep resumes after release', async (code) => {
     const holdErr = Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code });
@@ -510,12 +511,12 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     expect(await chargeState(db)).toBeNull();
   });
 
-  test('B10: the signature-time charge answers the customer\'s own signing and is NOT held back (no hold flag on the call)', async () => {
+  test('B10: the signature-time charge answers the customer\'s own signing and is NOT held back (customerInitiated opts out of the default guard)', async () => {
     const { run, chargeInvoiceWithSavedCard, db } = load();
     await db('collections_flags').insert({ customer_id: ids.customerId, flag: 'collection_hold', reason: 'dispute on call' });
 
     expect(await run({ trigger: 'signature' })).toMatchObject({ status: 'paid' });
-    expect(chargeInvoiceWithSavedCard.mock.calls[0][2].refuseWhenCollectionHold).toBeUndefined();
+    expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ customerInitiated: true });
   });
 
   test('a fresh claim held by another executor is left alone — no charge, no link, no false-alarm bell', async () => {

@@ -2626,6 +2626,38 @@ router.get('/:id/cards', async (req, res, next) => {
 // requireAdmin: returns every active property address on the account — a
 // per-customer assignment must not reveal sibling addresses, and no tech
 // surface calls this (the property writes below were already admin-only).
+// GET /api/admin/customers/:id/collection-holds — active collections holds
+// (B10). A dispute hold ("stops_charges") halts every off-session charge and
+// the customer was told billing follow-up is on hold; this is how staff see it.
+router.get('/:id/collection-holds', requireAdmin, async (req, res, next) => {
+  try {
+    const { listCollectionHolds } = require('../services/collections/collection-hold-admin');
+    res.json({ holds: await listCollectionHolds(req.params.id) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/customers/:id/collection-holds/release — lift the hold after
+// the dispute is resolved. Audited; every charge lane resumes on its next attempt.
+router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next) => {
+  try {
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
+    const result = await releaseCollectionHold(req.params.id);
+    if (!result.ok) return res.status(500).json({ error: 'Could not release the hold — try again.' });
+    await recordAuditEvent({
+      actor_type: 'technician',
+      actor_id: req.technicianId || null,
+      action: 'customer.collection_hold_released',
+      resource_type: 'customer',
+      resource_id: req.params.id,
+      metadata: { released: result.released },
+      ip_address: req.ip,
+      user_agent: req.get('user-agent') || null,
+      critical: false,
+    });
+    res.json({ released: result.released });
+  } catch (err) { next(err); }
+});
+
 // Canonical WaveGuard-qualifying service families on an account (the same
 // loader estimate conversion feeds into priorQualifyingServices). The admin
 // estimator's CLIENT_FALLBACK engine reads this to decide the rodent

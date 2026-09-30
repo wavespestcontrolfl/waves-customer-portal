@@ -77,7 +77,7 @@ const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { invoiceHasPositiveSetupFeeLine } = require('./estimate-first-application-invoice');
 const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
 
-const { collectionHoldInvoiceIds } = require('./collections/collection-hold');
+const { collectionHoldInvoiceIds, isCollectionHoldRefusal } = require('./collections/collection-hold');
 
 const SWEEP_SOURCE = 'completion_balance_sweep';
 
@@ -239,6 +239,19 @@ async function runCompletionBalanceSweep({ customerId, excludeInvoiceId, payment
         break;
       }
     } catch (err) {
+      if (isCollectionHoldRefusal(err)) {
+        // A collections dispute hold landed after the preflight (or its
+        // lookup failed): a SKIP, not a failed charge. Stop the sweep quietly
+        // (same stop-on-refusal posture); the next completion re-runs it.
+        summary.skipped += 1;
+        logger.info(`[balance-sweep] invoice ${inv.invoice_number} skipped (collections hold) for customer ${customerId} — sweep stopped`);
+        try {
+          await logAutopay(customerId, 'skipped_collection_hold', {
+            details: { source: SWEEP_SOURCE, invoice_id: inv.id, invoice_number: inv.invoice_number, trigger_scheduled_service_id: triggerScheduledServiceId, error: String(err.message || '').slice(0, 300) },
+          });
+        } catch (e) { /* log-only */ }
+        break;
+      }
       summary.failed += 1;
       const fenced = StripeService.savedCardChargeSuppressesAlternateCollection(err);
       logger.warn(`[balance-sweep] charge ${fenced ? 'fenced' : 'failed'} for invoice ${inv.invoice_number} (customer ${customerId}) — sweep stopped: ${err.message}`);

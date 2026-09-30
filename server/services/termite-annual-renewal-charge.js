@@ -294,6 +294,21 @@ function graceDeadlineFor(term) {
   return require('./annual-prepay-renewals').termiteRenewalGraceDeadlineFor(term);
 }
 
+// Collections DISPUTE hold (collection-hold.js, B10): while the customer's
+// dispute is open the renewal is neither charged, nor sent a pay link, nor
+// WITHDRAWN/lapsed for running past its grace window — the hold is the
+// office's to resolve, so every hold-blocked action DEFERS (bell + rotate)
+// and resumes after release. A lookup failure reads as held (fail closed).
+async function collectionsDisputeHoldBlocks(conn, customerId) {
+  try {
+    return await require('./collections/collection-hold').customerHasActiveCollectionHold(customerId, conn);
+  } catch (err) {
+    logger.warn(`[termite-annual-renewal] collection-hold lookup failed for customer ${customerId} — treating as held: ${err.message}`);
+    return true;
+  }
+}
+const HOLD_DEFER_REASON = 'the customer has an active collections dispute hold (or it could not be checked)';
+
 // The ONE "is this successor still inside its own grace window?" refusal
 // (the SAME GRACE_DAYS window minting itself is bounded to, P1-2): past it,
 // the renewal is the grace lapse's — never a charge, never a pay link.
@@ -1243,6 +1258,9 @@ async function successorActionBlocker(conn, successorId, { lock = false, chargeW
   // window minting itself is bounded to, P1-2) — a long outage that leaves
   // the recovery leg running weeks late must never fire a months-overdue
   // charge or bill. Durable: that window never reopens.
+  // A collections dispute hold defers BEFORE the grace check: a hold that
+  // outlives the grace window must not withdraw the renewal (B10).
+  if (await collectionsDisputeHoldBlocks(conn, fresh.customer_id)) return { reason: HOLD_DEFER_REASON, defer: true };
   const graceRefusal = graceWindowRefusal(fresh);
   if (graceRefusal) return graceRefusal;
 
@@ -2160,21 +2178,13 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     await stampSweepDeferred(successor, conn);
     return { status: 'deferred', reason: 'saved_method_unavailable' };
   }
-  // An active collections dispute hold (collection_hold, B10) stops this
-  // automatic charge. Nothing has been attempted, so it defers exactly like
-  // an unavailable saved method (bell + sweep-deferred stamp) and the sweep
-  // retries after the office releases the hold. A lookup failure reads as
-  // held (fail closed). The binding recheck under the charge's own locks is
-  // refuseWhenCollectionHold in submitCharge.
-  {
-    let held = true;
-    try {
-      held = await require('./collections/collection-hold').customerHasActiveCollectionHold(successor.customer_id, conn);
-    } catch (err) {
-      logger.warn(`[termite-annual-renewal] collection-hold lookup failed for term ${successor.id} — deferring: ${err.message}`);
-    }
-    if (held) return deferRenewalForCollectionHold(successor, conn, { releaseFence: false });
-  }
+  // An active collections DISPUTE hold stops this automatic charge. Nothing
+  // has been attempted, so it defers exactly like an unavailable saved
+  // method (bell + sweep-deferred stamp) and the sweep retries after the
+  // office releases the hold. A lookup failure reads as held (fail closed).
+  // The binding recheck under the charge's own connection is the primitive's
+  // default hold guard in submitCharge.
+  if (await collectionsDisputeHoldBlocks(conn, successor.customer_id)) return deferRenewalForCollectionHold(successor, conn, { releaseFence: false });
   if (!method) {
     await deliverInvoiceAndStampSkip(successor, 'no_method', 'No consented, chargeable saved payment method was found on file.', conn);
     return { status: 'no_method' };
@@ -2218,10 +2228,9 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     ...ceiling.options,
     requireAutopayForCustomerId: successor.customer_id,
     requireSelfPayCustomerId: successor.customer_id,
-    // Automatic renewal charge: an active collections dispute hold (B10)
-    // refuses it under the charge locks (decideAndCharge also defers ahead
-    // of the fence claim, so this is the binding race backstop).
-    refuseWhenCollectionHold: true,
+    // The charge primitive refuses an active collections dispute hold BY
+    // DEFAULT (B10) — decideAndCharge also defers ahead of the fence claim,
+    // so this is the binding race backstop.
     // Codex #4971 r29 P1: the gate's liveness is re-asserted INSIDE the
     // saved-card flow too — before its credit apply and before its Stripe
     // submission — not only at this closure's entry.
@@ -3156,6 +3165,40 @@ async function processRenewalCandidates({ conn = db, limit = 200, today = etDate
 // started-but-not-completed row is the recovery pass's job exclusively
 // (reconcileMissedLapseEffects below), never re-attempted from scratch
 // here.
+// Renewals past their grace deadline whose lapse is held back by a collections
+// DISPUTE hold (B10): tell staff once (ringRenewalBell dedupes per term/kind)
+// that the lapse is waiting on the hold, so a long-running dispute is visible
+// instead of silent. Best-effort, bounded.
+async function bellHeldOverdueRenewals({ conn, counts }) {
+  try {
+    // Own alias ('tt', not the scans' 't') so this stays a separate query.
+    const { termiteRenewalGraceDeadlineSql } = require('./annual-prepay-renewals');
+    const deadlineSql = termiteRenewalGraceDeadlineSql('tt');
+    const held = await conn('annual_prepay_terms as tt')
+      .whereNotNull('tt.annual_plan_version')
+      .whereNotNull('tt.renewed_from_term_id')
+      .where('tt.status', PAYMENT_PENDING_STATUS)
+      .whereNull('tt.dispute_suspended_at')
+      .whereNull('tt.renewal_lapse_started_at')
+      .whereExists(function collectionsDisputeHold() {
+        this.select(1).from('collections_flags as f')
+          .whereRaw('f.customer_id = tt.customer_id')
+          .where('f.flag', 'collection_hold')
+          .whereNull('f.released_at')
+          .whereRaw("f.reason ILIKE 'dispute%'");
+      })
+      .whereRaw(`${deadlineSql} < ?`, [etDateString()])
+      .select('tt.*')
+      .limit(50);
+    counts.graceHeldByCollectionsHold = held.length;
+    for (const term of held) {
+      await ringRenewalBell(term, 'ineligible', 'the renewal is past its grace window but the customer has an active collections dispute hold, so it will not be lapsed or withdrawn until the office releases the hold');
+    }
+  } catch (err) {
+    logger.warn(`[termite-annual-renewal] held-overdue renewal bell scan failed: ${err.message}`);
+  }
+}
+
 async function processGraceLapses({ conn = db, limit = 200, counts }) {
   try {
     // Codex round-7 P1 (2nd audit round): the deadline test used to run
@@ -3183,6 +3226,18 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
       // — never lapsed, voided or retrieved from here.
       .whereNull('t.dispute_suspended_at')
       .whereNull('t.renewal_lapse_started_at')
+      // A customer with an active collections DISPUTE hold is never lapsed,
+      // voided or retrieved from here (B10): the hold is the office's to
+      // resolve, and the lapse resumes after release. Excluded in SQL so
+      // held rows never occupy the bounded page; bellHeldOverdueRenewals
+      // tells staff once.
+      .whereNotExists(function collectionsDisputeHold() {
+        this.select(1).from('collections_flags as f')
+          .whereRaw('f.customer_id = t.customer_id')
+          .where('f.flag', 'collection_hold')
+          .whereNull('f.released_at')
+          .whereRaw("f.reason ILIKE 'dispute%'");
+      })
       .whereRaw(`${deadlineSql} < ?`, [etDateString()])
       .where(function presented() {
         // Chokepoint A: "presented" = a charge attempt that genuinely
@@ -3216,6 +3271,7 @@ async function processGraceLapses({ conn = db, limit = 200, counts }) {
       .select('t.*')
       .limit(limit);
     counts.graceScanned = candidates.length;
+    await bellHeldOverdueRenewals({ conn, counts });
     for (const term of candidates) {
       try {
         const outcome = await processGraceLapseForTerm(term, conn);
@@ -3885,6 +3941,9 @@ async function successorRecoveryRefusal(successor, conn) {
       return { reason: `the parent is no longer eligible (${parentEligibility.reason})`, retire: parentEligibility.durable };
     }
   }
+  // A collections dispute hold defers (no pay link, no withdrawal, even past
+  // grace) — covers crash / failed-fence-release cases in leg 7b (B10).
+  if (await collectionsDisputeHoldBlocks(conn, successor.customer_id)) return { reason: HOLD_DEFER_REASON, retire: false };
   return graceWindowRefusal(successor);
 }
 
@@ -4497,6 +4556,10 @@ module.exports = {
     checkStillEligibleForRenewalAction,
     processGraceLapseForTerm,
     processGraceLapses,
+    successorRecoveryRefusal,
+    actOnRecoveryRefusal,
+    successorActionBlocker,
+    collectionsDisputeHoldBlocks,
     reconcileMissedLapseEffects,
     reconcileStuckSuccessors,
     reconcileChargeFollowThrough,

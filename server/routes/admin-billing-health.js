@@ -285,7 +285,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
             tier: customer.waveguard_tier || '',
             billed_month: monthKey,
             initiated_by: 'machine',
-          }, idempotencyKey);
+          }, idempotencyKey, { operatorOverride: true }); // staff-ordered: exempt from the collections dispute-hold guard
           return { payment: chargedPayment };
         } catch (err) {
           return { response: await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId }) };
@@ -306,7 +306,7 @@ router.post('/customers/:id/charge-now', async (req, res, next) => {
       payment = lockOutcome.payment;
     } else {
       try {
-        payment = await service.chargeOneTime(customerId, chargeAmount, desc, null, { initiated_by: 'machine' });
+        payment = await service.chargeOneTime(customerId, chargeAmount, desc, null, { initiated_by: 'machine' }, { operatorOverride: true });
       } catch (err) {
         const failure = await buildChargeFailureResponse(err, { customerId, chargeAmount, technicianId: req.technicianId });
         return res.status(failure.status).json(failure.body);

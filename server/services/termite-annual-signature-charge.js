@@ -363,10 +363,10 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
       // Serialize against an Auto Pay pause/opt-out committing mid-charge.
       requireAutopayForCustomerId: invoice.customer_id,
       requireSelfPayCustomerId: invoice.customer_id,
-      // The daily sweep is machine-initiated: an active collections dispute
-      // hold (B10) refuses it. The signature-time charge answers the
-      // customer's own signing and is left alone.
-      ...(trigger === 'signature' ? {} : { refuseWhenCollectionHold: true }),
+      // The daily sweep is machine-initiated: the charge primitive refuses
+      // an active collections dispute hold for it BY DEFAULT (B10). The
+      // signature-time charge answers the customer's own signing
+      // (customerInitiated above) and is exempt.
     });
   } catch (err) {
     // A collections dispute hold (B10) that landed after the preflight and

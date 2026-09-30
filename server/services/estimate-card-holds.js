@@ -916,10 +916,9 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
       // (pre-push r13 P0; creation-time counterpart lives in
       // appointment-card-request.js).
       requireNoAppointmentCardLane: true,
-      // Automatic completion charge: an active collections dispute hold
-      // (B10) refuses it under the charge locks; the generic pre-charge
-      // failure path below leaves the hold 'held' for the office.
-      refuseWhenCollectionHold: true,
+      // The charge primitive refuses an active collections dispute hold BY
+      // DEFAULT (B10); the pre-charge failure path below leaves the hold
+      // 'held' for the office.
     });
     // Account credit fully covered the invoice inside the charge call — no card
     // was charged; release the hold cleanly rather than claim a phantom charge.
@@ -1325,6 +1324,14 @@ async function chargeNoShowFee({ scheduledServiceId, reason = 'no_show', service
     }
     await db('estimate_card_holds').where({ id: hold.id, status: 'charging' })
       .update({ status: 'held', updated_at: db.fn.now() }).catch(() => {});
+    // A collections DISPUTE hold (B10) refused the fee before Stripe: the
+    // hold returns to 'held', nothing terminal is recorded, no customer
+    // message; callers treat it as an unresolved (review) fee like
+    // charge_failed, reported under its own reason.
+    if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
+      logger.warn('[estimate-card-holds] no-show fee withheld — customer has an active collections dispute hold; card hold left held', { scheduledServiceId });
+      return { charged: false, reason: 'collection_hold', error: err.message };
+    }
     logger.error('[estimate-card-holds] no-show fee charge FAILED (no charge)', { scheduledServiceId, error: err.message });
     return { charged: false, reason: 'charge_failed', error: err.message };
   }

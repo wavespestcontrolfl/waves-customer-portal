@@ -598,7 +598,6 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
       requireAutopayForCustomerId: 'cust-1',
       requireSelfPayScheduledServiceId: 'svc-1',
       requireOneTimeLane: true,
-      refuseWhenCollectionHold: true,
     });
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_success', expect.objectContaining({
       details: expect.objectContaining({ source: 'appointment_card_recap_completion' }),
@@ -691,7 +690,7 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_failed', expect.anything());
   });
 
-  test.each(['INVOICE_COLLECTION_STOPPED', 'COLLECTION_HOLD_CHECK_FAILED'])('B10: a collections hold refusal (%s) → collection_hold office review, never reported as a declined/failed charge', async (code) => {
+  test.each(['COLLECTION_HOLD_ACTIVE', 'COLLECTION_HOLD_CHECK_FAILED'])('B10: a collections hold refusal (%s) → collection_hold office review, never reported as a declined/failed charge', async (code) => {
     recapHandlers();
     mockChargeSavedCard.mockRejectedValueOnce(Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code }));
     const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });

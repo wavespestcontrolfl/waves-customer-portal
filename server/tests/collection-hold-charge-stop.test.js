@@ -1,16 +1,22 @@
 /**
- * B10 — a dispute recorded on a collections call (collections_flags
- * collection_hold, customer-level) must stop off-session charges exactly like
- * an admin-stopped follow-up sequence does.
+ * B10 — a DISPUTE hold recorded on a collections call (collections_flags
+ * collection_hold whose reason starts with "dispute") stops off-session
+ * charges BY DEFAULT in the charge primitives; customer- and operator-
+ * initiated callers opt out explicitly. Fallback collection_hold rows
+ * (wrong-number / wrong-party artifacts) never stop money.
  *
- * Covered: the shared lookup (active hold, release resumes, pre-existing
- * rows honored, lookup failure throws), dunningStoppedInvoiceIds (sweep +
- * combined pay chokepoint), the sweep end to end, the binding check inside
- * chargeInvoiceWithSavedCard, and the account-credit apply.
+ * Covered here (mocked db): the shared lookup and its dispute discriminator,
+ * dunningStoppedInvoiceIds, the sweep, the three primitives
+ * (chargeInvoiceWithSavedCard, charge / chargeMonthly / chargeOneTime,
+ * chargeSavedPaymentMethodOffSession) incl. opt-outs and fail-closed, the
+ * account-credit apply, and the completion route wiring. Real-Postgres
+ * behaviour lives in collection-hold-postgres.test.js.
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 // ── tiny in-memory knex stand-in ──────────────────────────────────────────
+// whereRaw understands the one predicate the hold lookup uses:
+//   reason ILIKE ?   (prefix match, case-insensitive)
 function makeFakeDb(tables, { failTable = null } = {}) {
   const build = (name) => {
     const filters = [];
@@ -23,6 +29,13 @@ function makeFakeDb(tables, { failTable = null } = {}) {
     };
     q.whereIn = (col, vals) => { filters.push((r) => vals.map(String).includes(String(r[col]))); return q; };
     q.whereNull = (col) => { filters.push((r) => r[col] == null); return q; };
+    q.whereRaw = (sql, bindings = []) => {
+      if (/reason ILIKE \?/i.test(sql)) {
+        const prefix = String(bindings[0]).replace(/%$/, '').toLowerCase();
+        filters.push((r) => String(r.reason || '').toLowerCase().startsWith(prefix));
+      }
+      return q;
+    };
     q.forUpdate = () => q;
     q.select = async () => { if (failTable === name) throw new Error('db down'); return rows(); };
     q.first = async () => { if (failTable === name) throw new Error('db down'); return rows()[0]; };
@@ -33,7 +46,11 @@ function makeFakeDb(tables, { failTable = null } = {}) {
   return fake;
 }
 
-const HOLD = { id: 'f1', customer_id: 'cust-1', flag: 'collection_hold', released_at: null };
+// A dispute hold exactly as placeDisputeHold writes it, and the two
+// fallback artifacts exactly as collections-conversation.js writes them.
+const HOLD = { id: 'f1', customer_id: 'cust-1', flag: 'collection_hold', reason: 'dispute on call: says the July bill is wrong', released_at: null };
+const FALLBACK_WRONG_NUMBER = { id: 'f2', customer_id: 'cust-1', flag: 'collection_hold', reason: 'wrong-number report on billing follow-up call; wrong_number flag write failed', released_at: null };
+const FALLBACK_WRONG_PARTY = { id: 'f3', customer_id: 'cust-1', flag: 'collection_hold', reason: 'wrong-party answer on billing follow-up call; review card failed to file', released_at: null };
 const INVOICES = [
   { id: 'inv-1', customer_id: 'cust-1' },
   { id: 'inv-2', customer_id: 'cust-1' },
@@ -47,11 +64,20 @@ describe('collection-hold lookup', () => {
     return require('../services/collections/collection-hold');
   };
 
-  test('an unreleased collection_hold row holds the customer', async () => {
-    const m = load({ collections_flags: [{ ...HOLD }] });
+  test.each([
+    ['with a summary', 'dispute on call: says the July bill is wrong'],
+    ['without a summary', 'dispute raised on call'],
+    ['upgraded over a fallback row', 'dispute on call: x; earlier hold: wrong-number report on billing follow-up call'],
+  ])('an unreleased dispute hold (%s) holds the customer', async (_label, reason) => {
+    const m = load({ collections_flags: [{ ...HOLD, reason }] });
     expect(await m.customerHasActiveCollectionHold('cust-1')).toBe(true);
     expect(await m.customerHasActiveCollectionHold('cust-2')).toBe(false);
     expect(await m.customerHasActiveCollectionHold(null)).toBe(false);
+  });
+
+  test('fallback collection_hold artifacts (wrong number / wrong party / no reason) do NOT stop money', async () => {
+    const m = load({ collections_flags: [FALLBACK_WRONG_NUMBER, FALLBACK_WRONG_PARTY, { ...HOLD, id: 'f4', reason: null }] });
+    expect(await m.customerHasActiveCollectionHold('cust-1')).toBe(false);
   });
 
   test('releasing the hold (released_at stamped) re-enables charging', async () => {
@@ -63,36 +89,43 @@ describe('collection-hold lookup', () => {
   });
 
   test('other flags (pays_by_check, do_not_text) are not a charge hold', async () => {
-    const m = load({ collections_flags: [{ ...HOLD, flag: 'pays_by_check' }, { ...HOLD, id: 'f2', flag: 'do_not_text' }] });
+    const m = load({ collections_flags: [{ ...HOLD, flag: 'pays_by_check' }, { ...HOLD, id: 'f9', flag: 'do_not_text' }] });
     expect(await m.customerHasActiveCollectionHold('cust-1')).toBe(false);
   });
 
-  test('collectionHoldInvoiceIds maps invoices to their customer\'s hold only', async () => {
-    const m = load({ invoices: INVOICES, collections_flags: [{ ...HOLD }] });
+  test('collectionHoldInvoiceIds maps invoices to their customer\'s DISPUTE hold only', async () => {
+    const m = load({ invoices: INVOICES, collections_flags: [{ ...HOLD }, { ...FALLBACK_WRONG_PARTY, customer_id: 'cust-2' }] });
     expect([...await m.collectionHoldInvoiceIds(['inv-1', 'inv-2', 'inv-9'])].sort()).toEqual(['inv-1', 'inv-2']);
     expect((await m.collectionHoldInvoiceIds([])).size).toBe(0);
   });
 
-  test('the LOCKED check wraps a lock/read failure as COLLECTION_HOLD_CHECK_FAILED (retryable, pre-Stripe) — never the raw DB error', async () => {
+  test('the CHECKED lookup wraps a failure as COLLECTION_HOLD_CHECK_FAILED (retryable, pre-Stripe) — never the raw DB error', async () => {
     const m = load({ collections_flags: [] }, { failTable: 'collections_flags' });
-    const trx = makeFakeDb({ collections_flags: [] }, { failTable: 'collections_flags' });
-    await expect(m.customerHasActiveCollectionHoldLocked(trx, 'cust-1')).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', cause: expect.objectContaining({ message: 'db down' }) });
-    const lockFails = makeFakeDb({ collections_flags: [] });
-    lockFails.raw = jest.fn(async () => { throw new Error('lock_timeout'); });
-    await expect(m.customerHasActiveCollectionHoldLocked(lockFails, 'cust-1')).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
+    await expect(m.customerHasActiveCollectionHoldChecked('cust-1')).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', cause: expect.objectContaining({ message: 'db down' }) });
+    await expect(m.assertNoCollectionHold('cust-1')).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
     expect(m.isCollectionHoldRefusal({ code: 'COLLECTION_HOLD_CHECK_FAILED' })).toBe(true);
-    expect(m.isCollectionHoldRefusal({ code: 'INVOICE_COLLECTION_STOPPED' })).toBe(true);
+    expect(m.isCollectionHoldRefusal({ code: 'COLLECTION_HOLD_ACTIVE' })).toBe(true);
+    // the admin-stopped follow-up sequence code is a DIFFERENT thing
+    expect(m.isCollectionHoldRefusal({ code: 'INVOICE_COLLECTION_STOPPED' })).toBe(false);
     expect(m.isCollectionHoldRefusal(new Error('card_declined'))).toBe(false);
   });
 
-  test('a lookup failure throws — never reads as "no hold"', async () => {
+  test('assertNoCollectionHold throws COLLECTION_HOLD_ACTIVE only for a dispute hold', async () => {
+    const held = load({ collections_flags: [{ ...HOLD }] });
+    await expect(held.assertNoCollectionHold('cust-1')).rejects.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+    await expect(held.assertNoCollectionHold('cust-2')).resolves.toBeUndefined();
+    const fallbackOnly = load({ collections_flags: [FALLBACK_WRONG_NUMBER] });
+    await expect(fallbackOnly.assertNoCollectionHold('cust-1')).resolves.toBeUndefined();
+  });
+
+  test('a raw lookup failure throws — never reads as "no hold"', async () => {
     const m = load({ invoices: INVOICES, collections_flags: [] }, { failTable: 'collections_flags' });
     await expect(m.customerHasActiveCollectionHold('cust-1')).rejects.toThrow('db down');
     await expect(m.collectionHoldInvoiceIds(['inv-1'])).rejects.toThrow('db down');
   });
 });
 
-describe('dunningStoppedInvoiceIds honors the collections hold', () => {
+describe('dunningStoppedInvoiceIds honors the collections dispute hold', () => {
   const load = (tables, opts) => {
     jest.resetModules();
     jest.doMock('../models/db', () => makeFakeDb(tables, opts));
@@ -109,11 +142,11 @@ describe('dunningStoppedInvoiceIds honors the collections hold', () => {
     expect([...await dunningStoppedInvoiceIds(['inv-1', 'inv-2', 'inv-9'])].sort()).toEqual(['inv-1', 'inv-2', 'inv-9']);
   });
 
-  test('no hold and no stopped sequence → nothing stopped; a released hold stops nothing', async () => {
+  test('no hold, a fallback hold, or a released hold stops nothing', async () => {
     const { dunningStoppedInvoiceIds } = load({
       invoices: INVOICES,
       invoice_followup_sequences: [],
-      collections_flags: [{ ...HOLD, released_at: new Date() }],
+      collections_flags: [{ ...HOLD, released_at: new Date() }, FALLBACK_WRONG_NUMBER],
     });
     expect((await dunningStoppedInvoiceIds(['inv-1', 'inv-2', 'inv-9'])).size).toBe(0);
   });
@@ -130,6 +163,7 @@ describe('completion balance sweep with a dispute hold', () => {
   const OLD = { service_date: '2020-01-01', scheduled_service_id: null, service_record_id: null, notes: null, line_items: [], total: '50.00', subtotal: '50.00', discount_amount: '0' };
   let flags;
   let mockCharge;
+  let mockLogAutopay;
   let runCompletionBalanceSweep;
 
   beforeEach(() => {
@@ -141,7 +175,8 @@ describe('completion balance sweep with a dispute hold', () => {
     ];
     jest.doMock('../models/db', () => makeFakeDb({ invoices, invoice_followup_sequences: [], collections_flags: flags }));
     jest.doMock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
-    jest.doMock('../services/autopay-log', () => ({ logAutopay: jest.fn(async () => {}) }));
+    mockLogAutopay = jest.fn(async () => {});
+    jest.doMock('../services/autopay-log', () => ({ logAutopay: (...a) => mockLogAutopay(...a) }));
     jest.doMock('../services/open-balance', () => ({ openBalanceInvoices: jest.fn(async () => invoices) }));
     mockCharge = jest.fn(async () => ({ status: 'paid' }));
     jest.doMock('../services/stripe', () => ({
@@ -165,16 +200,23 @@ describe('completion balance sweep with a dispute hold', () => {
     const result = await runCompletionBalanceSweep(args);
     expect(mockCharge).toHaveBeenCalledTimes(2);
     expect(result.charged).toBe(2);
-    // the binding check still rides every charge
     expect(mockCharge.mock.calls[0][2]).toMatchObject({ refuseWhenDunningStopped: true });
   });
 
-  test.each(['INVOICE_COLLECTION_STOPPED', 'COLLECTION_HOLD_CHECK_FAILED'])('a binding hold refusal from the charge (%s) stops the sweep quietly — counted failed, logged, no customer messaging path', async (code) => {
-    flags[0].released_at = new Date(); // preflight passes; the locked charge check is what refuses
+  test('a fallback (non-dispute) collection_hold does not stop the sweep', async () => {
+    flags[0] = { ...FALLBACK_WRONG_PARTY };
+    const result = await runCompletionBalanceSweep(args);
+    expect(result.charged).toBe(2);
+  });
+
+  test.each(['COLLECTION_HOLD_ACTIVE', 'COLLECTION_HOLD_CHECK_FAILED'])('a hold refusal from the charge (%s) is a quiet SKIP — not a failed charge, logged as skipped_collection_hold', async (code) => {
+    flags[0].released_at = new Date(); // preflight passes; the primitive's own check is what refuses
     mockCharge.mockRejectedValueOnce(Object.assign(new Error('hold'), { code }));
     const result = await runCompletionBalanceSweep(args);
-    expect(result).toMatchObject({ charged: 0, failed: 1 });
-    expect(mockCharge).toHaveBeenCalledTimes(1); // stop-on-failure
+    expect(result).toMatchObject({ charged: 0, failed: 0, skipped: 1 });
+    expect(mockCharge).toHaveBeenCalledTimes(1); // sweep stops
+    expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'skipped_collection_hold', expect.anything());
+    expect(mockLogAutopay).not.toHaveBeenCalledWith('cust-1', 'charge_failed', expect.anything());
   });
 
   test('a hold-lookup failure fails closed: no charge, never throws', async () => {
@@ -196,7 +238,8 @@ describe('completion balance sweep with a dispute hold', () => {
   });
 });
 
-describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', () => {
+// ── the three off-session primitives ──────────────────────────────────────
+describe('off-session charge primitives — the hold check is default-ON', () => {
   const invoice = {
     id: 'inv-1', invoice_number: 'INV-1', customer_id: 'cust-1', status: 'draft',
     subtotal: '200.00', total: '200.00', discount_amount: '0.00',
@@ -207,12 +250,12 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
     stripe_payment_method_id: 'pm_stripe_1', card_funding: 'debit', last_four: '4242',
   };
 
-  // Mirrors stripe-saved-card-quote.test.js: the invoice/method/attempt reads
-  // are real-shaped; collections_flags is the state under test.
-  function setup({ holdRows, holdThrows = false }) {
+  // holdRows are what the collections_flags query returns (the fake below does
+  // not evaluate SQL predicates — discrimination is covered by the lookup
+  // tests above and the real-Postgres suite).
+  function setup({ holdRows = [], holdThrows = false } = {}) {
     jest.resetModules();
     const events = [];
-    // doMock registrations outlive resetModules — drop the sweep block's fake.
     jest.dontMock('../services/stripe');
     let chargeAttempt = null;
     const db = jest.fn((table) => {
@@ -223,8 +266,6 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
           return chain;
         });
       });
-      const plainForUpdate = chain.forUpdate;
-      chain.forUpdate = jest.fn((...a) => { if (table === 'customers') events.push('customers-lock'); return plainForUpdate(...a); });
       chain.first = jest.fn(async () => {
         if (table === 'invoices') return invoice;
         if (table === 'payment_methods') return card;
@@ -261,117 +302,140 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
     return { StripeService: require('../services/stripe'), stripeClient, events, db };
   }
 
-  test('an active dispute hold refuses the charge before Stripe (INVOICE_COLLECTION_STOPPED)', async () => {
-    const { StripeService, stripeClient } = setup({ holdRows: [{ ...HOLD }] });
-    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenDunningStopped: true }))
-      .rejects.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED', message: expect.stringContaining('billing dispute') });
-    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+  const HOLD_ROW = [{ id: 'f1' }];
+
+  describe('chargeInvoiceWithSavedCard', () => {
+    test('a dispute hold refuses the charge before Stripe with COLLECTION_HOLD_ACTIVE — no opt-in needed', async () => {
+      const { StripeService, stripeClient } = setup({ holdRows: HOLD_ROW });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
+        .rejects.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE', message: expect.stringContaining('billing dispute') });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test('with no hold the charge proceeds to Stripe', async () => {
+      const { StripeService, stripeClient } = setup({ holdRows: [] });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
+        .rejects.not.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    });
+
+    test('a hold-lookup failure fails closed with COLLECTION_HOLD_CHECK_FAILED before Stripe', async () => {
+      const { StripeService, stripeClient } = setup({ holdThrows: true });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
+        .rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', message: expect.stringContaining('flags table unreadable') });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['customerInitiated (the customer is at the keyboard)', { customerInitiated: true }],
+      ['operatorOverride (staff ordered the charge)', { operatorOverride: true }],
+    ])('%s opts out — a hold does not refuse and the hold is not even read', async (_label, opts) => {
+      const { StripeService, stripeClient, events } = setup({ holdRows: HOLD_ROW });
+      await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', opts))
+        .rejects.not.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+      expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+      expect(events).not.toContain('flags-read');
+    });
+
+    test('the hold read takes NO advisory lock — the hold writer never waits on a charge', async () => {
+      const { StripeService, events } = setup({ holdRows: [] });
+      await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}).catch(() => {});
+      expect(events.filter((e) => /advisory/i.test(e))).toEqual([]);
+    });
+
+    test('the admin-stopped follow-up sequence check is independent of the hold (refuseWhenDunningStopped, extended lane only)', async () => {
+      const { StripeService, db } = setup({ holdRows: [] });
+      await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}).catch(() => {});
+      expect(db.mock.calls.map((c) => c[0])).not.toContain('invoice_followup_sequences');
+    });
   });
 
-  test('with the hold released the guard passes and the charge proceeds to Stripe', async () => {
-    const { StripeService, stripeClient } = setup({ holdRows: [] });
-    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenDunningStopped: true }))
-      .rejects.not.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED' });
-    expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+  describe('charge / chargeMonthly / chargeOneTime (monthly dues + retries)', () => {
+    test('a dispute hold refuses charge() before any customer/Stripe work — COLLECTION_HOLD_ACTIVE', async () => {
+      const { StripeService, stripeClient, db } = setup({ holdRows: HOLD_ROW });
+      await expect(StripeService.charge('cust-1', 89, 'Silver WaveGuard Monthly', {}, 'k1'))
+        .rejects.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+      expect(db.mock.calls.map((c) => c[0])).not.toContain('customers');
+    });
+
+    test('chargeOneTime forwards the guard; a lookup failure fails closed', async () => {
+      const held = setup({ holdRows: HOLD_ROW });
+      await expect(held.StripeService.chargeOneTime('cust-1', 50, 'x', 'k2', {})).rejects.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+      const broken = setup({ holdThrows: true });
+      await expect(broken.StripeService.chargeOneTime('cust-1', 50, 'x', 'k3', {})).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
+    });
+
+    test('operatorOverride (admin Charge now) skips the guard', async () => {
+      const { StripeService, events } = setup({ holdRows: HOLD_ROW });
+      await StripeService.charge('cust-1', 89, 'x', {}, 'k4', { operatorOverride: true }).catch(() => {});
+      expect(events).not.toContain('flags-read');
+    });
+
+    test('no hold: charge() gets past the guard', async () => {
+      const { StripeService } = setup({ holdRows: [] });
+      await expect(StripeService.charge('cust-1', 89, 'x', {}, 'k5')).rejects.not.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+    });
   });
 
-  test('a hold-lookup failure fails closed: the charge throws before Stripe', async () => {
-    const { StripeService, stripeClient } = setup({ holdRows: [], holdThrows: true });
-    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenDunningStopped: true }))
-      .rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', message: expect.stringContaining('flags table unreadable') });
-    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
-  });
+  describe('chargeSavedPaymentMethodOffSession (no-show / late-cancel fees)', () => {
+    const feeArgs = { customerId: 'cust-1', paymentMethodId: 'pm_x', amountDollars: 49, description: 'fee', idempotencyKey: 'fee-1' };
 
-  test('refuseWhenCollectionHold alone (completion lanes) refuses on a hold and never reads the follow-up sequence', async () => {
-    const { StripeService, stripeClient, db } = setup({ holdRows: [{ ...HOLD }] });
-    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true }))
-      .rejects.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED', message: expect.stringContaining('billing dispute') });
-    expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
-    expect(db.mock.calls.map((c) => c[0])).not.toContain('invoice_followup_sequences');
-  });
+    test('a dispute hold refuses the fee before Stripe', async () => {
+      const { StripeService, stripeClient } = setup({ holdRows: HOLD_ROW });
+      await expect(StripeService.chargeSavedPaymentMethodOffSession(feeArgs)).rejects.toMatchObject({ code: 'COLLECTION_HOLD_ACTIVE' });
+      expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
+    });
 
-  test('refuseWhenCollectionHold alone lets a clean customer through to Stripe', async () => {
-    const { StripeService, stripeClient } = setup({ holdRows: [] });
-    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true }))
-      .rejects.not.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED' });
-    expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
-  });
-
-  test('P0 ordering: the customer hold lock is taken BEFORE the hold is read, and before Stripe', async () => {
-    const { StripeService, events } = setup({ holdRows: [] });
-    await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true }).catch(() => {});
-    const lockAt = events.findIndex((e) => e.startsWith('raw:SELECT pg_advisory_xact_lock_shared'));
-    const readAt = events.indexOf('flags-read');
-    expect(lockAt).toBeGreaterThanOrEqual(0);
-    expect(readAt).toBeGreaterThan(lockAt);
-  });
-
-  test('P1 lock order: the hold advisory lock precedes EVERY customers-row lock in the charge transaction (writer FK key-share deadlock)', async () => {
-    const { StripeService, events } = setup({ holdRows: [] });
-    await StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenCollectionHold: true, requireAutopayForCustomerId: 'cust-1' }).catch(() => {});
-    const lockAt = events.findIndex((e) => e.startsWith('raw:SELECT pg_advisory_xact_lock_shared'));
-    const customerLockAt = events.indexOf('customers-lock');
-    expect(lockAt).toBeGreaterThanOrEqual(0);
-    expect(customerLockAt).toBeGreaterThan(lockAt);
-  });
-
-  test('callers that did not opt in (admin charge-card) are unchanged by a hold', async () => {
-    const { StripeService, stripeClient } = setup({ holdRows: [{ ...HOLD }] });
-    await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', {}))
-      .rejects.not.toMatchObject({ code: 'INVOICE_COLLECTION_STOPPED' });
-    expect(stripeClient.paymentIntents.create).toHaveBeenCalled();
+    test('a lookup failure fails closed; an operator override skips the guard', async () => {
+      const broken = setup({ holdThrows: true });
+      await expect(broken.StripeService.chargeSavedPaymentMethodOffSession(feeArgs)).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
+      const overridden = setup({ holdRows: HOLD_ROW });
+      await overridden.StripeService.chargeSavedPaymentMethodOffSession({ ...feeArgs, operatorOverride: true }).catch(() => {});
+      expect(overridden.events).not.toContain('flags-read');
+    });
   });
 });
 
-describe('applyAccountCreditToInvoice (refuseWhenDunningStopped) honors the hold', () => {
-  const load = (tables, opts) => {
-    jest.resetModules();
-    jest.doMock('../models/db', () => makeFakeDb(tables, opts));
-    const credit = require('../services/customer-credit');
-    return { credit, trx: makeFakeDb(tables, opts) };
-  };
-  const base = () => ({
+describe('applyAccountCreditToInvoice refuseWhenCollectionHold', () => {
+  const tables = () => ({
     invoices: [{ id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '50.00', credit_applied: '0' }],
     invoice_followup_sequences: [],
+    collections_flags: [{ ...HOLD }],
   });
-
-  test('an active dispute hold consumes no credit', async () => {
-    const { credit, trx } = load({ ...base(), collections_flags: [{ ...HOLD }] });
-    await expect(credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenDunningStopped: true }, trx))
-      .resolves.toEqual({ applied: 0, skipped: 'dunning_stopped' });
-  });
-
-  test('a lookup failure throws (fail closed) rather than applying credit', async () => {
-    const { credit, trx } = load({ ...base(), collections_flags: [] }, { failTable: 'collections_flags' });
-    await expect(credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenDunningStopped: true }, trx))
-      .rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', message: expect.stringContaining('db down') });
-  });
-
-  test('a released hold no longer short-circuits with dunning_stopped', async () => {
-    const { credit, trx } = load({ ...base(), collections_flags: [{ ...HOLD, released_at: new Date() }] });
-    let outcome;
-    try { outcome = await credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenDunningStopped: true }, trx); } catch (e) { outcome = { threw: e.message }; }
-    expect(outcome).not.toEqual({ applied: 0, skipped: 'dunning_stopped' });
-  });
-});
-
-describe('applyAccountCreditToInvoice refuseWhenCollectionHold (hold only)', () => {
-  test('refuses on a hold without reading the follow-up sequence, and takes the shared lock first', async () => {
+  const load = (t, opts) => {
     jest.resetModules();
-    const tables = { invoices: [{ id: 'inv-1', customer_id: 'cust-1', status: 'sent', total: '50.00', credit_applied: '0' }], invoice_followup_sequences: [], collections_flags: [{ ...HOLD }] };
-    jest.doMock('../models/db', () => makeFakeDb(tables));
-    const trx = makeFakeDb(tables);
-    const credit = require('../services/customer-credit');
+    jest.doMock('../models/db', () => makeFakeDb(t));
+    return { credit: require('../services/customer-credit'), trx: makeFakeDb(t, opts) };
+  };
+
+  test('refuses on a dispute hold without reading the follow-up sequence', async () => {
+    const { credit, trx } = load(tables());
     await expect(credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenCollectionHold: true }, trx))
       .resolves.toEqual({ applied: 0, skipped: 'dunning_stopped' });
-    expect(trx.raw).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock_shared'), ['collections_hold:cust-1']);
     expect(trx.mock.calls.map((c) => c[0])).not.toContain('invoice_followup_sequences');
+  });
+
+  test('a lookup failure throws COLLECTION_HOLD_CHECK_FAILED (fail closed) rather than applying credit', async () => {
+    const { credit, trx } = load(tables(), { failTable: 'collections_flags' });
+    await expect(credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenCollectionHold: true }, trx))
+      .rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
+  });
+
+  test('a released or fallback hold no longer short-circuits with dunning_stopped', async () => {
+    for (const flags of [[{ ...HOLD, released_at: new Date() }], [FALLBACK_WRONG_NUMBER]]) {
+      const { credit, trx } = load({ ...tables(), collections_flags: flags });
+      let outcome;
+      try { outcome = await credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenCollectionHold: true }, trx); } catch (e) { outcome = { threw: e.message }; }
+      expect(outcome).not.toEqual({ applied: 0, skipped: 'dunning_stopped' });
+    }
   });
 });
 
 describe('completion route wiring (complete-scheduled-service.js)', () => {
-  // The completion handler is too large to drive in a unit test; pin the two
-  // automatic money calls it makes to the hold guard, on EVERY lane.
+  // The completion handler is too large to drive in a unit test; pin its two
+  // automatic money calls: the credit apply asks for the hold guard, and the
+  // charge relies on the primitive's default (no opt-out flag).
   const fs = require('fs');
   const path = require('path');
   const src = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
@@ -381,19 +445,49 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(i).toBeGreaterThan(0);
     const end = src.indexOf('if (creditResult?.applied > 0)', i);
     const call = src.slice(i, end);
-    // Top level of the options object (after the lane spreads), not inside one.
     expect(call).toMatch(/\} : \{\}\),\s*(\/\/[^\n]*\n\s*)*refuseWhenCollectionHold: true,\s*\}\);/);
   });
 
-  test('the automatic completion charge asks for the hold guard on every lane; the stopped-sequence guard stays extended-lane only', () => {
+  test('the automatic completion charge has no hold opt-out (default-on) and keeps the stopped-sequence guard extended-lane only', () => {
     const i = src.indexOf('await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {');
     expect(i).toBeGreaterThan(0);
     const call = src.slice(i, i + 9000);
-    const holdAt = call.indexOf('refuseWhenCollectionHold: true');
+    expect(call).not.toMatch(/operatorOverride|customerInitiated: true/);
     const stoppedAt = call.indexOf('refuseWhenDunningStopped: true');
-    expect(holdAt).toBeGreaterThan(0);
-    expect(holdAt).toBeLessThan(call.indexOf('maxAuthorizedSubtotal: capCeiling'));
-    // still inside the extendedAutopayCharge spread
+    expect(stoppedAt).toBeGreaterThan(0);
     expect(call.slice(0, stoppedAt)).toMatch(/\.\.\.\(extendedAutopayCharge \? \{[^}]*$/s);
+  });
+});
+
+describe('D: visit-completion payment — a hold refusal is non-durable', () => {
+  const load = () => {
+    jest.resetModules();
+    jest.doMock('../services/stripe', () => ({ savedCardChargeSuppressesAlternateCollection: () => false }));
+    jest.doMock('../models/db', () => makeFakeDb({}));
+    return require('../services/visit-completion-payment').classifyVisitPaymentError;
+  };
+
+  test.each(['COLLECTION_HOLD_ACTIVE', 'COLLECTION_HOLD_CHECK_FAILED'])('%s -> retry / payment_pending, NO durable billing_hold (resumes after release)', (code) => {
+    expect(load()(Object.assign(new Error('hold'), { code }))).toEqual({ outcome: 'retry', reason: 'payment_pending', billingHold: false });
+  });
+
+  test('the durable office_required hold is still what the admin-stopped / review codes get', () => {
+    const classify = load();
+    expect(classify(Object.assign(new Error('x'), { code: 'INVOICE_COLLECTION_STOPPED' }))).toMatchObject({ reason: 'office_required', billingHold: true });
+    expect(classify(Object.assign(new Error('x'), { code: 'VISIT_PAYMENT_REVIEW_REQUIRED' }))).toMatchObject({ billingHold: true });
+    expect(classify(new Error('boom'))).toMatchObject({ outcome: 'retry', billingHold: false });
+    expect(classify(Object.assign(new Error('declined'), { wavesCardDecline: {} }))).toMatchObject({ reason: 'payment_failed', billingHold: false });
+  });
+});
+
+describe('recurring-card-on-file prepay recovery sweep (source pin)', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/recurring-card-on-file.js'), 'utf8');
+  test('a hold refusal defers the claimed job BEFORE the decline / pay-link fallback', () => {
+    const holdAt = src.indexOf('if (isCollectionHoldRefusal(err))');
+    const fallbackAt = src.indexOf('A DETERMINISTIC failure (decline, guard refusal, missing method)');
+    expect(holdAt).toBeGreaterThan(0);
+    expect(holdAt).toBeLessThan(fallbackAt);
+    expect(src.slice(holdAt, fallbackAt)).toMatch(/continue;/);
+    expect(src.slice(holdAt, fallbackAt)).not.toMatch(/sendViaSMSAndEmail|alertUncollected/);
   });
 });

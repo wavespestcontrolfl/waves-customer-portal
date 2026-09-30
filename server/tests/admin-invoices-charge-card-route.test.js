@@ -75,7 +75,7 @@ describe('POST /:id/charge-card uncertain outcomes', () => {
       expect(StripeService.chargeInvoiceWithSavedCard).toHaveBeenCalledWith(
         'inv-1',
         'pm-1',
-        { expectedTotal: 257.25 },
+        { expectedTotal: 257.25, operatorOverride: true }, // staff-ordered: exempt from the default collections dispute-hold guard
       );
     });
   });

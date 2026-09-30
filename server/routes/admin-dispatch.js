@@ -2877,7 +2877,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
         // customer notice must use the cautious review copy, never an
         // unequivocal "no charge".
         if (feeResult?.charged === true) noShowFeeOutcome = 'charged';
-        else if (['charge_review', 'charge_failed'].includes(feeResult?.reason)) noShowFeeOutcome = 'review';
+        else if (['charge_review', 'charge_failed', 'collection_hold'].includes(feeResult?.reason)) noShowFeeOutcome = 'review';
         // Appointment-card fee rail fallback: visits secured via /secure
         // carry the disclosed fee on appointment_card_requests instead of a
         // hold row (mutually exclusive lanes — the rail re-checks). Runs
@@ -2887,7 +2887,7 @@ router.put('/:serviceId/status', async (req, res, next) => {
           const ApptCardRequests = require('../services/appointment-card-request');
           const apptFeeResult = await ApptCardRequests.chargeAppointmentNoShowFee({ scheduledServiceId: svc.id, reason: 'no_show' });
           if (apptFeeResult?.charged === true) noShowFeeOutcome = 'charged';
-          else if (['charge_review', 'charge_failed'].includes(apptFeeResult?.reason)) noShowFeeOutcome = 'review';
+          else if (['charge_review', 'charge_failed', 'collection_hold'].includes(apptFeeResult?.reason)) noShowFeeOutcome = 'review';
         }
         if (noShowFeeOutcome === 'review') {
           try {

@@ -2936,6 +2936,13 @@ async function chargeAppointmentNoShowFee({ scheduledServiceId, reason = 'no_sho
     }
     await db('appointment_card_requests').where({ id: request.id, fee_status: 'charging' })
       .update({ fee_status: null, updated_at: new Date() }).catch(() => {});
+    // A collections DISPUTE hold (B10) refused the fee before Stripe: claim
+    // reopened, nothing terminal recorded, no customer message; reported as
+    // an unresolved fee under its own reason.
+    if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
+      logger.warn(`[appt-card-request] no-show fee withheld (collections dispute hold) for visit ${scheduledServiceId}`);
+      return { charged: false, reason: 'collection_hold', error: err.message };
+    }
     logger.error(`[appt-card-request] no-show fee charge FAILED (no charge) for visit ${scheduledServiceId}: ${err.message}`);
     return { charged: false, reason: 'charge_failed', error: err.message };
     }
@@ -3115,7 +3122,7 @@ async function handleAppointmentCardCancellation({ scheduledServiceId, serviceSt
     // outcome (charged, payer_billed, revoked, stale refusals — all of
     // which stamped the fee event closed) releases cleanly.
     const unresolvedCharge = chargeResult?.charged !== true
-      && ['charge_review', 'charge_failed'].includes(chargeResult?.reason);
+      && ['charge_review', 'charge_failed', 'collection_hold'].includes(chargeResult?.reason);
     return { ...chargeResult, handled: true, released: !unresolvedCharge };
   }
   const startDate = start instanceof Date ? start : (start ? new Date(start) : null);
@@ -3520,9 +3527,8 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
         requireAutopayForCustomerId: svc.customer_id,
         requireSelfPayScheduledServiceId: scheduledServiceId,
         requireOneTimeLane: true,
-        // Automatic charge: an active collections dispute hold (B10)
-        // refuses it under the charge locks -> charge_failed office review.
-        refuseWhenCollectionHold: true,
+        // The charge primitive refuses an active collections dispute hold BY
+        // DEFAULT (B10) -> collection_hold office review.
       });
     } catch (err) {
       // A collections dispute hold (B10) is a pre-charge, office-review
@@ -3533,7 +3539,8 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
       // Awaited so a rejected audit write is caught here, never an
       // unhandled rejection (pre-push r2 P1 — floating-promise rule).
       try {
-        await require('./autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+        // A hold refusal is a SKIP, not a failed charge: distinct event type.
+        await require('./autopay-log').logAutopay(svc.customer_id, onHold ? 'skipped_collection_hold' : 'charge_failed', {
           details: { source: 'appointment_card_recap_completion', invoice_id: invoice.id, scheduled_service_id: scheduledServiceId, error: err.message },
         });
       } catch (e) { logger.warn(`[appt-card-request] autopay audit write failed: ${e.message}`); }

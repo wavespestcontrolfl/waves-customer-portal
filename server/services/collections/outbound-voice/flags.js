@@ -16,32 +16,17 @@
 
 const db = require('../../../models/db');
 const logger = require('../../logger');
-const { HOLD_FLAG, lockCustomerHoldExclusive } = require('../collection-hold');
+const { HOLD_FLAG, DISPUTE_REASON_PREFIX } = require('../collection-hold');
 
 async function writeFlag({ customerId, flag, reason, createdBy = 'system:collections_voice' }) {
   if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
-  const row = {
-    customer_id: customerId,
-    flag,
-    reason: reason ? String(reason).slice(0, 500) : null,
-    created_by: createdBy,
-  };
   try {
-    if (flag === HOLD_FLAG) {
-      // The hold stops off-session charges (B10). Serialize the insert with
-      // in-flight charges: the charge paths hold a shared per-customer
-      // advisory lock through their transaction, so this waits for any
-      // charge already past its hold check and is seen by every later one.
-      // A wait longer than the timeout fails the write (write_failed), the
-      // same signal callers already handle as "hold not durable".
-      await db.transaction(async (trx) => {
-        await trx.raw("SET LOCAL lock_timeout = '20s'");
-        await lockCustomerHoldExclusive(trx, customerId);
-        await trx('collections_flags').insert(row);
-      });
-    } else {
-      await db('collections_flags').insert(row);
-    }
+    await db('collections_flags').insert({
+      customer_id: customerId,
+      flag,
+      reason: reason ? String(reason).slice(0, 500) : null,
+      created_by: createdBy,
+    });
     return { ok: true, created: true };
   } catch (err) {
     // Unique-violation = the flag is already active — success by intent.
@@ -92,14 +77,40 @@ async function revokeAutomatedVoiceConsent(customerId, { reason, createdBy } = {
   return res;
 }
 
-/** Dispute raised on-call: collection_hold blocks EVERY dunning channel. */
+/**
+ * Dispute raised on-call: collection_hold blocks EVERY dunning channel AND
+ * (collection-hold.js) every off-session charge. The reason text is the
+ * discriminator that makes it a money hold — it must start with
+ * DISPUTE_REASON_PREFIX. collection_hold is also a wrong-number / wrong-party
+ * fallback artifact, and the one-active-row-per-flag index means a dispute
+ * raised while such a fallback row is active would otherwise be swallowed as
+ * "already active": the existing row is upgraded to carry the dispute reason
+ * (its earlier reason kept after it).
+ */
 async function placeDisputeHold(customerId, { summary, createdBy } = {}) {
-  const res = await writeFlag({
+  const disputeReason = summary ? `${DISPUTE_REASON_PREFIX} on call: ${summary}` : `${DISPUTE_REASON_PREFIX} raised on call`;
+  let res = await writeFlag({
     customerId,
-    flag: 'collection_hold',
-    reason: summary ? `dispute on call: ${summary}` : 'dispute raised on call',
+    flag: HOLD_FLAG,
+    reason: disputeReason,
     createdBy,
   });
+  if (res.ok && res.created === false) {
+    try {
+      const active = await db('collections_flags')
+        .where({ customer_id: customerId, flag: HOLD_FLAG })
+        .whereNull('released_at')
+        .first('id', 'reason');
+      if (active && !String(active.reason || '').toLowerCase().startsWith(DISPUTE_REASON_PREFIX)) {
+        await db('collections_flags').where({ id: active.id }).update({
+          reason: `${disputeReason}; earlier hold: ${active.reason || 'no reason recorded'}`.slice(0, 500),
+        });
+      }
+    } catch (err) {
+      logger.error(`[collections-flags] dispute upgrade of the active collection_hold FAILED customer=${customerId}: ${err.message}`);
+      res = { ok: false, reason: 'write_failed' };
+    }
+  }
   if (res.ok) {
     await fileFlagCard({
       customerId,

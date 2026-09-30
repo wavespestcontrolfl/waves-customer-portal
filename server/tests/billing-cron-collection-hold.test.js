@@ -1,0 +1,146 @@
+/**
+ * B10 — monthly dues under a collections DISPUTE hold (billing-cron.js).
+ *
+ * The customer disputed a bill on a collections call and was told all billing
+ * follow-up is on hold, so the once-a-month cron must NOT charge them — and
+ * must not treat it as a failure either: no payment-failed text or email, no
+ * autopay charge_failed event, no retry-count burn. It writes ONE armed
+ * never-attempted retry row (the shape the lock-contention deferral already
+ * uses) so the 10 AM retry sweep collects the month after the office releases
+ * the hold, and the sweep leaves that row armed while the hold is active.
+ *
+ * Mirrors billing-cron-monthly-lock-contention.test.js's harness.
+ */
+let mockCustomers = [];
+let mockPaymentsInserts = [];
+let mockHealthAlertInserts = [];
+let mockExistingHoldRow = null;
+
+jest.mock('../models/db', () => {
+  function thenableFor(resultFn) {
+    const b = {};
+    for (const m of [
+      'where', 'andWhere', 'orWhere', 'whereIn', 'whereNot', 'whereNull',
+      'whereNotNull', 'whereRaw', 'distinct', 'select', 'orderBy', 'update',
+      'insert', 'returning', 'count', 'pluck', 'join', 'leftJoin',
+    ]) b[m] = () => b;
+    b.first = () => Promise.resolve(null);
+    b.then = (resolve, reject) => Promise.resolve(resultFn()).then(resolve, reject);
+    return b;
+  }
+  const db = jest.fn((table) => {
+    if (table === 'customers') return thenableFor(() => mockCustomers);
+    if (String(table).startsWith('annual_prepay_terms')) return thenableFor(() => []);
+    if (table === 'payments') {
+      const b = thenableFor(() => []);
+      // findCollectedMonthlyPayment (paid this month?) -> no. Only the
+      // hold-defer dedupe read (it filters on metadata deferred_reason) can
+      // see an existing armed row.
+      let isHoldDedupe = false;
+      const passThrough = b.whereRaw;
+      b.whereRaw = (sql, ...rest) => { if (/deferred_reason/.test(String(sql))) isHoldDedupe = true; return passThrough(sql, ...rest); };
+      b.first = () => Promise.resolve(isHoldDedupe ? mockExistingHoldRow : null);
+      b.insert = jest.fn((row) => { mockPaymentsInserts.push(row); return Promise.resolve([1]); });
+      return b;
+    }
+    if (table === 'customer_health_alerts') {
+      const b = thenableFor(() => []);
+      b.insert = jest.fn((row) => { mockHealthAlertInserts.push(row); return Promise.resolve([1]); });
+      return b;
+    }
+    return thenableFor(() => []);
+  });
+  db.schema = { hasTable: jest.fn(() => Promise.resolve(true)) };
+  db.fn = { now: () => new Date('2026-09-23T12:00:00Z') };
+  return db;
+});
+
+jest.mock('../services/logger', () => ({ info() {}, warn() {}, error() {}, debug() {} }));
+jest.mock('../services/autopay-log', () => ({ logAutopay: jest.fn() }));
+jest.mock('../services/twilio', () => ({ sendSms: jest.fn(), sendSMS: jest.fn() }));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(() => Promise.resolve({ sent: true })),
+}));
+jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn(() => 'msg') }));
+jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => Promise.resolve('Hi there')) }));
+jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn(), sendPaymentRetryNotice: jest.fn() }));
+jest.mock('../services/account-membership-email', () => ({}));
+jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
+jest.mock('../services/stripe', () => ({
+  charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
+}));
+jest.mock('../utils/customer-billing-lock', () => ({
+  withCustomerBillingLock: jest.fn(async (_id, fn) => fn()),
+}));
+
+const { logAutopay } = require('../services/autopay-log');
+const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+const TwilioService = require('../services/twilio');
+const PaymentLifecycleEmail = require('../services/payment-lifecycle-email');
+const StripeService = require('../services/stripe');
+const BillingCron = require('../services/billing-cron');
+
+const baseCustomer = {
+  id: 'cust-held', first_name: 'Held', last_name: 'Dispute',
+  phone: '+15550004444', monthly_rate: 89, waveguard_tier: 'Silver',
+  autopay_enabled: true, autopay_paused_until: null,
+  autopay_payment_method_id: 'pm_1', billing_day: 1, billing_mode: 'monthly_membership',
+};
+
+beforeEach(() => {
+  mockCustomers = [{ ...baseCustomer }];
+  mockPaymentsInserts = [];
+  mockHealthAlertInserts = [];
+  mockExistingHoldRow = null;
+  jest.clearAllMocks();
+});
+
+test.each(['COLLECTION_HOLD_ACTIVE', 'COLLECTION_HOLD_CHECK_FAILED'])(
+  'monthly dues under a dispute hold (%s): skipped and deferred — NOT charged, NOT failed, NO customer message', async (code) => {
+    StripeService.chargeMonthly.mockRejectedValueOnce(Object.assign(new Error('Collection is on hold'), { code }));
+
+    const result = await BillingCron.processMonthlyBilling();
+
+    expect(result.skipped).toBe(1);
+    expect(result.charged).toBe(0);
+    expect(result.failed || 0).toBe(0);
+
+    // one armed, never-attempted retry row so the sweep collects after release
+    expect(mockPaymentsInserts).toHaveLength(1);
+    const row = mockPaymentsInserts[0];
+    expect(row).toMatchObject({ customer_id: 'cust-held', status: 'failed', retry_count: 0 });
+    expect(row.next_retry_at).toBeInstanceOf(Date);
+    expect(row.description).toEqual(expect.stringContaining('WaveGuard Monthly'));
+    expect(JSON.parse(row.metadata)).toMatchObject({ type: 'monthly_autopay', deferred_reason: 'collection_hold' });
+
+    // a distinct skip event — never a failed charge
+    expect(logAutopay).toHaveBeenCalledWith('cust-held', 'skipped_collection_hold', expect.anything());
+    expect(logAutopay).not.toHaveBeenCalledWith('cust-held', 'charge_failed', expect.anything());
+
+    // no customer-facing message of any kind, no failure bookkeeping
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(TwilioService.sendSms).not.toHaveBeenCalled();
+    expect(TwilioService.sendSMS).not.toHaveBeenCalled();
+    expect(PaymentLifecycleEmail.sendChargeFailed).not.toHaveBeenCalled();
+    expect(mockHealthAlertInserts.filter((a) => /fail|declin/i.test(`${a.alert_type} ${a.title}`))).toHaveLength(0);
+  }, 15000);
+
+test('a re-run does not stack a second deferred row for the same month', async () => {
+  mockExistingHoldRow = { id: 'pay-already-deferred' };
+  StripeService.chargeMonthly.mockRejectedValueOnce(Object.assign(new Error('hold'), { code: 'COLLECTION_HOLD_ACTIVE' }));
+
+  await BillingCron.processMonthlyBilling();
+
+  expect(mockPaymentsInserts).toHaveLength(0);
+  expect(logAutopay).toHaveBeenCalledWith('cust-held', 'skipped_collection_hold', expect.anything());
+}, 15000);
+
+test('with no hold the month is charged exactly as before (regression: the skip path is hold-only)', async () => {
+  StripeService.chargeMonthly.mockResolvedValueOnce({ id: 'pay-1', status: 'paid', amount: 89 });
+
+  const result = await BillingCron.processMonthlyBilling();
+
+  expect(result.charged).toBe(1);
+  expect(mockPaymentsInserts).toHaveLength(0);
+  expect(logAutopay).not.toHaveBeenCalledWith('cust-held', 'skipped_collection_hold', expect.anything());
+}, 15000);

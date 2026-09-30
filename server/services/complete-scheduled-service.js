@@ -11261,13 +11261,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // crash/block anywhere before the combined text delivers leaves
           // the job to send the classic receipt when it comes due.
           await StripeService.chargeInvoiceWithSavedCard(invoice.id, autopayPm.id, {
-            // An active collections dispute hold (collection_hold, B10) stops
-            // the automatic charge on EVERY completion lane (per-application,
-            // appointment-card, extended). Hold ONLY — the stopped-sequence
+            // The charge primitive refuses an active collections dispute hold
+            // BY DEFAULT on EVERY completion lane (B10); the stopped-sequence
             // check stays extended-lane-only below. Refusal throws
-            // INVOICE_COLLECTION_STOPPED (no decline facts, so no payment-
-            // failed text) and the pay-link fallback is unchanged.
-            refuseWhenCollectionHold: true,
+            // COLLECTION_HOLD_ACTIVE / _CHECK_FAILED (no decline facts, so no
+            // payment-failed text) and the pay-link fallback is unchanged.
             // Atomic re-enforcement of the SAME ceiling the preflight above
             // validated (Codex #3153 r7 P0): the charge service re-checks it
             // against the LOCKED invoice, so an invoice edit racing this
@@ -11452,7 +11450,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           }
         }
         try {
-          await require('../services/autopay-log').logAutopay(svc.customer_id, 'charge_failed', {
+          // A collections dispute hold refusal (B10) is a SKIP, not a failed
+          // charge: distinct autopay_log event, no decline bookkeeping.
+          await require('../services/autopay-log').logAutopay(svc.customer_id, require('../services/collections/collection-hold').isCollectionHoldRefusal(chargeErr) ? 'skipped_collection_hold' : 'charge_failed', {
             details: { source: completionChargeSource, invoice_id: invoice?.id, scheduled_service_id: svc.id, orphaned: chargeErr.code === 'STRIPE_CHARGED_DB_FAILED', collection_suppressed: fallbackPolicy.suppressFallback, collection_fenced: suppressAlternateCollection, reconciliation_required: reconciliationRequired, error: String(chargeErr.message || '').slice(0, 300) },
           });
         } catch (e) { /* log-only */ }

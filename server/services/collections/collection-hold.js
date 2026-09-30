@@ -1,87 +1,72 @@
 /**
- * Active collection_hold (collections_flags) as a money-movement stop.
+ * Active DISPUTE hold (collections_flags collection_hold) as a money-movement
+ * stop.
  *
  * A dispute raised on a collections voice call writes a customer-level
  * `collection_hold` flag (outbound-voice/flags.js placeDisputeHold) and tells
- * the customer "all billing follow-up is on hold". The off-session charge
- * paths (completion balance sweep, the completion / extended autopay lanes,
- * combined pay) historically honored only an admin-STOPPED
- * invoice_followup_sequences row, so a disputed invoice could still be
- * charged to the saved card. Those paths now also treat an active hold as
- * "dunning stopped" — see completion-balance-sweep.dunningStoppedInvoiceIds
- * (cheap preflight) and stripe.chargeInvoiceWithSavedCard /
- * customer-credit.applyAccountCreditToInvoice (binding, under the charge
- * transaction, refuseWhenDunningStopped).
+ * the customer "all billing follow-up is on hold". Every OFF-SESSION charge
+ * primitive (StripeService.charge, chargeInvoiceWithSavedCard,
+ * chargeSavedPaymentMethodOffSession) checks it by DEFAULT and refuses before
+ * any Stripe call; a customer- or operator-initiated caller opts out
+ * explicitly (`customerInitiated` / `operatorOverride`). The completion
+ * balance sweep and pay-combined also fold it into "dunning stopped"
+ * (completion-balance-sweep.dunningStoppedInvoiceIds).
  *
- * The flag row is the single source of truth: an unreleased row (released_at
- * IS NULL) holds, releaseFlag stamps released_at and charging resumes on the
- * next attempt. Rows written before this change are honored as-is — no
- * backfill, no migration.
+ * ONLY dispute holds stop money. collection_hold is also written as a
+ * fallback ARTIFACT when a wrong-number / wrong-party report could not be
+ * filed (collections-conversation.js) — those rows mean "pause outreach",
+ * not "don't charge the saved card", so they must not stop a charge. The
+ * discriminator is the row's reason text: placeDisputeHold writes
+ * `dispute on call: <summary>` or `dispute raised on call`
+ * (DISPUTE_REASON_PREFIX), the fallbacks write `wrong-number report ...` /
+ * `wrong-party answer ...`. Rows written before this change carry the same
+ * strings, so no backfill or migration is needed. A dispute raised while a
+ * fallback hold is already active upgrades that row's reason (flags.js), so
+ * the one-active-row-per-flag index can never hide a dispute.
  *
- * SERIALIZATION with the hold writer: a plain read cannot order a charge
- * against a hold committing a moment later (the flag is an INSERT, so there
- * is no row to FOR UPDATE). Both sides therefore take a per-customer
- * transaction-scoped advisory lock: the charge / credit paths take it SHARED
- * (concurrent charges do not queue behind each other) and hold it through
- * their whole transaction, Stripe call included; outbound-voice/flags.js
- * writeFlag takes it EXCLUSIVE around the collection_hold insert. A hold
- * that commits before the charge locks is seen by the check that follows the
- * lock; one that arrives later waits until the charge transaction ends.
+ * The flag row is the single source of truth: an unreleased row
+ * (released_at IS NULL) holds; releaseFlag stamps released_at and every
+ * lane resumes on its next attempt. There is deliberately NO cross-writer
+ * locking: the hold writer must never wait on, or fail because of, a charge
+ * in flight. A charge sees every hold that committed before its check; a
+ * hold committing in the milliseconds after the check races the charge
+ * exactly like a dispute call landing just after the card was charged.
  *
- * LOCK ORDER (deadlock rule): the hold writer takes the exclusive advisory
- * lock and THEN inserts collections_flags, whose customer_id FK needs a
- * key-share lock on the customers row. So every caller of
- * customerHasActiveCollectionHoldLocked must take it BEFORE any lock on the
- * customers row (FOR UPDATE) — never after, or the two deadlock and the
- * dispute-hold write can be the victim. Invoice-row locks are fine (the
- * writer never touches invoices).
- *
- * Every function here THROWS on a read failure and never swallows it: callers
- * treat a thrown lookup as "cannot prove there is no hold" and refuse.
+ * Refusal codes (both thrown BEFORE any Stripe call, both RETRYABLE):
+ *   COLLECTION_HOLD_ACTIVE        a dispute hold is active
+ *   COLLECTION_HOLD_CHECK_FAILED  the lookup itself failed (fail closed)
+ * Callers must treat them as "not attempted, retry after release": never a
+ * decline, a payer refusal or a handled outcome, and never a payment-failed
+ * message or pay link.
  */
 
 const db = require('../../models/db');
 
 const HOLD_FLAG = 'collection_hold';
+const DISPUTE_REASON_PREFIX = 'dispute';
+const HOLD_ACTIVE_CODE = 'COLLECTION_HOLD_ACTIVE';
+const HOLD_CHECK_FAILED_CODE = 'COLLECTION_HOLD_CHECK_FAILED';
+const isCollectionHoldRefusal = (err) => err?.code === HOLD_ACTIVE_CODE || err?.code === HOLD_CHECK_FAILED_CODE;
+
+// Restrict a collections_flags query to ACTIVE DISPUTE holds.
+function activeDisputeHolds(query) {
+  return query
+    .where({ flag: HOLD_FLAG })
+    .whereNull('released_at')
+    .whereRaw('reason ILIKE ?', [`${DISPUTE_REASON_PREFIX}%`]);
+}
 
 async function customerHasActiveCollectionHold(customerId, database = db) {
   if (!customerId) return false;
-  const row = await database('collections_flags')
-    .where({ customer_id: customerId, flag: HOLD_FLAG })
-    .whereNull('released_at')
-    .first('id');
+  const row = await activeDisputeHolds(database('collections_flags').where({ customer_id: customerId })).first('id');
   return !!row;
 }
 
-const lockKey = (customerId) => `collections_hold:${customerId}`;
-
-// Writer side (flags.writeFlag, collection_hold only). Blocks while any
-// charge transaction for the customer is in flight.
-async function lockCustomerHoldExclusive(trx, customerId) {
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [lockKey(customerId)]);
-}
-
-// Codes a charge / credit path throws BEFORE any Stripe call because of the
-// collections hold. Both are pre-charge and RETRYABLE: callers must treat
-// them as "not attempted, try again after the hold is released / the lookup
-// recovers" — never as a decline, a payer refusal or a handled outcome, and
-// never with a pay link or payment-failed message.
-//   INVOICE_COLLECTION_STOPPED     an active hold was found
-//   COLLECTION_HOLD_CHECK_FAILED   the lock / read itself failed (fail closed)
-const HOLD_REFUSED_CODE = 'INVOICE_COLLECTION_STOPPED';
-const HOLD_CHECK_FAILED_CODE = 'COLLECTION_HOLD_CHECK_FAILED';
-const isCollectionHoldRefusal = (err) => err?.code === HOLD_REFUSED_CODE || err?.code === HOLD_CHECK_FAILED_CODE;
-
-// Charge / credit side: take the shared lock FIRST, then read. Held until
-// the surrounding transaction ends. Returns true when a hold is active. A
-// failure of the lock or the read throws a COLLECTION_HOLD_CHECK_FAILED
-// error (fail closed, still before Stripe) instead of the raw DB error, so
-// callers can keep it retryable.
-async function customerHasActiveCollectionHoldLocked(trx, customerId) {
-  if (!customerId) return false;
+// Same answer, but a lookup failure throws COLLECTION_HOLD_CHECK_FAILED
+// (fail closed, retryable) instead of the raw DB error.
+async function customerHasActiveCollectionHoldChecked(customerId, database = db) {
   try {
-    await trx.raw('SELECT pg_advisory_xact_lock_shared(hashtextextended(?, 0))', [lockKey(customerId)]);
-    return await customerHasActiveCollectionHold(customerId, trx);
+    return await customerHasActiveCollectionHold(customerId, database);
   } catch (err) {
     throw Object.assign(new Error(`Collection hold could not be verified (${err.message}). Review before charging.`), {
       code: HOLD_CHECK_FAILED_CODE,
@@ -90,7 +75,17 @@ async function customerHasActiveCollectionHoldLocked(trx, customerId) {
   }
 }
 
-// Set of (stringified) invoice ids whose customer has an active hold.
+// The default-on guard the off-session charge primitives call. Throws the
+// coded refusal; returns nothing when clear.
+async function assertNoCollectionHold(customerId, database = db) {
+  if (await customerHasActiveCollectionHoldChecked(customerId, database)) {
+    throw Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), {
+      code: HOLD_ACTIVE_CODE,
+    });
+  }
+}
+
+// Set of (stringified) invoice ids whose customer has an active dispute hold.
 async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
   if (!invoiceIds || !invoiceIds.length) return new Set();
   const invoices = await database('invoices')
@@ -98,10 +93,7 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
     .select('id', 'customer_id');
   const customerIds = [...new Set(invoices.map((r) => r.customer_id).filter(Boolean).map(String))];
   if (!customerIds.length) return new Set();
-  const flags = await database('collections_flags')
-    .whereIn('customer_id', customerIds)
-    .where({ flag: HOLD_FLAG })
-    .whereNull('released_at')
+  const flags = await activeDisputeHolds(database('collections_flags').whereIn('customer_id', customerIds))
     .select('customer_id');
   const held = new Set(flags.map((r) => String(r.customer_id)));
   return new Set(invoices.filter((r) => r.customer_id && held.has(String(r.customer_id))).map((r) => String(r.id)));
@@ -109,11 +101,12 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
 
 module.exports = {
   HOLD_FLAG,
-  HOLD_REFUSED_CODE,
+  DISPUTE_REASON_PREFIX,
+  HOLD_ACTIVE_CODE,
   HOLD_CHECK_FAILED_CODE,
   isCollectionHoldRefusal,
   customerHasActiveCollectionHold,
-  customerHasActiveCollectionHoldLocked,
-  lockCustomerHoldExclusive,
+  customerHasActiveCollectionHoldChecked,
+  assertNoCollectionHold,
   collectionHoldInvoiceIds,
 };

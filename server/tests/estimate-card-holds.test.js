@@ -291,7 +291,7 @@ describe('completion charge accepted-amount cap — frozen at booking, never col
     mockChargeInvoiceWithSavedCard.mockResolvedValueOnce({ paymentIntentId: 'pi-ok', amount: 250 });
     const r = await chargeCardHoldOnCompletion({ scheduledServiceId: 'svc-1', invoiceId: 'inv-1' });
     expect(r).toEqual({ charged: true });
-    expect(mockChargeInvoiceWithSavedCard).toHaveBeenCalledWith('inv-1', 'pm-row-1', { maxAuthorizedSubtotal: 250, requireSelfPayScheduledServiceId: 'svc-1', requireInvoiceScheduledServiceBinding: true, requireCompletedOneTimeVisit: true, requireNoAppointmentCardLane: true, refuseWhenCollectionHold: true });
+    expect(mockChargeInvoiceWithSavedCard).toHaveBeenCalledWith('inv-1', 'pm-row-1', { maxAuthorizedSubtotal: 250, requireSelfPayScheduledServiceId: 'svc-1', requireInvoiceScheduledServiceBinding: true, requireCompletedOneTimeVisit: true, requireNoAppointmentCardLane: true });
     expect(mockDbUpdates).toEqual(expect.arrayContaining([
       expect.objectContaining({ status: 'charged_completion' }),
     ]));
@@ -1546,7 +1546,7 @@ describe('chargeCardHoldForRecapCompletion — recap path closes the no-invoice 
     expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['INVOICE_COLLECTION_STOPPED', 'COLLECTION_HOLD_CHECK_FAILED'])('B10: a collections hold refusal (%s) is retryable (collection_hold), never charge_failed — and the recap flow still alerts the office', async (code) => {
+  it.each(['COLLECTION_HOLD_ACTIVE', 'COLLECTION_HOLD_CHECK_FAILED'])('B10: a collections hold refusal (%s) is retryable (collection_hold), never charge_failed — and the recap flow still alerts the office', async (code) => {
     stubDb([HELD, { service_type: 'Pest Control', prepaid_amount: null }, null, { id: 'ss1', source_estimate_id: null }, { id: 'sr1', customer_id: 'cust1' }, HELD, COLLECTIBLE_INVOICE, { id: 'pmrow1' }]);
     mockChargeInvoiceWithSavedCard.mockRejectedValueOnce(Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code }));
     const r = await chargeCardHoldForRecapCompletion({ scheduledServiceId: 'ss1', serviceRecordId: 'sr1' });

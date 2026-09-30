@@ -1027,7 +1027,7 @@ router.get('/balance', async (req, res, next) => {
       if (p.stripe_payment_intent_id || Number(p.retry_count || 0) > 0 || p.next_retry_at == null) return false;
       try {
         const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-        return !!(m && m.deferred_reason === 'lock_contention');
+        return !!(m && ['lock_contention', 'collection_hold'].includes(m.deferred_reason)); // collection_hold (B10): dues deferred under a dispute hold are not a payable balance
       } catch {
         return false;
       }
