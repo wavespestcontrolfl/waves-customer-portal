@@ -63,7 +63,8 @@ function estimateTokensIn(html) {
  */
 function planRow(row, ref) {
   const out = { lead_id: null, estimate_id: null, estimateVia: null, leadVia: null };
-  const ids = [...uuidsIn(row.trigger_event_id), ...uuidsIn(row.idempotency_key)];
+  // The same key is often written to both fields (estimate follow-ups), so de-duplicate before counting matches.
+  const ids = [...new Set([...uuidsIn(row.trigger_event_id), ...uuidsIn(row.idempotency_key)])];
 
   const viaRun = row.automation_run_id ? ref.runEstimate.get(String(row.automation_run_id)) : null;
   if (viaRun) {

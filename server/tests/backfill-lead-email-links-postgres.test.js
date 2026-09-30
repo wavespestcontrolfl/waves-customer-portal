@@ -124,6 +124,20 @@ describe('backfill planning helpers', () => {
     expect(uuidsIn(`x:${id.toUpperCase()}:y:${id}`)).toEqual([id]);
     expect(estimateTokensIn('<a href="https://h.example.test/estimate/abcDEF_12-3">x</a> /estimate/abcDEF_12-3')).toEqual(['abcDEF_12-3']);
   });
+  test('the same estimate id in trigger_event_id AND idempotency_key is one match, not an ambiguity', () => {
+    const est = '11111111-1111-4111-8111-111111111111';
+    const lead = '22222222-2222-4222-8222-222222222222';
+    const ref = {
+      estimatesById: new Set([est]), estimateByToken: new Map(), runEstimate: new Map(), leadsById: new Set(), leadByEstimate: new Map([[est, lead]]),
+    };
+    const key = `estimate_followup_expiring:${est}`;
+    expect(planRow({ trigger_event_id: key, idempotency_key: key, recipient_id: null }, ref))
+      .toMatchObject({ estimate_id: est, estimateVia: 'trigger_event', lead_id: lead, leadVia: 'estimate_owner' });
+    // two DIFFERENT estimates is still ambiguous
+    const other = '33333333-3333-4333-8333-333333333333';
+    ref.estimatesById.add(other);
+    expect(planRow({ trigger_event_id: key, idempotency_key: `x:${other}`, recipient_id: null }, ref).estimate_id).toBeNull();
+  });
   test('planRow with empty references links nothing', () => {
     const ref = { estimatesById: new Set(), estimateByToken: new Map(), runEstimate: new Map(), leadsById: new Set(), leadByEstimate: new Map() };
     expect(planRow({ trigger_event_id: 'x', recipient_id: null }, ref)).toMatchObject({ lead_id: null, estimate_id: null });
