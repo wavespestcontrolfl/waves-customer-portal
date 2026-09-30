@@ -328,35 +328,63 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
 /**
  * Skip the visits inside each hold's pause (rule 1) — only once every write
  * of the accept stands, because a skip is one-way (job-status.js
- * ONE_WAY_FROM_STATUSES) and could never be compensated. The canonical
- * transition runs the usual follow-through (open invoice void, group
- * detach, tech notice); the customer notice is off — the resolution
- * confirmation already told them. A skip that fails leaves the hold
- * standing and rings the office to skip that visit by hand.
+ * ONE_WAY_FROM_STATUSES) and could never be compensated. Each visit is
+ * re-read under its row lock first: the plan was made before the hold
+ * committed, and a visit moved out of the pause, gone live, or paid for in
+ * the gap must not be skipped on the stale plan. The canonical transition
+ * runs the usual follow-through (open invoice void, group detach); the
+ * customer notice is off — the resolution confirmation already told them —
+ * and the assigned tech hears the visit is gone after commit. A visit that
+ * cannot be skipped leaves the hold standing and rings the office.
  */
 async function applyHoldSkips(holdResults) {
   const { transitionJobStatus } = require('../job-status');
+  const { findBillingCoveredVisits } = require('../../routes/admin-schedule');
+  const bellOffice = async (hold, visit, why) => {
+    const { notifyAdmin } = require('../notification-service');
+    await notifyAdmin('service', 'Plan hold: a paused visit is still booked', `Visit ${visit.id} on ${visit.from} falls inside the ${hold.familyKey} pause (hold ${hold.holdId}, back ${hold.resumeOn}) but was not skipped (${why}) — check it by hand.`, {
+      bell: true, dedupeKey: `plan_hold_skip_failed:${visit.id}`, metadata: { kind: 'plan_hold_skip_failed', holdId: hold.holdId, visitId: visit.id, reason: why },
+    }).catch(() => {});
+  };
   for (const hold of holdResults || []) {
     if (!hold?.holdId || !hold.pendingSkips?.length) continue;
     const skipped = [];
     for (const visit of hold.pendingSkips) {
+      let outcome;
       try {
-        await transitionJobStatus({
-          jobId: visit.id,
-          fromStatus: visit.status,
-          toStatus: 'skipped',
-          transitionedBy: null,
-          notes: `Skipped: ${hold.familyKey} paused until ${hold.resumeOn} (plan hold ${hold.holdId})`,
-          notifyCustomer: false,
+        outcome = await db.transaction(async (trx) => {
+          const row = await trx('scheduled_services').where({ id: visit.id }).forUpdate().first('*');
+          if (!row || row.status !== visit.status) return 'changed';
+          const date = dateOnlyString(row.scheduled_date);
+          // Moved out of the pause in the gap: nothing to skip.
+          if (!date || date < etDateString() || date >= hold.resumeOn) return 'left_pause';
+          if (['complete', 'en_route', 'on_site'].includes(row.track_state)) return 'live';
+          const covered = await findBillingCoveredVisits(trx, [row]);
+          if (covered.has(row.id)) return 'prepaid';
+          await transitionJobStatus({
+            jobId: visit.id,
+            fromStatus: visit.status,
+            toStatus: 'skipped',
+            transitionedBy: null,
+            notes: `Skipped: ${hold.familyKey} paused until ${hold.resumeOn} (plan hold ${hold.holdId})`,
+            notifyCustomer: false,
+            trx,
+          });
+          if (row.technician_id) {
+            require('../tech-visit-notifications').notifyVisitCancelled({
+              visitId: visit.id, technicianId: row.technician_id, actorId: 'customer',
+              snapshot: { date, windowStart: row.window_start || null, windowEnd: row.window_end || null },
+              previousStatus: visit.status, trx,
+            });
+          }
+          return 'skipped';
         });
-        skipped.push(visit.id);
       } catch (err) {
         logger.error(`[holds] visit ${visit.id} did not skip for hold ${hold.holdId}: ${err.message}`);
-        const { notifyAdmin } = require('../notification-service');
-        await notifyAdmin('service', 'Plan hold: a paused visit is still booked', `Visit ${visit.id} on ${visit.from} falls inside the ${hold.familyKey} pause (hold ${hold.holdId}, back ${hold.resumeOn}) but could not be skipped — skip it by hand.`, {
-          bell: true, dedupeKey: `plan_hold_skip_failed:${visit.id}`, metadata: { kind: 'plan_hold_skip_failed', holdId: hold.holdId, visitId: visit.id },
-        }).catch(() => {});
+        outcome = 'error';
       }
+      if (outcome === 'skipped') skipped.push(visit.id);
+      else if (outcome !== 'left_pause') await bellOffice(hold, visit, outcome);
     }
     if (!skipped.length) continue;
     try {

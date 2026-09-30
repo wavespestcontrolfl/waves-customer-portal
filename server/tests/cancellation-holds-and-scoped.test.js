@@ -10,6 +10,8 @@ jest.mock('../services/rebooker', () => ({ reschedule: (...a) => mockReschedule(
 // care that it is asked for, in order, once the hold stands.
 const mockTransition = jest.fn().mockResolvedValue({});
 jest.mock('../services/job-status', () => ({ transitionJobStatus: (...a) => mockTransition(...a) }));
+const mockTechCancelled = jest.fn();
+jest.mock('../services/tech-visit-notifications', () => ({ notifyVisitCancelled: (...a) => mockTechCancelled(...a) }));
 // The canonical billing-covered reader lives in the schedule route; a visit id
 // in this set is prepaid (moved, never skipped).
 const mockCovered = jest.fn(async () => new Set());
@@ -254,18 +256,45 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
   });
   const record = () => JSON.parse(mockState.tables.plan_holds[0].moved_visits);
 
-  test('skips every in-pause visit through the canonical transition with no customer notice, and records what was skipped', async () => {
-    seed({ holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [] }) }] });
+  const seedHeld = (visits) => seed({
+    holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [] }) }],
+    visits: visits || [lawnVisit('l1', daysOut(5), { technician_id: 't1' }), lawnVisit('l2', daysOut(12), { status: 'rescheduled' })],
+  });
+
+  test('skips every in-pause visit through the canonical transition, under its row lock, with no customer notice; the assigned tech hears after commit', async () => {
+    mockTechCancelled.mockClear();
+    seedHeld();
     await applyHoldSkips([held()]);
     expect(mockTransition).toHaveBeenCalledTimes(2);
-    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', fromStatus: 'confirmed', toStatus: 'skipped', notifyCustomer: false }));
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', fromStatus: 'confirmed', toStatus: 'skipped', notifyCustomer: false, trx: expect.anything() }));
     expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l2', fromStatus: 'rescheduled', toStatus: 'skipped', notifyCustomer: false }));
+    expect(mockState.forUpdate).toBeGreaterThanOrEqual(2);
+    expect(mockTechCancelled).toHaveBeenCalledTimes(1);
+    expect(mockTechCancelled).toHaveBeenCalledWith(expect.objectContaining({ visitId: 'l1', technicianId: 't1', actorId: 'customer', trx: expect.anything() }));
     expect(record().skipped).toEqual(['l1', 'l2']);
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
   });
 
+  test('the plan is re-checked under the lock: a visit moved out of the pause is left alone quietly; one paid for or gone live in the gap rings the office', async () => {
+    seedHeld([lawnVisit('l1', daysOut(40)), lawnVisit('l2', daysOut(12), { status: 'rescheduled' })]);
+    await applyHoldSkips([held()]);
+    expect(mockTransition).toHaveBeenCalledTimes(1);
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l2' }));
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+
+    mockTransition.mockClear();
+    seedHeld([lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(12), { status: 'rescheduled', track_state: 'en_route' })]);
+    mockCovered.mockImplementation(async (_conn, rows) => new Set(rows.filter((r) => r.id === 'l1').map((r) => r.id)));
+    await applyHoldSkips([held()]);
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(bells('plan_hold_skip_failed').map((c) => c[3].metadata)).toEqual([
+      expect.objectContaining({ visitId: 'l1', reason: 'prepaid' }),
+      expect.objectContaining({ visitId: 'l2', reason: 'live' }),
+    ]);
+  });
+
   test('a skip that fails rings the office for that visit, the hold stands, and the other skips still run', async () => {
-    seed({ holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [] }) }] });
+    seedHeld();
     mockTransition.mockRejectedValueOnce(new Error('one-way guard'));
     await expect(applyHoldSkips([held()])).resolves.toBeUndefined();
     expect(mockTransition).toHaveBeenCalledTimes(2);
