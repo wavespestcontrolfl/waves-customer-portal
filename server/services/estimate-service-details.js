@@ -133,7 +133,7 @@ const SERVICE_DETAILS_COPY = {
       'Product selection follows the inspection, not a script. Depending on the findings, the technician may place non-repellent products where pests actively enter, travel, and harbor, and residual contact or repellent treatments in appropriate labeled exterior zones \u2014 when both are used, placement is planned around the labels and the target pest.',
       'Some non-repellent products can extend control beyond the first insect that contacts or consumes them: for certain ants and cockroaches, exposed insects can pass the effect through contact, feeding, and grooming. That transfer is product- and pest-specific \u2014 we use it where it genuinely applies and never present it as a universal effect or a colony-elimination guarantee.',
       'Where the pest, site, and label support it, the technician establishes a residual exterior treatment zone at selected foundation, threshold, landscape-edge, and eave areas identified during inspection \u2014 targeted placement, never an automatic pass over every wall, plant, and surface.',
-      'Targeted interior service is included for pests covered by your recurring plan: baits, gels, monitors, crack-and-crevice, and void placements at travel and harborage areas \u2014 plumbing penetrations, under sinks, behind appliances \u2014 rather than routine baseboard spraying. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are separate services unless your estimate expressly includes them.',
+      'Interior service is included for pests covered by your recurring plan: an interior spray plus baits, gels, monitors, crack-and-crevice, and void placements at travel and harborage areas \u2014 plumbing penetrations, under sinks, behind appliances. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are separate services unless your estimate expressly includes them.',
       'Routine exterior visits include removal of accessible spider webs, egg sacs, and inactive nest material from designated service areas \u2014 wherever they can be safely reached from the ground with standard service equipment. Active stinging-insect nests and work needing specialized access are handled under the applicable service terms.',
     ],
     faq: [
@@ -147,7 +147,7 @@ const SERVICE_DETAILS_COPY = {
       },
       {
         q: 'Is the interior included, or is that extra?',
-        a: 'Included for the pests your recurring plan covers \u2014 whenever you see covered activity inside, targeted interior treatment is part of the plan at no extra charge. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are their own services and are included only when your estimate says so.',
+        a: 'Included for the pests your recurring plan covers \u2014 an interior spray is part of your pest visits at no extra charge, with baits, gels, and crack-and-crevice work added wherever you see covered activity inside. Specialty infestations (German-cockroach cleanouts, fleas, bed bugs, rodents) are their own services and are included only when your estimate says so.',
       },
       {
         q: 'Is it safe for my kids and pets?',

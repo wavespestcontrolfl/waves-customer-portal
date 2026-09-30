@@ -3,12 +3,29 @@
  * "does this date + time window clash with anything already on the calendar",
  * REGARDLESS of technician_id.
  *
- * Why tech-blind: Waves runs exactly ONE active field technician, so any
- * time overlap between visits is a real-world clash whether the rows carry
- * a technician_id, carry different ones, or carry none (AI-assistant
- * zone-engine confirms, rebooker series-conflict unassigns, and admin
- * unassigned creates all write technician_id-NULL rows that the per-tech
+ * Why tech-blind (the DEFAULT): Waves ran exactly ONE active field
+ * technician, so any time overlap between visits is a real-world clash
+ * whether the rows carry a technician_id, carry different ones, or carry none
+ * (AI-assistant zone-engine confirms, rebooker series-conflict unassigns, and
+ * admin unassigned creates all write technician_id-NULL rows that the per-tech
  * conflict checks used to sail past).
+ *
+ * Second technician (GATE_MULTI_TECH_CONFIRM, dark, owner 2026-09-29): a
+ * caller MAY pass `technicianId` to scope the probe to that technician's
+ * route. With the gate on AND capacity mode on (GATE_SCHEDULING_CAPACITY —
+ * techScopedConfirmActive()), a row conflicts only when it carries the SAME
+ * technician_id or NO technician_id: unassigned rows still block everyone,
+ * exactly the predicate booking.js's offer-side occupancy mirror applies
+ * (`row.technician_id == null || row.technician_id === slot.technician.id`),
+ * so a slot offered on technician B's day is not refused at confirm because
+ * technician A has an overlapping or nearby stop. No `technicianId`, gate off,
+ * or capacity off: the tech-blind behavior above, byte for byte. Callers that
+ * never pass it (admin, rebooker series, phone agent, follow-ups) are
+ * unaffected by the gate. Concurrency is unchanged: every writer behind this
+ * probe takes the date-wide rung-1 lock (`occupancy:<date>`, below) first, so
+ * two confirms for DIFFERENT technicians — or one assigned and one unassigned
+ * — still serialize per calendar date, and an unassigned row can never be
+ * double-booked against an insert this probe could not see.
  *
  * Predicate provenance (kept in lockstep with the existing commit gates —
  * routes/booking.js createSelfBooking's conflictQuery, rebooker.js's
@@ -39,6 +56,8 @@ const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
 const { guardedCoordSelects } = require('./day-stops');
 const { travelGapEnabled, travelGapConflicts } = require('./travel-gap');
+const { multiTechConfirmLive } = require('../../config/feature-gates');
+const { capacityEnabled } = require('./policy');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows, allocationKey } = require('./visit-capacity');
 const logger = require('../logger');
@@ -54,6 +73,22 @@ const INTERVIEW_SLOT_MINUTES = 30;
 const INTERVIEW_BUFFER_MINUTES = 15;
 
 const DEFAULT_DURATION_MINUTES = 60;
+
+// Tech-aware confirm scope is active only when the owner gate AND capacity
+// mode are on — the same condition under which booking.js's offer mirror
+// filters occupied rows by technician (`!capacityEnabled() || ...`), so offer
+// and confirm can never scope differently.
+function techScopedConfirmActive() {
+  return multiTechConfirmLive() && capacityEnabled();
+}
+
+// The offer-side predicate as SQL: a row counts when it is unassigned or on
+// this technician's own route. `column` is qualified by the caller.
+function applyTechScope(query, column, technicianId) {
+  return query.where((q) => {
+    q.whereNull(column).orWhere(column, technicianId);
+  });
+}
 
 // ---- date-wide occupancy advisory lock (shared by every gate writer) -------
 //
@@ -444,6 +479,12 @@ const CONFLICT_COLUMNS = [
  *                                          are fine (buffer-only). Omitted or
  *                                          gate off → the overlap SQL below,
  *                                          byte for byte.
+ * @param {string|number|null} [args.technicianId]
+ *                                          Opt-in technician scope (see the
+ *                                          header): with GATE_MULTI_TECH_CONFIRM
+ *                                          + capacity mode on, only rows with
+ *                                          this technician_id or a NULL one
+ *                                          count. Omitted/null → tech-blind.
  * @returns {Promise<Array>} overlapping rows (chronological), [] if none.
  */
 async function findConflictingVisits({
@@ -458,9 +499,12 @@ async function findConflictingVisits({
   includeInterviews = false,
   travel,
   arrivalWindow,
+  technicianId = null,
 } = {}) {
   if (!date || !windowStart || !windowEnd) return [];
   const excludeIds = (excludeServiceIds || []).filter(Boolean).map(String);
+  const scopeTechId = technicianId != null && technicianId !== '' && techScopedConfirmActive()
+    ? String(technicianId) : null;
 
   // Only staff callers explicitly opt into this advisory placement check.
   // Public booking/reservation and customer reschedule contracts stay on
@@ -485,7 +529,7 @@ async function findConflictingVisits({
 
   if (travel !== undefined && travelGapEnabled()) {
     return withInterviewConflicts(await findConflictingVisitsWithTravel({
-      db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
+      db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel, scopeTechId,
     }), { db, date, windowStart, windowEnd, includeInterviews });
   }
 
@@ -506,6 +550,7 @@ async function findConflictingVisits({
       [windowEnd, DEFAULT_DURATION_MINUTES, windowStart],
     );
   if (excludeIds.length) query.whereNotIn('id', excludeIds);
+  if (scopeTechId) applyTechScope(query, 'technician_id', scopeTechId);
   if (excludeCustomerId) {
     // customer_id <> ? is NULL (not true) for customer-NULL hold rows, so a
     // bare whereNot would silently drop every hold — keep them explicitly.
@@ -688,7 +733,7 @@ function stopCreditResolver(rows) {
  * inert (whereNotNull).
  */
 async function findConflictingVisitsWithTravel({
-  db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel,
+  db, date, windowStart, windowEnd, excludeIds, excludeCustomerId, excludeStatuses, includeHolds, travel, scopeTechId = null,
 }) {
   const candStart = timeToMinutes(windowStart);
   const candEnd = timeToMinutes(windowEnd);
@@ -717,6 +762,7 @@ async function findConflictingVisitsWithTravel({
     })
     .whereNotNull('scheduled_services.window_start');
   if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
+  if (scopeTechId) applyTechScope(query, 'scheduled_services.technician_id', scopeTechId);
   if (excludeCustomerId) {
     query.where((q) => {
       q.whereNull('scheduled_services.customer_id').orWhereNot('scheduled_services.customer_id', excludeCustomerId);
@@ -883,3 +929,6 @@ module.exports = {
   DEFAULT_EXCLUDE_STATUSES,
   _internals: { timeToMinutes, normalizeDate, occupancyLockKey },
 };
+// Own lines (not in the shared list above) so concurrent edits to that list never conflict.
+module.exports.techScopedConfirmActive = techScopedConfirmActive;
+module.exports.applyTechScope = applyTechScope;

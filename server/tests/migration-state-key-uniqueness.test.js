@@ -95,11 +95,35 @@ function isSupersedesDocReference(file, src, literal, matchIndex) {
     && src.split('migration:20260930120000').length === 2;
 }
 
+// The signup-email audit migration back-fills the audit_log publish events of
+// two earlier signup migrations: it reads the template versions each one tagged
+// (validation_snapshot.source) and writes a `<tag>:publish` audit_log action,
+// skipped if already present. It owns no system_settings state or
+// pricing_config_audit row for either stamp. The file is pushed and frozen, so
+// the exemption is pinned to its exact content and to the two declarations.
+const SIGNUP_AUDIT_BACKFILL = Object.freeze({
+  file: '20260930010000_signup_email_template_names_and_audit.js',
+  sha256: '98b7baceabe5956e31093215390d7cc5b583f203be8b084f75558beb75b6659c',
+  declarations: Object.freeze({
+    'migration:20260929220000': "const STREAMS = 'migration:20260929220000';",
+    'migration:20260930000000': "const DROP_PAYMENT = 'migration:20260930000000';",
+  }),
+});
+
+function isPinnedSignupAuditBackfillReference(file, src, literal, matchIndex) {
+  const declaration = SIGNUP_AUDIT_BACKFILL.declarations[literal];
+  return file === SIGNUP_AUDIT_BACKFILL.file
+    && Boolean(declaration)
+    && sha256(src) === SIGNUP_AUDIT_BACKFILL.sha256
+    && matchIndex === src.indexOf(declaration) + declaration.indexOf("'");
+}
+
 function derivedKeys(file, src) {
   return [...src.matchAll(DERIVED_KEY)]
     .filter((match) => !isReadOnlySeedAuditReference(file, src, match[1], match.index)
       && !isReadOnlyCollisionArchiveReference(file, src, match[1], match.index)
-      && !isSupersedesDocReference(file, src, match[1], match.index))
+      && !isSupersedesDocReference(file, src, match[1], match.index)
+      && !isPinnedSignupAuditBackfillReference(file, src, match[1], match.index))
     .map(([, literal, stamp]) => ({ literal, stamp }));
 }
 
@@ -140,6 +164,17 @@ describe('migration-derived state keys and audit tags', () => {
     const mutating = src.replace('exports.up = async function up(knex) {',
       "exports.up = async function up(knex) {\n  const tag = 'migration:20260930120000';");
     expect(derivedKeys(file, mutating)).toContainEqual({ literal: 'migration:20260930120000', stamp: '20260930120000' });
+  });
+
+  test('the signup audit back-fill is exempt only while its content is unchanged', () => {
+    const { file } = SIGNUP_AUDIT_BACKFILL;
+    const src = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
+    const foreign = (keys) => keys.filter((k) => k.stamp !== '20260930010000');
+    expect(foreign(derivedKeys(file, src))).toEqual([]);
+    const edited = src.replace('exports.up = async function up(knex) {',
+      "exports.up = async function up(knex) {\n  await knex('system_settings').insert({ key: 'migration:20260929220000' });");
+    expect(foreign(derivedKeys(file, edited))).toContainEqual({ literal: 'migration:20260929220000', stamp: '20260929220000' });
+    expect(foreign(derivedKeys('20261001000000_copy.js', src))).toHaveLength(2);
   });
 
   test('every derived key carries the stamp of the file that owns it', () => {

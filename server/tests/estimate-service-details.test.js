@@ -38,6 +38,15 @@ const {
 } = require('../services/estimate-service-details');
 const { renderServiceDetailsPdf } = require('../services/pdf/service-details-pdf');
 
+describe('interior spray copy (owner R1 2026-09-29)', () => {
+  test('recurring pest details state the interior spray is included and never disclaim baseboard spraying', () => {
+    const text = JSON.stringify(SERVICE_DETAILS_COPY);
+    expect(text).toContain('Interior service is included for pests covered by your recurring plan: an interior spray plus baits, gels, monitors');
+    expect(text).toContain('an interior spray is part of your pest visits at no extra charge');
+    expect(text).not.toMatch(/rather than routine baseboard spraying/i);
+  });
+});
+
 const PRODUCT = {
   id: 'p1',
   name: 'Suspend PolyZone',

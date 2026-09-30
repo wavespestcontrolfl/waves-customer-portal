@@ -24,6 +24,7 @@ jest.mock('../services/scheduling/find-time', () => ({
 jest.mock('../services/weather-forecast', () => ({ getDailyRainOutlookBounded: jest.fn(async () => null) }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  zoneRouteDaysLive: jest.fn(() => false),
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
 }));
 

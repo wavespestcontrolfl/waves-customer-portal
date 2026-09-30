@@ -229,9 +229,24 @@ describe('gratitudeCandidatePage — discovery filter accepts EITHER recognized 
 
     const versionWhere = whereCalls.find(([col]) => col === 'md.prompt_version');
     expect(versionWhere).toEqual(['md.prompt_version', drafter.PROMPT_VERSION]);
+    // ONE family LIKE (Codex #5392 r3 P0): keyed off the family, not the
+    // current constant, so a suffix bump ('_cf', later ones) never strands
+    // rows stamped under an earlier version.
     expect(orWhereCalls).toEqual([
-      ['md.prompt_version', drafter.REAL_ANSWERS_PROMPT_VERSION],
-      ['md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_VERSION}+%`],
+      ['md.prompt_version', 'like', 'house\\_voice\\_v12\\_real\\_answers%'],
     ]);
+    const pattern = orWhereCalls[0][2];
+    const likeRe = new RegExp(`^${pattern.replace(/\\(.)/g, '\u0000$1').replace(/%/g, '.*').replace(/\u0000(.)/g, (_, c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))}$`);
+    for (const stamped of [
+      'house_voice_v12_real_answers', // stamped before the bump
+      'house_voice_v12_real_answers+c', // the row from the finding
+      'house_voice_v12_real_answers+bclm',
+      drafter.REAL_ANSWERS_PROMPT_VERSION, // 'house_voice_v12_real_answers_cf'
+      `${drafter.REAL_ANSWERS_PROMPT_VERSION}+bc`,
+      'house_voice_v12_real_answers_cf_lbl+c', // a later suffix
+    ]) expect(likeRe.test(stamped)).toBe(true);
+    expect(likeRe.test('house_voice_v13_real_answers')).toBe(false);
+    expect(likeRe.test('house_voice_v12X')).toBe(false);
+    expect(likeRe.test('house_voice_v11')).toBe(false); // matched by the exact PROMPT_VERSION branch instead
   });
 });

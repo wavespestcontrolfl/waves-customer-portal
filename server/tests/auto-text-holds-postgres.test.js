@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 
-const { autoTextHoldReason, RECENT_CONVERSATION_MS } = require('../services/messaging/auto-text-holds');
+const { autoTextHoldReason, saidNoTextsOnAnyCall, RECENT_CONVERSATION_MS } = require('../services/messaging/auto-text-holds');
 
 const PHONE = '+19415550100';
 const CALL_AT = new Date('2026-09-26T15:00:00Z');
@@ -124,6 +124,45 @@ jest.setTimeout(30000);
         ai_extraction: '{"do_not_contact_request": false}',
       });
       expect(await hold()).toBeNull();
+    });
+  });
+
+  describe('said_no_texts', () => {
+    test('an earlier call where they said no to texts', async () => {
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) });
+      expect(await hold()).toBe('said_no_texts');
+    });
+
+    test('the call setting the text off, read by its id', async () => {
+      const id = randomUUID();
+      await database('call_log').insert({
+        id, direction: 'inbound', from_phone: '+19415559999', to_phone: '+19412975749', created_at: CALL_AT,
+        v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }),
+      });
+      expect(await hold({ originCallId: id })).toBe('said_no_texts');
+    });
+
+    test('a call from another line where they gave this number and said no to texts', async () => {
+      await priorCall({
+        from_phone: '+19415559999', v2_extraction_status: 'valid',
+        ai_extraction_enriched: JSON.stringify({ caller: { phone_e164: PHONE }, consent: { sms_declined: true } }),
+      });
+      expect(await hold()).toBe('said_no_texts');
+    });
+
+    test('never: no decline, a call from before the field existed, or a schema-failed extraction', async () => {
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: false } }) });
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_consent_given: false } }) });
+      await priorCall({ v2_extraction_status: 'invalid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) });
+      expect(await hold()).toBeNull();
+    });
+
+    test('saidNoTextsOnAnyCall on its own (the dropped-call and outbound-voicemail texts read only this hold)', async () => {
+      expect(await saidNoTextsOnAnyCall(PHONE)).toBe(false);
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) });
+      expect(await saidNoTextsOnAnyCall(PHONE)).toBe(true);
+      expect(await saidNoTextsOnAnyCall('+19415550000')).toBe(false);
+      expect(await saidNoTextsOnAnyCall('')).toBe(false);
     });
   });
 

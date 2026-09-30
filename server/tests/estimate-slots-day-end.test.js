@@ -29,6 +29,7 @@ jest.mock('../services/weather-forecast', () => ({
 }));
 jest.mock('../config/feature-gates', () => ({
   isEnabled: jest.fn(() => false),
+  zoneRouteDaysLive: jest.fn(() => false),
   gateEnvValue: jest.requireActual('../config/feature-gates').gateEnvValue,
 }));
 

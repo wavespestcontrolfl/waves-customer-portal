@@ -2857,6 +2857,26 @@ describe('predictWinnerBackfills (pure — the executor\'s rule, disclosed by th
     expect(dedupe.predictWinnerBackfills(winner, { id: 'L', termite_stations_rented: false }).backfills.termite_stations_rented).toBeUndefined();
   });
 
+  it('carries the newer last_seen_at onto the winner (GREATEST) and journals the winner prior; an older or equal loser value changes nothing', () => {
+    const older = new Date('2026-09-01T12:00:00.000Z');
+    const newer = new Date('2026-09-20T12:00:00.000Z');
+    const loserNewer = dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: older }, { id: 'L', last_seen_at: newer });
+    expect(loserNewer.backfills.last_seen_at).toEqual(newer);
+    expect(loserNewer.winnerPriorValues.last_seen_at).toEqual(older);
+    // Winner never seen: the loser's value fills it; no prior to journal (undo vacates to null).
+    const winnerNever = dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: null }, { id: 'L', last_seen_at: newer });
+    expect(winnerNever.backfills.last_seen_at).toEqual(newer);
+    expect(winnerNever.winnerPriorValues.last_seen_at).toBeUndefined();
+    // Winner newer, equal, or the loser never seen: untouched.
+    const winnerNewer = dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: newer }, { id: 'L', last_seen_at: older });
+    expect(winnerNewer.backfills.last_seen_at).toBeUndefined();
+    expect(winnerNewer.winnerPriorValues.last_seen_at).toBeUndefined();
+    expect(dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: newer }, { id: 'L', last_seen_at: new Date(newer) }).backfills.last_seen_at).toBeUndefined();
+    expect(dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: older }, { id: 'L', last_seen_at: null }).backfills.last_seen_at).toBeUndefined();
+    // ISO strings (a journal round trip) compare by instant, not lexically.
+    expect(dedupe.predictWinnerBackfills({ id: 'W', last_seen_at: '2026-09-20T08:00:00-04:00' }, { id: 'L', last_seen_at: '2026-09-20T13:00:00.000Z' }).backfills.last_seen_at).toBe('2026-09-20T13:00:00.000Z');
+  });
+
   it('a street-only winner absorbing a same-street unit-bearing loser keeps the unit; loser-only billing mode + fee and payer transfer', () => {
     const winner = { id: 'W', address_line1: '100 Test St', address_line2: null, billing_mode: null, per_application_fee: null, payer_id: null };
     const loser = { id: 'L', address_line1: '100 Test St Apt 4B', address_line2: null, billing_mode: 'per_application', per_application_fee: '85.00', payer_id: 'payer-1' };
