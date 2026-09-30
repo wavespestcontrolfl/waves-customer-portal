@@ -671,6 +671,19 @@ describe('extra match keys on conversions (name / ZIP / external id)', () => {
     ]);
     for (const c of cleaned) expect(c).toMatchObject({ firstName: null, zip: null, externalId: null });
   });
+  test('consent: a wrong-number caller phone swapped for the account holder\'s re-picks name/address, and raw sources never leave', async () => {
+    mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(['9415550101']), isSuppressed: () => false });
+    const job = mapCompletedJobCandidate({
+      id: 'ea5', customer_id: 'cust-1', lead_id: 'lead-3', service_date: '2026-07-01', invoice_total: 100,
+      lead_phone: '9415550101', customer_phone: '9415550199',
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_zip: '34211',
+      lead_first_name: 'Pat', lead_last_name: 'Lee', lead_zip: '34202',
+    });
+    expect(job).toMatchObject({ phone: '9415550101', firstName: 'Pat' });
+    const [cleaned] = await applyMarketingConsent('completed_job_revenue', [job]);
+    expect(cleaned).toMatchObject({ phone: '9415550199', firstName: 'Sam', lastName: 'Rivera', zip: '34211' });
+    expect(cleaned).not.toHaveProperty('identitySources');
+  });
   test('a clean contact keeps its extras through consent cleaning', async () => {
     mockLoadSuppression.mockResolvedValue({ invalidPhones: new Set(), isSuppressed: () => false });
     const [c] = await applyMarketingConsent('qualified_lead', [{ transactionId: 't-1', email: 'a@x.com', firstName: 'Jo', zip: '34221', externalId: 'cust-1' }]);

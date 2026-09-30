@@ -383,18 +383,23 @@ function dedupeCandidatesByTransaction(candidates = []) {
 // customer as fallback only when it is the same person as the uploaded
 // contact (see ad-match-fields.identityForContact). Lead rows have no state
 // column, so state only ever comes from the linked customer.
-function leadIdentity(row) {
-  return matchFields.identityForContact(
-    { email: row.email, phone: row.phone },
+function leadIdentitySources(row) {
+  return [
     { email: row.email, phone: row.phone, firstName: row.first_name, lastName: row.last_name, city: row.city, zip: row.zip },
     { email: row.customer_email, phone: row.customer_phone, firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
-  );
+  ];
+}
+function leadIdentity(row) {
+  return matchFields.identityForContact({ email: row.email, phone: row.phone }, ...leadIdentitySources(row));
 }
 
 function mapLeadCandidate(row) {
   const eventTimestamp = toRfc3339(row.converted_at || row.first_contact_at || row.created_at);
   return {
     ...leadIdentity(row),
+    // Both name/address sources, so consent cleaning can re-pick the identity
+    // if it swaps a phone. Stripped before upload; never sent.
+    identitySources: leadIdentitySources(row),
     // Meta external_id: lead:<id>, the same value the later Purchase carries.
     externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId: row.id }),
     conversionType: 'qualified_lead',
@@ -446,15 +451,17 @@ function mapCompletedJobCandidate(row) {
   const customerEmail = row.customer_email || null;
   const customerPhone = row.customer_phone || null;
   const leadId = row.lead_id || estimateLeadId(row.estimate_data);
+  const jobSources = [
+    { email: customerEmail, phone: customerPhone, firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
+    { email: leadEmail, phone: leadPhone, firstName: row.lead_first_name, lastName: row.lead_last_name, city: row.lead_city, zip: row.lead_zip },
+  ];
   return {
     // The customer record is canonical for a completed job and the lead the
     // fallback, but only a source that is the same person as the uploaded
     // email/phone below may supply the name/address.
-    ...matchFields.identityForContact(
-      { email: leadEmail || customerEmail, phone: leadPhone || customerPhone },
-      { email: customerEmail, phone: customerPhone, firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
-      { email: leadEmail, phone: leadPhone, firstName: row.lead_first_name, lastName: row.lead_last_name, city: row.lead_city, zip: row.lead_zip },
-    ),
+    ...matchFields.identityForContact({ email: leadEmail || customerEmail, phone: leadPhone || customerPhone }, ...jobSources),
+    // See mapLeadCandidate: re-picked after a consent phone swap, never sent.
+    identitySources: jobSources,
     externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId }),
     conversionType: 'completed_job_revenue',
     sourceTable: 'estimate_actuals',
@@ -689,10 +696,16 @@ async function applyMarketingConsent(conversionType, candidates) {
         const altPh = consentNormPhone(id.phone);
         if (altPh && altPh !== ph && !sup.invalidPhones.has(altPh)) { promoted = id.phone; break; }
       }
-      return { ...candidate, phone: promoted };
+      // The phone changed, so the name/address must be re-picked for the
+      // contact actually uploaded (a promoted account-holder phone must not
+      // ride with a different caller's name).
+      const reIdentity = Array.isArray(candidate.identitySources)
+        ? matchFields.identityForContact({ email: candidate.email, phone: promoted }, ...candidate.identitySources)
+        : {};
+      return { ...candidate, phone: promoted, ...reIdentity };
     }
     return candidate;
-  });
+  }).map(({ identitySources, ...rest }) => rest); // raw sources never leave this step
   if (suppressed || strippedPhones) {
     logger.info(`[ad-consent] ${conversionType} conversions: stripped identifiers from ${suppressed} opted-out contacts, ${strippedPhones} invalid phones`);
   }
