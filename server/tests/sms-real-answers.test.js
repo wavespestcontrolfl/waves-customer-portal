@@ -1107,9 +1107,10 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
         expect(out.getAvailableSlots).toHaveBeenCalled();
         expect(out.result.factsBlock).toContain('OPEN TIMES');
       }
-      // an upstream scheduling-intent flag or a cancel-classified intent also keeps the lookup
-      expect((await run({ availability: eligible, schedulingIntent: true })).getAvailableSlots).toHaveBeenCalled();
-      expect((await run({ availability: eligible, intent: 'CANCEL_REQUEST' })).getAvailableSlots).toHaveBeenCalled();
+      // the upstream scheduling flag / classified intent are NOT evidence of a separate need (round-31 P1): the flag is a
+      // keyword/day/time detector a plain pest report can trip ("…this morning"), so it never defeats the shortcut
+      expect((await run({ availability: eligible, schedulingIntent: true })).getAvailableSlots).not.toHaveBeenCalled();
+      expect((await run({ availability: eligible, intent: 'CANCEL_REQUEST' })).getAvailableSlots).not.toHaveBeenCalled();
       // ...while plain reports (persistence wording, a customer_issue intent, a location) still skip it
       for (const [inboundMessage, intent] of [['the ants are back', 'general_customer_sms_needs_review'], ['the ants came back', 'customer_issue_needs_review'], ['ants are back on the lawn', 'COMPLAINT'], ["they're back", 'general_customer_sms_needs_review']]) {
         const out = await run({ availability: eligible, inboundMessage, intent });
@@ -1122,7 +1123,8 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       const only = (inboundMessage, extra = {}) => reserviceIsOnlySchedulingNeed({ inboundMessage, intent: { intent: 'customer_issue_needs_review' }, schedulingIntent: false, ...extra });
       for (const m of ['the ants are back', 'the ants came back', 'I keep seeing roaches', 'ants are back on the lawn', 'the ants are back, whats my balance']) expect(only(m)).toBe(true);
       for (const m of ['the ants are back, cancel my plan', 'ants are back. can I move my lawn visit to Friday?', 'ants are back, any availability next week?', 'ants are back and the lawn has weeds', 'the termites and ants are back', 'ants are back, I want to book a mosquito treatment']) expect(only(m)).toBe(false);
-      expect(only('the ants are back', { schedulingIntent: true })).toBe(false);
+      expect(only('the ants are back', { schedulingIntent: true })).toBe(true); // upstream flags are not evidence (round-31 P1)
+      expect(only('the ants are back this morning')).toBe(true);
     });
 
     test('behavior otherwise identical: not eligible, a non-pest question, or a termite report still gets the normal-slot work', async () => {
@@ -3496,8 +3498,31 @@ describe('free re-service is an entitlement resolved through the existing mechan
       // pest bookable: the re-service offer AND the lawn times
       const both = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. For your lawn visit I can do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage: mixed, offeredTimes: slot });
       expect(both).toMatchObject({ ok: true, promisedLanes: ['pest'] });
-      // the upstream scheduling flag / a cancel intent also mean a separate need
-      expect(validateReserviceOffer({ reply: 'Your free re-service is on the schedule for Thursday. I can do Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: 'the ants are back', offeredTimes: slot, schedulingIntent: true }).ok).toBe(true);
+      // ...but the upstream flag alone is NOT evidence of a separate need (round-31 P1)
+      expect(validateReserviceOffer({ reply: 'Your free re-service is on the schedule for Thursday. I can do Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: 'the ants are back', offeredTimes: slot, schedulingIntent: true }).ok).toBe(false);
+    });
+
+    // Codex round-31 P1: what the REAL router produces for plain pest reports must not bypass the guards.
+    test('the real scheduling-intent detector fires on time words in a plain pest report — the guards still apply', () => {
+      const { hasSchedulingIntent } = require('../services/sms-intent');
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      // plain reports: the detector says false; time-word reports: it says TRUE (which is why it can't be trusted)
+      for (const m of ['The ants are back', "they're back", 'the ants came back']) expect(hasSchedulingIntent(m)).toBe(false);
+      for (const m of ['the ants are back this morning', 'the ants are back on Tuesday', 'the ants are back since yesterday afternoon']) {
+        const schedulingIntent = hasSchedulingIntent(m);
+        expect(schedulingIntent).toBe(true);
+        const intent = { intent: 'customer_issue_needs_review' };
+        const booked = validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: m, offeredTimes: slot, intent, schedulingIntent });
+        expect(booked.ok).toBe(false);
+        expect(booked.violations[0]).toMatch(/ALREADY BOOKED/);
+        const bookable = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage: m, offeredTimes: slot, intent, schedulingIntent });
+        expect(bookable.ok).toBe(false);
+        expect(bookable.violations[0]).toMatch(/offered_times/);
+      }
     });
 
     test('plain pest report + times is still rejected (the re-service is the ONLY scheduling need), booked or bookable', () => {

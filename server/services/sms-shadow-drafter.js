@@ -1264,15 +1264,20 @@ function reserviceReplyHasOfferWording(text) {
 // cancels / complains, asks to move or book another visit, or names another service ("The ants are back, cancel my
 // plan"; "The ants are back. Can I move my lawn visit to Friday?") still needs the normal OPEN TIMES lookup.
 const RESERVICE_OTHER_REQUEST_RE = /\b(?:re-?schedul\w*|re-?book\w*|move|moving|push|pushing|change|changing|switch|swap|skip|postpone|delay|cancel\w*|book|booking|another\s+(?:day|time)|different\s+(?:day|time)|what\s+times?|which\s+times?|any\s+(?:openings?|availability)|availab\w+|openings?|earlier|later\s+(?:date|time|day)|next\s+(?:week|available)|appointment)\b/i;
-function reserviceIsOnlySchedulingNeed({ inboundMessage, intent, schedulingIntent }) {
+// Codex round-31 P1: the bypass rests on INDEPENDENT EVIDENCE IN THE INBOUND TEXT of a separate need — never on the
+// upstream `schedulingIntent` flag or the classified intent. Traced: sms-intent.hasSchedulingIntent is a keyword /
+// weekday / month-day / clock-time detector, so it is TRUE for a plain pest report that merely carries a time word
+// ("the ants are back this morning", "…on Tuesday", "…since yesterday"), and the router labels ordinary pest
+// reports customer_issue_needs_review; trusting either would make every such report bypass all three
+// slot guards. (The plain "The ants are back" / "they're back" produce false, but time-word reports do not.)
+function reserviceIsOnlySchedulingNeed({ inboundMessage }) {
   const text = String(inboundMessage || '');
-  if (schedulingIntent || /cancel/i.test(String(intent?.intent || ''))) return false;
   if (SAVE_SALE_NON_PEST_TEXT_RE.test(text) || RESERVICE_OTHER_REQUEST_RE.test(text)) return false;
   return !require('./reservice-scheduler').namesOtherService(text, 'pest');
 }
-function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context, intent, schedulingIntent }) {
+function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
   if (!reserviceState || !gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context)) return false;
-  if (!reserviceIsOnlySchedulingNeed({ inboundMessage, intent, schedulingIntent })) return false;
+  if (!reserviceIsOnlySchedulingNeed({ inboundMessage })) return false;
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const lane = reportedReserviceLane(inboundMessage) || pronounOnlyReportLane(inboundMessage, context);
   return Boolean(lane) && (reserviceState.lanes.includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
@@ -1291,7 +1296,7 @@ function reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, o
     ? `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`
     : null;
 }
-function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context, intent, schedulingIntent }) {
+function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
   const actions = [].concat(intendedActions || []);
@@ -1310,7 +1315,7 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // scheduling need. A mixed inbound ("The ants are back. Can I move my lawn visit to Friday?") legitimately
   // carries times for the OTHER need. (offered_times entries are { date, window } only — they carry no service
   // identity to compare against the reported pest lane.)
-  const soleSchedulingNeed = reserviceIsOnlySchedulingNeed({ inboundMessage, intent, schedulingIntent });
+  const soleSchedulingNeed = reserviceIsOnlySchedulingNeed({ inboundMessage });
   const bookedLaneBlock = soleSchedulingNeed ? reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions }) : null;
   if (bookedLaneBlock) return { ok: false, violations: [bookedLaneBlock] };
   if (!promise) {
@@ -3238,7 +3243,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live draft resolves eligibility through the
   // existing re-service mechanism.
   const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
-  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage, context, intent, schedulingIntent });
+  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage, context });
   const willFetchOpenTimes = !presetFactsBlock && needsOpenTimes && !reserviceLaneDecides
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
@@ -3352,7 +3357,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
     }
-    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage, offeredTimes: parsed?.offered_times, context, intent, schedulingIntent });
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage, offeredTimes: parsed?.offered_times, context });
     if (!singlePassReservice.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
@@ -3382,7 +3387,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // Codex round-19 P2: unless a covered re-service offer is OWED (an eligible pest report) — then the
     // empty reply is checked like any other and revised.
     if (!parsed.reply) {
-      const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context, intent, schedulingIntent });
+      const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
       if (owed.ok) { converged = true; break; }
     }
 
@@ -3392,7 +3397,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
-    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context, intent, schedulingIntent });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply });
     for (const check of [reserviceCheck, complianceCheck]) {
       if (!check.ok) {
@@ -3742,7 +3747,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // escalate action makes autoSendActionsSafe return false, so these
     // drafts never reach the auto-send claim/executor path at all.
     const reserviceLanesSnapshot = validateReserviceOffer({
-      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context, intent, schedulingIntent,
+      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context,
     }).promisedLanes || null;
 
     // Only verified-clean drafts (verify loop converged) may leave the silent
