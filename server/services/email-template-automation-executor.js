@@ -1549,10 +1549,21 @@ function sendPolicyFor(run) {
 // lc.* key, or the lifted fence would send it as plain relationship mail.
 // Read from the template columns the automation load already selects (no extra
 // query). undefined = let the ledger decide from stream and key.
+// The classification is the LIBRARY's own (isMarketingSend), asked of each of the
+// template's two stream fields — the library reads the group key OVER the stream,
+// so a template with send_stream 'service_operational' and suppression group
+// 'marketing_nurture' must not slip through as relationship mail here while a
+// different sender would call it marketing: EITHER field marketing_*, or mode
+// 'marketing', is marketing.
 function ledgerMarketingClassFor(automation = {}) {
-  const stream = String(automation.template_send_stream || automation.template_suppression_group_key || '').toLowerCase();
-  const mode = String(automation.template_mode || '').toLowerCase();
-  return stream.startsWith('marketing_') || mode === 'marketing' ? 'marketing' : undefined;
+  const template = {
+    mode: automation.template_mode,
+    send_stream: automation.template_send_stream,
+    suppression_group_key: automation.template_suppression_group_key,
+  };
+  const marketing = EmailTemplates.isMarketingSend(template, template.suppression_group_key)
+    || EmailTemplates.isMarketingSend(template, template.send_stream);
+  return marketing ? 'marketing' : undefined;
 }
 
 // Shadow's read-only mirror of the ledger's eligibility step: would
@@ -1711,6 +1722,17 @@ async function settleLedgerDuplicate(run, row) {
   }
   if (ledgerDeliveryConfirmed(row, message)) {
     const messageId = row.email_message_id || message?.id || null;
+    // The message is confirmed delivered but the ledger row was never settled
+    // (markSent failed, or the worker died): complete it from the message so the
+    // send counts toward the caps now rather than at the lease sweep. Best-effort
+    // — the run IS delivered, and the sweep reconciles the same way if this fails.
+    if (row.status !== 'sent' && message?.sent_at) {
+      try {
+        await require('./email-division/ledger').reconcileFromMessage(row.id);
+      } catch (err) {
+        logger.warn(`[email-template-automation] ledger reconcile failed for run ${run.id}: ${scrubSentryText(err && err.message ? err.message : err)}`);
+      }
+    }
     return { result: { sent: true, message: messageId ? { id: messageId } : null } };
   }
   // Handed to the provider but never confirmed (started, no sent_at; or the
@@ -1747,7 +1769,27 @@ function recipientChangedSkip() {
 // throws for a failure the run's bounded retry policy handles (a provider /
 // library error the ledger settled 'failed', or an eligibility lookup that
 // could not read).
+// A delivery this run's key already confirmed — checked BEFORE the current-address
+// refusal: a run that was delivered and then crashed before finalizing must
+// finalize SENT even if the customer changed email since (the address refusal is
+// about a send that has not happened). Only a confirmed delivery short-circuits;
+// every other duplicate state is judged by the normal path below.
+async function confirmedLedgerDelivery(run) {
+  if (!UUID_RE.test(String(run.recipient_id || '')) || !run.idempotency_key) return null;
+  const row = await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key }).first();
+  if (!row || String(row.customer_id) !== String(run.recipient_id)) return null;
+  let settled;
+  try {
+    settled = await settleLedgerDuplicate(run, row);
+  } catch {
+    return null; // outstanding / uncertain: the normal path decides
+  }
+  return settled.result?.sent ? settled : null;
+}
+
 async function dispatchThroughLedger(run, automation, executionPayload, stream, onQueued) {
+  const delivered = await confirmedLedgerDelivery(run);
+  if (delivered) return delivered;
   const refusal = await ledgerRecipientRefusal(run);
   if (refusal) return { skipReason: refusal.reason, skipGuard: refusal.code };
 

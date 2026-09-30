@@ -242,6 +242,25 @@ async function settleReservedOnly(id, status, reason, conn) {
   });
 }
 
+// Reconcile ONE reservation from the delivery authority. A sender that has
+// CONFIRMED the message went out (email_messages sent_at) but finds the row
+// still `reserved`/`failed` (markSent failed, the worker died) calls this so the
+// row counts toward the caps as `sent`, linked to the message, with the
+// message's own sent_at — the same completion the sweep applies. Only an
+// accepted or uncertain message completes it; anything else leaves the row.
+// Returns whether a row changed.
+async function reconcileFromMessage(id, { conn } = {}) {
+  const runner = conn || db;
+  return runner.transaction(async (trx) => {
+    const existing = await trx('marketing_email_ledger').where({ id }).first('customer_id', 'idempotency_key');
+    if (!existing) return false;
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`marketing-email:${existing.customer_id}`]);
+    const state = await messageStateFor(trx, existing.idempotency_key);
+    if (state.kind !== 'accepted' && state.kind !== 'uncertain') return false;
+    return (await completeFromMessage(trx, id, state, ['reserved', 'failed'])) > 0;
+  });
+}
+
 async function markSkipped(id, reason, { conn } = {}) {
   return settleReservedOnly(id, 'skipped', reason, conn);
 }
@@ -485,7 +504,21 @@ function reservationHandoff(rowId, { onVerdict = () => {}, expectedRecipientEmai
     onVerdict(held);
     if (!held.ok) return { ok: false, reason: held.reason };
     await dispatch(trx, async () => {
-      const verdict = await judgeConsent(trx, held.row, now, expectedRecipientEmail);
+      let verdict;
+      try {
+        verdict = await judgeConsent(trx, held.row, now, expectedRecipientEmail);
+      } catch (err) {
+        // The recheck itself could not read (infrastructure), which is not a
+        // consent verdict. sendOne awaits this check before it builds the
+        // provider request, so nothing was sent: tell the library so it
+        // settles the message row definitely-unsent (retryable) instead of
+        // leaving the handoff 'started' — which would read as an uncertain
+        // delivery, count toward the caps and refuse every retry.
+        const unavailable = new Error(`marketing email reservation ${rowId} boundary check unavailable: ${err.message}`);
+        unavailable.providerBoundaryCheckFailed = true;
+        unavailable.cause = err;
+        throw unavailable;
+      }
       onVerdict(verdict);
       if (!verdict.ok) {
         const veto = new Error(`marketing email reservation ${rowId} refused at the provider boundary: ${verdict.reason}`);
@@ -583,5 +616,5 @@ async function settleDispatchOutcome(row, outcome) {
 }
 
 module.exports = {
-  reserve, markSent, markSkipped, markFailed, reserveWithCap, reservationHandoff, sendWithLedger, RESERVATION_LIFETIME_MS,
+  reserve, markSent, markSkipped, markFailed, reconcileFromMessage, reserveWithCap, reservationHandoff, sendWithLedger, RESERVATION_LIFETIME_MS,
 };
