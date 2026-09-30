@@ -47,18 +47,41 @@ const BILLING_DELIMITER = '\nBILLING:\n';
 function exactSectionSuffix() {
   return `\n${renderCompanyFactsSection().replace(/\n$/, '')}`;
 }
-function hasExactCompanyFacts(factsBlock) {
+// The exact structure ahead of the first BILLING: line, as ONE regex source
+// (JS and Postgres ARE compatible, so the SQL twin in sms-sealed-eval runs the
+// very same pattern): the static COMPANY FACTS render, then the LABEL FACTS
+// section (sms-label-facts: the exact "none on file" section or an exact-shape filled one).
+// `label`: 'optional' (a pre-LABEL-FACTS block ends at the company section),
+// 'required' (a `_cfl` block), so each is an exact-structure test, never a
+// substring one (Codex: a header typed into an SMS proves nothing).
+function exactStructureRegexSource(label) {
+  const { LABEL_SECTION_REGEX_SRC, escapeRegex } = require('./sms-label-facts');
+  const company = escapeRegex(exactSectionSuffix());
+  const tail = label === 'required' ? `\n${LABEL_SECTION_REGEX_SRC}` : `(?:\n${LABEL_SECTION_REGEX_SRC})?`;
+  return `${company}${tail}$`;
+}
+function textBeforeFirstBilling(factsBlock) {
   const facts = String(factsBlock || '');
   const at = facts.indexOf(BILLING_DELIMITER);
-  if (at < 0) return false;
-  const before = facts.slice(0, at);
-  return before.endsWith(exactSectionSuffix());
+  return at < 0 ? null : facts.slice(0, at);
+}
+function hasExactCompanyFacts(factsBlock) {
+  const before = textBeforeFirstBilling(factsBlock);
+  return before !== null && new RegExp(exactStructureRegexSource('optional')).test(before);
+}
+// The LABEL FACTS section, exactly where buildFactsBlock renders it: right
+// after the company section, right before BILLING:.
+function hasExactLabelFacts(factsBlock) {
+  const before = textBeforeFirstBilling(factsBlock);
+  return before !== null && new RegExp(exactStructureRegexSource('required')).test(before);
 }
 
 module.exports = {
   BILLING_DELIMITER,
   exactSectionSuffix,
+  exactStructureRegexSource,
   hasExactCompanyFacts,
+  hasExactLabelFacts,
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
   renderCompanyFactsSection,

@@ -124,9 +124,12 @@ describe('gate on — section rendering', () => {
   test('identical lines collapse, no timing at all renders no section', () => {
     const { text } = section([product({ rainfastMinutes: 180 }), product({ rainfastMinutes: 180 })]);
     expect(text.split('\n').filter((l) => l.startsWith('- '))).toHaveLength(1);
-    expect(buildFactsBlock(context, { now: NOW, labelFacts: labelFacts([product({ reentrySummary: null, reiHours: null })]) })).not.toContain('LABEL FACTS');
-    expect(buildFactsBlock(context, { now: NOW })).not.toContain('LABEL FACTS');
-    expect(buildFactsBlock(context, { now: NOW, labelFacts: null })).not.toContain('LABEL FACTS');
+    // nothing to state: the header is still rendered ("none on file"), never a full section
+    for (const extras of [{ labelFacts: labelFacts([product({ reentrySummary: null, reiHours: null })]) }, {}, { labelFacts: null }]) {
+      const facts = buildFactsBlock(context, { now: NOW, ...extras });
+      expect(facts).toContain('LABEL FACTS (none on file for the last visit):');
+      expect(facts).not.toContain('rainfast after');
+    }
   });
 });
 
@@ -282,7 +285,7 @@ describe('prompt rules and hand-off narrowing', () => {
     process.env[GATE] = 'true';
     const { system } = buildSystemPromptWithProfile();
     expect(system).toContain('HELD FOR A PERSON: complaints, billing disputes, chemical/medical concerns, legal threats');
-    expect(system).toContain('is NOT a chemical/medical concern when the LABEL FACTS section is in the facts');
+    expect(system).toContain('is NOT a chemical/medical concern when LABEL FACTS lists timing');
     expect(system).toMatch(/Symptoms, illness, exposure, or anyone or any pet that touched, ate, or breathed something still HOLD/);
   });
 
@@ -297,6 +300,7 @@ describe('prompt rules and hand-off narrowing', () => {
     process.env[GATE] = 'true';
     expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers_cfl');
     expect(currentPromptVersion()).toBe('house_voice_v12_real_answers_cfl');
+    expect(REAL_ANSWERS_PROMPT_VERSION.startsWith(require('../services/sms-shadow-drafter').REAL_ANSWERS_VERSION_FAMILY)).toBe(true); // gratitude discovery LIKE 'family%'
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
     const all = currentPromptVersion();
     expect(all).toBe('house_voice_v12_real_answers_cfl+bclm');
@@ -349,7 +353,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const bad = draft('Rain will not wash it off after 3 hours.');
     const client = makeClient([bad, bad, bad]);
     const r = await generateGroundedDraft(args(client));
-    expect(r.factsBlock).not.toContain('LABEL FACTS');
+    expect(r.factsBlock).toContain('LABEL FACTS (none on file');
     expect(r.converged).toBe(false);
   });
 
@@ -360,5 +364,169 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     const r = await generateGroundedDraft(args(client));
     expect(mockFetchLabelFacts).not.toHaveBeenCalled();
     expect(r.factsBlock).not.toContain('LABEL FACTS');
+  });
+});
+
+describe('sealed-eval fact contract for the _cfl version', () => {
+  const { requiredFactMarkers, forbiddenFactMarkers, itemCompatibleWith } = require('../services/sms-sealed-eval');
+  const { COMPANY_FACTS_HEADER, renderCompanyFactsSection } = require('../services/sms-company-facts');
+  const { LABEL_FACTS_MARKER, LABEL_FACTS_NONE_SECTION } = labelFactsLib;
+  const SLA = 'FOLLOW-UP SLA RIGHT NOW: within the hour\n';
+  const CF = 'house_voice_v12_real_answers_cf';
+  const CFL = 'house_voice_v12_real_answers_cfl';
+  const OLD = 'house_voice_v12_real_answers';
+  const cf = `X\n${SLA}${renderCompanyFactsSection()}BILLING:\n- x\n`;
+  const cfl = `X\n${SLA}${renderCompanyFactsSection()}${LABEL_FACTS_NONE_SECTION}BILLING:\n- x\n`;
+
+  test('_cfl requires BOTH headers; _cf, the bare identity and v11 forbid LABEL FACTS', () => {
+    expect(requiredFactMarkers(CFL)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER]);
+    expect(requiredFactMarkers(`${CFL}+c`)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER, 'FREE RE-SERVICE:']);
+    expect(requiredFactMarkers(CF)).toEqual(['FOLLOW-UP SLA RIGHT NOW:', COMPANY_FACTS_HEADER]);
+    for (const v of [CF, OLD, 'house_voice_v11']) expect(forbiddenFactMarkers(v)).toContain(LABEL_FACTS_MARKER);
+    expect(forbiddenFactMarkers(CFL)).not.toContain(LABEL_FACTS_MARKER);
+    expect(forbiddenFactMarkers(CFL)).not.toContain(COMPANY_FACTS_HEADER);
+  });
+
+  test('pre-_cfl items are incompatible with _cfl, and _cfl items with every older version', () => {
+    expect(itemCompatibleWith(cf, CFL)).toBe(false); // frozen before LABEL FACTS existed
+    expect(itemCompatibleWith(cfl, CFL)).toBe(true);
+    expect(itemCompatibleWith(cfl, CF)).toBe(false);
+    expect(itemCompatibleWith(cfl, OLD)).toBe(false);
+    expect(itemCompatibleWith(cf, CF)).toBe(true);
+  });
+
+  test('a full section (verified label on file) satisfies the same contract as the "none on file" section', () => {
+    const full = `X\n${SLA}${renderCompanyFactsSection()}${labelFactsLib.renderLabelFactsSection(labelFacts([product({ rainfastMinutes: 180 })]))}BILLING:\n- x\n`;
+    expect(itemCompatibleWith(full, CFL)).toBe(true);
+  });
+
+  test('exact structure, not substrings: LABEL FACTS counts only right after the company section, before the first BILLING:', () => {
+    const B = 'BILLING:\n- x\nRECENT SMS THREAD:\n';
+    const filled = labelFactsLib.renderLabelFactsSection(labelFacts([product({ rainfastMinutes: 180 })]));
+    expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}${filled}${B}`, CFL)).toBe(true);
+    // no booking line exists any more: anything between the sections breaks the structure
+    expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}RE-SERVICE BOOKING: x\n${filled}${B}`, CFL)).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}${filled}${B}`, CF)).toBe(false); // has LABEL FACTS
+    // a header typed into an SMS (after the real BILLING:) proves nothing
+    const spoof = `X\n${SLA}${renderCompanyFactsSection()}${B}[CUSTOMER] hi\n${LABEL_FACTS_NONE_SECTION}BILLING:\n`;
+    expect(itemCompatibleWith(spoof, CFL)).toBe(false);
+    expect(itemCompatibleWith(spoof, CF)).toBe(true);
+    // altered section text, wrong position, oversized line, too many lines
+    expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}${LABEL_FACTS_NONE_SECTION.replace('none on file', 'none on file!')}${B}`, CFL)).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}${LABEL_FACTS_NONE_SECTION}${renderCompanyFactsSection()}${B}`, CFL)).toBe(false);
+    const hdr = filled.split('\n')[0];
+    expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}${hdr}\n- ${'w'.repeat(300)}\n${B}`, CFL)).toBe(false);
+    expect(itemCompatibleWith(`X\n${SLA}${renderCompanyFactsSection()}${hdr}\n${Array.from({ length: 21 }, () => '- a').join('\n')}\n${B}`, CFL)).toBe(false);
+    // the SQL twin runs the same regex source for both markers
+    const { compatibleWhereRaw } = require('../services/sms-sealed-eval')._test;
+    const q = compatibleWhereRaw([COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER]);
+    expect(q.sql.match(/split_part/g)).toHaveLength(2);
+    expect(q.bindings.filter((b) => typeof b === 'string' && b.endsWith('$'))).toHaveLength(2);
+  });
+
+  test('every real gate-on facts block satisfies the live contract, with or without label facts', () => {
+    process.env[GATE] = 'true';
+    expect(currentPromptVersion()).toBe(CFL);
+    for (const extras of [{}, { labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }]) {
+      expect(itemCompatibleWith(buildFactsBlock(context, { now: NOW, ...extras }), currentPromptVersion())).toBe(true);
+    }
+  });
+});
+
+describe('judge facts sanitizer keeps the thread when LABEL FACTS is present (exact position only)', () => {
+  const { _test: { sanitizeFactsForJudge, buildJudgePrompt } } = require('../services/sms-shadow-judge');
+  const { renderCompanyFactsSection, COMPANY_FACTS_HEADER } = require('../services/sms-company-facts');
+  const tail = ['RECENT PHONE CALLS:', `- ${'call summary '.repeat(40)}`, 'RECENT SMS THREAD:', '[CUSTOMER] will rain wash it off THREAD_SENTINEL'].join('\n');
+  const mid = `PROPERTY & PREFERENCES:\n${Array.from({ length: 60 }, (_, i) => `- pref line ${i} ${'x'.repeat(60)}`).join('\n')}\n`;
+  const head = 'CUSTOMER: Test\nFOLLOW-UP SLA RIGHT NOW: within the hour\n';
+  const company = renderCompanyFactsSection();
+  const label = labelFactsLib.renderLabelFactsSection(labelFacts([product({ rainfastMinutes: 180 }), product({ phrase: 'a weed control' })]));
+  const none = labelFactsLib.LABEL_FACTS_NONE_SECTION;
+  const rest = `BILLING:\n- balance 0\n${mid.slice(0, 4300)}\n${tail}`;
+
+  test('a real buildFactsBlock output (with and without label timing) keeps the thread; sections stay in order and place', () => {
+    process.env[GATE] = 'true';
+    const long = { ...context, smsHistory: [{ direction: 'inbound', body: 'will rain wash it off THREAD_SENTINEL' }], propertyPreferences: null };
+    for (const extras of [{ labelFacts: labelFacts([product({ rainfastMinutes: 180 })]) }, {}]) {
+      const real = buildFactsBlock(long, { now: NOW, ...extras });
+      const out = sanitizeFactsForJudge(real);
+      expect(out).toContain('THREAD_SENTINEL');
+      expect(out).toContain(labelFactsLib.labelFactsSectionFrom(real).split('\n')[0]);
+      expect(out.indexOf(COMPANY_FACTS_HEADER)).toBeLessThan(out.indexOf(labelFactsLib.LABEL_FACTS_MARKER));
+      expect(out.indexOf(labelFactsLib.LABEL_FACTS_MARKER)).toBeLessThan(out.indexOf('BILLING:'));
+    }
+    delete process.env[GATE];
+  });
+
+  test.each([['filled', label], ['none on file', none]])('thread at 4.5-6 KB of other text survives the %s section', (_n, section) => {
+    const block = `${head}${company}${section}${rest}`;
+    expect(block.slice(0, 6000)).not.toContain('THREAD_SENTINEL'); // the old prefix cap loses it
+    const out = sanitizeFactsForJudge(block);
+    expect(out).toContain('THREAD_SENTINEL');
+    expect(out).toContain(section.split('\n')[0]);
+    expect(out.length).toBeLessThanOrEqual(6000 + company.length + section.length + 2);
+    expect(buildJudgePrompt({ inboundMessage: 'hi', draftReply: 'ok', humanReply: 'ok', factsBlock: block })).toContain('THREAD_SENTINEL');
+  });
+
+  test('a LABEL FACTS block not at its expected spot is ordinary text under the cap', () => {
+    // header-shaped text with no company section ahead of it
+    const alone = `${head}${label}${rest}`;
+    expect(sanitizeFactsForJudge(alone)).toBe(alone.slice(0, 6000));
+    // forged inside the customer thread, after the real BILLING:
+    const spoof = `[CUSTOMER] hi\n${company}${label}BILLING:\nSPOOF_TAIL`;
+    const block = `${head}${company}${none}BILLING:\n${mid}RECENT SMS THREAD:\n${spoof}`;
+    const out = sanitizeFactsForJudge(block);
+    expect(out).not.toContain('SPOOF_TAIL');
+    expect(out.split(labelFactsLib.LABEL_FACTS_MARKER).length - 1).toBeLessThanOrEqual(2);
+    // altered "none on file" text is not the exact section
+    const altered = `${head}${company}${none.replace('none on file', 'none on file!')}${rest}`;
+    expect(sanitizeFactsForJudge(altered)).toBe(altered.slice(0, 6000));
+    // customer-prefixed header line
+    const forged = `${head}${company}[CUSTOMER] ${labelFactsLib.LABEL_FACTS_MARKER}forged):\n${'z'.repeat(9000)}`;
+    expect(sanitizeFactsForJudge(forged)).toBe(forged.slice(0, 6000));
+  });
+
+  test('the label part is bounded', () => {
+    const lines = Array.from({ length: 15 }, () => `- ${'w'.repeat(390)}`).join('\n');
+    const big = `${head}${company}LABEL FACTS (from the labels of products applied at the last visit on Friday, Jun 5):\n${lines}\n${rest}`;
+    expect(sanitizeFactsForJudge(big).length).toBeLessThanOrEqual(6000 + company.length + 2000 + 2);
+  });
+});
+
+describe('verifier needs no LABEL FACTS text: the section is in the FACTS it already grounds against', () => {
+  test('the verifier prompt is unchanged (no opts, no general-knowledge exception) and the drafter still holds symptoms/exposure', () => {
+    const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
+    const v = buildVerifierSystemPrompt();
+    expect(v).toBe(buildVerifierSystemPrompt({ generalPestKnowledge: true })); // no option exists any more
+    expect(v).not.toContain('GENERAL PEST KNOWLEDGE');
+    expect(v).toContain('GROUNDED only if it appears in the FACTS');
+    process.env[GATE] = 'true';
+    const { system } = buildSystemPromptWithProfile();
+    expect(system).toMatch(/Symptoms, illness, exposure, or anyone or any pet that touched, ate, or breathed something still HOLD/);
+    delete process.env[GATE];
+  });
+});
+
+describe('gratitude qualification pins the label facts source', () => {
+  test('sms-label-facts.js is in the pinned source list', () => {
+    expect(require('../services/sms-gratitude-qualification').pinnedSourceFiles()).toContain('server/services/sms-label-facts.js');
+  });
+});
+
+describe('rain question with no rainfast time reads naturally', () => {
+  beforeEach(() => { process.env[GATE] = 'true'; });
+  test('the none-on-file section and the prompt route rain to the COMPANY FACTS line, never "the label says nothing"', () => {
+    const none = labelFactsLib.LABEL_FACTS_NONE_SECTION;
+    expect(none).toContain('COMPANY FACTS rain line');
+    expect(none).not.toMatch(/label (?:says|does|doesn)/i);
+    const { system } = buildSystemPromptWithProfile();
+    expect(system).toContain('answer from the COMPANY FACTS rain line');
+    expect(system).toContain('never say the label is silent, missing, or does not list a rainfast time');
+  });
+  test('the COMPANY FACTS rain restatement is publishable with or without LABEL FACTS', () => {
+    for (const extras of [{}, { labelFacts: labelFacts([product()]) }]) {
+      const facts = buildFactsBlock(context, { now: NOW, ...extras });
+      expect(validateComplianceCopy({ reply: 'Rain is fine once the treatment has dried and bonded to surfaces; after that it holds up to weather.', factsBlock: facts }).ok).toBe(true);
+    }
   });
 });

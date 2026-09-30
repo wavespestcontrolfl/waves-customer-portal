@@ -25,6 +25,26 @@ const logger = require('./logger');
 const { classifyProduct, PRODUCT_FAMILIES } = require('./email-division/visit-products');
 const { applyPerformedVisitHistoryFilter } = require('./pest-pressure/first-visit');
 
+// Every gate-on facts block carries a LABEL FACTS header (sealed-eval contract
+// marker): the full section when the last visit has verified label timing, the
+// "none on file" section otherwise.
+const LABEL_FACTS_MARKER = 'LABEL FACTS (';
+const LABEL_FACTS_NONE_SECTION = `${LABEL_FACTS_MARKER}none on file for the last visit):
+- No product timing is on file for this customer's last visit. Do not state any rainfast, drying or re-entry time. For a rain question, answer from the COMPANY FACTS rain line, plainly, with no mention of the label.
+`;
+// The exact shape of a rendered (non-empty) section header, for the judge's
+// exact-position exemption.
+const LABEL_FACTS_FILLED_HEADER_RE = /^LABEL FACTS \(from the labels of products applied at the last visit on [^()\n]{1,60}\):$/;
+// Structural bounds of a rendered section (shared by the judge exemption and
+// the sealed-eval exact-structure test; 255 is also the Postgres regex
+// repetition ceiling the SQL twin runs under).
+const LABEL_LINE_MAX = 250;
+const LABEL_LINES_MAX = 20;
+const escapeRegex = (t) => String(t).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+// Regex SOURCE (JS + Postgres ARE compatible) of a whole rendered LABEL FACTS
+// section, no leading/trailing newline: the exact "none on file" section, or
+// the exact header shape plus 1..20 bounded "- " lines.
+const LABEL_SECTION_REGEX_SRC = `(?:${escapeRegex(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''))}|LABEL FACTS \\(from the labels of products applied at the last visit on [^()\n]{1,60}\\):(?:\n- [^\n]{1,${LABEL_LINE_MAX}}){1,${LABEL_LINES_MAX}})`;
 const LABEL_FACTS_HEADER_PREFIX = 'LABEL FACTS (from the labels of products applied at the last visit on ';
 const LABEL_FACTS_TIMEOUT_MS = 3000;
 // Rows of the most recent service date (a customer can have a pest and a lawn
@@ -172,7 +192,9 @@ function renderLabelFactsSection(labelFacts, { formatDate, isBanned } = {}) {
     const clauses = [rainfastClause(product.rainfastMinutes), reentryClause(product, isBanned)].filter(Boolean);
     if (!clauses.length) continue;
     const line = `- ${product.phrase}: ${clauses.join('; ')}`;
-    if (!lines.includes(line)) lines.push(line);
+    // An over-long line would fall outside the section's exact structure: drop it (fail closed).
+    if (line.length - 1 > LABEL_LINE_MAX) continue;
+    if (!lines.includes(line) && lines.length < LABEL_LINES_MAX) lines.push(line);
   }
   if (!lines.length) return '';
   const date = (formatDate ? formatDate(labelFacts.serviceDate) : labelFacts.serviceDate) || labelFacts.serviceDate;
@@ -292,6 +314,13 @@ function hasUngroundedRainTime(text, sectionText) {
 }
 
 module.exports = {
+  LABEL_FACTS_MARKER,
+  LABEL_FACTS_FILLED_HEADER_RE,
+  LABEL_LINE_MAX,
+  LABEL_LINES_MAX,
+  LABEL_SECTION_REGEX_SRC,
+  escapeRegex,
+  LABEL_FACTS_NONE_SECTION,
   hasUngroundedRainTime,
   LABEL_FACTS_HEADER_PREFIX,
   LABEL_FACTS_TIMEOUT_MS,

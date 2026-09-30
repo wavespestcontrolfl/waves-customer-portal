@@ -41,8 +41,9 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const {
-  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactSectionSuffix, hasExactCompanyFacts,
+  COMPANY_FACTS_HEADER, BILLING_DELIMITER, exactStructureRegexSource, hasExactCompanyFacts, hasExactLabelFacts,
 } = require('./sms-company-facts');
+const { LABEL_FACTS_MARKER } = require('./sms-label-facts');
 
 const SCHEMA_VERSION = 'sms-sealed-eval.v1';
 
@@ -140,10 +141,14 @@ const CATEGORY_FACT_MARKERS = Object.freeze({ c: 'FREE RE-SERVICE:' });
 // token REQUIRES its marker, and — since the contract is exact — versions
 // without the token FORBID it, so items frozen before the section existed
 // never grade a suffixed version and suffixed items never grade an older one.
-// A future fact section (LABEL FACTS, ...) is one more row here plus its
-// suffix in the drafter's REAL_ANSWERS_PROMPT_VERSION.
+// A future fact section is one more row here plus its suffix in the
+// drafter's REAL_ANSWERS_PROMPT_VERSION. A suffix is CUMULATIVE: '_cfl' (LABEL
+// FACTS) carries the COMPANY FACTS section too. LABEL FACTS can be a required
+// marker because the drafter ALWAYS renders its header gate-on ("none on file"
+// when the last visit has no verified label timing), so its absence always
+// means "frozen before the section existed".
 const REAL_ANSWERS_BASE_VERSION = 'house_voice_v12_real_answers';
-const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: COMPANY_FACTS_HEADER });
+const VERSION_SUFFIX_FACT_MARKERS = Object.freeze({ cf: [COMPANY_FACTS_HEADER], cfl: [COMPANY_FACTS_HEADER, LABEL_FACTS_MARKER] });
 function versionSuffixTokens(promptVersion) {
   const base = String(promptVersion).split('+')[0];
   if (!base.startsWith(REAL_ANSWERS_BASE_VERSION)) return [];
@@ -154,7 +159,7 @@ function requiredFactMarkers(promptVersion) {
   const tags = String(promptVersion).split('+')[1] || '';
   return [
     V12_FACTS_MARKER,
-    ...versionSuffixTokens(promptVersion).map((t) => VERSION_SUFFIX_FACT_MARKERS[t]).filter(Boolean),
+    ...versionSuffixTokens(promptVersion).flatMap((t) => VERSION_SUFFIX_FACT_MARKERS[t] || []),
     ...[...tags].map((t) => CATEGORY_FACT_MARKERS[t]).filter(Boolean),
   ];
 }
@@ -164,7 +169,7 @@ function requiredFactMarkers(promptVersion) {
 // grade the plain v12 prompt after a rollback or switch. Every version has
 // one (Codex #5194 r7 P1): a v11 exam after the gate is rolled back must not
 // replay items frozen with the v12 SLA or category lines either.
-const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...Object.values(VERSION_SUFFIX_FACT_MARKERS), ...Object.values(CATEGORY_FACT_MARKERS)]);
+const CONTRACT_FACT_MARKERS = Object.freeze([V12_FACTS_MARKER, ...new Set(Object.values(VERSION_SUFFIX_FACT_MARKERS).flat()), ...Object.values(CATEGORY_FACT_MARKERS)]);
 function forbiddenFactMarkers(promptVersion) {
   const required = new Set(requiredFactMarkers(promptVersion));
   return CONTRACT_FACT_MARKERS.filter((m) => !required.has(m));
@@ -177,12 +182,15 @@ function contractLabel(promptVersion) {
   const forbidden = forbiddenFactMarkers(promptVersion);
   return [required.length ? `carry ${quote(required)}` : null, forbidden.length ? `lack ${quote(forbidden)}` : null].filter(Boolean).join(' and ');
 }
-// Does a frozen facts block carry this marker? The COMPANY FACTS marker is
-// TRUSTED only by an exact render before the first BILLING: line (a header
-// typed into a multi-line SMS proves nothing — Codex #5392 r3 P2); every other
-// marker is a server-rendered line and stays a substring check.
+// Does a frozen facts block carry this marker? The COMPANY FACTS and LABEL
+// FACTS markers are TRUSTED only by an exact-structure render ahead of the
+// first BILLING: line (a header typed into a multi-line SMS proves nothing —
+// Codex #5392 r3 P2); every other marker is a server-rendered line and stays a
+// substring check.
 function factPresent(facts, marker) {
-  return marker === COMPANY_FACTS_HEADER ? hasExactCompanyFacts(facts) : facts.includes(marker);
+  if (marker === COMPANY_FACTS_HEADER) return hasExactCompanyFacts(facts);
+  if (marker === LABEL_FACTS_MARKER) return hasExactLabelFacts(facts);
+  return facts.includes(marker);
 }
 function itemCompatibleWith(factsBlock, promptVersion) {
   const facts = String(factsBlock || '');
@@ -199,10 +207,11 @@ function compatibleWhereRaw(markers, forbidden = []) {
   const clauses = [];
   const bindings = [];
   const add = (marker, negate) => {
-    if (marker === COMPANY_FACTS_HEADER) {
-      const exact = exactSectionSuffix();
-      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND right(split_part(${col}, ?::text, 1), ?::int) = ?::text)`);
-      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exact.length, exact);
+    if (marker === COMPANY_FACTS_HEADER || marker === LABEL_FACTS_MARKER) {
+      // Exact-structure twin of hasExactCompanyFacts / hasExactLabelFacts: the
+      // text before the first BILLING: line matches the same regex source.
+      clauses.push(`${negate ? 'NOT ' : ''}(position(?::text in ${col}) > 0 AND split_part(${col}, ?::text, 1) ~ ?::text)`);
+      bindings.push(BILLING_DELIMITER, BILLING_DELIMITER, exactStructureRegexSource(marker === LABEL_FACTS_MARKER ? 'required' : 'optional'));
     } else {
       clauses.push(`${col} ${negate ? 'NOT ' : ''}LIKE ?`);
       bindings.push(`%${marker}%`);

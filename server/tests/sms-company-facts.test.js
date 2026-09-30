@@ -26,7 +26,7 @@ const {
   COMPANY_FACTS,
   COMPANY_FACTS_HEADER,
   BILLING_DELIMITER,
-  exactSectionSuffix,
+  exactStructureRegexSource,
   hasExactCompanyFacts,
   renderCompanyFactsSection,
 } = require('../services/sms-company-facts');
@@ -217,8 +217,7 @@ describe('sealed compatibility trusts only the exact rendered section (multi-lin
     const cf = compatibleWhereRaw(requiredFactMarkers(CF), forbiddenFactMarkers(CF));
     expect(cf.sql).toContain('split_part(');
     expect(cf.bindings).not.toContain(`%${COMPANY_FACTS_HEADER}%`);
-    const exact = exactSectionSuffix();
-    expect(cf.bindings).toEqual(expect.arrayContaining([BILLING_DELIMITER, exact, exact.length]));
+    expect(cf.bindings).toEqual(expect.arrayContaining([BILLING_DELIMITER, exactStructureRegexSource('optional')]));
     const old = compatibleWhereRaw(requiredFactMarkers(OLD), forbiddenFactMarkers(OLD));
     expect(old.sql).toMatch(/NOT \(position\(/);
     expect(old.bindings).not.toContain(`%${COMPANY_FACTS_HEADER}%`);

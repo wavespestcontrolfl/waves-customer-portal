@@ -286,7 +286,7 @@ function realAnswersHandoffBullets() {
   if (!gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL')) {
     // Owner ruling 2026-09-30: timing answered from LABEL FACTS is not a
     // chemical/medical concern (the gate itself is unchanged).
-    lines.push('- A question ONLY about timing — when people or pets can go back out, how long until it is dry, will rain wash it off — is NOT a chemical/medical concern when the LABEL FACTS section is in the facts: answer it from LABEL FACTS (see LABEL FACTS below) and do not hand it off. Symptoms, illness, exposure, or anyone or any pet that touched, ate, or breathed something still HOLD for a person. When there is no LABEL FACTS section, a pets/people timing question is held for a person as before.');
+    lines.push('- A question ONLY about timing — when people or pets can go back out, how long until it is dry, will rain wash it off — is NOT a chemical/medical concern when LABEL FACTS lists timing for the visit\'s products: answer it from LABEL FACTS (see LABEL FACTS below) and do not hand it off. Symptoms, illness, exposure, or anyone or any pet that touched, ate, or breathed something still HOLD for a person. When LABEL FACTS says none is on file, a pets/people timing question is held for a person as before, while a rain-only question is answered from the COMPANY FACTS rain line.');
   }
   lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
   return lines.join('\n');
@@ -562,13 +562,15 @@ async function fetchLabelFacts({ customerId } = {}) {
 }
 
 function renderLabelFactsSection(labelFacts) {
+  // Always a header gate-on (sealed-eval contract marker for '_cfl'): the
+  // "none on file" section when there is no verified label timing to state.
   return labelFactsLib.renderLabelFactsSection(labelFacts, {
     formatDate: formatEtDate,
     // Each timing clause screens against the compliance guard with ITSELF as
     // grounding, so a label sentence that would be unpublishable (a "safe"
     // claim, an unparseable number) never reaches the facts block.
     isBanned: (clause) => hasBannedCustomerCopy(clause, { labelFactsText: `- product: ${clause}`, rainTimeGuard: true }),
-  });
+  }) || labelFactsLib.LABEL_FACTS_NONE_SECTION;
 }
 
 // The rendered fact line, and its reader. One line, fixed wording, so the
@@ -1453,7 +1455,7 @@ COMPANY FACTS:
 
 LABEL FACTS (product timing from the label):
 - When a LABEL FACTS section is in the context block it lists, for the visit named in its header, each product applied and that product's own label rainfast time and re-entry wording. You may answer "will rain wash it off", "how long until it's dry", and "when can the kids or pets go back out" from it — and ONLY from it. Quote a time exactly as written there: the number as digits, the same unit, never spelled out, rounded, converted, added, or stretched. A rainfast time answers only rain questions; a re-entry time answers only re-entry questions. Describe the product only as the section does — never a brand name. "Until dry" (as the section words it) is a complete answer.
-- With no LABEL FACTS line covering it, never state any number of minutes or hours for drying, rainfast, or re-entry. For rain with no rainfast time listed, use the COMPANY FACTS rain line.
+- With no LABEL FACTS line covering it, never state any number of minutes or hours for drying, rainfast, or re-entry. For a rain question with no rainfast time listed (or with LABEL FACTS saying none is on file), answer from the COMPANY FACTS rain line — a treatment needs to dry and bond to surfaces, and after that it holds up to weather — plainly, as your own knowledge of how we work; never say the label is silent, missing, or does not list a rainfast time.
 - Never call a treatment safe, pet-safe, kid-safe, or non-toxic, and never say EPA-approved or "safe for" anyone — LABEL FACTS gives timing, not safety claims. A question about symptoms, illness, or exposure is not a timing question: it stays with a person.
 `
     : '';
