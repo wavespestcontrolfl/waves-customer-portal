@@ -15,6 +15,7 @@ router.use(authenticate);
 // page in the same week. The GBP URLs now come from WAVES_LOCATIONS, so a
 // profile-link change lands everywhere at once.
 const { resolveReviewLocation } = require('../config/locations');
+const { etDateString, addETDays } = require('../utils/datetime-et');
 const { visitAnchor, reviewLinkClickedSince } = require('../services/review-click-guard');
 
 // =========================================================================
@@ -42,9 +43,6 @@ router.get('/review-card', async (req, res, next) => {
       return res.json({ card: null });
     }
 
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-
     // Saved-property scope (GATE_APP_PROPERTY_SCOPE): the card renders on Home,
     // which follows the selected house — a visit at another saved property must
     // not be offered from this house's dashboard (GitHub codex r5 P1). Every
@@ -60,7 +58,9 @@ router.get('/review-card', async (req, res, next) => {
     // completed appointment can exist with no service record, and an older
     // record must not mask a newer record-less visit. Same-day ties go to the
     // later completion instant (the click guard's anchor), unknown last.
-    const windowStart = sevenDaysAgo.toISOString().split('T')[0];
+    // Seven ET calendar days back (the UTC calendar hides the card a day early
+    // between 8 p.m. and midnight ET).
+    const windowStart = etDateString(addETDays(new Date(), -7));
     let recordQuery = db('service_records')
       .where({ 'service_records.customer_id': req.customerId, 'service_records.status': 'completed' })
       .where('service_records.service_date', '>=', windowStart)

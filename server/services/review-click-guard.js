@@ -53,14 +53,27 @@ function instantOrMidnight(instant, date) {
   }
   return etMidnight(date);
 }
-const recordInstant = (row) => instantOrMidnight(row?.ended_at, row?.service_date);
-const scheduledInstant = (row) => instantOrMidnight(row?.actual_end_time || row?.check_out_time || row?.completed_at, row?.scheduled_date);
+const scheduledEnd = (row) => row?.actual_end_time || row?.check_out_time || row?.completed_at || null;
+// A completed record with no ended_at (pest-recap creates these, linked by
+// scheduled_service_id) takes its linked visit's completion instant before the
+// date fallback.
+async function recordAnchor(row, database) {
+  if (!row) return null;
+  if (row.ended_at) return instantOrMidnight(row.ended_at, row.service_date);
+  if (row.scheduled_service_id) {
+    const visit = await database('scheduled_services').where({ id: row.scheduled_service_id })
+      .first('actual_end_time', 'check_out_time', 'completed_at');
+    if (scheduledEnd(visit)) return instantOrMidnight(scheduledEnd(visit), row.service_date);
+  }
+  return etMidnight(row.service_date);
+}
+const scheduledInstant = (row) => instantOrMidnight(scheduledEnd(row), row?.scheduled_date);
 
 // The visit a review ask belongs to, as a completion instant (or ET midnight), or null.
 async function visitAnchor({ serviceRecordId = null, scheduledServiceId = null } = {}, database = db) {
   if (serviceRecordId) {
-    const row = await database('service_records').where({ id: serviceRecordId }).first('service_date', 'ended_at');
-    const anchor = recordInstant(row);
+    const row = await database('service_records').where({ id: serviceRecordId }).first('service_date', 'ended_at', 'scheduled_service_id');
+    const anchor = await recordAnchor(row, database);
     if (anchor) return anchor;
   }
   if (scheduledServiceId) {
@@ -96,14 +109,14 @@ async function newestCompletedVisitAnchor(customerId, database = db) {
   const [record, visit] = await Promise.all([
     database('service_records').where({ customer_id: customerId, status: 'completed' })
       .orderBy('service_date', 'desc').orderByRaw('ended_at DESC NULLS LAST')
-      .first('service_date', 'ended_at'),
+      .first('service_date', 'ended_at', 'scheduled_service_id'),
     database('scheduled_services').where({ customer_id: customerId, status: 'completed' })
       // Same-day ties by the SAME instant scheduledInstant() reads (actual end,
       // then check-out, then completed_at), so the later visit always wins.
       .orderBy('scheduled_date', 'desc').orderByRaw('COALESCE(actual_end_time, check_out_time, completed_at) DESC NULLS LAST')
       .first('scheduled_date', 'actual_end_time', 'check_out_time', 'completed_at'),
   ]);
-  const dates = [recordInstant(record), scheduledInstant(visit)].filter(Boolean);
+  const dates = [await recordAnchor(record, database), scheduledInstant(visit)].filter(Boolean);
   return dates.length ? new Date(Math.max(...dates.map((d) => d.getTime()))) : null;
 }
 

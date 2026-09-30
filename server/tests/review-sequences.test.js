@@ -7137,6 +7137,22 @@ describe('send-time click guard (services/review-click-guard.js)', () => {
       expect(await sent(noStamp, clickAt(new Date(at('04:00').getTime() - 1)), 'rec-a')).toBe(1); // 11:59 PM ET the evening before
     });
 
+    test('a completed record with NO ended_at takes its LINKED scheduled visit\'s completion instant before the date fallback: a morning click before check-out does not suppress, one after does', async () => {
+      const rec = [{ id: 'rec-a', customer_id: 'clk-1', status: 'completed', service_date: day, scheduled_service_id: 'ss-r' }];
+      const withVisit = () => makeMock({
+        customers: [customer], service_records: rec,
+        scheduled_services: [{ id: 'ss-r', customer_id: 'clk-1', status: 'completed', scheduled_date: day, check_out_time: at('20:00') }], // 4 PM ET
+        review_requests: [], sms_log: [],
+      });
+      for (const [clickWhen, expected] of [[at('12:00'), 1], [at('21:00'), 0]]) {
+        const mock = withVisit();
+        mock.__state.rows.review_requests.push(clickAt(clickWhen), queuedAsk({ id: 'rr-a', service_record_id: 'rec-a', created_at: new Date() }));
+        db.mockImplementation(mock);
+        mockSendCustomerMessage.mockClear();
+        expect((await ReviewService.processScheduled()).sent).toBe(expected);
+      }
+    });
+
     test('a scheduled visit anchors at its check-out / completion stamp', async () => {
       const mock = makeMock({
         customers: [customer],

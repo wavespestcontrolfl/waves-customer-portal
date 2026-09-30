@@ -123,6 +123,19 @@ describe('GET /satisfaction/review-card — the card follows the selected house'
     expect(await res.json()).toEqual({ card: null, propertyScope: expect.objectContaining({ closed: true }) });
     expect(db).not.toHaveBeenCalled();
   });
+  test('the 7-day window is 7 ET calendar days: at 9 PM ET on Sep 28 (already Sep 29 UTC) the cutoff is Sep 21, not Sep 22, for BOTH visit sources', async () => {
+    global.__SCOPE__ = OFF;
+    jest.useFakeTimers({ now: new Date('2026-09-29T01:00:00Z'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask', 'performance', 'hrtime'] });
+    try {
+      const res = await fetch(`${base}/satisfaction/review-card`);
+      expect(res.status).toBe(200);
+    } finally { jest.useRealTimers(); }
+    const cutoffs = db.mock.calls.map((c, i) => [c[0], db.mock.results[i].value])
+      .filter(([t]) => t === 'service_records' || t === 'scheduled_services')
+      .map(([t, c]) => [t, c.calls.filter((k) => k[0] === 'where' && k[2] === '>=').map((k) => k[3])]);
+    expect(cutoffs).toEqual([['service_records', ['2026-09-21']], ['scheduled_services', ['2026-09-21']]]);
+  });
+
   test('the record-less fallback (completed scheduled visit) carries the SAME property predicate and 7-day window', async () => {
     global.__SCOPE__ = SECONDARY;
     const res = await fetch(`${base}/satisfaction/review-card`);

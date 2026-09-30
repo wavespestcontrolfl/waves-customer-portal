@@ -11661,7 +11661,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (shouldBundleReview) {
       try {
         const ReviewService = require('../services/review-request');
-        const inlineReview = await ReviewService.createInline({
+        // Send-time click guard: a customer who already tapped a tracked review
+        // link since this visit (say, from the portal card) gets NO new
+        // solicitation bundled into the completion text. Nothing is minted; the
+        // completion message itself still goes out below without a review URL.
+        const clickedSinceVisit = await require('../services/review-click-guard')
+          .touchSuppressedByClick(svc.customer_id, { serviceRecordId: record.id, scheduledServiceId: svc.id });
+        const inlineReview = clickedSinceVisit ? null : await ReviewService.createInline({
           customerId: svc.customer_id,
           serviceRecordId: record.id,
         });

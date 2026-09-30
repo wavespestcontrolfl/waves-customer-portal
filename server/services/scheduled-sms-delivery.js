@@ -195,8 +195,19 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
     }
   };
   if (!reviewAsk) return dispatch();
-  const result = await dispatchReviewAsk(msg.customer_id, dispatch);
-  if (!['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'].includes(result?.code)) return result;
+  // A bundled completion text whose customer has since tapped a tracked review
+  // link (send-time click guard) loses only its review suffix: the completion
+  // message itself always goes out. Same suffix strip as the spacing hold below.
+  let clicked = false;
+  if (meta.entry_point === 'dispatch_completion_deferred' && meta.bundled_review_request_id) {
+    try {
+      const ask = await db('review_requests').where({ id: meta.bundled_review_request_id })
+        .first('id', 'customer_id', 'service_record_id', 'scheduled_service_id', 'created_at', 'template_key');
+      clicked = Boolean(ask) && await require('./review-click-guard').askSuppressedByClick(ask);
+    } catch { clicked = false; /* unreadable: the existing path decides */ }
+  }
+  let result = clicked ? {} : await dispatchReviewAsk(msg.customer_id, dispatch);
+  if (!clicked && !['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'].includes(result?.code)) return result;
   // Completion delivery must not wait behind its optional review invitation.
   // Remove only the exact suffix we generated, preserving every receipt,
   // invoice and report link. Persist body and linkage together before send.
@@ -234,7 +245,7 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
         await trx('review_requests')
           .where({ id: bundledReviewRequestId, status: 'pending' })
           .whereNull('sms_sent_at')
-          .update({ scheduled_for: reviewRetryAt });
+          .update(clicked ? { status: 'suppressed', scheduled_for: null } : { scheduled_for: reviewRetryAt });
         if (priorReservationPending) {
           await reserveForRequest({
             trx,
@@ -257,6 +268,11 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
       reviewAsk = false;
       return dispatch();
     }
+  }
+  // A click with a suffix that cannot be stripped: fall back to the ordinary path.
+  if (clicked) {
+    result = await dispatchReviewAsk(msg.customer_id, dispatch);
+    if (!['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'].includes(result?.code)) return result;
   }
   // These are pre-provider holds, not failed delivery attempts. Refund the
   // claim's attempt and retain the existing metadata/finalization contract.

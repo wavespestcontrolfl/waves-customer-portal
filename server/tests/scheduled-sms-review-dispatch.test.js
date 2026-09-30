@@ -17,6 +17,7 @@ jest.mock('../utils/cron-lock', () => ({
 jest.mock('../services/messaging/deferred-replay-registry', () => ({
   requiresDurableFinalize: entry => ['durable-test', 'invoice_send_deferred'].includes(entry),
 }));
+jest.mock('../services/review-click-guard', () => ({ askSuppressedByClick: jest.fn(async () => false) }));
 const db = require('../models/db');
 const history = require('../services/review-ask-history');
 const { dispatchScheduledSms } = require('../services/scheduled-sms-delivery');
@@ -302,6 +303,26 @@ test.each(['recent', 'history', 'busy'])('completion durably arms its stripped r
   expect(updates.at(-1).patch.metadata.sql).not.toContain('review_ask_delivered_at');
   expect(await require('../services/dispatch-completion-deferred').finalizeDeferredCompletionSend(meta)).toEqual({ ok: true });
   expect(reviewRequest).toMatchObject({ status: 'pending', sms_sent_at: null, scheduled_for: new Date(expectedRetryMs) });
+});
+
+test('a tracked click since the visit drops ONLY the bundled review suffix: the completion text still sends, and the ask is suppressed, not re-armed', async () => {
+  const completion = 'Your service is complete: https://portal.test/report/abc\nReceipt: https://portal.test/receipt/xyz';
+  row.message_body = completion + '\n\nEnjoyed the service? A quick review means the world: https://portal.test/rate/review1';
+  row.metadata.entry_point = 'dispatch_completion_deferred';
+  row.metadata.bundled_review_request_id = 'review-1';
+  providerRow = { id: 'review-1', customer_id: 'customer-1', service_record_id: 'rec-1', created_at: new Date() };
+  require('../services/review-click-guard').askSuppressedByClick.mockResolvedValueOnce(true);
+  const meta = row.metadata;
+  const send = jest.fn(async () => {
+    expect(row.message_body).toBe(completion);
+    expect(row.message_body).not.toMatch(/portal\.test\/rate|quick review/);
+    return { sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SM-completion' };
+  });
+  expect(await dispatchScheduledSms(row, meta, send, 'service_complete')).toMatchObject({ sent: true });
+  expect(send).toHaveBeenCalledTimes(1);
+  expect(reviewUpdates).toEqual([{ status: 'suppressed', scheduled_for: null }]);
+  expect(reviewRequest).toMatchObject({ id: 'review-1', status: 'suppressed', scheduled_for: null });
+  expect(history.lastDeliveredAskAt).not.toHaveBeenCalled(); // no review-ask spacing dispatch: it is not an ask anymore
 });
 
 test('an unpersisted completion rewrite never dispatches a stale bundled ask', async () => {
