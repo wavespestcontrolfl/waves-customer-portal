@@ -167,21 +167,26 @@ describe('push-open: one fire-and-forget beacon, nothing parked or replayed', ()
 });
 
 describe('foreground heartbeat', () => {
-  it('posts to the lightweight endpoint and holds a five-minute floor', () => {
+  it('probes every minute and leaves the write throttle to the server', () => {
+    // A probe the server throttled must not defer the next one (#5335): after
+    // a stamp at T0 the T+1..T+4 probes are no-ops server-side, and the T+5
+    // probe is the one that writes.
+    for (let m = 0; m <= 5; m += 1) reportPortalHeartbeat(1_000 + m * 60_000);
+    expect(beacon).toHaveBeenCalledTimes(6);
+    expect(new Set(beacon.mock.calls.map((c) => c[0]))).toEqual(new Set(['/customer/activity/heartbeat']));
+  });
+
+  it('only guards against a burst', () => {
     reportPortalHeartbeat(1_000);
-    reportPortalHeartbeat(1_000 + 4 * 60_000);
-    reportPortalHeartbeat(1_000 + 5 * 60_000 + 1);
-    expect(beacon.mock.calls.map((c) => c[0])).toEqual(['/customer/activity/heartbeat', '/customer/activity/heartbeat']);
+    reportPortalHeartbeat(1_000 + 10_000);
+    reportPortalHeartbeat(1_000 + 30_000);
+    expect(beacon).toHaveBeenCalledTimes(2);
   });
 
   it('a page view never defers the heartbeat, and a heartbeat never posts a page view', () => {
-    // The server may have throttled the page view's last_seen_at stamp, so
-    // the heartbeat keeps its own 5-minute floor regardless (#5335).
     reportPortalPageView('visits', 1_000);
     reportPortalHeartbeat(1_000 + 60_000);
     expect(beacon.mock.calls.map((c) => c[0])).toEqual(['/customer/activity/page-view', '/customer/activity/heartbeat']);
-    reportPortalHeartbeat(1_000 + 2 * 60_000); // inside the heartbeat's own floor
-    expect(beacon).toHaveBeenCalledTimes(2);
   });
 
   it('stops for the session when the gate is dark', async () => {

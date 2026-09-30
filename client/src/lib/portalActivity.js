@@ -23,10 +23,12 @@ const HEARTBEAT_PATH = '/customer/activity/heartbeat';
 // the same page session.
 export const RESEND_SAME_ROUTE_MS = 10 * 60 * 1000;
 
-// Foreground heartbeat: stamps last_seen_at only (no page-view row), at most
-// this often per signed-in identity. The page-view beacon also stamps
-// last_seen_at, so it counts as a heartbeat for this throttle.
-const HEARTBEAT_MIN_INTERVAL_MS = 5 * 60 * 1000;
+// Foreground heartbeat: stamps last_seen_at only (no page-view row). The write
+// throttle is the SERVER's (the UPDATE's WHERE clause); the client only guards
+// against a burst. It must stay well under the hook's one-minute probe, or a
+// probe the server throttled would defer the next one past the server's window
+// and leave an active customer looking stale (#5335).
+const HEARTBEAT_BURST_GUARD_MS = 30 * 1000;
 
 let serverDisabled = false;
 const lastSent = new Map();
@@ -84,15 +86,16 @@ export function reportPortalPageView(route, now = Date.now()) {
 
 /**
  * Keep last_seen_at fresh during a long visible session. The caller (the
- * portal hook) only calls this while the page is visible AND the customer has
- * interacted recently; this enforces the 5-minute floor. Hits a lightweight
- * endpoint that only stamps last_seen_at, so it never adds a tab-view row.
+ * portal hook) probes once a minute, only while the page is visible AND the
+ * customer has interacted recently; the server decides whether each probe
+ * writes (a throttled probe is one no-op UPDATE). Hits a lightweight endpoint
+ * that only stamps last_seen_at, so it never adds a tab-view row.
  */
 export function reportPortalHeartbeat(now = Date.now()) {
   if (serverDisabled) return;
   const key = `${currentIdentityKey()}|heartbeat`;
   const previous = lastSent.get(key);
-  if (previous !== undefined && now - previous < HEARTBEAT_MIN_INTERVAL_MS) return;
+  if (previous !== undefined && now - previous < HEARTBEAT_BURST_GUARD_MS) return;
   lastSent.set(key, now);
   void post(HEARTBEAT_PATH, {});
 }

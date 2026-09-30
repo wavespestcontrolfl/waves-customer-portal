@@ -3,8 +3,8 @@ import { reportPortalHeartbeat, reportPortalPageView } from '../lib/portalActivi
 
 const DEBOUNCE_MS = 800;
 // Foreground heartbeat: every minute, if the page is visible and the customer
-// touched it in the last IDLE_MS, ask the lib to stamp last_seen_at (the lib
-// holds the 5-minute floor). Hidden or idle sends nothing.
+// touched it in the last IDLE_MS, probe the server, which throttles the
+// last_seen_at write itself. Hidden or idle sends nothing.
 const HEARTBEAT_CHECK_MS = 60 * 1000;
 const IDLE_MS = 5 * 60 * 1000;
 const INTERACTION_EVENTS = ['pointerdown', 'keydown', 'scroll', 'touchstart'];
