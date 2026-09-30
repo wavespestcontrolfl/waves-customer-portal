@@ -311,6 +311,10 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
     seedHeld([lawnVisit('l1', daysOut(5), { track_state: 'en_route' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
     await applyHoldSkips([held()]);
     expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ skipped: ['l2'], unresolved: ['l1'], skipsFinal: false });
+    // A visit whose STATUS says underway is live too, never "ended".
+    seedHeld([lawnVisit('l1', daysOut(5), { status: 'on_site' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held()]);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ unresolved: ['l1'], skipsFinal: false });
 
     mockTransition.mockClear();
     seedHeld([lawnVisit('l1', daysOut(5), { status: 'completed' }), lawnVisit('l2', daysOut(12), { status: 'cancelled' })]);

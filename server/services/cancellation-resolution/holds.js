@@ -443,6 +443,8 @@ async function applyHoldSkips(holdResults) {
           // Idempotent: a recovery pass re-offers visits a crashed accept
           // may already have skipped.
           if (row && row.status === 'skipped') return 'skipped';
+          // Underway is not ended: the office hears, and the plan stays open.
+          if (row && ['en_route', 'on_site'].includes(row.status)) return 'live';
           // A visit that has ended (completed, cancelled, …) or become a
           // rebook placeholder is no longer bookable: nothing to skip.
           if (!row || row.status === 'rescheduled' || !CANCELLABLE_STATUSES.includes(row.status)) return 'gone';
