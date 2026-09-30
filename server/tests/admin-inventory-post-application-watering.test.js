@@ -159,6 +159,19 @@ describe('audit trail (local audit P1 on #5393)', () => {
     });
     expect(call.metadata.before).toBeNull();
     expect(call.metadata.after).toMatchObject({ mode: 'hold', hold_hours: 12, source: 'owner', verified_by: 'Owner' });
+    // Inside the PUT transaction the audit is critical (commits or rolls back
+    // with the catalog save); the PATCH path runs outside one and only warns.
+    expect(call.critical === true).toBe(method === 'PUT');
+    expect(Boolean(call.trx)).toBe(method === 'PUT');
+  });
+
+  test('PUT: a failed audit insert fails the save instead of being swallowed inside the transaction', async () => {
+    wire();
+    recordAuditEvent.mockImplementationOnce(async () => { throw new Error('audit down'); });
+    await withServer(async (base) => {
+      const res = await send(base, 'PUT', `/${PRODUCT}`, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
+      expect(res.status).toBe(500);
+    });
   });
 
   test('a save that does not mention the field records nothing', async () => {

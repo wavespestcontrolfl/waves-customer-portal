@@ -3337,9 +3337,13 @@ async function auditWateringRuleChange(req, product, wateringPatch, trx = null) 
   const before = product?.post_application_watering ?? null;
   const beforeText = before == null ? null : (typeof before === 'string' ? before : JSON.stringify(before));
   if (beforeText === (wateringPatch.value ?? null)) return;
-  try {
-    const { recordAuditEvent } = require('../services/audit-log');
-    await recordAuditEvent({
+  // Inside a transaction the audit row is critical: a swallowed insert
+  // failure would abort the Postgres transaction and lose the catalog save
+  // while the route still returned 200, so the audit and the update commit
+  // or roll back together. Outside a transaction (PATCH) a failed audit only
+  // warns; the row is already saved.
+  const { recordAuditEvent } = require('../services/audit-log');
+  const event = (extra) => ({
       actor_type: 'technician',
       actor_id: req.technicianId || null,
       action: 'products_catalog.post_application_watering.updated',
@@ -3352,7 +3356,11 @@ async function auditWateringRuleChange(req, product, wateringPatch, trx = null) 
         actor_name: req.technician?.name || null,
       },
       trx,
+      ...extra,
     });
+  if (trx) return recordAuditEvent(event({ critical: true }));
+  try {
+    await recordAuditEvent(event({}));
   } catch (err) {
     logger?.warn?.(`[admin-inventory] watering-rule audit failed: ${err.message}`);
   }
