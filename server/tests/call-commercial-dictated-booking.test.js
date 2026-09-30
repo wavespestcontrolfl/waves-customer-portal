@@ -301,7 +301,13 @@ describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
       const c = acceptShape(acceptText, lines);
       return grounded(c.ex, c.transcript);
     };
-    expect(restate('Yes, two in the afternoon works for us.').ok).toBe(true);
+    expect(restate('Yes, at two in the afternoon works for us.').ok).toBe(true);
+    expect(restate('Yes, Thursday at two in the afternoon works for us.').ok).toBe(true);
+    // A quote cut from a sentence that says the minutes (the pre-push reproduction).
+    const cut = acceptShape('Yes, Thursday at two', [`Agent: ${COMMIT}`, 'Caller: Yes, Thursday at two thirty works for us.']);
+    expect(grounded(cut.ex, cut.transcript).ok).toBe(false);
+    const bound = acceptShape('Yes, Thursday by two', [`Agent: ${COMMIT}`, 'Caller: Yes, Thursday by two works for us.']);
+    expect(grounded(bound.ex, bound.transcript).ok).toBe(false);
     expect(restate('Yes, two in the morning works for us.').ok).toBe(false);
     expect(restate('Yes, Thursday at two thirty works for us.').ok).toBe(false);
     expect(restate('Yes, Friday at two works for us.').ok).toBe(false);
@@ -313,8 +319,8 @@ describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
     c.transcript = c.transcript.replace('We will see you at two.', 'We will see you at two in the afternoon.').replace(`Caller: ${SURE}`, 'Caller: Yes, two in the morning works for us.');
     c.ex.evidence = c.ex.evidence.map((e) => (e.field_path === '/scheduling/caller_accepted_slot' ? { ...e, quote: 'Yes, two in the morning works for us' } : { ...e, quote: e.quote === 'We will see you at two' ? 'We will see you at two in the afternoon' : e.quote }));
     expect(grounded(c.ex, c.transcript).ok).toBe(false);
-    c.transcript = c.transcript.replace('two in the morning', 'two in the afternoon');
-    c.ex.evidence = c.ex.evidence.map((e) => (e.field_path === '/scheduling/caller_accepted_slot' ? { ...e, quote: 'Yes, two in the afternoon works for us' } : e));
+    c.transcript = c.transcript.replace('two in the morning', 'at two in the afternoon');
+    c.ex.evidence = c.ex.evidence.map((e) => (e.field_path === '/scheduling/caller_accepted_slot' ? { ...e, quote: 'Yes, at two in the afternoon works for us' } : e));
     expect(grounded(c.ex, c.transcript)).toMatchObject({ ok: true });
   });
 

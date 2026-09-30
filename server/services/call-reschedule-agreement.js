@@ -940,9 +940,9 @@ function earlierDayNames(turns, beforeIdx, slotDate, started) {
 // the slot words, one hour with an exact lead and tail, no alternative and no
 // other number or hour word (hourExactIn, with the period words attached to
 // the hour when they were said).
-function proposalIsExact(turn, words) {
+function proposalIsExact(turn, words, relative = false) {
   const hour = typeof words.period === 'string' ? `${words.hour} ${words.period}` : words.hour;
-  return hourExactIn(turn.raw, { day: words.day, hour }, true, false);
+  return hourExactIn(turn.raw, { day: words.day, hour }, true, relative);
 }
 
 // A caller's acceptance that restates the hour must state THIS slot: the hour
@@ -950,12 +950,17 @@ function proposalIsExact(turn, words) {
 // accepts 2 PM), no alternative, and no day beyond the recorded day words.
 // The same reading commitsToSlot applies to staff's commitment quote.
 function acceptanceStatesSlot(quote, words, hour24, turns, relative) {
-  if (!holds(quote, words.hour) || !periodIsTheHours(quote, { ...words, period: null })) return false;
   const around = sentencesHolding(turns, quote);
+  // Minutes and the hour's own words are read in the sentences the quote sits
+  // in, never the quote alone ("Yes, Thursday at two" cut from "... at two
+  // thirty works" states 2:30).
+  if (!holds(quote, words.hour) || !periodIsTheHours(around, { ...words, period: null })) return false;
   const otherDays = typeof words.day === 'string' ? padded(around).replace(padded(normalize(words.day)), ' ') : around;
-  const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
   return !/ (?:or|either) /.test(padded(around)) && !namesAnyDay(otherDays)
-    && (!unstatedHour || saidExactly(quote, words, turns, relative))
+    // The whole turn says one exact hour (an exact lead and tail, no bound,
+    // alternative or other hour), whether or not a period was said.
+    && turnsHolding(turns, quote, 'caller').every((turn) => proposalIsExact(turn, words, relative)
+      || hourExactIn(turn.raw, { day: words.day, hour: words.hour }, true, relative))
     && halvesSaid(around).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
 }
 
