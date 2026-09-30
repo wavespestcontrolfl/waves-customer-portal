@@ -2762,16 +2762,32 @@ describe('collections_flags merge (codex 2026-08-15 r6)', () => {
     expect(result).toMatch(/promoted 1/);
   });
 
-  it('winner DISPUTE hold + loser fallback hold: winner row untouched, loser released', async () => {
+  it('winner DISPUTE hold + loser fallback hold: the loser fallback rides in the surviving dispute\'s trailer, loser released', async () => {
     const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { priorHoldReasonOf } = require('../services/collections/collection-hold');
     const { trx, updates } = collisionTrx({
       loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
       winnerRow: { id: 'W1', reason: 'dispute raised on call' },
     });
     const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
-    expect(updates.find((u) => u.rowId === 'W1')).toBeUndefined();
+    const carry = updates.find((u) => u.rowId === 'W1');
+    expect(carry.patch.reason).toBe('dispute raised on call [earlier hold: wrong-party answer could not be filed]');
+    // releasing that dispute later restores the fallback (collection-hold-admin)
+    expect(priorHoldReasonOf(carry.patch.reason)).toEqual({ prior: 'wrong-party answer could not be filed' });
     expect(updates.find((u) => u.rowId === 'L1').patch.released_at).toBe('CURRENT_TIMESTAMP');
+    expect(result).toMatch(/carried 1/);
     expect(result).not.toMatch(/promoted/);
+  });
+
+  it('winner dispute that already has its own fallback trailer + loser fallback: winner untouched', async () => {
+    const { repointFlagsReleaseCollisions } = dedupe._test;
+    const { trx, updates } = collisionTrx({
+      loserRow: { id: 'L1', flag: 'collection_hold', reason: 'wrong-party answer could not be filed', released_at: null },
+      winnerRow: { id: 'W1', reason: 'dispute raised on call [earlier hold: wrong-number report]' },
+    });
+    const result = await repointFlagsReleaseCollisions(trx, 'collections_flags', 'customer_id', 'W', 'L');
+    expect(updates.find((u) => u.rowId === 'W1')).toBeUndefined();
+    expect(result).not.toMatch(/carried \d|promoted \d/);
   });
 
   it('both DISPUTE holds, or a non-hold flag collision: no promotion', async () => {

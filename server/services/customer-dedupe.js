@@ -24,7 +24,7 @@
 const db = require('../models/db');
 const { savepointRead: ledgerReferenceRead } = require('../utils/savepoint-read');
 const logger = require('./logger');
-const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason } = require('./collections/collection-hold');
+const { HOLD_FLAG, isDisputeHoldReason, embedPriorHoldReason, withoutPriorHoldReason, priorHoldReasonOf } = require('./collections/collection-hold');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { BILLING_DELIVERY_FIELDS, mergedBillingChannelUpdates } = require('./billing-delivery-channels');
 
@@ -947,13 +947,16 @@ async function repointWeekPlansKeepAvailable(trx, table, column, winnerId, loser
 // loser's colliding row is a dispute hold, releasing the loser's copy would
 // silently drop the dispute stop — so the winner's surviving row is promoted
 // to the dispute reason first (its who/when history stays; the prior reason is
-// appended for the record). The reverse (winner dispute, loser fallback) needs
-// nothing: the winner's dispute row survives.
+// kept in the trailer). The reverse (winner dispute, loser fallback) carries the
+// loser's fallback into the surviving dispute's trailer the same way: the loser's
+// row is released, so without it releasing that dispute would drop the outreach
+// block the fallback carried. A winner dispute that already has a trailer keeps its own.
 async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loserId) {
   const rows = await trx(table).where(column, loserId).select('id', 'flag', 'reason', 'released_at');
   let moved = 0;
   let released = 0;
   let promoted = 0;
+  let carried = 0;
   for (const { id, flag, reason, released_at: releasedAt } of rows) {
     try {
       await trx.transaction(async (sp) => {
@@ -962,23 +965,34 @@ async function repointFlagsReleaseCollisions(trx, table, column, winnerId, loser
       moved += 1;
     } catch (e) {
       if (!(e && e.code === '23505')) throw e;
-      if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null && isDisputeHoldReason(reason)) {
+      if (table === 'collections_flags' && flag === HOLD_FLAG && releasedAt == null) {
         const winnerRow = await trx(table).where({ [column]: winnerId, flag: HOLD_FLAG }).whereNull('released_at').first('id', 'reason');
-        if (winnerRow && !isDisputeHoldReason(winnerRow.reason)) {
+        if (winnerRow) {
           // Same trailer placeDisputeHold writes: releasing the dispute restores the
-          // winner's fallback hold (collection-hold-admin) instead of dropping it.
-          // A loser dispute that itself carries a trailer keeps only the winner's.
-          await trx(table).where({ id: winnerRow.id }).update({
-            reason: embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason),
-          });
-          promoted += 1;
+          // fallback hold (collection-hold-admin) instead of dropping its outreach block.
+          if (isDisputeHoldReason(reason) && !isDisputeHoldReason(winnerRow.reason)) {
+            // Loser dispute over the winner's fallback: the winner's row is promoted to the
+            // dispute (a loser dispute that itself carries a trailer keeps only the winner's).
+            await trx(table).where({ id: winnerRow.id }).update({
+              reason: embedPriorHoldReason(withoutPriorHoldReason(String(reason).trim()), winnerRow.reason),
+            });
+            promoted += 1;
+          } else if (!isDisputeHoldReason(reason) && isDisputeHoldReason(winnerRow.reason) && !priorHoldReasonOf(winnerRow.reason)) {
+            // Winner's plain dispute + loser's fallback: the loser's row is released below, so
+            // its fallback rides in the surviving dispute's trailer or releasing that dispute
+            // would drop the outreach block the fallback carried.
+            await trx(table).where({ id: winnerRow.id }).update({
+              reason: embedPriorHoldReason(winnerRow.reason, reason),
+            });
+            carried += 1;
+          }
         }
       }
       await trx(table).where({ id }).update({ [column]: winnerId, released_at: trx.fn.now() });
       released += 1;
     }
   }
-  return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}`;
+  return `moved ${moved}, released ${released} (winner already carried the active flag)${promoted ? `, promoted ${promoted} winner hold(s) to the dispute reason` : ''}${carried ? `, carried ${carried} fallback hold(s) into the surviving dispute` : ''}`;
 }
 
 const UNIQUE_COLLISION_HANDLERS = {

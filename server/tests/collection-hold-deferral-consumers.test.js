@@ -42,6 +42,18 @@ describe('isNeverAttemptedHoldDeferral', () => {
     expect(isNeverAttemptedHoldDeferral(holdRow({ retry_count: null }))).toBe(true);
   });
 
+  // Once the retry sweep collects it, the placeholder is left failed + disarmed + superseded by
+  // the retry's own paid row: still not a failure (Codex #5394).
+  test('a placeholder COLLECTED by the retry sweep (superseded by another row) is still a placeholder', () => {
+    const collected = holdRow({ id: 'pl-1', retry_count: 1, next_retry_at: null, superseded_by_payment_id: 'paid-1' });
+    expect(isNeverAttemptedHoldDeferral(collected)).toBe(true);
+    // the orphan-charge marker (superseded by its OWN id) and an unreplaced disarmed row stay visible
+    expect(isNeverAttemptedHoldDeferral({ ...collected, superseded_by_payment_id: 'pl-1' })).toBe(false);
+    expect(isNeverAttemptedHoldDeferral({ ...collected, superseded_by_payment_id: null })).toBe(false);
+    // a row a real attempt touched (PI stamped) is never a placeholder
+    expect(isNeverAttemptedHoldDeferral({ ...collected, stripe_payment_intent_id: 'pi_synthetic' })).toBe(false);
+  });
+
   test('a real attempt, a disarmed row, or another reason still counts as a failure', () => {
     expect(isNeverAttemptedHoldDeferral(holdRow({ stripe_payment_intent_id: 'pi_synthetic' }))).toBe(false);
     expect(isNeverAttemptedHoldDeferral(holdRow({ retry_count: 1 }))).toBe(false);
@@ -148,6 +160,28 @@ describe('payment health score leaves hold deferrals out of the whole sample (co
     expect(score).toBe(100); // 60 base + 30 on-time + 10 six-payment consistency bonus
   });
 
+  test('a placeholder COLLECTED by the retry sweep stays out of total / recent / failed too', async () => {
+    const db = require('../models/db');
+    const paid = (i) => ({ id: `p${i}`, status: 'paid', metadata: null, stripe_payment_intent_id: `pi_${i}`, retry_count: 0, next_retry_at: null });
+    const collected = (i) => ({
+      id: `c${i}`, status: 'failed', metadata: JSON.stringify({ deferred_reason: 'collection_hold', superseded_by_retry: true }),
+      stripe_payment_intent_id: null, retry_count: 1, next_retry_at: null, superseded_by_payment_id: `p${i}`,
+    });
+    const rows = [collected(1), collected(2), ...[1, 2, 3, 4, 5, 6].map(paid)];
+    db.schema = { hasTable: jest.fn(async (t) => t === 'payments') };
+    db.mockImplementation(() => {
+      const qb = {};
+      for (const m of ['where', 'whereNotNull', 'select', 'whereRaw', 'orderBy']) qb[m] = () => qb;
+      qb.limit = () => Promise.resolve(rows);
+      return qb;
+    });
+    const { computePaymentScore } = require('../services/customer-health');
+    const { score, details } = await computePaymentScore('c3');
+    expect(details.onTimeRate).toBe(1); // 6 paid / 6 real, not 6 / 8
+    expect(details.failedCount).toBe(0);
+    expect(score).toBe(100);
+  });
+
   test('a real failed payment still counts', async () => {
     const db = require('../models/db');
     const rows = [
@@ -196,7 +230,10 @@ const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
       { customer_id: cust, status: 'failed', retry_count: 0, next_retry_at: null, metadata: hold }, // disarmed
       { customer_id: cust, status: 'failed', retry_count: 0, next_retry_at: new Date(), stripe_payment_intent_id: 'pi_synthetic', metadata: hold }, // has a PI
       { customer_id: cust, status: 'failed', retry_count: 0, next_retry_at: new Date(), metadata: JSON.stringify({ deferred_reason: 'lock_contention' }) }, // other reason
+      { customer_id: cust, status: 'failed', retry_count: 1, next_retry_at: null, metadata: hold, superseded_by_payment_id: randomUUID() }, // collected by the retry -> excluded
     ]);
+    const orphan = await pg('payments').insert({ customer_id: cust, status: 'failed', retry_count: 1, next_retry_at: null, metadata: hold }).returning('id');
+    await pg('payments').where({ id: orphan[0].id ?? orphan[0] }).update({ superseded_by_payment_id: orphan[0].id ?? orphan[0] }); // orphan-charge marker -> visible
   });
 
   afterAll(async () => {
@@ -206,15 +243,15 @@ const SKIP = !process.env.REPAIR_TEST_DATABASE_URL;
     }
   });
 
-  test('drops only the armed never-attempted hold deferral', async () => {
+  test('drops only the armed never-attempted hold deferral and the placeholder a retry collected', async () => {
     const all = await pg('payments').where({ status: 'failed' }).count('* as n').first();
     const kept = await excludeNeverAttemptedHoldDeferrals(pg('payments').where({ status: 'failed' })).count('* as n').first();
-    expect(Number(all.n)).toBe(7);
-    expect(Number(kept.n)).toBe(6);
+    expect(Number(all.n)).toBe(9);
+    expect(Number(kept.n)).toBe(7);
   });
 
   test('works through an aliased join, as the at-risk lists use it', async () => {
     const rows = await excludeNeverAttemptedHoldDeferrals(pg('payments as p').where('p.status', 'failed'), 'p').select('p.id');
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(7);
   });
 });
