@@ -327,9 +327,18 @@ class PushNotificationService {
     const results = [];
     const delivered = new Set(deliveredSubscriptionIds || []);
     let superseded = false;
+    // A throw stops the remaining devices, as FCM's shouldContinue already
+    // treats one — it never rejects the fan-out, which would discard the
+    // earlier devices' results (and deliveredSubscriptionIds).
     const stillCurrent = beforeHandoff
       ? async () => {
-        if (!superseded && (await beforeHandoff()) === false) superseded = true;
+        if (superseded) return false;
+        try {
+          if ((await beforeHandoff()) === false) superseded = true;
+        } catch (err) {
+          logger.warn(`[push] beforeHandoff failed (${err.code || err.name || 'error'}); remaining devices skipped`);
+          superseded = true;
+        }
         return !superseded;
       }
       : null;

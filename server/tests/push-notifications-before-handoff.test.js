@@ -56,6 +56,13 @@ test('Android gets it as FCM\'s post-OAuth shouldContinue, not a pre-OAuth check
   expect(out).toMatchObject({ sent: 0, skipped: 1, superseded: true });
 });
 
+test('a throw mid-fan-out stops the rest but keeps earlier devices\' results', async () => {
+  primeSubs([IOS('a'), IOS('b')]);
+  const beforeHandoff = jest.fn().mockResolvedValueOnce(true).mockRejectedValueOnce(new Error('db down'));
+  const out = await Push.sendToAdminUsers(['tech-1'], { title: 'x', body: '' }, { beforeHandoff, deliveredSubscriptionIds: [] });
+  expect(out).toMatchObject({ sent: 1, skipped: 1, deliveredSubscriptionIds: ['a'] });
+});
+
 test('without it, behaviour is unchanged (every device, no shouldContinue)', async () => {
   primeSubs([IOS('a'), ANDROID('b')]);
   const out = await Push.sendToAdminUser('tech-1', { title: 'x', body: '' });
