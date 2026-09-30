@@ -457,6 +457,17 @@ describe('canonical customer binding (r1 P1)', () => {
     expect(await bindAssistCaller({ knownCaller: null, resolveCustomer })).toBeNull();
   });
 
+  test('chained over several identities (V1 record, then V2 caller): one disagreement unbinds, and null stays null', async () => {
+    gateOn();
+    const first = await bindAssistCaller({ knownCaller: caller, resolveCustomer: named('cust-A') });
+    expect(first).toBe(caller);
+    const second = await bindAssistCaller({ knownCaller: first, resolveCustomer: named('cust-B') });
+    expect(second).toBeNull();
+    const resolveCustomer = named('cust-A');
+    expect(await bindAssistCaller({ knownCaller: second, resolveCustomer })).toBeNull();
+    expect(resolveCustomer).not.toHaveBeenCalled();
+  });
+
   test('an unbound (null) caller turns both assist paths into no-ops', async () => {
     gateOn();
     expect(onFileStreetCandidates({ spokenStreet: '4306 Boone Blade', knownCaller: null })).toEqual([]);

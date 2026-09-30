@@ -8922,14 +8922,25 @@ const CallRecordingProcessor = {
     // Step 3 runs (same function, same extraction) lands on this customer
     // without ambiguity. Anything else (or the gate off) gets null, which
     // makes both assist paths no-ops. Gate off costs no lookup.
-    const onFileAssistCaller = (extractedNow) => bindAssistCaller({
-      knownCaller,
-      callCustomerId: call.customer_id,
-      hasLinkOverride: !!customerLinkOverride,
-      resolveCustomer: (multiMatchOut) => findCustomerForCallContact(
-        resolveCallContactPhone(call, extractedNow?.phone), extractedNow || {}, { multiMatchOut },
-      ),
-    });
+    // Judged against BOTH identities Step 3 may end up with: the V1 record and
+    // the V2 extraction's caller (V2-primary adoption, later in this pass, can
+    // replace the V1 name) — the assist runs before that adoption, so every
+    // candidate identity must resolve to the same customer.
+    const onFileAssistCaller = async (...extractionsNow) => {
+      let bound = knownCaller;
+      for (const extractedNow of extractionsNow) {
+        bound = await bindAssistCaller({
+          knownCaller: bound,
+          callCustomerId: call.customer_id,
+          hasLinkOverride: !!customerLinkOverride,
+          resolveCustomer: (multiMatchOut) => findCustomerForCallContact(
+            resolveCallContactPhone(call, extractedNow?.phone), extractedNow || {}, { multiMatchOut },
+          ),
+        });
+        if (!bound) return null;
+      }
+      return bound;
+    };
     // Cross-call threading context: the latest other call from this number in
     // the last week, so a continuation call completes the earlier record
     // instead of restarting from nothing. Fail-open — extraction proceeds
@@ -9042,7 +9053,7 @@ const CallRecordingProcessor = {
             // street-only request may borrow the on-file city + ZIP.
             v2AddressValidation = await validateWithOnFileAssist({
               serviceAddress: v2Result.extraction.property?.service_address,
-              knownCaller: await onFileAssistCaller(extracted),
+              knownCaller: await onFileAssistCaller(extracted, flatView(v2Result.extraction)),
               outOfServiceFlagged: !!v2Result.extraction.triage_flags?.includes('out_of_service_area'),
               validate: validateAddress,
             });
@@ -9824,7 +9835,7 @@ const CallRecordingProcessor = {
         // adopted when Google confirms exactly one premise.
         extraStreetCandidates: withOnFileStreetCandidate({
           spokenStreet: extracted.address_line1,
-          knownCaller: await onFileAssistCaller(extracted),
+          knownCaller: await onFileAssistCaller(extracted, flatView(v2Result?.extraction)),
           decoderCandidates: contactDictation?.addresses?.[0]?.street_alternatives || [],
         }),
         // "Building resolved, unit missing" is not a garbled street — the
