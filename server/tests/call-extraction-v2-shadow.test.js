@@ -114,9 +114,27 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('BUSINESS-HOURS READING rule above, for a new booking or a reschedule, with period null');
   });
 
+  test('agent_committed_booking reads casual staff commit phrases and keeps hedges false (prompt v20)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    const line = prompt.split('\n').find((l) => l.startsWith('- agent_committed_booking:'));
+    expect(line).toBeTruthy();
+    // Positive: staff phrasing after the caller accepted a named slot.
+    for (const phrase of ['"I\'ll pop you in for Sunday at 11"', '"I\'ll punch you in"', '"I\'ll put you in the calendar for Sunday at 11"', '"I\'ve got you down for Sunday at 11"', '"see you Sunday at 11"']) {
+      expect(line).toContain(phrase);
+    }
+    expect(line).toContain('AFTER the caller accepted');
+    // Negative: hedges, unaccepted offers, the caller's own promise.
+    for (const phrase of ['"I can probably get you in Sunday"', '"let me check and call you back"', '"I could pop you in Sunday at 11, does that work?"', 'said by the caller, is not one', 'when the caller never accepted the slot']) {
+      expect(line).toContain(phrase);
+    }
+    // The pinned-quote contract for the verifier is unchanged.
+    expect(line).toContain('pin an evidence quote of the AGENT\'s commitment sentence with speaker "agent"');
+    expect(line).toContain('when no single agent sentence states both the agreed day and time, leave agent_committed_booking null');
+  });
+
   test('prompt version and hash are stable', () => {
-    expect(PROMPT_VERSION).toBe('v19');
-    expect(PROMPT_HASH).toMatch(/^v19-[a-f0-9]{12}$/);
+    expect(PROMPT_VERSION).toBe('v20');
+    expect(PROMPT_HASH).toMatch(/^v20-[a-f0-9]{12}$/);
   });
 
   test('includes the family_member relationship instructions (schema 1.18.0)', () => {
