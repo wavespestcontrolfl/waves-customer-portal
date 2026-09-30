@@ -724,61 +724,142 @@ describe('attachCockroachReportV2 — derives work from data.applications', () =
   });
 });
 
-describe('cockroachWorkSourceSignature — chips-present records keep their PDF keys; chip-less ones key on the product rows', () => {
+describe('cockroachWorkSourceSignature — keyed on the DERIVED work, chipped records keep their PDF keys', () => {
   const original = process.env.COCKROACH_REPORT_V2;
   afterEach(() => {
     if (original === undefined) delete process.env.COCKROACH_REPORT_V2;
     else process.env.COCKROACH_REPORT_V2 = original;
   });
   const rec = (values) => ({ id: 'rec-1', service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach', serviceKey: 'cockroach_control', values } }) });
-  const row = (over = {}) => ({ product_id: 'p1', product_name: 'Advion Cockroach Gel Bait', application_method: 'bait_placement', application_area: 'Kitchen', ...over });
 
-  it('is empty for a record with stored chips whatever its rows do (no old PDF is re-rendered)', () => {
+  it('is empty for a record with stored chips whatever the derived work is (no old PDF is re-rendered)', () => {
     const chipped = rec(GERMAN_MODERATE);
-    expect(cockroachWorkSourceSignature(chipped, [row()])).toBe('');
+    expect(cockroachWorkSourceSignature(chipped, ['Bait placement'])).toBe('');
     expect(cockroachWorkSourceSignature(chipped, null)).toBe('');
-    expect(cockroachWorkSourceSignature({}, [row()])).toBe('');
-    // …and a chip-less record with NO rows keeps the pre-change key too
+    expect(cockroachWorkSourceSignature({}, ['Bait placement'])).toBe('');
+    // …and a chip-less record whose products derive nothing keeps the pre-change key too
     expect(cockroachWorkSourceSignature(rec(NO_WORK_SNAPSHOT), [])).toBe('');
   });
 
-  it('a chip-less record keys the product rows: stable under row order, different when a row is added or changed, failed load keys unknown', () => {
+  it('a chip-less record keys the derived chips: different work → different key; same work → same key; failed load → unknown', () => {
     const chipless = rec(NO_WORK_SNAPSHOT);
-    const a = cockroachWorkSourceSignature(chipless, [row(), row({ product_id: 'p2', product_name: 'Gentrol IGR', application_method: 'spot_treatment' })]);
-    expect(a).toMatch(/^-w[0-9a-f]{8}$/);
-    expect(cockroachWorkSourceSignature(chipless, [row({ product_id: 'p2', product_name: 'Gentrol IGR', application_method: 'spot_treatment' }), row()])).toBe(a);
-    expect(cockroachWorkSourceSignature(chipless, [row()])).not.toBe(a);
-    expect(cockroachWorkSourceSignature(chipless, [row({ application_method: 'spot_treatment' })])).not.toBe(cockroachWorkSourceSignature(chipless, [row()]));
+    const bait = cockroachWorkSourceSignature(chipless, ['Bait placement']);
+    expect(bait).toMatch(/^-w[0-9a-f]{8}$/);
+    expect(cockroachWorkSourceSignature(chipless, ['Bait placement', 'Insect growth regulator'])).not.toBe(bait);
+    expect(cockroachWorkSourceSignature(chipless, ['Bait placement'])).toBe(bait);
     expect(cockroachWorkSourceSignature(chipless, null)).toBe('-wf');
   });
+});
 
-  it('the PDF cache-key lookup reads the SAME raw columns the render stamp reads, and only for chip-less records', async () => {
-    process.env.COCKROACH_REPORT_V2 = 'true';
-    const queries = [];
-    const knexWith = (rows, fail = false) => {
-      const knex = (table) => {
-        queries.push(table);
-        const q = {
-          where: () => q,
-          select: () => (fail ? Promise.reject(new Error('db down')) : Promise.resolve(rows)),
-        };
-        return q;
+describe('the PDF cache-key lookup and the render stamp derive the SAME work (same enrichment, same classifier)', () => {
+  const { buildReportV1Data, deriveCockroachWorkChipsForRecord, cockroachClassifierApplication } = require('../services/service-report/report-data');
+  const original = process.env.COCKROACH_REPORT_V2;
+  beforeEach(() => { process.env.COCKROACH_REPORT_V2 = 'true'; });
+  afterEach(() => {
+    if (original === undefined) delete process.env.COCKROACH_REPORT_V2;
+    else process.env.COCKROACH_REPORT_V2 = original;
+  });
+
+  function makeKnex(tables, { failCatalog = false, failProducts = false } = {}) {
+    const knex = (table) => {
+      if (failProducts && table === 'service_products') throw new Error('db down');
+      let rows = [...(tables[table] || [])];
+      const q = {
+        where(c, v) { if (c && typeof c === 'object') rows = rows.filter((r) => Object.entries(c).every(([k, x]) => r[k] === x)); else if (typeof c === 'string') rows = rows.filter((r) => r[c] === v); return q; },
+        andWhere(c, op, v) { if (op === '>=') rows = rows.filter((r) => String(r[c]) >= String(v)); if (op === '<') rows = rows.filter((r) => String(r[c]) < String(v)); if (op === '>') rows = rows.filter((r) => String(r[c]) > String(v)); return q; },
+        whereIn(c, vs) { rows = rows.filter((r) => vs.includes(r[c])); return q; },
+        whereNot(c, v) { rows = rows.filter((r) => r[c] !== v); return q; },
+        whereRaw() { return q; }, modify(fn) { fn(q); return q; }, limit: () => q, orderBy: () => q, leftJoin: () => q,
+        select: () => {
+          if (failCatalog && table === 'products_catalog') return Promise.reject(new Error('catalog down'));
+          return q;
+        },
+        first: () => Promise.resolve(rows[0] || null),
+        then: (res, rej) => Promise.resolve(rows).then(res, rej), catch: () => Promise.resolve(rows),
       };
-      return knex;
+      return q;
     };
-    const chipless = rec(NO_WORK_SNAPSHOT);
-    // program lookup needs customer_id; without it resolveCockroachProgram returns null → unresolved key 'pf'
-    const rows = [row()];
-    const sig = await cockroachReportV2PdfSignature(chipless, knexWith(rows));
-    expect(sig).toBe(`-roachv2a-pf${cockroachWorkSourceSignature(chipless, rows)}`);
-    expect(queries).toContain('service_products');
-    // the render side (report-data) appends the identical component
-    expect(sig.endsWith(cockroachWorkSourceSignature(chipless, rows))).toBe(true);
-    // a failed product read keys 'f'
-    expect(await cockroachReportV2PdfSignature(chipless, knexWith(rows, true))).toBe('-roachv2a-pf-wf');
-    // a chipped record never queries the rows at all
-    queries.length = 0;
-    expect(await cockroachReportV2PdfSignature(rec(GERMAN_MODERATE), knexWith(rows))).toBe('-roachv2a-pf');
-    expect(queries).not.toContain('service_products');
+    knex.schema = { hasTable: async () => true };
+    return knex;
+  }
+
+  const catalog = (over = {}) => ({ id: 'cat-1', name: 'Mystery Roach Product', category: 'insecticide', product_type: 'pesticide', active_ingredient: 'x', epa_reg_number: '1-1', approved_for_service_report: true, ...over });
+  const productRow = (over = {}) => ({ id: 'sp-1', service_record_id: 'rec-w', product_id: 'cat-1', product_name: 'Mystery Roach Product', product_category: null, application_method: 'spot_treatment', application_area: 'Kitchen', created_at: '2026-05-16', ...over });
+  const service = (extra = {}) => ({
+    id: 'rec-w', customer_id: 'c1', service_line: 'pest', service_type: 'Cockroach Control Service', service_date: '2026-05-16',
+    first_name: 'A', last_name: 'B', areas_serviced: '[]', structured_notes: '{}', pressure_index: 0,
+    service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach', serviceKey: 'cockroach_control', values: NO_WORK_SNAPSHOT } }),
+    ...extra,
+  });
+  const base = (over = {}) => ({ service_products: [productRow()], products_catalog: [catalog()], property_geometries: [], property_zones: [], service_findings: [], service_photos: [], scheduled_services: [], ...over });
+
+  async function both(svc, tables, opts) {
+    const knex = makeKnex(tables, opts);
+    const data = await buildReportV1Data(svc, 'tok', knex, { mode: 'pdf' });
+    const lookup = await cockroachReportV2PdfSignature(svc, knex);
+    const rendered = cockroachReportV2RenderedSignature(data, svc);
+    return { lookup, rendered, chips: await deriveCockroachWorkChipsForRecord(svc, knex) };
+  }
+
+  it('an unknown product derives no work: no key on either side', async () => {
+    const { lookup, rendered, chips: derived } = await both(service(), base());
+    expect(derived).toEqual([]);
+    expect(lookup).toBe(rendered);
+    expect(rendered).not.toMatch(/-w/);
+  });
+
+  it('a catalog CATEGORY correction that changes the derived work changes the key — and both sides agree before and after', async () => {
+    const before = await both(service(), base());
+    const after = await both(service(), base({ products_catalog: [catalog({ category: 'IGR' })] }));
+    expect(after.chips).toEqual(['Insect growth regulator']);
+    expect(after.lookup).toBe(after.rendered);
+    expect(after.rendered).toMatch(/-w[0-9a-f]{8}$/);
+    expect(after.rendered).not.toBe(before.rendered);
+    const bait = await both(service(), base({ products_catalog: [catalog({ category: 'bait' })] }));
+    expect(bait.chips).toEqual(['Bait placement']);
+    expect(bait.lookup).toBe(bait.rendered);
+    expect(bait.rendered).not.toBe(after.rendered);
+  });
+
+  it('a change that does NOT alter the derived work leaves the key unchanged (name, area, catalog note)', async () => {
+    const one = await both(service(), base({ products_catalog: [catalog({ category: 'IGR' })] }));
+    const two = await both(service(), base({
+      service_products: [productRow({ application_area: 'Pantry', product_name: 'Renamed Product' })],
+      products_catalog: [catalog({ category: 'IGR', name: 'Renamed Product', active_ingredient: 'other' })],
+    }));
+    expect(two.chips).toEqual(one.chips);
+    expect(two.rendered).toBe(one.rendered);
+    expect(two.lookup).toBe(two.rendered);
+  });
+
+  it('frozen reportIdentitySnapshot product facts win over a later live catalog edit, on both sides', async () => {
+    const frozen = { productFacts: { 'cat-1': { productType: 'pesticide', name: 'Mystery Roach Product', category: 'IGR', activeIngredient: 'x' } } };
+    const svc = service({ report_identity_snapshot: frozen });
+    // the live catalog now says bait; the frozen facts still say IGR
+    const r = await both(svc, base({ products_catalog: [catalog({ category: 'bait' })] }));
+    expect(r.chips).toEqual(['Insect growth regulator']);
+    expect(r.lookup).toBe(r.rendered);
+  });
+
+  it('a failed catalog enrichment (rows with no stored category) keys unknown on both sides', async () => {
+    const r = await both(service(), base({ products_catalog: [catalog({ category: 'IGR' })] }), { failCatalog: true });
+    expect(r.chips).toBeNull();
+    expect(r.lookup).toBe('-roachv2a-pn-wf');
+    expect(r.rendered).toBe(r.lookup);
+  });
+
+  it('a failed product read keys unknown; a chipped record never reads or keys the rows', async () => {
+    const knex = makeKnex(base(), { failProducts: true });
+    expect(await deriveCockroachWorkChipsForRecord(service(), knex)).toBeNull();
+    expect(await cockroachReportV2PdfSignature(service(), knex)).toMatch(/-wf$/);
+    const chipped = service({ service_data: JSON.stringify({ typedReportSnapshot: { type: 'cockroach', serviceKey: 'cockroach_control', values: GERMAN_MODERATE } }) });
+    const r = await both(chipped, base({ products_catalog: [catalog({ category: 'IGR' })] }));
+    expect(r.lookup).toBe(r.rendered);
+    expect(r.lookup).not.toMatch(/-w/);
+  });
+
+  it('cockroachClassifierApplication reads the same row fields the render builds', () => {
+    const app = cockroachClassifierApplication({ product_name: 'X', product_category: 'IGR', active_ingredient: 'y', approved_report_product_facts: { productType: 'pesticide' }, application_method: 'spot_treatment', application_area: 'Kitchen' }, 'pest');
+    expect(app).toEqual({ product: { name: 'X', category: 'IGR', product_type: 'pesticide', active_ingredient: 'y' }, method: 'spot_treatment', applicationArea: 'Kitchen' });
   });
 });

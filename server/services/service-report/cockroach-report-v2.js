@@ -930,36 +930,37 @@ function cockroachProgramSignature(program) {
 // Work-source key component. A record whose frozen snapshot carries
 // work_completed chips renders the same page whatever its product rows do, so
 // it adds NOTHING (every pre-retirement PDF keeps its key). A chip-less record
-// derives "What we did" from its product rows, so the rows key the PDF: a
-// changed / added / removed row re-renders the cached copy. `rows` is the raw
-// service_products set (null = the load FAILED → keyed 'f', like the program
-// state). Raw columns only — the lookup (below) and report-data's render
-// stamp read the SAME fields, so the two sides can never disagree.
+// derives "What we did" from its product rows, so the key is a hash of the
+// DERIVED chips — the exact work the page shows — not of the raw rows: the
+// classifier also reads catalog category / type / active ingredient (live
+// enrichment or the frozen reportIdentitySnapshot facts), so a catalog
+// correction that changes the work changes the key, and an edit that does not
+// change the work leaves it alone. `chips` is workChipsFromApplications()
+// output (null = the product / catalog load FAILED → keyed 'f', like the
+// program state). An empty derived set adds nothing (page unchanged). The
+// lookup (cockroachWorkSourceLookup → report-data
+// deriveCockroachWorkChipsForRecord) and report-data's render stamp run the
+// same classifier over the same enrichment, so the two sides agree.
 function snapshotHasStoredWork(service = {}) {
   const snapshot = cockroachSnapshotOf(service);
   return Boolean(snapshot && chips(snapshot.values && snapshot.values.work_completed).length);
 }
 
-function cockroachWorkSourceSignature(service = {}, rows = null) {
+function cockroachWorkSourceSignature(service = {}, derivedChips = null) {
   if (!cockroachSnapshotOf(service) || snapshotHasStoredWork(service)) return '';
-  if (rows == null) return '-wf';
-  if (!Array.isArray(rows) || !rows.length) return '';
-  const tuples = rows
-    .map((r) => [r.product_id || '', lower(r.product_name), lower(r.application_method), lower(r.application_area)].join('|'))
-    .sort()
-    .join('\n');
-  return `-w${crypto.createHash('sha1').update(tuples).digest('hex').slice(0, 8)}`;
+  if (derivedChips == null) return '-wf';
+  if (!Array.isArray(derivedChips) || !derivedChips.length) return '';
+  return `-w${crypto.createHash('sha1').update(derivedChips.join('|')).digest('hex').slice(0, 8)}`;
 }
 
 async function cockroachWorkSourceLookup(service = {}, knex = null) {
   if (!knex || !service.id || !cockroachSnapshotOf(service) || snapshotHasStoredWork(service)) return '';
-  let rows = null;
+  let derived = null;
   try {
-    rows = await knex('service_products')
-      .where({ service_record_id: service.id })
-      .select('product_id', 'product_name', 'application_method', 'application_area');
-  } catch { rows = null; }
-  return cockroachWorkSourceSignature(service, Array.isArray(rows) ? rows : null);
+    // Lazy: report-data requires this module at load.
+    derived = await require('./report-data').deriveCockroachWorkChipsForRecord(service, knex);
+  } catch { derived = null; }
+  return cockroachWorkSourceSignature(service, Array.isArray(derived) ? derived : null);
 }
 
 async function cockroachReportV2PdfSignature(service = {}, knex = null) {

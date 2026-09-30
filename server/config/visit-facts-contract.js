@@ -1418,7 +1418,7 @@ const VISIT_FACTS_CONTRACT = {
           },
         ],
         whenMissing: 'hidden',
-        notes: 'Owner ruling 2026-09-26: the "Work completed today" chips were retired from the cockroach form (project-types.js) and "What we did" derives from the product rows instead. Classified by the row\'s catalog category / recorded method / active ingredient, with name fallbacks for Advion gel (bait), Gentrol / Tekko (IGR) and Alpine (crack & crevice); an exterior application area adds the perimeter line. An unrecognised product yields no line. Records completed before the retirement keep their stored work_completed chips, which win over the products. A chip-less record\'s PDF cache key carries a product-row signature (cockroachWorkSourceSignature).',
+        notes: 'Owner ruling 2026-09-26: the "Work completed today" chips were retired from the cockroach form (project-types.js) and "What we did" derives from the product rows instead. Classified by the row\'s catalog category / recorded method / active ingredient, with name fallbacks for Advion gel (bait), Gentrol / Tekko (IGR) and Alpine (crack & crevice); an exterior application area adds the perimeter line. An unrecognised product yields no line. Records completed before the retirement keep their stored work_completed chips, which win over the products. A chip-less record\'s PDF cache key carries a signature of the derived work chips (cockroachWorkSourceSignature).',
       },
     ],
   },
