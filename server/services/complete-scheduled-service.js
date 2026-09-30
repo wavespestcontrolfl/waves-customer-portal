@@ -11784,6 +11784,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // the owner confirms the copy. The autopay_ entry point routes it
     // through the GATE_AUTOPAY_CUSTOMER_SMS rollout gate like every other
     // automated-charge customer text.
+    // Collections dispute hold: the customer was told on a collections call
+    // that all billing follow-up is on hold, so NO completion-time text carries
+    // the pay link — the decline notice below and the completion/report SMS
+    // (allowCompletionInvoiceLinkBase) both honor this. The report link and the
+    // rest of the message still send. Read once, fail closed (a lookup failure
+    // omits the link). The mobile in-person payment sheet
+    // (invoicePaymentActionRequired) is a tech-facing prompt, not a customer
+    // message, and is left untouched.
+    const payLinkHeldByDisputeHold = (invoiceCreated && payUrl && svc.customer_id)
+      ? await require('../services/collections/collection-hold').shouldWithholdPayLink(svc.customer_id)
+      : false;
     let paymentFailedNoticeSent = false;
     // Resume dedupe: the side-effects resume path reruns the auto-charge, so
     // a crash after this notice delivered but before the completion attempt
@@ -11799,6 +11810,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       paymentFailedNoticeSent = true;
     } else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
       && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
+      && !payLinkHeldByDisputeHold
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       && !invoice.payer_id
       // Backfill closeouts are quiet end-to-end — a declined backlog charge
@@ -12363,7 +12375,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           // Third-party Bill-To: never text the homeowner the pay link for a
           // payer-billed invoice — AR routes to the payer's AP inbox. The
           // homeowner still gets the report-only completion SMS (no pay_url).
-          && !invoice?.payer_id;
+          && !invoice?.payer_id
+          // Active collections dispute hold (owner ruling 2026-09-30): report-only.
+          && !payLinkHeldByDisputeHold;
         // The decline notice (sent before this block) carries the pay link
         // as its own text — the completion SMS goes report-only only once
         // that notice has ACTUALLY delivered.

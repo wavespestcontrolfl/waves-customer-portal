@@ -104,14 +104,14 @@ const {
 
 function firstChain(row) {
   const q = {};
-  for (const m of ['where', 'whereNull', 'whereIn']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereNull', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => row);
   return q;
 }
 
 function throwChain() {
   const q = {};
-  for (const m of ['where', 'whereNull', 'whereIn']) q[m] = jest.fn(() => q);
+  for (const m of ['where', 'whereNull', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
   q.first = jest.fn(async () => { throw new Error('db down'); });
   return q;
 }
@@ -1244,6 +1244,29 @@ describe('deferred-replay registry', () => {
     db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: 'payer-1' }));
     expect(await recheckDeferredReplay('dispatch_completion_deferred', { invoice_id: 'inv-1', pay_url: 'https://p' }))
       .toEqual({ eligible: true, stripPayLink: true, reason: 'payer-billed' });
+  });
+
+  test('completion recheck (B10 follow-up): an active dispute hold strips the pay link, never the whole report send', async () => {
+    const meta = { invoice_id: 'inv-1', pay_url: 'https://p', customer_id: 'cust-1' };
+    // Hold lookup is the first read; a hold row means strip (no invoice read needed).
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' });
+    expect(db).toHaveBeenCalledTimes(1);
+    expect(db).toHaveBeenCalledWith('collections_flags');
+
+    // Released / non-dispute hold: the lookup finds no active dispute row, so the
+    // ordinary collectibility path runs and a collectible invoice keeps its link.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(firstChain(undefined));
+    db.mockReturnValueOnce(firstChain({ id: 'inv-1', status: 'sent', payer_id: null }));
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta)).toEqual({ eligible: true });
+
+    // Lookup failure fails CLOSED: strip (still eligible), do not retry into a pay link.
+    jest.clearAllMocks();
+    db.mockReturnValueOnce(throwChain());
+    expect(await recheckDeferredReplay('dispatch_completion_deferred', meta))
+      .toEqual({ eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' });
   });
 
   test('completion recheck (round 10 #4634 finding 3): a transient collectibility-read failure stays retryable-ineligible, never promoted to a strip', async () => {

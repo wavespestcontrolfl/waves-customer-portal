@@ -450,6 +450,14 @@ const REGISTRY = {
       // Most completion replays carry no pay link at all (report-only,
       // already-paid completions) — cheap no-op before any DB read.
       if (!meta.invoice_id || !meta.pay_url) return { eligible: true };
+      // A dispute hold that landed after this text was frozen (owner ruling
+      // 2026-09-30): the report still goes, the pay link does not. Fail
+      // closed - shouldWithholdPayLink answers true when its lookup fails.
+      // Checked BEFORE invoice collectibility: a strip needs no invoice read.
+      // The scheduler enriches meta.customer_id from sms_log.customer_id.
+      if (await require('../collections/collection-hold').shouldWithholdPayLink(meta.customer_id)) {
+        return { eligible: true, stripPayLink: true, reason: 'collections-dispute-hold' };
+      }
       const collectible = await invoiceStillCollectible(meta);
       if (collectible?.eligible === false) {
         // A transient read failure (DB outage mid-recheck) is NOT a

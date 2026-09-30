@@ -96,6 +96,22 @@ async function assertNoCollectionHold(customerId, database = db) {
   }
 }
 
+// Completion-time customer messages (the completion/report text, the decline
+// notice, a deferred completion replay) leave the pay link OUT while a dispute
+// hold stands: the customer was told on the call that all billing follow-up
+// is on hold. The report link and the rest of the message still send. Fail
+// closed - a lookup failure answers true (omit the link) rather than risk a
+// pay link reaching a disputing customer.
+async function shouldWithholdPayLink(customerId, database = db) {
+  if (!customerId) return false;
+  try {
+    return await customerHasActiveCollectionHold(customerId, database);
+  } catch (err) {
+    require('../logger').warn(`[collection-hold] pay-link hold lookup failed for customer ${customerId} - omitting the pay link: ${err.message}`);
+    return true;
+  }
+}
+
 // Set of (stringified) invoice ids whose customer has an active dispute hold.
 async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
   if (!invoiceIds || !invoiceIds.length) return new Set();
@@ -152,6 +168,7 @@ module.exports = {
   isCollectionHoldRefusal,
   customerHasActiveCollectionHold,
   customerHasActiveCollectionHoldChecked,
+  shouldWithholdPayLink,
   assertNoCollectionHold,
   collectionHoldInvoiceIds,
 };
