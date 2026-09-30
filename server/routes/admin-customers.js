@@ -2641,18 +2641,24 @@ router.get('/:id/collection-holds', requireAdmin, async (req, res, next) => {
 router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next) => {
   try {
     const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
-    const result = await releaseCollectionHold(req.params.id);
-    if (!result.ok) return res.status(500).json({ error: 'Could not release the hold — try again.' });
-    await recordAuditEvent({
-      actor_type: 'technician',
-      actor_id: req.technicianId || null,
-      action: 'customer.collection_hold_released',
-      resource_type: 'customer',
-      resource_id: req.params.id,
-      metadata: { released: result.released },
-      ip_address: req.ip,
-      user_agent: req.get('user-agent') || null,
-      critical: false,
+    // The release and its CRITICAL audit row commit together: a failed audit
+    // write rolls the release back and the request errors.
+    const result = await db.transaction(async (trx) => {
+      const released = await releaseCollectionHold(req.params.id, { trx });
+      if (!released.ok) throw Object.assign(new Error('Could not release the hold'), { statusCode: 500 });
+      await recordAuditEvent({
+        actor_type: 'technician',
+        actor_id: req.technicianId || null,
+        action: 'customer.collection_hold_released',
+        resource_type: 'customer',
+        resource_id: req.params.id,
+        metadata: { released: released.released },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent') || null,
+        critical: true,
+        trx,
+      });
+      return released;
     });
     res.json({ released: result.released });
   } catch (err) { next(err); }

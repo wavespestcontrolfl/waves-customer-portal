@@ -26,8 +26,8 @@ async function listCollectionHolds(customerId) {
     }));
 }
 
-async function releaseCollectionHold(customerId) {
-  const res = await releaseFlag({ customerId, flag: HOLD_FLAG });
+async function releaseCollectionHold(customerId, { trx = null } = {}) {
+  const res = await releaseFlag({ customerId, flag: HOLD_FLAG, trx });
   return res;
 }
 

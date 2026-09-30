@@ -22,7 +22,7 @@ test('lists only collection_hold rows and says which ones stop charges', async (
 test('release goes through the one writer, only for collection_hold', async () => {
   mockRelease.mockResolvedValue({ ok: true, released: 1 });
   expect(await releaseCollectionHold('c-1')).toEqual({ ok: true, released: 1 });
-  expect(mockRelease).toHaveBeenCalledWith({ customerId: 'c-1', flag: 'collection_hold' });
+  expect(mockRelease).toHaveBeenCalledWith({ customerId: 'c-1', flag: 'collection_hold', trx: null });
 });
 
 test('the routes are admin-only and audited', () => {

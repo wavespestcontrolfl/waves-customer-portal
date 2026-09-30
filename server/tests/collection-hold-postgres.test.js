@@ -145,6 +145,39 @@ describeOrSkip('collection_hold as a money stop — real Postgres', () => {
     await clear();
   });
 
+  test('RACE (real PG): the fallback is released while the dispute is being placed - never "ok" without an ACTIVE dispute row', async () => {
+    await wrongPartyFallback();
+    // A concurrent staff release holds the fallback row's lock; placeDisputeHold's
+    // duplicate insert passes (unique check only), its conditional UPDATE then
+    // BLOCKS on that row. When the release commits, Postgres re-evaluates the
+    // UPDATE's WHERE (released_at IS NULL) against the released row: 0 rows ->
+    // the insert is retried and a fresh ACTIVE dispute row lands.
+    const releaser = await db.transaction();
+    await releaser('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).forUpdate().first();
+    const placing = flags.placeDisputeHold(customerId, { summary: 'raced' });
+    expect(await settledWithin(placing, 500)).toBe('pending'); // parked on the row lock
+    await releaser('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).update({ released_at: db.fn.now() });
+    await releaser.commit();
+    const res = await placing;
+    expect(res.ok).toBe(true);
+    const active = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at');
+    expect(active).toHaveLength(1);
+    expect(active[0].reason).toBe('dispute on call: raced');
+    await stopped();
+  });
+
+  test('release + a failing CRITICAL audit write in one transaction: the release rolls back (hold stays active)', async () => {
+    await flags.placeDisputeHold(customerId, { summary: 'x' });
+    await expect(db.transaction(async (trx) => {
+      const r = await flags.releaseFlag({ customerId, flag: 'collection_hold', trx });
+      expect(r).toEqual({ ok: true, released: 1 });
+      throw new Error('audit down');
+    })).rejects.toThrow('audit down');
+    await stopped(); // still held
+    await db.transaction(async (trx) => { await flags.releaseFlag({ customerId, flag: 'collection_hold', trx }); });
+    await clear(); // committed release resumes charging
+  });
+
   test('collectionHoldInvoiceIds (sweep + pay-combined preflight) follows the same dispute-only rule', async () => {
     const [held, fallback, clean] = [await newCustomer(), await newCustomer(), await newCustomer()];
     const ids = {};

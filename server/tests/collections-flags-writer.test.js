@@ -59,56 +59,73 @@ test('E: a collection_hold write is a PLAIN insert — no transaction, no adviso
 describe('placeDisputeHold (B: only DISPUTE holds stop money)', () => {
   const { placeDisputeHold } = require('../services/collections/outbound-voice/flags');
   jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n1' })) }));
+  const dup = Object.assign(new Error('dup'), { code: '23505' });
 
-  function tables({ insertThrows = null, active = null } = {}) {
-    const updates = [];
-    const inserts = [];
-    const build = () => {
-      const q = {};
-      ['where', 'whereNull'].forEach((m) => { q[m] = jest.fn(() => q); });
-      q.first = jest.fn(async () => active);
-      q.insert = jest.fn(async (row) => { inserts.push(row); if (insertThrows) throw insertThrows; return [1]; });
-      q.update = jest.fn(async (patch) => { updates.push(patch); return 1; });
-      return q;
-    };
-    db.mockImplementation(() => build());
-    return { updates, inserts };
-  }
-
-  test('writes the reason discriminator the money check matches: "dispute on call: <summary>" / "dispute raised on call"', async () => {
-    const withSummary = tables();
-    await placeDisputeHold('c-1', { summary: 'says July is wrong' });
-    expect(withSummary.inserts[0]).toMatchObject({ flag: 'collection_hold', reason: 'dispute on call: says July is wrong' });
-    const bare = tables();
-    await placeDisputeHold('c-1', {});
-    expect(bare.inserts[0]).toMatchObject({ reason: 'dispute raised on call' });
-  });
-
-  test('a dispute over an ACTIVE fallback row (unique index) upgrades that row so the dispute is never swallowed', async () => {
-    const dup = Object.assign(new Error('dup'), { code: '23505' });
-    const t = tables({ insertThrows: dup, active: { id: 'row-1', reason: 'wrong-party answer on billing follow-up call; review card failed to file' } });
-    const res = await placeDisputeHold('c-1', { summary: 'bill is wrong' });
-    expect(res.ok).toBe(true);
-    expect(t.updates).toHaveLength(1);
-    expect(t.updates[0].reason).toMatch(/^dispute on call: bill is wrong; earlier hold: wrong-party answer/);
-  });
-
-  test('a dispute over an already-dispute row changes nothing; a failed upgrade reports ok:false (never a silent non-hold)', async () => {
-    const dup = Object.assign(new Error('dup'), { code: '23505' });
-    const same = tables({ insertThrows: dup, active: { id: 'row-1', reason: 'dispute on call: earlier' } });
-    expect((await placeDisputeHold('c-1', { summary: 'again' })).ok).toBe(true);
-    expect(same.updates).toHaveLength(0);
-    // first call (insert) must hit the unique violation, the lookup then fails
-    let calls = 0;
+  // script: per-call behaviours for the collections_flags table
+  function world({ inserts = [], updates = [], activeDispute = [] }) {
+    const log = { inserts: [], updates: [] };
+    db.raw = jest.fn((sql, bindings) => ({ sql, bindings }));
     db.mockImplementation(() => {
-      calls += 1;
       const q = {};
-      ['where', 'whereNull'].forEach((m) => { q[m] = jest.fn(() => q); });
-      q.insert = jest.fn(async () => { throw dup; });
-      q.first = jest.fn(async () => { throw new Error('read failed'); });
+      ['where', 'whereNull', 'whereRaw'].forEach((m) => { q[m] = jest.fn(() => q); });
+      q.insert = jest.fn(async (row) => {
+        log.inserts.push(row);
+        const next = inserts.shift();
+        if (next === 'dup') throw dup;
+        return [1];
+      });
+      q.update = jest.fn(async (patch) => { log.updates.push(patch); return updates.length ? updates.shift() : 0; });
+      q.first = jest.fn(async () => (activeDispute.length ? activeDispute.shift() : null));
       return q;
     });
-    expect((await placeDisputeHold('c-1', { summary: 'x' })).ok).toBe(false);
-    expect(calls).toBeGreaterThan(1);
+    return log;
+  }
+
+  test('writes the reason discriminator the money check matches', async () => {
+    const a = world({});
+    await placeDisputeHold('c-1', { summary: 'says July is wrong' });
+    expect(a.inserts[0]).toMatchObject({ flag: 'collection_hold', reason: 'dispute on call: says July is wrong' });
+    const b = world({});
+    await placeDisputeHold('c-1', {});
+    expect(b.inserts[0]).toMatchObject({ reason: 'dispute raised on call' });
+  });
+
+  test('an active fallback row is upgraded by ONE conditional UPDATE on the active, non-dispute row', async () => {
+    const w = world({ inserts: ['dup'], updates: [1] });
+    const res = await placeDisputeHold('c-1', { summary: 'bill is wrong' });
+    expect(res.ok).toBe(true);
+    expect(w.inserts).toHaveLength(1);
+    expect(w.updates).toHaveLength(1);
+    expect(w.updates[0].reason.sql).toMatch(/earlier hold/);
+    expect(w.updates[0].reason.bindings[0]).toBe('dispute on call: bill is wrong');
+  });
+
+  test('RACE 1: the fallback is released between the duplicate insert and the update - the insert is retried and a dispute row lands', async () => {
+    const w = world({ inserts: ['dup', 'ok'], updates: [0], activeDispute: [null] });
+    const res = await placeDisputeHold('c-1', { summary: 'x' });
+    expect(res.ok).toBe(true);
+    expect(w.inserts).toHaveLength(2);
+  });
+
+  test('RACE 2: already a dispute row (update matches 0) is verified active, not re-inserted', async () => {
+    const w = world({ inserts: ['dup'], updates: [0], activeDispute: [{ id: 'r1' }] });
+    expect((await placeDisputeHold('c-1', {})).ok).toBe(true);
+    expect(w.inserts).toHaveLength(1);
+  });
+
+  test('bounded: repeated release races give up with ok:false and no success card', async () => {
+    const { notifyAdmin } = require('../services/notification-service');
+    notifyAdmin.mockClear();
+    const w = world({ inserts: ['dup', 'dup', 'dup'], updates: [0, 0, 0], activeDispute: [null, null, null] });
+    const res = await placeDisputeHold('c-1', {});
+    expect(res.ok).toBe(false);
+    expect(w.inserts).toHaveLength(3);
+    expect(notifyAdmin).not.toHaveBeenCalled();
+  });
+
+  test('a db failure reports ok:false (never a silent non-hold)', async () => {
+    db.raw = jest.fn();
+    db.mockImplementation(() => { const q = {}; ['where', 'whereNull', 'whereRaw'].forEach((m) => { q[m] = () => q; }); q.insert = async () => { throw dup; }; q.update = async () => { throw new Error('boom'); }; return q; });
+    expect((await placeDisputeHold('c-1', {})).ok).toBe(false);
   });
 });

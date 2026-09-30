@@ -87,30 +87,42 @@ async function revokeAutomatedVoiceConsent(customerId, { reason, createdBy } = {
  * "already active": the existing row is upgraded to carry the dispute reason
  * (its earlier reason kept after it).
  */
+const DISPUTE_HOLD_ATTEMPTS = 3;
+
 async function placeDisputeHold(customerId, { summary, createdBy } = {}) {
   const disputeReason = summary ? `${DISPUTE_REASON_PREFIX} on call: ${summary}` : `${DISPUTE_REASON_PREFIX} raised on call`;
-  let res = await writeFlag({
-    customerId,
-    flag: HOLD_FLAG,
-    reason: disputeReason,
-    createdBy,
-  });
-  if (res.ok && res.created === false) {
-    try {
-      const active = await db('collections_flags')
+  // Atomic, bounded: insert; if a hold is already active, ONE conditional
+  // UPDATE on the ACTIVE row (released_at IS NULL, reason not already a
+  // dispute) sets the dispute reason. 0 rows updated means the row was
+  // released (retry the insert) or is already a dispute row (verified). ok is
+  // reported only when an active dispute-prefixed row verifiably exists.
+  let res = { ok: false, reason: 'write_failed' };
+  try {
+    for (let attempt = 0; attempt < DISPUTE_HOLD_ATTEMPTS && !res.ok; attempt += 1) {
+      const inserted = await writeFlag({ customerId, flag: HOLD_FLAG, reason: disputeReason, createdBy });
+      if (!inserted.ok) { res = inserted; break; }
+      if (inserted.created !== false) { res = inserted; break; }
+      const upgraded = await db('collections_flags')
         .where({ customer_id: customerId, flag: HOLD_FLAG })
         .whereNull('released_at')
-        .first('id', 'reason');
-      if (active && !String(active.reason || '').toLowerCase().startsWith(DISPUTE_REASON_PREFIX)) {
-        await db('collections_flags').where({ id: active.id }).update({
-          reason: `${disputeReason}; earlier hold: ${active.reason || 'no reason recorded'}`.slice(0, 500),
+        .whereRaw('(reason IS NULL OR reason NOT ILIKE ?)', [`${DISPUTE_REASON_PREFIX}%`]) // parenthesized: knex does not wrap raw fragments
+        .update({
+          reason: db.raw("left(? || '; earlier hold: ' || coalesce(reason, 'no reason recorded'), 500)", [disputeReason]),
         });
-      }
-    } catch (err) {
-      logger.error(`[collections-flags] dispute upgrade of the active collection_hold FAILED customer=${customerId}: ${err.message}`);
-      res = { ok: false, reason: 'write_failed' };
+      if (Number(upgraded) > 0) { res = { ok: true, created: false, upgraded: true }; break; }
+      const activeDispute = await db('collections_flags')
+        .where({ customer_id: customerId, flag: HOLD_FLAG })
+        .whereNull('released_at')
+        .whereRaw('reason ILIKE ?', [`${DISPUTE_REASON_PREFIX}%`])
+        .first('id');
+      if (activeDispute) res = { ok: true, created: false };
+      // else: released between the insert and the update - loop and insert again
     }
+  } catch (err) {
+    logger.error(`[collections-flags] dispute hold FAILED customer=${customerId}: ${err.message}`);
+    res = { ok: false, reason: 'write_failed' };
   }
+  if (!res.ok && !res.reason) res = { ok: false, reason: 'write_failed' };
   if (res.ok) {
     await fileFlagCard({
       customerId,
@@ -153,13 +165,13 @@ async function activeFlags(customerId) {
  * Release an active flag — stamp released_at, never delete (the row is the
  * paper trail). Idempotent: nothing active ⇒ { ok:true, released:0 }.
  */
-async function releaseFlag({ customerId, flag }) {
+async function releaseFlag({ customerId, flag, trx = null }) {
   if (!customerId || !flag) return { ok: false, reason: 'missing_args' };
   try {
-    const released = await db('collections_flags')
+    const released = await (trx || db)('collections_flags')
       .where({ customer_id: customerId, flag })
       .whereNull('released_at')
-      .update({ released_at: db.fn.now() });
+      .update({ released_at: (trx || db).fn.now() });
     return { ok: true, released: Number(released) || 0 };
   } catch (err) {
     logger.error(`[collections-flags] flag release FAILED customer=${customerId} flag=${flag}: ${err.message}`);
