@@ -3397,6 +3397,21 @@ const gates = {
   // gate goes back to the overlap-only re-check, byte for byte.
   bookCapacityCommit: gateEnvValue('GATE_BOOK_CAPACITY_COMMIT'),
 
+  // Tech-aware CONFIRM-side conflict checks for a second field technician
+  // (owner-approved 2026-09-29). The offer side (booking.js's occupancy mirror)
+  // already keeps only rows that are unassigned or on the slot's own technician
+  // when GATE_SCHEDULING_CAPACITY is on; the confirm-side probes
+  // (occupancy.js findConflictingVisits, /book's zone overlap check) were
+  // tech-blind by design for the one-technician era, so a slot offered on
+  // technician B's day was refused at confirm because technician A had an
+  // overlapping or nearby stop. On (with capacity mode), the self-serve commits
+  // that pass a technicianId scope their conflict rows to that technician plus
+  // unassigned rows. **Ships DARK: off unless exactly `true`/`1`/`on`**. This
+  // entry is for logGateStatus only — the canonical CALL-TIME reader is
+  // multiTechConfirmLive() below. Kill switch: unset GATE_MULTI_TECH_CONFIRM —
+  // every confirm-side probe goes back to tech-blind, byte for byte.
+  multiTechConfirm: gateEnvValue('GATE_MULTI_TECH_CONFIRM'),
+
   // Anonymous, cookie-free blog read-depth beacon (owner-approved 2026-09-27,
   // "E2: cookie-free read-depth counts"). Ships DARK: off unless exactly
   // 'true'. The route reads this via isEnabled('blogReadDepth') at request
@@ -3732,6 +3747,15 @@ function bookCapacityCommitLive() {
   return gateEnvValue('GATE_BOOK_CAPACITY_COMMIT');
 }
 
+// GATE_MULTI_TECH_CONFIRM read at CALL time — the one canonical reader for the
+// tech-aware confirm-side conflict scope (scheduling/occupancy.js
+// techScopedConfirmActive, which also requires GATE_SCHEDULING_CAPACITY so the
+// confirm side scopes exactly when the offer side does). The `multiTechConfirm`
+// gates-map entry above is for logGateStatus only.
+function multiTechConfirmLive() {
+  return gateEnvValue('GATE_MULTI_TECH_CONFIRM');
+}
+
 // Fresh annual contracts require the term-aware cancellation path. Read both
 // switches at call time so pricing, availability and delivery agree.
 function termiteAnnualPlanSelectionEnabled() {
@@ -4019,4 +4043,5 @@ module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
+module.exports.multiTechConfirmLive = multiTechConfirmLive;
 // gates 1775330914
