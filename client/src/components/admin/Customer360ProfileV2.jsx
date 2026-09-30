@@ -8358,7 +8358,7 @@ function CustomerCollectionHold({ customerId, isAdmin }) {
         try {
           const body = await adminFetch(`/admin/customers/${forCustomerId}/collection-holds`);
           if (stillViewing()) setHolds(Array.isArray(body?.holds) ? body.holds : []);
-        } catch (_refetchErr) {
+        } catch {
           // The message above already says to reload.
         }
       } else {
