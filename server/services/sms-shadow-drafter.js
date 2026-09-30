@@ -101,7 +101,7 @@ const PROMPT_VERSION = 'house_voice_v11';
 // "they're back") is NOT a complaint for hand-off purposes — the PEST
 // REPORTS rule (realAnswersHandoffBullets) now answers it unconditionally,
 // offering the free re-service off the SAME FREE RE-SERVICE fact the
-// COMPLAINTS rule uses. That fact (reserviceFactLine / fetchReserviceLanes)
+// COMPLAINTS rule uses. That fact (reserviceFactLine / fetchReserviceFactState)
 // is no longer gated on GATE_SMS_AGENT_COMPLAINTS — it renders on EVERY
 // gate-on facts block now, same as FOLLOW-UP SLA RIGHT NOW. This is an
 // UNCONDITIONAL change to the bare v12 prompt (no gate protects it), so the
@@ -409,7 +409,7 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
 // "deleted_at IS NULL, active, has a reservice_token, has a live lane") —
 // so the FREE RE-SERVICE fact, the drafted offer, and what staff can
 // actually send from the composer never disagree. Deliberately has NO
-// dependency on GATE_SMS_REAL_ANSWERS (unlike fetchReserviceLanes below,
+// dependency on GATE_SMS_REAL_ANSWERS (unlike fetchReserviceFactState below,
 // which wraps this for the draft-time facts block, which only ever renders
 // inside a real-answers facts block): the send-time re-service promise
 // recheck (reservicePromiseStillEligible) must revalidate an
@@ -445,28 +445,16 @@ async function liveReserviceLaneState(customerId) {
     if (timer) clearTimeout(timer);
   }
 }
-async function liveReserviceLanes(customerId) {
-  return (await liveReserviceLaneState(customerId)).bookable;
-}
 // Why the given lanes cannot be promised now: not covered any more vs covered
 // but already booked (an open re-service visit in the lane).
-function reserviceLanesBlockedReason(lanes, state) {
-  const notCovered = lanes.filter((lane) => !state.eligible.includes(lane));
-  if (notCovered.length) return `no longer eligible for a free ${notCovered.join(' and ')} re-service`;
-  const booked = lanes.filter((lane) => !state.bookable.includes(lane));
-  return booked.length ? `a free ${booked.join(' and ')} re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page` : null;
-}
-
-// Free re-service eligibility for the facts block (Codex r6 P1; decoupled
-// from GATE_SMS_AGENT_COMPLAINTS 2026-09-29, owner ruling: a pest report —
-// "still seeing bugs", "they're back" — is not a complaint, so the fact
-// must be available to the PEST REPORTS rule below with that gate OFF, its
-// default in prod). Only when real-answers is on — returns null when the
-// gate is off (no fact is rendered at all); otherwise delegates to
-// liveReserviceLanes above.
-async function fetchReserviceLanes({ customerId } = {}) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  return liveReserviceLanes(customerId);
+function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
+  const blocked = lanes.filter((lane) => !state.bookable.includes(lane));
+  if (!blocked.length || (anyOf && blocked.length < lanes.length)) return null;
+  // anyOf: one bookable lane among `lanes` is enough, and the reason names no lane.
+  const names = anyOf ? '' : ` ${blocked.join(' and ')}`;
+  return blocked.every((lane) => state.eligible.includes(lane))
+    ? `a free${names} re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page`
+    : `no longer eligible for a free${names} re-service`;
 }
 
 // The rendered fact line, and its reader. One line, fixed wording, so the
@@ -481,7 +469,14 @@ function reserviceFactLine(lanes, booked = {}) {
   // only the "eligible for …" lanes (eligibleReserviceLanes), i.e. bookable ones.
   const bookedEntries = Object.entries(booked || {}).filter(([lane]) => lane === 'pest' || lane === 'lawn');
   const bookedText = bookedEntries
-    .map(([lane, info]) => `${lane} already booked${info?.date ? ` (${info.date}${info.windowStart ? ` at ${info.windowStart}` : ''})` : ''}`)
+    .map(([lane, info]) => {
+      // Codex round-14 P2: the two-hour arrival WINDOW (never the raw start time,
+      // which reads as an exact arrival).
+      const { arrivalWindowRange, formatSmsTimeRange } = require('../utils/sms-time-format');
+      const range = info?.windowStart ? arrivalWindowRange(info.windowStart) : null;
+      const windowText = range ? `, ${formatSmsTimeRange(range)}` : '';
+      return `${lane} already booked${info?.date ? ` (${info.date}${windowText})` : ''}`;
+    })
     .join('; ');
   if (list.length) {
     return `${RESERVICE_FACT_LABEL} eligible for ${list.join(' and ')} (booked through their free re-service link, which a teammate texts)`
@@ -494,7 +489,7 @@ function reserviceFactLine(lanes, booked = {}) {
 
 // Fact-block state for a live draft (Codex round-13 P2): the bookable lanes plus
 // the covered-but-already-booked lanes with their open callback's date/window.
-// null when real-answers is off (no fact is rendered), like fetchReserviceLanes.
+// null when real-answers is off (no fact is rendered).
 async function fetchReserviceFactState({ customerId } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
   const state = await liveReserviceLaneState(customerId);
@@ -579,7 +574,16 @@ const RESERVICE_SPECIFIC_NOUN_SOURCE = `re-?service|re-?treat(?:ment)?|re-?spray
 // re-service promise, so "free estimate" stays out; "free inspection" is a
 // technician visit, so it stays in (Codex round-10 P2: inspection / inspect /
 // assessment / look at / check-up are guarded nouns, not just mentioned here).
-const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|visit|trip|treatment|service|callback|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)`;
+// Codex round-14 P2 (PR #5336): the GENERIC nouns (service / treatment / visit /
+// trip / application) are billing and scheduling vocabulary too ("There is no
+// additional charge for your scheduled service"), so they only count as an OFFER
+// of another visit with a return marker — another / extra / second / return /
+// follow-up / repeat + noun, "come back", "go back", callback, redo — or, for
+// visit / trip only, when they are not a scheduled/regular/next/plan visit
+// (a technician-sent "free visit" is still an offer; "your scheduled visit" is
+// billing copy). service / treatment / application need the marker outright.
+const RESERVICE_NOT_SCHEDULED_LOOKBEHIND = "(?<!\\b(?:scheduled|regular|routine|upcoming|next|planned|annual|quarterly|monthly|bi-?monthly|initial|first|this|plan(?:['’]s)?|today['’]s|tomorrow['’]s)\\s)";
+const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|(?:another|extra|second|return|follow-?up|repeat)\\s+(?:visits?|trips?|treatments?|services?|applications?|sprays?|calls?)|${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:visit|trip)|callback|redo|re-do|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)`;
 // "free" as a price word, not an idiom: excluded when "free" is followed by
 // "to <verb>" / "from ..." / "of ..." (except "free of charge"), so "feel
 // free to call", "you are / you're free to return", "free of pests" never
@@ -606,9 +610,25 @@ const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)\\bfree\\b(?!\\s+(?:to|
 // Deterministic backstop: a reply that offers a free visit while the facts
 // do not say eligible is a violation, fed into the same revise/verify loop
 // (and enforced in single-pass mode, where no verifier would catch it).
+// Codex round-14 follow-up (PR #5336): the generic service/treatment/application
+// nouns count as an offer when a price word BINDS DIRECTLY to them — "free
+// treatment", "a complimentary service call", "no-charge treatment",
+// "treatment at no charge", "the service is free" — unless a schedule word
+// precedes the noun (scheduled / regular / routine / next / plan's / annual …:
+// "your regular treatment is complimentary with your plan" is billing copy).
+// Only the LOOSE form (a no-charge phrase somewhere near a generic noun, in
+// FREE_OFFER_NOUN_SOURCE above) needs a return marker. The words allowed
+// between the price word and the noun are modifiers only (never a
+// determiner/preposition, which would make it "no charge for your treatment").
+const GENERIC_SERVICE_NOUN = `${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:treatment|service|application)s?\\b(?!\\s+(?:estimates?|quotes?|consultations?)\\b)`;
+const BOUND_PRICE_ADJ = "(?:(?<!\\bfeel\\s)(?<!-)\\bfree(?!\\s+(?:to|from|of)\\b)|complimentary|no[- ](?:charge|cost))";
+const BOUND_MODIFIER = "(?:(?!(?:for|your|the|our|this|that|its|of|with|on|to|and|a|an|is|are)\\b)[\\w'’-]+\\s+){0,2}";
+const BOUND_GENERIC_OFFER_SOURCE = `\\b${BOUND_PRICE_ADJ}\\s+${BOUND_MODIFIER}${GENERIC_SERVICE_NOUN}`
+  + `|\\b${RESERVICE_NOT_SCHEDULED_LOOKBEHIND}(?:treatment|service|application)s?\\s+(?:at\\s+no\\s+(?:additional\\s+)?(?:charge|cost)|(?:is|are|will\\s+be)\\s+(?:free|complimentary|on\\s+(?:us|the\\s+house)))\\b`;
 const FREE_RESERVICE_OFFER_RE = new RegExp(
   `${FREE_OFFER_WORD_SOURCE}[^.?!\\n]{0,60}\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b`
-  + `|\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]{0,60}${FREE_OFFER_WORD_SOURCE}`,
+  + `|\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]{0,60}${FREE_OFFER_WORD_SOURCE}`
+  + `|${BOUND_GENERIC_OFFER_SOURCE}`,
   'i',
 );
 // Codex round-2 finding: a promise can cover a re-service WITHOUT ever
@@ -997,7 +1017,7 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
 // only changes phrasing) falls back to the draft-time snapshot, unchanged
 // from before. Fails CLOSED: an outgoing body that still reads as a promise
 // but resolves no lane to check (named or snapshot), or no customer to
-// check, blocks; the live lookup (liveReserviceLanes) is itself fail-closed
+// check, blocks; the live lookup (liveReserviceLaneState) is itself fail-closed
 // on any DB/timeout error. Returns null when the body may go out, else a
 // short reason.
 // Codex round-9 (PR #5336): a decision created BEFORE this feature deployed has
@@ -1015,70 +1035,57 @@ function reserviceSnapshotVersionEmitted(promptVersion) {
   return major > 12 || (major === 12 && Number(m[2] || 0) >= 2);
 }
 async function loadDraftRowForReservice(draftId) {
-  if (!draftId) return null;
+  if (!draftId) return {};
   try {
-    return (await db('message_drafts').where({ id: draftId }).first('facts_block', 'intended_actions')) || null;
+    return (await db('message_drafts').where({ id: draftId }).first('facts_block', 'intended_actions')) || {};
   } catch (err) {
     logger.warn(`[sms-shadow] draft lookup failed for re-service grandfathering (${err.message}); using live eligibility`);
-    return null;
+    return {};
   }
 }
 function draftIntendedActions(raw) {
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    return Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.actions) ? parsed.actions : null);
+    return [].concat(Array.isArray(parsed) ? parsed : (parsed && parsed.actions) || []).filter(Boolean);
   } catch {
-    return null;
+    return [];
   }
 }
-// decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } is passed by the send
-// paths that hold a decision row (agent-decision-send-checks, scheduler.js);
-// omitting it keeps the strict, snapshot-only behavior.
-async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta = null }) {
+// decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } comes from the send paths that
+// hold a decision row (agent-decision-send-checks, scheduler.js); NO_DECISION (no row behind the body)
+// keeps the strict, snapshot-or-named-lane behavior.
+const NO_DECISION = { none: true };
+async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta: meta = NO_DECISION }) {
   const body = String(outgoingBody || '');
   if (!isReserviceOfferPromise(body)) return null;
-  // Codex round-7 (PR #5336): checked BEFORE the snapshot fallback below — an
-  // edit that swaps the promised service for an excluded specialty names no
-  // pest/lawn lane, so it would otherwise inherit the draft-time snapshot.
+  // Codex round-7 (PR #5336): checked BEFORE any snapshot fallback — an edit that
+  // swaps the promised service for an excluded specialty names no pest/lawn lane.
   if (reserviceExcludedSpecialtyInPromise(body)) {
     return 're-service promise names an excluded specialty (termites/rodents/mosquitoes/tree & shrub) the link cannot book';
   }
-  const snapshotLanes = Array.isArray(promisedLanes) ? promisedLanes.filter((l) => l === 'pest' || l === 'lawn') : [];
+  const snapshotLanes = ['pest', 'lawn'].filter((lane) => [].concat(promisedLanes || []).includes(lane));
   const namedLanes = namedReserviceLanesInText(body);
-  const newVersion = !!decisionMeta && reserviceSnapshotVersionEmitted(decisionMeta.promptVersion);
-  // Codex round-11 P1: a NEW-version decision ALWAYS carries the snapshot when it
-  // promises — missing means blocked, even if the (edited) body happens to name
-  // a live-eligible lane; the body never stands in for the snapshot.
-  if (newVersion && !snapshotLanes.length) return 'no promised re-service lane on record to revalidate';
-  // Every decision-backed promise (both versions, every branch below) also
-  // needs the send_reservice_link action on record: without it nothing would
-  // actually text the link (Codex round-10 P2, extended to new-version in round 11).
-  let draftRow = null;
-  if (decisionMeta) {
-    if (decisionMeta.intendedActions == null || (!newVersion && decisionMeta.factsBlock === undefined)) draftRow = await loadDraftRowForReservice(decisionMeta.draftId);
-    const actions = Array.isArray(decisionMeta.intendedActions) ? decisionMeta.intendedActions : draftIntendedActions(draftRow?.intended_actions);
-    if (!(actions || []).some((a) => a?.type === 'escalate' && a?.note === 'send_reservice_link')) {
-      return 'no send_reservice_link action on record — nothing would actually send the re-service link';
-    }
-  }
-  if (!snapshotLanes.length && decisionMeta) {
-    // Grandfathered pre-deploy decision: named lanes must all be live-eligible;
-    // with no lane named, at least one live-eligible lane (limited to the lanes
-    // the persisted draft facts said were eligible, when they are recoverable).
-    if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
-    const state = await liveReserviceLaneState(customerId);
-    const live = state.bookable;
-    if (namedLanes.length) return reserviceLanesBlockedReason(namedLanes, state);
-    const factsBlock = decisionMeta.factsBlock !== undefined ? decisionMeta.factsBlock : draftRow?.facts_block;
-    const factsLanes = factsBlock ? eligibleReserviceLanes(factsBlock) : [];
-    if (live.some((lane) => !factsLanes.length || factsLanes.includes(lane))) return null;
-    const booked = (factsLanes.length ? factsLanes : state.eligible).some((lane) => state.eligible.includes(lane) && !state.bookable.includes(lane));
-    return booked ? 'a free re-service is already booked (an open re-service visit exists) — the link would land on the already-booked page' : 'no longer eligible for a free re-service';
-  }
   const lanes = namedLanes.length ? namedLanes : snapshotLanes;
-  if (!lanes.length) return 'no promised re-service lane on record to revalidate';
+  // Where the promised lanes come from, resolved ONCE (Codex round-14): the draft-time snapshot; the
+  // body's own named lanes when no decision backs it; a grandfathered pre-deploy decision (older
+  // prompt version, no snapshot) that live eligibility decides; else nothing on record — which
+  // includes a NEW-version decision missing its snapshot (Codex round-11 P1: the edited body never
+  // stands in for the snapshot).
+  const backed = !meta.none;
+  const known = snapshotLanes.length || (backed ? !reserviceSnapshotVersionEmitted(meta.promptVersion) : namedLanes.length);
+  if (!known) return 'no promised re-service lane on record to revalidate';
+  // Every decision-backed promise also needs the send_reservice_link action on record (Codex
+  // round-10 P2 / round-11): without it nothing would actually text the link. A promise naming no
+  // lane also needs the persisted draft's facts, to limit which live lane counts.
+  const draftRow = backed && (!meta.intendedActions || meta.factsBlock === undefined) ? await loadDraftRowForReservice(meta.draftId) : {};
+  const actions = backed ? (meta.intendedActions || draftIntendedActions(draftRow.intended_actions)) : [{ type: 'escalate', note: 'send_reservice_link' }];
+  if (!actions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link')) {
+    return 'no send_reservice_link action on record — nothing would actually send the re-service link';
+  }
   if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
-  return reserviceLanesBlockedReason(lanes, await liveReserviceLaneState(customerId));
+  const factsLanes = eligibleReserviceLanes(meta.factsBlock === undefined ? draftRow.facts_block : meta.factsBlock);
+  const candidates = lanes.length ? lanes : (factsLanes.length ? factsLanes : ['pest', 'lawn']);
+  return reserviceLanesBlockedReason(candidates, await liveReserviceLaneState(customerId), !lanes.length);
 }
 
 // Service identity for a real-answers OPEN TIMES lookup (owner 2026-09-28,
@@ -1975,11 +1982,11 @@ function buildFactsBlock(context, extras = {}) {
     ? `FOLLOW-UP SLA RIGHT NOW: ${followupSlaPhrase(extras.now)}\n`
     : '';
   // Free re-service eligibility (Codex r6 P1; decoupled from the complaints
-  // gate 2026-09-29 — see fetchReserviceLanes's comment) — renders whenever
+  // gate 2026-09-29 — see fetchReserviceFactState's comment) — renders whenever
   // real-answers is on, for both the COMPLAINTS rule (when that gate is on)
   // and the unconditional PEST REPORTS rule below; a caller that passes no
   // lanes renders "not eligible" (fail closed). Resolved upstream
-  // (fetchReserviceLanes).
+  // (fetchReserviceFactState).
   const reserviceSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? `${reserviceFactLine(extras.reserviceLanes, extras.reserviceBooked)}\n`
     : '';
@@ -2418,7 +2425,7 @@ const PRONOUN_RETURN_TEXT_RE = /\b(?:they'?re\s+back|it'?s\s+back|they\s+(?:came
 // Cheap, synchronous relationship signal for the PRONOUN_RETURN_TEXT_RE
 // branch above — read from the SAME context object generateGroundedDraft
 // already has in hand (no extra DB call; the authoritative eligibility
-// check is the existing async fetchReserviceLanes below, which still gates
+// check is the existing async fetchReserviceFactState below, which still gates
 // whether a free re-service may actually be OFFERED). True for a completed
 // pest-family visit in serviceHistory (same category/label rule
 // reservice-scheduler.js's laneForCoverageRow uses for the pest lane,
@@ -3287,9 +3294,7 @@ module.exports = {
   replyBindsDeclaredDays,
   liveServiceType,
   serviceIdentityFor,
-  fetchReserviceLanes,
   fetchReserviceFactState,
-  liveReserviceLanes,
   liveReserviceLaneState,
   reserviceFactLine,
   validateReserviceOffer,

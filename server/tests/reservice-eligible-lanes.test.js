@@ -7,7 +7,7 @@
  * customer row that carries a reservice_token AND has at least one live
  * lane — exactly what the admin composer's /reservice-link route checked
  * per candidate row before this fix, now shared with the SMS FREE
- * RE-SERVICE fact (liveReserviceLanes/fetchReserviceLanes) and the
+ * RE-SERVICE fact (liveReserviceLaneState/fetchReserviceFactState) and the
  * send-time promise recheck (reservicePromiseStillEligible) so none of
  * them can disagree about who staff can actually send a link to.
  *

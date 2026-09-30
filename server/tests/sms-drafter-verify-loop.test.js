@@ -538,7 +538,7 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
   });
   function setup(lanes) {
     jest.resetModules();
-    // liveReserviceLanes (fetchReserviceLanes's underlying live-lane check)
+    // liveReserviceLaneState (fetchReserviceFactState's underlying live-lane check)
     // delegates entirely to reservice-scheduler.loadReserviceLaneAvailability
     // (the ONE shared availability the public re-service page also uses) —
     // mock that directly rather than modeling a fake customer row through
@@ -550,7 +550,7 @@ describe('generateGroundedDraft — a free re-service offer needs the facts to s
     }));
     jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
     const drafter = require('../services/sms-shadow-drafter');
-    jest.spyOn(drafter, 'fetchReserviceLanes'); // observed only; the real one runs
+    jest.spyOn(drafter, 'fetchReserviceFactState'); // observed only; the real one runs
     return drafter;
   }
   const args = (client) => ({

@@ -1779,7 +1779,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
     expect(buildFactsBlock(CONTEXT, { reserviceLanes: ['pest'] })).not.toContain('FREE RE-SERVICE');
   });
 
-  // Codex round-4 P1: liveReserviceLanes / fetchReserviceLanes delegate
+  // Codex round-4 P1: liveReserviceLaneState / fetchReserviceFactState delegate
   // ENTIRELY to reservice-scheduler.loadEligibleReserviceLanes — the ONE
   // shared predicate the composer's /reservice-link route also resolves
   // through — so the active/deleted/token/lane checks are exercised once,
@@ -1809,48 +1809,48 @@ describe('free re-service is an entitlement resolved through the existing mechan
     return { drafter: require('../services/sms-shadow-drafter'), loadEligibleReserviceLanes };
   }
 
-  test('fetchReserviceLanes: eligible lanes come from loadEligibleReserviceLanes on the customer id', async () => {
+  test('fetchReserviceFactState: bookable lanes come from the shared availability loader on the customer id', async () => {
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['pest', 'lawn'] });
-    await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual(['pest', 'lawn']);
+    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['pest', 'lawn'], booked: {} });
     expect(loadEligibleReserviceLanes).toHaveBeenCalledWith('cust-1');
   });
 
-  test('fetchReserviceLanes fails closed: self-serve off, no id, or a lookup error → []', async () => {
-    await expect(loadWith({ selfServe: false }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
-    await expect(loadWith({}).drafter.fetchReserviceLanes({ customerId: null })).resolves.toEqual([]);
-    await expect(loadWith({ throws: true }).drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual([]);
+  test('fetchReserviceFactState fails closed: self-serve off, no id, or a lookup error → no lanes', async () => {
+    await expect(loadWith({ selfServe: false }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: {} });
+    await expect(loadWith({}).drafter.fetchReserviceFactState({ customerId: null })).resolves.toEqual({ lanes: [], booked: {} });
+    await expect(loadWith({ throws: true }).drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: [], booked: {} });
   });
 
-  test('fetchReserviceLanes: real-answers gate off → null (no fact rendered, mechanism never consulted)', async () => {
+  test('fetchReserviceFactState: real-answers gate off → null (no fact rendered, mechanism never consulted)', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     const { drafter, loadEligibleReserviceLanes } = loadWith({});
-    await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toBeNull();
+    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toBeNull();
     expect(loadEligibleReserviceLanes).not.toHaveBeenCalled();
   });
 
-  test('fetchReserviceLanes: complaints gate off (its default in prod) still consults the mechanism — decoupled 2026-09-29', async () => {
+  test('fetchReserviceFactState: complaints gate off (its default in prod) still consults the mechanism — decoupled 2026-09-29', async () => {
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['lawn'] });
-    await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual(['lawn']);
+    await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: {} });
     expect(loadEligibleReserviceLanes).toHaveBeenCalled();
   });
 
-  // Codex round-3 P2: liveReserviceLanes (fetchReserviceLanes's underlying
+  // Codex round-3 P2: liveReserviceLaneState (fetchReserviceFactState's underlying
   // live-lane check, also used by reservicePromiseStillEligible below) must
   // consult the live mechanism with NO dependency on GATE_SMS_REAL_ANSWERS —
   // a send-time recheck must still revalidate an already-drafted promise
   // even if the gate were flipped off in between.
-  test('liveReserviceLanes: consults the mechanism even with GATE_SMS_REAL_ANSWERS off', async () => {
+  test('liveReserviceLaneState: consults the mechanism even with GATE_SMS_REAL_ANSWERS off', async () => {
     delete process.env.GATE_SMS_REAL_ANSWERS;
     const { drafter, loadEligibleReserviceLanes } = loadWith({ lanes: ['pest'] });
-    await expect(drafter.liveReserviceLanes('cust-1')).resolves.toEqual(['pest']);
+    await expect(drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: ['pest'], open: {}, bookable: ['pest'] });
     expect(loadEligibleReserviceLanes).toHaveBeenCalledWith('cust-1');
   });
 
-  test('liveReserviceLanes fails closed the same way fetchReserviceLanes does', async () => {
-    await expect(loadWith({ selfServe: false }).drafter.liveReserviceLanes('cust-1')).resolves.toEqual([]);
-    await expect(loadWith({}).drafter.liveReserviceLanes(null)).resolves.toEqual([]);
-    await expect(loadWith({ throws: true }).drafter.liveReserviceLanes('cust-1')).resolves.toEqual([]);
+  test('liveReserviceLaneState fails closed the same way fetchReserviceFactState does', async () => {
+    await expect(loadWith({ selfServe: false }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: [], open: {}, bookable: [] });
+    await expect(loadWith({}).drafter.liveReserviceLaneState(null)).resolves.toEqual({ eligible: [], open: {}, bookable: [] });
+    await expect(loadWith({ throws: true }).drafter.liveReserviceLaneState('cust-1')).resolves.toEqual({ eligible: [], open: {}, bookable: [] });
   });
 
   // Codex round-3 P2: send-time revalidation of an already-reviewed/queued
@@ -1897,7 +1897,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
       })).resolves.toMatch(/no customer on record/);
     });
 
-    test('a live lookup error fails CLOSED (liveReserviceLanes\'s own fail-closed propagates)', async () => {
+    test('a live lookup error fails CLOSED (liveReserviceLaneState\'s own fail-closed propagates)', async () => {
       const { drafter } = loadWith({ throws: true });
       await expect(drafter.reservicePromiseStillEligible({
         outgoingBody: PROMISE_BODY, customerId: 'cust-1', promisedLanes: ['pest'],
@@ -2485,7 +2485,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
       test('draft time: the FREE RE-SERVICE fact lists only bookable lanes, so an already-booked lane is not offered', async () => {
         const { drafter } = loadWith({ lanes: ['pest', 'lawn'], booked: ['pest'] });
         process.env.GATE_SMS_REAL_ANSWERS = 'true';
-        await expect(drafter.fetchReserviceLanes({ customerId: 'cust-1' })).resolves.toEqual(['lawn']);
+        await expect(drafter.fetchReserviceFactState({ customerId: 'cust-1' })).resolves.toEqual({ lanes: ['lawn'], booked: { pest: { date: '2026-10-05' } } });
         const facts = `X\n${drafter.reserviceFactLine(['lawn'])}\nBILLING:`;
         expect(drafter.validateReserviceOffer({ reply: pestPromise, factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(false);
         expect(drafter.validateReserviceOffer({ reply: lawnPromise, factsBlock: facts, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(true);
@@ -2520,7 +2520,8 @@ describe('free re-service is an entitlement resolved through the existing mechan
       test('the fact names the booked lane and its appointment; validation still reads bookable lanes only', () => {
         const { reserviceFactLine, validateReserviceOffer } = require('../services/sms-shadow-drafter');
         const only = reserviceFactLine([], open);
-        expect(only).toContain('pest already booked (2026-10-05 at 09:00)');
+        expect(only).toContain('pest already booked (2026-10-05, 9:00 AM - 11:00 AM)');
+        expect(only).not.toMatch(/at 09:00/);
         expect(only).not.toContain('not eligible');
         const mixed = reserviceFactLine(['lawn'], open);
         expect(mixed).toContain('eligible for lawn');
@@ -2628,6 +2629,23 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["No charge for the estimate, and we book the visit after.", false, []],
   ["We'll send your free pest re-service and a free quote.", true, ['pest']],
   ["A free cost assessment comes first, then the treatment visit.", false, []],
+  ["There is no additional charge for your scheduled service.", false, []],
+  ["No charge for your regular treatment; it is included in your plan.", false, []],
+  ["Your next visit is on us, thanks for being a member.", false, []],
+  ["The service is included at no cost with your plan.", false, []],
+  ["There's no charge for the upcoming visit.", false, []],
+  ["Your annual treatment is complimentary with WaveGuard.", false, []],
+  ["We'll come back out for another visit at no charge.", true, []],
+  ["Another treatment is on the house.", true, []],
+  ["We can do a free treatment for the ants.", true, ['pest']],
+  ["We can do a complimentary service call.", true, []],
+  ["Your regular treatment is complimentary with your plan.", false, []],
+  ["We'll send a tech for a no-charge lawn treatment.", true, ['lawn']],
+  ["Another lawn treatment at no charge.", true, ['lawn']],
+  ["The treatment is free of charge.", true, []],
+  ["Your scheduled service is free with your plan.", false, []],
+  ["Feel free to call about your service.", false, []],
+  ["We offer a free service estimate.", false, []],
   ["We can't offer a free lawn re-service.", false, []],
   ["You're not eligible for a free re-service right now.", false, []],
   ["Unfortunately that isn't covered - the re-service is not free.", false, []],
