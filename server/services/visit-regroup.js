@@ -7,7 +7,7 @@
  * extension) get folded into ONE visit so the tech closes them out together.
  *
  * Eligibility is NOT re-implemented here. Candidates are pre-filtered by a
- * cheap SQL shape (an ungrouped, not-started, tomorrow-or-later row with a
+ * cheap SQL shape (an ungrouped, not-started row three or more days out with a
  * same-day same-customer same-property live partner); every verdict then
  * comes from visit-groups.js: `maybeGroupRow(id, { preview: true })` runs the
  * exact read-only eligibility path (property + window required, canJoin,
@@ -28,18 +28,37 @@
  * un-reminded sibling's due tier would otherwise fire ONE combined notice to
  * a customer who already got a reminder for the other service.
  *
- * Never touches today or earlier: a tech's day does not change under them.
+ * Never touches a visit inside the reminder clearance (76h: no reminder is
+ * due or in flight) or a row already in a visit: this is a backfill of loose
+ * pairs only; joining an existing visit stays with the insert-time paths.
  */
 
 const db = require('../models/db');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 
 const DEFAULT_LIMIT = 500;
 
-/** Tomorrow (ET) as YYYY-MM-DD — the earliest date the sweep may touch. */
+// Reminder clearance: the earliest customer reminder goes out 72h before the
+// visit (appointment-reminders.js, window 72.25h). A row whose visit starts
+// more than this far out has no reminder due or in flight, so grouping it can
+// never land between a standalone reminder's send and its stamp (the sender
+// reads membership unlocked, sends, then stamps).
+const REMINDER_CLEARANCE_MS = 76 * 3600 * 1000;
+
+/**
+ * Earliest calendar date (ET) the sweep may touch: three days out. The exact
+ * fence is the per-row start instant (REMINDER_CLEARANCE_MS); this date is the
+ * coarse SQL prefilter below it. Today and tomorrow are never touched.
+ */
 function earliestRegroupDate(now = new Date()) {
-  return etDateString(addETDays(now, 1));
+  return etDateString(addETDays(now, 3));
+}
+
+function visitStartInstant(row) {
+  const time = String(row.window_start || '').slice(0, 5);
+  if (!/^\d{2}:\d{2}$/.test(time)) return null;
+  return parseETDateTime(`${dateString(row.scheduled_date)}T${time}`);
 }
 
 async function reminderStateKey(database, rowIds) {
@@ -54,17 +73,23 @@ async function reminderStateKey(database, rowIds) {
   });
 }
 
-// Every member the eligibility path picked must itself be untouched: a
-// partner already en route / on site (or otherwise started) is never folded
-// into a group by a backfill, and nothing dated before `earliest` is touched.
-async function membersStillUntouched(database, rowIds, earliest) {
+// Every member the eligibility path picked must itself be untouched and
+// still loose: a partner already en route / on site (or otherwise started),
+// or already inside a visit (whose other members this sweep never judged), is
+// never folded in by a backfill; nothing before `earliest` or inside the
+// reminder clearance is touched.
+async function membersStillUntouched(database, rowIds, earliest, now = new Date()) {
   const rows = await database('scheduled_services')
     .whereIn('id', rowIds)
-    .select('id', 'status', 'track_state', 'en_route_at', 'arrived_at', 'scheduled_date');
+    .select('id', 'status', 'track_state', 'en_route_at', 'arrived_at', 'scheduled_date', 'window_start', 'visit_id');
   if (rows.length !== rowIds.length) return false;
-  return rows.every((r) => ['pending', 'confirmed'].includes(String(r.status))
-    && String(r.track_state) === 'scheduled' && !r.en_route_at && !r.arrived_at
-    && dateString(r.scheduled_date) >= earliest);
+  const clearAfter = now.getTime() + REMINDER_CLEARANCE_MS;
+  return rows.every((r) => {
+    const start = visitStartInstant(r);
+    return ['pending', 'confirmed'].includes(String(r.status))
+      && String(r.track_state) === 'scheduled' && !r.en_route_at && !r.arrived_at && !r.visit_id
+      && dateString(r.scheduled_date) >= earliest && start && start.getTime() > clearAfter;
+  });
 }
 
 const dateString = (value) => require('./visit-groups').dateOnly(value);
@@ -89,6 +114,7 @@ async function findCandidateRows(database, { fromDate, toDate, limit, after = nu
           AND p.property_id = ss.property_id
           AND p.scheduled_date = ss.scheduled_date
           AND p.id <> ss.id
+          AND p.visit_id IS NULL
           AND p.status NOT IN (${JOIN_INELIGIBLE_STATUSES.map(() => '?').join(',')})
           AND psvc.groupable = true
           AND psvc.group_family = svc.group_family)`,
@@ -111,11 +137,11 @@ async function findCandidateRows(database, { fromDate, toDate, limit, after = nu
 // if a reminder run or a lifecycle transition lands before the apply. The
 // reminder rows are read FOR SHARE so a concurrent reminder stamp serializes
 // behind the grouping (or is seen, committed, before it).
-function lockedFences(earliest) {
+function lockedFences(earliest, now) {
   return async (fresh, trx) => {
     const ids = fresh.map((r) => String(r.id));
     await trx('appointment_reminders').whereIn('scheduled_service_id', ids).forShare().select('id');
-    if (!(await membersStillUntouched(trx, ids, earliest)) || new Set(await reminderStateKey(trx, ids)).size > 1) {
+    if (!(await membersStillUntouched(trx, ids, earliest, now)) || new Set(await reminderStateKey(trx, ids)).size > 1) {
       const err = new Error('regroup fence changed under lock');
       err.code = 'REGROUP_FENCE_CHANGED';
       throw err;
@@ -123,22 +149,21 @@ function lockedFences(earliest) {
   };
 }
 
-// One reported group per stop: a transitive window chain (09-10, 10-11,
-// 11-12) yields overlapping verdicts that share a member, so a verdict that
-// touches an already-reported group widens that group instead of adding one.
-function recordGroup(groups, byRow, group) {
-  const existing = group.rowIds.map((id) => byRow.get(id)).find(Boolean);
-  const target = existing || group;
-  if (existing) {
-    existing.rowIds = [...new Set([...existing.rowIds, ...group.rowIds])];
-    if (!existing.visitId) existing.visitId = group.visitId;
-  } else {
-    groups.push(group);
+// One reported group per stop. The sweep only groups LOOSE rows, so a verdict
+// that reaches a member already grouped this run (a transitive 09-10 / 10-11 /
+// 11-12 chain) is left alone, exactly as the apply sees it: after the first
+// pair is written, its members carry visit_id and the third row has no loose
+// partner. The dry run mirrors that instead of reporting an overlapping group.
+function recordGroup(base, byRow, group) {
+  if (group.rowIds.some((id) => byRow.has(id))) {
+    group.rowIds.filter((id) => !byRow.has(id)).forEach((id) => base.left.push({ rowId: id, reason: 'joins_existing_visit' }));
+    return;
   }
-  target.rowIds.forEach((id) => byRow.set(id, target));
+  base.groups.push(group);
+  group.rowIds.forEach((id) => byRow.set(id, group));
 }
 
-async function judgeCandidate(cand, { database, dryRun, earliest, handled }) {
+async function judgeCandidate(cand, { database, dryRun, earliest, handled, now }) {
   const VisitGroups = require('./visit-groups');
   // Read-only verdict from the real eligibility path.
   const verdict = await VisitGroups.maybeGroupRow(cand.id, { database, preview: true, createdBy: 'regroup-sweep' });
@@ -149,14 +174,14 @@ async function judgeCandidate(cand, { database, dryRun, earliest, handled }) {
   const rowIds = verdict.rowIds.map(String);
   rowIds.forEach((id) => handled.add(id));
   const leave = (reason) => ({ left: rowIds.map((id) => ({ rowId: id, reason })) });
-  if (!(await membersStillUntouched(database, rowIds, earliest))) return leave('already_started');
+  if (!(await membersStillUntouched(database, rowIds, earliest, now))) return leave('already_started');
   if (new Set(await reminderStateKey(database, rowIds)).size > 1) return leave('reminder_state_differs');
   const group = {
     customerId: cand.customer_id, propertyId: cand.property_id, date: dateString(cand.scheduled_date), rowIds, visitId: null,
   };
   if (dryRun) return { group };
   const visit = await VisitGroups.maybeGroupRow(cand.id, {
-    database, createdBy: 'regroup-sweep', lockedGuard: lockedFences(earliest),
+    database, createdBy: 'regroup-sweep', lockedGuard: lockedFences(earliest, now),
   });
   // createOrJoinVisit refused under its locks (frozen, artifact, in-flight
   // completion, a backfill fence that changed since the preview).
@@ -168,7 +193,7 @@ async function judgeCandidate(cand, { database, dryRun, earliest, handled }) {
 
 /**
  * @param {object}  [opts]
- * @param {string}  [opts.fromDate]  YYYY-MM-DD; clamped up to tomorrow (ET).
+ * @param {string}  [opts.fromDate]  YYYY-MM-DD; clamped up to three days out (ET).
  * @param {string}  [opts.toDate]    YYYY-MM-DD inclusive upper bound.
  * @param {boolean} [opts.dryRun=true]  Default is a dry run; pass false to write.
  * @param {object}  [opts.database]  knex handle (default: shared pool).
@@ -180,7 +205,8 @@ async function judgeCandidate(cand, { database, dryRun, earliest, handled }) {
  *   toDate: string|null, candidates: number, capped: boolean, groups: Array, left: Array }>}
  *   groups: one entry per stop [{ customerId, propertyId, date, rowIds, visitId }]
  *   (visitId null on a dry run); left: [{ rowId, reason }] ('not_eligible' |
- *   'already_started' | 'reminder_state_differs' | 'refused'). Ids only — never a customer name.
+ *   'already_started' (started, already in a visit, or inside the reminder clearance) |
+ *   'reminder_state_differs' | 'joins_existing_visit' | 'refused'). Ids only — never a customer name.
  */
 async function regroupUngroupedSameStopRows({
   fromDate, toDate = null, dryRun = true, database = db, now = new Date(), limit = DEFAULT_LIMIT,
@@ -196,7 +222,7 @@ async function regroupUngroupedSameStopRows({
 
   const handled = new Set();
   const byRow = new Map();
-  const ctx = { database, dryRun, earliest: effectiveFrom, handled };
+  const ctx = { database, dryRun, earliest: effectiveFrom, handled, now };
   let after = null;
   for (;;) {
     const candidates = await findCandidateRows(database, { fromDate: effectiveFrom, toDate, limit, after });
@@ -211,14 +237,14 @@ async function regroupUngroupedSameStopRows({
       if (handled.has(String(cand.id))) continue;
       const outcome = await judgeCandidate(cand, ctx);
       if (outcome.left) base.left.push(...outcome.left);
-      if (outcome.group) recordGroup(base.groups, byRow, outcome.group);
+      if (outcome.group) recordGroup(base, byRow, outcome.group);
     }
     if (candidates.length < limit) break;
   }
   return base;
 }
 
-/** Count of candidate rows (ungrouped + a same-stop partner) from tomorrow on. */
+/** Count of candidate rows (ungrouped + a loose same-stop partner) from the earliest regroup date on. */
 async function countRegroupCandidateRows({ fromDate, toDate = null, database = db, now = new Date() } = {}) {
   const earliest = earliestRegroupDate(now);
   const effectiveFrom = fromDate && String(fromDate) > earliest ? String(fromDate) : earliest;
@@ -233,4 +259,6 @@ async function countRegroupCandidateRows({ fromDate, toDate = null, database = d
   }
 }
 
-module.exports = { regroupUngroupedSameStopRows, countRegroupCandidateRows, earliestRegroupDate, DEFAULT_LIMIT };
+module.exports = {
+  regroupUngroupedSameStopRows, countRegroupCandidateRows, earliestRegroupDate, DEFAULT_LIMIT, REMINDER_CLEARANCE_MS,
+};

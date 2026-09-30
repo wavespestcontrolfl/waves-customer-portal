@@ -147,8 +147,8 @@ postgres('same-stop regroup sweep', () => {
     expect((await visitIds(f.rows)).every((v) => v === null)).toBe(true);
   });
 
-  test('today and earlier are never touched', async () => {
-    const today = etDateString(new Date());
+  test('today through two days out are never touched', async () => {
+    const today = etDateString(addETDays(new Date(), 2));
     const f = await fixture({ date: today, windows: [['09:00', '10:00'], ['09:30', '10:30']] });
     const apply = await regroupUngroupedSameStopRows({ fromDate: today, toDate: today, dryRun: false });
     expect(apply.fromDate > today).toBe(true);
@@ -194,19 +194,51 @@ postgres('same-stop regroup sweep', () => {
     expect((await visitIds(stuck.rows)).every((v) => v === null)).toBe(true);
   });
 
-  test('a transitive window chain is reported as one stop', async () => {
+  test('a transitive window chain groups its first loose pair and the dry run says the same', async () => {
     const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['10:00', '11:00'], ['11:00', '12:00']] });
-    const all = f.rows.map((r) => String(r.id)).sort();
+    // Candidates walk in id order, so which overlapping pair forms first varies;
+    // either way it holds the middle row, and the apply writes what the dry run said.
+    const middle = String(f.rows[1].id);
     const dry = await regroupUngroupedSameStopRows({ fromDate: f.date, toDate: f.date });
     expect(dry.groups).toHaveLength(1);
-    expect([...dry.groups[0].rowIds].sort()).toEqual(all);
+    const pair = [...dry.groups[0].rowIds].sort();
+    expect(pair).toHaveLength(2);
+    expect(pair).toContain(middle);
+    const loose = f.rows.map((r) => String(r.id)).find((id) => !pair.includes(id));
+    expect(dry.left).toEqual([{ rowId: loose, reason: 'joins_existing_visit' }]);
     const out = await sweep(f);
     expect(out.groups).toHaveLength(1);
-    expect([...out.groups[0].rowIds].sort()).toEqual(all);
-    const vids = await visitIds(f.rows);
-    expect(new Set(vids).size).toBe(1);
-    expect(vids[0]).toBe(out.groups[0].visitId);
+    expect([...out.groups[0].rowIds].sort()).toEqual(pair);
+    const byId = new Map((await mockPg('scheduled_services').whereIn('id', f.rows.map((r) => r.id)).select('id', 'visit_id'))
+      .map((r) => [String(r.id), r.visit_id]));
+    expect(pair.every((id) => byId.get(id) === out.groups[0].visitId)).toBe(true);
+    expect(byId.get(loose)).toBeNull();
     expect(await visitCount(f.customerId)).toBe(1);
+  });
+
+  test('a row whose partner already sits in a visit is never joined by the sweep', async () => {
+    const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:00', '10:00'], ['09:30', '10:30']] });
+    await require('../services/visit-groups').createOrJoinVisit({ rows: f.rows.slice(0, 2), createdBy: 'test' });
+    const out = await sweep(f);
+    expect(out.candidates).toBe(0);
+    expect(out.groups).toHaveLength(0);
+    expect((await visitIds([f.rows[2]]))[0]).toBeNull();
+  });
+
+  test('visits inside the 76h reminder clearance are left alone', async () => {
+    const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:30', '10:30']] });
+    const { parseETDateTime } = require('../utils/datetime-et');
+    const start = parseETDateTime(`${f.date}T09:00`).getTime();
+    const inside = await regroupUngroupedSameStopRows({
+      fromDate: f.date, toDate: f.date, dryRun: false, now: new Date(start - 74 * 3600 * 1000),
+    });
+    expect(inside.groups).toHaveLength(0);
+    expect(inside.left.map((l) => l.reason)).toContain('already_started');
+    expect((await visitIds(f.rows)).every((v) => v === null)).toBe(true);
+    const outside = await regroupUngroupedSameStopRows({
+      fromDate: f.date, toDate: f.date, dryRun: false, now: new Date(start - 80 * 3600 * 1000),
+    });
+    expect(outside.groups).toHaveLength(1);
   });
 
   test('maxCandidates caps the whole run, not a page', async () => {

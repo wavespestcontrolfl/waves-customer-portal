@@ -1160,7 +1160,8 @@ function initScheduledJobs() {
   // before the gates, while autopay customers were excluded, or by a writer
   // that never calls maybeGroupRow: moves, series extension) are folded into
   // one visit through the canonical maybeGroupRow / createOrJoinVisit path.
-  // Tomorrow onward only — a tech's current day never changes under them.
+  // Only loose pairs more than 76h out (no reminder due or in flight), so a
+  // tech's near days never change under them.
   // Inert unless GATE_VISIT_GROUPS is on (checked inside the sweep). Grouping
   // writes no customer message. runExclusive: read-then-act; a deploy overlap
   // must not run two sweeps over the same rows.

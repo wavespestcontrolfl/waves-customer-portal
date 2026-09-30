@@ -10,8 +10,8 @@
  *   node scripts/regroup-same-stop-rows.js --limit 200      # judge at most 200 candidate rows this run
  *
  * Needs GATE_VISIT_GROUPS=true in the environment (gate off = no-op, as at
- * every other grouping seam). Tomorrow onward only — today and earlier are
- * never touched. Eligibility is server/services/visit-groups.js (maybeGroupRow
+ * every other grouping seam). Only loose pairs whose visits start more than
+ * 76 hours out (no reminder due or in flight) are touched. Eligibility is server/services/visit-groups.js (maybeGroupRow
  * / createOrJoinVisit); this only finds the rows. Grouping sends no customer
  * text. Prints row / customer / property / visit ids only, never a name.
  * Re-running is a no-op (grouped rows carry visit_id and stop being candidates).
