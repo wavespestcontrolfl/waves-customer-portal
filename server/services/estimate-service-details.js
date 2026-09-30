@@ -408,141 +408,242 @@ const SERVICE_DETAILS_COPY = {
     ctaMicro: 'A written termite agreement covers every installation \u2014 it states your coverage, warranty type, renewal, and exclusions in plain terms.',
     illustrations: ['station_map'],
   },
-  // Lawn guide rebuilt 2026-07-11 per the owner-supplied external lawn
-  // review (UF/IFAS- and EPA-grounded): inspection-led protocol, turf-type
-  // specificity, cultural-vs-pest honesty, no universal re-entry times, no
-  // "residue binds the blade" universal claims, control-not-eliminate
-  // language, fertilizer-ordinance compliance, and report/knowledge-base
-  // documentation made explicit.
+  // Lawn guide revised 2026-09-30 from the owner-approved prep & service guide
+  // (lawn-care-prep-guide-draft-20260929): a prep guide — what you do, what we
+  // do, why — instead of program marketing. Keeps the turf-type honesty,
+  // fertilizer blackout, product-specific re-entry (never a universal time),
+  // no "safe" claims, license line, and service-report documentation.
+  //
+  // `sections` is the generic ordered-block list the PDF renders right after
+  // the systemBox. Section schema (all fields optional except heading):
+  //   { heading: string,
+  //     level?: 1 | 2,            // 1 = ruled section heading (default), 2 = bold subheading
+  //     paragraphs?: string[],    // body paragraphs
+  //     steps?: string[],         // numbered list ("1.", "2.", ...)
+  //     bullets?: string[],       // bulleted list
+  //     table?: { columns: string[], rows: string[][] },
+  //     note?: string }           // closing paragraph, rendered after the table
+  //   { slot: 'process' }         // marker: render "What's included" + "How your
+  //                               // visits work" HERE instead of after the sections
+  // Render order inside one section: paragraphs, steps, bullets, table, note.
   lawn_care: {
     title: 'Lawn Care — Service Details',
-    tagline: 'Your grass type, your property’s conditions, and the actual problem determine the treatment — not a one-size-fits-all route sheet.',
+    tagline: 'Your grass type, your property’s conditions, and the actual problem determine the treatment. This guide tells you what to do before and after each visit, what we do while we’re there, and why.',
     systemBox: {
       heading: 'Your program at a glance',
       rows: [
-        ['Visits', 'Full lawn programs typically run 9–12 visits per year (your estimate states your plan’s count), scheduled around turf growth, seasonal pest pressure, weather, and local fertilizer rules — not a rigid monthly calendar'],
-        ['Built for your grass', 'St. Augustine, Bermuda, Zoysia & Bahia run dedicated program tracks — a product or rate that helps one grass can injure another, so the turf is identified before anything is applied'],
-        ['Every visit', 'Inspection first — then turf-specific fertilization, weed & sedge management, and insect/disease work as season, conditions, and labels warrant'],
-        ['Covered turf insects', 'Chinch bugs, sod webworms, armyworms, white grubs & mole crickets — monitored every visit, treated on evidence. Fire-ant control is included only when your proposal specifically includes it; billbugs and unusual turf pests are inspected and quoted from diagnosis'],
-        ['Disease', 'Scouted every visit — a brown patch is a symptom, not a diagnosis. Condition-based fungicide is part of comprehensive lawn plans; fertilization-only and weed-only plans quote it separately'],
-        ['Summer fertilizer rules', 'Manatee County, Bradenton & Sarasota County restrict nitrogen/phosphorus fertilizer Jun 1 – Sep 30 — summer visits shift to iron & micronutrients, weed control, and lawn insect control, never skipped'],
-        ['Documentation', 'Digital report every visit: findings, photos, exact products, watering & mowing instructions, and your lawn-health trend in the app'],
-        ['Re-service', 'No-charge re-services for covered issues while your plan is active — report a concern any time; some treatments need their normal response window (about 7–10 days) before another application'],
-        ['Separate services', 'Mowing, edging, irrigation diagnosis/repair, sod installation, flowerbed weed control, tree & shrub care — core aeration and lawn plugging are available as separately quoted services'],
+        ['Visits', '9–12 per year (your estimate states your count), timed to turf growth, pest season, weather, and local fertilizer rules — not a fixed monthly date'],
+        ['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another'],
+        ['Every visit', 'Inspect first. Then turf-specific fertilization, weed and sedge control, and insect or disease treatment when the evidence supports it'],
+        ['Covered insects', 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets — checked every visit, treated on evidence. Fire ants only when your proposal includes them'],
+        ['Disease', 'Scouted every visit. Fungicide is applied when disease is present or the risk is documented, on comprehensive plans; fertilization-only and weed-only plans quote it separately'],
+        ['Re-service', 'Covered issues are re-serviced at no charge while your plan is active. Report a concern any time'],
+        ['Documentation', 'A digital report every visit: findings, photos, exact products, watering and mowing instructions, and your lawn-health trend in the Waves app'],
       ],
-      note: 'Your estimate and service agreement control the exact scope, covered pests, and guarantee terms. Where a lawn problem needs something a treatment cannot fix — shade, a broken sprinkler head, compacted soil — we say so instead of selling you product.',
+      note: 'Your estimate and service agreement control scope, covered pests, and guarantee terms. Turf-specific program · Re-service for covered issues per your program terms · Every visit documented.',
     },
+    sections: [
+      {
+        heading: 'Before your first visit',
+        paragraphs: ['Five things we need from you. Each one changes what we apply.'],
+        steps: [
+          'Who mows, and what day. We schedule around your mow so product isn’t stripped off the blade the next morning. Why: most liquid applications need a day or two on the leaf to work.',
+          'Your irrigation days and run times per zone. If you don’t know them, tell us the controller brand and we’ll read it on the first visit. Why: watering-in and dry-time instructions are written against your real schedule, and overwatering is the single biggest cause of dollarweed, sedge, and fungus in our area.',
+          'Grass type if you know it, and the sod invoice if you have one. Why: the herbicide list is different for every grass, and for Bermuda removal the St. Augustine cultivar decides whether the treatment is allowed at all (see below).',
+          'Anything applied in the last 60 days by anyone. Store-bought weed-and-feed, a previous company, a landscaper. Send a photo of the bag or bottle. Why: stacking products injures turf and voids label intervals.',
+          'Edible gardens, ponds, beehives, chickens, an invisible-fence wire, and shallow irrigation lines. Why: product placement is planned around them.',
+        ],
+      },
+      {
+        heading: 'Before every visit',
+        bullets: [
+          'Mow at least 24 hours before if mowing is due. Don’t mow the day of. Why: we need leaf surface to treat, and fresh cuts bleed product.',
+          'Sprinklers off the night before. Why: we treat a dry lawn; wet grass dilutes liquids and granules stick to the blade instead of reaching the soil.',
+          'Clear the lawn: toys, hoses, furniture, pet bowls, pet waste. Unlock gates. Pets and kids inside during the application.',
+          'Tell us what changed: new sod, a new dog, a sprinkler repair, a brown patch that showed up this week. Text a photo. Why: the visit starts from your lawn’s history, and a change we don’t know about is a diagnosis we get wrong.',
+        ],
+      },
+      // The visit walkthrough (included + process) belongs between the prep
+      // and the aftercare, as the owner-approved draft orders it.
+      { slot: 'process' },
+      {
+        heading: 'After every visit',
+        paragraphs: ['Your service report tells you which of these applies. They change with the product, so we will not print one rule for every visit.'],
+        bullets: [
+          'Watering. The report says one of: water in today (granular fertilizer, most insect granules), keep dry for the stated hours (liquid weed control, fungicide), or resume your normal schedule. Don’t run the sprinklers after a visit unless the report says to.',
+          'Mowing. Wait 1–2 days after liquid applications, longer if the report says so. Never mow a wet application.',
+          'Kids and pets. Off the lawn until the treated area is dry for liquids; until watered in for granules. Dogs that graze grass or lick paws are the main exposure route. If you have a grazer, tell us.',
+          'What “working” looks like. Weeds yellow and wilt over 1–2 weeks; stubborn perennials may need a second pass. Insect damage stops spreading, but dead turf does not regrow. It fills in by runners, plugs, or sod.',
+          'Call us right away if the lawn yellows in streaks or stripes within days of a visit, or damage is spreading. That’s an immediate look, not wait-and-see. No waiting period for a re-service.',
+        ],
+      },
+      {
+        heading: 'Watering your lawn (the everyday rule)',
+        paragraphs: [
+          'Water on need, not on a timer: folded blades, a blue-gray cast, and footprints that stay mean it’s time. A typical event is ½–¾ inch, early morning, 1–2 times a week in the dry season and less in the rainy season. Skip a cycle after ½ inch of rain. Your district’s watering days apply; hand-watering rules are looser if a spot needs a drink sooner. Overwatering feeds shallow roots, fungus, dollarweed, and sedges.',
+          'If your irrigation runs are on file in the Waves app, your reports use those numbers. If not, the generic starting point is 30–45 minutes per rotor zone and 10–15 minutes per spray-head zone, then adjust with a tuna can test to ½–¾ inch.',
+        ],
+      },
+      {
+        heading: 'Mowing heights (UF/IFAS starting points)',
+        paragraphs: ['Standard St. Augustine (Floratam, Palmetto, Raleigh) 3.5–4"; dwarf St. Augustine (Seville, Captiva) 2–2.5"; Bermuda 1–2"; Zoysia 1.75–2.5"; Bahia 3–4". Never remove more than a third of the blade in one mowing. Keep blades sharp. Scalping looks like pest damage and invites Bermuda and weeds.'],
+      },
+      {
+        heading: 'Bermuda removal from St. Augustine (Recognition + Fusilade II)',
+        paragraphs: ['Part of the lawn program, priced higher on your estimate. This is a multi-application program, not a spray. It is the first selective way to take bermudagrass out of St. Augustine while the St. Augustine lives through it (UF/IFAS SS-AGR-503). Fusilade II is what kills the Bermuda. Recognition carries a safener that lets St. Augustine tolerate it. Neither works alone.'],
+      },
+      {
+        heading: 'What has to be true first',
+        level: 2,
+        bullets: [
+          'It has to be bermudagrass. Torpedograss is the dangerous look-alike; this mix only suppresses it. We confirm the weed before anything is quoted.',
+          'Your St. Augustine cultivar has to be eligible. Floratam, Palmetto, Raleigh, SunClipse, and CitraBlue: yes. ProVista, Captiva, and Seville: no, our policy, stricter than the label. Unknown cultivar: a test patch first, watched 3–4 weeks. We identify from the sod invoice, builder, or sod farm, never by eye.',
+          'The turf has to be healthy. No drought stress, flooding, active chinch bug or disease damage, recent scalping, or sod younger than 4 weeks.',
+          'Spring is the window. UF/IFAS says prioritize spring and avoid late summer and fall, when injury risk climbs. If you’re reading this in August, we map it now and treat in spring.',
+          'If Bermuda is already most of the lawn, removing it leaves a hole St. Augustine can’t close. Renovation is the honest answer there, and we’ll say so.',
+        ],
+      },
+      {
+        heading: 'What you do',
+        level: 2,
+        bullets: [
+          'Mow at normal height about a week before, then don’t mow, edge, or hand-pull for 7 days after. Why: Bermuda has to have leaf to absorb the product and time to move it into the runners and rhizomes.',
+          'Don’t scalp. Low mowing removes the leaf we need and is what favors Bermuda in the first place.',
+          'No irrigation for 48 hours after, and we need a 3-hour dry window with no rain. We’ll reschedule rather than spray into weather.',
+          'Don’t use clippings from treated areas as mulch, and don’t plant anything but turf in a treated area for 12 months (label restrictions).',
+          'Deal with the source. Bermuda coming across a property line or out of a bed will come back. Edge beds 6 inches deep and clean mowers that leave a contaminated lawn.',
+        ],
+      },
+      {
+        heading: 'What you’ll see',
+        level: 2,
+        table: {
+          columns: ['When', 'What’s happening', 'What you see'],
+          rows: [
+            ['Days 1–7', 'Bermuda growth shuts down', 'Often nothing. Normal.'],
+            ['Days 7–14', 'Cell membranes fail', 'Bermuda yellows, reddens, thins'],
+            ['Days 10–21', 'Growing points die', 'Visible dieback; St. Augustine may discolor mildly and temporarily'],
+            ['Weeks 5–6', 'Re-inspection', 'Second treatment only if there is live regrowth to hit'],
+            ['Months after', 'St. Augustine fills in', 'Gradual closure; edges may see Bermuda return from outside'],
+          ],
+        },
+        note: 'Two applications per growing season is the ceiling, set by the label’s resistance rules. An old dense stand that needs a third pass gets it the next spring. We will never promise permanent eradication; a lawn sharing a line with untreated Bermuda will see it again.',
+      },
+      {
+        heading: 'Special situations',
+      },
+      {
+        heading: 'New sod you had installed (we don’t install sod)',
+        level: 2,
+        paragraphs: ['Tell us the install date, the grass type, and what the installer applied. New sod gets an establishment plan, not the standard pass.'],
+        bullets: [
+          'Water: days 1–7, 2–3 short cycles a day; days 8–14, once a day, early morning; weeks 3–4, 2–3 times a week at ¼–½ inch; from week 5, your normal schedule at ½–¾ inch. New sod is usually exempt from district watering days for the first 30 days only.',
+          'Mow: first cut at 14–21 days, once a tug on the sod holds. Sharp blade, correct height for the grass, never more than a third of the blade.',
+          'Fertilizer: none for 30–60 days, and none at all June 1–Sept 30 in Sarasota and Manatee. A summer install gets iron and micronutrients until October.',
+          'Herbicide: none during establishment. Pull weeds by hand. The Recognition/Fusilade program waits at least 4 weeks after sodding and in practice a full season.',
+          'Feet and pets: off for 2 weeks.',
+          'Why: roots, not blades, decide whether sod lives. Everything above protects rooting.',
+        ],
+      },
+      {
+        heading: 'Plugging (live plugs of your grass into thin or bare spots)',
+        level: 2,
+        bullets: [
+          'Before: water the area the day before so plugs go into moist soil. Rake out dead material if we haven’t asked to do it. Mark sprinkler heads.',
+          'After: water daily for 2 weeks, then taper with the sod schedule above. Mow around the plugs for 3–4 weeks. No pre-emergent herbicide for 8 weeks; it stops the runners that knit plugs together.',
+          'Why: plugs spread by runners across bare soil; dry soil or an early pre-emergent kills the spread.',
+        ],
+      },
+      {
+        heading: 'Dethatching (power dethatching, not raking)',
+        level: 2,
+        bullets: [
+          'Before: mow short the day before. Sprinklers off for 24 hours. Mark sprinkler heads, drip lines, and invisible-fence wire. Why: dry thatch lifts, wet thatch smears; the machine finds anything you don’t mark.',
+          'After: the lawn looks rough for 2–3 weeks. That’s expected. Water and, in season, feed within a week; this is the best moment for top dressing or plugging thin spots.',
+          'When: in the grass’s active growth window so it recovers. We pick the date for your grass type.',
+          'Why: more than ½ inch of thatch blocks water and fertilizer from the soil and shelters chinch bugs and fungus.',
+        ],
+      },
+      {
+        heading: 'Top dressing (sand)',
+        level: 2,
+        bullets: [
+          'Before: mow low the day before. Water the night before. Clear the lawn.',
+          'After: keep foot traffic off for 2 days. Water lightly to settle the sand. Mow when the grass is through it. Rake high spots if we ask.',
+          'Why: a thin sand layer levels ruts and speeds thatch breakdown; it works best right after dethatching.',
+        ],
+      },
+      {
+        heading: 'Summer fertilizer rules (June 1 – September 30)',
+        paragraphs: ['Manatee County, Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn fertilizer in this window. Your address decides which ordinance applies. Summer visits still run the full inspection, insect and disease work, weed control, and iron and micronutrients to hold color. Your lawn is not skipped, and we won’t break the ordinance for you.'],
+      },
+    ],
     included: [
       'Inspection-led visits with turf-specific fertilization and nutrient applications',
-      'Broadleaf, sedge, and grassy-weed management — pre- and post-emergent as conditions and labels allow',
-      'Monitoring and evidence-based treatment for chinch bugs, grubs, sod webworms, armyworms, and other covered turf insects',
-      'Turf-disease evaluation, with treatment when the evidence supports it',
-      'Non-pest condition checks: drought stress, overwatering, sprinkler-pattern clues, mowing injury, shade stress',
-      'Photos, findings, exact product records, and notes carried forward visit to visit — plus your lawn-health trend',
+      'Broadleaf, sedge, and grassy-weed management, pre- and post-emergent as conditions and labels allow',
+      'Monitoring and evidence-based treatment for chinch bugs, grubs, sod webworms, armyworms, and mole crickets',
+      'Turf-disease scouting, with treatment when the evidence supports it',
+      'Non-pest checks: drought stress, overwatering, sprinkler-pattern clues, mowing injury, shade',
+      'A digital report every visit with photos, findings, exact products, and your lawn-health trend',
     ],
+    // "What we do on a visit" — renders under the shared "How your visits work" heading.
     process: [
-      'Every visit starts with your lawn’s history, not a spreader: previous findings, photos, products applied, what improved, and what did not respond as expected. The program gets smarter about your lawn every visit — it never restarts from zero.',
-      'We confirm the turf before choosing products. St. Augustine, Bermuda, Zoysia, and Bahia tolerate different herbicides, rates, and mowing heights — a product appropriate for one grass can injure another — so mixed turf, new sod, and unidentified cultivars get flagged before herbicide selection.',
-      'Then we inspect: color, density, and recovery; the pattern and location of damage; leaf, root, and thatch condition; visible insects and feeding evidence; weed and sedge identification; disease symptoms; soil moisture and drainage; sprinkler-coverage clues; mowing height and scalping; shade, traffic, and pet areas. A brown area is a symptom, not a diagnosis — insects, disease, drought, overwatering, mower injury, and shade can all look alike.',
-      'We separate pest problems from cultural ones. A pesticide can control a covered pest — it cannot create sunlight in deep shade, fix a broken sprinkler head, decompact soil, reverse repeated scalping, replace dead sod, or make the wrong grass thrive in the wrong spot. When the primary cause is cultural or environmental, your report says so plainly, along with what has to change for lasting improvement.',
-      'Treatment follows the evidence: product, rate, method, and treated area are chosen from the confirmed (or reasonably supported) target, your grass and its condition, weather and soil moisture, nearby ornamentals and water, previous applications, local fertilizer rules, and the label. More product is never better — using a pesticide inconsistent with its labeling violates federal law.',
-      'Visits flex with the season instead of running an identical pass: nutrition leads part of the year, weed management another, insect and disease monitoring another — driven by weather, growth, results, and label restrictions.',
-      'And every visit is documented: areas inspected, findings, areas treated, the exact products applied, photos when they add evidence, watering and mowing instructions, product-specific re-entry guidance, and what to reassess next visit.',
+      'Read the history. Previous findings, photos, products, and what did or didn’t respond. The visit never starts from zero.',
+      'Confirm the grass. Mixed turf, new sod, and unknown cultivars are flagged before any herbicide is chosen.',
+      'Inspect. Color, density, damage pattern, leaf and root condition, thatch, visible insects, weed and sedge ID, disease symptoms, soil moisture, sprinkler-coverage clues, mowing height, shade and traffic. A brown area is a symptom, not a diagnosis: insects, disease, drought, overwatering, mower injury, and shade all look alike from the driveway.',
+      'Separate pest problems from cultural ones. A pesticide can control a covered pest. It cannot make sunlight in shade, fix a broken sprinkler head, or regrow dead sod. When the cause is cultural, the report says so and says what has to change.',
+      'Treat on evidence. Product, rate, and area come from the confirmed target, your grass, the weather, the label, and local fertilizer rules. More product is never better; applying outside the label is illegal.',
+      'Document it. Areas inspected, findings, products applied and why, photos, watering and mowing instructions, product-specific re-entry guidance, and what to reassess next visit.',
     ],
     responsibilities: {
-      heading: 'How you can multiply the results',
+      heading: 'Not part of this service',
       bullets: [
-        'Mow for the grass you have — UF/IFAS starting points: standard St. Augustine about 3.5–4", dwarf St. Augustine 2–2.5", Bermuda 1–2", Zoysia 1.75–2.5", Bahia 3–4". Never remove more than about a third of the blade in one mowing, and keep blades sharp — repeated scalping produces browning that mimics pest damage.',
-        'Water on lawn need, not an unchanged timer: folded blades, a blue-gray cast, and footprints that linger mean it’s time. A typical event is about ½–¾ inch, early morning. Overwatering feeds shallow roots, disease, dollarweed, and sedges — adjust with rainfall and season.',
-        'Before applying any store-bought fertilizer, weed-and-feed, or pesticide, send us a photo of the front and back labels first. Overlapping treatments can injure turf, violate label intervals, confuse diagnosis, and undo the plan.',
-        'On service day: unlock gates, secure pets, pick up toys and bowls, clear heavy pet waste from treatment areas, and flag new sod, edibles, ponds, beehives, or anything that changed since last visit.',
+        'Mowing and edging',
+        'Irrigation diagnosis and repair',
+        'Sod installation and aeration',
+        'Flowerbed weed control, and tree and shrub care',
+        'Plugging, dethatching, and top dressing are quoted separately',
       ],
     },
     faq: [
       {
-        q: 'Will this help my Bermuda grass?',
-        a: 'Yes — provided it runs as a Bermuda program, which is exactly what we do. Bermuda is not "St. Augustine with smaller blades": its fertility, mowing, weed-control, and recovery plan are built for Bermuda. What "help" means depends on the cause — thinning from shade has a different fix than armyworms, weeds, nematodes, low mowing, or irrigation stress — so we diagnose first, and your reports track the response visit over visit.',
+        q: 'Will my lawn be weed-free?',
+        a: 'No company should promise that. Some weeds are prevented, some are treated after they emerge, and grassy weeds inside another grass may have limited selective options. The durable fix is dense turf; where shade, water, or compaction keep it thin, weeds return no matter what’s sprayed, and your report will say so.',
       },
       {
-        q: 'Are my brown spots fungus, insects, or something else?',
-        a: 'Nobody can answer that honestly without inspecting the lawn. Brown or yellow areas can be disease, chinch bugs, grubs, webworms, irrigation coverage, drought, overwatering, mower scalping, fertilizer or herbicide injury, pet activity, shade, root decline — or several at once, and turf disease is one of the most commonly misdiagnosed lawn problems. We inspect the pattern, tissue, moisture, roots, and surroundings, then document the finding with photos. When a confident field call is not possible, we say so and tell you what testing or monitoring comes next.',
+        q: 'How fast will it improve?',
+        a: 'Depends on the cause and whether roots are alive. Weeds decline over 1–2 weeks. A treatment stops a pest without replacing dead turf. Your technician tells you which case you have and what to watch for by the next visit.',
       },
       {
-        q: 'Do you apply fungicide whenever you see a brown patch?',
-        a: 'No. A brown patch does not automatically mean fungus, and an unnecessary fungicide will not correct insects, drought, sprinkler gaps, mowing injury, or pet damage — misidentification is a leading reason lawn treatments fail. Every comprehensive visit includes disease scouting; fungicide is applied when disease is present, when conditions create a documented high risk, or when your lawn’s disease history justifies a preventive application. When we do treat, the product is labeled for your turf and that disease, with the watering and mowing instructions that fungicide requires. Fertilization-only and weed-only plans quote fungicide separately.',
-      },
-      {
-        q: 'Do you apply insecticide at every visit automatically?',
-        a: 'No — treatments follow evidence, not a route sheet. The technician weighs your grass, pest history, current activity, season, and the label, and when an insecticide is applied, your report identifies the pest or the evidence supporting it. Blanket applications you cannot trace to a reason are exactly what the report exists to prevent.',
-      },
-      {
-        q: 'How fast will my lawn improve?',
-        a: 'There is no honest universal timeline. It depends on the cause, how long the damage was present, whether roots and growing points are still alive, the grass and season, mowing and watering, and whether the underlying condition was corrected. A treatment can stop an active pest without instantly replacing dead turf; weeds take time to decline after treatment; areas with dead roots may need renovation rather than patience. Your technician tells you which situation you have and what to watch for by the next visit.',
-      },
-      {
-        q: 'Will every weed disappear?',
-        a: 'No lawn company should promise a permanently weed-free yard. Some weeds are best prevented before they emerge, others need post-emergent work, and mature perennials, sedges in chronically wet soil, and grassy weeds growing inside another grass may need repeat treatment or have limited selective options. Sometimes leaving a weed untreated for a visit is the right call — unidentified weed, wrong product for your grass, heat-stressed turf, label temperature limits, or fresh sod. The durable fix is dense, healthy turf; where the lawn stays thin from shade, water, or compaction, weeds keep returning no matter what is sprayed — and your report says so.',
+        q: 'Do you spray insecticide every visit?',
+        a: 'No. Treatments follow evidence, and when insecticide is applied the report names the pest or the evidence.',
       },
       {
         q: 'Do you treat nutsedge?',
-        a: 'Yes, when it is identified and a labeled treatment fits your turf — with an honest caveat: sedges thrive in continuously wet soil and regrow from underground tubers, so herbicide suppresses the visible growth while recurring excess moisture keeps sponsoring new shoots. Expect repeat treatments, and expect us to point at the drainage or irrigation pattern if that is the real sponsor.',
+        a: 'Yes, with a caveat: sedge lives in wet soil and regrows from tubers. Expect repeat treatments and expect us to point at the irrigation pattern sponsoring it.',
       },
       {
-        q: 'When can my dogs and kids use the lawn again?',
-        a: 'Follow the product-specific re-entry instructions in your service report — that is the honest answer, and it is different for different products and even different weather. Many liquid applications require keeping people and pets off until the treated area has dried; some granular products instead need watering-in before normal use resumes. There is no single standard time, and we will not print one. Keep everyone clear during the application, bring in toys and water bowls beforehand, and check the report — it states the exact guidance for the products actually used, every visit.',
+        q: 'Can you fix thin grass under my trees?',
+        a: 'Not with product. No Florida lawn grass thrives in deep shade. Pruning, a shade groundcover, or mulch is the honest answer there.',
       },
       {
-        q: 'What about rain, watering, and mowing after a visit?',
-        a: 'It depends on the product, so your report tells you plainly: water it in, keep it dry for a stated period, resume normal irrigation, or no action needed. Do not automatically run irrigation after service unless the report says to, and do not mow a wet application — some treatments need leaf-contact time before clippings carry them away. We schedule around weather so applications are not wasted, and if a downpour compromises a treatment, contact us.',
+        q: 'What happens on a re-service?',
+        a: 'It starts with an inspection, not an automatic re-spray. Many treatments need 7–10 days to show their work. We re-treat when it’s the same covered condition and the label allows, and explain the non-treatment fix when that’s what the lawn needs.',
       },
       {
-        q: 'I just had new sod installed — can you treat it?',
-        a: 'New sod gets an establishment plan, not the standard program pass. Tell us the installation date, the grass type if you know it, what the installer applied, your watering schedule, and any sod warranty terms. Some fertilizers and herbicides must be delayed or modified during rooting — treating fresh sod like established turf is how new lawns get hurt.',
-      },
-      {
-        q: 'Do you offer aeration or lawn plugging?',
-        a: 'Yes — both, as separately quoted specialty services rather than part of the standard visit rotation. Core aeration relieves soil compaction and opens the root zone; plugging installs live sod plugs at 6-, 12-, or 18-inch spacing to regrow thin or bare areas. We recommend them from what the inspection actually shows — compaction, thatch, bare ground, your grass type — and whether the site can support the recovery.',
-      },
-      {
-        q: 'Can treatments fix thin grass under my trees?',
-        a: 'They can address a covered pest or a nutrient issue — they cannot manufacture sunlight. No common Florida lawn grass performs well in dense shade, and tree-root competition and mowing difficulty pile on. In genuinely unsuitable areas, pruning by a qualified professional, a shade-tolerant groundcover, or mulch is more realistic than repeatedly treating grass that cannot win there — and we will tell you that rather than billing you to fight physics.',
-      },
-      {
-        q: 'Does service continue during the summer fertilizer restriction?',
-        a: 'Yes. Manatee County, Bradenton, and Sarasota County restrict nitrogen and phosphorus lawn fertilizers from June 1 through September 30, and your property address — not a company calendar — determines which ordinance applies. A restricted period does not mean your lawn is ignored: summer visits still carry the full inspection and pest scouting, covered turf-insect treatment, selective weed control, iron and approved zero-nitrogen/zero-phosphorus micronutrients to hold color lawfully, disease monitoring with condition-based treatment, and the usual checks on drought stress, mowing, and irrigation — and your report documents exactly what was used.',
-      },
-      {
-        q: 'What happens when I request a re-service?',
-        a: 'Report a concern any time — there is no waiting period to call, and if damage is actively spreading we inspect promptly. The re-service itself starts with inspection, not an automatic second application: we review the previous report and photos, ask when the concern began, and determine whether it is the same covered condition, a different pest, normal treatment response time (many treatments need about 7–10 days to show their work before re-applying makes sense), or an excluded cause like irrigation or mowing. We re-treat when it is appropriate and label-permitted — and explain the non-treatment correction when that is what the lawn actually needs. "More product" is not a diagnosis.',
-      },
-      {
-        q: 'Do you guarantee a perfect green lawn?',
-        a: 'No responsible company can guarantee a flawless lawn regardless of irrigation, mowing, shade, soil, weather, pets, and what gets applied between visits. What we do stand behind: careful inspection, correct covered treatments, label and ordinance compliance, honest documentation, re-service for covered issues under your written program terms — and telling you straight when a condition falls outside what treatment can fix. Your service agreement states the exact guarantee terms.',
-      },
-      {
-        q: 'What if you are not sure what is causing the problem?',
-        a: 'We say so. We will not invent a confident-sounding diagnosis to make a visit feel complete. You get what we observed, what has been ruled out, what remains possible, and the next step — monitoring, an irrigation check, a root or thatch exam, an insect or turf sample, or soil testing (recommended or arranged when needed; your proposal states whether sampling and laboratory fees are included), up to UF/IFAS laboratory analysis. An honest "not yet confirmed" beats a guess with a product bill attached.',
+        q: 'What if you’re not sure what’s wrong?',
+        a: 'We say so, and tell you what’s ruled out and the next step: monitoring, an irrigation check, a root or thatch exam, or a UF/IFAS soil or tissue sample. “Not yet confirmed” beats a guess with a product bill.',
       },
     ],
-    // Lawn-specific safety copy replaces the shared structural-pest section
-    // (crack-and-crevice/station content doesn't describe a lawn visit) —
-    // external review: no universal re-entry time, no universal "binds to
-    // the blade" claim, signal words qualified.
+    // Lawn-specific safety copy replaces the shared structural-pest section.
+    // No universal re-entry time, no "safe" claims.
     safetyOverride: {
-      heading: 'Pets, kids & your family — lawn-treatment safety, straight',
+      heading: 'Pets, kids, and your family',
       paragraphs: [
-        'If you have kids or dogs on this lawn, this is the question that matters most — so here is the real answer instead of a slogan.',
-        'Every pesticide product Waves applies is EPA-registered and used in accordance with its label — and that label is legally binding: it dictates where the product may go, at what rate, with what precautions, and when people and pets may re-enter. Registration does not mean risk-free, and no honest company will call any pesticide "completely safe."',
+        'Every product we apply is EPA-registered and used by its label, which is legally binding on where it goes, at what rate, and when people and pets may return. Registration is not a promise of zero risk, and no honest company calls a pesticide risk-free.',
+        'There is no single re-entry time for every visit: liquids need to dry, some granules need watering in, and weather moves both. Your report states the guidance for the products actually used. Tell us about edible gardens, beehives, ponds, chickens, play areas, and sensitive occupants before treatment.',
+        'Waves Pest Control, LLC operates under Florida license JB351547 and is insured. Florida law requires a posted treatment notice at every qualifying lawn visit; your report carries the details behind the sign.',
       ],
-      bullets: [
-        'There is no single re-entry time for every lawn visit, and we will not print one. Many liquid applications require keeping people and pets off until the treated area has dried; some granular products instead need watering-in before normal use resumes; other labels carry different conditions — and weather, humidity, shade, and method all move those windows. Your service report states the exact re-entry guidance for the products actually used, every visit.',
-        'During service, keep children and pets inside or clear of the work area, and bring in toys, chew items, food and water bowls, and anything else that could contact treated turf.',
-        'Signal words are the EPA’s at-a-glance acute-hazard categories — DANGER most severe, WARNING next, CAUTION the lowest signal-word category. They are useful indicators, not a complete measure of every risk: the full label governs every application.',
-        'Tell us about edible gardens, beehives, ponds, chickens, play areas, and sensitive occupants before treatment — placement and product selection are planned around them and the label.',
-        'More product is never the answer: rates come from the label, not from how bad the weeds look. Correct identification, correct product, correct placement — that is what produces results.',
-        'Waves Pest Control, LLC operates under Florida pest-control business license JB351547 and is insured, and every applied product is documented in your service report with its own re-entry guidance.',
-      ],
-      closing: 'We will never tell you a lawn treatment is “100% safe” — no honest company can, and the EPA does not permit that claim for any product. What we can show you is the product-by-product paper trail and the label-driven precautions behind every visit — the same rules our technicians follow on their own lawns.',
     },
     // Stylized in-house product renders (client/public/product-images) — the
     // program's flagship products, generated 2026-07-11 (gemini-3-pro-image;
@@ -570,8 +671,6 @@ const SERVICE_DETAILS_COPY = {
         'Every completed visit produces a digital lawn service report: areas inspected, conditions and problems observed, areas treated, the exact products applied and why, photos when findings warrant them, watering and mowing instructions when applicable, product-specific re-entry guidance, and what to reassess next visit.',
         'Lawn visits feed your lawn report’s health score and trend — findings and treatment notes carry forward, so future decisions are based on your lawn’s actual history and response, not a generic checklist.',
         'Behind the program is our agronomic knowledge base: Southwest Florida turf protocols, product data, and documented outcomes from real local lawns. That knowledge base — not guesswork — is what treatment decisions draw on.',
-        'Track your technician’s live location and estimated arrival in the Waves app once they’re en route, and keep every past report, invoice, and visit in one place — savable and shareable as a PDF.',
-        'Your service report is the property-specific record of what was inspected, found, and performed at YOUR home. Your service agreement controls the plan itself: covered pests, frequency, exclusions, and guarantee terms.',
       ],
     },
     ctaMicro: 'Turf-specific program · Re-service for covered issues per your program terms · Every visit documented',
@@ -857,6 +956,9 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}) {
     address: estimate.address || null,
     estimateSlug: estimate.estimate_slug || null,
     included: copy.included,
+    // Generic ordered blocks rendered right after the systemBox (schema documented
+    // on the lawn_care entry). Passed through unchanged.
+    sections: copy.sections || [],
     process: (copy.process || []).reduce((acc, step) => {
       if (typeof step === 'string') { acc.push(step); return acc; }
       if (step && typeof step === 'object' && ownershipMatches(step.ownership)) acc.push(step.text);

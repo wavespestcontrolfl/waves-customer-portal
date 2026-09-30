@@ -173,14 +173,120 @@ function sectionHeading(doc, text) {
   doc.moveDown(0.5);
 }
 
+// Room a wrapped 10pt list item / paragraph needs (measured, min 30) so a long
+// item moves to the next page whole instead of splitting across the footer.
+function itemRoom(doc, text, width) {
+  doc.font('Helvetica').fontSize(10);
+  return Math.max(30, doc.heightOfString(String(text), { width, lineGap: 1.5 }) + 4);
+}
+
 function bullets(doc, items) {
   doc.font('Helvetica').fontSize(10).fillColor(BODY);
   for (const item of items) {
-    ensureRoom(doc, 30);
+    ensureRoom(doc, itemRoom(doc, item, W - 14));
     const y = doc.y;
     doc.circle(L + 4, y + 5, 1.6).fillColor(BLUE).fill();
     doc.fillColor(BODY).font('Helvetica').fontSize(10).text(item, L + 14, y, { width: W - 14, lineGap: 1.5 });
     doc.moveDown(0.35);
+  }
+}
+
+// Numbered list — same layout as bullets(), with "1." labels in the gutter.
+function numberedSteps(doc, items) {
+  doc.font('Helvetica').fontSize(10).fillColor(BODY);
+  items.forEach((item, i) => {
+    ensureRoom(doc, itemRoom(doc, item, W - 22));
+    const y = doc.y;
+    doc.font('Helvetica-Bold').fontSize(10).fillColor(BLUE).text(`${i + 1}.`, L, y, { width: 18 });
+    doc.fillColor(BODY).font('Helvetica').fontSize(10).text(item, L + 22, y, { width: W - 22, lineGap: 1.5 });
+    doc.moveDown(0.35);
+  });
+}
+
+// Body paragraphs at 10pt.
+function paragraphs(doc, items) {
+  for (const p of items) {
+    ensureRoom(doc, itemRoom(doc, p, W));
+    doc.font('Helvetica').fontSize(10).fillColor(BODY).text(p, L, doc.y, { width: W, lineGap: 1.5 });
+    doc.moveDown(0.5);
+  }
+}
+
+// Level-2 subheading: bold 10.5pt navy, kept with the content that follows.
+function subHeading(doc, text) {
+  ensureRoom(doc, 46);
+  doc.moveDown(0.4);
+  doc.font('Helvetica-Bold').fontSize(10.5).fillColor(NAVY).text(text, L, doc.y, { width: W, lineGap: 1 });
+  doc.moveDown(0.3);
+}
+
+// Simple ruled table. Row heights are measured (never assumed) so long cells
+// wrap cleanly; each row gets its own ensureRoom and the header row repeats
+// after a page break so a split table stays readable.
+function ruledTable(doc, table) {
+  const columns = Array.isArray(table && table.columns) ? table.columns : [];
+  const rows = Array.isArray(table && table.rows) ? table.rows : [];
+  if (!columns.length || !rows.length) return;
+  const pad = 6;
+  const weights = columns.length === 3 ? [0.16, 0.30, 0.54] : columns.map(() => 1 / columns.length);
+  const colW = weights.map((w) => W * w);
+  const colX = colW.reduce((acc, w, i) => { acc.push(i === 0 ? L : acc[i - 1] + colW[i - 1]); return acc; }, []);
+  // Header cells and the first column render bold; the rest regular.
+  const measure = (cells, header) => Math.max(...cells.map((c, i) => {
+    doc.font(header || i === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
+    return doc.heightOfString(String(c == null ? '' : c), { width: colW[i] - pad * 2, lineGap: 1 });
+  })) + pad * 2;
+  const drawRow = (cells, top, h, header) => {
+    doc.save();
+    if (header) doc.rect(L, top, W, h).fillColor(SOFT).fill();
+    doc.rect(L, top, W, h).lineWidth(0.5).strokeColor(RULE).stroke();
+    colX.slice(1).forEach((x) => doc.moveTo(x, top).lineTo(x, top + h).lineWidth(0.5).strokeColor(RULE).stroke());
+    doc.restore();
+    cells.forEach((c, i) => {
+      doc.font(header || i === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(9)
+        .fillColor(header ? NAVY : BODY)
+        .text(String(c == null ? '' : c), colX[i] + pad, top + pad, { width: colW[i] - pad * 2, lineGap: 1 });
+    });
+  };
+  const headerH = measure(columns, true);
+  // Keep the header with at least the first row.
+  ensureRoom(doc, headerH + measure(rows[0], false) + 4);
+  let top = doc.y;
+  drawRow(columns, top, headerH, true);
+  top += headerH;
+  rows.forEach((cells) => {
+    const h = measure(cells, false);
+    if (top + h > CONTENT_BOTTOM) {
+      footer(doc);
+      doc.addPage();
+      top = 48;
+      drawRow(columns, top, headerH, true);
+      top += headerH;
+    }
+    drawRow(cells, top, h, false);
+    top += h;
+  });
+  doc.y = top + 8;
+}
+
+// Generic ordered sections (see the schema note in estimate-service-details.js).
+// Render order inside a section: paragraphs, steps, bullets, table, note.
+function renderSections(doc, sections, onSlot) {
+  for (const section of sections || []) {
+    if (!section) continue;
+    if (section.slot) { if (onSlot) onSlot(section.slot); continue; }
+    if (!section.heading) continue;
+    // Keep a heading with the start of its content: reserve room for the heading
+    // plus the first block so it never strands at the foot of a page.
+    const first = (section.paragraphs || [])[0] || (section.steps || [])[0] || (section.bullets || [])[0];
+    ensureRoom(doc, 46 + (first ? itemRoom(doc, first, W - 22) : 60));
+    if (section.level === 2) subHeading(doc, section.heading);
+    else sectionHeading(doc, section.heading);
+    if (Array.isArray(section.paragraphs)) paragraphs(doc, section.paragraphs);
+    if (Array.isArray(section.steps)) numberedSteps(doc, section.steps);
+    if (Array.isArray(section.bullets)) bullets(doc, section.bullets);
+    if (section.table) ruledTable(doc, section.table);
+    if (section.note) paragraphs(doc, [section.note]);
   }
 }
 
@@ -448,11 +554,18 @@ function renderServiceDetailsPdf(content) {
 
     if (content.systemBox) systemBox(doc, content.systemBox);
 
-    sectionHeading(doc, "What's included");
-    bullets(doc, content.included || []);
-
-    sectionHeading(doc, 'How your visits work');
-    bullets(doc, content.process || []);
+    // Included + process render at the sections' `{ slot: 'process' }` marker
+    // when the copy places one, otherwise in their default spot below.
+    const sections = Array.isArray(content.sections) ? content.sections : [];
+    const renderProcess = () => {
+      sectionHeading(doc, "What's included");
+      bullets(doc, content.included || []);
+      sectionHeading(doc, 'How your visits work');
+      bullets(doc, content.process || []);
+    };
+    const processSlotted = sections.some((s) => s && s.slot === 'process');
+    renderSections(doc, sections, (slot) => { if (slot === 'process') renderProcess(); });
+    if (!processSlotted) renderProcess();
 
     if (Array.isArray(content.faq) && content.faq.length) {
       sectionHeading(doc, 'The questions we hear most — answered straight');

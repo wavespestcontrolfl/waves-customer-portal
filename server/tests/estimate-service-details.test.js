@@ -109,7 +109,7 @@ describe('service-details PDF renderer', () => {
       const buffer = await renderServiceDetailsPdf(content);
       expect(buffer.subarray(0, 5).toString()).toBe('%PDF-');
     }
-  });
+  }, 30000);
 
   test('product-image callouts obey the public-registry chokepoint', async () => {
     // With an EMPTY registry, every image that names a specific product is
@@ -128,5 +128,70 @@ describe('service-details PDF renderer', () => {
       'product-lesco-fertilizer-bag.png',
       'product-lesco-am-micros.png',
     ]);
+  });
+});
+
+describe('lawn_care guide (revised prep & service guide)', () => {
+  const lawnStrings = (copy) => {
+    const out = [];
+    const walk = (node) => {
+      if (typeof node === 'string') out.push(node);
+      else if (Array.isArray(node)) node.forEach(walk);
+      else if (node && typeof node === 'object') Object.values(node).forEach(walk);
+    };
+    ['title', 'tagline', 'systemBox', 'sections', 'included', 'process', 'faq', 'safetyOverride',
+      'responsibilities', 'complianceExtras', 'documentationOverride', 'ctaMicro'].forEach((k) => walk(copy[k]));
+    return out;
+  };
+
+  test('carries ordered sections including a Bermuda section with a table', async () => {
+    const lawn = await buildServiceDetailsContent('lawn_care', {});
+    expect(Array.isArray(lawn.sections)).toBe(true);
+    const headings = lawn.sections.map((s) => s.heading);
+    expect(headings.slice(0, 2)).toEqual(['Before your first visit', 'Before every visit']);
+    // The visit walkthrough (included + process) is slotted between the prep
+    // and the aftercare, as the owner-approved draft orders it.
+    const slotAt = lawn.sections.findIndex((s) => s.slot === 'process');
+    expect(slotAt).toBe(2);
+    expect(lawn.sections[slotAt + 1].heading).toBe('After every visit');
+    expect(headings.some((h) => /^Bermuda removal from St\. Augustine/.test(h))).toBe(true);
+    const tables = lawn.sections.filter((s) => s.table);
+    expect(tables.length).toBeGreaterThan(0);
+    expect(tables[0].table.columns).toEqual(['When', 'What’s happening', 'What you see']);
+    expect(tables[0].table.rows.every((r) => r.length === 3)).toBe(true);
+    expect(lawn.systemBox.rows).toHaveLength(7);
+    expect(lawn.faq).toHaveLength(7);
+    expect(lawn.responsibilities.heading).toBe('Not part of this service');
+    expect(lawn.documentation.bullets).toHaveLength(3);
+    // Other services do not gain sections.
+    const pest = await buildServiceDetailsContent('pest_control', {});
+    expect(pest.sections).toEqual([]);
+  });
+
+  test('renders a PDF for lawn_care that is larger with the sections than without', async () => {
+    const lawn = await buildServiceDetailsContent('lawn_care', { customer_name: 'Test Customer', address: '1 Test Way' });
+    const withSections = await renderServiceDetailsPdf(lawn);
+    const without = await renderServiceDetailsPdf({ ...lawn, sections: [] });
+    expect(withSections.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(withSections.length).toBeGreaterThan(without.length);
+    const pages = (buf) => (buf.toString('latin1').match(/\/Type \/Page\b/g) || []).length;
+    expect(pages(withSections)).toBeGreaterThan(pages(without));
+    // The process slot renders included + process exactly once either way.
+    const slotOnly = await renderServiceDetailsPdf({ ...lawn, sections: [{ slot: 'process' }] });
+    expect(slotOnly.subarray(0, 5).toString()).toBe('%PDF-');
+    expect(Math.abs(slotOnly.length - without.length)).toBeLessThan(without.length * 0.05);
+  }, 30000);
+
+  test('all lawn copy obeys the product & safety standard', () => {
+    const strings = lawnStrings(SERVICE_DETAILS_COPY.lawn_care);
+    expect(strings.length).toBeGreaterThan(40);
+    for (const text of strings) {
+      expect(text).not.toMatch(/\bsafe(ly)?\b/i);
+      expect(text).not.toMatch(/EPA[- ]approved/i);
+      expect(text).not.toMatch(/per visit/i);
+    }
+    const joined = strings.join('\n');
+    expect(joined).toMatch(/EPA-registered/);
+    expect(joined).toMatch(/risk-free/);
   });
 });

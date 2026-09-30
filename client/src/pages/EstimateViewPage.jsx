@@ -2058,7 +2058,18 @@ export function oneTimeRowIdentityKey(item = {}) {
   return `row:${item?.service || ''}|${label}|${Number.isFinite(amount) ? amount : ''}|${quoteState}`;
 }
 
-export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null, noGuarantee = false, guaranteeScope: scopeProp = null }) {
+// One-time lawn specialty rows (engine keys from estimate-one-time-copy.json:
+// one_time_lawn, plugging, dethatching, top_dressing) carry the lawn prep &
+// service guide too. The server's service-details routes accept 'lawn_care'
+// for an estimate carrying any of these rows (estimate-public.js
+// ONE_TIME_LAWN_GUIDE_SERVICES) — keep the two lists in step.
+const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+export function oneTimeLawnGuideOffered(breakdown) {
+  return (Array.isArray(breakdown?.items) ? breakdown.items : [])
+    .some((item) => item && ONE_TIME_LAWN_GUIDE_SERVICES.has(item.service));
+}
+
+export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWaivedServices = [], headlineTotal = null, noGuarantee = false, guaranteeScope: scopeProp = null, serviceDetailsRequest = null }) {
   const scope = resolvedGuaranteeScope(scopeProp, noGuarantee);
   // excludeServices accepts plain service keys (setup-fee callers) and
   // oneTimeRowIdentityKey values (embedded-row callers) — check both.
@@ -2172,6 +2183,20 @@ export function OneTimeBreakdownCard({ breakdown, excludeServices = [], prepayWa
         <div style={{ fontSize: 14, color: ESTIMATE_MUTED, marginTop: 8, lineHeight: 1.5 }}>
           Waves will confirm final pricing before this can be accepted online.
         </div>
+      ) : null}
+      {/* Lawn prep & service guide for one-time lawn lines (no lawn service
+          section renders these rows, so the section's own row never shows).
+          Only when the caller opted in — callers skip it when a recurring
+          lawn section already carries the row. */}
+      {serviceDetailsRequest && oneTimeLawnGuideOffered({ items }) ? (
+        <ServiceDetailsRequestRow
+          token={serviceDetailsRequest.token}
+          serviceKey="lawn_care"
+          customerEmail={serviceDetailsRequest.customerEmail}
+          customerPhone={serviceDetailsRequest.customerPhone}
+          disabled={serviceDetailsRequest.disabled === true}
+          preview={serviceDetailsRequest.preview === true}
+        />
       ) : null}
     </div>
   );
@@ -8320,6 +8345,17 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     const prepayWaivedServices = feeList
       .filter((fee) => fee?.waivedWithPrepay === true)
       .map((fee) => fee.service);
+    // Guide row for one-time lawn lines, under the one-time breakdown card.
+    // `lawnSectionCarriesRow` = a recurring lawn_care section is rendered
+    // (recurring mode) and already shows its own row — skip so the page never
+    // offers the same guide twice. The staff draft preview mirrors the row
+    // inert, same as the section rows.
+    const oneTimeLawnGuideRequest = (lawnSectionCarriesRow) => (
+      renderFlags.showServiceDetailsRequest && !readOnly
+      && !(lawnSectionCarriesRow && services.some((s) => s?.isRecurring && s.key === 'lawn_care'))
+        ? { token, customerEmail: estimate.customerEmail, customerPhone: estimate.customerPhone, disabled: cardsDisabled, preview: readOnlyPreview }
+        : null
+    );
     if (mode === 'recurring') {
       return (
         <>
@@ -8357,6 +8393,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                       .filter((fee) => !(glassContent && fee.waivedWithPrepay && section.isPest === true))
                       .map((fee) => fee.service)}
                     prepayWaivedServices={prepayWaivedServices}
+                    serviceDetailsRequest={oneTimeLawnGuideRequest(true)}
                   />
                 ) : null}
               </>
@@ -8658,6 +8695,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
                   .map((item) => oneTimeRowIdentityKey(item))),
               ]}
               prepayWaivedServices={prepayWaivedServices}
+              serviceDetailsRequest={oneTimeLawnGuideRequest(true)}
             />
           ) : null}
 
@@ -8673,7 +8711,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
     return (
       <>
         {hasOneTimeRows
-          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} guaranteeScope={pageGuaranteeScope} />
+          ? <OneTimeBreakdownCard breakdown={pricing.oneTimeBreakdown} guaranteeScope={pageGuaranteeScope} serviceDetailsRequest={oneTimeLawnGuideRequest(false)} />
           : (
             <OneTimePriceCard
               oneTimePrice={pricing.anchorOneTimePrice || pricing.oneTimeBreakdown?.total || 0}

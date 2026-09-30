@@ -26492,13 +26492,29 @@ const serviceDetailsSendLimiter = rateLimit({
   message: { error: 'Too many requests. Please try again later.' },
 });
 
-// The packet only exists for services actually ON this estimate.
+// One-time lawn specialty lines (engine keys — estimate-one-time-copy.json)
+// carry the lawn prep & service guide too, so an estimate whose only lawn work
+// is one of these rows can fetch/send the 'lawn_care' packet. Keep in step
+// with the client's ONE_TIME_LAWN_GUIDE_SERVICES (EstimateViewPage.jsx).
+const ONE_TIME_LAWN_GUIDE_SERVICES = new Set(['one_time_lawn', 'plugging', 'dethatching', 'top_dressing']);
+
+// The packet only exists for services actually ON this estimate: the
+// recurring lines, plus 'lawn_care' when the estimate carries a one-time lawn
+// line. Nothing else widens — a one-time pest/rodent/termite row never unlocks
+// its (recurring-program) packet.
 function estimateRecurringKeysForDetails(estimate) {
   const estData = parseEstimateDataSafe(estimate);
   const estResult = estData?.result || estData?.engineResult || estData || {};
-  return new Set(
+  const keys = new Set(
     recurringServicesWithSupplements(estResult).map(recurringServiceKey).filter(Boolean),
   );
+  if (!keys.has('lawn_care')) {
+    try {
+      const oneTimeItems = normalizeOneTimeBreakdown(estData).items;
+      if (oneTimeItems.some((item) => ONE_TIME_LAWN_GUIDE_SERVICES.has(item?.service))) keys.add('lawn_care');
+    } catch { /* malformed one-time data: no widening (fail closed) */ }
+  }
+  return keys;
 }
 
 router.get('/:token/service-details/:serviceKey/pdf', dataLimiter, async (req, res, next) => {
@@ -28688,6 +28704,7 @@ module.exports.frequencyFromTreatmentRow = frequencyFromTreatmentRow;
 module.exports.commercialPestFrequenciesFromV1Services = commercialPestFrequenciesFromV1Services;
 module.exports.transferGroupFollowupOwnership = transferGroupFollowupOwnership;
 module.exports.buildPricingServices = buildPricingServices;
+module.exports.estimateRecurringKeysForDetails = estimateRecurringKeysForDetails;
 // Test hook (owner ruling 2026-08-03): per-service manual-discount slices on
 // split multi-service plans.
 module.exports.stampPerServiceManualDiscountSlices = stampPerServiceManualDiscountSlices;
