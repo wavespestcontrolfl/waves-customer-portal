@@ -337,7 +337,10 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       return { sent: false, aborted: true, boundaryCheckFailed: true, reason: 'provider_boundary_check_failed' };
     };
 
-    test('the boundary recheck\'s eligibility read throws: definitely UNSENT — ledger failed (never an uncertain sent, cap not charged), message not left started, the run retries and sends ONCE', async () => {
+    test.each([
+      ['RETURNS LOOKUP_FAILED (the real helper\'s failure shape)', () => ({ ok: false, reason: 'LOOKUP_FAILED', checks: { error: 'read unavailable' } })],
+      ['THROWS', () => { throw new Error('eligibility read unavailable'); }],
+    ])('the boundary recheck\'s eligibility read %s: definitely UNSENT — ledger failed (never an uncertain sent or a skip, cap not charged), message not left started, the run retries and sends ONCE', async (_label, failure) => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
       const automation = await nurture();
@@ -346,7 +349,7 @@ describeOrSkip('executor -> email division ledger dispatch (Postgres)', () => {
       let calls = 0;
       eligibleForEmail.mockImplementation((...args) => {
         calls += 1;
-        if (calls === 2) throw new Error('eligibility read unavailable');
+        if (calls === 2) return failure();
         return realEligibility(...args);
       });
       sendTemplate.mockImplementation(boundaryCheckUnavailable());

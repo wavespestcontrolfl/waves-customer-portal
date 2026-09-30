@@ -478,6 +478,13 @@ async function judgeConsent(trx, row, now, expectedRecipientEmail = null) {
     customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
     emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
   });
+  // eligibleForEmail RETURNS (never throws) LOOKUP_FAILED when its reads fail:
+  // that is not a consent verdict, so it must not settle the reservation
+  // 'skipped' (a permanent drop) — it is the same unavailable-check failure the
+  // wrapper in reservationHandoff turns into a retryable, definitely-unsent abort.
+  if (!verdict.ok && verdict.reason === REASONS.LOOKUP_FAILED) {
+    throw new Error(`eligibility recheck lookup failed${verdict.checks?.error ? `: ${verdict.checks.error}` : ''}`);
+  }
   if (!verdict.ok) {
     await skipReservation(trx, row.id, verdict.reason);
     return { ok: false, reason: verdict.reason, row };
