@@ -8,6 +8,8 @@ const {
 } = require('./lawn-visit-input');
 const { validateAssessmentJson, normalizeAssessment, emptyAnalysis } = require('./lawn-visit-result');
 const { withoutNoteInfluencedProse } = require('./lawn-visit-customer-copy');
+const { lawnAssessmentRefereeLive } = require('../config/feature-gates');
+const { refereeVisit, skippedReferee } = require('./lawn-visit-referee');
 
 // Invalid input fails before a paid call. Provider misses return an explicit
 // unavailable result with no invented scores. The route owns the feature gate.
@@ -21,7 +23,8 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } =
     label: photoLabel(index, zones[index]),
   }));
   const started = Date.now();
-  const outcome = await dispatchWithFallback(MODELS.TEXT_POLICIES.lawnVisitAssessment, {
+  const policy = MODELS.TEXT_POLICIES.lawnVisitAssessment;
+  const payload = {
     system: SYSTEM_PROMPT,
     text: buildUserText(photos.length, context),
     images,
@@ -32,7 +35,11 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } =
     reasoningEffort: 'medium',
     laneId: 'lawn_visit_assessment',
     promptVersion: PROMPT_VERSION,
-  }, { validate: (result) => validateAssessmentJson(result, photos.length) });
+  };
+  const outcome = await dispatchWithFallback(policy, payload, { validate: (result) => validateAssessmentJson(result, photos.length) });
+  // GATE_LAWN_ASSESSMENT_REFEREE (owner ruling 2026-09-29), read at call time.
+  // Off: nothing below runs and the return shape is exactly what it always was.
+  const refereeOn = lawnAssessmentRefereeLive();
   const base = {
     promptVersion: PROMPT_VERSION,
     contextHash: contextHash({ photos, photoZones: zones, visionContext: context }),
@@ -49,13 +56,33 @@ async function analyzeVisit({ photos = [], visionContext = {}, thinkingLevel } =
       ...base, status: 'unavailable', reason: outcome.reason || 'error',
       provider: null, model: null, fallbackUsed: false, usage: null, raw: null,
       ...emptyAnalysis(photos.length),
+      ...(refereeOn ? { referee: skippedReferee('gemini_unavailable') } : {}),
     };
+  }
+  // A second opinion + name referee only follow a Gemini answer: when the
+  // OpenAI backup already answered, there is no first read to second-guess.
+  let assessed = outcome.json;
+  let referee = null;
+  if (refereeOn) {
+    if (outcome.fallbackUsed) {
+      referee = skippedReferee('gemini_fallback');
+    } else {
+      ({ json: assessed, referee } = await refereeVisit({
+        policy, payload, geminiJson: outcome.json, visit: { photoCount: photos.length, images, context },
+      }));
+      if (referee.triggered || referee.secondOpinion.called) {
+        logger.info(`[lawn-visit-assessment] second opinion ${referee.secondOpinion.ok ? 'ok' : 'failed'}, referee ${referee.outcome} (${referee.disputes.length} disputed)`);
+      }
+    }
   }
   return {
     ...base, status: 'complete', reason: null,
     provider: outcome.provider, model: outcome.model, fallbackUsed: !!outcome.fallbackUsed,
+    // `raw` stays the provider's own untouched answer; a settled name tie-break
+    // changes only the normalized fields, and `referee` records what moved.
     usage: outcome.usage || null, raw: outcome.json,
-    ...withoutNoteInfluencedProse(normalizeAssessment(outcome.json, photos.length, zones), context.technicianNotes),
+    ...withoutNoteInfluencedProse(normalizeAssessment(assessed, photos.length, zones), context.technicianNotes),
+    ...(refereeOn ? { referee } : {}),
   };
 }
 

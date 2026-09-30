@@ -185,7 +185,13 @@ function billedLegs(analysis) {
   const won = analysis.status === 'complete'
     ? [{ provider: analysis.provider || null, model: analysis.model || null, reason: null, usage: analysis.usage || null }]
     : [];
-  return [...failed, ...won];
+  // The gated referee's extra calls (GATE_LAWN_ASSESSMENT_REFEREE) are billed legs too.
+  const referee = analysis.referee || {};
+  const extra = [
+    referee.secondOpinion?.called ? { provider: null, model: referee.secondOpinion.model || null, reason: referee.secondOpinion.reason || null, usage: referee.secondOpinion.usage || null } : null,
+    referee.triggered ? { provider: 'anthropic', model: referee.referee?.model || null, reason: referee.referee?.reason || null, usage: referee.usage || null } : null,
+  ].filter(Boolean);
+  return [...failed, ...won, ...extra];
 }
 
 function sumUsage(legs) {
