@@ -1,0 +1,164 @@
+// Owner rules for the AI report paragraph (GATE_REPORT_WRITER_RULES, owner
+// "go" 2026-09-30). Lawn and tree/shrub/palm stay byte-identical (owner: a
+// separate lane owns them); every other writer gets the rules block, and
+// every older line the rules contradict is rewritten out of its prompt.
+const fs = require('fs');
+const path = require('path');
+const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
+const {
+  OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection,
+} = require('../services/service-report/report-writer-rules');
+const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
+
+// The real v4 hard constraints, sliced from the route source. Only template
+// expressions are stubbed; every rewrite target is literal text.
+const scheduleSource = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
+const v4Start = scheduleSource.indexOf('## HARD CONSTRAINTS');
+const v4End = scheduleSource.indexOf('## ANTI-TEMPLATE RULES', v4Start);
+const V4_SHARED = `# SERVICE REPORT COPY — SYSTEM PROMPT v4\n${scheduleSource.slice(v4Start, v4End).replace(/\$\{[^}]*\}/g, 'X')}## ANTI-TEMPLATE RULES\nOld examples.`;
+
+const IN_SCOPE = [
+  ['pest_general_quarterly', null],
+  ['pest_re_service', null],
+  ['one_time_pest_control', null],
+  ['pest_rodent_quarterly', null],
+  ['rodent_trapping', 'rodent_trapping'],
+  ['rodent_bait_quarterly', 'rodent_bait_station'],
+  ['rodent_trapping_exclusion_sanitation', 'rodent_trapping'],
+  ['termite_bait', 'termite_bait_station'],
+  ['termite_liquid', 'termite_treatment'],
+  ['foam_drill', 'termite_treatment'],
+  ['mosquito_monthly', null],
+  ['mosquito_event', 'mosquito_event'],
+  ['cockroach_control', 'cockroach'],
+  ['flea_tick', 'flea'],
+  ['bed_bug_treatment', null],
+  ['bee_wasp_removal', null],
+  ['fire_ant', null],
+  ['pest_inspection', 'pest_inspection'],
+];
+
+// Owner 2026-09-30: "dont touch Lawn / Tree, shrub & palm".
+const OUT_OF_SCOPE = [
+  ['lawn_care_6week', null],
+  ['lawn_care_one_time', 'one_time_lawn_treatment'],
+  ['lawn_re_service', 'one_time_lawn_treatment'],
+  ['lawn_tree_shrub_combo', null],
+  ['dethatching', null],
+  ['plugging', null],
+  ['top_dressing', null],
+  ['tree_shrub_program', 'tree_shrub'],
+  ['tree_shrub_6week', 'tree_shrub'],
+  ['palm_injection', 'palm_injection'],
+  ['palm_treatment', null],
+  ['termite_pretreatment', 'termite_treatment'],
+  ['waveguard_membership', null],
+];
+
+describe('writer rules scope', () => {
+  test.each(IN_SCOPE)('%s gets the owner rules', (serviceKey, findingsType) => {
+    const context = { serviceKey, findingsType };
+    expect(writerRulesInScope('Old label', context)).toBe(true);
+    const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true });
+    expect(prompt).toContain(OWNER_RULES);
+    expect(prompt).toContain(`# ${REPORT_WRITER_RULES_VERSION}`);
+    expect(prompt.split('Describe the rating in words only')).toHaveLength(2);
+  });
+
+  test.each(OUT_OF_SCOPE)('%s stays byte-identical with the gate on', (serviceKey, findingsType) => {
+    const context = { serviceKey, findingsType };
+    expect(writerRulesInScope('Old label', context)).toBe(false);
+    expect(selectReportCopyPrompt(V4_SHARED, 'Old label', { ...context, writerRules: true }))
+      .toBe(selectReportCopyPrompt(V4_SHARED, 'Old label', context));
+  });
+
+  test.each([
+    ['Every 6 Weeks Lawn Care Service', false],
+    ['Palm Care Service', false],
+    ['Bi-Monthly Tree & Shrub Care Service', false],
+    ['Quarterly Pest Control Service', true],
+  ])('legacy label %s follows the same scope', (label, inScope) => {
+    const on = selectReportCopyPrompt(V4_SHARED, label, { writerRules: true });
+    const off = selectReportCopyPrompt(V4_SHARED, label);
+    expect(on === off).toBe(!inScope);
+    expect(on.includes(OWNER_RULES)).toBe(inScope);
+  });
+
+  test('without the flag nothing changes for an in-scope writer', () => {
+    const prompt = selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey: 'pest_general_quarterly', findingsType: null });
+    expect(prompt).not.toContain('OWNER RULES');
+    expect(prompt).toContain('other labeled crawling pests');
+  });
+});
+
+describe('prompt rewrites', () => {
+  const inScopePrompts = [
+    ['pest_general_quarterly', null], ['rodent_trapping', 'rodent_trapping'], ['termite_liquid', 'termite_treatment'],
+  ].map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType, writerRules: true }));
+  const sourcePrompts = [
+    ['pest_general_quarterly', null], ['rodent_trapping', 'rodent_trapping'],
+  ].map(([serviceKey, findingsType]) => selectReportCopyPrompt(V4_SHARED, 'Old label', { serviceKey, findingsType }));
+
+  test.each(PROMPT_REWRITES.map(([from, to], index) => [index, from, to]))(
+    'rewrite %i still matches its source text and never survives', (index, from, to) => {
+      expect(sourcePrompts.some((prompt) => prompt.includes(from))).toBe(true);
+      for (const prompt of inScopePrompts) expect(prompt).not.toContain(from);
+      if (to) expect(inScopePrompts.some((prompt) => prompt.includes(to))).toBe(true);
+    },
+  );
+
+  test('the rules prompt no longer invites active ingredients, paragraphs or the coverage phrase', () => {
+    for (const prompt of inScopePrompts) {
+      expect(prompt).not.toMatch(/Use active ingredient names/);
+      expect(prompt).not.toMatch(/use a supplied active ingredient/);
+      expect(prompt).not.toContain('other labeled crawling pests');
+      expect(prompt).not.toContain('plain-text paragraphs');
+      expect(prompt).toContain('exactly ONE line');
+    }
+  });
+
+  test('the owner style rules ride along with the grounding exception', () => {
+    expect(OWNER_RULES).toContain(HUMAN_PROSE_RULES);
+    expect(OWNER_RULES).toMatch(/hedges .* keep them/);
+  });
+});
+
+describe('writerRulesRejection', () => {
+  test.each([
+    ['We mixed 2 oz per gallon along the foundation.', 'amount'],
+    ['We applied 30 mL at the slider.', 'amount'],
+    ['A teaspoon went into each crack.', 'amount'],
+    ['We treated 120 linear feet of foundation.', 'footage'],
+    ['We treated about 1,200 sq ft of beds.', 'footage'],
+    ['We treated a 3-ft band around the home.', 'footage'],
+    ['Activity dropped 50% since the last visit.', 'percent'],
+    ['This is billed per visit.', 'per_visit'],
+    ['Thank you for choosing Waves Pest Control & Lawn Care.', 'company_name'],
+    ['Waves Lawn Care treated the beds.', 'company_name'],
+    ['The area is safe once dry.', 'safe_word'],
+    ['We used a pet-safe bait.', 'safe_word'],
+    ['The gel is non-toxic to people.', 'safe_word'],
+    ['We applied a chemical along the base.', 'chemical'],
+    ['We applied fipronil along the foundation.', 'active_ingredient'],
+    ['A lambda-cyhalothrin spray went on the eaves.', 'active_ingredient'],
+  ])('rejects %j (%s)', (copy, reason) => {
+    expect(writerRulesRejection(copy)).toBe(reason);
+  });
+
+  test("this visit's catalog actives are screened as well", () => {
+    const copy = 'We placed an indoxacarb gel under the sink.';
+    expect(writerRulesRejection(copy, { activeIngredients: ['Indoxacarb 0.6%'] })).toBe('active_ingredient');
+    expect(writerRulesRejection('We placed gel bait under the sink.', { activeIngredients: ['Indoxacarb 0.6%'] })).toBeNull();
+  });
+
+  // The four in-scope example paragraphs from the plan page Adam approved
+  // (pest, rodent, termite, mosquito) must pass the screen.
+  test.each([
+    ['pest', 'WHAT WE DID\n\nWe came back to look into the ants you booked us for. Your technician checked the kitchen and the lanai side of the house, treated the kitchen cabinet bases and the sliding-door track inside, and treated the door thresholds and the lanai-side foundation outside.\n\nWHAT WE FOUND\n\nGhost ants were trailing along the back of the kitchen counter and the sliding-door track, and activity was light. You mentioned ants near the dishwasher; none were seen there today. The photo of the sliding-door track shows the ants there.'],
+    ['rodent', 'WHAT WE DID\n\nWe checked the six traps set for this job, reset them, and refreshed the lure.\n\nWHAT WE FOUND\n\nTwo captures were recorded, and the technician logged roof rats. Droppings were still present near the A/C unit in the attic, where you told us you hear scratching at night. The technician also noted a gap at the rear soffit corner, and the soffit-vent tip in this report covers openings like it.'],
+    ['termite', 'WHAT WE DID\n\nYou asked us to check your termite stations after a neighbor found termites, and to look at the lines you saw on the garage wall. We inspected 11 of your 12 stations, replaced the bait at station 7 on the east wall, and looked over the garage wall. The station behind the garage is buried under mulch, so we could not open it.\n\nWHAT WE FOUND\n\nTermites were feeding on the bait at station 7, and we saw live termites there. The other 10 stations we opened showed no termite activity, and we found no mud tubes on the garage wall. We will recheck station 7 and open the buried station at your next monitoring visit.'],
+    ['mosquito', 'WHAT WE DID\n\nWe treated the shrub leaves along your back fence and the beds around the pool cage and lanai, where adult mosquitoes rest, keeping spray off the blooming hibiscus. We emptied two plant saucers on the lanai and flipped a bucket by the shed.\n\nWHAT WE FOUND\n\nMosquito activity was light along the back fence; we saw none at the front. The saucers and bucket were holding water, the kind of spot mosquitoes can breed in, and about 1.4 inches of rain fell in the seven days before the visit. You mentioned evening bites on the lanai, so we focused there.'],
+  ])('passes the approved %s example', (_family, copy) => {
+    expect(writerRulesRejection(copy)).toBeNull();
+  });
+});

@@ -180,6 +180,13 @@ async function resolveContextWindow({
   return { floor: cap, reason: `last ${ONE_TIME_CAP_DAYS} days`, serviceLine, isRecurring };
 }
 
+// A mailbox copy of something Waves sent (Gmail SENT label or a Waves
+// address), which is never the customer's own words.
+function wavesSentEmail(email) {
+  const labels = Array.isArray(email?.label_ids) ? email.label_ids : [];
+  return labels.includes('SENT') || /@wavespestcontrol\.com\s*>?\s*$/i.test(String(email?.from_address || ''));
+}
+
 /**
  * Build the compact comms-context block for an AI draft.
  *
@@ -191,6 +198,11 @@ async function buildCompletionCommsContext({
   customerId,
   scheduledServiceId = null,
   originDate = null,
+  // GATE_REPORT_WRITER_RULES (the report writer only): the customer's own
+  // words — inbound texts and emails, plus call summaries labeled by who
+  // called — and a hint that they are never a finding. Waves' own texts and
+  // emails stay out. Every other caller keeps the mixed log unchanged.
+  customerWordsOnly = false,
   knex = db,
 } = {}) {
   if (!customerId) return { text: '', floor: null, reason: '', serviceLine: null, promptHint: '' };
@@ -224,7 +236,7 @@ async function buildCompletionCommsContext({
     knex('emails')
       .where({ customer_id: customerId })
       .where('received_at', '>=', floor)
-      .select('received_at', 'subject', 'snippet', 'body_text')
+      .select('received_at', 'subject', 'snippet', 'body_text', ...(customerWordsOnly ? ['from_address', 'label_ids'] : []))
       .orderBy('received_at', 'desc')
       .limit(6)
       .catch((err) => {
@@ -237,28 +249,35 @@ async function buildCompletionCommsContext({
   for (const call of calls) {
     const summary = compactText(call.lead_synopsis || call.notes || call.transcription);
     if (summary) {
+      const who = call.direction === 'outbound' ? 'Waves called the customer' : 'the customer called';
       entries.push({
         ts: contextTs(call.created_at),
-        line: `Call ${contextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
+        line: customerWordsOnly
+          ? `Call ${contextDate(call.created_at)} (${who}; AI summary, not verified): ${summary}`
+          : `Call ${contextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
       });
     }
   }
   for (const msg of sms) {
+    if (customerWordsOnly && msg.direction !== 'inbound') continue;
     const summary = compactText(msg.message_body, 260);
     if (summary) {
       entries.push({
         ts: contextTs(msg.created_at),
-        line: `Text ${contextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`,
+        line: customerWordsOnly
+          ? `Customer text ${contextDate(msg.created_at)}: ${summary}`
+          : `Text ${contextDate(msg.created_at)} (${msg.direction || 'unknown'}${msg.message_type ? `, ${msg.message_type}` : ''}): ${summary}`,
       });
     }
   }
   for (const email of emails) {
+    if (customerWordsOnly && wavesSentEmail(email)) continue;
     const summary = compactText(email.snippet || email.body_text, 260);
     const subject = compactText(email.subject, 120);
     if (summary || subject) {
       entries.push({
         ts: contextTs(email.received_at),
-        line: `Email ${contextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`,
+        line: `${customerWordsOnly ? 'Customer email' : 'Email'} ${contextDate(email.received_at)}${subject ? ` "${subject}"` : ''}: ${summary || '[no body preview]'}`,
       });
     }
   }
@@ -270,7 +289,9 @@ async function buildCompletionCommsContext({
     .join('\n');
 
   // Ratified relevance rule: window + prompt hint, never a keyword filter.
-  const promptHint = serviceLine
+  const promptHint = customerWordsOnly
+    ? `These are the customer's own recent messages and AI summaries of recent calls (${reason}). They are what the customer said, never a finding: use them only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote them, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`
+    : serviceLine
     ? `These are the customer's recent communications (${reason}). Use only what is relevant to this ${serviceLine} visit; ignore unrelated topics.`
     : `These are the customer's recent communications (${reason}). Use only what is relevant to this visit; ignore unrelated topics.`;
 

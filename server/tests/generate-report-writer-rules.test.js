@@ -1,0 +1,184 @@
+// GATE_REPORT_WRITER_RULES at the route (owner "go" 2026-09-30): pest and
+// the remaining specialty writers get the owner rules, product names and
+// rates stay out of the prompt, customer messages arrive labeled and
+// scrubbed, and the output screen rejects what the rules forbid. Lawn and
+// tree/shrub/palm must reach the model byte-identical (owner: another lane
+// owns them). Mirrors the handler harness in
+// generate-report-photo-content.test.js.
+let mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
+let mockServiceType = 'Quarterly Pest Control Service';
+const mockProvider = jest.fn();
+const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
+const mockComms = jest.fn(async () => ({ text: '', promptHint: '' }));
+jest.mock('../services/llm/call', () => ({ callOpenAI: (...args) => mockProvider(...args), callAnthropic: (...args) => mockProvider(...args) }));
+jest.mock('../services/pest-pressure/store', () => ({ loadActiveConfig: async () => null }));
+jest.mock('../services/service-completion-profiles', () => ({
+  ...jest.requireActual('../services/service-completion-profiles'),
+  resolveCompletionProfileForScheduledService: async () => mockProfile,
+}));
+jest.mock('../services/service-report/report-copy-context', () => ({ buildReportCopyContext: (...args) => mockBuildContext(...args) }));
+jest.mock('../services/completion-comms-context', () => ({ buildCompletionCommsContext: (...args) => mockComms(...args) }));
+jest.mock('../models/db', () => {
+  const db = jest.fn((table) => {
+    const chain = {};
+    for (const name of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
+    chain.first = async () => (table === 'scheduled_services'
+      ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1' } : null);
+    chain.then = (resolve) => Promise.resolve([]).then(resolve);
+    return chain;
+  });
+  db.raw = jest.fn(); db.fn = { now: () => new Date() }; return db;
+});
+const router = require('../routes/admin-schedule');
+const { OWNER_RULES, TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER } = require('../services/service-report/report-writer-rules');
+
+const handler = router.stack.find((layer) => layer.route?.path === '/generate-report').route.stack.at(-1).handle;
+const CLEAN = 'WHAT WE DID\n\nWe treated the door thresholds and the foundation on the lanai side.\n\nWHAT WE FOUND\n\nGhost ants were trailing along the slider track, and activity was light.';
+
+function mkReq(body) {
+  return {
+    techRole: 'admin',
+    body: {
+      scheduledServiceId: '11111111-1111-4111-8111-111111111111',
+      serviceType: mockServiceType,
+      productsApplied: 'Taurus SC (0.5 fl oz/gal)',
+      products: [{ productId: 'prod-1', name: 'Taurus SC', applicationMethod: 'perimeter_spray', areaValue: '120', areaUnit: 'linear_ft' }],
+      ...body,
+    },
+  };
+}
+function mkRes() {
+  return { statusCode: 200, status(code) { this.statusCode = code; return this; }, json: jest.fn() };
+}
+
+beforeEach(() => {
+  mockProvider.mockReset();
+  mockProvider.mockImplementation(async () => ({ ok: true, text: CLEAN }));
+  mockBuildContext.mockClear();
+  mockComms.mockReset();
+  mockComms.mockImplementation(async () => ({ text: '', promptHint: '' }));
+  mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
+  mockServiceType = 'Quarterly Pest Control Service';
+  delete process.env.GATE_REPORT_WRITER_RULES;
+});
+afterEach(() => { delete process.env.GATE_REPORT_WRITER_RULES; });
+
+test.each([
+  ['lawn_care_6week', null, 'Every 6 Weeks Lawn Care Service'],
+  ['tree_shrub_program', 'tree_shrub', 'Bi-Monthly Tree & Shrub Care Service'],
+  ['dethatching', null, 'Dethatching'],
+])('gate on: %s reaches the model byte-identical (cache hit on the gate-off prompt)', async (serviceKey, findingsType, serviceType) => {
+  mockProfile = { serviceKey, findingsType };
+  mockServiceType = serviceType;
+  const body = { serviceNotes: `Visit note for ${serviceKey}: fed the front beds and checked the back fence.` };
+  const off = mkRes();
+  await handler(mkReq(body), off);
+  expect(off.statusCode).toBe(200);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(mockBuildContext.mock.calls[0][0].writerRules).toBe(false);
+
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const on = mkRes();
+  await handler(mkReq(body), on);
+  expect(on.statusCode).toBe(200);
+  // Same system prompt + user message = same cache key: the provider is not
+  // called again and the cached copy comes back.
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(on.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN, cached: true }));
+  expect(mockBuildContext.mock.calls[1][0].writerRules).toBe(false);
+});
+
+test('gate on: pest gets the owner rules, the technician note block and no product names or rates', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Ghost ants on the slider track. Treated the thresholds and the lanai side of the foundation.' }), res);
+  expect(res.statusCode).toBe(200);
+  const call = mockProvider.mock.calls[0][0];
+  expect(call.system).toContain(OWNER_RULES);
+  expect(call.text).toContain(TECHNICIAN_NOTE_HEADER);
+  expect(call.text).toContain('Products applied: 1 recorded. Names, amounts and rates are withheld on purpose');
+  expect(call.text).not.toContain('Taurus');
+  expect(call.text).not.toContain('fl oz');
+  expect(call.text).not.toContain('Service Notes:');
+  expect(mockBuildContext.mock.calls[0][0].writerRules).toBe(true);
+});
+
+test('gate off: pest keeps the exact legacy user message', async () => {
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Treated the thresholds.' }), res);
+  const call = mockProvider.mock.calls[0][0];
+  expect(call.system).not.toContain('OWNER RULES');
+  expect(call.text).toContain('[COMPLETED WORK]\nService Notes: Treated the thresholds.');
+  expect(call.text).toContain('Products Applied / Active Ingredients: Taurus SC (0.5 fl oz/gal)');
+});
+
+test('gate on: copy that breaks a rule is rejected and retried', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('We treated the door thresholds', 'We mixed 2 oz per gallon and treated the door thresholds') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Ants on the slider track; treated thresholds (retry case).' }), res);
+  expect(res.statusCode).toBe(200);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+});
+
+test('gate off: the same amount is not screened by the rules', async () => {
+  const withAmount = CLEAN.replace('We treated the door thresholds', 'We mixed 2 oz per gallon and treated the door thresholds');
+  mockProvider.mockImplementation(async () => ({ ok: true, text: withAmount }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Ants on the slider track; treated thresholds (gate-off case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(1);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: withAmount }));
+});
+
+test("gate on: customer messages arrive as the customer's own words with access codes scrubbed", async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockComms.mockImplementation(async () => ({
+    text: 'Customer text Sep 28: The ants are back by the dishwasher. Gate code 4821 if you need it.',
+    promptHint: 'These are the customer\'s own recent messages.',
+  }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Ants on the slider track (comms case).', includeCustomerComms: true }), res);
+  expect(mockComms).toHaveBeenCalledWith(expect.objectContaining({ customerWordsOnly: true }));
+  const { text } = mockProvider.mock.calls[0][0];
+  expect(text).toContain(CUSTOMER_WORDS_HEADER);
+  expect(text).toContain('The ants are back by the dishwasher.');
+  expect(text).not.toContain('4821');
+  expect(text).not.toContain('RECENT CUSTOMER COMMUNICATIONS');
+});
+
+test('gate off: customer messages keep the legacy block and options', async () => {
+  mockComms.mockImplementation(async () => ({ text: 'Text Sep 28 (inbound): ants are back', promptHint: 'hint' }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Ants on the slider track (comms off case).', includeCustomerComms: true }), res);
+  expect(mockComms.mock.calls[0][0]).not.toHaveProperty('customerWordsOnly');
+  expect(mockProvider.mock.calls[0][0].text).toContain('RECENT CUSTOMER COMMUNICATIONS\nhint\nText Sep 28 (inbound): ants are back');
+});
+
+describe('typed product application record', () => {
+  const { buildTypedFindingsPromptBlock } = router._test;
+  const values = {
+    treatment_method: 'Trenching',
+    areas_treated: 'Foundation perimeter',
+    products_used: 'Termidor SC',
+    gallons_or_amount: '40 gallons',
+    linear_feet_or_stations: '180 linear ft',
+  };
+
+  test('is withheld from the prompt under the writer rules', () => {
+    const block = buildTypedFindingsPromptBlock({ findingsType: 'termite_treatment', values, withholdProductRecord: true });
+    expect(block).toContain('Trenching');
+    expect(block).not.toContain('Product application record');
+    expect(block).not.toContain('Termidor');
+    expect(block).not.toContain('40 gallons');
+    expect(block).not.toContain('180 linear ft');
+  });
+
+  test('stays in the prompt otherwise', () => {
+    const block = buildTypedFindingsPromptBlock({ findingsType: 'termite_treatment', values });
+    expect(block).toContain('Product application record');
+    expect(block).toContain('Termidor SC');
+  });
+});

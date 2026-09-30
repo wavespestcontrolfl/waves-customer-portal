@@ -2788,3 +2788,55 @@ migration. Off, or unset: byte-identical to today. Cost shape: a confident read
 draws no extra call; an unsure-or-serious read draws one Sol re-read; only a
 name dispute also draws one Fable call. Full detail: `CLAUDE.md`'s "Lawn visit
 assessment name referee" paragraph and `server/services/lawn-visit-referee.js`.
+
+## 2026-09-30 — Report writer: one set of owner rules (dark), lawn and tree/shrub/palm excluded
+
+Owner "go" on the combined report plan (steps 2–3), with the scope ruling "dont
+touch Lawn / Tree, shrub & palm, im working on these in another lane".
+`GATE_REPORT_WRITER_RULES` (off unless exactly `true`, read per request via
+`reportWriterRulesLive()`) gives the AI report paragraph one OWNER RULES block
+(`server/services/service-report/report-writer-rules.js`) for the recurring pest
+writer and every remaining-service module except `physical_lawn` and
+`palm_care`. Lawn, tree/shrub, palm, dethatching/plugging/top dressing and the
+whole-v4 writer (termite pretreatment, WaveGuard membership) reach the model
+byte-identical with the gate on; `writerRulesInScope` decides, and the route
+tests prove it by cache identity.
+
+What the rules settle, and where each comes from:
+- Two sections, one line each, read as one paragraph (the parser's own shape,
+  never taught before, so drafts were rejected and retried).
+- Only recorded facts; the technician's words and hedges kept, never upgraded
+  (a species from "roaches", a diagnosis from a suspicion). The dictated note
+  is its own TECHNICIAN NOTE block, sorted sentence by sentence into work,
+  seen, customer said and advice.
+- Customer words (booked reason, concern, calls, texts, emails) are
+  attributed, never findings. Under the gate the comms block keeps only the
+  customer's own texts and emails plus labeled call summaries, drops Waves'
+  own texts and emails, and scrubs access codes.
+- No product, brand or active-ingredient names. Active ingredients were the
+  plan page's one open question; the owner said "go" without answering, so the
+  recommended default (none) ships and can be reversed by editing rule 5 and
+  the screen.
+- No amounts or measurements (owner no-mL ruling 2026-09-27; "linear feet is
+  not needed" 2026-09-29): the model no longer receives product names, rates,
+  "treated area entered" footage, the product-safety/re-entry block, household
+  notes or the typed termite product record, and the fallback drops "with N
+  linear ft recorded".
+- Never "safe" in any form, including "safe once dry"; no re-entry times (the
+  safety section owns them). EPA only as "EPA-registered"/"EPA-exempt".
+- No prices, "per visit" (say "per application"), warranty or guarantee.
+  Company name "Waves Pest Control" only.
+- Nothing the report prints on its own is repeated, the tip card and the
+  What-to-expect cards included; the EXPECTATIONS grounding is relabeled as
+  printed separately.
+- The owner's 2026-07-30 prose rules apply, except that the technician's
+  hedges stay: accuracy over style.
+- The automatic "No activity observed" finding no longer grounds the next
+  visit's paragraph.
+
+Enforcement: the prompt rewrites every older line the rules contradict
+(`PROMPT_REWRITES`, each pinned by a test), and `writerRulesRejection` rejects
+units, footage, percentages, "per visit", other company names, "safe" words,
+"chemical" and active ingredients (a common list plus this visit's catalog
+actives) through the existing retry and provider fallback. Generation-time only:
+the completion-time recheck is unchanged. Kill switch: unset the gate.

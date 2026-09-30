@@ -9,7 +9,7 @@ const TwilioService = require('../services/twilio');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
-const { isEnabled, discountStackingLive, reportPhotoContentLive, visitPrepPhotosLive } = require('../config/feature-gates');
+const { isEnabled, discountStackingLive, reportPhotoContentLive, reportWriterRulesLive, visitPrepPhotosLive } = require('../config/feature-gates');
 const { percentageDiscountDollars, stackGroupConflict: discountStackGroupConflict } = require('../services/discount-stack');
 const { deriveLegacyPrimarySubmission, deriveLegacyAddonSubmission } = require('../../shared/legacy-visit-money-submission.cjs');
 const { completeScheduledServiceInsert } = require('../services/booking/create-scheduled-service');
@@ -72,6 +72,9 @@ const { validateTreeShrubReviewForReport } = require('../services/tree-shrub-ass
 const ActivityIndicators = require('../services/service-report/activity-indicators');
 const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
+const {
+  TECHNICIAN_NOTE_HEADER, MAX_TECHNICIAN_NOTE_CHARS, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+} = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
   stampSeriesPrepaid,
@@ -23776,12 +23779,15 @@ function customerFacingCompanionTypes(companions) {
 // are technician-recorded visit data with the same provenance split as the
 // primary findings. `findingsType` may be null on companion-only profiles
 // (e.g. lawn_tree_shrub_combo): the block then carries companions alone.
-function renderTypedGroupLines(sections) {
+// Under GATE_REPORT_WRITER_RULES the product application record (termite
+// treatment names, EPA numbers, gallons, footage) stays out of the prompt;
+// its names still feed the trade-name output screen.
+function renderTypedGroupLines(sections, { withholdProductRecord = false } = {}) {
   const parts = [];
   if (sections.work.length) parts.push(`Work recorded (completed work):\n${sections.work.join('\n')}`);
   if (sections.observations.length) parts.push(`Findings observed:\n${sections.observations.join('\n')}`);
   if (sections.objectives?.length) parts.push(`Recorded treatment objectives (targets only — not proof of a sighting, inspection, or completed application):\n${sections.objectives.join('\n')}`);
-  if (sections.products.length) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
+  if (sections.products.length && !withholdProductRecord) parts.push(`Product application record (context only — describe the work plainly, NEVER name these products in customer copy):\n${sections.products.join('\n')}`);
   if (sections.advice.length) parts.push(`Recommendations recorded (future advice — never describe as completed work or observed findings):\n${sections.advice.join('\n')}`);
   if (sections.customer.length) parts.push(`Customer communication (the homeowner's words / what was discussed — attribute it, NEVER present as a technician-verified finding):\n${sections.customer.join('\n')}`);
   return parts;
@@ -23808,14 +23814,14 @@ function copyActivityScore(type, values, submitted) {
 // "Next steps selected" line for either the primary or companion sections.
 function buildTypedFindingsPromptBlock({
   findingsType = null, values = null, companionFindings = [],
-  allowedCompanionTypes = [], activityScore = null,
+  allowedCompanionTypes = [], activityScore = null, withholdProductRecord = false,
 }) {
   const primarySections = findingsType
     ? typedFindingsPromptSections(findingsType, values)
     : { work: [], observations: [], products: [], advice: [], customer: [] };
   const primaryActivityLine = findingsType ? typedActivityLine(findingsType, activityScore) : null;
   if (primaryActivityLine) primarySections.observations.push(primaryActivityLine);
-  const primaryParts = renderTypedGroupLines(primarySections);
+  const primaryParts = renderTypedGroupLines(primarySections, { withholdProductRecord });
   const allowed = new Set(allowedCompanionTypes);
   // The profile's declared companion set bounds the work — every AUTHORIZED
   // companion renders (no arbitrary numeric cap; a >4-companion profile must
@@ -23835,7 +23841,7 @@ function buildTypedFindingsPromptBlock({
       const sections = typedFindingsPromptSections(entry.type, companionValues, { companion: true });
       const activityLine = typedActivityLine(entry.type, entry?.activityScore);
       if (activityLine) sections.observations.push(activityLine);
-      const parts = renderTypedGroupLines(sections);
+      const parts = renderTypedGroupLines(sections, { withholdProductRecord });
       if (!parts.length) return null;
       const label = ActivityIndicators.findingsSchemaForType(entry.type)?.label || entry.type;
       return `Companion findings (${label}):\n${parts.join('\n')}`;
@@ -23871,6 +23877,11 @@ router.post('/generate-report', async (req, res) => {
       // a pre-deploy tab that still submits req.body.nextStepChips has it
       // accepted and ignored; it is deliberately not destructured here.
     } = req.body;
+    // GATE_REPORT_WRITER_RULES, read once per request. It applies only to
+    // writers in its scope (never lawn or tree/shrub/palm — owner
+    // 2026-09-30, another lane owns them); see report-writer-rules.js.
+    const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
+    const writerRulesGate = reportWriterRulesLive();
 
     if (scheduledServiceId && !(await technicianOwnsScheduledService(req, scheduledServiceId))) {
       return res.status(404).json({ error: 'Scheduled service not found' });
@@ -24258,34 +24269,6 @@ Do not include the client name as a header. Do not add greetings, sign-offs, or 
     const promptObs = obs.map((x) => redactAccessCodes(x));
     const promptRecs = recs.map((x) => redactAccessCodes(x));
     const promptConcern = redactAccessCodes(concernText);
-    const userMessage = `Generate the service report copy for this visit.
-
-INPUTS
-
-Client Full Name: ${customerName || 'Not specified'}
-Service Type: ${serviceType || 'Not specified'}
-Technician Full Name: ${technicianName || 'Not specified'}
-Service Date: ${serviceDate || 'Not specified'}
-Arrival Time: ${arrivalTime || 'Not specified'}
-
-[COMPLETED WORK]
-Service Notes: ${promptNotes || 'Not specified'}
-Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
-Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
-Products Applied / Active Ingredients: ${productsText || 'Not specified'}
-
-[OBSERVED BY TECHNICIAN]
-Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
-Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
-
-[REPORTED BY CUSTOMER]
-Customer interaction: ${customerInteraction || 'Not specified'}
-Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
-
-[FUTURE ADVICE — not completed work]
-Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
-
-Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
 
     // TECHNICIAN PHOTO OBSERVATIONS (GATE_REPORT_PHOTO_CONTENT, owner spec
     // 2026-09-27): the tech's own reviewed/edited captions for this visit's
@@ -24523,6 +24506,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
               companionFindings: companionEntries,
               allowedCompanionTypes,
               activityScore: typedActivityScoreNum,
+              withholdProductRecord: writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext),
             });
             // The deterministic last-resort copy can't read the prompt block,
             // so a typed-only request during a double-provider miss needs the
@@ -24568,6 +24552,8 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         }
       }
     }
+
+    const writerRulesOn = writerRulesGate && writerRulesInScope(groundingServiceType, reportPromptContext);
 
     // Strict re-check of the input gate now that companion authorization is
     // known: if companion facts were the ONLY thing that opened the gate and
@@ -24623,6 +24609,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         products: Array.isArray(products) ? products : [],
         productNames: fallbackProductNames,
         serviceDate: groundingServiceDate,
+        writerRules: writerRulesOn,
       });
       contextText = ctx.contextText || '';
       contextSignals = ctx.signals || {};
@@ -24683,17 +24670,23 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         const comms = await buildCompletionCommsContext({
           customerId: groundingCustomerId,
           scheduledServiceId,
+          ...(writerRulesOn ? { customerWordsOnly: true } : {}),
         });
         if (comms.text) {
-          commsBlock = `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
+          commsBlock = writerRulesOn
+            ? `\n\n${CUSTOMER_WORDS_HEADER}\n${comms.promptHint}\n${redactAccessCodes(comms.text)}`
+            : `\n\nRECENT CUSTOMER COMMUNICATIONS\n${comms.promptHint}\n${comms.text}`;
         }
       } catch (commsErr) {
         logger.warn(`[generate-report] comms context failed: ${commsErr.message}`);
       }
     }
 
-    const { selectReportCopyPrompt } = require('../services/service-report/lawn-report-copy-prompt');
-    const effectiveSystemPrompt = selectReportCopyPrompt(systemPrompt, groundingServiceType, reportPromptContext);
+    const effectiveSystemPrompt = selectReportCopyPrompt(
+      systemPrompt,
+      groundingServiceType,
+      writerRulesOn ? { ...reportPromptContext, writerRules: true } : reportPromptContext,
+    );
     if (!effectiveSystemPrompt) {
       return res.status(503).json({
         error: 'A report writer could not be matched to this service. Your notes were preserved; review the service profile before generating again.',
@@ -24701,6 +24694,37 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         retryable: true,
       });
     }
+    const userMessage = `Generate the service report copy for this visit.
+
+INPUTS
+
+Client Full Name: ${customerName || 'Not specified'}
+Service Type: ${serviceType || 'Not specified'}
+Technician Full Name: ${technicianName || 'Not specified'}
+Service Date: ${serviceDate || 'Not specified'}
+Arrival Time: ${arrivalTime || 'Not specified'}
+
+${writerRulesOn
+    ? `${TECHNICIAN_NOTE_HEADER}\n${promptNotes.slice(0, MAX_TECHNICIAN_NOTE_CHARS) || 'Not specified'}\n\n[COMPLETED WORK]`
+    : `[COMPLETED WORK]\nService Notes: ${promptNotes || 'Not specified'}`}
+Actions completed: ${promptActions.length ? promptActions.join('; ') : 'Not specified'}
+Areas serviced: ${promptAreas.length ? promptAreas.join(', ') : 'Not specified'}
+${writerRulesOn
+    ? withheldProductsLine(Array.isArray(products) && products.length ? products.length : fallbackProductNames.length)
+    : `Products Applied / Active Ingredients: ${productsText || 'Not specified'}`}
+
+[OBSERVED BY TECHNICIAN]
+Observations: ${promptObs.length ? promptObs.join('; ') : 'None noted'}
+Pest activity rating: ${ratingNum !== null ? `${ratingNum}/5 (${PEST_ACTIVITY_LABELS[ratingNum]})` : 'Not rated'}
+
+[REPORTED BY CUSTOMER]
+Customer interaction: ${customerInteraction || 'Not specified'}
+Customer concern (as reported, not a verified finding): ${promptConcern || 'None'}
+
+[FUTURE ADVICE — not completed work]
+Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
+
+Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
     const fullUserMessage = `${userMessage}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
@@ -24735,10 +24759,26 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         retryable: true,
       });
     }
+    // Under the writer rules the copy may not name an active ingredient
+    // either: this visit's catalog actives join the rules screen (fail-soft
+    // to the screen's common list when the catalog read misses).
+    const visitActiveIngredients = [];
+    if (writerRulesOn) {
+      const productIds = (Array.isArray(products) ? products : []).map((prod) => prod?.productId).filter(Boolean);
+      if (productIds.length) {
+        try {
+          const rows = await db('products_catalog').whereIn('id', productIds).select('active_ingredient');
+          visitActiveIngredients.push(...(Array.isArray(rows) ? rows : []).map((row) => row?.active_ingredient).filter(Boolean));
+        } catch { /* the screen's common list still applies */ }
+      }
+    }
+    const writerRulesScreen = (text) => (writerRulesOn
+      ? writerRulesRejection(text, { activeIngredients: visitActiveIngredients })
+      : null);
     const generated = await generateReportCopyWithFallback({
       systemPrompt: effectiveSystemPrompt,
       userMessage: fullUserMessage,
-      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null),
+      extraRejection: (text) => (screenTradeNames(text) ? 'trade_name' : null) || writerRulesScreen(text),
     });
     if (!generated.ok) {
       // Assessment-only requests carry no structured facts the deterministic
@@ -24766,13 +24806,17 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         recommendations: [...promptRecs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
         customerConcern: promptConcern,
-        applicationRecords: deterministicApplications,
+        // The writer rules drop the recorded footage ("with 120 linear ft
+        // recorded") from the last-resort copy too.
+        applicationRecords: writerRulesOn
+          ? deterministicApplications.map(({ areaValue, areaUnit, ...application }) => application)
+          : deterministicApplications,
       });
       // Same request-specific trade-name guard as the AI path (codex r19):
       // typed free text ("Reapply Termidor HE next visit") can carry names
       // into the fallback's recommendations. Degrade to no-report -> 503
       // rather than publish them.
-      const fallbackReport = report && screenTradeNames(report) ? null : report;
+      const fallbackReport = report && (screenTradeNames(report) || writerRulesScreen(report)) ? null : report;
       if (!fallbackReport) {
         logger.warn('[generate-report] both AI providers missed and no safe structured fallback facts were available', {
           failures: generated.failures,
@@ -24802,6 +24846,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       model: generated.model,
       fallbackUsed: generated.failures.length > 0,
       hasGrounding: !!groundingCustomerId,
+      ...(writerRulesOn ? { writerRules: true } : {}),
       ...contextSignals,
     });
     res.json({ report, ...(photoGroundingUsed ? { photoGroundingUsed: true } : {}) });

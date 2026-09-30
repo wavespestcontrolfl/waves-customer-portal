@@ -232,4 +232,42 @@ describe('buildCompletionCommsContext', () => {
     const ctx = await buildCompletionCommsContext({ customerId: null, knex: stubKnex({}) });
     expect(ctx.text).toBe('');
   });
+
+  // GATE_REPORT_WRITER_RULES: the report writer reads only the customer's
+  // own words, each labeled; Waves' own texts and emails stay out.
+  test('customerWordsOnly keeps the customer\'s own words, labeled, and drops what Waves sent', async () => {
+    const mk = (offsetDays) => new Date(NOW - offsetDays * DAY);
+    const knex = stubKnex({
+      scheduled_services: [
+        { id: 'svc-1', customer_id: 'c1', service_type: 'Rodent Exclusion Service', created_at: mk(10) },
+      ],
+      service_completion_profiles: [],
+      call_log: [
+        { created_at: mk(1), direction: 'inbound', lead_synopsis: 'Heard noises again in the attic' },
+        { created_at: mk(4), direction: 'outbound', lead_synopsis: 'Confirmed the visit window' },
+      ],
+      sms_log: [
+        { created_at: mk(2), direction: 'outbound', message_body: 'Confirming your exclusion visit window' },
+        { created_at: mk(3), direction: 'inbound', message_body: 'Scratching is worse after midnight' },
+      ],
+      emails: [
+        { received_at: mk(5), subject: 'Attic photos', snippet: 'Photos of the soffit gap attached', from_address: 'pat@example.com', label_ids: ['INBOX'] },
+        { received_at: mk(6), subject: 'Your visit', snippet: 'See you Tuesday', from_address: 'Waves Pest Control <contact@wavespestcontrol.com>', label_ids: ['SENT'] },
+      ],
+    });
+    const ctx = await buildCompletionCommsContext({
+      customerId: 'c1', scheduledServiceId: 'svc-1', customerWordsOnly: true, knex,
+    });
+    const lines = ctx.text.split('\n');
+    expect(lines).toEqual([
+      expect.stringMatching(/^Call .* \(the customer called; AI summary, not verified\): Heard noises again in the attic$/),
+      expect.stringMatching(/^Customer text .*: Scratching is worse after midnight$/),
+      expect.stringMatching(/^Call .* \(Waves called the customer; AI summary, not verified\): Confirmed the visit window$/),
+      expect.stringMatching(/^Customer email .* "Attic photos": Photos of the soffit gap attached$/),
+    ]);
+    expect(ctx.text).not.toContain('Confirming your exclusion visit window');
+    expect(ctx.text).not.toContain('See you Tuesday');
+    expect(ctx.promptHint).toContain('never a finding');
+    expect(ctx.promptHint).toContain('rodent');
+  });
 });
