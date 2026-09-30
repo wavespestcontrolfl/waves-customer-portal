@@ -312,6 +312,7 @@ describe('buildCompletionCommsContext', () => {
           { created_at: mk(9), direction: 'inbound', message_body: 'blue works at the side gate where the ants are' },
           { created_at: mk(9.2), direction: 'inbound', message_body: 'Use the side gate, the roaches are by the pool' },
           { created_at: mk(9.4), direction: 'inbound', message_body: 'Ants are coming in under the back door' },
+          { created_at: mk(9.6), direction: 'inbound', message_body: 'blue is the access word for the side gate where ants are' },
         ],
         // A bare code as the whole body, with no quote and no anchor.
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],

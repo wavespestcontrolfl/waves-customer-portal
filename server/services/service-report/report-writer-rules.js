@@ -252,9 +252,18 @@ const TIMEFRAME_RE = new RegExp(
   + `|\\bin\\s+${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`
   + `|\\bnext\\s+${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b`
   // "takes"/"lasts" only: "the last two weeks" is history.
-  + `|\\b(?:will|should|may|might|can|could|expect(?:ed)?|takes|lasts|continues?|keeps?\\s+working)\\b[^.!?]{0,40}?\\b${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`,
+  + `|\\b(?:will|should|may|might|can|could|expect(?:ed)?|takes|lasts|continues?|keeps?\\s+working)\\b[^.!?]{0,40}?\\b${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`
+  // With no number at all: "over the coming days", "in the days ahead",
+  // "in the weeks to come", "over the next few weeks".
+  + `|\\b(?:in|over|during|for|within)\\s+the\\s+(?:coming|next|upcoming)\\s+(?:few\\s+|several\\s+|couple\\s+(?:of\\s+)?)?${DURATION_UNIT}`
+  + `|\\bin\\s+the\\s+${DURATION_UNIT}\\s+ahead\\b|\\b${DURATION_UNIT}\\s+to\\s+come\\b`,
   'i',
 );
+// The activity gauge's number or scale (rule 12) in any form: "the rating
+// was 2", "rated two out of five", "2 on the five-point scale". The level in
+// words ("activity was light") and a count of a set ("2 of 5 stations",
+// "two out of five stations") pass.
+const GAUGE_RE = /\b(?:rat(?:ed|ing)|scored?|gauge|level)\s+(?:(?:was|is|of|at|read|a|an)\s+)*(?:[0-5]|zero|one|two|three|four|five)\b|\b(?:[0-5]|zero|one|two|three|four|five)\s+out\s+of\s+(?:5|five)\b(?!\s+[a-z]{2,}s\b)|\b(?:five|5)[\s-]*point\s+scale\b|\bscale\s+of\s+(?:0|1|zero|one)\b/i;
 // Money and entitlement (rule 9). ENTITLEMENT_RE catches the predicate
 // forms ("the next check is free", "the follow-up is included") but not a
 // physical state ("covered by mulch", "free of standing water").
@@ -305,7 +314,16 @@ const BARE_WEEKDAY_RE = /\b(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b/gi;
 // "there" ("You mentioned ants near the dishwasher; none were seen there
 // today"). "Your home", "the property", "inside", an existential "there
 // was" and "on this visit" name no place checked.
-const ABSENCE_RE = /\bno\s+(?:[\w-]+\s+){0,2}?(?:activity|pests?|insects?|bugs?|termites?|rodents?|mosquito(?:e?s)?|ants?|roach(?:es)?|spiders?|fleas?|ticks?|wasps?|bees?|feeding|captures?|droppings|evidence|signs?|mud\s+tubes?|damage)\b|\bnone\b|\bnothing\b/gi;
+// Also with a negated verb: "we did not observe any pest activity", "the
+// technician didn't see ants", "activity was not observed".
+const ABSENT_THING = String.raw`(?:activity|pests?|insects?|bugs?|termites?|rodents?|mosquito(?:e?s)?|ants?|roach(?:es)?|spiders?|fleas?|ticks?|wasps?|bees?|feeding|captures?|droppings|evidence|signs?|mud\s+tubes?|damage)`;
+const ABSENCE_RE = new RegExp([
+  String.raw`\bno\s+(?:[\w-]+\s+){0,2}?${ABSENT_THING}\b`,
+  String.raw`\bnone\b`,
+  String.raw`\bnothing\b`,
+  String.raw`\b(?:did\s+not|didn['’]t|could\s+not|couldn['’]t|do\s+not|don['’]t)\s+(?:\w+\s+)?(?:see|find|observe|notice|detect|spot)\s+(?:any\s+)?(?:[\w-]+\s+){0,2}?${ABSENT_THING}\b`,
+  String.raw`\b${ABSENT_THING}\s+(?:was|were|is|are)(?:\s+not|n['’]t)\s+(?:\w+\s+)?(?:seen|found|observed|noticed|detected|spotted|present)\b`,
+].join('|'), 'gi');
 const PLACE_NOUNS = [
   'kitchens?', 'bath(?:room)?s?', 'bedrooms?', 'closets?', 'pantr(?:y|ies)', 'laundry', 'garages?', 'attics?',
   'crawl\\s*spaces?', 'basements?', 'hallways?', 'stair(?:s|wells?)', 'offices?', 'rooms?',
@@ -353,7 +371,7 @@ const AFTERCARE_RE = new RegExp(`${INSTRUCTION_START}(?:`
 // 13, 14).
 const OWNER_PHRASE_RE = /\binfested\b|\bno\s+(?:problems?|issues?)\b|\bnothing\s+to\s+worry\s+about\b|\bmap(?:s|ped|ping)?\b|\btrac(?:e|ed|ing)\s+(?:route|outline|path|area|perimeter|line)s?\b|\btreated\s+outlines?\b|\bbond(?:ed|s)?\b|\b\w+-proof\b|\b(?:termite|ant|roach|pest|bug|rodent|mouse|rat|mosquito|flea|tick|spider|critter|animal|wildlife|squirrel|bird|snake)proof\b/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
-const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\b(?:stay|keep)\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
+const REENTRY_RE = /\b(?:allow|let|give)\s+(?:the\s+)?(?:treated\s+\w+|treatment|product|spray|application|areas?|surfaces?)\b[^.!?]{0,30}?\bto\s+dry\b|\bwait\s+(?:for|until)\b[^.!?]{0,40}?\bdr(?:y|ied|ies)\b|\bavoid\s+(?:\w+\s+){0,2}?contact\b|\bcontact\s+with\s+(?:the\s+|any\s+)?treated\b|\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\b(?:stay|keep)\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
 // Checked in order; the first hit names the rejection. Active ingredients
 // (a common list plus the caller's catalog actives) are checked last.
@@ -371,6 +389,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [AFTERCARE_RE, 'aftercare'],
   [REENTRY_RE, 'reentry'],
   [TIMEFRAME_RE, 'timeframe'],
+  [GAUGE_RE, 'gauge'],
   [PRICE_RE, 'price'],
   [ENTITLEMENT_RE, 'price'],
   [(copy) => forwardMention(copy, MONTH_DAY_RE), 'date'],

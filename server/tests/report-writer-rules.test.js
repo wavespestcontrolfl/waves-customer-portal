@@ -234,6 +234,17 @@ describe('writerRulesRejection', () => {
     ['We will arrive this afternoon.', 'time'],
     ['Thanks from Waves Pest Control of Southwest Florida.', 'company_name'],
     ['Thanks from Waves Pest Control, LLC.', 'company_name'],
+    ['We did not observe any pest activity today.', 'unscoped_absence'],
+    ["The technician didn't see ants today.", 'unscoped_absence'],
+    ['Activity was not observed today.', 'unscoped_absence'],
+    ['Allow the treated areas to dry before using them.', 'reentry'],
+    ['Wait for the treatment to dry before returning.', 'reentry'],
+    ['Avoid contact with treated surfaces.', 'reentry'],
+    ['Activity may continue over the coming days.', 'timeframe'],
+    ['You may notice activity in the days ahead.', 'timeframe'],
+    ['The activity rating was 2.', 'gauge'],
+    ['The kitchen was rated two out of five.', 'gauge'],
+    ['Activity was 2 on the five-point scale.', 'gauge'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -265,6 +276,11 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('Mosquitoes will be most active in the evening.')).toBeNull();
     expect(writerRulesRejection('The technician arrived in the morning.')).toBeNull();
     expect(writerRulesRejection('Waves Pest Control, your technician checked the stations.')).toBeNull();
+    expect(writerRulesRejection('We did not see ants in the kitchen.')).toBeNull();
+    expect(writerRulesRejection('We did not find the source of the smell.')).toBeNull();
+    expect(writerRulesRejection('We allowed the cabinet to dry before placing bait.')).toBeNull();
+    expect(writerRulesRejection('Two out of five stations had feeding.')).toBeNull();
+    expect(writerRulesRejection('Activity was light at 3 stations.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
