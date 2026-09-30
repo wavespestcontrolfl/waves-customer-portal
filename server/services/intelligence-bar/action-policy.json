@@ -463,6 +463,22 @@
     "approval": null,
     "scope": "none"
   },
+  "purge_cloudflare_cache": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "retry_cloudflare_pages_build": {
+    "module": "cloudflare-ops-tools.js",
+    "domain": "cloudflare-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "get_commit_info": {
     "module": "github-ops-tools.js",
     "domain": "github-ops",
@@ -470,6 +486,30 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "rerun_failed_github_checks": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "add_github_pr_label": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "request_codex_review": {
+    "module": "github-ops-tools.js",
+    "domain": "github-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "get_content_decay_alerts": {
     "module": "seo-tools.js",
@@ -895,6 +935,22 @@
     "approval": null,
     "scope": "none"
   },
+  "redeploy_railway_service": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "restart_railway_service": {
+    "module": "ops-tools.js",
+    "domain": "ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
   "get_recent_completions": {
     "module": "tools.js",
     "domain": "customers",
@@ -1014,6 +1070,30 @@
     "role": "admin",
     "approval": null,
     "scope": "broad"
+  },
+  "resolve_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "ignore_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
+  },
+  "assign_sentry_issue": {
+    "module": "sentry-ops-tools.js",
+    "domain": "sentry-ops",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "none"
   },
   "get_service_history": {
     "module": "tech-tools.js",
@@ -1645,6 +1725,14 @@
     "kind": "read",
     "role": "admin",
     "approval": null,
+    "scope": "none"
+  },
+  "submit_gsc_sitemap": {
+    "module": "seo-tools.js",
+    "domain": "seo",
+    "kind": "external_action",
+    "role": "admin",
+    "approval": "ui_confirm",
     "scope": "none"
   },
   "set_estimate_presentation": {

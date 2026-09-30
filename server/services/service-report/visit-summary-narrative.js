@@ -108,7 +108,8 @@ function groundingFacts({
       displayScore: pestPressure.displayScore,
       maxScore: pestPressure.maxScore || 5,
       label: cleanText(pestPressure.label) || null,
-      trend: cleanText(pestPressure.trend) || null,
+      // 'rescaled' asserts no trend (earlier scores were on another scale).
+      trend: pestPressure.trend === 'rescaled' ? null : (cleanText(pestPressure.trend) || null),
       trendDelta: pestPressure.trendDelta ?? null,
       summary: cleanText(pestPressure.summary) || null,
     }

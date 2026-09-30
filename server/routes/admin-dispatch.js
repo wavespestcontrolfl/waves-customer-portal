@@ -3376,10 +3376,13 @@ function recapStatusForReason(reason) {
 }
 
 // GET /:serviceId/pest-recap/context — service info + timeline + product catalog.
+// ?include=common_products adds the Fast Complete picker's most-used list.
 router.get('/:serviceId/pest-recap/context', async (req, res, next) => {
   try {
     if (!(await assertRecapOwnership(req, res))) return;
-    const ctx = await PestRecap.buildRecapContext(req.params.serviceId);
+    const ctx = await PestRecap.buildRecapContext(req.params.serviceId, undefined, {
+      includeCommonProducts: req.query.include === 'common_products',
+    });
     if (!ctx.ok) return res.status(recapStatusForReason(ctx.reason)).json({ error: ctx.reason });
     res.json(ctx);
   } catch (err) { next(err); }
@@ -4536,7 +4539,11 @@ async function applySeriesMoveEffects({ result, serviceId, newDate, newWindow, n
             : dueConflicts.length ? 'Series move left visits without a time window'
               : (result.arrivalWindowDates?.length ? 'Series move needs route review' : 'Series move overlaps other visits'),
           `A series move shifted a recurring plan: ${parts.join('; ')}.`,
-          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts, overlapDates, preservedOccurrences: preserved } }
+          // A card-only pass stores only the conflicts it rings for: the
+          // successor owns the preserved and overlap work (admin-alert-relevance.js
+          // settles the card by the items it names).
+          { bell: true, link, metadata: { scheduledServiceId: serviceId, seriesMoveId, conflicts: dueConflicts,
+            overlapDates: cardOnly ? [] : overlapDates, preservedOccurrences: cardOnly ? [] : preserved } }
         );
         if (!notif?.id) logger.error(`[dispatch] schedule_conflict notification insert FAILED for ${serviceId}: ${JSON.stringify(conflicts)}`);
         else await stampMarker('conflict_card_at');

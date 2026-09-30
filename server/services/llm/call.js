@@ -546,7 +546,14 @@ function anthropicRequest({ model, system, text, images, documents, tools, jsonM
 // and the lanes' own Ajv validators still enforce the full schema on the
 // answer, so only the wire copy sent to Anthropic drops them. Deep copy; the
 // caller's schema object is never mutated.
-const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set(['minItems', 'maxItems', 'minLength', 'maxLength']);
+// Numeric bounds too: `For 'number' type, properties maximum, minimum are not
+// supported` is a 400 on EVERY call (the plant photo ID referee's first live
+// run failed 3/3 on 2026-09-29, #5307), so any lane whose schema bounds a
+// number could never be answered by an Anthropic leg, primary or fallback.
+const ANTHROPIC_UNSUPPORTED_KEYWORDS = new Set([
+  'minItems', 'maxItems', 'minLength', 'maxLength',
+  'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf',
+]);
 function anthropicSchema(schema) {
   return JSON.parse(JSON.stringify(schema, (key, value) => (ANTHROPIC_UNSUPPORTED_KEYWORDS.has(key) ? undefined : value)));
 }

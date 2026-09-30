@@ -25,6 +25,7 @@ const EmailTemplateLibrary = require('./email-template-library');
 const { getPrimaryContact, getAppointmentContacts, getServiceContactSlots, SERVICE_CONTACT_COLUMNS, PREFS_UNAVAILABLE, withAccountPrimaryContact } = require('./customer-contact');
 const { portalUrl: buildPortalUrl } = require('../utils/portal-url');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
+const { propertyDisplayLabel } = require('../utils/property-display');
 const { formatETDay, formatETDate, formatETTime } = require('../utils/datetime-et');
 
 const CONTACT_EMAIL = 'contact@wavespestcontrol.com';
@@ -49,13 +50,10 @@ function fullName(customer = {}) {
     || 'Waves customer';
 }
 
+// The Property row is the booked street address; profile_label is only a
+// nickname ("Primary") and shows only when no address exists.
 function propertyLabel(customer = {}) {
-  const label = clean(customer.profile_label);
-  if (label) return label;
-  // Full address incl. state + zip (owner call 07-06).
-  const cityStateZip = [customer.city, [customer.state, customer.zip].filter(Boolean).join(' ')].filter(Boolean).join(', ');
-  const address = [customer.address_line1, cityStateZip].filter(Boolean).join(', ');
-  return address || 'Service property';
+  return propertyDisplayLabel(customer);
 }
 
 function portalTabUrl(tab = 'visits') {
@@ -94,6 +92,7 @@ async function loadCustomer(customerId) {
       'email',
       'phone',
       'address_line1',
+      'address_line2',
       'city',
       'state',
       'zip',

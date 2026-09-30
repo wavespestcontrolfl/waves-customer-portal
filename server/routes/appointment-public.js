@@ -54,8 +54,11 @@ const {
   ARRIVAL_WINDOW_MINUTES,
 } = require('../utils/sms-time-format');
 const { calendarIcsAvailable, groupedStopEndsAt, groupedIcsVerdict } = require('../services/appointment-ics-eligibility');
+const { visitInsideMoveNoticeWindow } = require('../services/scheduling/self-serve-notice');
+const { visitTimeElapsed } = require('../services/reschedule-eligibility');
 const visitPrep = require('../services/visit-prep');
 const { unauthenticatedAuthLimitKey } = require('../middleware/rate-limit-key');
+const { recordPageView } = require('../services/customer-page-views');
 
 // Token-keyed appointment data — never cacheable.
 router.use(noStore);
@@ -177,14 +180,23 @@ function pageState(svc, now = new Date()) {
   // Past the quoted arrival window with no terminal status = the visit came
   // and went; don't show a "your visit is tomorrow" card for it.
   const date = apptDateStr(svc.scheduled_date);
-  const start = hhmm(svc.window_start);
-  if (date) {
-    const endsAt = start
-      ? new Date(parseETDateTime(`${date}T${start}`).getTime() + ARRIVAL_PROMISE_MINUTES * 60000)
-      : parseETDateTime(`${date}T23:59`);
-    if (endsAt && endsAt < now) return { state: 'past' };
+  if (!date) return { state: 'upcoming' };
+  if (!hhmm(svc.window_start)) {
+    // Windowless: stays live through the end of its own calendar day — no
+    // arrival-promise instant to compare against.
+    const endsAt = parseETDateTime(`${date}T23:59`);
+    return { state: endsAt && endsAt < now ? 'past' : 'upcoming' };
   }
-  return { state: 'upcoming' };
+  // A window_start is present: defer to the SAME "has this visit's time
+  // passed" rule reschedule-eligibility.js applies (visitTimeElapsed —
+  // codex + independent-reviewer finding on PR #5308). This used to
+  // compute window_start+2h only, which could disagree with that rule for
+  // a long job (e.g. 06:00-10:00 viewed at 09:00): this page would call the
+  // visit "past" and offer a "Pick a new time" link, while
+  // reschedule-eligibility.js still called it upcoming-and-not-missed —
+  // reschedule-public.js then refuses the move (too soon, inside the
+  // notice window) and the link dead-ends.
+  return { state: visitTimeElapsed(svc, now) ? 'past' : 'upcoming' };
 }
 
 
@@ -681,6 +693,8 @@ router.get('/:token', async (req, res, next) => {
   try {
     const svc = await loadByToken(req.params.token);
     if (!svc || svc.customer_deleted_at) return res.status(404).json({ error: 'Not found' });
+    // Customer-page-view log (bots/staff skipped, deduped, never blocks).
+    void recordPageView({ req, page: 'appointment', customerId: svc.customer_id, subjectType: 'scheduled_service', subjectId: svc.id });
 
     const visitInfoRaw = await visitServicesFor(svc);
     // Unknown membership fails closed: the page can't be changed online
@@ -794,6 +808,14 @@ router.get('/:token', async (req, res, next) => {
         || (svc.visit_id && !visitInfo.visitUnknown
           && (await require('../services/visit-groups').frozenVisitVerdict(db, svc.visit_id)).frozen))
         ? null : svc.reschedule_token,
+      // Dead-link guard (C3/C6): the "See open times" CTA's own destination
+      // (/reschedule/:token) refuses to MOVE a visit that already starts
+      // inside the self-serve move-notice window — the same verdict
+      // buildRescheduleLink now applies before texting the link. We are
+      // already inside `state === 'upcoming'` here (a missed/past visit
+      // returned above with its own `state: 'past'`), so this is never the
+      // missed-visit recovery case — only "too soon to move, not missed".
+      canMoveOnline: !visitInsideMoveNoticeWindow(svc, new Date()),
     });
   } catch (err) {
     next(err);
@@ -1268,6 +1290,39 @@ async function deriveVisitPrepEligibility(svc) {
 // visit can go en route, get cancelled, or a grouped sibling can push the
 // stop's state), and this is the one place that re-proves it, on the
 // connection that already owns the lock.
+// The generic CORE of the locked recheck: given a svc row that the caller
+// has ALREADY loaded fresh on `trx` (after its own row lock + identity
+// checks — token match for the public route below, or customer-ownership
+// match for the app route in schedule.js), locks any grouped members and
+// re-derives eligibility on that fresh state. Returns the row when eligible,
+// else null. Exported so schedule.js's app-authenticated POST /:id/prep-photos
+// can share this exact member-lock + eligibility recheck rather than growing
+// its own copy — schedule.js requires this module directly (never the
+// reverse), so there is no cycle the way there would be pulling this logic
+// into visit-prep.js (which this route already requires).
+async function reloadEligibleVisitPrepRowCore(svc, trx) {
+  if (!svc) return null;
+  let visitUnknown = false;
+  let visitInfo = {};
+  if (svc.visit_id) {
+    const { openMembers } = require('../services/visit-groups');
+    const members = await openMembers(trx, svc.visit_id, { forUpdate: true });
+    if (members.length >= 2) {
+      if (!membersOneStop(members)) {
+        visitUnknown = true;
+      } else {
+        const { state, phase } = groupedState(members);
+        visitInfo = { visit: { state, phase } };
+      }
+    }
+  }
+  const { state } = visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfo);
+  const eligibility = visitPrep.visitPrepEligibility({
+    svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
+  });
+  return eligibility.eligible ? svc : null;
+}
+
 async function reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId, trx) {
   // The customer row FIRST (Codex r3 P1): loadByToken re-reads
   // customers.active / deleted_at, but without a lock a deactivation or
@@ -1290,25 +1345,7 @@ async function reloadEligibleVisitPrepRow(token, expectedId, expectedCustomerId,
   if (expectedId && String(svc.id) !== String(expectedId)) return null;
   if (String(svc.customer_id) !== String(expectedCustomerId)) return null;
 
-  let visitUnknown = false;
-  let visitInfo = {};
-  if (svc.visit_id) {
-    const { openMembers } = require('../services/visit-groups');
-    const members = await openMembers(trx, svc.visit_id, { forUpdate: true });
-    if (members.length >= 2) {
-      if (!membersOneStop(members)) {
-        visitUnknown = true;
-      } else {
-        const { state, phase } = groupedState(members);
-        visitInfo = { visit: { state, phase } };
-      }
-    }
-  }
-  const { state } = visitUnknown ? { state: 'not_available' } : pageStateForGroup(svc, visitInfo);
-  const eligibility = visitPrep.visitPrepEligibility({
-    svc, state, visitUnknown, dispatchOwnedUnreviewed: dispatchOwnedUnreviewed(svc),
-  });
-  return eligibility.eligible ? svc : null;
+  return reloadEligibleVisitPrepRowCore(svc, trx);
 }
 
 // Office feed item — PR 3b (customer-visit-photos scope doc §5.4 item 3,
@@ -1534,3 +1571,12 @@ module.exports.pageStateForVisit = async function pageStateForVisit(svc, now = n
   const info = svc?.visit_id ? await visitServicesFor(svc) : {};
   return info.visitUnknown ? { state: 'not_available', phase: null } : pageStateForGroup(svc, info, now);
 };
+// Visit-prep photos (customer-visit-photos-scope-20260928.md PR 4, "app
+// entry"): schedule.js's customer-authenticated POST /:id/prep-photos
+// requires this module directly (never the reverse) to reuse the SAME
+// eligibility derivation, multer config, locked-recheck core, and office
+// feed item as the public token route — never a second copy of any of them.
+module.exports.deriveVisitPrepEligibility = deriveVisitPrepEligibility;
+module.exports.reloadEligibleVisitPrepRowCore = reloadEligibleVisitPrepRowCore;
+module.exports.visitPrepUpload = visitPrepUpload;
+module.exports.notifyOfficeVisitPrepSubmission = notifyOfficeVisitPrepSubmission;

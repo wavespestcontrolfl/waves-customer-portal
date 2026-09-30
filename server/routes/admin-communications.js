@@ -2638,7 +2638,18 @@ router.post('/reschedule-link', requireAdmin, async (req, res) => {
     const svc = await soonestUpcomingVisit(customerIds);
     if (!svc) return res.status(404).json({ error: 'No upcoming appointment for this customer' });
 
-    const { url, line } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+    const { url, line, tooSoonToMove } = await buildRescheduleLink(svc.id, { customerId: svc.customer_id });
+    // A dead-link-guard refusal (C3/C6) is not the same problem as a
+    // missing link: the visit is eligible, just too close to its own start
+    // to move online right now — a distinct 409 so the composer doesn't
+    // tell the operator this appointment has no reschedule link at all
+    // (independent-reviewer finding on PR #5308).
+    if (tooSoonToMove) {
+      return res.status(409).json({
+        error: 'This visit is too close to move online — ask them to reply or call.',
+        code: 'too_close_to_move_online',
+      });
+    }
     // Null url = legacy pre-backfill row without a token (or shortener +
     // portal-url both unavailable) — nothing usable to insert.
     if (!url) return res.status(404).json({ error: 'This appointment has no reschedule link' });
@@ -4122,17 +4133,19 @@ router.get('/template-performance', async (req, res, next) => {
   try {
     const days = Math.min(Math.max(parsePositiveInt(req.query.days) || 30, 1), 365);
     const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    // The exact rendered row (metadata.templateKey) when the sender recorded
+    // it; otherwise the message-type alias the older rows carry.
     const rows = await db('messaging_audit_log')
       .where({ channel: 'sms' })
       .where('created_at', '>=', since)
-      .select(db.raw("COALESCE(metadata->>'original_message_type', purpose, 'unknown') as template_key"))
+      .select(db.raw("COALESCE(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown') as template_key"))
       .select(db.raw("COALESCE(metadata->>'sms_variant_key', '') as variant_key"))
       .count('* as attempts')
       .sum({ segments: 'segment_count' })
       .select(db.raw("SUM(CASE WHEN sent_at IS NOT NULL THEN 1 ELSE 0 END) as sent"))
       .select(db.raw("SUM(CASE WHEN blocked_code IS NOT NULL THEN 1 ELSE 0 END) as blocked"))
       .select(db.raw("SUM(CASE WHEN provider_error IS NOT NULL THEN 1 ELSE 0 END) as provider_failures"))
-      .groupByRaw("COALESCE(metadata->>'original_message_type', purpose, 'unknown'), COALESCE(metadata->>'sms_variant_key', '')")
+      .groupByRaw("COALESCE(metadata->>'templateKey', metadata->>'original_message_type', purpose, 'unknown'), COALESCE(metadata->>'sms_variant_key', '')")
       .orderBy('attempts', 'desc');
 
     res.json({

@@ -161,6 +161,8 @@ const acceptanceTerms = require('../services/acceptance-terms-text');
 const { acceptanceRecordForEstimate } = require('../services/estimate-acceptance-record');
 const { buildEstimateConsultationOffer } = require('../services/estimate-consultation-offer');
 const { getCachedLookup } = require('../services/property-lookup/lookup-cache');
+const estimateMapImage = require('../services/estimate-map-image');
+const { ipFallbackKey } = require('../middleware/rate-limit-key');
 const {
   parcelOverlayEnabled,
   buildParcelOverlayParam,
@@ -4440,7 +4442,12 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     complexity ? { label: 'Complexity', value: complexity } : null,
   ]);
 
-  const satelliteUrl = estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null;
+  // Never the raw stored value: a Static Maps URL carries the server key. The
+  // public payload gets the token-scoped proxy path instead (no token -> null).
+  const satelliteUrl = estimateMapImage.publicSatelliteUrl(
+    estimate.satelliteUrl || estimate.satellite_url || parsedData.satelliteUrl || null,
+    estimate.token,
+  );
   // One-time-ONLY estimate whose rows all resolve to one service copy pack
   // (roach cleanout, flea, wasp, bed bug, …): the card describes THAT
   // service instead of the generic "reviewed your property" line. Mixed
@@ -4525,13 +4532,11 @@ function showYourWorkCountyName(county) {
 // estimator's own Static Maps overlay builder. Read-only: ANY miss or
 // error returns null so the page falls back to the stored satellite_url,
 // and nothing here logs the address/parcel/coords (public-route PII rule).
-async function resolveShowYourWorkOverlayUrl(estimate = {}) {
+async function resolveShowYourWorkOverlayStaticUrl(estimate = {}) {
   try {
     if (!parcelOverlayEnabled()) return null;
     const address = estimate.address || null;
     if (!address) return null;
-    const googleKey = process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
-    if (!googleKey) return null;
     const row = await getCachedLookup(address);
     if (!row) return null;
     let parcel = row.parcel;
@@ -4543,10 +4548,20 @@ async function resolveShowYourWorkOverlayUrl(estimate = {}) {
     if (!parcel?.polygon || !Number.isFinite(lat) || !Number.isFinite(lng)) return null;
     const overlayParam = buildParcelOverlayParam(parcel.polygon);
     if (!overlayParam) return null;
-    return `https://maps.googleapis.com/maps/api/staticmap?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&${overlayParam}&key=${googleKey}`;
+    // KEYLESS on purpose: the server key is appended only inside the
+    // token-scoped proxy fetch (GET /:token/map/overlay), never in a payload.
+    return `${estimateMapImage.STATIC_MAP_BASE}?center=${lat},${lng}&zoom=20&size=640x640&maptype=satellite&format=png&${overlayParam}`;
   } catch {
     return null;
   }
+}
+
+// The public payload only ever carries the proxy path; the proxy route
+// re-resolves the keyless URL itself from the same cached lookup row.
+async function resolveShowYourWorkOverlayUrl(estimate = {}) {
+  if (!estimate.token || !estimateMapImage.serverMapsKey()) return null;
+  const staticUrl = await resolveShowYourWorkOverlayStaticUrl(estimate);
+  return staticUrl ? estimateMapImage.publicMapProxyPath(estimate.token, 'overlay') : null;
 }
 
 async function buildShowYourWork(estimate = {}, estData = {}) {
@@ -5901,7 +5916,7 @@ function renderPage(token, estimate, estData, membership, opts = {}) {
   const isRegulatedCertificateSurface = hasRegulatedCertificateServiceMix(recurring, oneTimeItems);
   const intelligence = isRegulatedCertificateSurface
     ? null
-    : buildWaveGuardIntelligencePayload(est, estData, { recurringServices: recurring });
+    : buildWaveGuardIntelligencePayload({ ...est, token: est.token || token }, estData, { recurringServices: recurring });
   // "Show your work" extension of the same card: parcel-outline satellite
   // image swaps in for the plain one when available, and the facts /
   // parcel-match / quality-note block lands after the metrics grid. All
@@ -8220,7 +8235,17 @@ function sendEstimatePage(res, token, estimate, estData, membership, opts = {}) 
     .set('Pragma', 'no-cache')
     .set('Expires', '0')
     .set('Content-Type', 'text/html; charset=utf-8')
-    .send(renderPage(token, estimate, estData, membership, opts));
+    // Scrub the SOURCE values before renderPage HTML-escapes them (an escaped
+    // `&amp;key=` is no longer a param boundary), then scrub the finished HTML
+    // (entity-aware) as a backstop: no Maps key in any SSR HTML, whatever blob
+    // it rode in on, and whether or not it matches the configured key.
+    .send(estimateMapImage.scrubMapsKeysFromString(renderPage(
+      token,
+      estimateMapImage.scrubMapsKeysDeep(estimate),
+      estimateMapImage.scrubMapsKeysDeep(estData),
+      estimateMapImage.scrubMapsKeysDeep(membership),
+      estimateMapImage.scrubMapsKeysDeep(opts),
+    )));
 }
 
 // Existing-customer estimate treatment — waived WaveGuard setup fee and no
@@ -8926,7 +8951,7 @@ async function handleEstimateView(req, res, next) {
       createdAt: estimate.created_at,
       // This property's own offer deadline (#4309 round 7).
       expiresAt: estimate.expires_at,
-      satelliteUrl: estimate.satellite_url || null,
+      satelliteUrl: estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token),
       showOneTimeOption: !!estimate.show_one_time_option,
       oneTimeChoicePrice,
       pricingFrequencies: Array.isArray(pricingBundleForView?.frequencies)
@@ -11099,6 +11124,11 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         }
       };
       let customerId = estimate.customer_id;
+      // True only when THIS accept minted the profile below (no linked,
+      // sibling, or phone-matched customer). Handed to the converter so the
+      // insert's own defaults (pipeline_stage 'active_customer' + the quoted
+      // monthly_rate) are never read as a pre-existing monthly membership.
+      let customerCreatedThisAccept = false;
       // Already-linked customer: fill its last_name/email ONLY if blank/the
       // 'Customer' placeholder (the fill helpers re-check that under this
       // same lock — lockCustomerComms(trx, acceptPreLockedCommsId) above
@@ -11246,11 +11276,21 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
             // explicit non-membership tier (the column defaults to 'Bronze'
             // if omitted, so it must be set).
             waveguard_tier: treatAsOneTime ? 'One-Time' : (estimate.waveguard_tier || 'Bronze'),
-            monthly_rate: treatAsOneTime ? null : effectiveMonthlyTotal,
+            // A termite-annual sign-before-pay accept PARKS in the converter
+            // before any customer write (activation, after signature, replays
+            // the whole conversion and re-stamps monthly_rate from the
+            // estimate's own monthly_total). Minting the profile with the
+            // quoted rate here would leave a bundled estimate's customer for
+            // up to 45 days with monthly_rate > 0 and billing_mode NULL —
+            // read as a monthly member by a second accept's phone match and
+            // admitted to the 1st-of-month charge sweep. NULL keeps it a
+            // non-member until the signature commits.
+            monthly_rate: (treatAsOneTime || isTermiteAnnualSignBeforePay) ? null : effectiveMonthlyTotal,
             member_since: etDateString(),
             referral_code: code,
           })).returning('*');
           customerId = newCust.id;
+          customerCreatedThisAccept = true;
           await createDefaultCustomerRows(trx, customerId);
         }
         await trx('estimates').where({ id: estimate.id }).update({ customer_id: customerId });
@@ -12041,6 +12081,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         annualPrepayConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           skipAutoSchedule: true,
           skipMembershipEmail: true,
           // Labeled manual-discount itemization on the prepay invoice (owner
@@ -12218,6 +12262,10 @@ router.put('/:token/accept', acceptDeclineLimiter, async (req, res, next) => {
         standardConversionResult = await EstimateConverter.convertEstimate(estimate.id, {
           database: trx,
           billingTerm,
+          // IDENTITY of the profile this accept minted (null otherwise); the
+          // converter honors it only for that same row while its lane is
+          // still unstamped (see holdsExistingMembership).
+          createdCustomerId: customerCreatedThisAccept ? customerId : null,
           firstApplicationRowAmounts: firstApplicationRowAmounts.length ? firstApplicationRowAmounts : null,
           // The converter's own STANDARD draft-invoice branch runs on the
           // GLOBAL pool (its internal db.transaction + ledger reads), which
@@ -26716,7 +26764,13 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
     const recentPacketSend = async () => db('sms_log')
       .where({ direction: 'outbound', message_type: 'estimate_service_details' })
       .whereRaw("RIGHT(regexp_replace(COALESCE(to_phone, ''), '[^0-9]', '', 'g'), 10) = ?", [tenDigits])
-      .whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
+      // GATE_SMS_LINK_WRAP: the logged body carries the packet as a /l/<code>
+      // short link whose short_codes.target_url is pdfUrl, not pdfUrl itself —
+      // so a row matches on the raw URL OR on a code minted for that exact URL.
+      .where(function packetLinkInBody() {
+        this.whereRaw('strpos(COALESCE(message_body, \'\'), ?) > 0', [pdfUrl])
+          .orWhereRaw("EXISTS (SELECT 1 FROM short_codes sc WHERE sc.target_url = ? AND strpos(COALESCE(sms_log.message_body, ''), '/l/' || sc.code) > 0)", [pdfUrl]);
+      })
       .whereRaw("created_at >= NOW() - interval '10 minutes'")
       .first();
     const sendPromise = (async () => {
@@ -26806,9 +26860,28 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
         await markClaimWithheld();
         return { success: false, withheld: true };
       }
+      // GATE_SMS_LINK_WRAP: this send bypasses sendCustomerMessage on purpose
+      // (its own claim/dedupe, window + annual-offer preSendCheck and
+      // ANNUAL_OFFER_WITHHELD result contract all hang off TwilioService.sendSMS
+      // directly), so it applies the SAME shared wrapper at this call site
+      // rather than routing through the choke point. Gate off / any mint
+      // failure = the body below is byte-identical to today. The dedupe above
+      // matches the wrapped body by the code's target_url (the pre-wrap pdfUrl).
+      const packetBody = `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`;
+      const smsLinkWrap = require('../services/messaging/sms-link-wrap');
+      let wrappedPacket = { body: packetBody, codes: [] };
+      try {
+        wrappedPacket = await smsLinkWrap.wrapPortalLinks({
+          body: packetBody,
+          channel: 'sms',
+          audience: 'customer',
+          purpose: 'estimate_service_details',
+          customerId: estimate.customer_id || null,
+        });
+      } catch (e) { logger.warn(`[estimate-public] service-details SMS link wrap skipped: ${String((e && (e.code || e.name)) || 'error').slice(0, 40)}`); }
       const smsSendResult = await TwilioService.sendSMS(
         contact.customerPhone,
-        `Waves Pest Control: here's the full ${serviceTitle} details packet you requested — how visits work, products, labels & safety sheets: ${pdfUrl}`,
+        wrappedPacket.body,
         {
           customerId: estimate.customer_id || null,
           messageType: 'estimate_service_details',
@@ -26851,6 +26924,19 @@ router.post('/:token/service-details/send', serviceDetailsSendLimiter, async (re
           },
         },
       );
+      // Fire-and-forget stamp of the codes this text carried. A throw above
+      // skips it (uncertain send: codes stay unstamped); a code the provider
+      // boundary stripped stays unstamped too. Log the code only.
+      if (wrappedPacket.codes.length && smsSendResult) {
+        void smsLinkWrap.settleWrappedLinks(wrappedPacket.codes, {
+          sent: smsSendResult.success === true,
+          deliveryOutcome: smsSendResult.deliveryOutcome,
+          deduped: smsSendResult.deduped,
+          provider: 'twilio',
+          providerMessageId: smsSendResult.sid,
+          withheldLinksRewritten: smsSendResult.withheldLinksRewritten,
+        }).catch((e) => logger.warn(`[estimate-public] service-details wrapped-link stamp failed: ${String((e && (e.code || e.name)) || 'error').slice(0, 40)}`));
+      }
       // Codex round 3 on #4608 (P0): the SAME durable stamp for the OTHER
       // withheld path — the composed preSendCheck's annual-offer block,
       // resolved above as a coded refusal rather than a throw.
@@ -27800,15 +27886,18 @@ async function composeEstimateDataPayload(estimate, {
         // Pinned override only on a signed pdf render pass — see docRenderPin.
         expiresAt: docRenderPin?.validThrough || estimate.expires_at,
         status: estimate.status,
-        // On a pdf render pass the HEADLESS SERVER browser fetches this URL,
-        // so it must be a known-good public imagery host — satellite_url is
-        // staff-writable free text, and an internal/arbitrary URL here would
-        // let a saved estimate steer server-side GETs (SSRF; codex #3281 r1).
-        // The customer's own browser (normal page loads) keeps the stored
-        // value unfiltered, today's behavior.
+        // A stored Google Static Maps URL is served as the token-scoped proxy
+        // path (GET /:token/map/satellite) — the server key never rides in a
+        // customer payload. The proxy rebuilds the URL from allow-listed
+        // stored params and only ever fetches maps.googleapis.com, so the PDF
+        // render pass (headless browser) can no longer be steered at an
+        // internal/arbitrary URL either (SSRF; codex #3281 r1): on that pass
+        // a non-Google stored value is dropped, as before.
         satelliteUrl: isPdfRenderPass
-          ? (String(estimate.satellite_url || '').startsWith('https://maps.googleapis.com/') ? estimate.satellite_url : null)
-          : (estimate.satellite_url || null),
+          ? (estimateMapImage.isGoogleStaticMapUrl(estimate.satellite_url)
+            ? estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token)
+            : null)
+          : estimateMapImage.publicSatelliteUrl(estimate.satellite_url, estimate.token),
         intelligence,
         // The server's regulated-surface decision (WDO / pre-treatment
         // certificate — AGENTS.md: no AI narrative, no ask bar), computed from
@@ -28154,7 +28243,9 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       } catch (e) { logger.error(`[notifications] Estimate viewed notification failed: ${e.message}`); }
     }
 
-    res.json(await composeEstimateDataPayload(estimate, {
+    // scrubMapsKeysDeep: last line of defense — no server Maps key in this
+    // public JSON even if a keyed URL sits in some blob the builders missed.
+    res.json(estimateMapImage.scrubMapsKeysDeep(await composeEstimateDataPayload(estimate, {
       adminDraftPreview,
       isPdfRenderPass,
       docRenderPin,
@@ -28162,9 +28253,126 @@ router.get('/:token/data', dataLimiter, async (req, res, next) => {
       currentViewRecorded,
       isInternalRefresh,
       includeConsultationOffer: true,
-    }));
+    })));
   } catch (err) { next(err); }
 });
+
+// ── Token-scoped satellite image proxy ─────────────────────────────
+// The customer page/JSON/PDF pass reference these paths instead of a Google
+// Static Maps URL, because that URL carried the server's Maps key (the same
+// key Geocoding/Routes use, so it cannot be referrer-restricted). The route
+// validates the estimate token like the other public reads, rebuilds the
+// Static Maps URL server-side from the estimate's OWN stored parameters — it
+// reads NOTHING from the caller's query string, so it cannot be steered into
+// an open proxy or an arbitrary map — appends the key, and streams the bytes.
+const mapImageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  // Shared key: collapses an IPv6 client's /64 to one bucket (raw req.ip
+  // would let it rotate addresses inside its subnet to dodge the limit).
+  keyGenerator: (req) => ipFallbackKey(req.ip),
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests. Please try again in a minute.' },
+});
+
+// Headers every map response carries (404s included). Cross-Origin-Resource-
+// Policy is `cross-origin` because helmet defaults to same-origin, which would
+// block these <img> loads when the SPA is built against a separate API origin
+// (VITE_API_URL). The image is the estimate's own satellite view, already
+// behind the bearer token.
+function stampMapImageHeaders(res) {
+  res.set('Referrer-Policy', 'no-referrer');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.set('X-Content-Type-Options', 'nosniff');
+}
+
+function mapImageNotFound(res) {
+  // ONE 404 body for every branch (gate off, malformed/unknown token,
+  // non-viewable row, no usable stored map, upstream failure): the route must
+  // not become an existence oracle for bearer-token links.
+  stampMapImageHeaders(res);
+  return res.status(404).set('Cache-Control', 'no-store').json({ error: 'Estimate not found' });
+}
+
+// The overlay route is dark while estimateShowYourWork is off: answer the
+// generic 404 BEFORE any limiter (a dark route must not 429) and before any
+// database work.
+function overlayGateOpen(req, res, next) {
+  if (!featureGates.isEnabled('estimateShowYourWork')) return mapImageNotFound(res);
+  return next();
+}
+
+// Matches exactly what Express routes to the two map handlers below: the
+// router is case-insensitive and non-strict (optional trailing slash), `:token`
+// is one non-slash segment, and GET handlers also answer HEAD. Matching is
+// against the raw path (path-to-regexp does not decode or collapse slashes), so
+// encoded or doubled-slash variants never reach these handlers either.
+const MAP_IMAGE_PATH_RE = /^\/[^/]+\/map\/(satellite|overlay)\/?$/i;
+
+// Mounted in server/index.js on /api/estimates BEFORE the global /api/
+// limiter (which runs ahead of this router). It stamps the privacy headers
+// first — so router.param's malformed-token 404, the global limiter's 429 and
+// the route limiter's 429 all inherit no-store + CORP; a successful image
+// response overwrites Cache-Control — and answers the dark overlay's generic
+// 404 before the global limiter can turn it into a 429.
+function mapImagePreGuard(req, res, next) {
+  const match = MAP_IMAGE_PATH_RE.exec(req.path || '');
+  if (!match || (req.method !== 'GET' && req.method !== 'HEAD')) return next();
+  stampMapImageHeaders(res);
+  res.set('Cache-Control', 'no-store');
+  if (match[1].toLowerCase() === 'overlay') return overlayGateOpen(req, res, next);
+  return next();
+}
+
+async function handleEstimateMapImage(kind, req, res, next) {
+  try {
+    stampMapImageHeaders(res);
+    // (router.param('token') already 404s a malformed token before this.)
+    const estimate = await db('estimates').where({ token: req.params.token }).first();
+    if (!estimate) return mapImageNotFound(res);
+    // Same viewability contract as GET /:token/data (minus the staff-preview
+    // and signed-pdf-pin bypasses: an <img> carries no Bearer/pin, so drafts
+    // and expired links simply have no map).
+    if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) {
+      return mapImageNotFound(res);
+    }
+    const groupLinkViewBypass = Boolean(estimate.estimate_group_id)
+      && ['sent', 'viewed', 'expired'].includes(estimate.status)
+      && !estimate.archived_at
+      && !estimateOffCustomerSurface(estimate)
+      && groupLinkStillViewable(estimate);
+    if (!isEstimateCustomerViewable(estimate) && !groupLinkViewBypass) return mapImageNotFound(res);
+
+    let keylessUrl = null;
+    if (kind === 'overlay') {
+      keylessUrl = await resolveShowYourWorkOverlayStaticUrl(estimate);
+    } else {
+      const parsed = parseEstimateDataSafe(estimate);
+      keylessUrl = estimateMapImage.sanitizedStaticMapUrlFromStored(
+        estimate.satellite_url || parsed.satelliteUrl || null,
+      );
+    }
+    if (!keylessUrl) return mapImageNotFound(res);
+
+    const image = await estimateMapImage.fetchStaticMapImage(keylessUrl, {
+      cacheKey: `${estimate.id}:${kind}:${keylessUrl}`,
+    });
+    if (!image) {
+      logger.warn(`[estimate-map] ${kind} image unavailable upstream`);
+      return mapImageNotFound(res);
+    }
+    return res
+      .status(200)
+      .set('Content-Type', image.contentType)
+      .set('Content-Length', String(image.buffer.length))
+      .set('Cache-Control', 'private, max-age=3600')
+      .send(image.buffer);
+  } catch (err) { next(err); }
+}
+
+router.get('/:token/map/satellite', mapImageLimiter, (req, res, next) => handleEstimateMapImage('satellite', req, res, next));
+router.get('/:token/map/overlay', overlayGateOpen, mapImageLimiter, (req, res, next) => handleEstimateMapImage('overlay', req, res, next));
 
 async function handleEstimateAsk(req, res, next) {
   try {
@@ -28250,6 +28458,8 @@ async function handleEstimateAsk(req, res, next) {
 module.exports = router;
 // Codex round 2 on #4608: exported so estimate-annual-guard.js's content-derivation regex tests can assert exact parity against the canonical token format gate, instead of a hand-copied literal that could silently drift from it.
 module.exports.ESTIMATE_TOKEN_RE = ESTIMATE_TOKEN_RE;
+module.exports.mapImagePreGuard = mapImagePreGuard;
+module.exports.sendEstimatePage = sendEstimatePage;
 module.exports.refuseFrozenRestartMutation = refuseFrozenRestartMutation;
 module.exports.acceptVisitEstimatedPrice = acceptVisitEstimatedPrice;
 module.exports.selectTierCeiling = selectTierCeiling;

@@ -385,6 +385,11 @@ app.use('/api/public/secure-card', (req, res, next) => {
   res.set('X-Robots-Tag', 'noindex');
   next();
 });
+// Live-tracking pre-parser guard (middleware/track-public-preparser.js):
+// privacy headers on every outcome incl. the GLOBAL /api limiter's 429s
+// (same reasoning as secure-card above), and POST /:token/view's malformed-
+// token 404 + body-ignore decided before the shared body parsers.
+app.use('/api/public/track', require('./middleware/track-public-preparser').trackPublicPreparser);
 // The public agent surfaces (MCP + A2A) carry the same unobservable-when-
 // dark contract as the funnels above: while their gates are off they must
 // read 404 even for an IP that already exhausted the global /api/ limiter
@@ -455,6 +460,11 @@ app.use('/api/public/reservice', require('./middleware/no-store').noStore, (req,
   next();
 });
 app.use('/api/visit-summary', require('./middleware/no-store').noStore);
+
+// Estimate map-image proxy: privacy headers + the dark overlay 404 must land
+// BEFORE the global limiter, or an over-budget IP gets a 429 (and no
+// no-store/CORP) from a route that is supposed to be dark / generic.
+app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 
 app.use('/api/', limiter);
 
@@ -682,6 +692,8 @@ app.use('/api/service-preferences', require('./routes/service-preferences'));
 app.use('/api/referrals', referralRoutes);
 app.use('/r', require('./routes/referral-links'));
 app.use('/l', require('./routes/public-shortlinks'));
+// Outside-link click redirect for prep guides — registered destinations only.
+app.use('/go', require('./routes/outbound-redirect'));
 // Digital business card — public token-scoped data + Save-contact vCard.
 app.use('/api/card', require('./routes/card-public'));
 // Universal-link association files (apple-app-site-association / assetlinks.json).

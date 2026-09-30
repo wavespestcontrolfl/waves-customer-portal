@@ -727,6 +727,23 @@ describe('EMAIL_BOUND_SURFACES', () => {
     expect(orIn[1].args('where')).toEqual([{ customer_id: 'winner-1' }]);
   });
 
+  it('pending automation intent markers are a probed email surface, linked and addressed through the jsonb payload (#5154 codex P1 r7)', () => {
+    // A 'pending' marker replays later and delivers to its payload's
+    // customer_email snapshot — exactly like a queued run, one step earlier.
+    const surface = dedupe._test.EMAIL_BOUND_SURFACES.find((s) => s.table === 'email_template_automation_intents');
+    expect(surface).toBeTruthy();
+    expect(surface.emailColumn).toBe("payload->>'customer_email'");
+    expect(surface.carriesName).toBe(false);
+    const linked = makeChain('email_template_automation_intents', () => []);
+    surface.linkWhere(linked, 'winner-1');
+    expect(linked.args('whereRaw')).toEqual(["payload->>'customer_id' = ?", ['winner-1']]);
+    const q = makeChain('email_template_automation_intents', () => []);
+    surface.active(q);
+    expect(q.args('where')).toEqual(['status', 'pending']);
+    // Timestamp registry entry (activity signal for the probe's select).
+    expect(dedupe.activityColumnsFor('email_template_automation_intents')).toEqual(['created_at', 'updated_at']);
+  });
+
   it('the held first-touch ledger is a probed email surface — unreleased holds block the email clear (r23)', () => {
     // held_email is a LIVE delivery target: pending/releasing rows later
     // release the new_lead drip and newsletter DOI to that address. Only
@@ -958,7 +975,7 @@ describe('revertMerge', () => {
       // fanout-registry mirror). Status filters may use whereIn — still a
       // probe, not an id verification.
       if (['leads', 'estimates', 'automation_enrollments', 'email_template_automation_runs',
-        'referral_promoters', 'notification_prefs', 'customer_contracts', 'booking_intents',
+        'email_template_automation_intents', 'referral_promoters', 'notification_prefs', 'customer_contracts', 'booking_intents',
         'newsletter_subscribers'].includes(table)
         && q.called('select') && !isIdVerification) {
         return (tables[table] && tables[table].emailArtifacts) || [];
@@ -2089,6 +2106,27 @@ describe('revertMerge', () => {
     db.transaction.mockImplementation(async (fn) => fn(trx));
     await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/1 open estimate.*deliver to the merged-in email/) });
+    expect(state.journalUpdate).toBe(null);
+  });
+
+  it('refuses (409) when a pending automation intent marker delivers to the backfilled email (#5154 codex P1 r7 — same as a queued run)', async () => {
+    const journal = baseJournal();
+    const { trx, state } = buildRevertTrx({
+      journal,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        // A pending estimate.expired marker whose payload snapshots the
+        // merged-in email — the undo would otherwise clear the email and
+        // the replay would mail the winner's lifecycle copy to the loser.
+        email_template_automation_intents: { emailArtifacts: [{ id: 'intent-new' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/1 pending automation intent.*deliver to the merged-in email/) });
     expect(state.journalUpdate).toBe(null);
   });
 

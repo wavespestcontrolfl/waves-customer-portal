@@ -6,6 +6,7 @@ const db = require('../models/db');
 const PROCESS_BOOT_AT = new Date();
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
@@ -1703,6 +1704,28 @@ function initScheduledJobs() {
     }
   }, { timezone: 'America/New_York' });
 
+  // Model-judged closing of Waves "other" call promises (PROMISE_CONTACT_CHECK,
+  // call-commitment-contact-check.js): every 15 minutes, best effort. Inert
+  // unless the kill switch, PROMISE_EVIDENCE_CLOSE and GATE_CALL_COMMITMENTS
+  // are all live; a tick that fails or is skipped never throws out of here.
+  cron.schedule('0 */15 * * * *', async () => {
+    const { isEnabled, promiseEvidenceCloseLive, promiseContactCheckLive } = require('../config/feature-gates');
+    if (!isEnabled('callCommitments') || !promiseEvidenceCloseLive() || !promiseContactCheckLive()) return;
+    try {
+      const lockRes = await runExclusive('call-commitment-contact-check', () => require('./call-commitment-contact-check').runPromiseContactCheck());
+      if (lockRes?.skipped === true && !['lease_held', 'gated_off'].includes(lockRes.reason)) {
+        const { recordJobStart, recordJobEnd } = require('../utils/cron-lock');
+        const startedAt = Date.now();
+        const error = new Error(`Call contact check tick skipped: ${lockRes.reason || 'no_connection'}`);
+        await recordJobStart('call-commitment-contact-check').catch(() => {});
+        await recordJobEnd('call-commitment-contact-check', startedAt, error).catch(() => {});
+        throw error;
+      }
+    } catch (err) {
+      logger.error(`[call-contact-check] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
   // SMS intake and its shared-ledger follow-up run every five minutes.
   cron.schedule('0 */5 * * * *', async () => {
     if (!gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')) return;
@@ -1744,6 +1767,30 @@ function initScheduledJobs() {
       if (result?.reopened > 0) logger.info(`[slot-proof-reconciler] reopened=${result.reopened} of ${result.checked} call(s)`);
     } catch (err) {
       logger.error(`[slot-proof-reconciler] tick failed (${err.code || err.name || 'error'})`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // Visit prep pest read recovery sweep (GATE_VISIT_PREP_READ_SWEEP, dark):
+  // every 15 minutes retries a never-attempted 'none' read or a stop
+  // reclassified to pest since an 'unsupported' verdict (never pending or
+  // failed rows). The gate is checked BEFORE the cron lock, so off means no
+  // query and no job_health write; runExclusive so a deploy overlap can't
+  // double-spend the daily read cap on the same backlog.
+  cron.schedule('0 */15 * * * *', async () => {
+    try {
+      if (!require('../config/feature-gates').visitPrepReadSweepLive()) return;
+      const tickStartedAt = Date.now();
+      const result = await runExclusive('visit-prep-read-sweep', () => require('./visit-prep-pest-read-sweep').sweepVisitPrepPestReads());
+      // A tick that got no DB connection: record the miss through
+      // recordMissedTick (writes only if this tick's window has no start or
+      // success yet, so another replica's run and runExclusive's own record
+      // are never overwritten or double-counted). lease_held is not a miss.
+      if (result?.skipped && result.reason !== 'lease_held') {
+        await recordMissedTick('visit-prep-read-sweep', tickStartedAt, `tick skipped: ${result.reason || 'no_connection'}`).catch(() => {});
+        throw new Error(`Visit-prep read sweep tick skipped: ${result.reason || 'no_connection'}`);
+      }
+    } catch (err) {
+      logger.error(`[visit-prep-read-sweep] tick failed (${err.code || err.name || 'error'})`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -2449,8 +2496,9 @@ function initScheduledJobs() {
   // WEEKLY MONDAY 10:23AM ET — plan internal links to the pages Search
   // Console has just off page one (position 8–20), ranked by impressions,
   // ahead of the 10:30 sweep. On an unused 10am minute per the stagger rule
-  // (see the 10:16 invoice follow-up block). Kill switch:
-  // AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false.
+  // (see the 10:16 invoice follow-up block), plus the AI-search benchmark's
+  // target pages. Kill switches: AUTONOMOUS_INTERNAL_LINK_GSC_TARGETS=false,
+  // AUTONOMOUS_INTERNAL_LINK_BENCHMARK_TARGETS=false.
   cron.schedule('23 10 * * 1', async () => {
     if (!isEnabled('autonomousContentEngine')) return;
     try {
@@ -3404,15 +3452,36 @@ function initScheduledJobs() {
 
   // =========================================================================
   // EVERY MIN — Email template automation executor. Sends due delayed/retry
-  // runs created by trigger-mapped email template automations.
+  // runs created by trigger-mapped email template automations. Runs in
+  // EVERY mode (codex P1 round 6 on #5154): with the gate off, executeRun
+  // settles each due run skipped (gate_off) without reading, previewing or
+  // sending anything, so a run due during an outage is dropped rather than
+  // sent stale when the gate returns. processTrigger creates no runs while
+  // off, so this only drains what was already queued.
   // =========================================================================
   cron.schedule('* * * * *', async () => {
     try {
-      if (!isEnabled('emailTemplateAutomations')) return;
       const EmailTemplateAutomationExecutor = require('./email-template-automation-executor');
       await EmailTemplateAutomationExecutor.processDueRuns();
     } catch (err) {
       logger.error(`Email template automation tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 15 MIN — Email template automation lifecycle reconciliation sweep.
+  // Retry safety net for the direct estimate.expired / review.linked_5star
+  // emitters: replays 'pending' rows in the email_template_automation_intents
+  // outbox (codex round 3 on #5154 — durable markers written in the SAME
+  // transaction as the transition that earns them; NOT re-derived by
+  // guessing from entity timestamps, which round 2 tried and Codex found
+  // ambiguous). No-op (no query) when the mode is off.
+  // =========================================================================
+  cron.schedule('*/15 * * * *', async () => {
+    try {
+      await require('./email-template-automation-emitters').sweepMissedLifecycleEvents();
+    } catch (err) {
+      logger.error(`[email-template-automation] lifecycle sweep tick failed: ${scrubSentryText(err && err.message ? err.message : err)}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -3517,6 +3586,24 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`[first-application-sibling-split] sweep tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // EVERY 10 MIN — Admin alert relevance sweep (owner ruling 2026-09-28,
+  // "we don't want garbage"). Marks read, with a metadata.retired audit
+  // stamp, every unread admin bell whose customer / visit / invoice /
+  // estimate / lead has since moved on (admin-alert-relevance.js class
+  // table — never customer-contact or money-owed bells). Live by default;
+  // kill switch ADMIN_ALERT_RELEVANCE=off (read at call time inside the
+  // sweep). Read-only apart from notification rows. runExclusive: a deploy
+  // overlap must not run two sweeps over the same page of rows.
+  // =========================================================================
+  cron.schedule('*/10 * * * *', async () => {
+    try {
+      await runExclusive('admin-alert-relevance-sweep', () => require('./admin-alert-relevance').runAdminAlertRelevanceSweep());
+    } catch (err) {
+      logger.error(`[alert-relevance] sweep tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4554,6 +4641,9 @@ function initScheduledJobs() {
                 request_updated_at: claimMeta.request_updated_at } : {}),
               useCustomerChannel: claimMeta.useCustomerChannel === true,
               bundled_review_request_id: claimMeta.bundled_review_request_id,
+              // A deferred template send keeps the key of the row that rendered
+              // its frozen body (complete-scheduled-service enqueue).
+              ...(claimMeta.template_key ? { templateKey: String(claimMeta.template_key) } : {}),
               // Enqueue provenance survives the replay (codex #3607 r4): the
               // audit row is written under this worker's own entry point, so
               // the ORIGINAL one (e.g. autopay_completion_decline_deferred)
@@ -5389,6 +5479,14 @@ function initScheduledJobs() {
         await EngagementEngine.sweepTimeRules();
         await EngagementEngine.processDueJobs();
       });
+      // Best-effort, AFTER the engine's own work and outside its lock: close
+      // hot-estimate bells whose estimate settled (ALERT_EPISODES). Never
+      // fails or delays the tick's result.
+      try {
+        await require('./estimate-hot-view-alert').closeSettledHotViewAlerts();
+      } catch (err) {
+        logger.warn(`[est-engage] hot-view settle pass failed: ${err.message}`);
+      }
     } catch (err) {
       logger.error(`[est-engage] cron failed: ${err.message}`);
     }
@@ -7698,6 +7796,70 @@ function initScheduledJobs() {
       }
     } catch (err) {
       logger.error(`Triage auto-resolve tick failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // DAILY 5:10 AM ET — Email division area-intel recompute: the current
+  // month every tick, and the previous month (a) on EVERY tick through
+  // ET day EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY (10) of the new month,
+  // and (b) after that, on every tick until one run for it has succeeded
+  // (persisted marker below). (a) is the late-arrival window: the
+  // completion flow backfills service_records with an EARLIER
+  // service_date (complete-scheduled-service.js isBackfillCompletion), so
+  // a prior-month closeout recorded after the 1st must still reach that
+  // month's aggregate — the first successful run is not final until the
+  // window closes. Records backfilled after day 10 into a closed month are
+  // a known, bounded miss. (b) keeps the catch-up for a missed window: a
+  // gate enabled on day 11+ or a string of failed ticks still recomputes
+  // the previous month once. computeAreaIntel replaces the whole month
+  // atomically, so repeating a month is idempotent, not a double-count.
+  // Dark behind GATE_EMAIL_AREA_INTEL (emailAreaIntelLive) — unset returns
+  // immediately. No caller sends anything. See
+  // server/services/email-division/area-intel.js.
+  const EMAIL_AREA_INTEL_PREV_MONTH_KEY = 'email_area_intel_previous_month_computed';
+  const EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY = 10;
+  cron.schedule('10 5 * * *', async () => {
+    const { emailAreaIntelLive } = require('../config/feature-gates');
+    if (!emailAreaIntelLive()) return;
+    try {
+      const { computeAreaIntel } = require('./email-division/area-intel');
+      const { etMonthStart, etParts } = require('../utils/datetime-et');
+      await runExclusive('email-area-intel-recompute', async () => {
+        const now = new Date();
+        const result = await computeAreaIntel({ month: now });
+        logger.info(`[email-area-intel] recomputed ${result.month}: ${result.citiesProcessed} cities`);
+        // etMonthStart's offset resolves the TRUE previous calendar month on
+        // any day of the current month (a plain "now minus 1 day" only
+        // works on day 1 itself). The marker records the last previous-
+        // month value actually recomputed; a mismatch (unset, or still
+        // naming an earlier month) means that catch-up has not succeeded
+        // yet, so this tick retries it — and only writes the marker AFTER
+        // computeAreaIntel resolves, so a failed run leaves it unset and
+        // the very next tick tries again. Inside the late-arrival window
+        // the previous month is recomputed regardless of the marker.
+        const prevMonthStr = etMonthStart(now, -1);
+        const day = etParts(now).day;
+        const inLateArrivalWindow = day <= EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY;
+        const marker = await db('system_settings').where({ key: EMAIL_AREA_INTEL_PREV_MONTH_KEY }).first('value');
+        const markerCurrent = marker?.value === prevMonthStr;
+        if (inLateArrivalWindow || !markerCurrent) {
+          const prevResult = await computeAreaIntel({ month: new Date(`${prevMonthStr}T12:00:00Z`) });
+          logger.info(`[email-area-intel] recomputed ${prevResult.month} (previous month): ${prevResult.citiesProcessed} cities`);
+        }
+        // The marker means "the FINAL late-arrival recompute succeeded": it is
+        // written only on or after the window's last day, so a recompute that
+        // fails on day 10 is retried on day 11 instead of being taken as
+        // final by an earlier in-window success (codex round 7 P2).
+        if (!markerCurrent && day >= EMAIL_AREA_INTEL_LATE_ARRIVAL_LAST_DAY) {
+          await db('system_settings').insert({
+            key: EMAIL_AREA_INTEL_PREV_MONTH_KEY, value: prevMonthStr, category: 'email_area_intel',
+            description: 'Previous month whose final (day 10 or later) email_area_intel_monthly recompute succeeded; the daily tick retries until this matches.',
+            updated_at: new Date(),
+          }).onConflict('key').merge();
+        }
+      });
+    } catch (err) {
+      logger.error(`Email area-intel recompute tick failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

@@ -20,8 +20,15 @@ const rows = () => [
   },
 ];
 
+// The Closed-automatically read is its own request: walk-counting tests answer
+// it separately so their request numbers keep meaning "queue reads".
+const AUTO_CLOSED_EMPTY = { ok: true, status: 200, json: async () => ({ commitments: [] }) };
+const isAutoClosed = (url) => String(url).includes("/commitments/auto-closed");
+
 let calls;
+let autoClosedRows;
 beforeEach(() => {
+  autoClosedRows = [];
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-09-05T15:00:00Z"));
   calls = [];
@@ -29,6 +36,7 @@ beforeEach(() => {
   localStorage.setItem("waves_admin_token", "t");
   vi.stubGlobal("fetch", vi.fn(async (url, options = {}) => {
     calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+    if (isAutoClosed(url)) return { ok: true, status: 200, json: async () => ({ commitments: autoClosedRows }) };
     if (String(url).includes("/commitments/open")) return { ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3 }) };
     return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
   }));
@@ -55,6 +63,7 @@ describe("OwedTabV2", () => {
     let releaseFirst;
     const firstReply = new Promise((resolve) => { releaseFirst = resolve; });
     globalThis.fetch.mockImplementation(async (url) => {
+      if (isAutoClosed(url)) return AUTO_CLOSED_EMPTY;
       if (String(url).includes("party=waves")) { await firstReply; return { ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3 }) }; }
       return { ok: true, status: 200, json: async () => ({ commitments: [], overdue_implicit_days: 3 }) };
     });
@@ -79,7 +88,7 @@ describe("OwedTabV2", () => {
   it("lists open promises overdue-first with who, source, and the possibly-kept hint", async () => {
     render(<OwedTabV2 />);
     await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
-    expect(calls[0].url).toContain("/admin/call-recordings/commitments/open?party=waves");
+    expect(calls.find((c) => c.url.includes("/commitments/open")).url).toContain("/admin/call-recordings/commitments/open?party=waves");
     expect(screen.getByText(/Overdue · open since/)).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Test Customer" })).toHaveAttribute("href", "/admin/customers?customerId=cust-1");
     expect(screen.getByText("AI assistant")).toBeInTheDocument();
@@ -88,7 +97,8 @@ describe("OwedTabV2", () => {
   });
 
   it("keeps Waves' callback rows in the ledger until the card feed itself loads enabled", async () => {
-    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) });
+    globalThis.fetch.mockImplementation(async (url) => (isAutoClosed(url) ? AUTO_CLOSED_EMPTY
+      : { ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) }));
     render(<OwedTabV2 />);
     await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
     expect(screen.getByText(/Call the caller back/)).toBeInTheDocument();
@@ -97,7 +107,8 @@ describe("OwedTabV2", () => {
 
   it("hands Waves' callbacks to the cards once they load, folding their counts and pagination into the summary", async () => {
     cards.summary = { enabled: true, open: 100, overdue: 4, hasMore: true };
-    globalThis.fetch.mockResolvedValue({ ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) });
+    globalThis.fetch.mockImplementation(async (url) => (isAutoClosed(url) ? AUTO_CLOSED_EMPTY
+      : { ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3, callbacks_enabled: true }) }));
     render(<OwedTabV2 />);
     await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
     expect(screen.queryByText(/Call the caller back/)).not.toBeInTheDocument();
@@ -107,6 +118,7 @@ describe("OwedTabV2", () => {
   it("walks a queue longer than one page with Load more, appending rows at the server's next offset", async () => {
     globalThis.fetch.mockImplementation(async (url, options = {}) => {
       calls.push({ url: String(url), method: options.method || "GET", body: null });
+      if (isAutoClosed(url)) return AUTO_CLOSED_EMPTY;
       if (String(url).includes("offset=200")) return { ok: true, status: 200, json: async () => ({ commitments: [{ ...rows()[1], id: "c3", description: "Send the WDO paperwork" }], has_more: false, next_offset: null, overdue_implicit_days: 3 }) };
       return { ok: true, status: 200, json: async () => ({ commitments: rows(), has_more: true, next_offset: 200, overdue_implicit_days: 3 }) };
     });
@@ -137,6 +149,7 @@ describe("OwedTabV2", () => {
     const stale = { ...rows()[0], id: "stale", description: "Stale customer read" };
     globalThis.fetch.mockImplementation(async (url, options = {}) => {
       const path = String(url);
+      if (isAutoClosed(url)) return AUTO_CLOSED_EMPTY;
       if (options.method === "PATCH") {
         return {
           ok: false,
@@ -178,7 +191,8 @@ describe("OwedTabV2", () => {
   it("keeps an action error through poll failure and recovery until the next action", async () => {
     let failPatch = true;
     let failRead = false;
-    globalThis.fetch.mockImplementation(async (_url, options = {}) => {
+    globalThis.fetch.mockImplementation(async (url, options = {}) => {
+      if (isAutoClosed(url)) return AUTO_CLOSED_EMPTY;
       if (options.method === "PATCH") {
         if (!failPatch) return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
         return {
@@ -248,6 +262,86 @@ describe("OwedTabV2", () => {
     expect(screen.getByText(/GATE_CALL_COMMITMENTS is on/)).toBeInTheDocument();
   });
 
+  it("lists what the portal closed on its own with the stored proof, and Reopen sends the reopen action at the row's version", async () => {
+    autoClosedRows = [
+      { id: "k1", kind: "send_estimate", party: "waves", status: "fulfilled", customer_id: "cust-1", customer_first_name: "Test", customer_last_name: "Customer",
+        description: "Send the quote for the quarterly plan",
+        updated_at: "2026-09-04T15:00:00.123Z", fulfillment: { kind: "estimate_sent", strength: "association", matched_at: "2026-09-03T12:45:00Z" } },
+      { id: "k2", kind: "callback", party: "waves", status: "dismissed", customer_id: null, from_phone: "+15555550166", direction: "inbound",
+        updated_at: "2026-09-04T16:00:00.456Z", fulfillment: { kind: "customer_left", strength: "association", matched_at: "2026-09-04T16:00:00Z" } },
+    ];
+    render(<OwedTabV2 />);
+    await screen.findByText("Closed automatically (last 7 days)");
+    expect(calls.some((c) => c.url.includes("/commitments/auto-closed?days=7"))).toBe(true);
+    expect(screen.getByText(/Kept: estimate sent Sep 3, 8:45 AM/)).toBeInTheDocument();
+    // The promise itself, so two of the same kind can be told apart before a Reopen.
+    expect(screen.getByText("Send the quote for the quarterly plan")).toBeInTheDocument();
+    expect(screen.getByText(/Customer left Sep 4/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "Reopen" })[0]);
+    await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
+    const patch = calls.find((c) => c.method === "PATCH");
+    expect(patch.url).toContain("/admin/call-recordings/commitments/k1");
+    expect(patch.body).toEqual({ action: "reopen", expected_at: "2026-09-04T15:00:00.123Z" });
+    // The action reloads both lists.
+    await waitFor(() => expect(calls.filter((c) => c.url.includes("/commitments/auto-closed"))).toHaveLength(2));
+  });
+
+  it("describes a close a model judged from a person's text or call back, with the quote it rested on", async () => {
+    autoClosedRows = [
+      { id: "k1", kind: "other", party: "waves", status: "fulfilled", customer_id: "cust-1", customer_first_name: "Test", customer_last_name: "Customer",
+        description: "Check on the warranty and let the caller know", updated_at: "2026-09-04T15:00:00.123Z",
+        fulfillment: { kind: "person_contact", strength: "association", record_type: "sms_log", matched_at: "2026-09-03T12:45:00Z", quote: "Your warranty covers the retreatment." } },
+      { id: "k2", kind: "other", party: "waves", status: "fulfilled", customer_id: "cust-2", customer_first_name: "Test", customer_last_name: "Other",
+        description: "Find out about the gate code", updated_at: "2026-09-04T16:00:00.456Z",
+        fulfillment: { kind: "person_contact", strength: "association", record_type: "call_log", matched_at: "2026-09-03T14:00:00Z", quote: "The code is on the lockbox." } },
+    ];
+    render(<OwedTabV2 />);
+    await screen.findByText("Closed automatically (last 7 days)");
+    expect(screen.getByText(/Kept: staff text Sep 3, 8:45 AM/)).toBeInTheDocument();
+    expect(screen.getByText(/Kept: staff call back Sep 3, 10:00 AM/)).toBeInTheDocument();
+    expect(screen.getByText(/Judged kept from: "Your warranty covers the retreatment\."/)).toBeInTheDocument();
+    expect(screen.getByText(/Judged kept from: "The code is on the lockbox\."/)).toBeInTheDocument();
+  });
+
+  it("pages the Closed-automatically list: Load more asks for the page after the cursor and appends it", async () => {
+    const closedRow = (id, n) => ({ id, kind: "send_estimate", party: "waves", status: "fulfilled", customer_id: `cust-${n}`, customer_first_name: `Test${n}`, customer_last_name: "Customer",
+      updated_at: `2026-09-04T1${n}:00:00.000Z`, fulfillment: { kind: "estimate_sent", strength: "association", matched_at: "2026-09-03T12:45:00Z" } });
+    const cursor = { before_at: "2026-09-04T15:00:00.000Z", before_id: "8a3f5c1e-2b4d-4e6f-9a1b-3c5d7e9f1a2b" };
+    fetch.mockImplementation(async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || "GET", body: options.body ? JSON.parse(options.body) : null });
+      if (isAutoClosed(url)) {
+        const later = String(url).includes("before_at=");
+        return { ok: true, status: 200, json: async () => (later
+          ? { commitments: [closedRow("k2", 4)], has_more: false, next: null }
+          : { commitments: [closedRow("k1", 5)], has_more: true, next: cursor }) };
+      }
+      if (String(url).includes("/commitments/open")) return { ok: true, status: 200, json: async () => ({ commitments: rows(), overdue_implicit_days: 3 }) };
+      return { ok: true, status: 200, json: async () => ({ commitment: {} }) };
+    });
+    render(<OwedTabV2 />);
+    await screen.findByText("Closed automatically (last 7 days)");
+    expect(screen.getAllByRole("button", { name: "Reopen" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Load more" }));
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Reopen" })).toHaveLength(2));
+    const next = calls.filter((c) => isAutoClosed(c.url)).at(-1).url;
+    expect(next).toContain(`before_at=${encodeURIComponent(cursor.before_at)}`);
+    expect(next).toContain(`before_id=${cursor.before_id}`);
+    // The last page: no more to load.
+    expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+  });
+
+  it("shows no Closed-automatically section when nothing closed, or while looking at the customer's promises", async () => {
+    render(<OwedTabV2 />);
+    await waitFor(() => expect(screen.getByText("Send the caller an estimate")).toBeInTheDocument());
+    expect(screen.queryByText(/Closed automatically/)).not.toBeInTheDocument();
+    cleanup();
+    autoClosedRows = [{ id: "k1", kind: "send_estimate", party: "waves", status: "fulfilled", updated_at: "2026-09-04T15:00:00.123Z", fulfillment: { kind: "estimate_sent", strength: "association", matched_at: "2026-09-03T12:45:00Z" } }];
+    render(<OwedTabV2 />);
+    await screen.findByText(/Closed automatically/);
+    fireEvent.change(screen.getByLabelText("Whose promises"), { target: { value: "customer" } });
+    await waitFor(() => expect(screen.queryByText(/Closed automatically/)).not.toBeInTheDocument());
+  });
+
   it("labels due state honestly", () => {
     const now = new Date("2026-09-05T15:00:00Z").getTime();
     expect(dueLabel({ overdue: true, due_at: "2026-09-04T15:00:00Z" }, now).tone).toBe("alert");
@@ -278,6 +372,7 @@ it("keeps expanded owed pages when refreshing automatically", async () => {
   const second = { ...rows()[1], description: "Second page promise" };
   const requested = [];
   globalThis.fetch.mockImplementation(async (url) => {
+    if (isAutoClosed(url)) return AUTO_CLOSED_EMPTY;
     requested.push(String(url));
     const later = String(url).includes("offset=200");
     return { ok: true, status: 200, json: async () => ({
@@ -301,6 +396,7 @@ it("restarts an expanded refresh when page-boundary drift skips a row", async ()
   const inserted = { ...first, id: "inserted", description: "Inserted then fulfilled" };
   let requestNumber = 0;
   globalThis.fetch.mockImplementation(async (url) => {
+    if (isAutoClosed(url)) return AUTO_CLOSED_EMPTY;
     requestNumber += 1;
     const later = String(url).includes("offset=200");
     let commitments;
@@ -339,6 +435,7 @@ it("keeps the rendered expanded queue when three walks never stabilize", async (
   let requestNumber = 0;
   let unstable = true;
   globalThis.fetch.mockImplementation(async (url) => {
+    if (isAutoClosed(url)) return AUTO_CLOSED_EMPTY;
     requestNumber += 1;
     const later = String(url).includes("offset=200");
     const walk = Math.max(0, Math.ceil((requestNumber - 2) / 2));

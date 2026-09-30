@@ -990,6 +990,17 @@ class ContextAggregator {
     return m ? m[1] : null;
   }
 
+  // 'M/D/YYYY' label for a DATE column in the one-line summary. Built from
+  // calendarDay, never new Date(value).toLocaleDateString(..., ET): on a UTC
+  // host pg's local-midnight Date is 00:00Z, which ET renders as the day
+  // before (a Thu Oct 1 visit read "Next: ... 9/30/2026").
+  summaryDay(value) {
+    const day = this.calendarDay(value);
+    if (!day) return '';
+    const [y, m, d] = day.split('-').map(Number);
+    return `${m}/${d}/${y}`;
+  }
+
   // The arrival window lives in window_start (Postgres `time`, ET wall-clock
   // strings like '13:00:00') on nearly every row — booking and admin-schedule
   // both write it, while window_display is set by only a few legacy paths
@@ -1066,8 +1077,8 @@ class ContextAggregator {
         || (dues.basis === 'no_surcharge' ? null : 'collection state unconfirmed');
       s += ` ($${dues.base.toFixed(2)}/mo dues${why ? ` — ${why}` : ''})`;
     }
-    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${new Date(lastSvc.service_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
-    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${new Date(upcoming[0].scheduled_date).toLocaleDateString('en-US', { timeZone: 'America/New_York' })}`;
+    if (lastSvc) s += ` | Last: ${lastSvc.service_type} ${this.summaryDay(lastSvc.service_date)}`;
+    if (upcoming.length) s += ` | Next: ${upcoming[0].service_type} ${this.summaryDay(upcoming[0].scheduled_date)}`;
     if (balance > 0) s += ` | ⚠️ $${balance.toFixed(2)} overdue`;
     if (flags.some(f => f.type === 'open_complaint')) s += ` | ⚠️ Open complaint`;
     if (flags.some(f => f.type === 'cancel_save_active')) s += ` | 🚨 Cancel save active`;

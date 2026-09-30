@@ -452,6 +452,48 @@ async function reconcileInvoiceDiscountProvenance(invoiceId, lineItems, discount
 // conversion, or annual-prepay stamping can commit between the two, and the
 // cancellation sweep only voids non-void invoices, so it would miss a
 // restore that commits on a stale verdict. All reads fail CLOSED.
+// True when this invoice bills an upcoming visit OTHER than its own anchor,
+// read from the invoice's own lines (client_id scheduled_<id>_primary — every
+// service mint writes one) plus the combined first-application stamp
+// (scheduled_services.first_application_invoice_id). Fails closed.
+async function invoiceBillsAnotherUpcomingVisit(conn, invoiceRow) {
+  let items = invoiceRow.line_items;
+  if (typeof items === "string") { try { items = JSON.parse(items); } catch { items = []; } }
+  const lines = Array.isArray(items) ? items : [];
+  const itemized = lines.map((li) => /^scheduled_(.+)_primary$/.exec(String(li?.client_id || ""))?.[1]).filter(Boolean);
+  const lineIds = itemized.filter((id) => id !== String(invoiceRow.scheduled_service_id));
+  // An unitemized base-application invoice on an anchor bills every member
+  // of that anchor's combined group (the re-price side reads it the same
+  // way — Codex r8 P1 on #5301), whichever stamp those members carry.
+  const aggregateOnAnchor = itemized.length === 0 && invoiceRow.scheduled_service_id
+    && lines.some((li) => lineIsBaseApplication(li));
+  if (!invoiceRow.id && !lineIds.length) return false; // nothing to match on
+  try {
+    // The stamp column postdates some schemas (dev/preview/rolling deploys);
+    // without it only the invoice's own member lines can match (Codex r9 P2).
+    const hasStamp = await conn.schema.hasColumn("scheduled_services", "first_application_invoice_id");
+    if (!hasStamp && !lineIds.length) return false;
+    const row = await conn("scheduled_services")
+      .where(function () {
+        if (hasStamp) this.where("first_application_invoice_id", invoiceRow.id);
+        if (lineIds.length) this.orWhereIn("id", lineIds);
+        if (hasStamp && aggregateOnAnchor) {
+          this.orWhereIn("first_application_invoice_id", function () {
+            this.select("id").from("invoices").where("scheduled_service_id", invoiceRow.scheduled_service_id);
+          });
+        }
+      })
+      .whereNot("id", invoiceRow.scheduled_service_id)
+      // Only statuses that prove the billed work won't be charged; a COMPLETED
+      // member can still be re-priced (Codex r9 P1 on #5301).
+      .whereNotIn("status", ["cancelled", "canceled", "no_show", "skipped", "rescheduled"])
+      .first("id");
+    return Boolean(row);
+  } catch (err) {
+    throw new Error(`Could not verify the other visits this invoice bills — refusing to unvoid (${err.message})`);
+  }
+}
+
 async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = {}) {
   // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28) additions — both
   // independent of the scheduled_service_id early-return below, so they
@@ -573,6 +615,16 @@ async function assertUnvoidableLinkedVisit(conn, invoiceRow, { lock = false } = 
   ) {
     throw new Error(
       "Cannot unvoid — this visit is stamped prepaid by an annual prepay term, so its base work is already paid; bill any extras on a new invoice instead",
+    );
+  }
+  // A combined first-application invoice also bills OTHER visits (owner
+  // ruling 2026-09-29 on #5301): restoring one while it bills another
+  // upcoming visit could revive an old price that visit was re-priced away
+  // from while this invoice was void. Refused outright — staff create a new
+  // invoice instead.
+  if (await invoiceBillsAnotherUpcomingVisit(conn, invoiceRow)) {
+    throw new Error(
+      "Cannot unvoid — this invoice also bills other upcoming visits whose prices may have changed since it was voided; create a new invoice instead",
     );
   }
 }
@@ -2664,7 +2716,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // line. Runs under `database` (the caller's own transaction) so the
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
-  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, database = db,
+  invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, templateKey = null, database = db,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2704,6 +2756,8 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      // The frozen body's template row; the scheduler replay forwards it.
+      ...(templateKey ? { template_key: templateKey } : {}),
       // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
       // already owns (and sent) this notice's Email, so the replay must keep
       // Email out of its fan-out exactly like the nested call did; the
@@ -4160,8 +4214,18 @@ const InvoiceService = {
     if (linkedScheduledServiceId || stampedEstimateIdInNotes) {
       if (database && database.isTransaction) {
         if (linkedScheduledServiceId) {
-          const { acquireScheduledInvoiceMintLock } = require("./scheduled-invoice-mint");
-          await acquireScheduledInvoiceMintLock(database, linkedScheduledServiceId);
+          // The SHARED lock chain (mint advisory lock → customer KEY SHARE →
+          // visit row FOR UPDATE + the never-ran status refusal), not a bare
+          // visit FOR UPDATE: this path is every linked create() caller that
+          // does not otherwise route through the chain (manual admin, project/
+          // WDO, prepay-switch undo, estimate converter). A cancellation that
+          // won the mint lock and committed while this waited must not be
+          // billed past (Codex #5244 r7), and the customer key-share must come
+          // BEFORE the visit lock — the invoice insert's customer FK would
+          // otherwise take it after, inverting the order the chain exists to
+          // hold against the extension accept (ABBA deadlock).
+          const { acquireScheduledMintLockChain } = require("./scheduled-invoice-mint");
+          await acquireScheduledMintLockChain(database, { scheduledServiceId: linkedScheduledServiceId, customerId });
         }
         if (stampedEstimateIdInNotes) {
           await database.raw("SELECT pg_advisory_xact_lock(hashtext(?))", [`unminted_setup_fee_manual_billing:${stampedEstimateIdInNotes}`]);
@@ -5947,6 +6011,10 @@ const InvoiceService = {
     // variant). If the row is missing/disabled, we skip the SMS rather than
     // falling back to inline copy.
     let body = null;
+    // Tracks whichever of the three rows below actually rendered — never
+    // guessed, so a caught template-lookup error below (body stays null)
+    // leaves this null too.
+    let renderedTemplateKey = null;
     try {
       const templates = require("../routes/admin-sms-templates");
       const tplOpts = {
@@ -5980,6 +6048,7 @@ const InvoiceService = {
           first_visit_clause: firstVisitClause,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_annual_prepay";
       }
       // Upfront invoices — the setup + first-application invoice auto-sent at
       // estimate acceptance, or any invoice billed before its service date —
@@ -5996,6 +6065,7 @@ const InvoiceService = {
           service_type: serviceType,
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent_upfront";
       }
       if (!body) {
         // Either an ordinary invoice, or the prepay template was missing/disabled
@@ -6007,6 +6077,7 @@ const InvoiceService = {
           service_date: formattedDate || "today",
           pay_url: payUrl,
         }, tplOpts);
+        if (body) renderedTemplateKey = "invoice_sent";
       }
     } catch (err) {
       logger.warn(`[invoice] Template lookup failed: ${err.message}`);
@@ -6118,6 +6189,7 @@ const InvoiceService = {
       if (updated && pendingChannelToQueue) {
         const queueOutcome = await queuePendingChannelReplay({
           invoiceId, customerId: customer.id, toPhone: customer.phone || "", body,
+          templateKey: renderedTemplateKey,
           database: trx, ...pendingChannelToQueue,
         });
         pendingChannelQueued = queueOutcome.queued === true;
@@ -6184,6 +6256,10 @@ const InvoiceService = {
           original_message_type: "invoice",
           billingDeliveryCategory: "invoice",
           notificationEventKey: `invoice:${invoiceId}:sent`,
+          // Which of the three invoice_sent* rows actually rendered
+          // (never inferred — the messageType above is the fixed
+          // kill-switch key, not the rendering row).
+          ...(renderedTemplateKey ? { templateKey: renderedTemplateKey } : {}),
         },
         ...(hasEmailLeg ? { hasEmailLeg: true } : {}),
         // The canonical sender owns push-first / push+SMS / Twilio routing.
@@ -6301,6 +6377,7 @@ const InvoiceService = {
         if (sendResult.nextAllowedAt) err.nextAllowedAt = sendResult.nextAllowedAt;
         if (sendResult.retryAfterMs) err.retryAfterMs = sendResult.retryAfterMs;
         err.smsBody = body;
+        if (renderedTemplateKey) err.smsTemplateKey = renderedTemplateKey;
         err.toPhone = customer.phone;
         throw err;
       }
@@ -6844,6 +6921,7 @@ const InvoiceService = {
         if (err.nextAllowedAt) sms.nextAllowedAt = err.nextAllowedAt;
         if (err.retryAfterMs) sms.retryAfterMs = err.retryAfterMs;
         if (err.smsBody) sms.heldBody = err.smsBody;
+        if (err.smsTemplateKey) sms.heldTemplateKey = err.smsTemplateKey;
         if (err.toPhone) sms.heldToPhone = err.toPhone;
       }
     }
@@ -6892,6 +6970,8 @@ const InvoiceService = {
               billingDeliveryCategory: "invoice",
               notificationEventKey: `invoice:${invoiceId}:sent`,
               hasEmailLeg: true,
+              // The held body's template row; the scheduler replay forwards it.
+              ...(sms.heldTemplateKey ? { template_key: sms.heldTemplateKey } : {}),
               original_block_code: sms.code,
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
@@ -6921,6 +7001,7 @@ const InvoiceService = {
       }
     }
     delete sms.heldBody;
+    delete sms.heldTemplateKey;
     delete sms.heldToPhone;
 
     // A send-window hold on a SCHEDULED delivery defers the WHOLE send: a
@@ -7946,6 +8027,7 @@ const InvoiceService = {
         original_message_type: "receipt",
         billingDeliveryCategory: "payment_receipt",
         notificationEventKey: `invoice:${invoiceId}:receipt`,
+        templateKey: "invoice_receipt",
       },
       // Caller-declared (see the sendReceipt option doc above) — only flows
       // that actually pair this SMS with a sendReceiptEmail sidecar opt in.
@@ -11495,6 +11577,31 @@ const InvoiceService = {
           );
       })
       .whereNotIn("status", InvoiceService.CANCELLED_SERVICE_RESOLVED_STATUSES);
+  },
+
+  /**
+   * ALL invoices linked to this scheduled service, in ANY status — the
+   * same direct-or-through-service-record link
+   * unresolvedInvoicesForCancelledService uses above, minus its
+   * resolved-status filter. Owner ruling 2026-09-28 ("bare visits only"):
+   * the Intelligence Bar cancel card refuses a visit with ANY invoice on
+   * record at all — paid, void, refunded, draft, whatever — since a bare
+   * visit is one with nothing on the books to begin with, not just nothing
+   * currently voidable. Accepts `conn` (db or a trx) so the commit-time
+   * recheck (tools.js cancelAppointment) can run this same query under the
+   * row lock it already holds. Returns a query builder; callers decide the
+   * columns/limit (an existence check at proposal time, the identical shape
+   * re-run under the lock at commit).
+   */
+  anyInvoiceLinkedToVisit(conn, scheduledServiceId) {
+    return conn("invoices")
+      .where((q) => {
+        q.where({ scheduled_service_id: scheduledServiceId })
+          .orWhereIn(
+            "service_record_id",
+            conn("service_records").where({ scheduled_service_id: scheduledServiceId }).select("id"),
+          );
+      });
   },
 
   async getStats() {

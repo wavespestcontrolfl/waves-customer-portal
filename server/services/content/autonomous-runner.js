@@ -100,6 +100,47 @@ const getImpactTracker = lazy('impact-tracker', '../seo/impact-tracker');
 const getSocialMedia = lazy('social-media', '../social-media');
 const getInterceptSeeder = lazy('intercept-brief-seeder', './intercept-brief-seeder');
 const getTopicTargetingGate = lazy('topic-targeting-gate', './topic-targeting-gate');
+const getGithubClient = lazy('github-client', '../content-astro/github-client');
+
+// Bounds for the session-level page-edit lock held across a citability
+// refresh's GitHub write phase. Waiting past ACQUIRE fails closed
+// (PAGE_EDIT_OWNERSHIP_LOST); GitHub calls inside the locked section stop at
+// HOLD so a hung request cannot keep every page-edit producer waiting. A
+// write cut off at HOLD is reconciled by the publisher before any retry.
+const PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT = 30_000;
+const PAGE_EDIT_LOCK_POLL_MS = 250;
+const PAGE_EDIT_LOCK_HOLD_MS_DEFAULT = 5 * 60_000;
+const PAGE_EDIT_LOCK_STATEMENT_TIMEOUT_MS = 30_000;
+
+async function raceDeadline(promise, deadlineAt, message) {
+  let timer = null;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([promise, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Check a connection out of the pool, giving up at `deadlineAt`. A checkout
+// that completes after the deadline is returned to the pool at once.
+async function acquireConnectionBy(deadlineAt) {
+  const checkout = db.client.acquireConnection();
+  let timer = null;
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timed out waiting for a database connection')), Math.max(0, deadlineAt - Date.now()));
+  });
+  try {
+    return await Promise.race([checkout, expired]);
+  } catch (err) {
+    checkout.then((conn) => db.client.releaseConnection(conn)).catch(() => {});
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function releasePageEditLockConnection(lockConn, unlockError) {
   // Tarn still owns this checkout. Mark it disposed so Knex rejects it,
@@ -297,6 +338,10 @@ class AutonomousRunner {
     run.page_type = brief.page_type;
     run.action_type = brief.action_type || opp.action_type;
     run.shadow_mode = isShadow(run.action_type);
+    // In-memory only (finalize persists named columns): the composed
+    // backfill brief — its live gap list — for the retry feedback in
+    // _gateFailRetryOrSkip.
+    run.citability_backfill_brief = brief.gsc_signal?.bucket === 'citability_backfill' ? brief : null;
 
     const finalProtected = await this._checkProtectedPage(opp, brief);
     if (finalProtected?.protected) {
@@ -1003,55 +1048,7 @@ class AutonomousRunner {
     let qualityResult = { ok: false, error: 'quality_gate_unavailable' };
     if (qualityGate) {
       const t5 = Date.now();
-      const sitemap = getSitemap();
-      const ctx = {};
-      const checkSitemapBeforePublish = ['refresh_existing_page'].includes(brief.action_type);
-      if (sitemap && draft.url && checkSitemapBeforePublish) {
-        const has = await sitemap.hasUrl(draft.url).catch(() => null);
-        if (has) ctx.sitemapHasUrl = has.present;
-      }
-      // Hydrate the live page body so the quality gate's improvement_over_prior
-      // hard check has a prior version to compare against. Without this every
-      // refresh fails that check (no_previous_version_to_compare) and can never
-      // publish. On load failure we leave previousVersion unset → the hard
-      // check fails closed and the refresh routes to review (safe).
-      let gateBrief = brief;
-      if (brief.action_type === 'refresh_existing_page') {
-        const publisher = getAstroPublisher();
-        if (publisher?.loadExistingPageBody) {
-          const prior = await publisher
-            .loadExistingPageBody(brief.target_url || brief.page_url || draft.url)
-            .catch((err) => {
-              logger.warn(`[autonomous-runner] previousVersion load failed: ${err.message}`);
-              return null;
-            });
-          if (prior) ctx.previousVersion = prior;
-        }
-        // publishRefresh ships the LIVE frontmatter, so the gate classifies
-        // the refresh (answer-first / licensed-photo checks) by the live
-        // post_type / page_type, not the draft's (Codex r2 on #5216) — the
-        // SAME snapshot gate 3c loaded. Without one the gate fails CLOSED
-        // (holds the refresh to the identification checks).
-        if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
-        else ctx.liveFrontmatterUnavailable = true;
-        // Same resolved-target derivation as the metadata lane: page_type
-        // 'refresh' says nothing about the target, and a refresh that
-        // rewrites a blog post's meta_description must keep the full blog
-        // meta-completeness contract. Resolution failure fails CLOSED to
-        // the stricter blog contract — such a target cannot publish anyway.
-        let targetPageType = 'supporting-blog';
-        let targetFilePath = null;
-        try {
-          const resolved = publisher?.resolveExistingAstroFileForTarget
-            ? await publisher.resolveExistingAstroFileForTarget(brief.target_url || brief.page_url || draft.url)
-            : null;
-          if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
-          if (resolved?.path) targetFilePath = String(resolved.path);
-        } catch (_) { /* keep the stricter blog contract */ }
-        // target_file_path lets the citability comparison signal skip legacy
-        // .md targets, which publishRefresh cannot give an MDX component.
-        gateBrief = { ...brief, target_page_type: targetPageType, target_file_path: targetFilePath };
-      }
+      const { ctx, gateBrief } = await this._buildQualityGateContext(brief, draft, { refreshLiveFrontmatter });
       try {
         qualityResult = qualityGate.evaluate(draft, gateBrief, ctx);
       } catch (err) {
@@ -1420,6 +1417,26 @@ class AutonomousRunner {
         await this._skipClaimOrThrow(queue, opp.id, 'superseded_by_ordinary_page_edit', { claimToken });
         return finalized;
       }
+      if (err.code === 'REFRESH_PUBLISH_UNRECONCILED') {
+        // A timed-out GitHub write may have landed and could not be ruled out.
+        // Never retry into a duplicate PR: park it for a person to check.
+        // The park must happen even when the audit write fails: a claimed row
+        // would be re-pended by stale-claim recovery into a duplicate PR.
+        let finalized;
+        try {
+          finalized = await finalize(run, t0, {
+            outcome: 'completed_pending_review',
+            skip_reason: 'refresh_publish_unreconciled',
+            failure_message: err.message,
+            reviewer_notes: `${err.message}. Close any PR on that branch and delete the branch, then dismiss.`,
+          });
+        } catch (auditErr) {
+          await this._parkPublishedClaimForReconciliation(queue, opp.id, 'refresh_publish_unreconciled', { claimToken }, err);
+          throw auditErr;
+        }
+        await this._parkPublishedClaimForReconciliation(queue, opp.id, 'refresh_publish_unreconciled', { claimToken }, err);
+        return finalized;
+      }
       if (err.code === 'BLOG_OWNER_LIST_BLOCKED' || err.code === 'BLOG_OWNER_LIST_UNVERIFIED') {
         return this._ownerListCommitRefused(queue, opp, run, t0, finalize, { claimToken, err, unattendedBlog });
       }
@@ -1668,22 +1685,97 @@ class AutonomousRunner {
     }
   }
 
+  async _parkUnreconciledApproval(opportunityId, run, approvalClaimedAt, err) {
+    const reason = 'refresh_publish_unreconciled';
+    const notes = `${err.message}. Close any PR on that branch and delete the branch, then dismiss.`.slice(0, 4000);
+    const now = new Date();
+    // One transaction: a run parked without its queue row (or the reverse)
+    // would let the interrupted-publish janitor make it requeueable, or leave
+    // a dismiss-only row whose run still reads as publishing.
+    try {
+      await db.transaction(async (trx) => {
+        const runRows = await trx('autonomous_runs').where({ id: run.id, outcome: 'publishing_named_competitor' })
+          .update({ outcome: 'completed_pending_review', skip_reason: reason, failure_message: String(err.message).slice(0, 4000), reviewer_notes: notes, updated_at: now });
+        const oppRows = await trx('opportunity_queue').where({ id: opportunityId, status: 'claimed', skip_reason: 'named_competitor_publishing' })
+          .where('claimed_at', approvalClaimedAt)
+          .update({ status: 'pending_review', skip_reason: reason, updated_at: now });
+        if (Number(runRows) !== 1 || Number(oppRows) !== 1) throw new Error(`approval claims moved (run ${runRows}, queue ${oppRows})`);
+      });
+    } catch (parkErr) {
+      // Both records stay as they were (publishing), which the
+      // interrupted-publish janitor parks for a person rather than retrying.
+      logger.error(`[autonomous-runner] unreconciled approval park failed (opp ${opportunityId}, run ${run.id}); left in its publishing state for the janitor: ${parkErr.message}`);
+    }
+  }
+
+  // Under the page-edit lock: the backfill must still hold its queue claim
+  // and must not have been superseded by an ordinary page edit.
+  async _assertBackfillPageOwnership(lockConn, run) {
+    let ownership = db('opportunity_queue')
+      .connection(lockConn)
+      .where('id', run.opportunity_id)
+      .where('status', 'claimed')
+      .where('claimed_at', run.queue_claimed_at);
+    ownership = run.queue_claim_id == null
+      ? ownership.whereNull('claim_id')
+      : ownership.where('claim_id', run.queue_claim_id);
+    const locked = await ownership.first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
+    if (!locked || locked.bucket !== 'citability_backfill') {
+      const err = new Error('Citability backfill lost its queue claim before the publisher boundary');
+      err.code = 'PAGE_EDIT_OWNERSHIP_LOST';
+      throw err;
+    }
+    if (pageEditSuperseded(locked)) {
+      const err = new Error('Citability backfill no longer owns the page at the publisher boundary');
+      err.code = 'PAGE_EDIT_SUPERSEDED';
+      throw err;
+    }
+  }
+
   /**
    * Hold the shared page-edit lock across an external publisher call without
    * keeping a database transaction open. A successful GitHub branch/commit/PR
    * must not be converted into an ordinary retry by a later COMMIT failure.
    * This lock fails closed: proceeding without page ownership proof could
-   * publish over an ordinary edit.
+   * publish over an ordinary edit. Both waits are bounded: acquiring gives up
+   * after CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS, and GitHub calls inside the
+   * locked section fail once CONTENT_PAGE_EDIT_LOCK_HOLD_MS has elapsed.
    */
   async _withPageEditLock(fn) {
     let lockConn = null;
     let acquired = false;
     let unlockError = null;
+    const acquireMs = envInt('CONTENT_PAGE_EDIT_LOCK_ACQUIRE_MS', PAGE_EDIT_LOCK_ACQUIRE_MS_DEFAULT);
+    // A zero hold would fail every GitHub call, so it falls back to the default.
+    const holdMs = envInt('CONTENT_PAGE_EDIT_LOCK_HOLD_MS', PAGE_EDIT_LOCK_HOLD_MS_DEFAULT) || PAGE_EDIT_LOCK_HOLD_MS_DEFAULT;
+    // One deadline bounds both the pool checkout and the lock polling, so a
+    // saturated pool cannot stretch the advertised wait.
+    const waitUntil = Date.now() + acquireMs;
+    let timeoutSet = false;
     try {
-      lockConn = await db.client.acquireConnection();
-      await lockConn.query("SELECT pg_advisory_lock(hashtext($1))", ['opportunity_page_edit']);
+      lockConn = await acquireConnectionBy(waitUntil);
+      // Every statement on this dedicated session (lock polling, the
+      // ownership read, unlock) is bounded, so a stalled query cannot keep
+      // the shared lock held past the hold budget. Reset before the session
+      // returns to the pool. The SET itself runs before any server-side
+      // timeout exists, so it is raced against the remaining wait budget; a
+      // session that stalls here is destroyed, never pooled.
+      try {
+        await raceDeadline(lockConn.query(`SET statement_timeout = ${PAGE_EDIT_LOCK_STATEMENT_TIMEOUT_MS}`), waitUntil,
+          'timed out configuring the page-edit lock session');
+      } catch (setErr) {
+        unlockError = setErr;
+        throw setErr;
+      }
+      timeoutSet = true;
+      for (;;) {
+        const res = await lockConn.query('SELECT pg_try_advisory_lock(hashtext($1)) AS locked', ['opportunity_page_edit']);
+        if (res?.rows?.[0]?.locked === true) break;
+        if (Date.now() >= waitUntil) throw new Error(`timed out after ${acquireMs}ms waiting for another page edit`);
+        await new Promise((r) => setTimeout(r, PAGE_EDIT_LOCK_POLL_MS));
+      }
       acquired = true;
-      return await fn(lockConn);
+      return await getGithubClient().runWithRequestDeadline(Date.now() + holdMs, () => fn(lockConn));
     } catch (err) {
       if (!acquired) {
         const unavailable = new Error(`Page-edit ownership lock unavailable: ${err.message}`);
@@ -1697,6 +1789,14 @@ class AutonomousRunner {
         catch (err) {
           unlockError = err;
           logger.warn(`[autonomous-runner] page-edit advisory unlock failed (${err.message}); destroying the locked session`);
+        }
+      }
+      if (lockConn && timeoutSet && !unlockError) {
+        try { await lockConn.query('RESET statement_timeout'); }
+        catch (err) {
+          // A session whose timeout cannot be reset must not return to the pool.
+          unlockError = err;
+          logger.warn(`[autonomous-runner] page-edit session reset failed (${err.message}); destroying the session`);
         }
       }
       if (lockConn) {
@@ -2098,6 +2198,16 @@ class AutonomousRunner {
   async _gateFailRetryOrSkip(queue, opp, run, t0, finalize, {
     claimToken, skipReason, notes, blocking, advisoryMessages = [],
   }) {
+    // A citability backfill's one redraft must hear its completion contract
+    // (and the optional signals) whichever gate rejected the draft. Early
+    // gates (editorial, guardrails, topic, comparison) return here before
+    // the quality gate runs, so the feedback is judged here against the live
+    // page when no quality result exists yet.
+    if (run?.citability_backfill_brief) {
+      const feedback = await this._citabilityBackfillRetryFeedback(run);
+      blocking = [...(blocking || []), ...feedback.blocking];
+      if (!advisoryMessages.length) advisoryMessages = feedback.advisory;
+    }
     const findings = (blocking || []).map((finding) => ({
       severity: finding.severity,
       code: finding.code,
@@ -2117,6 +2227,49 @@ class AutonomousRunner {
       exhaustedNote: 'redraft with gate feedback failed the gate again; skipped (exceptions-only review queue).',
       unrecordedNote: 'could not record retry feedback; skipped (exceptions-only review queue).',
     });
+  }
+
+  /**
+   * Retry feedback for a citability backfill draft: the hard completion
+   * finding (CITABILITY_BACKFILL_GAPS_CLEARED, with the unresolved gaps or
+   * regressed traits) plus the optional citability advisories. Reuses the
+   * quality gate's own result when it ran; otherwise evaluates the same
+   * checks against the live page as the prior version. Never throws.
+   */
+  async _citabilityBackfillRetryFeedback(run) {
+    const empty = { blocking: [], advisory: [] };
+    try {
+      const qualityResult = run.quality_gate_result;
+      if (qualityResult && Array.isArray(qualityResult.hard_failures)) {
+        const unresolved = qualityResult.hard_failures.find((f) => f?.name === 'citability_backfill_gaps_cleared');
+        return {
+          blocking: unresolved
+            ? [{ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: String(unresolved.reason || 'planned citability gaps unresolved') }]
+            : [],
+          advisory: citabilityAdvisoryMessages(qualityResult),
+        };
+      }
+      const draft = run.draft_payload;
+      const gate = getQualityGate();
+      const checkGaps = gate?._internals?.checkCitabilityBackfillGapsCleared;
+      if (!draft || typeof draft !== 'object' || typeof checkGaps !== 'function') return empty;
+      const brief = run.citability_backfill_brief;
+      const publisher = getAstroPublisher();
+      const targetUrl = brief.target_url || brief.page_url || draft.url;
+      const prior = await loadRefreshPriorBody(publisher, targetUrl);
+      const ctx = prior ? { previousVersion: prior } : {};
+      const gateBrief = { ...brief, ...(await refreshTargetFields(publisher, targetUrl)) };
+      const r = checkGaps(draft, gateBrief, ctx);
+      return {
+        blocking: r && r.ok === false
+          ? [{ severity: 'P1', code: 'CITABILITY_BACKFILL_GAPS_CLEARED', message: String(r.reason) }]
+          : [],
+        advisory: typeof gate.citabilityAdvisories === 'function' ? gate.citabilityAdvisories(draft, gateBrief, ctx) : [],
+      };
+    } catch (err) {
+      logger.warn(`[autonomous-runner] citability backfill retry feedback unavailable: ${err.message}`);
+      return empty;
+    }
   }
 
   async _infrastructureRetryOrSkip(queue, opp, run, t0, finalize, { claimToken, skipReason, notes }) {
@@ -3644,6 +3797,41 @@ class AutonomousRunner {
       }
     }
 
+    // Re-run the quality gate on the stored draft too (Codex r10 on #5216,
+    // "Revalidate quality before approving a parked refresh"): the checks
+    // above re-validate the comparison gate, guardrails and topic
+    // targeting, but nothing re-ran verdict-box-first / licensed-photo-slot
+    // / improvement-over-prior against a possibly-edited draft_payload
+    // before this approval publish. SAME context-building runNext uses
+    // (_buildQualityGateContext), off the SAME live-frontmatter snapshot
+    // guardOptions just derived above — never a second, possibly-divergent
+    // fetch. A failing gate keeps the run parked, same outcome shape as the
+    // guardrails/topic re-checks above.
+    const qualityGateMod = getQualityGate();
+    if (!qualityGateMod) {
+      const e = new Error('Quality gate unavailable — cannot re-validate the stored draft before publishing (fail closed)');
+      e.statusCode = 409;
+      throw e;
+    }
+    const { ctx: qualityCtx, gateBrief: qualityBrief } = await this._buildQualityGateContext(
+      brief, draft, { refreshLiveFrontmatter: guardOptions.liveFrontmatter || null },
+    );
+    let qualityRecheck;
+    try {
+      qualityRecheck = qualityGateMod.evaluate(draft, qualityBrief, qualityCtx);
+    } catch (err) {
+      const e = new Error(`Quality gate could not re-validate the stored draft (${err.message}) — retry once the underlying issue clears`);
+      e.statusCode = 409;
+      throw e;
+    }
+    if (!qualityRecheck.ok) {
+      const codes = (qualityRecheck.hard_failures || []).map((f) => f.name).join('; ') || 'below_min_total_score';
+      const e = new Error(`Quality gate no longer passes on the stored draft: ${codes}`);
+      e.statusCode = 409;
+      e.details = qualityRecheck;
+      throw e;
+    }
+
     // Same canary / publish-cap guards as the autonomous lane (now serialized
     // under the engine lock so the cap read is authoritative).
     const seoRes = parseJsonMaybe(run.seo_completion_gate_result) || {};
@@ -3712,6 +3900,11 @@ class AutonomousRunner {
     } catch (err) {
       if (err.code === 'PAGE_EDIT_SUPERSEDED') {
         await this._retireSupersededApprovalClaim(opportunityId, run, approvalClaimedAt, err.message);
+      } else if (err.code === 'REFRESH_PUBLISH_UNRECONCILED') {
+        // A timed-out GitHub write may have landed. Reverting would make the
+        // draft approvable again and open a second PR; park both records on a
+        // reason no approval path accepts.
+        await this._parkUnreconciledApproval(opportunityId, run, approvalClaimedAt, err);
       } else {
         await revertClaims(); // let the operator retry
       }
@@ -3860,7 +4053,7 @@ class AutonomousRunner {
     try {
       const cutoff = new Date(Date.now() - staleMinutes * 60000);
       const REASON = 'named_competitor_publish_interrupted';
-      const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post before requeueing; the publish may have completed externally before the crash`;
+      const note = `[${new Date().toISOString()}] janitor: named-competitor publish interrupted (stuck >${staleMinutes}m) — check GitHub for an open Astro PR or live post, close or keep it, then dismiss; the publish may have completed externally before the crash`;
       const stuckOpps = await db('opportunity_queue')
         .where({ status: 'claimed', skip_reason: 'named_competitor_publishing' })
         .where('claimed_at', '<', cutoff)
@@ -4029,6 +4222,55 @@ class AutonomousRunner {
     return options;
   }
 
+  /**
+   * The quality-gate context + brief for a draft — ONE derivation shared by
+   * runNext's gate and the named-competitor/affiliate approval re-check
+   * (Codex r10 on #5216: "Revalidate quality before approving a parked
+   * refresh" — the approval path re-ran guardrails on the stored draft but
+   * never the quality gate, so an edited draft_payload could move the
+   * verdict box or add an unlicensed photo and still publish on approval),
+   * so a re-check can never drift from what runNext itself evaluated the
+   * draft against.
+   *
+   * - Sitemap presence only applies (and only matters) for a refresh.
+   * - Refresh drafts additionally hydrate the live prior body
+   *   (improvement_over_prior), the live frontmatter snapshot the caller
+   *   already loaded for this same refresh (post_type / page_type
+   *   classification — Codex r2/r9 on #5216), the durable
+   *   customer-question ledger marker (Codex r8), and the resolved target
+   *   page_type/file_path (blog vs. page meta contract).
+   */
+  async _buildQualityGateContext(brief, draft, { refreshLiveFrontmatter = null } = {}) {
+    const ctx = {};
+    if (brief.action_type !== 'refresh_existing_page') return { ctx, gateBrief: brief };
+    const targetUrl = brief.target_url || brief.page_url || draft.url;
+    const sitemapHas = await refreshSitemapPresence(draft.url);
+    if (sitemapHas !== null) ctx.sitemapHasUrl = sitemapHas;
+    // Hydrate the live page body so the quality gate's improvement_over_prior
+    // hard check has a prior version to compare against. Without this every
+    // refresh fails that check (no_previous_version_to_compare) and can never
+    // publish. On load failure we leave previousVersion unset → the hard
+    // check fails closed and the refresh routes to review (safe).
+    const publisher = getAstroPublisher();
+    const prior = await loadRefreshPriorBody(publisher, targetUrl);
+    if (prior) ctx.previousVersion = prior;
+    // publishRefresh ships the LIVE frontmatter, so the gate classifies
+    // the refresh (answer-first / licensed-photo checks) by the live
+    // post_type / page_type, not the draft's (Codex r2 on #5216) — the
+    // SAME snapshot gate 3c loaded. Without one the gate fails CLOSED
+    // (holds the refresh to the identification checks).
+    if (refreshLiveFrontmatter && typeof refreshLiveFrontmatter === 'object') ctx.liveFrontmatter = refreshLiveFrontmatter;
+    else ctx.liveFrontmatterUnavailable = true;
+    // The durable customer-question marker: the page itself carries no
+    // page type (not in the blog schema), but the run ledger records
+    // which run first published it (Codex r8 on #5216). A failed read
+    // makes the gate fail closed on a page that opens on the box.
+    const questionLedger = await publishedAsCustomerQuestion(targetUrl);
+    if (questionLedger === null) ctx.liveQuestionLedgerUnavailable = true;
+    else ctx.liveIsCustomerQuestion = questionLedger;
+    return { ctx, gateBrief: { ...brief, ...(await refreshTargetFields(publisher, targetUrl)) } };
+  }
+
   // Load + JSONB-parse the brief the reviewed run was generated against
   // (run.brief_id), falling back to the latest brief for the opportunity only
   // when the run carries no brief_id. Shape consumed by the astro-publisher.
@@ -4105,36 +4347,33 @@ class AutonomousRunner {
       ? publisher.publishRefresh.bind(publisher)
       : publisher?.publishOrUpdatePage?.bind(publisher);
     if (usePublish) {
-      const publish = () => usePublish(draft, brief, { humanApproved });
+      const publish = (opts = {}) => usePublish(draft, brief, { humanApproved, ...opts });
       // Serialize the last ownership read with ordinary page-edit producers.
       // If an ordinary enqueue won while the lane was off, its marker is
       // visible here before any branch/commit/PR side effect. If this worker
       // wins while the lane is open, producers re-read the active reservation
-      // after the lock and yield to it.
-      const r = latestOpportunity?.bucket === 'citability_backfill'
-        ? await this._withPageEditLock(async (lockConn) => {
-          let ownership = db('opportunity_queue')
-            .connection(lockConn)
-            .where('id', run.opportunity_id)
-            .where('status', 'claimed')
-            .where('claimed_at', run.queue_claimed_at);
-          ownership = run.queue_claim_id == null
-            ? ownership.whereNull('claim_id')
-            : ownership.where('claim_id', run.queue_claim_id);
-          const locked = await ownership.first('bucket', 'signal_metadata', 'status', 'claim_id', 'claimed_at');
-          if (!locked || locked.bucket !== 'citability_backfill') {
-            const err = new Error('Citability backfill lost its queue claim before the publisher boundary');
-            err.code = 'PAGE_EDIT_OWNERSHIP_LOST';
-            throw err;
-          }
-          if (pageEditSuperseded(locked)) {
-            const err = new Error('Citability backfill no longer owns the page at the publisher boundary');
-            err.code = 'PAGE_EDIT_SUPERSEDED';
-            throw err;
-          }
-          return publish();
-        })
+      // after the lock and yield to it. publishRefresh runs only its GitHub
+      // write phase under the guard, so validation and image generation never
+      // hold the page-edit lock.
+      const ownedWrite = (write) => this._withPageEditLock(async (lockConn) => {
+        await this._assertBackfillPageOwnership(lockConn, run);
+        return write();
+      });
+      const backfill = latestOpportunity?.bucket === 'citability_backfill';
+      if (backfill && !(brief.action_type === 'refresh_existing_page' && publisher?.publishRefresh)) {
+        const err = new Error('Citability backfill can only publish through publishRefresh, which honors the page-edit guard');
+        err.code = 'CITABILITY_BACKFILL_NOT_REFRESH';
+        throw err;
+      }
+      const r = backfill
+        ? await publish({ commitGuard: ownedWrite })
         : await publish();
+      // An unchanged refresh returns before the write guard runs. Recheck
+      // ownership under the lock so a backfill an ordinary edit superseded
+      // during validation is retired as superseded, not completed as a no-op.
+      if (backfill && r?.status === 'no_changes') {
+        await this._withPageEditLock((lockConn) => this._assertBackfillPageOwnership(lockConn, run));
+      }
       // A refresh whose body + editable meta already match the live page is a
       // completed no-op: publishRefresh returns status:'no_changes' (no PR, no
       // commit, nothing republished). Leave published_url UNSET so the impact
@@ -4717,6 +4956,9 @@ function countsTowardTrustBuild(row) {
 
 function isDeterministicPublishError(err) {
   if (err?.code === 'BLOG_FRONTMATTER_INVALID') return true;
+  // A backfill row routed to a publisher that cannot take the page-edit guard
+  // would write without owning the page; retrying cannot change the route.
+  if (err?.code === 'CITABILITY_BACKFILL_NOT_REFRESH') return true;
   // Fact-check P0/P1 is edit-required: the content must change, so park it for
   // review instead of releasing the claim and retrying the same unpublishable
   // draft. (Guardrails don't run on the autonomous publish path, so the
@@ -5042,9 +5284,88 @@ function firstReturnedId(rows) {
   return null;
 }
 
+// Quality-gate context pieces for a refresh (_buildQualityGateContext).
+// Sitemap presence of the draft URL; null when there is no sitemap/URL or
+// the read fails.
+async function refreshSitemapPresence(url) {
+  const sitemap = getSitemap();
+  if (!sitemap || !url) return null;
+  const has = await sitemap.hasUrl(url).catch(() => null);
+  return has ? has.present : null;
+}
+
+// The live page body the refresh is compared against; null on failure.
+async function loadRefreshPriorBody(publisher, targetUrl) {
+  if (!publisher?.loadExistingPageBody) return null;
+  return publisher.loadExistingPageBody(targetUrl).catch((err) => {
+    logger.warn(`[autonomous-runner] previousVersion load failed: ${err.message}`);
+    return null;
+  });
+}
+
+// Same resolved-target derivation as the metadata lane: page_type 'refresh'
+// says nothing about the target, and a refresh that rewrites a blog post's
+// meta_description must keep the full blog meta-completeness contract.
+// Resolution failure fails CLOSED to the stricter blog contract — such a
+// target cannot publish anyway. target_file_path lets the citability
+// comparison signal skip legacy .md targets, which publishRefresh cannot
+// give an MDX component.
+async function refreshTargetFields(publisher, targetUrl) {
+  let targetPageType = 'supporting-blog';
+  let targetFilePath = null;
+  try {
+    const resolved = publisher?.resolveExistingAstroFileForTarget
+      ? await publisher.resolveExistingAstroFileForTarget(targetUrl)
+      : null;
+    if (resolved?.path && !String(resolved.path).startsWith('src/content/blog/')) targetPageType = 'page';
+    if (resolved?.path) targetFilePath = String(resolved.path);
+  } catch { /* keep the stricter blog contract */ }
+  return { target_page_type: targetPageType, target_file_path: targetFilePath };
+}
+
+/**
+ * Was this target first published by a customer-question run? true / false
+ * from autonomous_runs (page_type + published_url, path-compared), null when
+ * the ledger cannot be read.
+ */
+// Host + path of a URL. A bare path is the hub's (the brief builder keeps
+// relative page_url values for hub pages) — never a wildcard across fleet
+// domains (Codex r3 on #5272). www. is ignored.
+const LEDGER_HUB_HOST = 'wavespestcontrol.com';
+function ledgerUrlKey(value) {
+  const { _internals: { normalizePathForCompare } } = require('./related-posts');
+  const raw = String(value || '').trim();
+  let host = LEDGER_HUB_HOST;
+  if (/^https?:\/\//i.test(raw)) {
+    try { host = new URL(raw).hostname.toLowerCase().replace(/^www\./, ''); } catch { host = null; }
+  }
+  return { host, path: normalizePathForCompare(raw) };
+}
+
+async function publishedAsCustomerQuestion(targetUrl) {
+  const target = ledgerUrlKey(targetUrl);
+  if (!target.path || target.path === '/') return false;
+  try {
+    const rows = await db('autonomous_runs')
+      .where('page_type', 'customer-question')
+      .whereNotNull('published_url')
+      .select('published_url');
+    // Same path; and when both sides name a host, the same host — two fleet
+    // domains can carry different posts at one path (Codex r2 on #5272).
+    return rows.some((row) => {
+      const run = ledgerUrlKey(row.published_url);
+      return run.path === target.path && run.host !== null && run.host === target.host;
+    });
+  } catch (err) {
+    logger.warn(`[autonomous-runner] customer-question ledger read failed: ${err.message}`);
+    return null;
+  }
+}
+
 module.exports = new AutonomousRunner();
 module.exports.AutonomousRunner = AutonomousRunner;
 module.exports._internals = {
+  publishedAsCustomerQuestion,
   isShadow,
   autoPublishEnabled,
   OPERATOR_INTERCEPT_BUCKET,

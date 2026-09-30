@@ -111,6 +111,37 @@ describe("useSpeechDictation upload fallback", () => {
     expect(FakeRecorder.instances).toHaveLength(1);
   });
 
+  it("reports starting from the tap until the recording begins", async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
+    let resolveStream;
+    navigator.mediaDevices.getUserMedia.mockImplementation(() => new Promise((r) => { resolveStream = r; }));
+    const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    expect(result.current.starting).toBe(false);
+    act(() => { result.current.toggle(); });
+    // The permission prompt is open: nothing is recording yet, but the
+    // caller must already treat the dictation as under way.
+    expect(result.current.starting).toBe(true);
+    expect(result.current.listening).toBe(false);
+    await act(async () => { resolveStream({ getTracks: () => [track] }); });
+    expect(result.current.starting).toBe(false);
+    expect(result.current.listening).toBe(true);
+  });
+
+  it("clears starting when the microphone is refused", async () => {
+    fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
+    let refuse;
+    navigator.mediaDevices.getUserMedia.mockImplementation(() => new Promise((_, reject) => { refuse = reject; }));
+    const { result } = renderHook(() => useSpeechDictation(vi.fn(), { uploadServiceId: "svc-1" }));
+    await waitFor(() => expect(result.current.mode).toBe("upload"));
+    act(() => { result.current.toggle(); });
+    expect(result.current.starting).toBe(true);
+    await act(async () => { refuse(new Error("Permission denied")); });
+    expect(result.current.starting).toBe(false);
+    expect(result.current.listening).toBe(false);
+    expect(alert).toHaveBeenCalledWith("Microphone unavailable: Permission denied");
+  });
+
   it("releases the microphone when the recorder cannot be constructed", async () => {
     fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ available: true }) });
     window.MediaRecorder = class { static isTypeSupported() { return false; } constructor() { throw new Error("NotSupportedError"); } };
@@ -119,6 +150,7 @@ describe("useSpeechDictation upload fallback", () => {
     await act(async () => { result.current.toggle(); });
     expect(track.stop).toHaveBeenCalled();
     expect(result.current.listening).toBe(false);
+    expect(result.current.starting).toBe(false);
     expect(alert).toHaveBeenCalledWith("Dictation error: NotSupportedError");
     // Not stuck: a later tap starts a fresh attempt.
     await act(async () => { result.current.toggle(); });
@@ -133,6 +165,7 @@ describe("useSpeechDictation upload fallback", () => {
     await act(async () => { result.current.toggle(); });
     expect(track.stop).toHaveBeenCalled();
     expect(result.current.listening).toBe(false);
+    expect(result.current.starting).toBe(false);
     expect(alert).toHaveBeenCalledWith("Dictation error: InvalidStateError");
     await act(async () => { result.current.toggle(); });
     expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2);
