@@ -776,17 +776,21 @@ const LATEST_EVENT_IS_WOULD_BLOCK_SQL = `(
   WHERE e.run_id = email_template_automation_runs.id
     AND e.event_type <> 'deduped'
   ORDER BY e.created_at DESC LIMIT 1
-) = 'would_block'`;
+) = 'would_block' AND email_template_automation_runs.context->>'origin_mode' = 'shadow'`;
 
 // Which prior-run status (if any) a live attempt may promote in place:
 // 'shadow' (a would-send) always; 'skipped' only when the run's LATEST
 // lifecycle event (a replay's own 'deduped' audit row never counts) is the
-// shadow preflight's 'would_block' — never a genuine
-// condition/exit skip, and never a live block (markRunSkipped logs its own
-// later event). Any other status is not promotable.
+// shadow preflight's 'would_block' AND the run was created in shadow
+// (context.origin_mode) — never a genuine condition/exit skip, never a live
+// block (markRunSkipped logs its own later event), and never a LIVE-origin
+// run that a rollback to shadow finalized skipped/would_block (a duplicate
+// trigger after re-enable must not turn that into a fresh real send). Any
+// other status is not promotable.
 async function promotableShadowStatus(conn, existing) {
   if (existing.status === 'shadow') return 'shadow';
   if (existing.status !== 'skipped') return null;
+  if (asObject(existing.context).origin_mode !== 'shadow') return null;
   const latest = await conn('email_template_automation_run_events')
     .where({ run_id: existing.id })
     .whereNot({ event_type: 'deduped' })
@@ -829,9 +833,10 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
       // fabricated runnable row.
       let promoteQuery = conn('email_template_automation_runs').where({ id: existing.id, status: promotableFrom });
       if (promotableFrom === 'skipped') {
-        // Re-check the would-block fact in the statement itself: the row is
-        // still promotable only while its latest ledger event is the shadow
-        // would_block (a live skip since then logs its own event).
+        // Re-check the would-block fact and the shadow origin in the
+        // statement itself: the row is still promotable only while its
+        // latest ledger event is the shadow would_block (a live skip since
+        // then logs its own event) and it was created in shadow.
         promoteQuery = promoteQuery.whereRaw(LATEST_EVENT_IS_WOULD_BLOCK_SQL);
       }
       const promotedRows = await promoteQuery
@@ -910,7 +915,10 @@ async function createRunUnlocked({ conn, automation, triggerEventKey, triggerEve
   return { run, deduped: false };
 }
 
-async function processTrigger({
+// Normalizes a processTrigger call (camelCase and snake_case aliases) and
+// rejects a call with no trigger key. Pure input handling: nothing here reads
+// the gate, the DB, or any automation.
+function parseTriggerRequest({
   triggerEventKey,
   trigger_event_key: snakeTriggerEventKey,
   triggerEventId,
@@ -932,8 +940,107 @@ async function processTrigger({
     err.status = 400;
     throw err;
   }
-  const eventId = cleanString(triggerEventId || snakeTriggerEventId, '');
-  const targetAutomationKey = cleanString(automationKey || snakeAutomationKey, '');
+  return {
+    eventKey,
+    eventId: cleanString(triggerEventId || snakeTriggerEventId, ''),
+    targetAutomationKey: cleanString(automationKey || snakeAutomationKey, ''),
+    entityType: entityType || snakeEntityType,
+    entityId: entityId || snakeEntityId,
+    payload,
+    recipient,
+    executeImmediately,
+    now,
+  };
+}
+
+// Everything ONE automation decides about ONE trigger before a run row
+// exists: recipient, entity, idempotency key, and whether the run starts
+// skipped (exit/condition), scheduled (delayed) or queued. Throws (status
+// 400) for a blank idempotency template; the caller isolates that failure to
+// this automation.
+function planAutomationRun(automation, trigger, mode) {
+  const { eventKey, eventId, payload, recipient, now } = trigger;
+  const resolvedRecipient = recipientFor(eventKey, { payload, recipient }, automation);
+  const entity = entityFor(eventKey, { payload, entityType: trigger.entityType, entityId: trigger.entityId });
+  const context = contextFor({
+    triggerEventKey: eventKey,
+    triggerEventId: eventId,
+    entityType: entity.entityType,
+    entityId: entity.entityId,
+    payload,
+    recipient: resolvedRecipient,
+    automation,
+    mode,
+  });
+  const idempotencyTemplate = cleanString(automation.idempotency_key_template);
+  if (!idempotencyTemplate) {
+    const err = new Error(`automation ${automation.automation_key} does not define an idempotency key template`);
+    err.status = 400;
+    throw err;
+  }
+  const exitReason = conditionFailureFor(asObject(automation.conditions), payload, now)
+    || exitReasonFor(asObject(automation.exit_conditions), payload);
+  const delayMs = Math.max(0, Number(automation.delay_minutes || 0)) * 60 * 1000;
+  const runAfter = new Date(now.getTime() + delayMs);
+  const scheduled = runAfter > now;
+  return {
+    entity,
+    recipient: resolvedRecipient,
+    retryPolicy: retryPolicyFor(automation),
+    context,
+    idempotencyKey: renderIdempotencyKey(idempotencyTemplate, context),
+    runAfter,
+    exitReason,
+    // A skipped run is never scheduled or executed, whatever its delay.
+    status: exitReason ? 'skipped' : (scheduled ? 'scheduled' : 'queued'),
+  };
+}
+
+// Plans, creates, and (when it is due now and the caller wants it) executes
+// the run for one automation. Any throw belongs to this automation alone.
+async function processAutomation(automation, trigger, mode) {
+  const plan = planAutomationRun(automation, trigger, mode);
+  const created = await createRun({
+    automation,
+    triggerEventKey: trigger.eventKey,
+    triggerEventId: trigger.eventId,
+    entityType: plan.entity.entityType,
+    entityId: plan.entity.entityId,
+    recipient: plan.recipient,
+    payload: trigger.payload,
+    context: plan.context,
+    idempotencyKey: plan.idempotencyKey,
+    runAfter: plan.runAfter,
+    status: plan.status,
+    exitReason: plan.exitReason,
+    retryPolicy: plan.retryPolicy,
+    mode,
+  });
+  const runsNow = plan.status === 'queued' && !created.deduped && trigger.executeImmediately;
+  const run = runsNow ? await executeRun(created.run, { automation }) : created.run;
+  return { automation_key: automation.automation_key, run, deduped: runsNow ? false : created.deduped };
+}
+
+// The FIRST collected failure is rethrown (direct callers keep the same
+// throw/status contract), carrying the per-automation detail on
+// err.automationFailures so the lifecycle emitters can tell a fixable
+// automation-configuration failure from a permanent recipient one.
+function aggregateFailure(failures, results) {
+  const first = failures[0].error;
+  const thrown = first instanceof Error ? first : new Error(String(first));
+  thrown.automationFailures = failures.map(({ automation_key: automationKey, error }) => ({
+    automation_key: automationKey,
+    status: error && error.status ? Number(error.status) : null,
+    code: (error && error.code) || null,
+    message: error && error.message ? error.message : String(error),
+  }));
+  thrown.partialResults = results;
+  return thrown;
+}
+
+async function processTrigger(args) {
+  const trigger = parseTriggerRequest(args);
+  const { eventKey } = trigger;
   // Read once per trigger call — mode can only change process-wide anyway,
   // and every automation matched below needs the same answer for the
   // shadow-promotion dedupe rule (createRunUnlocked). Fail-closed FIRST:
@@ -950,105 +1057,31 @@ async function processTrigger({
     // instead of settling it 'processed'.
     return { trigger_event_key: eventKey, automation_count: 0, results: [], disabled: true };
   }
-  const automations = await loadAutomations(eventKey, targetAutomationKey);
-  const results = [];
+  const automations = await loadAutomations(eventKey, trigger.targetAutomationKey);
   // DB hit only when something actually matched — an unknown/unwired
   // trigger key stays a pure, zero-write no-op (loadAutomations returns []).
   if (automations.length) {
-    payload = await resolveEmailForTrigger(eventKey, payload, recipient);
+    trigger.payload = await resolveEmailForTrigger(eventKey, trigger.payload, trigger.recipient);
   }
 
   // Per-automation isolation (pre-live fix): one automation's failure — a
   // blank idempotency template, a key variable the payload never provides, a
   // DB hiccup on its run — must not stop the LATER automations on the same
   // trigger from being visited, or a shared pending intent marker could never
-  // reach them. Every automation is attempted; failures are collected and the
-  // FIRST one is rethrown after the loop (so direct callers keep the same
-  // throw/status contract), carrying the per-automation detail on
-  // err.automationFailures so the lifecycle emitters can tell a fixable
-  // automation-configuration failure from a permanent recipient one.
+  // reach them. Every automation is attempted; failures are collected and
+  // rethrown together by aggregateFailure after the loop.
+  const results = [];
   const failures = [];
   for (const automation of automations) {
     try {
-      const resolvedRecipient = recipientFor(eventKey, { payload, recipient }, automation);
-      const entity = entityFor(eventKey, {
-        payload,
-        entityType: entityType || snakeEntityType,
-        entityId: entityId || snakeEntityId,
-      });
-      const retryPolicy = retryPolicyFor(automation);
-      const context = contextFor({
-        triggerEventKey: eventKey,
-        triggerEventId: eventId,
-        entityType: entity.entityType,
-        entityId: entity.entityId,
-        payload,
-        recipient: resolvedRecipient,
-        automation,
-        mode,
-      });
-      const idempotencyTemplate = cleanString(automation.idempotency_key_template);
-      if (!idempotencyTemplate) {
-        const err = new Error(`automation ${automation.automation_key} does not define an idempotency key template`);
-        err.status = 400;
-        throw err;
-      }
-      const idempotencyKey = renderIdempotencyKey(idempotencyTemplate, context);
-      const conditions = asObject(automation.conditions);
-      const exitConditions = asObject(automation.exit_conditions);
-      const conditionFailure = conditionFailureFor(conditions, payload, now);
-      const exitReason = conditionFailure || exitReasonFor(exitConditions, payload);
-      const delayMs = Math.max(0, Number(automation.delay_minutes || 0)) * 60 * 1000;
-      const runAfter = new Date(now.getTime() + delayMs);
-      const status = exitReason ? 'skipped' : (runAfter > now ? 'scheduled' : 'queued');
-      const created = await createRun({
-        automation,
-        triggerEventKey: eventKey,
-        triggerEventId: eventId,
-        entityType: entity.entityType,
-        entityId: entity.entityId,
-        recipient: resolvedRecipient,
-        payload,
-        context,
-        idempotencyKey,
-        runAfter,
-        status,
-        exitReason,
-        retryPolicy,
-        mode,
-      });
-
-      if (created.deduped || status === 'skipped' || status === 'scheduled' || !executeImmediately) {
-        results.push({ automation_key: automation.automation_key, run: created.run, deduped: created.deduped });
-        continue;
-      }
-
-      const executed = await executeRun(created.run, { automation });
-      results.push({ automation_key: automation.automation_key, run: executed, deduped: false });
+      results.push(await processAutomation(automation, trigger, mode));
     } catch (err) {
       failures.push({ automation_key: automation.automation_key, error: err });
       logger.warn(`[email-template-automation] ${eventKey}/${automation.automation_key} failed, continuing with remaining automations: ${scrubSentryText(err && err.message ? err.message : err)}`);
     }
   }
-
-  if (failures.length) {
-    const first = failures[0].error;
-    const thrown = first instanceof Error ? first : new Error(String(first));
-    thrown.automationFailures = failures.map(({ automation_key: automationKey, error }) => ({
-      automation_key: automationKey,
-      status: error && error.status ? Number(error.status) : null,
-      code: (error && error.code) || null,
-      message: error && error.message ? error.message : String(error),
-    }));
-    thrown.partialResults = results;
-    throw thrown;
-  }
-
-  return {
-    trigger_event_key: eventKey,
-    automation_count: automations.length,
-    results,
-  };
+  if (failures.length) throw aggregateFailure(failures, results);
+  return { trigger_event_key: eventKey, automation_count: automations.length, results };
 }
 
 async function loadAutomationForRun(run) {

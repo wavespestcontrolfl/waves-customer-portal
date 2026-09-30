@@ -1921,7 +1921,7 @@ describe('email template automation executor', () => {
       ['a skipped row with no ledger events at all', undefined],
       ['a LIVE block after an earlier would_block (latest event is a later skip)', { event_type: 'skipped' }],
     ])('%s is NOT promoted: it dedupes as before', async (_label, latestEvent) => {
-      const skippedRun = run({ status: 'skipped', exit_reason: 'estimate accepted' });
+      const skippedRun = run({ status: 'skipped', exit_reason: 'estimate accepted', context: JSON.stringify({ origin_mode: 'shadow' }) });
       const existingRunQuery = chain({ first: skippedRun });
       const latestEventQuery = chain({ first: latestEvent });
       const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
@@ -1936,6 +1936,27 @@ describe('email template automation executor', () => {
 
       expect(result.results[0].deduped).toBe(true);
       expect(result.results[0].run.status).toBe('skipped');
+      expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
+    });
+
+    test.each([
+      ['a LIVE-origin run rolled back to shadow and finalized would_block', JSON.stringify({ origin_mode: 'live' })],
+      ['a would_block row with no origin_mode stamp', JSON.stringify({})],
+    ])('%s is NOT promoted: it dedupes without even reading the ledger', async (_label, context) => {
+      const skippedRun = run({ status: 'skipped', exit_reason: 'template disabled', context });
+      const existingRunQuery = chain({ first: skippedRun });
+      const dedupeLogQuery = chain({ returning: [{ id: 'event-1' }] });
+      setDbQueues({
+        'email_template_automations as a': [chain({ result: [automation({ delay_minutes: 60 })] })],
+        customers: [chain({ first: { id: 'cust-1', email: 'sam@example.com', deleted_at: null } })],
+        email_template_automation_runs: [existingRunQuery],
+        email_template_automation_run_events: [dedupeLogQuery],
+      });
+
+      const result = await replay();
+
+      expect(result.results[0].deduped).toBe(true);
+      expect(existingRunQuery.update).not.toHaveBeenCalled();
       expect(dedupeLogQuery.insert).toHaveBeenCalledWith(expect.objectContaining({ event_type: 'deduped' }));
     });
 

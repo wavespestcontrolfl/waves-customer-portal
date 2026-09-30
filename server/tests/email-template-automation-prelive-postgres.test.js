@@ -91,7 +91,6 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
 
   async function makeAutomation(overrides = {}) {
     const key = `qa_prelive_${randomUUID().slice(0, 8)}`;
-    automationKeys.push(key);
     const [row] = await db('email_template_automations').insert({
       automation_key: key,
       name: key,
@@ -106,6 +105,10 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
       retry_policy: JSON.stringify({ max_attempts: 2, backoff_minutes: [15, 60] }),
       ...overrides,
     }).returning('*');
+    // Track the EFFECTIVE key: ...overrides may replace automation_key, and
+    // cleanup must delete what was really inserted (a leaked active row on a
+    // real trigger would fire in the QA database).
+    automationKeys.push(row.automation_key);
     return row;
   }
 
@@ -191,6 +194,39 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
       const replay = await trigger(automation, eventId, { executeImmediately: false });
       expect(replay.results[0].deduped).toBe(true);
       expect((await db('email_template_automation_runs').where({ id: runId }).first()).status).toBe('skipped');
+    });
+
+    test('a LIVE-origin run finalized skipped/would_block by a rollback to shadow is NOT promoted by a duplicate trigger after re-enable', async () => {
+      const automation = await makeAutomation({ delay_minutes: 30 });
+      const eventId = `evt-${randomUUID().slice(0, 8)}`;
+
+      // Live: the delayed run is created scheduled with origin_mode 'live'.
+      mockGate.mode = 'live';
+      const created = await trigger(automation, eventId);
+      const runId = created.results[0].run.id;
+      expect(created.results[0].run.status).toBe('scheduled');
+      expect((await db('email_template_automation_runs').where({ id: runId }).first()).context.origin_mode).toBe('live');
+
+      // Rollback to shadow; the run comes due and the shadow preflight blocks
+      // it: skipped + would_block, but the row is live-origin.
+      mockGate.mode = 'shadow';
+      mockPreflight.result = { ok: false, code: 'TEMPLATE_DISABLED', reason: 'template is disabled' };
+      await db('email_template_automation_runs').where({ id: runId }).update({ run_after: new Date(Date.now() - 60000) });
+      await Executor.processDueRuns({ runIds: [runId] });
+      const finalized = await db('email_template_automation_runs').where({ id: runId }).first();
+      expect(finalized.status).toBe('skipped');
+      expect(finalized.context.origin_mode).toBe('live');
+      expect(await eventTypes(runId)).toContain('would_block');
+
+      // Re-enable live, block fixed; a duplicate delivery of the same trigger
+      // must dedupe, never turn the rolled-back live run into a real send.
+      mockGate.mode = 'live';
+      mockPreflight.result = { ok: true };
+      const replay = await trigger(automation, eventId, { executeImmediately: false });
+      expect(replay.results[0].deduped).toBe(true);
+      const after = await db('email_template_automation_runs').where({ id: runId }).first();
+      expect(after.status).toBe('skipped');
+      expect(await eventTypes(runId)).not.toContain('promoted_from_shadow');
     });
   });
 
