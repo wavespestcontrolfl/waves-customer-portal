@@ -12,7 +12,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { activeFlags, releaseFlag } = require('./outbound-voice/flags');
-const { HOLD_FLAG, DISPUTE_REASON_PREFIX, priorHoldReasonOf } = require('./collection-hold');
+const { HOLD_FLAG, DISPUTE_REASON_PREFIX, priorHoldReasonOf, isDisputeHoldReason } = require('./collection-hold');
 
 async function listCollectionHolds(customerId) {
   const rows = await activeFlags(customerId);
@@ -32,9 +32,9 @@ async function listCollectionHolds(customerId) {
 
 // Releases exactly ONE hold row: `holdId` from listCollectionHolds, and only
 // while that row is still active and belongs to this customer. released: 0
-// means the hold changed since staff loaded it (already released, or replaced
-// by a newer hold) — the caller reports a conflict, never a blind release of
-// whatever hold is active now.
+// means the hold changed since staff loaded it (already released, replaced by a
+// newer hold, or no longer a dispute) — the caller reports a conflict, never a
+// blind release of whatever hold is active now.
 //
 // A dispute that was raised on top of an ACTIVE wrong-number / wrong-party
 // fallback hold shares that one row (one active row per customer+flag), with the
@@ -52,6 +52,11 @@ async function releaseCollectionHold(customerId, { holdId, trx = null } = {}) {
       .forUpdate()
       .first('id', 'reason');
     if (!row) return { ok: true, released: 0 };
+    // Only a DISPUTE hold is released here (that is all the office is shown a Release for).
+    // A row that is no longer a dispute is a fallback hold left standing by an earlier
+    // release of this same dispute: a repeated request, or a second admin releasing the
+    // holdId they loaded, must not lift it. released: 0 is the caller's 409 "hold changed".
+    if (!isDisputeHoldReason(row.reason)) return { ok: true, released: 0 };
     const restore = priorHoldReasonOf(row.reason);
     if (!restore) return releaseFlag({ customerId, flag: HOLD_FLAG, id: holdId, trx: t });
     await t('collections_flags').where({ id: holdId }).update({ reason: restore.prior });

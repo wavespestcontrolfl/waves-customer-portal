@@ -223,8 +223,23 @@ function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
   );
 }
 
+// Customer-facing payment HISTORY (portal): the hold-deferral placeholder is not a payment
+// at any point of its life. While armed it is never-attempted (above); once the retry sweep
+// collects it, the retry inserts its OWN paid row and the placeholder is left 'failed' with
+// superseded_by_payment_id pointing at that row (retry_count bumped, next_retry_at cleared) -
+// it must not surface then either, or a collected month reads as FAILED with "Update Payment
+// Method". Superseded by ITS OWN id is the orphan-charge marker (charged at Stripe, ledger
+// row missing) and stays visible, like any disarmed row that nothing replaced.
+function excludeHoldDeferralPlaceholders(query, alias = 'payments') {
+  return query.whereRaw(
+    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id)))`,
+    [HOLD_DEFERRAL_REASON],
+  );
+}
+
 module.exports = {
   isNeverAttemptedHoldDeferral,
+  excludeHoldDeferralPlaceholders,
   excludeNeverAttemptedHoldDeferrals,
   HOLD_DEFERRAL_REASON,
   PRIOR_HOLD_OPEN,

@@ -57,6 +57,16 @@ describeOrSkip('collection_hold as a money stop — real Postgres', () => {
       created_at timestamptz NOT NULL DEFAULT now(),
       released_at timestamptz
     )`);
+    await db.raw(`CREATE TABLE payments (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE,
+      status varchar(20),
+      metadata jsonb,
+      stripe_payment_intent_id text,
+      retry_count int DEFAULT 0,
+      next_retry_at timestamptz,
+      superseded_by_payment_id uuid
+    )`);
     await db.raw('CREATE UNIQUE INDEX collections_flags_active_uniq ON collections_flags (customer_id, flag) WHERE released_at IS NULL');
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -173,9 +183,13 @@ describeOrSkip('collection_hold as a money stop — real Postgres', () => {
       const [listed] = await releaseAdmin().listCollectionHolds(customerId);
       expect(listed).toMatchObject({ id: fallbackRow.id, stops_charges: false });
 
-      // A second release of the same row now releases the fallback for real (staff intent).
-      expect(await releaseAdmin().releaseCollectionHold(customerId, { holdId: fallbackRow.id })).toEqual({ ok: true, released: 1 });
-      expect(await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at')).toHaveLength(0);
+      // A repeated release of the SAME holdId (double click, a second admin's stale screen)
+      // must NOT lift the fallback that is now standing on that row: released 0 = the
+      // route's 409 "hold changed". The outreach block survives.
+      expect(await releaseAdmin().releaseCollectionHold(customerId, { holdId: fallbackRow.id })).toEqual({ ok: true, released: 0 });
+      const still = await db('collections_flags').where({ customer_id: customerId, flag: 'collection_hold' }).whereNull('released_at');
+      expect(still).toHaveLength(1);
+      expect(still[0].reason).toBe(fallbackRow.reason);
     });
   });
 
@@ -190,6 +204,29 @@ describeOrSkip('collection_hold as a money stop — real Postgres', () => {
     const [after] = await db('collections_flags').where({ id: row.id });
     expect(after).toMatchObject({ released_at: null, reason: null });
     await clear();
+  });
+
+  test('the customer payment-history predicate hides hold-deferral placeholders (armed AND collected) and nothing else', async () => {
+    const other = randomUUID();
+    const rows = [
+      ['armed', { status: 'failed', metadata: { deferred_reason: 'collection_hold' }, retry_count: 0, next_retry_at: new Date() }],
+      ['collected', { status: 'failed', metadata: { deferred_reason: 'collection_hold', superseded_by_retry: true }, retry_count: 1, next_retry_at: null, superseded_by_payment_id: other }],
+      ['orphan-self', { status: 'failed', metadata: { deferred_reason: 'collection_hold' }, retry_count: 1, next_retry_at: null, self: true }],
+      ['disarmed-unreplaced', { status: 'failed', metadata: { deferred_reason: 'collection_hold' }, retry_count: 1, next_retry_at: null }],
+      ['real-declined', { status: 'failed', metadata: {}, retry_count: 1, next_retry_at: null, stripe_payment_intent_id: 'pi_x' }],
+      ['plain-failed', { status: 'failed', metadata: null, retry_count: 0, next_retry_at: new Date() }],
+      ['paid', { status: 'paid', metadata: { deferred_reason: 'collection_hold' }, retry_count: 0, next_retry_at: null }],
+    ];
+    const ids = {};
+    for (const [name, r] of rows) {
+      const { self, ...cols } = r;
+      const [{ id }] = await db('payments').insert({ customer_id: customerId, ...cols, metadata: cols.metadata == null ? null : JSON.stringify(cols.metadata) }).returning('id');
+      ids[name] = id;
+      if (self) await db('payments').where({ id }).update({ superseded_by_payment_id: id });
+    }
+    const visible = await hold.excludeHoldDeferralPlaceholders(db('payments').where({ customer_id: customerId }), 'payments').select('id');
+    const names = Object.entries(ids).filter(([, id]) => visible.some((v) => v.id === id)).map(([n]) => n).sort();
+    expect(names).toEqual(['disarmed-unreplaced', 'orphan-self', 'paid', 'plain-failed', 'real-declined']);
   });
 
   test('a plain dispute (no fallback under it) is released outright', async () => {

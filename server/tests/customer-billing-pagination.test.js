@@ -120,11 +120,11 @@ test('filters third-party payer rows while keeping visible cursor pagination com
   });
 });
 
-// B10: the armed collections-hold deferral row is a never-attempted placeholder, not a
-// payment. The history query (stripe.getPaymentHistory) and BOTH total-count queries apply
+// B10: the collections-hold deferral row (armed, or left 'failed' after the retry sweep
+// collected it through its own paid row) is a placeholder, not a payment. The history query (stripe.getPaymentHistory) and BOTH total-count queries apply
 // the shared predicate, so the customer never sees a FAILED row for a charge that was never
 // attempted and `total` still matches what pagination serves.
-describe('armed hold-deferral rows stay out of the customer payment history', () => {
+describe('hold-deferral placeholders (armed or collected) stay out of the customer payment history', () => {
   const predicateCalls = (builder) => builder.whereRaw.mock.calls.filter(([sql]) => /deferred_reason/.test(sql));
 
   test('the count query (no payer invoices) excludes them', async () => {
@@ -151,7 +151,7 @@ describe('armed hold-deferral rows stay out of the customer payment history', ()
   test('the history query in stripe.js applies the shared predicate', () => {
     const src = require('fs').readFileSync(require('path').join(__dirname, '../services/stripe.js'), 'utf8');
     const body = src.slice(src.indexOf('async getPaymentHistory('), src.indexOf('// REFUND'));
-    expect(body).toContain("excludeNeverAttemptedHoldDeferrals(q, 'payments')");
+    expect(body).toContain("excludeHoldDeferralPlaceholders(q, 'payments')");
   });
 });
 

@@ -79,8 +79,8 @@ describe('every failed-payment consumer applies the shared predicate', () => {
     ['services/context-aggregator.js', 'excludeNeverAttemptedHoldDeferrals'],
     ['services/customer-health.js', 'isNeverAttemptedHoldDeferral'],
     ['routes/billing-v2.js', 'isNeverAttemptedHoldDeferral'],
-    ['routes/billing-v2.js', 'excludeNeverAttemptedHoldDeferrals'],
-    ['services/stripe.js', 'excludeNeverAttemptedHoldDeferrals'],
+    ['routes/billing-v2.js', 'excludeHoldDeferralPlaceholders'],
+    ['services/stripe.js', 'excludeHoldDeferralPlaceholders'],
   ];
   test.each(consumers)('%s uses %s', (file, fn) => {
     const src = fs.readFileSync(path.join(root, file), 'utf8');

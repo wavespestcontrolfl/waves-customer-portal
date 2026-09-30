@@ -46,6 +46,15 @@ test('release goes through the one writer, only for collection_hold, and names t
   expect(mockDbRow.updates).toEqual([]);
 });
 
+// Codex P1: after the dispute is released the SAME row stands as the fallback. A repeated
+// request (or a second admin's stale holdId) must not lift it.
+test('a repeated release of the same holdId finds a fallback row and releases nothing', async () => {
+  mockDbRow.row = { id: 'hold-1', reason: 'wrong-party answer on billing follow-up call; review card failed to file' };
+  expect(await releaseCollectionHold('c-1', { holdId: 'hold-1' })).toEqual({ ok: true, released: 0 });
+  expect(mockRelease).not.toHaveBeenCalled();
+  expect(mockDbRow.updates).toEqual([]);
+});
+
 test('a hold that is no longer active releases nothing (the caller reports a conflict)', async () => {
   mockDbRow.row = null;
   expect(await releaseCollectionHold('c-1', { holdId: 'hold-1' })).toEqual({ ok: true, released: 0 });
