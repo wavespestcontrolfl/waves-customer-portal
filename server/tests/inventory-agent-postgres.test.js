@@ -1714,7 +1714,7 @@ jest.setTimeout(30000);
     expect(await bellsFor(needsSizeLine.id)).toHaveLength(1);
     expect(await bellsFor(sizeMismatchLine.id)).toHaveLength(1);
     const mismatchBell = (await bellsFor(sizeMismatchLine.id))[0];
-    expect(mismatchBell.body).toMatch(/doesn't match the catalog container size/);
+    expect(mismatchBell.detail || mismatchBell.body).toMatch(/doesn't match the catalog container size/);
   });
 
   test('drainAgentQueue: a line no longer agent_pending by the time it\'s locked is left alone', async () => {
