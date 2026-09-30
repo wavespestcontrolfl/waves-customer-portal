@@ -1056,6 +1056,10 @@ async function planUpdateDetailsRecurrenceDates(conn, {
 }) {
   const dates = new Set();
   dates.cadenceTargetById = new Map();
+  // Dates of rows this save will INSERT (make-recurring spawn, visit-count /
+  // top-up extension) — new visits at the post-save price that a held
+  // annual-prepay term could select (Codex r6 P1 on #5387).
+  dates.insertDates = [];
   if (!isRecurring) return dates;
   const before = await conn('scheduled_services').where({ id }).first();
   if (!before) return dates;
@@ -1169,7 +1173,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
     const spawnTarget = Math.max(0, (spawnCount - 1) - existingUpcomingChildren);
     for (const d of planSpawnChildDates({
       baseDateStr, pattern: recurringPattern, rOpts: editOpts(after), skip, dir, seen, spawnCount, spawnTarget, blackoutDates,
-    })) dates.add(d);
+    })) { dates.add(d); dates.insertDates.push(d); }
   }
 
   // Visit-count reconcile / fixed→ongoing top-up extends of a running plan.
@@ -1213,7 +1217,7 @@ async function planUpdateDetailsRecurrenceDates(conn, {
           seen.add(baseDateStr);
           for (const d of planSeriesExtendDates({
             baseDateStr, pattern: parent.recurring_pattern, rOpts, skip, dir, seen, need, blackoutDates,
-          })) dates.add(d);
+          })) { dates.add(d); dates.insertDates.push(d); }
         }
       }
     }
@@ -4795,7 +4799,10 @@ async function lockAndGuardFollowingSiblings(conn, {
     // the loop runs next — a sibling whose live invoice is linked only
     // through its service record or a combined-visit packet must refuse
     // here for the same reason the single-visit repricing guard does.
-    const covered = await findBillingCoveredVisits(conn, guardRows, { liveInvoice: true });
+    // The secure-prepay coverage rail is PRICE-only (owner ruling on #5253,
+    // reaffirmed on #5387): a service-only 'following' edit keeps every other
+    // live-invoice check but never this one (Codex r6 P1).
+    const covered = await findBillingCoveredVisits(conn, guardRows, { liveInvoice: true, securePrepay: !!priceChanged });
     if (covered.size > 0) {
       const [firstId, reason] = [...covered.entries()][0];
       const when = guardRows.find((visit) => visit.id === firstId);
@@ -13228,6 +13235,27 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // Per-visit series-wide changes this save will make to OTHER rows of
     // the series: the cadence rewrite's destination date and the address
     // move's property (addressPlan.rows). One map for every guard.
+    // Post-save shapes of the rows this save will INSERT (spawn / extension;
+    // plannedRecurrenceDates.insertDates), built from the edited visit as it
+    // will stand. Judged by the secure-prepay rail ONLY (synthetic ids never
+    // reach an id-keyed invoice read); a hit refuses the save against the
+    // edited visit (Codex r6 P1 on #5387).
+    const plannedInsertCandidates = (row) => (plannedRecurrenceDates.insertDates || []).map((date, index) => ({
+      ...row,
+      ...saveCoverageProposed(),
+      id: `planned-insert-${index}`,
+      scheduled_date: date,
+      status: 'pending',
+      is_recurring: true,
+      is_callback: false,
+      recurring_parent_id: row.recurring_parent_id || row.id,
+      annual_prepay_term_id: null,
+      prepaid_amount: null,
+      prepaid_method: null,
+      _proposed: undefined,
+      _coverageContext: undefined,
+      _plannedInserts: undefined,
+    }));
     const saveSeriesOverlayById = () => {
       const byId = new Map();
       const put = (id, patch) => byId.set(String(id), { ...(byId.get(String(id)) || {}), ...patch });
@@ -13652,6 +13680,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           if (priceGuardRow) {
             priceGuardRow._proposed = saveCoverageProposed();
             priceGuardRow._coverageContext = await cadenceCoverageContext(trx, priceGuardCols);
+            priceGuardRow._plannedInserts = plannedInsertCandidates(priceGuardRow);
           }
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
@@ -18057,7 +18086,17 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
         contextRows.push(row);
       }
     }
-    const candidateRows = [...customerVisits, ...contextRows].map((v) => ({ ...v, ...(v._proposed || {}) }));
+    const insertOwner = new Map();
+    const insertRows = [];
+    for (const v of customerVisits) {
+      for (const row of v._plannedInserts || []) {
+        const key = `${v.id}:${row.id}`;
+        insertOwner.set(key, v.id);
+        insertRows.push({ ...row, id: key });
+      }
+    }
+    const candidateRows = [...customerVisits, ...contextRows].map((v) => ({ ...v, ...(v._proposed || {}) }))
+      .concat(insertRows);
     for (const term of terms) {
       const covered = await coverageRowsForTerm(term, conn, {
         extraCandidateRows: candidateRows,
@@ -18071,12 +18110,17 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
       for (const v of customerVisits) {
         if (!marks.has(v.id) && coveredIds.has(String(v.id))) marks.set(v.id, reasonFor(term));
       }
+      for (const [key, ownerId] of insertOwner) {
+        if (!marks.has(ownerId) && coveredIds.has(key)) {
+          marks.set(ownerId, `adding a visit this save creates, which would be ${reasonFor(term)}`);
+        }
+      }
     }
   }
   return marks;
 }
 
-async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false } = {}) {
+async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInvoice = false, securePrepay = liveInvoice } = {}) {
   const covered = new Map();
   const mark = (id, reason) => { if (!covered.has(id)) covered.set(id, reason); };
   // The term LINK outlives the coverage: a voided/refunded prepay flips the
@@ -18261,7 +18305,7 @@ async function findBillingCoveredVisits(conn, visits, { feeRails = true, liveInv
   // (Codex requirement 5): the plan trim and the series-cancel fee rails
   // never called findBillingCoveredVisits with it and must stay
   // byte-identical.
-  if (liveInvoice) {
+  if (liveInvoice && securePrepay) {
     const securePending = await securePendingPrepayCoverageReasons(conn, visits);
     for (const [id, reason] of securePending) mark(id, reason);
   }

@@ -674,6 +674,34 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     expect(whereNullCalls).toContain('t.dispute_suspended_at');
   });
 
+  test('securePrepay:false (a service-only following edit) skips this rail — price-only ruling (Codex r6 P1 on #5387)', async () => {
+    const v1 = visit();
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true, securePrepay: false });
+    expect(covered.has('v1')).toBe(false);
+  });
+
+  test('a visit this save will INSERT that the term would cover refuses the save against the edited visit (Codex r6 P1 on #5387)', async () => {
+    // Edited v1 is outside the window; the spawn inserts a child inside it.
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01' });
+    const conn = fixture({ visits: [v1] });
+    const alone = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(alone.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _plannedInserts: [{ ...v1, id: 'planned-insert-0', scheduled_date: '2026-06-01' }],
+    }], { liveInvoice: true });
+    expect(covered.get('v1')).toMatch(/adding a visit this save creates/);
+  });
+
+  test('a planned insert outside the window does not refuse', async () => {
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-03-01' });
+    const conn = fixture({ visits: [v1] });
+    const covered = await findBillingCoveredVisits(conn, [{
+      ...v1, _plannedInserts: [{ ...v1, id: 'planned-insert-0', scheduled_date: '2027-05-01' }],
+    }], { liveInvoice: true });
+    expect(covered.has('v1')).toBe(false);
+  });
+
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {
     const v1 = visit();
     const conn = fixture({ visits: [v1], securePrepayLockAcquired: false });
