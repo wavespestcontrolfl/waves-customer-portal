@@ -11722,7 +11722,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     };
     const reviewSuffix = bundledReviewUrl
-      ? `\n\nEnjoyed the service? A quick review means the world: ${bundledReviewUrl}`
+      ? `\n\n${require('./scheduled-sms-delivery').COMPLETION_REVIEW_INVITE} ${bundledReviewUrl}`
       : '';
 
     // Digital business card: mint the customer's card off their first
