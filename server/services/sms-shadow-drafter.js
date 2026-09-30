@@ -1391,20 +1391,21 @@ function reserviceHasSeparateRequest(text) {
   }
   return false;
 }
-// Codex round-31 P1: the bypass rests on INDEPENDENT EVIDENCE IN THE INBOUND TEXT of a separate need — never on the
-// upstream `schedulingIntent` flag or the classified intent. Traced: sms-intent.hasSchedulingIntent is a keyword /
-// weekday / month-day / clock-time detector, so it is TRUE for a plain pest report that merely carries a time word
-// ("the ants are back this morning", "…on Tuesday", "…since yesterday"), and the router labels ordinary pest
-// reports customer_issue_needs_review; trusting either would make every such report bypass all three
-// slot guards. (The plain "The ants are back" / "they're back" produce false, but time-word reports do not.)
-function reserviceIsOnlySchedulingNeed({ inboundMessage }) {
+// Codex round-32 P1 (PR #5336), structural and FAIL-CLOSED: no text detector may ever relax a slot guard. Three rounds of
+// "separate need" heuristics ("book" → "next week" → …) kept leaking, so when the reported pest lane decides the reply
+// (bookable or already booked) the guards ALWAYS apply — no offered_times, no book_appointment, no OPEN TIMES in the
+// facts — whatever else the inbound asks. This detector only decides whether to ADD a prompt hint telling the model
+// to hand the OTHER request to the office; it may be imperfect and never loosens anything.
+function reserviceMixedRequest({ inboundMessage }) {
   const text = String(inboundMessage || '');
-  if (SAVE_SALE_NON_PEST_TEXT_RE.test(text) || reserviceHasSeparateRequest(text)) return false;
-  return !require('./reservice-scheduler').namesOtherService(text, 'pest');
+  return SAVE_SALE_NON_PEST_TEXT_RE.test(text) || reserviceHasSeparateRequest(text)
+    || require('./reservice-scheduler').namesOtherService(text, 'pest');
 }
+// Per-draft user-prompt hint (NOT the pinned system prompt), gate-on only: the re-service is handled per the PEST REPORTS
+// rule; the other request goes to a person.
+const RESERVICE_MIXED_REQUEST_HINT = 'MIXED REQUEST: this text reports pests AND asks for something else (another visit, a schedule change, a cancellation or another service). Answer the pest report per the PEST REPORTS rule (offer the free re-service link when FREE RE-SERVICE says eligible, or refer to the appointment already on the schedule when it says booked). Do NOT quote, offer or book any times for the other request — add {"type":"escalate","note":"<the other request in a few words>"} to intended_actions and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.';
 function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
   if (!reserviceState || !gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context)) return false;
-  if (!reserviceIsOnlySchedulingNeed({ inboundMessage })) return false;
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const lane = reportedReserviceLane(inboundMessage) || pronounOnlyReportLane(inboundMessage, context);
   return Boolean(lane) && (reserviceState.lanes.includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
@@ -1438,12 +1439,8 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   const promise = isReserviceOfferPromise(planCustomer ? text : withoutGenericInspections(text));
   // Codex round-26 P2: a pest report whose lane the facts mark ALREADY BOOKED is answered from the appointment on the
   // schedule — the prompt forbids OPEN TIMES and a paid visit for it, so a reply that offers slots is rejected.
-  // Codex round-30 P1: offered_times / book_appointment are rejected only when the re-service is the customer's SOLE
-  // scheduling need. A mixed inbound ("The ants are back. Can I move my lawn visit to Friday?") legitimately
-  // carries times for the OTHER need. (offered_times entries are { date, window } only — they carry no service
-  // identity to compare against the reported pest lane.)
-  const soleSchedulingNeed = reserviceIsOnlySchedulingNeed({ inboundMessage });
-  const bookedLaneBlock = soleSchedulingNeed ? reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions }) : null;
+  // Codex round-32 P1: ALWAYS applied — no text detector relaxes it (a mixed inbound hands its other request to the office).
+  const bookedLaneBlock = reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions });
   if (bookedLaneBlock) return { ok: false, violations: [bookedLaneBlock] };
   if (!promise) {
     // Codex round-27 P2: when the offer is OWED, the link ACTION alone is not the customer-facing offer — a
@@ -1480,8 +1477,8 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     // Codex round-5 P2 (finding #3): the re-service link page shows the customer its OWN real
     // availability — a promise that ALSO offers or books a specific slot right here is a second,
     // conflicting offer (and a book_appointment has no eligibility/pricing checks of its own).
-    [soleSchedulingNeed && [].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
-    [soleSchedulingNeed && actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
+    [[].concat(offeredTimes || []).length, 'the reply promises a free re-service but also declares offered_times — the re-service link shows its own availability, never quote or offer appointment times here'],
+    [actions.some((a) => a && a.type === 'book_appointment'), 'the reply promises a free re-service but intended_actions includes book_appointment — the re-service link shows its own availability, never book a slot here'],
     [!lanes.length, 'the reply offers a free visit but FREE RE-SERVICE in the facts does not say this customer is eligible — never offer or imply a free re-service'],
     [reportedReserviceExcludedSpecialty(inboundMessage), 'the customer reported an excluded-specialty issue (termites/rodents/mosquitoes/tree & shrub) — never offer or imply a free pest or lawn re-service for it'],
     [reserviceExcludedSpecialtyInPromise(text), 'the reply promises a free re-service for an excluded specialty (termites/rodents/mosquitoes/tree & shrub) — the re-service link only books pest or lawn'],
@@ -3105,14 +3102,14 @@ async function fetchVoiceExemplars({ intent, limit = FEWSHOT_COUNT, dbi = db, ex
   }
 }
 
-function buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock = '') {
+function buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock = '', mixedHint = '') {
   return `${factsBlock}
 
 CLASSIFIED INTENT: ${intent?.intent || 'GENERAL'}${schedulingIntent ? ' (scheduling-intent detected — be especially careful to only state schedule facts present above)' : ''}
 ${intent?.intent === GRATITUDE_INTENT ? `APPROVED GRATITUDE REPLY: ${JSON.stringify(intent.approvedReply || 'Our pleasure!')}` : ''}
 
 The facts above are the ONLY ones you have. If answering needs a detail that isn't shown — an exact time, a tech name, what was found, a billing event — do not invent it; say you'll confirm and follow up.
-${exemplarBlock ? `\n${exemplarBlock}\n` : ''}
+${exemplarBlock ? `\n${exemplarBlock}\n` : ''}${mixedHint ? `\n${mixedHint}\n` : ''}
 NEW INBOUND MESSAGE: "${inboundMessage}"
 
 Draft the reply JSON now.`;
@@ -3458,7 +3455,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
     ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
-  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock);
+  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage }) ? RESERVICE_MIXED_REQUEST_HINT : '');
 
   // Route once for the whole loop (revisions included) — routing looks at the
   // intent label AND the raw message so complaints mislabeled as scheduling
@@ -4138,6 +4135,7 @@ module.exports = {
   customerHasPestRelationship,
   pestReportSignal,
   reserviceLaneDecidesReply,
-  reserviceIsOnlySchedulingNeed,
+  reserviceMixedRequest,
+  RESERVICE_MIXED_REQUEST_HINT,
   reportedPestLane,
 };

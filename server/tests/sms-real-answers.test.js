@@ -1093,38 +1093,69 @@ describe('generateGroundedDraft — real-answers wiring shares the facts block w
       expect(out.getAvailableSlots).not.toHaveBeenCalled();
     });
 
-    // Codex round-29 P1: the shortcut applies only when the re-service is the customer's SOLE need.
-    test('mixed / cancel requests keep the normal OPEN TIMES lookup: "ants are back, cancel my plan", "ants are back. Can I move my lawn visit to Friday?"', async () => {
+    // Codex round-32 P1 (fail-closed): whenever the reported pest lane decides the reply, normal-slot work is skipped
+    // REGARDLESS of any other request — a mixed inbound hands its other request to the office (prompt hint only).
+    test('mixed / cancel / time-word requests still skip the normal OPEN TIMES lookup; only a prompt HINT changes', async () => {
       const eligible = { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true };
       for (const inboundMessage of [
         'The ants are back, cancel my plan',
         'The ants are back. Can I move my lawn visit to Friday?',
+        'The ants are back. Can you book a re-service next week?',
         'the ants are back and I want to reschedule my visit',
         'the ants are back, I want a refund',
         'ants are back and my lawn looks bad',
+        'the ants are back this morning',
       ]) {
         const out = await run({ availability: eligible, inboundMessage });
-        expect(out.getAvailableSlots).toHaveBeenCalled();
-        expect(out.result.factsBlock).toContain('OPEN TIMES');
+        expect(out.getAvailableSlots).not.toHaveBeenCalled();
+        expect(out.loadBookableCallServices).not.toHaveBeenCalled();
+        expect(out.result.factsBlock).not.toContain('OPEN TIMES');
       }
-      // the upstream scheduling flag / classified intent are NOT evidence of a separate need (round-31 P1): the flag is a
-      // keyword/day/time detector a plain pest report can trip ("…this morning"), so it never defeats the shortcut
+      // flags and intents never matter
       expect((await run({ availability: eligible, schedulingIntent: true })).getAvailableSlots).not.toHaveBeenCalled();
       expect((await run({ availability: eligible, intent: 'CANCEL_REQUEST' })).getAvailableSlots).not.toHaveBeenCalled();
-      // ...while plain reports (persistence wording, a customer_issue intent, a location) still skip it
-      for (const [inboundMessage, intent] of [['the ants are back', 'general_customer_sms_needs_review'], ['the ants came back', 'customer_issue_needs_review'], ['ants are back on the lawn', 'COMPLAINT'], ["they're back", 'general_customer_sms_needs_review']]) {
-        const out = await run({ availability: eligible, inboundMessage, intent });
-        expect(out.getAvailableSlots).not.toHaveBeenCalled();
-      }
     });
 
-    test('reserviceIsOnlySchedulingNeed: the sole-need rule, unit rows', () => {
-      const { reserviceIsOnlySchedulingNeed } = require('../services/sms-shadow-drafter');
-      const only = (inboundMessage, extra = {}) => reserviceIsOnlySchedulingNeed({ inboundMessage, intent: { intent: 'customer_issue_needs_review' }, schedulingIntent: false, ...extra });
-      for (const m of ['the ants are back', 'the ants came back', 'I keep seeing roaches', 'ants are back on the lawn', 'the ants are back, whats my balance']) expect(only(m)).toBe(true);
-      for (const m of ['the ants are back, cancel my plan', 'ants are back. can I move my lawn visit to Friday?', 'ants are back, any availability next week?', 'ants are back and the lawn has weeds', 'the termites and ants are back', 'ants are back, I want to book a mosquito treatment']) expect(only(m)).toBe(false);
-      expect(only('the ants are back', { schedulingIntent: true })).toBe(true); // upstream flags are not evidence (round-31 P1)
-      expect(only('the ants are back this morning')).toBe(true);
+    test('generateGroundedDraft puts the MIXED REQUEST hint in the user prompt only for a mixed inbound whose pest lane decides the reply', async () => {
+      const eligible = { eligible: ['pest'], open: {}, bookable: ['pest'], verified: true };
+      const prompts = [];
+      const draftPrompt = async (inboundMessage) => {
+        prompts.length = 0;
+        process.env[GATE] = 'true';
+        const getAvailableSlots = jest.fn();
+        mockDraftDeps({ getAvailableSlots });
+        jest.doMock('../services/llm/call', () => ({
+          dispatchWithFallback: jest.fn(async (policy, payload) => {
+            if (payload?.laneId === 'sms_service_identity') return IDENTITY_NONE;
+            prompts.push(String(payload?.text || ''));
+            return { ok: true, text: JSON.stringify({ reply: '', intended_actions: [], missing_info: null }), model: 'fixture-model' };
+          }),
+        }));
+        const actual = jest.requireActual('../services/reservice-scheduler');
+        jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => eligible }));
+        jest.resetModules();
+        const drafter = require('../services/sms-shadow-drafter');
+        await drafter.generateGroundedDraft({
+          client: {}, context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], serviceHistory: [{ type: 'General Pest Control' }] },
+          inboundMessage, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, city: 'Venice', voiceProfile: null,
+        });
+        return prompts.join('\n');
+      };
+      expect(await draftPrompt('The ants are back. Can I move my lawn visit to Friday?')).toContain('MIXED REQUEST');
+      expect(await draftPrompt('The ants are back, cancel my plan')).toContain('MIXED REQUEST');
+      expect(await draftPrompt('the ants are back')).not.toContain('MIXED REQUEST');
+    });
+
+    test('the MIXED REQUEST prompt hint (user prompt, gate-on, imperfect detection) tells the model to escalate the other request', () => {
+      const { reserviceMixedRequest, RESERVICE_MIXED_REQUEST_HINT, buildUserPromptFromFacts } = require('../services/sms-shadow-drafter');
+      for (const m of ['The ants are back, cancel my plan', 'The ants are back. Can I move my lawn visit to Friday?', 'ants are back and the lawn has weeds', 'ants are back, please book me a time']) expect(reserviceMixedRequest({ inboundMessage: m })).toBe(true);
+      for (const m of ['the ants are back', 'the ants came back', 'The ants are back. Can you book a re-service?', 'The ants are back. Can someone come back out?', 'The ants are back after my appointment', 'the ants are back this morning']) expect(reserviceMixedRequest({ inboundMessage: m })).toBe(false);
+      expect(RESERVICE_MIXED_REQUEST_HINT).toContain('"type":"escalate"');
+      expect(RESERVICE_MIXED_REQUEST_HINT).toContain('FOLLOW-UP SLA RIGHT NOW');
+      expect(RESERVICE_MIXED_REQUEST_HINT).toMatch(/Do NOT quote, offer or book any times/);
+      const withHint = buildUserPromptFromFacts('FACTS', 'ants are back, cancel my plan', { intent: 'x' }, false, '', RESERVICE_MIXED_REQUEST_HINT);
+      expect(withHint).toContain('MIXED REQUEST');
+      expect(buildUserPromptFromFacts('FACTS', 'ants are back', { intent: 'x' }, false, '')).not.toContain('MIXED REQUEST');
     });
 
     test('behavior otherwise identical: not eligible, a non-pest question, or a termite report still gets the normal-slot work', async () => {
@@ -3487,23 +3518,36 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(check("Sorry about that! I'm sending your free pest re-service link now.")).toMatchObject({ ok: true, promisedLanes: ['pest'] });
     });
 
-    // Codex round-30 P1 (PR #5336): times for a SEPARATE scheduling need are allowed on a mixed inbound.
-    test('mixed inbound: offered_times / book_appointment for the OTHER need converge (pest booked, or pest bookable with the re-service offer)', () => {
+    // Codex round-32 P1 (PR #5336): a mixed inbound NEVER relaxes a guard — the other request goes to the office.
+    test('mixed inbound + times is REJECTED (pest booked or bookable); mixed + escalate + SLA wording converges', () => {
       const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
-      const mixed = 'The ants are back. Can I move my lawn visit to Friday?';
       const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
       const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
       const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
-      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
-      // pest booked: refer to the appointment, offer lawn times
-      const booked = validateReserviceOffer({ reply: 'Your free re-service is already on the schedule for Thursday. I can move your lawn visit to Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: mixed, offeredTimes: slot });
+      const sendLink = { type: 'escalate', note: 'send_reservice_link' };
+      const handOff = { type: 'escalate', note: 'move lawn visit to Friday' };
+      for (const mixed of [
+        'The ants are back. Can I move my lawn visit to Friday?',
+        'The ants are back. Can you book a re-service next week?',
+        'The ants are back, cancel my plan',
+      ]) {
+        // pest booked + times / book_appointment → rejected
+        const booked = validateReserviceOffer({ reply: 'Your free re-service is already on the schedule for Thursday. I can do Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: mixed, offeredTimes: slot });
+        expect(booked.ok).toBe(false);
+        expect(booked.violations[0]).toMatch(/ALREADY BOOKED/);
+        expect(validateReserviceOffer({ reply: 'Your free re-service is on the schedule for Thursday. Booking Friday.', factsBlock: bookedFacts, intendedActions: [{ type: 'book_appointment' }], inboundMessage: mixed }).ok).toBe(false);
+        // pest bookable + times / book_appointment → rejected
+        const bookable = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. I can also do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: [sendLink], inboundMessage: mixed, offeredTimes: slot });
+        expect(bookable.ok).toBe(false);
+        expect(bookable.violations[0]).toMatch(/offered_times/);
+        expect(validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: bookableFacts, intendedActions: [sendLink, { type: 'book_appointment' }], inboundMessage: mixed }).ok).toBe(false);
+      }
+      // the right shape: the re-service handled, the other request escalated with SLA wording, NO times
+      const mixed = 'The ants are back. Can I move my lawn visit to Friday?';
+      const bookable = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. I've passed your lawn visit request to the office and they'll get back to you within the hour.", factsBlock: bookableFacts, intendedActions: [sendLink, handOff], inboundMessage: mixed });
+      expect(bookable).toMatchObject({ ok: true, promisedLanes: ['pest'] });
+      const booked = validateReserviceOffer({ reply: "Your free re-service is already on the schedule for Thursday. I've passed your lawn visit request to the office and they'll get back to you within the hour.", factsBlock: bookedFacts, intendedActions: [handOff], inboundMessage: mixed });
       expect(booked).toMatchObject({ ok: true });
-      expect(validateReserviceOffer({ reply: 'Your free re-service is on the schedule for Thursday. Booking your lawn visit for Friday.', factsBlock: bookedFacts, intendedActions: [{ type: 'book_appointment' }], inboundMessage: mixed }).ok).toBe(true);
-      // pest bookable: the re-service offer AND the lawn times
-      const both = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. For your lawn visit I can do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage: mixed, offeredTimes: slot });
-      expect(both).toMatchObject({ ok: true, promisedLanes: ['pest'] });
-      // ...but the upstream flag alone is NOT evidence of a separate need (round-31 P1)
-      expect(validateReserviceOffer({ reply: 'Your free re-service is on the schedule for Thursday. I can do Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: 'the ants are back', offeredTimes: slot, schedulingIntent: true }).ok).toBe(false);
     });
 
     // Codex round-31 P1: what the REAL router produces for plain pest reports must not bypass the guards.
@@ -3583,9 +3627,9 @@ describe('free re-service is an entitlement resolved through the existing mechan
     });
 
     // Codex round-30 P1 (PR #5336): a request whose object IS the re-service is the re-service itself.
-    test('a request for the re-service itself is the SOLE need; a request for a distinct appointment/service is separate', () => {
-      const { reserviceIsOnlySchedulingNeed } = require('../services/sms-shadow-drafter');
-      const only = (inboundMessage) => reserviceIsOnlySchedulingNeed({ inboundMessage });
+    test('hint detection: a request for the re-service itself is not "mixed"; a request for a distinct appointment/service is (prompt hint only)', () => {
+      const { reserviceMixedRequest } = require('../services/sms-shadow-drafter');
+      const only = (inboundMessage) => !reserviceMixedRequest({ inboundMessage });
       for (const m of [
         'The ants are back. Can you book a re-service?', 'The ants are back. Can someone come back out?', 'The ants are back. Can you schedule that?',
         'the ants are back, can you book it?', 'the ants are back, please send someone out', 'ants are back, move the re-service to Friday',
@@ -3599,27 +3643,28 @@ describe('free re-service is an entitlement resolved through the existing mechan
 
     test('"Can you book a re-service?" with pest booked / bookable: the slot guards stay ON (no offered_times, no book_appointment)', () => {
       const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
-      const inboundMessage = 'The ants are back. Can you book a re-service?';
       const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
       const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
       const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
       const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
-      // pest booked: another pest visit + times + book_appointment is rejected
-      const booked = validateReserviceOffer({ reply: 'I can book another visit for Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [{ type: 'book_appointment' }], inboundMessage, offeredTimes: slot });
-      expect(booked.ok).toBe(false);
-      expect(booked.violations[0]).toMatch(/ALREADY BOOKED/);
-      // pest bookable: the promise checks reject times / book_appointment
-      const withTimes = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. I can also do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage, offeredTimes: slot });
-      expect(withTimes.ok).toBe(false);
-      expect(withTimes.violations[0]).toMatch(/offered_times/);
-      const withBook = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: bookableFacts, intendedActions: [...sendLink, { type: 'book_appointment' }], inboundMessage });
-      expect(withBook.ok).toBe(false);
-      expect(withBook.violations[0]).toMatch(/book_appointment/);
+      for (const inboundMessage of ['The ants are back. Can you book a re-service?', 'The ants are back. Can you book a re-service next week?']) {
+        // pest booked: another pest visit + times + book_appointment is rejected
+        const booked = validateReserviceOffer({ reply: 'I can book another visit for Friday 9-11am.', factsBlock: bookedFacts, intendedActions: [{ type: 'book_appointment' }], inboundMessage, offeredTimes: slot });
+        expect(booked.ok).toBe(false);
+        expect(booked.violations[0]).toMatch(/ALREADY BOOKED/);
+        // pest bookable: the promise checks reject times / book_appointment
+        const withTimes = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now. I can also do Friday 9-11am.", factsBlock: bookableFacts, intendedActions: sendLink, inboundMessage, offeredTimes: slot });
+        expect(withTimes.ok).toBe(false);
+        expect(withTimes.violations[0]).toMatch(/offered_times/);
+        const withBook = validateReserviceOffer({ reply: "I'm sending your free pest re-service link now.", factsBlock: bookableFacts, intendedActions: [...sendLink, { type: 'book_appointment' }], inboundMessage });
+        expect(withBook.ok).toBe(false);
+        expect(withBook.violations[0]).toMatch(/book_appointment/);
+      }
     });
 
     test('a bare "appointment" mention is history, not a separate request; request language is', () => {
-      const { reserviceIsOnlySchedulingNeed } = require('../services/sms-shadow-drafter');
-      const only = (inboundMessage) => reserviceIsOnlySchedulingNeed({ inboundMessage });
+      const { reserviceMixedRequest } = require('../services/sms-shadow-drafter');
+      const only = (inboundMessage) => !reserviceMixedRequest({ inboundMessage });
       for (const m of ['The ants are back after my appointment', 'ants are back since my last appointment', 'the ants came back after the appointment on Tuesday']) expect(only(m)).toBe(true);
       for (const m of ['the ants are back, can I get an appointment for Friday?', 'ants are back and I need an appointment', 'ants are back, I want to schedule an appointment', 'ants are back, please move my appointment']) expect(only(m)).toBe(false);
     });
