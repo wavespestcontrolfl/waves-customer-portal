@@ -14,7 +14,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callContactSelects } = require('./staff-contact');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
-const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText, ownReplySubject } = require('./email/email-strip');
 const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
 
 const LIMIT = 50;
@@ -353,12 +353,22 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // 16000-char body cap for the whole check).
       // A send with no words of its own (only quoted history, only a
       // signature) is no reply at all, so it never witnesses one.
-      const rows = resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId))
-        .map(({ row }) => {
-          const { body_html: _html, ...rest } = row;
-          return { ...rest, body_text: stripQuotedAndSignature(emailPlainText(row)) };
-        })
-        .filter((row) => row.body_text);
+      // A reply with no body words of its own may still answer in its
+      // subject — but only a subject that is new text, never the thread's
+      // subject behind "Re:" (ownReplySubject).
+      const rows = [];
+      for (const { row, linkedCustomerId } of resolved) {
+        if (String(linkedCustomerId) !== String(customerId)) continue;
+        const { body_html: _html, ...rest } = row;
+        let text = stripQuotedAndSignature(emailPlainText(row));
+        if (!text && row.subject) {
+          const threadSubjects = row.gmail_thread_id ? await conn('emails').where({ gmail_thread_id: row.gmail_thread_id })
+            .whereNot('id', row.id).whereNotNull('subject').limit(LIMIT).pluck('subject') : [];
+          const own = ownReplySubject(row.subject, threadSubjects);
+          if (own) text = `Subject: ${own}`;
+        }
+        if (text) rows.push({ ...rest, body_text: text });
+      }
       rows.truncated = candidates.length > EMAIL_REPLY_RAW_LIMIT || rows.length > LIMIT;
       return rows;
     })(),

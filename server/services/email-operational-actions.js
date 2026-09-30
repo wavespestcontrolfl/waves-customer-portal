@@ -72,7 +72,9 @@ function overdueBody(kind, whenAt) {
 // The email's grounded source is its subject AND its body: a request or
 // promise may sit only in the subject ("Please reschedule Friday"), so an
 // empty body with a subject is still eligible, and the receipt hash covers
-// both so a changed subject re-extracts (Codex, 2026-09-30).
+// both: it records exactly what was read. Nothing re-queues on a change
+// because none happens — a Gmail message is immutable once sent, and a
+// resync never rewrites a stored subject or body (email-sync.js upsertEmail).
 const subjectOf = (email) => String(email?.subject || '').trim();
 const sourceHash = (email) => hashExtractionSource(JSON.stringify([subjectOf(email), emailPlainText(email)]));
 

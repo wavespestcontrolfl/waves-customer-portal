@@ -1,6 +1,6 @@
 'use strict';
 
-const { stripQuotedAndSignature, decodeEntities } = require('../services/email/email-strip');
+const { ownReplySubject, stripQuotedAndSignature, decodeEntities } = require('../services/email/email-strip');
 
 describe('stripQuotedAndSignature', () => {
   test('cuts a Gmail-style "On ... wrote:" quote header and everything after it', () => {
@@ -91,5 +91,18 @@ describe('stripQuotedAndSignature', () => {
       const body = 'On Tuesday the tech wrote: come at 3 and On Friday he wrote: no';
       expect(stripQuotedAndSignature(body)).toBe(body);
     });
+  });
+});
+
+describe('ownReplySubject', () => {
+  test('the thread subject behind Re:/Fwd: prefixes is not new text', () => {
+    expect(ownReplySubject('Re: Please reschedule Friday', ['Please reschedule Friday'])).toBe('');
+    expect(ownReplySubject('RE: re: Fwd: please reschedule  friday', ['Please reschedule Friday'])).toBe('');
+    expect(ownReplySubject('Re:', [])).toBe('');
+  });
+
+  test('a subject that says something new is the reply\'s own words, without its prefixes', () => {
+    expect(ownReplySubject('Re: Booked you for Friday 9am', ['Please reschedule Friday'])).toBe('Booked you for Friday 9am');
+    expect(ownReplySubject('Estimate attached', [])).toBe('Estimate attached');
   });
 });

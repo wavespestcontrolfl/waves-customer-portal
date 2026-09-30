@@ -563,6 +563,25 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(fulfillment).toMatchObject({ verdict: 'fulfilled', record_type: 'email_reply', record_id: reply.id, basis: 'person_reply' });
   });
 
+  test('a reply with no body words counts only when its subject is new text, never the thread subject behind Re:', async () => {
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const sourceAt = new Date(Date.now() - 10 * 60000);
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', subject: 'Please reschedule Friday',
+      received_at: new Date(sourceAt.getTime() - 60000) });
+    const sent = (subject, minutes) => insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null, subject, body_text: '',
+      label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + minutes * 60000) });
+    const echo = await sent('Re: Please reschedule Friday', 1);
+    const answer = await sent('Re: Booked you for Monday 9am', 2);
+    const message = { id: randomUUID(), customer_id: customerId, direction: 'inbound', created_at: sourceAt,
+      from_phone: '+12025550101', to_phone: '+12025550101', any_customer_phone: true };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, { kind: 'other', party: 'waves', sms_context: { basis: 'request' } }, message, new Date());
+    const replies = evidence.records.filter((r) => r.type === 'email_reply');
+    expect(replies.map((r) => r.id)).toEqual([answer.id]);
+    expect(replies[0].text).toBe('Subject: Booked you for Monday 9am');
+    expect(replies.some((r) => r.id === echo.id)).toBe(false);
+  });
+
   test('with the email gate off, a staff Gmail reply is no evidence for a live SMS ask (dark launch)', async () => {
     const sourceAt = new Date();
     const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request', received_at: new Date(sourceAt.getTime() - 60000) });

@@ -102,4 +102,21 @@ function emailPlainText(row) {
   return html.trim() ? require('../newsletter-proof').htmlReplyToText(html) : '';
 }
 
-module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText };
+// A reply's subject counts as its own words only when it is new text: not
+// the thread's subject again behind "Re:"/"Fwd:" (every reply carries
+// that, so it would make an empty reply look like an answer). Returns the
+// subject without its reply prefixes, or '' when it says nothing new.
+const REPLY_PREFIX = /^\s*(?:re|fwd?|aw|sv)\s*(?:\[\d+\])?\s*:\s*/i;
+function withoutReplyPrefixes(subject) {
+  let text = decodeEntities(subject).trim();
+  while (REPLY_PREFIX.test(text)) text = text.replace(REPLY_PREFIX, '');
+  return text.replace(/\s+/g, ' ').trim();
+}
+function ownReplySubject(subject, threadSubjects = []) {
+  const own = withoutReplyPrefixes(subject);
+  if (!own) return '';
+  const seen = new Set(threadSubjects.map((s) => withoutReplyPrefixes(s).toLowerCase()));
+  return seen.has(own.toLowerCase()) ? '' : own;
+}
+
+module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject };
