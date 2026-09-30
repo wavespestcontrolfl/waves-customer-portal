@@ -225,6 +225,10 @@ function hasAttrSpreadAfter(attrs, from = 0) {
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
+    // Top-level comment trivia between attributes is skipped whole, so a
+    // brace inside it is never read as a spread (#5380 r3).
+    if (c === '/' && s[i + 1] === '*') { const end = s.indexOf('*/', i + 2); if (end < 0) return true; i = end + 1; continue; }
+    if (c === '/' && s[i + 1] === '/') { const end = s.indexOf('\n', i + 2); if (end < 0) break; i = end; continue; }
     if (c !== '{') continue;
     // Quoted values and expressions are skipped whole, so a { reached here
     // is a value (`name={…}`) or at attribute position — and there JSX

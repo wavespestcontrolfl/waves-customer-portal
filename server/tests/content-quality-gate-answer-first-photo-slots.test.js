@@ -916,6 +916,19 @@ describe('verdict box with a JSX spread fails closed', () => {
     expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
       .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
   });
+  test.each([
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." /* {editor note} */ />'],
+    ['<BottomLineBox verdict="Yes, they sting." // {editor note}\n recommendation="Seal gaps." />'],
+  ])('a brace inside comment trivia is not a spread: %s', (tag) => {
+    const body = `${tag}\n\nMore.`;
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: true });
+  });
+  test('a spread after comment trivia still fails closed', () => {
+    const body = '<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." /* x */ {...props} />\n\nMore.';
+    expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))
+      .toEqual({ ok: false, reason: 'verdict_box_prop_not_static' });
+  });
   test('a spread box has no readable verdict for the answer-first check', () => {
     const { checkAnswerInFirstParagraph } = require('../services/content/content-quality-gate')._internals;
     const body = '<BottomLineBox verdict="Yes, fire ants sting." recommendation="Seal gaps." {...extra} />\n\nMore.';
