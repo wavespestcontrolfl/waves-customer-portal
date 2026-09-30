@@ -24774,10 +24774,22 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // to the screen's common list when the catalog read misses).
     const visitActiveIngredients = [];
     if (writerRulesOn) {
-      const productIds = (Array.isArray(products) ? products : []).map((prod) => prod?.productId).filter(Boolean);
-      if (productIds.length) {
+      // By id, and by name for name-only products (a legacy or restored row
+      // has productId null), the same two ways the grounding loader matches.
+      const selectedProducts = Array.isArray(products) ? products : [];
+      const productIds = selectedProducts.map((prod) => prod?.productId).filter(Boolean);
+      const productNames = [...new Set([
+        ...selectedProducts.filter((prod) => !prod?.productId).map((prod) => String(prod?.name || '').trim()),
+        ...(selectedProducts.length ? [] : fallbackProductNames),
+      ].filter(Boolean))];
+      if (productIds.length || productNames.length) {
         try {
-          const rows = await db('products_catalog').whereIn('id', productIds).select('active_ingredient');
+          const rows = await db('products_catalog')
+            .where((q) => {
+              if (productIds.length) q.whereIn('id', productIds);
+              if (productNames.length) q.orWhereIn('name', productNames);
+            })
+            .select('active_ingredient');
           visitActiveIngredients.push(...(Array.isArray(rows) ? rows : []).map((row) => row?.active_ingredient).filter(Boolean));
         } catch { /* the screen's common list still applies */ }
       }
@@ -24805,8 +24817,9 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       }
       // Under the writer rules the last-resort copy echoes only recorded
       // items the rules allow: an item with a timeframe, price, amount or
-      // other forbidden term ("follow up in 7 days") is left out rather than
-      // published.
+      // other forbidden term is left out rather than published, and free-text
+      // recommendations are left out entirely (aftercare, next-visit timing
+      // and handling advice belong to the report's own sections).
       const rulesItems = (items) => (writerRulesOn
         ? items.filter((item) => !writerRulesScreen(String(item || '')))
         : items);
@@ -24820,7 +24833,7 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
         // when the free-text fields are empty. All free-text inputs arrive
         // pre-redacted (codex r34).
         observations: rulesItems([...promptObs, ...typedFallbackObservations]),
-        recommendations: rulesItems([...promptRecs, ...typedFallbackNextSteps]),
+        recommendations: writerRulesOn ? [] : [...promptRecs, ...typedFallbackNextSteps],
         ratingLabel: ratingNum !== null ? PEST_ACTIVITY_LABELS[ratingNum] : null,
         customerConcern: rulesItems([promptConcern])[0] || '',
         // The writer rules drop the recorded footage ("with 120 linear ft

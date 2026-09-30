@@ -7,6 +7,7 @@
 // generate-report-photo-content.test.js.
 let mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
 let mockServiceType = 'Quarterly Pest Control Service';
+let mockCatalogRows = [];
 const mockProvider = jest.fn();
 const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
 const mockComms = jest.fn(async () => ({ text: '', promptHint: '' }));
@@ -24,7 +25,7 @@ jest.mock('../models/db', () => {
     for (const name of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
     chain.first = async () => (table === 'scheduled_services'
       ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1' } : null);
-    chain.then = (resolve) => Promise.resolve([]).then(resolve);
+    chain.then = (resolve) => Promise.resolve(table === 'products_catalog' ? mockCatalogRows : []).then(resolve);
     return chain;
   });
   db.raw = jest.fn(); db.fn = { now: () => new Date() }; return db;
@@ -59,6 +60,7 @@ beforeEach(() => {
   mockComms.mockImplementation(async () => ({ text: '', promptHint: '' }));
   mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
   mockServiceType = 'Quarterly Pest Control Service';
+  mockCatalogRows = [];
   delete process.env.GATE_REPORT_WRITER_RULES;
 });
 afterEach(() => { delete process.env.GATE_REPORT_WRITER_RULES; });
@@ -153,9 +155,28 @@ test('gate on: the last-resort copy leaves out recorded items the rules forbid',
   expect(res.statusCode).toBe(200);
   const { report, deterministic } = res.json.mock.calls[0][0];
   expect(deterministic).toBe(true);
-  expect(report).toContain('Trim the shrubs off the wall');
+  expect(report).toContain('Exterior perimeter treatment');
+  // Free-text recommendations never reach the rules-on fallback: aftercare
+  // and next-visit timing belong to the report's own sections.
   expect(report).not.toContain('7 days');
+  expect(report).not.toContain('Trim the shrubs');
   expect(report).not.toMatch(/linear ft/);
+});
+
+test('gate on: a name-only product still has its catalog actives screened', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ active_ingredient: 'Bacillus thuringiensis israelensis (Bti)' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('We treated the door thresholds', 'We placed Bti in the pond and treated the door thresholds') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+  const res = mkRes();
+  await handler(mkReq({
+    serviceNotes: 'Dunks in the pond (name-only product case).',
+    productsApplied: 'Mosquito Dunks (1 dunk)',
+    products: [{ productId: null, name: 'Mosquito Dunks', applicationMethod: 'spot_treatment' }],
+  }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
 });
 
 test('gate off: the same amount is not screened by the rules', async () => {

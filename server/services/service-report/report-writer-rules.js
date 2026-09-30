@@ -66,7 +66,7 @@ const PROMPT_REWRITES = Object.freeze([
   ],
   [
     '(Customer concern, and the "Customer communication" lines of a STRUCTURED SERVICE FINDINGS block)',
-    '(Customer concern, the CUSTOMER\'S OWN WORDS block, technician-note sentences about what the customer said, and the "Customer communication" lines of a STRUCTURED SERVICE FINDINGS block)',
+    '(Customer concern, the WHAT THE CUSTOMER TOLD US block, technician-note sentences about what the customer said, and the "Customer communication" lines of a STRUCTURED SERVICE FINDINGS block)',
   ],
   [
     '(Observations, Pest activity rating, and ONLY the "Findings observed" lines',
@@ -154,7 +154,7 @@ function composeWriterRulesPrompt([header, ...parts]) {
 // User-message labels the route uses while the rules apply.
 const TECHNICIAN_NOTE_HEADER = "[TECHNICIAN NOTE — the technician's own words, often dictated; it may mix work done, what was seen, what the customer said, and advice for later: sort each sentence]";
 const MAX_TECHNICIAN_NOTE_CHARS = 3000;
-const CUSTOMER_WORDS_HEADER = "CUSTOMER'S OWN WORDS (recent messages and call summaries; context only, never a finding)";
+const CUSTOMER_WORDS_HEADER = 'WHAT THE CUSTOMER TOLD US (their own texts and emails, and AI summaries of calls; context only, never a finding)';
 
 function withheldProductsLine(count) {
   return count > 0
@@ -219,6 +219,13 @@ const TIMEFRAME_RE = new RegExp(
 );
 // Money and entitlement (rule 9).
 const PRICE_RE = /\$\s?\d|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
+// Next-visit dates, days and times (rule 11): the report prints the
+// appointment itself. "October 7", "next Tuesday", "10 AM".
+// "May" only capitalized, so "activity may 2…" is not a date.
+const MONTH_DAY_RE = /\b(?:[Jj]an(?:uary)?|[Ff]eb(?:ruary)?|[Mm]ar(?:ch)?|[Aa]pr(?:il)?|May|[Jj]une?|[Jj]uly?|[Aa]ug(?:ust)?|[Ss]ept?(?:ember)?|[Oo]ct(?:ober)?|[Nn]ov(?:ember)?|[Dd]ec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/;
+// Forward words only: "you texted us on Monday" is a past fact.
+const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
+const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])/i;
 // Re-entry and aftercare wording without a number ("stay off until dry").
 const REENTRY_RE = /\bre-?ent(?:ry|er|ering)\b|\b(?:until|once|after)\s+(?:the\s+(?:area|product|treatment|spray|application)\s+(?:is|has)\s+|it(?:'s|’s|\s+is|\s+has)\s+)?(?:fully\s+|completely\s+)?dr(?:y|ied|ies)\b|\bstay\s+(?:off|out\s+of)\b|\bkeep\s+(?:your\s+)?(?:kids|children|pets|people|family)\b[^.]{0,40}?\b(?:off|out|away)\b/i;
 
@@ -237,6 +244,8 @@ function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   if (REENTRY_RE.test(copy)) return 'reentry';
   if (TIMEFRAME_RE.test(copy)) return 'timeframe';
   if (PRICE_RE.test(copy)) return 'price';
+  if (MONTH_DAY_RE.test(copy) || WEEKDAY_RE.test(copy)) return 'date';
+  if (CLOCK_RE.test(copy)) return 'time';
   const patterns = [...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
     .filter(Boolean);

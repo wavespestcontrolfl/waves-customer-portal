@@ -153,6 +153,9 @@ describe('writerRulesRejection', () => {
     ['The visit is included in your plan.', 'price'],
     ['Each extra check is $95.', 'price'],
     ['The work is covered by your warranty.', 'price'],
+    ['We will return next Tuesday.', 'date'],
+    ['Your next visit is scheduled for October 7.', 'date'],
+    ['We arrive between 8 and 10 AM.', 'time'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -168,6 +171,8 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('We will recheck station 7 at your next monitoring visit.')).toBeNull();
     expect(writerRulesRejection('The station behind the garage is covered by mulch.')).toBeNull();
     expect(writerRulesRejection('The gutters were free of standing water.')).toBeNull();
+    expect(writerRulesRejection('You texted us on Monday about the ants.')).toBeNull();
+    expect(writerRulesRejection('We checked 4/5 stations.')).toBeNull();
   });
 
   test('a dry cabinet or a note about rain is not re-entry wording', () => {

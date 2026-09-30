@@ -281,14 +281,18 @@ async function buildCompletionCommsContext({
     : calls;
   const entries = [];
   for (const call of callRows) {
-    const summary = compactText(source(call.lead_synopsis || call.notes || call.transcription));
+    // customerWordsOnly: a raw transcript mixes both speakers, so only the
+    // call's summary or notes may stand in for it.
+    const summary = compactText(source(customerWordsOnly
+      ? call.lead_synopsis || call.notes
+      : call.lead_synopsis || call.notes || call.transcription));
     if (summary) {
       const who = call.direction === 'inbound' ? 'the customer called'
         : call.direction === 'outbound' ? 'Waves called the customer' : 'caller unknown';
       entries.push({
         ts: contextTs(call.created_at),
         line: customerWordsOnly
-          ? `Call ${contextDate(call.created_at)} (${who}; AI summary, not verified): ${summary}`
+          ? `Call ${contextDate(call.created_at)} (${who}; AI summary of the whole conversation, not verified): ${summary}`
           : `Call ${contextDate(call.created_at)} (${call.direction || 'unknown'}${call.call_outcome ? `, ${call.call_outcome}` : ''}): ${summary}`,
       });
     }
@@ -325,7 +329,7 @@ async function buildCompletionCommsContext({
 
   // Ratified relevance rule: window + prompt hint, never a keyword filter.
   const promptHint = customerWordsOnly
-    ? `These are the customer's own recent messages and AI summaries of recent calls (${reason}). They are what the customer said, never a finding: use them only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote them, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`
+    ? `Recent contact with this customer (${reason}). Texts and emails are the customer's own words. A call entry is an AI summary of a conversation between the customer and Waves: use only what it says the customer reported, never what Waves said or promised. It is never a finding: use it only to choose what to acknowledge, attribute anything you use ("You mentioned…"), never quote it, and ignore anything unrelated to this ${serviceLine ? `${serviceLine} ` : ''}visit.`
     : serviceLine
     ? `These are the customer's recent communications (${reason}). Use only what is relevant to this ${serviceLine} visit; ignore unrelated topics.`
     : `These are the customer's recent communications (${reason}). Use only what is relevant to this visit; ignore unrelated topics.`;

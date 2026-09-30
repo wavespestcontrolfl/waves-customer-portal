@@ -249,6 +249,8 @@ describe('buildCompletionCommsContext', () => {
         { created_at: mk(7), direction: null, lead_synopsis: 'Discussed the attic hatch' },
         // Linked by caller ID before classification, then marked spam.
         { created_at: mk(8), direction: 'inbound', processing_status: 'spam', lead_synopsis: 'Extended warranty robocall' },
+        // Only a raw transcript: both speakers mixed, never the customer's words.
+        { created_at: mk(5), direction: 'outbound', transcription: 'Agent: We will be there Thursday. Customer: OK.' },
       ],
       sms_log: [
         { created_at: mk(2), direction: 'outbound', message_body: 'Confirming your exclusion visit window' },
@@ -274,16 +276,18 @@ describe('buildCompletionCommsContext', () => {
     expect(whereArgs['call_log:raw'].map(([sql]) => sql).join(' ')).toContain("COALESCE(??, '') <> ?");
     expect(whereArgs.call_log.some(([arg]) => typeof arg === 'function')).toBe(true);
     expect(ctx.text).not.toContain('warranty robocall');
+    expect(ctx.text).not.toContain('We will be there Thursday');
+    expect(ctx.promptHint).toContain('never what Waves said or promised');
     expect(ctx.text).not.toContain('4821');
     expect(ctx.text).toMatch(/Customer text .*: \[redacted\] and the side yard is muddy/);
     expect(whereArgs['emails:raw'].map(([sql]) => sql).join(' ')).toMatch(/SENT.*wavespestcontrol\.com/s);
     const lines = ctx.text.split('\n').filter((line) => !line.includes('side yard is muddy'));
     expect(lines).toEqual([
-      expect.stringMatching(/^Call .* \(the customer called; AI summary, not verified\): Heard noises again in the attic$/),
+      expect.stringMatching(/^Call .* \(the customer called; AI summary of the whole conversation, not verified\): Heard noises again in the attic$/),
       expect.stringMatching(/^Customer text .*: Scratching is worse after midnight$/),
-      expect.stringMatching(/^Call .* \(Waves called the customer; AI summary, not verified\): Confirmed the visit window$/),
+      expect.stringMatching(/^Call .* \(Waves called the customer; AI summary of the whole conversation, not verified\): Confirmed the visit window$/),
       expect.stringMatching(/^Customer email .* "Attic photos": Photos of the soffit gap attached$/),
-      expect.stringMatching(/^Call .* \(caller unknown; AI summary, not verified\): Discussed the attic hatch$/),
+      expect.stringMatching(/^Call .* \(caller unknown; AI summary of the whole conversation, not verified\): Discussed the attic hatch$/),
     ]);
     expect(ctx.text).not.toContain('Confirming your exclusion visit window');
     expect(ctx.text).not.toContain('See you Tuesday');
