@@ -578,6 +578,18 @@ async function markTextCarriedBySummary(invoiceId) {
     .update({ sms_result: JSON.stringify({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY }), updated_at: db.fn.now() });
 }
 
+// The combined-stop charge defers its receipt job (deferReceiptDelivery) until the closeout
+// coordinator knows whether the summary text will carry the receipt link. When it will not,
+// the job is due again now, but only while it is still queued with no outcome, and the
+// queue is drained at once.
+async function resumeDeferredReceiptDelivery(invoiceId) {
+  const resumed = await db('receipt_delivery_jobs').where({ invoice_id: invoiceId, status: 'queued', attempts: 0 })
+    .where('next_attempt_at', '>', db.fn.now())
+    .update({ next_attempt_at: db.fn.now(), updated_at: db.fn.now() });
+  if (resumed) scheduleReceiptDeliveryDrain({ delayMs: 0, limit: 5 });
+  return resumed;
+}
+
 function scheduleReceiptDeliveryDrain({ delayMs = 0, limit = 10 } = {}) {
   const run = () => {
     processDueReceiptDeliveryJobs({ limit }).catch((err) => {
@@ -601,6 +613,7 @@ module.exports = {
   recordOperatorReceiptDelivered,
   releaseOperatorReceiptClaim,
   markTextCarriedBySummary,
+  resumeDeferredReceiptDelivery,
   TEXT_CARRIED_BY_SUMMARY,
   _internals: {
     recoverStaleLocks,

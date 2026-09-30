@@ -912,9 +912,14 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
   }
   // Paid: the receipt job's Text leg is not owed (its email still sends). Only a job that
   // has not run is set, and only then does the summary carry the receipt link.
+  const ReceiptQueue = require('./receipt-delivery-queue');
   if (summaryLink?.kind === 'receipt' && summaryLink.invoiceId === payment.invoiceId
-      && await require('./receipt-delivery-queue').markTextCarriedBySummary(summaryLink.invoiceId)) {
+      && await ReceiptQueue.markTextCarriedBySummary(summaryLink.invoiceId)) {
     await recordSummaryBillingLink(database, packet.id, summaryLink);
+  } else if (payment.state === 'paid' && payment.invoiceId
+      && !packetPayload(await database('visit_completion_packets').where({ id: packet.id }).first('payload')).summaryBillingLink) {
+    // Not folded: the charge deferred the receipt job for this decision, so it is due again now.
+    await ReceiptQueue.resumeDeferredReceiptDelivery(payment.invoiceId);
   }
   let delivery = await Summary.deliverVisitCompletionSummary(packet.id, token, database);
   await runPacketCompletionCredits(packet.id, database);

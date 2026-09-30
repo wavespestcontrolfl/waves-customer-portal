@@ -220,8 +220,16 @@ async function recheckDeferredSummarySms(meta, database = db, options = {}) {
 // before its provider request: a throw before that signal (a failed recheck
 // on the held connection) is provably unsent and restores the claim, while a
 // throw after it is the provider outcome and propagates with the mark in place.
+const LINK_CHANGED = 'link_changed';
+
 async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, scheduled = false, phone = null, email = null, pendingRef = null, authorized, dispatch }) {
   const lost = { ok: false, code: 'VISIT_SUMMARY_CLAIM_LOST' };
+  // `authorized` answers LINK_CHANGED when a queued body's invoice link went stale under the
+  // held rows and it has already put the plain body in its place: not a lost claim, a retry
+  // (the replay sends the plain summary a minute later) instead of losing the whole text.
+  const linkChanged = () => ({ ok: false, code: 'VISIT_SUMMARY_LINK_CHANGED', retryable: true,
+    reason: 'The invoice link changed before delivery; the plain summary follows',
+    nextAllowedAt: new Date(Date.now() + 60 * 1000).toISOString() });
   const holdAndAuthorize = async (trx, phase) => {
     // Lock order (customer-comms-lock.js): the per-customer comms lock
     // first — the per-property toggle writer commits under it, so a
@@ -260,8 +268,12 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
     if (email) await locks.lockCustomerEmail(trx, email);
     return authorized(customer, prefs, trx, phase);
   };
-  const marked = await db.transaction(async (trx) => ((await holdAndAuthorize(trx, 'claim'))
-    ? VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: trx, pendingRef }) : false));
+  const marked = await db.transaction(async (trx) => {
+    const allowed = await holdAndAuthorize(trx, 'claim');
+    if (allowed === LINK_CHANGED) return LINK_CHANGED;
+    return allowed ? VisitGroups.beginVisitNotificationDispatch(visitId, kind, token, { scheduled, database: trx, pendingRef }) : false;
+  });
+  if (marked === LINK_CHANGED) return linkChanged();
   if (!marked) return lost;
   // Nothing reached the provider: the mark returns to its pre-dispatch state
   // so the same claim can retry. Only a mark still carrying its pre-provider
@@ -275,7 +287,9 @@ async function claimDispatchThroughHandoff({ visitId, customerId, kind, token, s
   let verdict;
   try {
     verdict = await db.transaction(async (trx) => {
-      if (!(await holdAndAuthorize(trx, 'dispatch'))) return lost;
+      const allowed = await holdAndAuthorize(trx, 'dispatch');
+      if (allowed === LINK_CHANGED) return linkChanged();
+      if (!allowed) return lost;
       // The sender awaits this immediately before its provider request:
       // the pre-provider marker is cleared durably first (a crash after it
       // is uncertain, a crash before it reclaimable); a mark recovery has
@@ -310,9 +324,15 @@ async function beginDeferredSummarySms(meta, dispatch) {
       const eligible = phase === 'claim'
         ? (await recheckDeferredSummarySms(meta, trx, { customer })).eligible
         : (await deferredSummaryRecipient(meta, trx, { customer })).eligible;
-      // A body still carrying the link is judged again under the held rows.
-      return eligible && (!meta.billing_link
-        || summaryLinkStillValid(trx, { kind: meta.billing_link.kind, invoiceId: meta.billing_link.invoice_id }, meta.visit_id, meta.to_phone));
+      if (!eligible || !meta.billing_link) return eligible;
+      // A body still carrying the link is judged again under the held rows. If it went stale
+      // since the scheduler's recheck, the plain summary is put in its place, in this
+      // transaction, and the replay retries at once (never the whole summary lost).
+      if (await summaryLinkStillValid(trx, { kind: meta.billing_link.kind, invoiceId: meta.billing_link.invoice_id }, meta.visit_id, meta.to_phone)) return true;
+      const swapped = await trx('sms_log').where({ message_type: 'visit_summary', status: 'sending' })
+        .whereRaw("metadata->>'visit_summary_claim_token' = ?", [meta.visit_summary_claim_token])
+        .update({ message_body: meta.plain_body, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) - 'billing_link' - 'plain_body'"), updated_at: trx.fn.now() });
+      return swapped ? LINK_CHANGED : false;
     } });
 }
 

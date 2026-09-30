@@ -4905,9 +4905,12 @@ postgres('visit summary recipient recovery', () => {
     // The email is the customer's only guaranteed path to the link, so the fold asks what the
     // email senders ask and fails closed.
     describe('the email leg must be deliverable', () => {
-      test.each([['unpaid', {}], ['paid', { status: 'paid' }]])('%s: an actively suppressed invoice email address keeps today\'s behavior', async (kind, options) => {
+      test.each([
+        ['unpaid', {}, 'bounce'], ['paid', { status: 'paid' }, 'bounce'],
+        ['unpaid', {}, 'spam_complaint'], ['unpaid', {}, 'do_not_email'],
+      ])('%s: an actively suppressed (%s) invoice email address keeps today\'s behavior, the ledger the sender reads', async (kind, options, suppressionType) => {
         const invoiceId = await stop(options);
-        await mockPg('email_suppressions').insert({ email: fixture.primaryEmail, status: 'active', suppression_type: 'bounce' });
+        await mockPg('email_suppressions').insert({ email: fixture.primaryEmail, status: 'active', suppression_type: suppressionType });
         try {
           await coordinate();
           expect(await recorded()).toBeUndefined();
@@ -5066,6 +5069,110 @@ postgres('visit summary recipient recovery', () => {
           });
           expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: expected });
         } finally { await mockPg('payers').where({ id: payer.id }).del(); }
+      });
+    });
+
+    describe('the link going stale under the locked recheck falls back to the plain summary', () => {
+      const holdSummary = () => {
+        const nextAllowedAt = new Date(Date.now() + 8 * 3600000).toISOString();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt }));
+      };
+
+      test('immediate send: a billing hold landing after the plan sends the plain summary in the same run', async () => {
+        await stop();
+        let calls = 0;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          calls += 1;
+          if (calls === 1) await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+          return handoffSender()(input);
+        });
+        await coordinate();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(2);
+        expect(sendCustomerMessage.mock.calls[0][0].body).toMatch(/Pay your invoice: /);
+        expect(sendCustomerMessage.mock.calls[1][0].body).toBe(plainBody());
+        expect(await summaryEffect()).toMatchObject({ status: 'sent' });
+      });
+
+      test('deferred send: the handoff swaps in the plain body and retries instead of rejecting the summary', async () => {
+        await stop();
+        holdSummary();
+        await coordinate();
+        const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+        await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+        await mockPg('sms_log').where({ id: queued.id }).update({ status: 'sending' });
+        const refused = await deferredHandoff(queued.metadata);
+        expect(refused).toMatchObject({ ok: false, code: 'VISIT_SUMMARY_LINK_CHANGED', retryable: true });
+        const swapped = await mockPg('sms_log').where({ id: queued.id }).first();
+        expect(swapped.message_body).toBe(plainBody());
+        expect(swapped.metadata.billing_link).toBeUndefined();
+        expect(await summaryEffect()).toMatchObject({ status: 'pending' });
+        // The retry goes out plain.
+        expect(await deferredHandoff(swapped.metadata)).toMatchObject({ ok: true });
+      });
+
+      test('the scheduled worker: a link that goes stale after its first recheck still delivers the summary, plain, on the retry', async () => {
+        await stop();
+        holdSummary();
+        await coordinate();
+        const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+        const cron = require('../utils/scheduled-cron');
+        const gates = require('../config/feature-gates');
+        const isEnabled = gates.isEnabled;
+        jest.spyOn(gates, 'logGateStatus').mockImplementation(() => {});
+        jest.spyOn(gates, 'isEnabled').mockImplementation((gate) => gate === 'cronJobs' || isEnabled(gate));
+        cron.schedule.mockClear();
+        require('../services/scheduler').initScheduledJobs();
+        const tick = cron.schedule.mock.calls.find(([, callback]) => String(callback).includes('claimDueScheduledSms'))[1];
+        // The scheduler's own recheck sees a valid link; the hold lands before the locked handoff.
+        jest.spyOn(Summary, 'recheckDeferredSummarySms').mockResolvedValueOnce({ eligible: true });
+        await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+        await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+        sendCustomerMessage.mockImplementation(handoffSender(async () => ({ sent: true, providerMessageId: 'fixture-deferred' })));
+        await tick();
+        expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({ status: 'scheduled', message_body: plainBody() });
+        await mockPg('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+        await tick();
+        expect(await mockPg('sms_log').where({ id: queued.id }).first()).toMatchObject({ status: 'sent', message_body: plainBody() });
+        expect(sendCustomerMessage.mock.calls.at(-1)[0].body).toBe(plainBody());
+      });
+    });
+
+    describe('a stop that is not folded gets its deferred receipt back', () => {
+      const waitFor = async (check) => { for (let i = 0; i < 60; i += 1) { if (await check()) return true; await new Promise((resolve) => setTimeout(resolve, 50)); } return false; };
+      const deferJob = (invoiceId) => mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() + 3 * 60000) });
+
+      test('a paid stop that does not fold: the job is due now and drained right after the coordinator finishes', async () => {
+        const invoiceId = await stop({ status: 'paid', sameRecipient: false });
+        await deferJob(invoiceId);
+        await coordinate();
+        expect(await recorded()).toBeUndefined();
+        expect(await waitFor(() => strayTexts.length === 1)).toBe(true);
+        expect(await jobRow(invoiceId)).toMatchObject({ status: 'completed' });
+        expect(strayTexts).toEqual(['payment_receipt']);
+      });
+
+      test('a folded stop leaves its job deferred and carried, and a replay does not resume it', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await deferJob(invoiceId);
+        await coordinate();
+        expect(await recorded()).toEqual({ kind: 'receipt', invoiceId });
+        await mockPg('visit_completion_packets').where({ id: fixture.packetId }).update({ status: 'processing', error: null });
+        await coordinate();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const job = await jobRow(invoiceId);
+        expect(job.status).toBe('queued');
+        expect(new Date(job.next_attempt_at).getTime()).toBeGreaterThan(Date.now() + 60000);
+        expect(strayTexts).toEqual([]);
+      });
+
+      test('a job that already has an outcome is not touched', async () => {
+        const invoiceId = await stop({ status: 'paid', sameRecipient: false });
+        await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ status: 'retry_scheduled', attempts: 2, next_attempt_at: new Date(Date.now() + 3 * 60000) });
+        await coordinate();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        const job = await jobRow(invoiceId);
+        expect(job).toMatchObject({ status: 'retry_scheduled', attempts: 2 });
+        expect(new Date(job.next_attempt_at).getTime()).toBeGreaterThan(Date.now() + 60000);
       });
     });
 
