@@ -24,6 +24,8 @@ jest.mock('../services/messaging/send-window', () => ({
   isWithinSendWindowET: jest.fn(() => true),
 }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
+// The branded-email leg needs a configured provider; the template send below is a recording stub.
+jest.mock('../services/sendgrid-mail', () => ({ ...jest.requireActual('../services/sendgrid-mail'), isConfigured: jest.fn(() => true) }));
 
 const { randomUUID } = require('crypto');
 
@@ -231,6 +233,33 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
       expect(row.status).toBe('scheduled');
       expect(row.scheduled_send_attempts || 0).toBe(0);
       expect(row.send_claim_token).toBeNull();
+    });
+
+    test('the separate branded invoice EMAIL leg re-reads the hold at its own provider boundary (retryable, never terminal)', async () => {
+      const InvoiceEmail = require('../services/invoice-email');
+      const c = await newCustomer();
+      await db('customers').where({ id: c }).update({ email: `${c}@example.invalid` });
+      const token = randomUUID();
+      const inv = await newInvoice(c, { status: 'sending', send_claim_token: token });
+      // The real template send runs the invoice's provider-handoff hook around the provider request.
+      const emailReached = jest.fn();
+      const templates = jest.spyOn(require('../services/email-template-library'), 'sendTemplate').mockImplementation(async (opts) => {
+        const verdict = await opts.withProviderHandoff(async () => { emailReached(); });
+        return verdict.ok ? { sent: true, message: { provider_message_id: 'm1' } } : { sent: false, blocked: true, reason: verdict.reason };
+      });
+      // the dispute lands while the email is prepared: the boundary lookup answers "held"
+      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValue({ held: true, reason: 'hold' });
+      let out;
+      try { out = await InvoiceEmail.sendInvoiceEmail(inv, { claimToken: token }); } finally { spy.mockRestore(); }
+      expect(emailReached).not.toHaveBeenCalled();
+      expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deliveryOutcome: 'not_sent' });
+      // exemptions and payer-billed skip it (the lookup is never consulted for them)
+      const skipped = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockResolvedValue({ held: true, reason: 'hold' });
+      try {
+        const exempt = await InvoiceEmail.sendInvoiceEmail(inv, { claimToken: token, holdExempt: 'operator' });
+        expect(exempt.code).not.toBe('COLLECTION_HOLD_DEFER');
+        expect(emailReached).toHaveBeenCalledTimes(1);
+      } finally { skipped.mockRestore(); templates.mockRestore(); }
     });
 
     test('an operator/customer exemption is not stopped at the boundary either', async () => {

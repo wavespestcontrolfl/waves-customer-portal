@@ -426,6 +426,19 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
             const ownership = await require('./invoice-helpers').selfPayAtDispatch(invoice.id, trx)();
             if (ownership.ok !== true) return ownership;
           }
+          // Collections DISPUTE hold, re-read at THIS email provider boundary on the locked
+          // handle (owner ruling 2026-09-30): a hold that committed while the PDF/template
+          // rendered still stops the pay link - retryable + deferred, never terminal (savepoint
+          // read, fail closed). Payer-billed and the explicit operator/customer exemptions skip it.
+          if (!current.payer_id && !['operator', 'customer'].includes(options.holdExempt)) {
+            const collectionHold = require('./collections/collection-hold');
+            const held = await collectionHold.dueInvoiceHeldByDisputeHold(current.customer_id, trx);
+            if (held.held) {
+              const defer = collectionHold.holdDeferOutcome(held);
+              boundaryRefusal = { code: defer.code, reason: defer.reason, retryable: true, deferred: true, nextAllowedAt: defer.nextAllowedAt };
+              return { ok: false, ...boundaryRefusal };
+            }
+          }
           if (options.billingDeliveryCategory && !current.payer_id) {
             let freshPrefs;
             try {

@@ -7107,6 +7107,7 @@ const InvoiceService = {
           recipientOverride: emailRecipientOverride,
           payUrlParams,
           claimToken: claim.invoice.send_claim_token,
+          holdExempt,
           ...(!operatorInitiated ? { billingDeliveryCategory: 'invoice' } : {}),
         });
         if (r?.ok) email.ok = true;
