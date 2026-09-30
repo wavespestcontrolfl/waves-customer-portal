@@ -440,7 +440,7 @@ jest.setTimeout(30000);
     expect(saved).toMatchObject({ status: 'agent_unsure' });
     expect(saved.agent_decision.reason).toMatch(/catalog matches this title to a stocked product/);
     const [bell] = await bellsFor(line.id);
-    expect(bell.body).toMatch(/matches it to Demand CS, so it wasn't ignored/);
+    expect(bell.detail || bell.body).toMatch(/matches it to Demand CS, so it wasn't ignored/);
   });
 
   test('the logged bell warns to cancel a live restock request instead of receiving it', async () => {
@@ -472,7 +472,7 @@ jest.setTimeout(30000);
     expect(updated).toMatchObject({ inventory_unit: 'each', default_unit: 'each' });
     expect(await stockOf(trapProduct.id)).toBe(60); // 5 ordered x 12 count
     const [bell] = await bellsFor(line.id);
-    expect(bell.body).toMatch(/application unit to each/);
+    expect(bell.detail || bell.body).toMatch(/application unit to each/);
   });
 
   test('an EXISTING count product whose default_unit already carries usage and can\'t take a count holds for a person instead of silently deducting nothing later (review item 1)', async () => {
@@ -497,7 +497,7 @@ jest.setTimeout(30000);
     expect(saved.agent_decision).toMatchObject({ reason: 'application_unit_incompatible_with_count' });
     expect(await stockOf(trapProduct.id)).toBe(5); // never applied
     const [bell] = await bellsFor(line.id);
-    expect(bell.body).toMatch(/application unit can't take a count/);
+    expect(bell.detail || bell.body).toMatch(/application unit can't take a count/);
   });
 
   // 2026-09-27 pre-push audit: no movement doesn't mean unused — visit
@@ -524,7 +524,7 @@ jest.setTimeout(30000);
     expect(product).toMatchObject({ default_unit: 'oz', inventory_unit: null, inventory_on_hand: null });
     expect(await mockConn('product_inventory_movements').where({ product_id: trapProduct.id })).toHaveLength(0);
     const [bell] = await bellsFor(line.id);
-    expect(bell.body).toMatch(/already used on visits, services or protocols/);
+    expect(bell.detail || bell.body).toMatch(/already used on visits, services or protocols/);
   });
 
   test('a held count decision on a blank-container product leaves the catalog untouched (the savepoint rolls back)', async () => {
@@ -1077,7 +1077,7 @@ jest.setTimeout(30000);
     expect(saved).toMatchObject({ status: 'possible_duplicate', movement_id: null });
     expect(await stockOf(taurus.id)).toBe(0);
     const [bell] = await bellsFor(line.id);
-    expect(bell.body).toMatch(/wasn't added\. A manual restock or count was logged around the same time/);
+    expect(bell.detail || bell.body).toMatch(/wasn't added\. A manual restock or count was logged around the same time/);
   });
 
   // Codex round 8: a lawn visit's substitution references its products by
@@ -1166,7 +1166,7 @@ jest.setTimeout(30000);
     const saved = await mockConn('purchase_receipt_lines').where({ id: line.id }).first();
     expect(saved.agent_decision.newProduct).toMatchObject({ listingEpaRegNumber: '279-3206' });
     const [bell] = await bellsFor(line.id);
-    expect(bell.body).toMatch(/the listing gives EPA Reg\. No\. 279-3206, so confirm it from the label/);
+    expect(bell.detail || bell.body).toMatch(/the listing gives EPA Reg\. No\. 279-3206, so confirm it from the label/);
   });
 
   // 2026-09-27 pre-push audit: validation read a whitespace-only size as

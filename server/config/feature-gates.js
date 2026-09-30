@@ -3988,6 +3988,17 @@ function alertEpisodesLive() {
   return !['off', 'false', '0'].includes(String(process.env.ALERT_EPISODES ?? '').trim().toLowerCase());
 }
 
+// ADMIN_BODY_GUARD_ALL read at CALL time — ships LIVE: on unless set to
+// exactly 'off', 'false' or '0' (case-insensitive), so an unset env is the
+// live state and the env is a pure kill switch (owner ruling 2026-09-30, rule
+// 14). The canonical reader for notification-service's admin brevity guard:
+// on, an over-length admin BODY of ANY category is cut to one sentence with the
+// full text kept in `detail` (the bell's "Show full text"); off, only
+// ops_digest is cut, byte-identical to before.
+function adminBodyGuardAllLive() {
+  return !['off', 'false', '0'].includes(String(process.env.ADMIN_BODY_GUARD_ALL ?? '').trim().toLowerCase());
+}
+
 // PROMISE_EVIDENCE_CLOSE read at CALL time — DEFAULT ON (owner ruling
 // 2026-09-28, "close it, show proof"); off only when set to 'off', 'false'
 // or '0' (case-insensitive). On, call-commitments' fulfillment refresh closes
@@ -4049,4 +4060,5 @@ module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 module.exports.multiTechConfirmLive = multiTechConfirmLive;
+module.exports.adminBodyGuardAllLive = adminBodyGuardAllLive;
 // gates 1775330914

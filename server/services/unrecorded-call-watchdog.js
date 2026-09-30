@@ -154,9 +154,10 @@ async function alertUnrecordedCallsLocked(rows, { now = new Date() } = {}) {
     const written = await NotificationService.notifyAdmin(
       'alert',
       `Call recording may be DOWN — ${fresh.length} answered calls have no recording`,
-      // Every call rides in the body: the bell renders title/body only, and
-      // these SIDs are settled by this one notification, so the operator
-      // must be able to see each call that needs manual recovery.
+      // Every call rides in the body: these SIDs are settled by this one
+      // notification, so the operator must be able to see each call that needs
+      // manual recovery. The brevity guard keeps the whole text in `detail`,
+      // one tap away behind the bell's "Show full text".
       `${fresh.length} answered inbound calls have no Twilio recording, so no transcript, extraction, or lead will follow. ` +
       'Check for webhook 502s in the Twilio debugger (the number\'s voice fallback bridges without the portal) and recent deploys. ' +
       `Calls needing manual recovery: ${fresh.map(describe).join('; ')}.`,
