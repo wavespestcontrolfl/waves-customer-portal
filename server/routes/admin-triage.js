@@ -161,14 +161,15 @@ function callbackNumberReply(numberVerdict, numbersCleared) {
 // lock, and a submission for a decision that is no longer the newest one (a
 // reprocess since the page loaded) or is not one of the call's decisions is
 // REJECTED (409, STALE_ROUTE_DECISION) instead of landing on a decision the
-// reviewer never saw. No id (an older client, the triage-card verdicts): a verdict
+// reviewer never saw; so is one whose row was refreshed IN PLACE since it loaded
+// (the same id, a new created_at: `routeDecisionCreatedAt`). No id (an older client, the triage-card verdicts): a verdict
 // that wins the lock freezes the row it names; one that loses attaches to the
 // refreshed newest row it now reads, as before.
-async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy, routeDecisionId = null }) {
+async function upsertFeedback({ callLogId, triageItemId = null, decisionKind, verdict, wrongFields, note, reviewedBy, routeDecisionId = null, routeDecisionCreatedAt = null }) {
   await withLockedRouteDecisions(db, { callLogId, mode: 'enforce' }, async (trx, rows) => {
     // Newest first, read AFTER the locks are granted (created_at is refreshed).
     const newestOf = (list) => [...list].sort((x, y) => new Date(y.created_at) - new Date(x.created_at))[0];
-    const picked = resolveDisplayedRouteDecision(rows, routeDecisionId, newestOf);
+    const picked = resolveDisplayedRouteDecision(rows, routeDecisionId, newestOf, routeDecisionCreatedAt);
     if (picked.missing || picked.stale) {
       const err = new Error('This decision changed since it loaded — review the refreshed decision before answering.');
       err.statusCode = 409;
@@ -2278,6 +2279,13 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
       return res.status(400).json({ error: 'route_decision_id must be a UUID' });
     }
 
+    // ...and the created_at it displayed: a reprocess refreshes an unreviewed
+    // decision in place under the SAME id, so the id alone is not a revision.
+    const rawCreatedAt = req.body?.route_decision_created_at == null ? '' : String(req.body.route_decision_created_at).trim();
+    if (rawCreatedAt && Number.isNaN(new Date(rawCreatedAt).getTime())) {
+      return res.status(400).json({ error: 'route_decision_created_at must be a timestamp' });
+    }
+
     await upsertFeedback({
       callLogId,
       decisionKind: 'auto_routed',
@@ -2286,6 +2294,7 @@ router.post('/auto-routed/:callLogId/verdict', async (req, res) => {
       note: typeof req.body?.note === 'string' ? req.body.note.slice(0, 500) : null,
       reviewedBy: req.technicianId,
       routeDecisionId: rawDecisionId || null,
+      routeDecisionCreatedAt: rawCreatedAt || null,
     });
     res.json({ ok: true, call_log_id: callLogId, verdict });
   } catch (err) {

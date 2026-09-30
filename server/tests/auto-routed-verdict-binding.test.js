@@ -42,6 +42,14 @@ describe('resolveDisplayedRouteDecision', () => {
   test('the displayed row is no longer the newest: stale', () => {
     expect(resolveDisplayedRouteDecision(decisionRows(), OLD, newestByCreatedAt)).toMatchObject({ stale: true, decision: { id: NEW } });
   });
+  test('an IN-PLACE refresh (same id, new created_at) is stale; the created_at the reviewer saw still passes', () => {
+    const rows = decisionRows();
+    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2026-01-02T00:00:00Z')).toMatchObject({ decision: { id: NEW } });
+    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2026-01-02T00:00:00.000Z')).toMatchObject({ decision: { id: NEW } });
+    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, '2026-01-01T12:00:00Z')).toMatchObject({ stale: true });
+    // an older client sends no created_at: the id check alone
+    expect(resolveDisplayedRouteDecision(rows, NEW, newestByCreatedAt, null)).toMatchObject({ decision: { id: NEW } });
+  });
   test('the displayed row is not one of the call\'s decisions: missing', () => {
     expect(resolveDisplayedRouteDecision(decisionRows(), OTHER, newestByCreatedAt)).toEqual({ missing: true });
   });
@@ -123,6 +131,23 @@ describe('POST /api/admin/triage/auto-routed/:callLogId/verdict', () => {
     expect(state.feedback).toHaveLength(0);
   });
 
+  test('the SAME row refreshed in place by a reprocess since the page loaded (same id, new created_at): 409, nothing written', async () => {
+    const state = fakeDb();
+    const res = await post({ route_decision_id: NEW, route_decision_created_at: '2026-01-01T12:00:00Z' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe(STALE_ROUTE_DECISION);
+    expect(state.feedback).toHaveLength(0);
+    // the revision the reviewer saw still passes
+    const ok = await post({ route_decision_id: NEW, route_decision_created_at: '2026-01-02T00:00:00Z' });
+    expect(ok.statusCode).toBe(200);
+    expect(state.feedback[0].route_decision_id).toBe(NEW);
+  });
+
+  test('a malformed created_at is a 400', async () => {
+    fakeDb();
+    expect((await post({ route_decision_id: NEW, route_decision_created_at: 'yesterday-ish' })).statusCode).toBe(400);
+  });
+
   test('no id (an older client) falls back to today\'s behavior: the newest decision', async () => {
     const state = fakeDb();
     const res = await post({});
@@ -172,6 +197,15 @@ describe('POST /api/ai/admin/calls/:id/route-feedback', () => {
     expect(state.feedback).toHaveLength(0);
   });
 
+  test('an in-place refresh of the displayed row (same id, new created_at): 409, nothing written', async () => {
+    const state = fakeDb({ rows: rowsFor() });
+    const res = await post({ routeDecisionId: NEW, routeDecisionCreatedAt: '2026-01-01T12:00:00Z' });
+    expect(res.statusCode).toBe(409);
+    expect(res.body.code).toBe(STALE_ROUTE_DECISION);
+    expect(state.feedback).toHaveLength(0);
+    expect((await post({ routeDecisionId: NEW, routeDecisionCreatedAt: '2026-01-02T00:00:00Z' })).statusCode).toBe(200);
+  });
+
   test('an id that is not this call\'s decision keeps its existing 400', async () => {
     const state = fakeDb({ rows: rowsFor() });
     const res = await post({ routeDecisionId: OTHER });
@@ -190,7 +224,10 @@ describe('POST /api/ai/admin/calls/:id/route-feedback', () => {
 describe('the auto-routed review client', () => {
   test('sends the displayed route_decision_id and reloads on STALE_ROUTE_DECISION', () => {
     const src = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/TriageInboxTabV2.jsx'), 'utf8');
-    expect(src).toMatch(/kind === "auto_routed" && item\.route_decision_id \? \{ route_decision_id: item\.route_decision_id \} : \{\}/);
+    expect(src).toMatch(/kind === "auto_routed" && item\.route_decision_id\s*\?/);
+    expect(src).toMatch(/route_decision_id: item\.route_decision_id, route_decision_created_at: item\.created_at \|\| null/);
+    const log = fs.readFileSync(path.join(__dirname, '../../client/src/pages/admin/CallLogTabV2.jsx'), 'utf8');
+    expect(log).toMatch(/routeDecisionCreatedAt: call\.routeDecision\?\.createdAt \|\| null/);
     expect(src).toMatch(/err\?\.code === 'STALE_ROUTE_DECISION'[\s\S]{0,200}load\(mode, status, autoOnly\)/);
   });
 });

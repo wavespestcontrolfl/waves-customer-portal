@@ -463,13 +463,21 @@ async function withLockedRouteDecisions(conn, { callLogId, decisionId = null, mo
 //   - the displayed row is no longer the newest (or is a different decision than
 //     the one the pick names): { stale: true } — the caller answers 409 and the
 //     client reloads;
+//   - the displayed row's REVISION moved: upsertRouteDecision refreshes an
+//     unreviewed row IN PLACE (same id; action, reasons and created_at replaced),
+//     so the id alone cannot tell the reviewer's evidence from a refreshed one.
+//     created_at is rewritten by every refresh, so the client sends the created_at
+//     it displayed (`displayedCreatedAt`) and a different one under the lock is
+//     { stale: true } too. Absent (an older client): the id check alone;
 //   - otherwise the displayed row.
-function resolveDisplayedRouteDecision(rows, displayedId, newestOf) {
+const sameInstant = (a, b) => new Date(a).getTime() === new Date(b).getTime();
+function resolveDisplayedRouteDecision(rows, displayedId, newestOf, displayedCreatedAt = null) {
   const newest = newestOf(rows) || null;
   if (!displayedId) return { decision: newest };
   const shown = rows.find((r) => r.id === displayedId);
   if (!shown) return { missing: true };
   if (!newest || newest.id !== shown.id) return { stale: true, decision: newest };
+  if (displayedCreatedAt && !sameInstant(shown.created_at, displayedCreatedAt)) return { stale: true, decision: newest };
   return { decision: shown };
 }
 const STALE_ROUTE_DECISION = 'STALE_ROUTE_DECISION';

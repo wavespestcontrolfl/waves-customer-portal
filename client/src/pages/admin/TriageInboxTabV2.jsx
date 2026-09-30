@@ -486,7 +486,9 @@ export default function TriageInboxTabV2({ isAdmin }) {
         // Auto-routed review: the decision this row DISPLAYS. The server checks it
         // is still the call's newest decision and answers 409 otherwise, so a
         // verdict never lands on a decision the reviewer did not see.
-        ...(kind === "auto_routed" && item.route_decision_id ? { route_decision_id: item.route_decision_id } : {}),
+        ...(kind === "auto_routed" && item.route_decision_id
+          ? { route_decision_id: item.route_decision_id, route_decision_created_at: item.created_at || null }
+          : {}),
       }),
     })
       .then(() => {

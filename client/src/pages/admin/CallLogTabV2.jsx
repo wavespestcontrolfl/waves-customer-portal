@@ -783,6 +783,8 @@ export default function CallLogTabV2() {
         body: JSON.stringify({
           verdict,
           routeDecisionId: call.routeDecision?.id || null,
+          // the revision displayed: an in-place reprocess keeps the id, changes this
+          routeDecisionCreatedAt: call.routeDecision?.createdAt || null,
           wrongFields,
           note,
         }),

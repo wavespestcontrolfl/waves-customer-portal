@@ -605,6 +605,12 @@ router.post('/admin/calls/:id/route-feedback', adminAuthenticate, requireTechOrA
     const note = String(req.body?.note || '').trim().slice(0, 500);
     const requestedRouteDecisionId = String(req.body?.routeDecisionId || '').trim();
     const triageItemId = String(req.body?.triageItemId || '').trim() || null;
+    // The created_at the reviewer saw on that decision: a reprocess refreshes an
+    // unreviewed row in place under the SAME id (resolveDisplayedRouteDecision).
+    const requestedRouteDecisionCreatedAt = String(req.body?.routeDecisionCreatedAt || '').trim() || null;
+    if (requestedRouteDecisionCreatedAt && Number.isNaN(new Date(requestedRouteDecisionCreatedAt).getTime())) {
+      return res.status(400).json({ error: 'routeDecisionCreatedAt must be a timestamp' });
+    }
 
     // The decision row(s) are resolved AND locked (FOR UPDATE) in the same
     // transaction as the feedback write (withLockedRouteDecisions), so a
@@ -646,7 +652,7 @@ router.post('/admin/calls/:id/route-feedback', adminAuthenticate, requireTechOrA
       // reprocess since the page loaded would otherwise have it judge a decision
       // the reviewer never saw. No id (an older client): the newest row, as before.
       const outcome = await withLockedRouteDecisions(db, { callLogId: call.id }, async (trx, decisionRows) => {
-        const picked = resolveDisplayedRouteDecision(decisionRows, requestedRouteDecisionId || null, preferredRouteDecisionForFeedback);
+        const picked = resolveDisplayedRouteDecision(decisionRows, requestedRouteDecisionId || null, preferredRouteDecisionForFeedback, requestedRouteDecisionCreatedAt);
         if (picked.missing) return { missing: true };
         if (picked.stale) return { stale: true };
         return { row: await writeFeedback(trx, picked.decision) };
