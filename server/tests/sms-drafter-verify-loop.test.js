@@ -87,6 +87,42 @@ describe('generateGroundedDraft — convergence loop', () => {
     expect(client.calls).toHaveLength(1); // draft only — nothing to verify
   });
 
+  // Codex round-19 P2: an empty reply is not "nothing to check" when a covered re-service offer is OWED.
+  describe('empty reply while an eligible pest report is owed the re-service offer', () => {
+    const { reserviceFactLine } = require('../services/sms-shadow-drafter');
+    const factsBlock = `FACTS\n${reserviceFactLine(['pest'])}\nBILLING:`;
+    const args = (client) => ({ client, context: CTX, inboundMessage: 'the ants are back again', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false, factsBlock });
+    const OLD = process.env.GATE_SMS_REAL_ANSWERS;
+    beforeAll(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+    afterAll(() => { if (OLD === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = OLD; });
+
+    test('the empty reply is revised into the offer instead of converging', async () => {
+      const offer = { reply: "So sorry about the ants! I'm sending your free pest re-service booking link now.", intended_actions: [{ type: 'escalate', note: 'send_reservice_link' }], missing_info: null };
+      const client = makeClient([
+        { reply: '', intended_actions: [{ type: 'none', note: 'no reply warranted' }], missing_info: null },
+        offer, // the revision (the owed-offer violation skips the verifier)
+        { supported: true, violations: [] },
+      ]);
+      const r = await generateGroundedDraft(args(client));
+      expect(r.parsed.reply).toMatch(/free pest re-service booking link/);
+      expect(r.converged).toBe(true);
+    });
+
+    test('an empty reply that is never fixed does not converge', async () => {
+      const empty = { reply: '', intended_actions: [], missing_info: null };
+      const client = makeClient([empty, empty, empty]);
+      const r = await generateGroundedDraft(args(client));
+      expect(r.converged).toBe(false);
+    });
+
+    test('not owed (lane not in the facts) → the empty reply still converges without a verify call', async () => {
+      const client = makeClient([{ reply: '', intended_actions: [], missing_info: null }]);
+      const r = await generateGroundedDraft({ ...args(client), factsBlock: `FACTS\n${reserviceFactLine([])}\nBILLING:` });
+      expect(r.converged).toBe(true);
+      expect(client.calls).toHaveLength(1);
+    });
+  });
+
   test('a revise error keeps the prior draft, not converged (Codex P2)', async () => {
     // draft → verify(violation) → revise THROWS. Must keep the first draft,
     // not drop the whole sample.

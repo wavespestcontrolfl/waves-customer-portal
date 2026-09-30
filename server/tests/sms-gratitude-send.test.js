@@ -164,6 +164,7 @@ jest.mock('../services/sms-suggest-mode', () => ({
 }));
 jest.mock('../services/sms-shadow-drafter', () => ({
   PROMPT_VERSION: 'house_voice_v11',
+  GRATITUDE_DISCOVERY_REAL_ANSWERS_IDENTITIES: ['house_voice_v12_real_answers', 'house_voice_v12_real_answers2'],
   resolveEffectiveVoiceProfile: jest.fn(async () => ({ version: null })),
 }));
 jest.mock('../services/sms-graduation', () => ({

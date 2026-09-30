@@ -118,30 +118,29 @@ function decisionCarriesReserviceLink(decision) {
 /**
  * The scheduled-send form of the re-service recheck (scheduler.js): the same verdict as
  * agentDecisionSendBlockReason's re-service leg, for a queued reply whose decision row still has to be
- * read. A plain non-promise message is never blocked by the recheck's own plumbing (pre-push audit P1,
- * PR #5336), and a decision that carries the link action is never let through unchecked because the
- * read failed (round 15). A failure to read the row or to run the check blocks when the body reads as
- * a promise, when the decision is known to carry the action (`carriesAction`, from the scheduled row's
- * own metadata, else the row just read), or — for a decision whose action state is unknown — when the
- * body could plausibly be about a free return visit (reserviceBodyPrescreen); otherwise it sends.
- * Returns a short reason, or null.
+ * read. FAIL CLOSED (round 19): a scheduled send backed by an agent decision whose row cannot be read
+ * (a throw, or no row) BLOCKS whatever the body says. The only sends it lets through are a readable row
+ * that does not carry the link action with a non-promise body. Returns a short reason, or null.
  */
 async function scheduledReserviceBlockReason({ agentDecisionId, outgoingBody, fallbackCustomerId = null, carriesAction = false, dbh = require('../models/db') }) {
-  const { isReserviceOfferPromise, reserviceCarriesLinkAction, reserviceBodyPrescreen } = require('./sms-shadow-drafter');
+  const { reserviceCarriesLinkAction } = require('./sms-shadow-drafter');
   const logger = require('./logger');
   let known = carriesAction === true;
   try {
     const row = await dbh('agent_decisions').where({ id: agentDecisionId }).first('input_snapshot', 'customer_id', 'prompt_version');
-    // Codex round-16 (PR #5336): a missing row (first() → undefined) is NOT a pre-deploy decision to
-    // grandfather — nothing is known about it, so it takes the same fail-closed path as a failed read.
+    // Codex round-16/19 (PR #5336): a missing row is not a pre-deploy decision to grandfather — nothing is
+    // known about it, so it takes the same fail-closed path as a failed read.
     if (!row) throw new Error('agent decision row not found');
     const snapshot = parseInputSnapshot(row.input_snapshot);
     known = known || reserviceCarriesLinkAction(snapshot && snapshot.intended_actions);
     return await reserviceBlock({ decision: { ...row, customer_id: row.customer_id || fallbackCustomerId }, outgoingBody });
   } catch (err) {
-    const block = known || isReserviceOfferPromise(outgoingBody) || (!carriesAction && reserviceBodyPrescreen(outgoingBody));
-    logger.warn(`[agent-decision-send-checks] re-service recheck failed for decision ${agentDecisionId}: ${err.message}${block ? '; blocking send' : '; not a re-service message, sending'}`);
-    return block ? 'reservice_recheck_failed' : null;
+    // Codex round-19 P1: any agent-decision-backed scheduled send whose decision cannot be read BLOCKS,
+    // whatever the body says — a body that evades both the promise detector and the prescreen must not
+    // send just because a pre-deploy queued row carries no carries_reservice_link flag. The only send
+    // this recheck lets through is a READABLE row that does not carry the action with a non-promise body.
+    logger.warn(`[agent-decision-send-checks] re-service recheck failed for decision ${agentDecisionId}: ${err.message}; blocking send${known ? ' (decision carries the re-service link action)' : ''}`);
+    return 'reservice_recheck_failed';
   }
 }
 

@@ -944,8 +944,17 @@ function gratitudeCandidatePage({ activatedAt, now, cursor, pageSize }) {
       // A `this`-bound function, not an arrow — the Knex-documented
       // subquery convention this codebase already uses elsewhere
       // (availability.js's whereNotExists(function linkedVisit() {...})).
-      this.where('md.prompt_version', drafter.PROMPT_VERSION)
-        .orWhere('md.prompt_version', 'like', `${drafter.REAL_ANSWERS_PROMPT_BASE_PREFIX}%`);
+      // Codex round-19 P1 (PR #5336): an EXPLICIT identity list plus escaped "+category" tag prefixes —
+      // never an unescaped LIKE on the bare prefix (its `_` is a wildcard, and a prefix over-matches
+      // future variants the executor was never written for). The identities are the current
+      // real-answers one and the bare one it replaced (drafts written in the minutes before that
+      // deploy), each optionally category-tagged.
+      const identities = [drafter.PROMPT_VERSION, ...drafter.GRATITUDE_DISCOVERY_REAL_ANSWERS_IDENTITIES];
+      const escapeLike = (v) => String(v).replace(/[\\%_]/g, (c) => `\\${c}`);
+      this.whereIn('md.prompt_version', identities);
+      for (const identity of drafter.GRATITUDE_DISCOVERY_REAL_ANSWERS_IDENTITIES) {
+        this.orWhereRaw("md.prompt_version LIKE ? ESCAPE '\\'", [`${escapeLike(identity)}+%`]);
+      }
     })
     .whereNotNull('md.model')
     .where('s.created_at', '>', activatedAt)

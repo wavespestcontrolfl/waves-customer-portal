@@ -37,6 +37,8 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   // card's input_snapshot. None of this file's fixtures promise a
   // re-service, so the stub reports no promise.
   validateReserviceOffer: jest.fn(() => ({ ok: true, violations: [], promisedLanes: undefined })),
+  // generateLlmReviewDraft also persists the already-booked callbacks' snapshot (round-18); none here.
+  reserviceBookedSnapshot: jest.fn(() => ({})),
 }));
 
 jest.mock('../services/context-aggregator', () => ({
