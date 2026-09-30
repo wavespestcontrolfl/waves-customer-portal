@@ -119,18 +119,28 @@ async function payMethodOnFileLabel(invoice, { allowed = true } = {}) {
 // a check, Zelle, an ACH debit, a card with no stored last four). `payment` is
 // the ledger row (or null).
 function receiptTenderLabel({ payment = null, invoice = {} } = {}) {
-  const card = dottedCardLabel(payment?.card_brand, payment?.card_last_four)
-    || dottedCardLabel(invoice.card_brand, invoice.card_last_four);
-  if (card) return card;
   const paymentType = clean(payment?.payment_method_type).toLowerCase();
-  if (paymentType === 'ach' || paymentType === 'us_bank_account') return bankOrCardLabel(payment);
   let meta = payment?.metadata;
   if (typeof meta === 'string') {
     try { meta = JSON.parse(meta); } catch { meta = null; }
   }
-  const named = clean(invoice.payment_method).toLowerCase()
+  // The CURRENT tender wins: recordManualPayment stamps invoice.payment_method
+  // when cash/check/Zelle settles an invoice, and a reopened (disputed card)
+  // invoice can still carry the old card columns. Card details are used only
+  // when the current tender is card-based (or unknown).
+  const invoiceTender = clean(invoice.payment_method).toLowerCase();
+  const named = invoiceTender
     || clean(meta?.payment_method).toLowerCase()
     || paymentType;
+  const cardBased = !named || named === 'card' || named === 'card_present' || !MANUAL_TENDERS[named];
+  if (cardBased) {
+    const card = dottedCardLabel(payment?.card_brand, payment?.card_last_four)
+      || dottedCardLabel(invoice.card_brand, invoice.card_last_four);
+    if (card) return card;
+  }
+  if (paymentType === 'ach' || paymentType === 'us_bank_account') {
+    if (!invoiceTender || invoiceTender === 'ach' || invoiceTender === 'us_bank_account') return bankOrCardLabel(payment);
+  }
   return MANUAL_TENDERS[named] || '';
 }
 
@@ -141,17 +151,22 @@ function receiptTenderLabel({ payment = null, invoice = {} } = {}) {
 // the customer's. Only ever a STREET address: the nickname in profile_label
 // ("Primary", "Rental") is never a fallback here, so a customer with no street
 // line simply gets no Property row.
-async function scheduledServiceIdFor(invoice) {
+const LOOKUP_FAILED = Symbol('lookup-failed');
+
+async function scheduledServiceIdFor(invoice, { failureSentinel = false } = {}) {
   if (invoice?.scheduled_service_id) return invoice.scheduled_service_id;
   if (!invoice?.service_record_id) return null;
   try {
     const record = await db('service_records').where({ id: invoice.service_record_id }).first('scheduled_service_id');
     return record?.scheduled_service_id || null;
   } catch {
-    return null;
+    return failureSentinel ? LOOKUP_FAILED : null;
   }
 }
 
+// '' = the visit carries no stamped street address; null = the lookup FAILED.
+// The caller must not treat a failure as "no stamp": that would fall back to
+// the primary address and name the wrong property on a secondary-property visit.
 async function stampedVisitAddress(scheduledServiceId) {
   if (!scheduledServiceId) return '';
   try {
@@ -166,14 +181,19 @@ async function stampedVisitAddress(scheduledServiceId) {
       state: row.service_address_state,
       zip: row.service_address_zip,
     }) || '';
-  } catch {
-    return '';
+  } catch (err) {
+    logger.warn(`[billing-email-details] visit address lookup failed for ${scheduledServiceId}: ${err.message}`);
+    return null;
   }
 }
 
 async function invoicePropertyAddress(invoice, customer) {
   try {
-    const stamped = await stampedVisitAddress(await scheduledServiceIdFor(invoice));
+    const scheduledId = await scheduledServiceIdFor(invoice, { failureSentinel: true });
+    if (scheduledId === LOOKUP_FAILED) return '';
+    const stamped = await stampedVisitAddress(scheduledId);
+    // A failed visit lookup omits the Property row rather than guessing.
+    if (stamped === null) return '';
     if (stamped) return stamped;
     let source = customer;
     // A caller's projection may omit the unit line (address_line2) or the whole

@@ -109,6 +109,16 @@ describe('card and tender labels', () => {
       expect(Details.receiptTenderLabel({ payment: { metadata: '{not json' }, invoice: {} })).toBe('');
     });
 
+    test('a reopened card invoice settled by cash/check/Zelle names the CURRENT tender, not the stale card', () => {
+      const staleCard = { card_brand: 'visa', card_last_four: '4242' };
+      expect(Details.receiptTenderLabel({ payment: null, invoice: { ...staleCard, payment_method: 'cash' } })).toBe('Cash');
+      expect(Details.receiptTenderLabel({ payment: null, invoice: { ...staleCard, payment_method: 'check' } })).toBe('Check');
+      expect(Details.receiptTenderLabel({ payment: { metadata: { payment_method: 'zelle' } }, invoice: staleCard })).toBe('Zelle');
+      // A card tender (or no manual tender) still reads as the card.
+      expect(Details.receiptTenderLabel({ payment: null, invoice: { ...staleCard, payment_method: 'card' } })).toBe('VISA ···· 4242');
+      expect(Details.receiptTenderLabel({ payment: null, invoice: staleCard })).toBe('VISA ···· 4242');
+    });
+
     test('nothing known -> blank, never a guess', () => {
       expect(Details.receiptTenderLabel({ payment: null, invoice: {} })).toBe('');
       expect(Details.receiptTenderLabel({ payment: null, invoice: { payment_method: 'mystery' } })).toBe('');
@@ -239,6 +249,18 @@ describe('property address (full street address, never a nickname)', () => {
     mockTables({ customer_properties: [{ address_line1: '', city: 'Parrish' }], customers: [{ address_line1: '', profile_label: 'Primary' }] });
     expect(await Details.customerPropertyAddress('c', 'prop-1')).toBe('');
     expect(await Details.customerPropertyAddress(null, null)).toBe('');
+  });
+
+  test('a FAILED visit-address lookup omits the Property row instead of falling back to the primary address', async () => {
+    mockTables({ scheduled_services: new Error('db down') });
+    const invoice = {
+      id: 'inv-1', customer_id: 'c', scheduled_service_id: 'ss-1',
+      customer_address_snapshot: { address_line1: '9 Old Road', city: 'Palmetto', state: 'FL', zip: '34221' },
+    };
+    expect(await Details.invoicePropertyAddress(invoice, customer)).toBe('');
+    // A missing stamp (lookup fine, no address) still falls back as before.
+    mockTables({ scheduled_services: [{ service_address_line1: null }] });
+    expect(await Details.invoicePropertyAddress(invoice, customer)).toBe('9 Old Road Unit 4, Palmetto, FL 34221');
   });
 
   test('an unreadable lookup is blank, never a throw', async () => {

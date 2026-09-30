@@ -482,7 +482,15 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
         // An operator's one-off recipient or a payer's AP inbox must never see
         // the homeowner's card: only the customer's own delivery names it.
-        payment_method: await BillingEmailDetails.payMethodOnFileLabel(invoice, { allowed: !effectiveOverride }),
+        // A distinct saved billing contact (notification_prefs.billing_email)
+        // is a third party here too: the RESOLVED recipient must be the
+        // customer's own primary address, not just "no override".
+        payment_method: await BillingEmailDetails.payMethodOnFileLabel(invoice, {
+          allowed: !effectiveOverride
+            && recipient.role === 'primary'
+            && !!cleanEmail(customer.email)
+            && cleanEmail(recipient.email) === cleanEmail(customer.email),
+        }),
       };
     } catch (err) {
       detailPayload = {};
