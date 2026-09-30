@@ -65,6 +65,10 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
   const automationKeys = [];
   const customerIds = [];
   const markerIds = [];
+  // Synthetic review ids fed to the UNSCOPED review.linked_5star emitter: any
+  // pre-existing active automation on that trigger in the dev/CI database
+  // also creates a run for them, so cleanup goes by entity too (codex #5418 r3).
+  const reviewIds = [];
 
   beforeAll(async () => {
     db = require('../models/db');
@@ -79,6 +83,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
       await db('email_template_automation_runs').whereIn('automation_key', automationKeys).del();
       await db('email_template_automations').whereIn('automation_key', automationKeys).del();
     }
+    if (reviewIds.length) await db('email_template_automation_runs').whereIn('entity_id', reviewIds).del();
     if (markerIds.length) await db('email_template_automation_intents').whereIn('id', markerIds).del();
     if (customerIds.length) await db('customers').whereIn('id', customerIds).del();
     await db.destroy();
@@ -335,6 +340,7 @@ jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMe
     }
 
     async function makeMarker(customerId, reviewId) {
+      reviewIds.push(reviewId);
       const rows = await emitters.recordAutomationIntents(db, [{
         triggerEventKey: 'review.linked_5star',
         entityType: 'review',
