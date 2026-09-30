@@ -4677,7 +4677,7 @@ const ANCHORED_PRICE_AUTHORITY_KEYS = new Set(['estimated_price', 'primary_line_
 // inputs — row locks and xact advisory locks are re-entrant, so the second
 // pass only re-checks. Returns the locked sibling targets.
 async function lockAndGuardFollowingSiblings(conn, {
-  editedId, editedRow = null, parentId, fromDateStr, serviceChanged, priceChanged,
+  editedId, editedRow = null, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields = null,
 }) {
   // C (owner ruling 2026-09-28): this loop re-derives and writes a sibling's
   // estimated_price below whenever billingRelevant, so each affected sibling
@@ -4755,7 +4755,18 @@ async function lockAndGuardFollowingSiblings(conn, {
   // visit's own live invoice kept the old amount is the same stale-collect
   // bug the refusal exists for — completion/Charge Now reuse that invoice by
   // scheduled_service_id before the new price is considered.
-  const guardRows = editedRow ? [editedRow, ...targets] : targets;
+  // Each guarded visit is judged as it will stand after this save: the
+  // service/price fields the propagation copies onto every sibling
+  // (proposedFields = computePriceServiceGroupChanges().fields) are overlaid
+  // as _proposed, so the secure-prepay coverage rail sees a sibling whose
+  // service moves INTO a pending term's covered family (pre-push audit P1).
+  const overlay = {};
+  for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
+    if (proposedFields && proposedFields[col] !== undefined) overlay[col] = proposedFields[col];
+  }
+  const withProposed = (row) => (Object.keys(overlay).length === 0 ? row
+    : { ...row, _proposed: { ...overlay, ...(row._proposed || {}) } });
+  const guardRows = (editedRow ? [editedRow, ...targets] : targets).map(withProposed);
   let invoiceLinkColumn = false;
   if (billingRelevant && guardRows.length > 0) {
     // Same refusal contract as the plan trim (findBillingCoveredVisits
@@ -4810,7 +4821,7 @@ async function propagatePriceServiceToFollowingSiblings(conn, {
   editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
 }) {
   const targets = await lockAndGuardFollowingSiblings(conn, {
-    editedId, editedRow, parentId, fromDateStr, serviceChanged, priceChanged,
+    editedId, editedRow, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields: fields,
   });
   const billingRelevant = priceChanged || serviceChanged;
   // Missing-table compat probe, ONCE — inside the loop the add-on reads run
@@ -13689,6 +13700,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
                 : null,
               serviceChanged: earlyGroups.serviceChanged,
               priceChanged: earlyGroups.priceChanged,
+              proposedFields: earlyGroups.fields,
             });
           }
         }
