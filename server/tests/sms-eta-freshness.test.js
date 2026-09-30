@@ -17,6 +17,7 @@
 jest.mock('../services/sms-shadow-drafter', () => ({
   findEtaMinutesClaims: jest.fn(),
   bodyMentionsArrival: jest.fn(() => false),
+  bodyMentionsVisitStatus: jest.fn(() => false),
   bodyHasTimedArrivalPhrase: jest.fn(() => false),
   bodyHasUnclassifiedArrivalDigit: jest.fn(() => false),
   // Structural default-deny (Codex round-7 P2): unioned into `claims`
@@ -1166,7 +1167,7 @@ describe('round 14 P1: status-only recheck requires an affirmative en-route clai
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1207,7 +1208,7 @@ describe('round 15: corrections pass on done visits, coming/headed still recheck
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1244,7 +1245,7 @@ describe('round 16 P1: unclassified ETA backstop', () => {
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1296,7 +1297,7 @@ describe('round 16 P2: minutes-null (status-only) snapshot entries', () => {
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1331,7 +1332,7 @@ describe('round 17 P2s: link URL parsing, on-site wording, long durations on eve
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1392,7 +1393,7 @@ describe('round 18 P2s: on-site arrival recheck, technician reassignment', () =>
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1428,7 +1429,7 @@ describe('numeric binding ignores on-site entries; status claims still see them'
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1463,7 +1464,7 @@ describe('round 19 P2: explicit link scheme', () => {
   const drafter = require('../services/sms-shadow-drafter');
   const real = jest.requireActual('../services/sms-shadow-drafter');
   beforeEach(() => {
-    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
       drafter[name].mockReset().mockImplementation(real[name]);
     }
   });
@@ -1490,5 +1491,74 @@ describe('round 19 P2: explicit link scheme', () => {
     const digitSnap = { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'], trackTokens: ['abcdef9'] }] };
     const r = [{ ...rows[0], track_view_token: 'abcdef9' }];
     expect(await etaClaimBlockReason({ liveEtaSnapshot: digitSnap, factsGeneratedAt: FRESH, outgoingBody: 'Track your tech: portal.wavespestcontrol.com/track/abcdef9', now: NOW, dbh: fakeDb(r) })).toBeNull();
+  });
+});
+
+// Codex round-20 P2s (PR #5334): wording gaps ("The technician arrived.",
+// "en-route") and destination identity. STRUCTURAL: a draft carrying a live
+// snapshot whose body touches visit status is ALWAYS rechecked (state, tech,
+// destination) even when no narrower classifier reads the wording.
+describe('round 20 P2s: always-recheck on visit-status wording, destination identity', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+
+  const dest = { id: 'svc-1', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285' };
+  const row = (extra = {}) => ({ id: 'svc-1', status: 'en_route', track_state: 'en_route', technician_id: 'tech-1', property_id: 'prop-1', lat: '27.4', lng: '-82.5', service_address_line1: '1 TEST St ', service_address_zip: '34285', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra });
+  const snap = (extra = {}) => ({ entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], technicianId: 'tech-1', state: 'en_route', destinations: [dest], ...extra }] });
+  const run = (body, rows, snapshot = snap()) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+
+  test.each(['Your technician is en-route.', 'Your technician is en route.'])('%p is a status claim: passes en route, blocked once completed', async (body) => {
+    expect(await run(body, [row()])).toBeNull();
+    expect(await run(body, [row({ status: 'completed', track_state: 'completed' })])).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('"The technician arrived." (on-site snapshot): recheck runs; blocked after the visit completes or is cancelled, passes while on site', async () => {
+    const onSite = snap({ minutes: null, state: 'on_property' });
+    expect(await run('The technician arrived.', [row({ status: 'on_site', track_state: 'on_property' })], onSite)).toBeNull();
+    expect(await run('The technician arrived.', [row({ status: 'completed', track_state: 'completed' })], onSite)).toBe('eta_claim_no_longer_en_route');
+    expect(await run('The technician arrived.', [row({ status: 'cancelled', track_state: 'scheduled' })], onSite)).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('novel wording the classifiers never heard of still triggers the state recheck through the broad vocabulary gate', async () => {
+    // No numeric / timed / completed-arrival / en-route-phrase classifier reads this.
+    const body = 'Our driver has pulled in and is at your door.';
+    expect(await run(body, [row({ status: 'completed', track_state: 'completed' })])).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('a recorded en-route entry whose visit is now on site blocks (status changed), same technician or not', async () => {
+    expect(await run('Your technician is en-route.', [row({ status: 'on_site', track_state: 'on_property' })])).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('non-status copy and accurate corrections are untouched by the recheck (even on a completed visit)', async () => {
+    const done = [row({ status: 'completed', track_state: 'completed' })];
+    for (const body of ['Thanks, 5 stars!', "The technician hasn't arrived yet.", "I'll text you once he's on the way."]) expect(await run(body, done)).toBeNull();
+  });
+
+  test('technician reassignment blocks the recorded-state recheck', async () => {
+    expect(await run('The technician arrived.', [row({ status: 'on_site', track_state: 'on_property', technician_id: 'tech-2' })], snap({ minutes: null, state: 'on_property' }))).toBe('eta_claim_tech_changed');
+  });
+
+  describe('destination identity', () => {
+    test('same destination (numeric strings, case/space folding) passes a minutes claim', async () => {
+      expect(await run('The tech is 9 minutes away.', [row()])).toBeNull();
+    });
+    test.each([
+      ['property moved', { property_id: 'prop-2' }],
+      ['coordinates moved', { lat: '27.9' }],
+      ['coordinates cleared', { lat: null, lng: null }],
+      ['street changed', { service_address_line1: '9 Other Ave' }],
+      ['zip changed', { service_address_zip: '34292' }],
+    ])('%s blocks a minutes claim, a status claim, and a link-only share', async (_n, extra) => {
+      expect(await run('The tech is 9 minutes away.', [row(extra)])).toBe('eta_claim_destination_changed');
+      expect(await run('Your technician is en-route.', [row(extra)])).toBe('eta_claim_destination_changed');
+      expect(await run('Track: portal.wavespestcontrol.com/track/tok-1', [row(extra)])).toBe('eta_claim_destination_changed');
+    });
+    test('a recorded destination whose visit row cannot be read blocks', async () => {
+      expect(await run('The tech is 9 minutes away.', [row({ id: 'svc-other' })])).toBe('eta_claim_no_longer_en_route');
+      const two = snap({ scheduledServiceIds: ['svc-1'], destinations: [dest, { ...dest, id: 'svc-ghost' }] });
+      expect(await run('The tech is 9 minutes away.', [row()], two)).toBe('eta_claim_destination_changed');
+    });
   });
 });

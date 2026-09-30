@@ -1594,12 +1594,12 @@ describe('round 16 P2s: Nm, slash fractions, status-only groups, distinct stops'
     test('an unresolved live stop still gets a minutes-null group (grouped siblings share one); resolved keeps minutes', () => {
       const rows = [svc('a'), svc('b'), svc('c', { technician_id: null })];
       const groups = buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: ['k1', 'k1', null], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', null]]), includeLiveEta: true });
-      expect(groups).toEqual([
+      expect(groups.map(({ destinations, ...g }) => g)).toEqual([
         { minutes: null, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], state: 'en_route', technicianId: 'tech-1' },
         { minutes: null, scheduledServiceIds: ['c'], trackTokens: ['tok-c'], state: 'en_route' },
       ]);
       const resolved = buildLiveEtaGroups({ upcomingServices: rows.slice(0, 2), liveEtaKeys: ['k1', 'k1'], uniqueLiveEtaKeys: ['k1'], liveEtaResultByKey: new Map([['k1', { minutes: 9, fixExpiresAtMs: 5 }]]), includeLiveEta: true });
-      expect(resolved).toEqual([{ minutes: 9, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], state: 'en_route', technicianId: 'tech-1', fixExpiresAtMs: 5 }]);
+      expect(resolved.map(({ destinations, ...g }) => g)).toEqual([{ minutes: 9, scheduledServiceIds: ['a', 'b'], trackTokens: ['tok-a', 'tok-b'], state: 'en_route', technicianId: 'tech-1', fixExpiresAtMs: 5 }]);
     });
     test('includeLiveEta false or a non-live row: no groups', () => {
       expect(buildLiveEtaGroups({ upcomingServices: [svc('a')], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: false })).toEqual([]);
@@ -1671,7 +1671,7 @@ describe('round 18 P2s: decimals, driving, on-site groups, technician identity',
     const svc = (id, extra = {}) => ({ id, scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: `tok-${id}`, technician_id: 'tech-1', ...extra });
     test('an on_property visit becomes a minutes-null status group recorded as on_property; a scheduled one does not', () => {
       const rows = [svc('a', { status: 'on_site', track_state: 'on_property' }), svc('b', { track_state: 'scheduled' })];
-      expect(buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true }))
+      expect(buildLiveEtaGroups({ upcomingServices: rows, liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true }).map(({ destinations, ...g }) => g))
         .toEqual([{ minutes: null, scheduledServiceIds: ['a'], trackTokens: ['tok-a'], state: 'on_property', technicianId: 'tech-1' }]);
     });
     test('the snapshot carries technicianId and state through', () => {
@@ -1725,6 +1725,34 @@ describe('round 19 P2s: window minutes, zero, tracking-link digits, on-site sibl
     expect(groups.map((g) => g.scheduledServiceIds)).toEqual([['a', 'b'], ['c']]);
     expect(groups.every((g) => g.state === 'on_property' && g.minutes === null)).toBe(true);
     expect(groups[0].trackTokens).toEqual(['tok-a', 'tok-b']);
+  });
+});
+
+// Codex round-20 P2s (PR #5334).
+describe('round 20 P2s: bare-past arrival, en-route hyphen, destination identity', () => {
+  test.each(['The technician arrived.', 'The tech just arrived at your home.', 'Our crew finally arrived.'])('%p is a completed-arrival claim', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+  });
+  test('a negated "hasn\'t arrived" is still a correction, not a claim', () => {
+    expect(bodyClaimsCompletedArrival("The technician hasn't arrived yet.")).toBe(false);
+  });
+  test.each(['Your technician is en-route.', 'Your technician is en route.', 'Your technician is enroute.'])('%p is an en-route status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+  });
+  test('bodyMentionsVisitStatus: broad status vocabulary, minus conditionals / corrections / windows', () => {
+    const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+    for (const t of ['The technician arrived.', 'Your tech is en-route.', 'The crew is outside.', 'The tech has pulled up.']) expect(bodyMentionsVisitStatus(t)).toBe(true);
+    for (const t of ['Thanks, 5 stars!', "I'll text you once he's on the way.", "The tech hasn't arrived yet.", 'Your arrival window is 2 hours.']) expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('the snapshot carries each group destination through', () => {
+    const destinations = [{ id: 'a', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285' }];
+    expect(buildLiveEtaSnapshot({ liveEtaGroups: [{ minutes: 9, scheduledServiceIds: ['a'], destinations }] }).entries[0].destinations).toEqual(destinations);
+  });
+  test('buildLiveEtaGroups records property id + stamped coordinates per member', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', property_id: 'prop-1', service_lat: '27.4', service_lng: '-82.5', service_address_line1: '1 Test St', service_address_zip: '34285' };
+    const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true });
+    expect(g.destinations).toEqual([{ id: 'a', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285' }]);
   });
 });
 

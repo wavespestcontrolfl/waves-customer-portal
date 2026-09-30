@@ -645,8 +645,8 @@ function validateReserviceOffer({ reply, factsBlock }) {
 // keeps the ungrounded/no-snapshot trigger-based path (findEtaMinutesClaims,
 // bodyMentionsArrival, bodyHasTimedArrivalPhrase) from missing these exact
 // phrasings too.
-const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
-const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
+const STRONG_ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out\s+from|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
+const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|arriv\w*|eta|away|out|get(?:ting)?\s+(?:there|to\s+you)|be(?:ing)?\s+(?:there|with\s+you)|show(?:ing)?\s+up|pull(?:ing)?\s+up|here\s+in|from\s+you\b|from\s+your\s+(?:house|home|place|property)|from\s+the\s+(?:house|home|property)|to\s+go|left|until\s+(?:he|she|they|the\s+tech)|due\s+in|reach(?:ing)?\s+you)\b/i;
 // Up to 5 digits (Codex round-9 P2, PR #5334): normalizeTimeQuantities below
 // rewrites hour figures into minutes ("17 hours" -> "1020 minutes"), so the
 // unit token must be able to read a normalized figure wider than 3 digits.
@@ -899,7 +899,7 @@ function replaceQuantity(text, re, convert) {
 // sentence is office timing too. Shared by every ETA check (claim
 // tokenizers, leftover-word checks, vague phrases) so they cannot drift.
 const OFFICE_FOLLOWUP_VERB_RE = /\b(?:confirm(?:ing)?|get(?:ting)?\s+back\s+to\s+you|(?:text|call|email|message|ping)(?:ing)?\s+you(?:\s+back)?|reach(?:ing)?\s+out|follow(?:ing)?[\s-]+up|check(?:ing)?|let(?:ting)?\s+you\s+know|send(?:ing)?|update\s+you|circle\s+back|be\s+in\s+touch|touch\s+base)\b/gi;
-const TECH_ARRIVAL_VERB_RE = /\b(?:arrive[sd]?|arriving|be\s+there|be\s+(?:at\s+your|with\s+you)|on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|pull(?:ing)?\s+up|show(?:ing)?\s+up|away|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you|(?<!reach\s)out)\b/gi;
+const TECH_ARRIVAL_VERB_RE = /\b(?:arrive[sd]?|arriving|be\s+there|be\s+(?:at\s+your|with\s+you)|on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|heading\s+(?:over|your\s+way|to\s+you)|pull(?:ing)?\s+up|show(?:ing)?\s+up|away|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you|(?<!reach\s)out)\b/gi;
 // Characters between a verb match and the figure [a, b); 0 when they overlap.
 function nearestVerbGap(local, verbRe, a, b) {
   let best = Infinity;
@@ -1055,7 +1055,7 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // arrived", "arrived at your home", "the tech is here / outside / at your
 // door", "pulled up" state the tech IS on site — a different fact from "on
 // the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|pulled\s+up)\b/i;
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|(?:tech(?:nician)?|he|she|they|driver|crew|team)\s+(?:just\s+|already\s+|finally\s+)?arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|pulled\s+up)\b/i;
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
@@ -1089,11 +1089,33 @@ function bodyClaimsCompletedArrival(text) {
 //   - a conditional ("I'll text you once he's on the way", "when the tech
 //     is en route"), or
 //   - part of a scheduling window (isWindowQuantity).
-const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|(?:head(?:ing|ed)|coming)\s+(?:over|your\s+way|to\s+you|to\s+your\s+\w+)|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:coming|headed|heading|driving|rolling|travell?ing)\b|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:in\s+the\s+(?:truck|van|vehicle)|on\s+the\s+road)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
+const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|(?:head(?:ing|ed)|coming)\s+(?:over|your\s+way|to\s+you|to\s+your\s+\w+)|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:coming|headed|heading|driving|rolling|travell?ing)\b|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:in\s+the\s+(?:truck|van|vehicle)|on\s+the\s+road)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
 const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
 function bodyMentionsArrival(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(EN_ROUTE_STATUS_RE.source, EN_ROUTE_STATUS_RE.flags))) {
+    const before = str.slice(Math.max(0, m.index - 60), m.index);
+    if (CONDITIONAL_BEFORE_RE.test(before)) continue;
+    if (isNegatedInClause(str, m.index)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    return true;
+  }
+  return false;
+}
+// Round-20 structural gate: does the body say ANYTHING about the visit's live
+// status (arrival, route, position)? The send-time check uses this as the
+// DEFAULT-DENY trigger: a draft that carried a live snapshot and whose body
+// touches visit status in any form is rechecked against the snapshot's recorded
+// state / technician / destination even when no narrower classifier (numeric
+// ETA, "on the way", "has arrived") recognized the exact wording ("The
+// technician arrived.", "en-route", whatever comes next). Deliberately broad
+// (vocabulary, not phrasing); the only exemptions are the same non-claims the
+// narrower classifiers already honor: a conditional ("once he's on the way"), a
+// negated correction ("hasn't arrived"), and a scheduling window.
+const VISIT_STATUS_RE = /\b(?:arriv\w*|en[\s-]?route|on\s+(?:the|his|her|their|our|my)\s+way|(?:coming|headed|heading|driving|rolling|travell?ing)|(?:is|are|'s|'re|be|been|was|were)\s+(?:now\s+|just\s+|already\s+)?(?:here|outside|there|nearby|close|on[\s-]?site|on\s+(?:the|your)\s+property)|left\s+(?:for|to)|pull(?:ed|ing)?\s+up|show(?:ed|ing)?\s+up|at\s+(?:your|the)\s+(?:door|house|home|place|address)|on[\s-]?site|almost\s+there)\b/gi;
+function bodyMentionsVisitStatus(text) {
+  const str = String(text || '');
+  for (const m of str.matchAll(new RegExp(VISIT_STATUS_RE.source, VISIT_STATUS_RE.flags))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (CONDITIONAL_BEFORE_RE.test(before)) continue;
     if (isNegatedInClause(str, m.index)) continue;
@@ -1418,6 +1440,9 @@ function buildLiveEtaSnapshot(context) {
       // sms-eta-freshness refuses at send when a reassignment changed it.
       ...(g.technicianId != null ? { technicianId: g.technicianId } : {}),
       ...(typeof g.state === 'string' ? { state: g.state } : {}),
+      // Round-20 P2: the destination (property + stamped coordinates) the figure
+      // was computed for; send time refuses when the appointment moved.
+      ...(Array.isArray(g.destinations) ? { destinations: g.destinations.filter((d) => d && d.id != null) } : {}),
       // The instant the GPS fix behind this figure goes stale to the public
       // tracker (Codex round-11 P2, PR #5334); sms-eta-freshness.js expires a
       // minutes claim at min(15-minute draft window, this). Omitted when
@@ -3765,7 +3790,7 @@ module.exports = {
   PAYMENT_ACK_RE,
   validateLiveEtaMinutes,
   countEnRouteEtaStops,
-  findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival,
+  findEtaMinutesClaims, normalizeNumberWords, bodyMentionsArrival, bodyMentionsVisitStatus,
   bodyHasTimedArrivalPhrase,
   bodyHasUnclassifiedArrivalDigit,
   findGroundedMinutesFigures,

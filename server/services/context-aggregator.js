@@ -843,7 +843,7 @@ const UPCOMING_SERVICE_COLUMNS = [
   // tracking page requires for a live vehicle, never raw status alone,
   // or it can advertise "Track live" for a stop the tracking page
   // itself still renders as scheduled. See customerTrackState below.
-  'ss.id', 'ss.technician_id', 'ss.track_view_token', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei',
+  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei',
   'ss.lat as service_lat', 'ss.lng as service_lng',
   'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city',
 ];
@@ -892,6 +892,20 @@ async function loadUpcomingServices(customer, includeLiveEta) {
 // rechecked against the visit's current tracker state at send time. Grouped
 // siblings sharing one physical stop share one group; each keeps its own
 // /track/ token (round-4) and the GPS-fix expiry rides along (round-11).
+// Destination identity of one visit row (round-20 P2): the property it is
+// stamped to plus the stamped coordinates and street/ZIP. Numbers are compared
+// numerically and strings case/space-folded by sms-eta-freshness, so pg's
+// numeric-as-string and trimming differences never read as a move.
+function liveEtaDestinationIdentity(row) {
+  return {
+    id: row.id,
+    propertyId: row.property_id ?? null,
+    lat: finiteNumber(row.service_lat),
+    lng: finiteNumber(row.service_lng),
+    line1: row.service_address_line1 ?? null,
+    zip: row.service_address_zip ?? null,
+  };
+}
 function liveEtaGroupFor(members, result, state = 'en_route') {
   const technicianId = members.find((s) => s.technician_id != null)?.technician_id;
   return {
@@ -905,6 +919,10 @@ function liveEtaGroupFor(members, result, state = 'en_route') {
     // Which technician the ETA/status was about (round-18 P2): send time
     // refuses when a reassignment changed the row's technician_id.
     ...(technicianId != null ? { technicianId } : {}),
+    // Round-20 P2: WHERE the ETA/status was about — each member's property id +
+    // the coordinates/address stamp the destination came from. Send time
+    // refuses when staff moved the appointment to another property.
+    destinations: members.map(liveEtaDestinationIdentity),
     ...(result && result.fixExpiresAtMs != null ? { fixExpiresAtMs: result.fixExpiresAtMs } : {}),
   };
 }

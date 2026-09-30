@@ -265,12 +265,15 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries }) {
   // mentions minutes at all.
   const mentionsMinutes = snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || ''));
   const unparsedStatusClaim = !claims.length && !timedArrivalClaim && !arrivedClaim && drafter.bodyMentionsArrival(outgoingBody) && mentionsMinutes;
+  // Round-20: broad default-deny — any visit-status vocabulary at all (see
+  // bodyMentionsVisitStatus), whether or not a narrower classifier read it.
+  const visitStatusMention = liveContext && drafter.bodyMentionsVisitStatus(outgoingBody);
   const classified = claims.length > 0 || timedArrivalClaim || unparsedStatusClaim || arrivedClaim;
   // Round-16 structural backstop: nothing above read a claim, yet a number sits
   // beside a time unit / arrival word — hold it to the status-claim checks.
   const unclassifiedClaim = liveContext && !classified && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unclassifiedSignalOnly: true });
   return {
-    claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim, unclassifiedClaim,
+    claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim, arrivedClaim, unclassifiedClaim, visitStatusMention,
     hasClaim: classified || unclassifiedClaim,
   };
 }
@@ -354,8 +357,21 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
   // token path is refused outright, claim or not.
   if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';
   const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0 });
-  if (!claim.hasClaim && !claim.hasTrackLink) return null;
   const entries = usableSnapshotEntries(liveEtaSnapshot);
+  // Round-20 structural rule: wording classification decides WHICH claim to
+  // verify, never WHETHER to recheck. A draft that carries a live-ETA/on-site
+  // snapshot and whose body touches visit status in ANY form (the broad
+  // bodyMentionsVisitStatus vocabulary gate, not a phrase list of claims) is
+  // held to the visit-state recheck at send time even when no narrower
+  // classifier recognized the wording ("The technician arrived.", "en-route"):
+  // each snapshot entry's visits must still be in the state the draft recorded
+  // (en route / on site), with the same technician and destination. Body copy
+  // with no status vocabulary at all ("Thanks, 5 stars!") is unaffected, as are
+  // accurate corrections ("hasn't arrived") and scheduling windows.
+  if (!claim.hasClaim && !claim.hasTrackLink) {
+    if (!entries.length || !claim.visitStatusMention) return null;
+    return checkEntriesStillLive({ boundEntries: entries, allowOnSite: false, recordedState: true, dbh });
+  }
   if (!entries.length) return 'eta_claim_no_snapshot';
 
   // Tracking-link-only path (Codex round-4 P2): no minutes figure, no
@@ -399,14 +415,32 @@ function technicianChanged(boundEntries, rows) {
   return boundEntries.some((entry) => entry.technicianId != null
     && entry.scheduledServiceIds.some((id) => String(techById.get(id) ?? '') !== String(entry.technicianId)));
 }
-async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, dbh, trackTokensToVerify = [] }) {
+const foldStr = (v) => (v == null ? '' : String(v).trim().toLowerCase());
+const sameNum = (a, b) => (a == null || b == null ? a == null && b == null : Number(a) === Number(b));
+function destinationMatches(recorded, row) {
+  return Boolean(row)
+    && String(recorded.propertyId ?? '') === String(row.property_id ?? '')
+    && sameNum(recorded.lat, row.lat) && sameNum(recorded.lng, row.lng)
+    && foldStr(recorded.line1) === foldStr(row.service_address_line1)
+    && foldStr(recorded.zip) === foldStr(row.service_address_zip);
+}
+// An entry that recorded destinations (every entry the aggregator builds does)
+// must find EACH of its recorded visits at the same destination; a missing
+// row/field pair is a mismatch. Entries from older snapshots without the field
+// keep the previous behavior.
+function destinationChanged(boundEntries, rows) {
+  const rowById = new Map(rows.map((row) => [row.id, row]));
+  return boundEntries.some((entry) => Array.isArray(entry.destinations)
+    && entry.destinations.some((d) => !d || !destinationMatches(d, rowById.get(d.id))));
+}
+async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, recordedState = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
-    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id');
+    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip');
     // requireOnSite (Codex round-13 P2): a completed-arrival claim ("has
     // arrived") holds only once the tracker says the tech is on the property.
-    const liveStates = new Set(requireOnSite ? ['on_property'] : (allowOnSite ? ['en_route', 'on_property'] : ['en_route']));
+    const liveStates = new Set(requireOnSite ? ['on_property'] : ((allowOnSite || recordedState) ? ['en_route', 'on_property'] : ['en_route']));
     const liveById = new Map(rows.map((row) => [row.id, liveStates.has(customerTrackState(row))]));
     // Codex round-7 P2: a minutes/status claim about a grouped entry
     // implicitly covers EVERY sibling in it ("your techs are 9 minutes
@@ -428,6 +462,19 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite 
     // entries that recorded a technicianId are checked (older snapshots keep
     // the previous behavior); a link-only share names no technician.
     if (!allowOnSite && technicianChanged(boundEntries, rows)) return 'eta_claim_tech_changed';
+    // Round-20 P2: the figure/status was about a specific destination; staff
+    // moving the appointment to another property keeps the row en route but
+    // makes the minutes wrong. Unreadable or mismatched → block (every path).
+    if (destinationChanged(boundEntries, rows)) return 'eta_claim_destination_changed';
+    // Recorded-state recheck (no classified claim): each entry's visits must
+    // still be in the exact state the draft carried — on site stays on site,
+    // en route stays en route.
+    if (recordedState) {
+      const rowById = new Map(rows.map((row) => [row.id, row]));
+      const stillRecorded = boundEntries.every((entry) => entry.scheduledServiceIds.every((id) => (
+        customerTrackState(rowById.get(id)) === (entry.state === 'on_property' ? 'on_property' : 'en_route'))));
+      if (!stillRecorded) return 'eta_claim_no_longer_en_route';
+    }
 
     if (trackTokensToVerify.length) {
       const rowByToken = new Map(rows.filter((row) => row.track_view_token).map((row) => [row.track_view_token, row]));
