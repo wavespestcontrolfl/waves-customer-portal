@@ -1058,7 +1058,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, inboundNamesPayment } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1343,10 +1343,13 @@ function paymentDateMatchesClaim(p, claimed) {
 // status report need not (the prompt does not demand one) but, when a date is
 // stated by the reply or the customer, the row must match it. `amountCents`
 // null = an amount-free status claim (any row of the family that also agrees
-// on tender/date). Returns the bound row or null.
+// on tender/date). Returns the bound row or null. `onAmbiguous` is what an
+// unresolvable tender ambiguity returns (null by default = "nothing bound",
+// fail closed for a claim that needs a row; the NOT-FOUND family passes a
+// truthy sentinel so an ambiguity reads as "a row may exist" = contradicted).
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
-  inboundNamedPayment = false, requireDate = family === 'paid',
+  inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null,
 }) {
   if (requireDate && !claimedDate) return null;
   const wanted = new Set(PAYMENT_STATUS_VOCABULARY[family].rowStatuses);
@@ -1362,7 +1365,7 @@ function bindPaymentRow({
   // unreadable tender counts as its own) — a generic claim cannot say WHICH
   // one it is about, so fail closed rather than bind to any of them.
   if (!claimedTender && inboundNamedPayment
-      && new Set(candidates.map((p) => paymentTenderLabel(p) || 'unknown')).size > 1) return null;
+      && new Set(candidates.map((p) => paymentTenderLabel(p) || 'unknown')).size > 1) return onAmbiguous;
   const matched = claimedTender ? candidates.filter((p) => paymentTenderLabel(p) === claimedTender) : candidates;
   return matched[0] || null;
 }
@@ -1486,13 +1489,26 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
     // at send time: outgoingAmountsStale / amountFreeStatusClaimStale call this
     // function with FRESH context, so a row that has since settled or failed no
     // longer backs "still processing".
-    const phraseClaim = paymentStatusPhraseClaim(masked, amounts.length > 0);
+    const phraseClaim = paymentStatusPhraseClaim(masked, amounts.length > 0 || inboundNamesPayment(inboundText));
     if (phraseClaim) {
       if (billingUnavailable) return true;
       const binding = paymentClaimBinding(text, inboundText);
       if (!binding) return true;
-      const targets = amounts.length ? amounts : [null];
-      if (targets.some((a) => !bindPaymentRow({ family: phraseClaim, amountCents: a, context, ...binding }))) return true;
+      // Identity of an amount-free claim: the amount(s) the CUSTOMER named.
+      const targets = amounts.length ? amounts : (amountsIn(inboundText).length ? amountsIn(inboundText) : [null]);
+      const isAbsenceClaim = phraseClaim === 'not_found' || phraseClaim === 'not_received';
+      const bind = (a) => bindPaymentRow({
+        family: phraseClaim,
+        amountCents: a,
+        context,
+        ...binding,
+        requireDate: false,
+        onAmbiguous: isAbsenceClaim ? { ambiguous: true } : null,
+      });
+      // NOT-FOUND ("isn't showing", "haven't received"): valid only when NO
+      // matching paid/pending row exists NOW for the named identity (Codex
+      // round-8 P1). Every other family needs a matching row of its status.
+      if (isAbsenceClaim ? targets.some((a) => bind(a)) : targets.some((a) => !bind(a))) return true;
       continue;
     }
     if (!amounts.length) {
@@ -1700,7 +1716,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '') {
   const paymentMoneyExtra = realAnswersOn
     ? `
 - Payment-method questions ("how do I pay", "can I Zelle you", "do you take a card") are answerable RIGHT NOW — answer directly from the Payment options line, stating the real methods (and the exact Zelle contact ONLY when one is listed there) rather than promising a follow-up; never invent a Zelle phone/email or any other contact that isn't in that line. When money is due, add {"type":"send_payment_link"} so a teammate texts the pay link too.
-- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. ${paymentStatusPromptLine()} A line marked failed or refunded means it did NOT go through — never say it was received. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
+- "Did you get my payment?" / any payment-confirmation question: Recent payments shows each payment's status and, when known, how it was paid ("via Zelle", "via card", "via bank/ACH"). Confirm receipt ONLY for a line marked paid, and ALWAYS confirm it by stating the EXACT amount and date that line shows ("we received your $120.00 payment from Sep 12") — never a bare "you're all set"/"got it, thanks"/"we got your payment" with no amount named, even when a payment is genuinely on file; if you can't state the amount and date, say it isn't showing yet and you'll confirm. A line marked processing means it's still processing, not received yet — say so. ${paymentStatusPromptLine()} A line marked failed means it did NOT go through — never say it was received. A line marked refunded or disputed WAS received and then reversed — say it was refunded/disputed, never that it failed and never that it is still paid. If the customer names HOW they paid ("I Zelled you", "I paid by check"), confirm that specific method ONLY when a paid line shows that exact "via ..." tag; a paid line with no "via ..." tag confirms the amount and date ONLY — never guess or state a method it doesn't show; if no paid line shows the tender they named, say it isn't showing on our end yet and you'll confirm. If nothing matches at all, say it isn't showing on our end yet and you'll confirm. NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid — a Zelle or ACH payment can be genuinely sent and still take time to show up here.`
     : '';
 
   const base = `You are the Waves Pest Control AI assistant drafting an SMS reply to a customer in Southwest Florida. This reply may be shown to a Waves team member to review and send, or — once an intent has earned it through review — sent to the customer automatically. Treat it as customer-facing: write exactly what should go to the customer, and make it safe and correct to send AS-IS with no human edit.
@@ -1876,7 +1892,22 @@ function paymentTenderLabel(p) {
   if (!p) return null;
   const type = String(p.payment_method_type || '').toLowerCase();
   if (type.includes('bank') || type === 'us_bank_account' || type === 'ach') return 'bank/ACH';
-  if (type === 'card' || p.card_brand || p.card_last_four) return 'card';
+  if (type === 'card') return 'card';
+  // Codex round-8 P1 (PR #5331): card_last_four ALONE proves nothing — an ACH
+  // payment (stripe.js) stores its BANK last4 in card_last_four with no
+  // payment_method_type. Read the method the row actually persisted: the
+  // Stripe-resolved metadata.payment_method (written on every gateway payment
+  // row: 'card' | 'us_bank_account' | …), then card_brand (set only for a card
+  // charge). Nothing readable -> null (an unknown tender the binder treats as
+  // its own, fail-closed).
+  const meta = (() => {
+    if (p.metadata && typeof p.metadata === 'object') return p.metadata;
+    try { return JSON.parse(p.metadata || 'null') || {}; } catch { return {}; }
+  })();
+  const metaMethod = String(meta.payment_method || '').toLowerCase();
+  if (metaMethod.includes('bank') || metaMethod === 'ach') return 'bank/ACH';
+  if (metaMethod === 'card') return 'card';
+  if (p.card_brand) return 'card';
   const m = MANUAL_TENDER_FIELD_RE.exec(String(p.description || '').trim());
   return m ? tenderLabelForWord(m[1]) : null;
 }

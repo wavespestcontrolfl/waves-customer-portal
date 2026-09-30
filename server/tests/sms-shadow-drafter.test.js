@@ -783,7 +783,8 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     expect(p).toMatch(/ALWAYS confirm it by stating the EXACT amount and date/i);
     expect(p).toMatch(/never a bare "you're all set"\/"got it, thanks"\/"we got your payment" with no amount named/i);
     expect(p).toMatch(/A line marked processing means it's still processing/i);
-    expect(p).toMatch(/A line marked failed or refunded means it did NOT go through/i);
+    expect(p).toMatch(/A line marked failed means it did NOT go through/i);
+    expect(p).toMatch(/A line marked refunded or disputed WAS received and then reversed/i);
     expect(p).toMatch(/NEVER say a payment was received, applied, or that they're all set unless a Recent payments line is actually marked paid/i);
     // Finding 4: the old "(or Open invoice)" reference is gone — Open
     // invoice only ever lists what is UNPAID, never a paid confirmation.
@@ -803,7 +804,9 @@ describe('v13 — PAYMENT OPTIONS fact (real answers: how do I pay / Zelle / did
     const { paymentTenderLabel } = require('../services/sms-shadow-drafter');
     // Card/Stripe payment — snapshotted columns from the 20260924000032 migration
     expect(paymentTenderLabel({ payment_method_type: 'card', card_brand: 'Visa' })).toBe('card');
-    expect(paymentTenderLabel({ card_last_four: '4242' })).toBe('card'); // brand/last4 alone still reads as a card
+    // Codex round-8 P1: last4 ALONE proves nothing (ACH rows store bank last4 here) — brand or persisted metadata decide
+    expect(paymentTenderLabel({ card_last_four: '4242' })).toBeNull();
+    expect(paymentTenderLabel({ card_last_four: '4242', card_brand: 'Visa' })).toBe('card');
     // Bank/ACH
     expect(paymentTenderLabel({ payment_method_type: 'us_bank_account' })).toBe('bank/ACH');
     expect(paymentTenderLabel({ payment_method_type: 'bank' })).toBe('bank/ACH');
@@ -1024,7 +1027,11 @@ describe('independent-review P1 (round 2, PR #5331): an affirmative receipt clai
 
   test('negation still passes with no amount named', () => {
     const ctx = ctxWith([{ amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' }]);
-    expect(replyQuotesUngroundedAmount("We haven't received your payment yet.", ctx, { byMeaning: true })).toBe(false);
+    // Codex round-8 (owner ruling): an unnamed-identity absence claim is contradicted by ANY paid row
+    // in the Recent payments facts — a denial must not hide a payment that did land. It is truthful only
+    // when the customer's own message names a DIFFERENT payment.
+    expect(replyQuotesUngroundedAmount("We haven't received your payment yet.", ctx, { byMeaning: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount("We haven't received your payment yet.", ctx, { byMeaning: true, inboundMessage: 'Did my $95 payment arrive?' })).toBe(false);
   });
 });
 

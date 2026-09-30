@@ -66,9 +66,16 @@ function paymentAckPatternSource() {
 // same table (pendingClaimRe / failedClaimRe / the paid list feeding
 // paymentAckPatternSource) — so the prompt can never permit a status phrase the
 // guard does not know: adding a phrase here adds it to both.
-//   paid    -> a row marked paid                      (received/applied/cleared/…)
-//   pending -> a row marked pending/processing        ("still processing", …)
-//   failed  -> a row marked failed/declined/refunded  ("didn't go through", …)
+//   paid      -> a row marked paid                     (received/applied/cleared/…)
+//   pending   -> a row marked pending/processing       ("still processing", …)
+//   failed    -> a row marked failed/declined/…        ("didn't go through", …)
+//   reversed  -> a row marked refunded/disputed        ("was refunded", "is disputed", …)
+//                (settled THEN reversed — never a "failed" payment; Codex round-8 P1)
+//   not_received -> NO PAID row exists ("haven't received", "hasn't come through", …)
+//   not_found -> NO paid/pending row exists for the named payment
+//                ("isn't showing", "haven't received", …). Its rowStatuses are the
+//                statuses that CONTRADICT the claim: the claim is valid only when no
+//                matching row of those statuses exists NOW (Codex round-8 P1).
 const PAYMENT_STATUS_VOCABULARY = Object.freeze({
   paid: Object.freeze({
     rowStatuses: Object.freeze(['paid']),
@@ -79,32 +86,64 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
     phrases: Object.freeze(['still processing', 'is processing', 'currently processing', 'being processed', 'in process', 'pending', 'processing']),
   }),
   failed: Object.freeze({
-    rowStatuses: Object.freeze(['failed', 'declined', 'refunded', 'canceled', 'cancelled', 'void', 'voided', 'disputed']),
+    rowStatuses: Object.freeze(['failed', 'declined', 'canceled', 'cancelled', 'void', 'voided']),
     phrases: Object.freeze(['failed', 'declined', "didn't go through", 'did not go through', 'was returned', 'bounced', 'unsuccessful']),
+  }),
+  reversed: Object.freeze({
+    rowStatuses: Object.freeze(['refunded', 'disputed']),
+    phrases: Object.freeze(['was refunded', 'has been refunded', 'is refunded', 'refunded', 'was disputed', 'is disputed', 'disputed', 'charged back', 'was reversed']),
+  }),
+  not_found: Object.freeze({
+    rowStatuses: Object.freeze(['paid', 'pending', 'processing', 'requires_action']),
+    phrases: Object.freeze([
+      "isn't showing", 'is not showing', "aren't showing", 'not showing', "don't see", 'do not see', 'no record',
+      "isn't reflected", 'not on file',
+    ]),
+  }),
+  // "Not received yet" is TRUE for a still-processing row (the prompt itself
+  // says a processing line means "not received yet"), so only a PAID row
+  // contradicts it.
+  not_received: Object.freeze({
+    rowStatuses: Object.freeze(['paid']),
+    phrases: Object.freeze([
+      "haven't received", 'have not received', "hasn't been received", 'has not been received',
+      "hasn't come through", "hasn't posted", "hasn't cleared",
+    ]),
   }),
 });
 const phrasePattern = (list) => list.map((v) => v.replace(/\s+/g, '\\s+').replace(/'/g, "['\u2019]")).join('|');
 // A status claim is only a PAYMENT claim when the clause also names a payment
-// noun (or a tender/amount handled by the caller) — "your invoice is pending"
-// or "we're processing your request" are not.
-const PAYMENT_NOUN_RE = /\b(?:payments?|transfers?|deposits?|charges?|zelle|ach|paid)\b/i;
-const PENDING_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY.pending.phrases)})\\b`, 'i');
-const FAILED_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY.failed.phrases)})\\b`, 'i');
-// null | 'pending' | 'failed' for a clause that asserts a payment is
-// processing / did not go through.
-function paymentStatusPhraseClaim(clause, hasAmount = false) {
+// noun (or an amount, or the customer's own message is about a payment, both
+// handled by the caller) — "your invoice is pending" or "we're processing your
+// request" are not.
+const PAYMENT_NOUN_RE = /\b(?:payments?|transfers?|deposits?|charges?|zelle|ach|paid|refund(?:ed|s)?|disputed?|chargeback)\b/i;
+const familyRe = (family) => new RegExp(`\\b(?:${phrasePattern(PAYMENT_STATUS_VOCABULARY[family].phrases)})\\b`, 'i');
+const STATUS_PHRASE_RES = Object.freeze([
+  ['not_found', familyRe('not_found')],
+  ['not_received', familyRe('not_received')],
+  ['reversed', familyRe('reversed')],
+  ['failed', familyRe('failed')],
+  ['pending', familyRe('pending')],
+]);
+// The customer's own message is about a payment (used to relax the noun
+// requirement for a bare "it isn't showing on our end yet" reply).
+const INBOUND_PAYMENT_RE = /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?|zelle[d']*|venmo|paypal|check|ach)\b/i;
+const inboundNamesPayment = (text) => INBOUND_PAYMENT_RE.test(String(text || ''));
+// null | 'not_found' | 'reversed' | 'failed' | 'pending' for a clause that
+// asserts a payment's status. `namesPayment` = the caller already knows the
+// clause is about a payment (it carries an amount, or the inbound is about one).
+function paymentStatusPhraseClaim(clause, namesPayment = false) {
   const text = String(clause || '');
   if (/\?/.test(text)) return null;
-  if (!hasAmount && !PAYMENT_NOUN_RE.test(text)) return null;
-  if (PENDING_PHRASE_RE.test(text)) return 'pending';
-  if (FAILED_PHRASE_RE.test(text)) return 'failed';
+  if (!namesPayment && !PAYMENT_NOUN_RE.test(text)) return null;
+  for (const [family, re] of STATUS_PHRASE_RES) if (re.test(text)) return family;
   return null;
 }
 // The prompt sentence derived from the table above.
 function paymentStatusPromptLine() {
   const q = (list) => list.map((p) => `"${p}"`).join(', ');
   const V = PAYMENT_STATUS_VOCABULARY;
-  return `Payment-status wording and the Recent payments status each requires: say a payment was ${q(V.paid.phrases)} ONLY for a line marked ${V.paid.rowStatuses.join('/')}; say it is ${q(V.pending.phrases)} ONLY for a line marked ${V.pending.rowStatuses.join(' or ')}; say it ${q(V.failed.phrases)} ONLY for a line marked ${V.failed.rowStatuses.slice(0, 3).join(', ')}. Any other wording about a payment's status is not allowed.`;
+  return `Payment-status wording and the Recent payments status each requires: say a payment was ${q(V.paid.phrases)} ONLY for a line marked ${V.paid.rowStatuses.join('/')}; say it is ${q(V.pending.phrases)} ONLY for a line marked ${V.pending.rowStatuses.join(' or ')}; say it ${q(V.failed.phrases)} ONLY for a line marked ${V.failed.rowStatuses.slice(0, 3).join(', ')}; say it ${q(V.reversed.phrases)} ONLY for a line marked ${V.reversed.rowStatuses.join(' or ')} (a refunded or disputed payment WAS received and then reversed — never say it failed, and never say it is still paid); say ${q(V.not_found.phrases)} ONLY when NO line marked ${V.not_found.rowStatuses.join('/')} matches the payment the customer asked about; say ${q(V.not_received.phrases)} ONLY when NO line marked ${V.not_received.rowStatuses.join('/')} matches it (a processing line is not received yet). Any other wording about a payment's status is not allowed.`;
 }
 
 // Cheap, drafter-free PRE-SCREEN for "could this body assert a payment
@@ -122,13 +161,14 @@ function paymentStatusPromptLine() {
 // MUST stay a strict SUPERSET of those two drafter predicates — if either
 // gains a status phrase that avoids all three words, add its anchor here
 // (payment-receipt-vocabulary.test.js pins the current claim examples).
-const PAYMENT_STATUS_PRESCREEN_RE = /\b(?:payments?|paid|account|transfers?|deposits?|charges?|zelle|ach|processing|pending)\b/i;
+const PAYMENT_STATUS_PRESCREEN_RE = /\b(?:payments?|paid|account|transfers?|deposits?|charges?|zelle|ach|processing|pending|showing|refund(?:ed|s)?|disputed?|chargeback)\b/i;
 function mayAssertPaymentStatus(text) {
   return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || ''));
 }
 
 module.exports = {
   PAYMENT_STATUS_VOCABULARY,
+  inboundNamesPayment,
   paymentStatusPhraseClaim,
   paymentStatusPromptLine,
   mayAssertPaymentStatus,

@@ -744,3 +744,35 @@ describe('Codex round-8 P1 #2: a Zelle payment STATUS report is not a new transf
     expect(classifyZelleClause("Yes, we've got Zelle")).toBe('offer');
   });
 });
+
+describe('Codex round-8 P1 #3: absence claims ("isn\'t showing") get a send-time billing read', () => {
+  const stubbedRows = { billing: { outstandingBalance: 0, recentPayments: [] } };
+  test('"Your payment isn\'t showing on our end yet." reaches the strict binder at send time (immediate + scheduled share this path)', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    ContextAggregator.getContextForCustomer.mockResolvedValue(stubbedRows);
+    replyQuotesUngroundedAmount.mockReturnValue(true);
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: "Your payment isn't showing on our end yet.", dbh: dbWithCustomer({ id: 'c1' }) }))
+      .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalled();
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalledWith("Your payment isn't showing on our end yet.", stubbedRows, expect.objectContaining({ byMeaning: true }));
+  });
+
+  test('a bare "it isn\'t showing yet" is checked when the customer\'s message is about a payment, and skipped otherwise', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    ContextAggregator.getContextForCustomer.mockResolvedValue(stubbedRows);
+    replyQuotesUngroundedAmount.mockReturnValue(false);
+    await amountFreeStatusClaimStale({ customerId: 'c1', body: "It isn't showing on our end yet.", strict: true, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'Did you get my Zelle payment?' });
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalledTimes(1);
+    replyQuotesUngroundedAmount.mockClear();
+    await amountFreeStatusClaimStale({ customerId: 'c1', body: "It isn't showing on our end yet.", strict: true, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'What time are you coming?' });
+    expect(replyQuotesUngroundedAmount).not.toHaveBeenCalled();
+  });
+
+  test('a refunded/disputed report is a status claim too', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    ContextAggregator.getContextForCustomer.mockResolvedValue(stubbedRows);
+    replyQuotesUngroundedAmount.mockReturnValue(false);
+    await amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your payment was refunded.', strict: true, dbh: dbWithCustomer({ id: 'c1' }) });
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
+  });
+});
