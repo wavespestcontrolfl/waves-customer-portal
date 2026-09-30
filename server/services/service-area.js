@@ -2,14 +2,15 @@
  * Service-area geography — the ONE bounding box for "is this coordinate
  * plausibly a Waves service address".
  *
- * Waves serves Manatee, Sarasota, Charlotte and DeSoto counties. The
+ * Waves serves Manatee, Sarasota and Charlotte counties plus the south-
+ * Hillsborough towns; DeSoto is not served (owner ruling 2026-09-30). The
  * authoritative membership test is the county name
  * (SERVICE_AREA_COUNTIES in services/call-triage-flags.js), which needs a
  * reverse-geocode; this box is the cheap arithmetic backstop for paths that
  * already hold a coordinate and must not accept one from the wrong state.
  *
  * Deliberately generous at the edges: it has to contain Anna Maria and
- * Holmes Beach on the west, Duette and the DeSoto line on the east, Boca
+ * Holmes Beach on the west, Duette and the DeSoto county line on the east, Boca
  * Grande on the south, and on the north the served south-Hillsborough
  * cities (SOUTH_HILLSBOROUGH_CITIES in config/locations.js — Riverview and
  * Gibsonton reach past 27.9°N), which is why the top edge sits above the
