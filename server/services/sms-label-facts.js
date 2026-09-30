@@ -1034,7 +1034,7 @@ const ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|you|us|our|my|me|they
 // indoor place with a question / ok word. Staff going in ("can you come inside to spray", "the tech will come inside") is access,
 // not re-entry. Every alternative is a plain word list with bounded gaps.
 const INDOOR_PLACE_RE = /\b(?:inside|indoors?|house|home|rooms?|bedrooms?|kitchen|living\s+room|garage|attic|crawlspace|basement|bathroom|closet|cabinets?|pantry|baseboards?|floors?|carpets?|couch|furniture|nursery)\b/;
-const ENTRY_RE = /\b(?:re-?enter|enter|return\s+(?:home|inside|indoors|in|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|come\s+home|(?:get|head|move|be)\s+back\s+(?:home|in|inside|indoors|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|(?:go|come|get|walk|move)\s+(?:back\s+)?(?:in|inside|indoors)|let\s+(?:\w+\s+){0,2}?(?:back\s+)?(?:in|inside|indoors)|sleep(?:ing)?\s+in|stay(?:ing)?\s+in|use\s+the\s+(?:kitchen|bathroom|bedroom|room|garage|basement|attic))\b/;
+const ENTRY_RE = /\b(?:re-?enter|enter|return\s+(?:home|inside|indoors|in|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|come\s+home|(?:get|head|move|be)\s+back\s+(?:home|in|inside|indoors|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|(?:go|come|get|walk|move)\s+(?:back\s+)?(?:in|inside|indoors)(?!\s+(?:\d|(?:a|an)\s+(?:few|couple|week|month|day|hour)|(?:one|two|three|four|five|six|seven|eight|nine|ten|a)\s+(?:days?|weeks?|months?|hours?)|the\s+(?:morning|afternoon|evening)))|let\s+(?:\w+\s+){0,2}?(?:back\s+)?(?:in|inside|indoors)|sleep(?:ing)?\s+in|stay(?:ing)?\s+in|use\s+the\s+(?:kitchen|bathroom|bedroom|room|garage|basement|attic))\b/;
 const STAFF_ENTRY_RE = /\b(?:you|(?:the|our|your)\s+(?:tech|technician|guy|team|crew)|tech|technician|someone)\s+(?:will\s+|can\s+|could\s+|should\s+|would\s+|need\s+to\s+|have\s+to\s+|to\s+)?(?:come|go|get|enter|walk)\s+(?:in|inside|indoors|into|back)\b/;
 const OK_WORD_RE = /\b(?:safe|ok|okay|fine|ready|usable|clear|allowed)\b/;
 // ("you" is not the one going in: "do you spray inside the house?" is a question about the service)
@@ -1049,8 +1049,17 @@ const DEICTIC_STAY_RE = /\b(?:sleep(?:ing)?|stay(?:ing)?|be|being|live|living|re
 const PERMISSION_ENTRY_WORD_SRC = 'allowed|permitted|ok|okay|cleared?|good|fine|safe';
 const PERMISSION_ENTRY_RE = new RegExp(`\\b(?:${PERMISSION_ENTRY_WORD_SRC})\\s+(?:to\\s+)?(?:(?:go|come|get|head|move)\\s+)?(?:back(?:\\s+(?:in|inside|indoors|home))?|in|inside|indoors|home|return)\\b(?!\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening)|the\\s+(?:morning|afternoon|evening)|on\\b|at\\b|by\\b|around\\b|next\\b|tomorrow|\\d|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)))`);
 const PERMISSION_GO_BACK_RE = new RegExp(`\\b(?:${PERMISSION_ENTRY_WORD_SRC})\\s+to\\s+(?:go|come|get|head|move)\\s+(?:back|in|inside|indoors)\\b`);
+// Bare "come back" forms ("can we come back now?", "ok to come back?", "when can we get back", "can we go back yet"): a being / first-person
+// subject (or an ok word), a question / ok / now / yet shape, the going verb ending the clause or followed only by an immediacy word, and NO
+// scheduling object ("come back Tuesday", "come back in two weeks for the follow-up", "come back to check", "get back to you" are not).
+const BARE_BACK_RE = /\b(?:come|go|get|head|move|be)\s+back(?=\s*(?:[?!.,;]|$)|\s+(?:now|yet|today|tonight|already|soon|safely|anytime|any\s+time|right\s+away)\b)/;
+const BARE_BACK_SCHEDULING_RE = /\b(?:appointments?|schedul\w*|reschedul\w*|to\s+check|follow-?ups?|estimates?|quotes?|inspections?|tomorrow|next|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?s?)\b/;
+const BARE_BACK_SHAPE_RE = /\b(?:now|yet)\b/;
+const asksBareBackEntry = (text) => BARE_BACK_RE.test(text) && !BARE_BACK_SCHEDULING_RE.test(text) && !STAFF_ENTRY_RE.test(text) && !BE_HOME_ACCESS_RE.test(text)
+  && (INDOOR_ASKER_RE.test(text) || OK_WORD_RE.test(text)) && (ASKED_QUESTION_RE.test(text) || OK_WORD_RE.test(text) || BARE_BACK_SHAPE_RE.test(text));
 const asksIndoorReentry = (text) => !STAFF_ENTRY_RE.test(text) && !BE_HOME_ACCESS_RE.test(text) && (
-  (PERMISSION_ENTRY_RE.test(text) && INDOOR_ASKER_RE.test(text))
+  asksBareBackEntry(text)
+  || (PERMISSION_ENTRY_RE.test(text) && INDOOR_ASKER_RE.test(text))
   || PERMISSION_GO_BACK_RE.test(text)
   ||
   (DEICTIC_STAY_RE.test(text) && ASKED_QUESTION_RE.test(text) && (INDOOR_ASKER_RE.test(text) || OK_WORD_RE.test(text)))
@@ -1074,7 +1083,8 @@ const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:
 const ELLIPTICAL_RE = /^and\s+\w+|^(?:(?:so|ok|okay|but)\s+)?(?:(?:what|how)\s+about|is\s+(?:it|that|this)|are\s+they|can\s+(?:they|he|she|it)|will\s+(?:it|that)|now|then|outside|inside|out)\b/;
 const NOT_ELLIPTICAL_RE = new RegExp([BUSINESS_RE.source, SCHEDULE_WORD_RE.source, /\b(?:arrive|arrives|come|coming|call|text|schedule|reschedule|appointment|book|booking|visit|pay|price|cost|service)\b/.source].join('|'));
 function isEllipticalInbound(text) {
-  return text.split(/\s+/).length <= 8 && ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text);
+  // (a bare "can we come back now?" is a short follow-up too: it carries the thread's kinds and visit references, though "come" is a NOT_ELLIPTICAL word)
+  return text.split(/\s+/).length <= 8 && (asksBareBackEntry(text) || (ELLIPTICAL_RE.test(text) && !NOT_ELLIPTICAL_RE.test(text)));
 }
 
 // No question shape is required for a topic: "tell me when my dogs can go outside" asks re-entry as much as a
@@ -1409,6 +1419,13 @@ const MONTH_DATE_RE = new RegExp(`\\b(${MONTH_SRC})[a-z]*\\.?\\s+(\\d{1,2})(?:st
 const DAY_MONTH_DATE_RE = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?(${MONTH_WORD_SRC})\\b\\.?${YEAR_TAIL_SRC}`, 'g');
 const NUMERIC_DATE_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g;
 const DASHED_DATE_RE = /(?<![\d./-])(\d{1,2})[-.](\d{1,2})[-.](\d{2}|\d{4})(?![\d/-])/g;
+// A hyphen / dot month-day with no year ("the 8-15 treatment", "on 8-15", "8.15 visit", "08-15"): a date only with a visit word after it or
+// on / from / since / the / that / of / for before it, and never a time window ("8-10 AM"), a count ("2-3 hours", "1-2 days"), a price ("$8.15") or a
+// fragment of a longer number. Resolved like the slash form (the visit's own year): the month and day must be the visit's.
+const DASH_DAY_TAIL_SRC = "(?![\\d/.-])(?!\\s*(?:am|pm|a\\.m|p\\.m|o'?clock|hours?|hrs?|h\\b|days?|weeks?|wks?|months?|years?|yrs?|minutes?|mins?|times|x\\b|%|percent|to\\b|or\\b|-|gallons?|feet|ft|inches|lbs?|oz|pounds?|dollars?|bucks))";
+const DASH_DATE_LEAD_RE = new RegExp(`(?<![\\d$#/.,:-])\\b(?:on|from|since|the|that|of|for)\\s+(\\d{1,2})[-.](\\d{1,2})${DASH_DAY_TAIL_SRC}`, 'g');
+const DASH_DATE_TRAIL_RE = new RegExp(`(?<![\\d$#/.,:-])(\\d{1,2})[-.](\\d{1,2})(?![\\d/.-])\\s+(?:(?:pest|lawn|tree)\\s+)?(?:visit|treatment|service|spray|spraying|application|appointment|round)\\b`, 'g');
+const validMonthDay = (m, d) => m >= 1 && m <= 12 && d >= 1 && d <= 31;
 const ISO_DATE_RE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
 // A month or season named on its own ("the May treatment", "back in August", "last spring"). "may" is a verb
 // as often as a month, so it is read from the original-case text and only as "May" with a visit word or a
@@ -1468,6 +1485,9 @@ const VISIT_REFERENCES = [
   { re: DAY_MONTH_DATE_RE, differs: (m, v) => otherYmd(v, monthNumber(m[2]), Number(m[1]), tailYear(m[3], m[4])) },
   { re: NUMERIC_DATE_RE, differs: (m, v) => otherYmd(v, Number(m[1]), Number(m[2]), m[3]) },
   { re: DASHED_DATE_RE, differs: (m, v) => otherYmd(v, Number(m[1]), Number(m[2]), m[3]) },
+  // (an impossible month / day, like "13-45", is no date)
+  { re: DASH_DATE_LEAD_RE, differs: (m, v) => validMonthDay(Number(m[1]), Number(m[2])) && otherYmd(v, Number(m[1]), Number(m[2])) },
+  { re: DASH_DATE_TRAIL_RE, differs: (m, v) => validMonthDay(Number(m[1]), Number(m[2])) && otherYmd(v, Number(m[1]), Number(m[2])) },
   { re: ISO_DATE_RE, differs: (m, v) => otherYmd(v, Number(m[2]), Number(m[3]), m[1]) },
 ];
 

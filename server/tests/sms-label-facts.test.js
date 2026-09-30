@@ -1783,6 +1783,32 @@ describe('r24: permission-entry inbound forms; outbound rows the model sees', ()
   });
 });
 
+describe('r25 (round 25): bare "come back" re-entry forms; hyphen / dot month-day dates', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  test('a being / first-person subject with a question / ok / now / yet shape and a bare "come / go / get back" asks re-entry, and is a short follow-up', () => {
+    for (const text of ['Can we come back now?', 'ok to come back?', 'when can we get back', 'can we go back yet', 'Are the kids ok to come back?', 'is it safe to come back now']) {
+      expect([text, asked(text).includes('reentry')]).toEqual([text, true]);
+    }
+    for (const text of ['Can we come back now?', 'ok to come back?', 'when can we get back', 'can we go back yet']) expect([text, labelFactsLib.inboundIsElliptical(text)]).toEqual([text, true]);
+    // ...so it inherits the thread's visit references: "the May treatment" earlier in the thread voids the facts
+    expect(labelFactsLib.labelFactsForInbound({ serviceDate: '2026-06-05' }, ['can we go back yet', 'What about the May treatment?'], '2026-06-10')).toBeNull();
+  });
+  test('staff subjects and scheduling objects are not re-entry', () => {
+    for (const text of ['can you come back Tuesday', 'will the tech come back', 'come back in two weeks for the follow-up', 'ok, come back in two weeks for the follow-up?', 'can you come back tomorrow?', 'when can you come back?', 'can we come back next week?', 'I will get back to you', 'can you get back to me?', 'we can come back Thursday', 'can we come back to check the estimate', 'can we reschedule, when can we come back?']) {
+      expect([text, asked(text).includes('reentry')]).toEqual([text, false]);
+    }
+  });
+  const differs = (t) => labelFactsLib.inboundRefersToOtherVisit(t, '2026-06-05', '2026-06-10');
+  test('a hyphen / dot month-day with a visit word or on / from / since / the / that before it is a date that must be the visit\'s', () => {
+    for (const t of ['the 8-15 treatment', 'what about the 8-15 treatment?', 'on 8-15', '8.15 visit', 'on 08-15', 'the 08-15 visit', 'since 8-15', 'from the 8.15 service', '8/15']) expect([t, differs(t)]).toEqual([t, true]);
+    // the visit's own date (6-5 / 06.05) is not another visit
+    for (const t of ['the 6-5 treatment', 'on 06-05', '6.5 visit', 'since 6-5']) expect([t, differs(t)]).toEqual([t, false]);
+  });
+  test('time windows, counts, prices, phone fragments and impossible dates are not dates', () => {
+    for (const t of ['8-10 AM works', 'come between 8-10 AM', 'on 8-10 am', 'I am free 8-10', '2-3 hours', 'the 2-3 hours after', 'the 1-2 days', 'wait 2-3 days', 'call 555-1234', 'it was $8.15', 'the 13-45', 'on 8-10 to 8-12']) expect([t, differs(t)]).toEqual([t, false]);
+  });
+});
+
 describe('r26: the follow-up deadline the real-answers prompt requires may trail a hand-off (the exact SLA_PHRASES of sms-followup-sla)', () => {
   const { SLA_PHRASES } = require('../services/sms-followup-sla');
   const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');
