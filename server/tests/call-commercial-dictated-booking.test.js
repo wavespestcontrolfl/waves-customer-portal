@@ -284,6 +284,19 @@ describe('the price: the extraction judges it, the code verifies the pinned quot
     expect(grounded(extraction({ service: { price_is_final: false } }), t).reason).toBe('price_not_final');
   });
 
+  test('a recurring billing unit on the accepted price goes to the office (codex #5377 r5 P1)', () => {
+    for (const unit of ['per_month', 'per_quarter', 'per_year']) {
+      const entry = { amount_usd: 150, accepted: true, caller_response: 'accepted', unit };
+      const r = extraction({ service: { price: entry, prices: [entry] } });
+      expect(grounded(r)).toEqual({ ok: false, reason: 'price_unit_not_bookable' });
+      expect(route(r).allowed).toBe(false);
+    }
+    for (const unit of ['one_time', 'per_application', undefined]) {
+      const entry = { amount_usd: 150, accepted: true, caller_response: 'accepted', ...(unit ? { unit } : {}) };
+      expect(grounded(extraction({ service: { price: entry, prices: [entry] } })).ok).toBe(true);
+    }
+  });
+
   test('a multi-term accepted price ("$150 to start plus $50/month") goes to the office (codex #5377 r3 P1)', () => {
     const prices = [
       { amount_usd: 150, accepted: true, caller_response: 'accepted', unit: 'one_time' },
