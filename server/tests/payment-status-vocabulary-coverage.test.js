@@ -132,14 +132,17 @@ describe('round-13: literal paid / unpaid forms', () => {
     expect(rq('This invoice is paid.', ctx([paid]))).toBe(true);
   });
   test('"is unpaid" / "hasn\'t been paid" are contradicted by a PAID row; owed figures must be owed', () => {
-    const r = "Your $120 payment hasn't been paid from Sep 12.";
-    expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 120 }))).toBe(false);
-    expect(rq('Your $120 invoice is unpaid.', ctx([paid], { outstandingBalance: 120 }))).toBe(true); // a paid $120 row contradicts
-    expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 50 }))).toBe(true); // $120 is not owed
-    expect(rq('This invoice is unpaid.', ctx([], { outstandingBalance: 120 }))).toBe(false);
-    expect(rq('This invoice is unpaid.', ctx([paid], { outstandingBalance: 120 }))).toBe(true);
+    // invoice-subject claims bind the INVOICE's own status (round-22); payment-subject ones the payments rows
+    const invs = (status, total, amountDue) => ({ invoiceStatuses: [{ id: 'i1', invoiceNumber: 'WPC-2026-0001', status, total, amountDue }] });
+    expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 120, ...invs('sent', 120, 120) }))).toBe(false);
+    expect(rq('Your $120 invoice is unpaid.', ctx([paid], { outstandingBalance: 0, ...invs('paid', 120, 0) }))).toBe(true); // the invoice is paid
+    expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 50, ...invs('sent', 50, 50) }))).toBe(true); // $120 is not that invoice
+    expect(rq('This invoice is unpaid.', ctx([], { outstandingBalance: 120, ...invs('sent', 120, 120) }))).toBe(false);
+    expect(rq('This invoice is unpaid.', ctx([paid], { outstandingBalance: 0, ...invs('paid', 120, 0) }))).toBe(true);
     expect(rq('You have an unpaid balance of $50.', ctx([], { outstandingBalance: 50 }))).toBe(false); // owed language, untouched
-    expect(r).toBeTruthy();
+    // payment-subject: still contradicted by a paid row
+    expect(rq("Your payment hasn't been paid.", ctx([paid], { outstandingBalance: 120 }))).toBe(true);
+    expect(rq("Your payment hasn't been paid.", ctx([], { outstandingBalance: 120 }))).toBe(false);
   });
 });
 
@@ -151,11 +154,12 @@ describe('round-14: "unpaid" needs a current open invoice or balance', () => {
   const CLAIMS = ['This invoice is still unpaid.', 'Your invoice is unpaid.', "Your payment hasn't been paid.", 'Your account shows as unpaid.'];
 
   test('open invoice / positive balance grounds it; nothing open (voided or canceled after the draft) does not', () => {
+    const invs = (status, amountDue) => ({ invoiceStatuses: [{ id: 'i1', invoiceNumber: 'WPC-2026-0001', status, total: 95, amountDue }] });
     for (const claim of CLAIMS) {
-      expect({ claim, open: rq(claim, withOpen({ outstandingBalance: 95 })) }).toEqual({ claim, open: false });
-      expect({ claim, invoice: rq(claim, withOpen({ openInvoice: { amountDue: 95 } })) }).toEqual({ claim, invoice: false });
+      expect({ claim, open: rq(claim, withOpen({ outstandingBalance: 95, ...invs('sent', 95) })) }).toEqual({ claim, open: false });
+      expect({ claim, invoice: rq(claim, withOpen({ openInvoice: { amountDue: 95 }, ...invs('overdue', 95) })) }).toEqual({ claim, invoice: false });
       // the void-after-draft case: the send-time recheck re-reads billing and finds nothing open
-      expect({ claim, voided: rq(claim, withOpen({ outstandingBalance: 0, openInvoice: null })) }).toEqual({ claim, voided: true });
+      expect({ claim, voided: rq(claim, withOpen({ outstandingBalance: 0, openInvoice: null, ...invs('void', 0) })) }).toEqual({ claim, voided: true });
     }
   });
 
@@ -361,9 +365,9 @@ describe('round-18: every pair of claim kinds is validated independently (no sho
     failed: ctx([row('failed')]),
     refunded: ctx([row('refunded')]),
     disputed: ctx([row('disputed')]),
-    owed95: ctx([], { outstandingBalance: 95, openInvoice: { amountDue: 95 } }),
-    paidAndOwed: ctx([row('paid')], { outstandingBalance: 95 }),
-    everything: ctx([row('paid'), row('processing'), row('failed'), row('refunded'), row('disputed')], { outstandingBalance: 95, hasProcessingPayment: true }),
+    owed95: ctx([], { outstandingBalance: 95, openInvoice: { amountDue: 95 }, invoiceStatuses: [{ id: 'i1', invoiceNumber: 'WPC-2026-0001', status: 'sent', total: 95, amountDue: 95 }] }),
+    paidAndOwed: ctx([row('paid')], { outstandingBalance: 95, invoiceStatuses: [{ id: 'i1', invoiceNumber: 'WPC-2026-0001', status: 'sent', total: 95, amountDue: 95 }] }),
+    everything: ctx([row('paid'), row('processing'), row('failed'), row('refunded'), row('disputed')], { outstandingBalance: 95, hasProcessingPayment: true, invoiceStatuses: [{ id: 'i1', invoiceNumber: 'WPC-2026-0001', status: 'sent', total: 95, amountDue: 95 }] }),
   };
   const alone = (name, c) => rq(`${CLAIMS[name][0].toUpperCase()}${CLAIMS[name].slice(1)}.`, c);
   const joined = (a, b) => `${CLAIMS[a][0].toUpperCase()}${CLAIMS[a].slice(1)} while ${CLAIMS[b]}.`;
@@ -878,5 +882,76 @@ describe('round-21: amount-free, date-free, tender-free status claims are judged
   });
   test('absence claims are not scoped to the newest payment', () => {
     expect(rq("We haven't received your payment yet.", ctx([row('processing', '2026-09-20'), row('processing', '2026-09-10')]), ASK)).toBe(false);
+  });
+});
+
+// Codex round-22 P2(1): invoice-subject UNPAID claims bind the NAMED invoice's own status.
+describe('round-22: "Invoice #0123 is still unpaid" binds THAT invoice, not the account-wide balance', () => {
+  const rq = (r, list, extra = {}) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: [], invoiceStatuses: list, ...extra } }, { byMeaning: true });
+  const inv = (num, status, amountDue, total = 100) => ({ id: `i-${num}`, invoiceNumber: `WPC-2026-${num}`, status, total, amountDue });
+  const CLAIM = 'Invoice #0123 is still unpaid.';
+
+  test('collectible (open / sent / viewed / overdue / partially paid) with an amount due => true', () => {
+    for (const status of ['open', 'sent', 'viewed', 'overdue', 'partially_paid']) {
+      expect({ status, r: rq(CLAIM, [inv('0123', status, 60)]) }).toEqual({ status, r: false });
+    }
+    expect(rq(CLAIM, [inv('0123', 'sent', 0)])).toBe(true); // nothing due
+  });
+  test('closed (paid / prepaid / void / canceled / uncollectible / refunded / processing) contradicts it', () => {
+    for (const status of ['paid', 'prepaid', 'void', 'canceled', 'uncollectible', 'refunded', 'processing']) {
+      expect({ status, r: rq(CLAIM, [inv('0123', status, 0)]) }).toEqual({ status, r: true });
+    }
+  });
+  test('the auditor case: #0123 is voided while ANOTHER invoice is open (and the account owes money) => ungrounded', () => {
+    const list = [inv('0456', 'sent', 95), inv('0123', 'void', 0)];
+    expect(rq(CLAIM, list, { outstandingBalance: 95, openInvoice: { id: 'i-0456', amountDue: 95 } })).toBe(true);
+    // the same claim about the OPEN invoice is fine
+    expect(rq('Invoice #0456 is still unpaid.', list, { outstandingBalance: 95, openInvoice: { id: 'i-0456', amountDue: 95 } })).toBe(false);
+  });
+  test('identification: by number or amount; ambiguity, an unknown number, or missing invoice state fails closed', () => {
+    const list = [inv('0456', 'sent', 95, 95), inv('0123', 'sent', 60, 60)];
+    expect(rq('Your $60 invoice is unpaid.', list)).toBe(false);
+    expect(rq('Your invoice is unpaid.', list)).toBe(true); // which one?
+    expect(rq('Invoice #0999 is still unpaid.', list)).toBe(true);
+    expect(rq(CLAIM, undefined)).toBe(true);
+    expect(rq(CLAIM, null)).toBe(true);
+  });
+  test('payment- and account-subject unpaid claims keep the account-wide obligation rule', () => {
+    expect(rq("Your payment hasn't been paid.", [], { outstandingBalance: 95 })).toBe(false);
+    expect(rq("Your payment hasn't been paid.", [], { outstandingBalance: 0 })).toBe(true);
+  });
+});
+
+// Codex round-22 P1 (the CLASS): a payment assertion the enumerator has no phrase for fails CLOSED.
+describe('round-22: unrecognized payment assertions fail closed (draft and send share the path)', () => {
+  const V3 = require('../services/payment-receipt-vocabulary');
+  const rq = (r, rows = [], extra = {}) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [], ...extra } }, { byMeaning: true });
+  const paid = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+
+  test('"yet to receive / see / get" forms are not_received phrases and ground properly', () => {
+    for (const s of ['We have yet to receive your payment.', 'We have yet to see your payment.', 'We have yet to get your payment.', 'Your payment has yet to post.', 'Your payment is yet to come through.']) {
+      expect({ s, none: rq(s) }).toEqual({ s, none: false }); // truthful with no paid row
+      expect({ s, paid: rq(s, [paid]) }).toEqual({ s, paid: true }); // false once a paid row exists
+    }
+  });
+  test('an unlisted phrasing that the prescreen flags but no phrase recognizes is UNGROUNDED', () => {
+    for (const s of ['Your payment is all squared away on our end.', 'We are in receipt of your payment.', 'Your payment landed safely.', 'Your payment is in good hands.']) {
+      expect({ s, claims: require('../services/sms-shadow-drafter').enumeratePaymentClaims(s, {}).claims.length }).toEqual({ s, claims: 0 });
+      expect({ s, r: rq(s, [paid]) }).toEqual({ s, r: true });
+    }
+  });
+  test('clearly non-assertive clauses are NOT swept up: questions, conditionals, offers/instructions, payment-option references', () => {
+    for (const s of [
+      'Can you tell me when you paid?', 'If your payment does not go through, let us know.', 'Once the visit is done we will reschedule your payment date.',
+      'You can pay with the link below.', 'Please use your personal pay link.', 'We accept card payments and Zelle.', 'Payment options are listed on your invoice.',
+      "I'll send you the payment link now.", 'Your payment method on file is a Visa.', 'Your autopay payment date is the 1st.', 'Thanks so much!', 'See you Tuesday at 9.',
+      "We're processing your request.", 'Your estimate is pending.', "Yes, we've got Zelle.",
+    ]) expect({ s, r: rq(s) }).toEqual({ s, r: false });
+  });
+  test('the trigger is narrow: payment noun / paid / unpaid / settlement / zero balance', () => {
+    expect(V3.unrecognizedPaymentAssertion('Your payment is all squared away.')).toBe(true);
+    expect(V3.unrecognizedPaymentAssertion('You can pay any time.')).toBe(false);
+    expect(V3.unrecognizedPaymentAssertion('Your account is in good standing.')).toBe(false); // "account" alone is not a status noun
+    expect(V3.unrecognizedPaymentAssertion('Everything is squared away and paid.')).toBe(true);
   });
 });

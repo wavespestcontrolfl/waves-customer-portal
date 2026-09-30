@@ -185,6 +185,8 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
       // so a paid row contradicts them exactly like "haven't received".
       "didn't get", 'did not get', "didn't receive", 'did not receive', "haven't gotten", 'have not gotten',
       "haven't got", 'have not got', "haven't seen", 'have not seen', 'never received', 'never got',
+      // Codex round-22 P1: "we have yet to receive your payment" — the common "yet to <verb>" denials
+      ...['receive', 'see', 'get', 'be received', 'come through', 'post', 'clear', 'show'].flatMap((v) => [`have yet to ${v}`, `has yet to ${v}`, `yet to ${v}`]),
       // Codex round-16 P1: negated event-status verbs, generated from the SAME stem list that builds the
       // positive event grammar ("did not clear", "wasn't successful", "hasn't posted", ...).
       ...NEGATED_EVENT_PHRASES,
@@ -368,11 +370,38 @@ const PAYMENT_STATUS_PRESCREEN_RE = new RegExp(
   })\\b`,
   'i',
 );
+// Codex round-22 P1: the claim enumerator can never list every phrasing, so a clause that the payment
+// prescreen flags but for which the enumerator finds NO claim is treated as an UNRECOGNIZED payment assertion
+// (fail closed) — unless it is clearly NON-assertive: a question, a conditional, an offer/instruction ("you
+// can pay…", "please…"), or a plain reference to the payment options / pay link / payment method.
+const NON_ASSERTIVE_PAYMENT_RE = new RegExp([
+  '\\?', // a question
+  '\\b(?:if|once|when|whenever|unless|in\\s+case|should\\s+you|as\\s+soon\\s+as|after\\s+you|before\\s+you)\\b', // conditional
+  '\\b(?:you\\s+(?:can|could|may|might|will\\s+be\\s+able\\s+to)|feel\\s+free|please|(?:can|could|would|will)\\s+you|let\\s+me|reply\\s+with|just\\s+(?:reply|text)|go\\s+ahead)\\b', // offer / request
+  "\\b(?:we|i)(?:'ll|\\s+will|'d|\\s+can|\\s+could)\\s+(?:send|text|email|share|resend|forward|get|help|check|look|find|make|set|go|take|give|walk|confirm|follow|let|reach|call|update|see)\\b", // future action
+  '\\b(?:we\\s+(?:accept|take|offer|support)|to\\s+pay|ways?\\s+to\\s+pay|how\\s+to\\s+pay|pay(?:ing)?\\s+(?:link|online|by|with|via|through|using))\\b', // how-to-pay
+  '\\b(?:pay|payment)\\s+(?:link|method|methods|options?|page|portal|plan|info(?:rmation)?|details|instructions?|reminder|schedule|date|due)\\b',
+  '\\bpersonal\\s+pay\\b',
+  '\\bautopay\\b',
+].join('|'), 'i');
+const isNonAssertivePaymentClause = (text) => NON_ASSERTIVE_PAYMENT_RE.test(String(text || ''));
+// The words that make a clause a payment-STATUS assertion when NO claim was recognized: a payment noun,
+// paid / unpaid, a settlement phrase or a zero balance. (Narrower than mayAssertPaymentStatus on purpose:
+// a bare "processing" / "pending" with no payment noun ("we're processing your request"), or "Zelle" /
+// "account" alone (offers and availability are rechecked by their own seams), are not status assertions.)
+const PAYMENT_STATUS_NOUN_RE = /\b(?:payments?|paid|unpaid|charges?|transfers?|deposits?|refund(?:ed|s)?|disputed?|chargeback)\b/i;
+function unrecognizedPaymentAssertion(text) {
+  const t = String(text || '');
+  if (!(PAYMENT_STATUS_NOUN_RE.test(t) || SETTLEMENT_PHRASE_RE.test(t) || ZERO_BALANCE_RE.test(t))) return false;
+  return !isNonAssertivePaymentClause(t);
+}
 function mayAssertPaymentStatus(text) {
   return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || '')) || ZERO_BALANCE_RE.test(String(text || ''));
 }
 
 module.exports = {
+  unrecognizedPaymentAssertion,
+  isNonAssertivePaymentClause,
   REFUND_COMPLETION_RE,
   invoiceSubjectClause,
   EVENT_STATUS_STEMS,

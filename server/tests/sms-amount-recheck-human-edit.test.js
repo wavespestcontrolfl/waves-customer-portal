@@ -39,18 +39,29 @@ test('an amount-free settlement claim is rechecked against current billing', asy
 // too — an invoice voided/canceled after the draft (no paid row, nothing open) blocks the send.
 describe('a queued "still unpaid" reply is rechecked against the invoice that is open NOW', () => {
   const { amountFreeStatusClaimStale } = require('../services/sms-amount-recheck');
+  const invs = (status, amountDue) => ({ invoiceStatuses: [{ id: 'i1', invoiceNumber: 'WPC-2026-0001', status, total: 95, amountDue }] });
   const check = (body, extra) => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], extra));
     return amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh });
   };
-  test.each(['This invoice is still unpaid.', 'Your invoice is unpaid.', "Your payment hasn't been paid."])('%s', async (body) => {
-    await expect(check(body, { outstandingBalance: 95 })).resolves.toEqual({ stale: false }); // open at draft time
-    await expect(check(body, { outstandingBalance: 0, openInvoice: null })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' }); // voided after the draft
+  // invoice-subject claims bind the INVOICE's own status (round-22); payment-subject ones the account-wide obligation
+  test.each(['This invoice is still unpaid.', 'Your invoice is unpaid.'])('%s', async (body) => {
+    await expect(check(body, { outstandingBalance: 95, ...invs('sent', 95) })).resolves.toEqual({ stale: false }); // open at draft time
+    await expect(check(body, { outstandingBalance: 0, openInvoice: null, ...invs('void', 0) })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' }); // voided after the draft
   });
-  test('with a figure: the amount must still be owed AND something must be open (outgoingAmountsStale)', async () => {
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 95 }));
+  test("Your payment hasn't been paid. (payment subject: account-wide obligation)", async () => {
+    await expect(check("Your payment hasn't been paid.", { outstandingBalance: 95 })).resolves.toEqual({ stale: false });
+    await expect(check("Your payment hasn't been paid.", { outstandingBalance: 0, openInvoice: null })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+  test('a voided #0123 while ANOTHER invoice is open is stale at send time', async () => {
+    const list = [{ id: 'b', invoiceNumber: 'WPC-2026-0456', status: 'sent', total: 95, amountDue: 95 }, { id: 'a', invoiceNumber: 'WPC-2026-0123', status: 'void', total: 60, amountDue: 0 }];
+    await expect(check('Invoice #0123 is still unpaid.', { outstandingBalance: 95, openInvoice: { id: 'b', amountDue: 95 }, invoiceStatuses: list })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    await expect(check('Invoice #0456 is still unpaid.', { outstandingBalance: 95, openInvoice: { id: 'b', amountDue: 95 }, invoiceStatuses: list })).resolves.toEqual({ stale: false });
+  });
+  test('with a figure: the invoice must still be open with that amount (outgoingAmountsStale)', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 95, ...invs('sent', 95) }));
     await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your $95 invoice is unpaid.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
-    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 0, openInvoice: null }));
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 0, openInvoice: null, ...invs('void', 0) }));
     await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your $95 invoice is unpaid.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   });
   test('a multi-family reply is rechecked against every family at send time', async () => {

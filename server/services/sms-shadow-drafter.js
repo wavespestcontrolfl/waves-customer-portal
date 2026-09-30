@@ -1330,7 +1330,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, unrecognizedPaymentAssertion, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1971,7 +1971,7 @@ function enumerateMaskedClaims(masked, hasAmounts, env) {
   // to the authoritative invoice status by validateInvoiceStatusClaim, never to a payments row.
   const invoiceSubject = invoiceSubjectClause(masked);
   if (invoiceSubject) {
-    for (const c of claims) if (c.kind === 'status') c.subject = 'invoice';
+    for (const c of claims) if (c.kind === 'status' || c.kind === 'unpaid') c.subject = 'invoice';
   }
   if (d.ackPol === 'negated') {
     claims.push({ kind: 'negated_ack' });
@@ -2173,6 +2173,7 @@ function validateAnaphoricClaim(claim, text, env) {
 // The invoice is identified by the number named in the clause or the customer's message, then by an amount
 // (the invoice total or amount due); with nothing to go on it must be the ONLY recent invoice. Unknown
 // invoice state, no match, or several candidates all fail closed.
+const INVOICE_COLLECTIBLE_STATUSES = new Set(['open', 'sent', 'viewed', 'overdue', 'partially_paid']);
 const INVOICE_STATUS_FAMILY = { paid: 'paid', prepaid: 'paid', processing: 'pending', refunded: 'refunded' };
 function validateInvoiceStatusClaim(claim, text, amounts, env) {
   const list = env.context?.billing?.invoiceStatuses;
@@ -2195,14 +2196,23 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
     }
   }
   if (pool.length !== 1) return true; // none / ambiguous
-  return INVOICE_STATUS_FAMILY[String(pool[0].status).toLowerCase()] !== claim.family;
+  const status = String(pool[0].status).toLowerCase();
+  // "Invoice #0123 is still unpaid" (Codex round-22 P1): true of THAT invoice only when it is COLLECTIBLE
+  // (open / sent / viewed / overdue / partially paid) with an amount due; a paid / void / canceled /
+  // uncollectible / refunded / processing invoice contradicts it — whatever OTHER invoices are open.
+  if (claim.family === 'unpaid') return !(INVOICE_COLLECTIBLE_STATUSES.has(status) && Number(pool[0].amountDue) > 0);
+  return INVOICE_STATUS_FAMILY[status] !== claim.family;
 }
 function clauseUngrounded(clause, env) {
   const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
   // Price grammar left once readable figures (and any zero-balance span) are masked is a price the
   // extractor cannot verify ("fifty dollars"): fail closed (#5194 r4/r8).
   if (require('./sms-suggest-mode').hasPriceQuote(masked)) return true;
-  if (!claims.length) return false;
+  // Codex round-22 P1 (the CLASS, not one phrasing): the payment prescreen fired but the enumerator found NO
+  // claim => an unrecognized payment assertion ("we have yet to receive…", whatever comes next). Fail closed,
+  // unless the clause is clearly non-assertive (question, conditional, offer/instruction, payment-options
+  // reference). Draft and send share this path.
+  if (!claims.length) return unrecognizedPaymentAssertion(text);
   // Every claim validates on its own binder; ANY ungrounded claim fails the clause.
   const presence = [];
   const anaphoric = isAnaphoricPaymentClause(text, amounts);
