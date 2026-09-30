@@ -186,8 +186,13 @@ async function emitEstimateExpired({
   // instant), so the direct emit and a replay derive the same key. Neither
   // present: the per-expiry run key cannot be built, and no replay could change
   // that — settled, not retried.
-  const expiryInstant = expiresAt || flippedAt || updatedAt || null;
-  const expiresOn = expiryInstant ? etDateString(new Date(expiryInstant)) : '';
+  // The EFFECTIVE expiry is the earlier of the two: an estimate aged out before its
+  // expires_at (ESTIMATE_EXPIRATION_DAYS shorter than the send window) really expired
+  // at the flip, not at its later stored expiry.
+  const instants = [expiresAt, flippedAt || updatedAt]
+    .filter(Boolean).map((value) => new Date(value)).filter((date) => !Number.isNaN(date.getTime()));
+  const expiryInstant = instants.length ? new Date(Math.min(...instants.map((date) => date.getTime()))) : null;
+  const expiresOn = expiryInstant ? etDateString(expiryInstant) : '';
   if (!expiresOn) {
     await settleUndispatchable(intentId, 'marker payload has neither an expiry nor a flip time');
     return null;

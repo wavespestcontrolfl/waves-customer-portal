@@ -205,6 +205,13 @@ describe('emitEstimateExpired with no expires_at (Rule 1 aged-out estimates)', (
     expect(keyOf()).toEqual(['2026-09-18']);
   });
 
+  test('an estimate aged out EARLY (expires_at later than the actual flip) uses the flip date: effective = the earlier of the two, direct and replay alike', async () => {
+    const base = { id: 'est-9', customer_email: 'sam@example.com', expires_at: '2026-10-20T16:00:00.000Z' };
+    await emitEstimateExpired({ ...base, updated_at: new Date(flip) });
+    await emitEstimateExpired({ ...base, flipped_at: flip });
+    expect(keyOf()).toEqual(['2026-09-20', '2026-09-20']);
+  });
+
   test('neither an expiry nor a flip time: settled unrecoverable on the first look, never replayed', async () => {
     const rows = mockIntentsTable([{ id: 'intent-1', status: 'pending' }]);
     await emitEstimateExpired({ id: 'est-9', customer_email: 'sam@example.com', expires_at: null }, 'intent-1');

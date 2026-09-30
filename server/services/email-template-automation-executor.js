@@ -13,7 +13,7 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
 const {
   hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
-  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, onceScopeFor, anyRivalAtSameProperty,
+  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE, NEXT_VISIT_CHANGED, onceScopeFor, anyRivalAtSameProperty,
 } = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
@@ -1823,9 +1823,10 @@ function estimateChangedSkip(reason) {
     ESTIMATE_NOT_EXPIRED: 'the estimate is no longer expired; not sent',
     ESTIMATE_EXPIRY_SUPERSEDED: 'the estimate was extended and expired again since this run was created; a newer run owns the touch',
     ESTIMATE_FOLLOWUP_BLOCKED: 'the estimate was archived or opted out of automated follow-up since this run was created; not sent',
+    NEXT_VISIT_CHANGED: 'the next appointment this email names was cancelled, rescheduled or moved since it was written; not sent',
     VISIT_NOT_ELIGIBLE: 'the visit this run is about is no longer eligible (reassigned, suppressed, or renumbered since the run was created); not sent',
   }[reason] || 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient';
-  return { skipReason, skipGuard: reason === VISIT_NOT_ELIGIBLE ? 'visit_not_eligible' : 'estimate_recipient_changed' };
+  return { skipReason, skipGuard: { [VISIT_NOT_ELIGIBLE]: 'visit_not_eligible', [NEXT_VISIT_CHANGED]: 'next_visit_changed' }[reason] || 'estimate_recipient_changed' };
 }
 
 // Ledger-routed dispatch (the wiring PR). Everything the library's
@@ -1882,7 +1883,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
     expectedRecipientEmail: run.recipient_email,
     // Once per customer / estimate, decided inside the reservation under the
     // customer's advisory lock (null for a template with no such rule).
-    ...ledgerGuardsFor(run),
+    ...ledgerGuardsFor(run, executionPayload),
     template: {
       templateKey: run.template_key,
       versionId: run.template_version_id || undefined,
@@ -1902,7 +1903,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
       throw Object.assign(new Error('email division eligibility lookup failed'), { code: 'LEDGER_LOOKUP_FAILED' });
     }
     if (out.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-    if (ESTIMATE_VERDICT_REASONS.has(out.reason) || out.reason === VISIT_NOT_ELIGIBLE) return estimateChangedSkip(out.reason);
+    if (ESTIMATE_VERDICT_REASONS.has(out.reason) || out.reason === VISIT_NOT_ELIGIBLE || out.reason === NEXT_VISIT_CHANGED) return estimateChangedSkip(out.reason);
     if (out.reason === ONCE_ALREADY_DELIVERED) {
       return { skipReason: 'this customer (or estimate) already has a sent email of this kind; not sent again', skipGuard: 'already_delivered' };
     }
@@ -1927,7 +1928,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   // dispatch takes.
   if (settled?.status === 'sent') throw out.error || deliveryUncertainError();
   if (settled?.status === 'skipped' && settled.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-  if (settled?.status === 'skipped' && (ESTIMATE_VERDICT_REASONS.has(settled.reason) || settled.reason === VISIT_NOT_ELIGIBLE)) {
+  if (settled?.status === 'skipped' && (ESTIMATE_VERDICT_REASONS.has(settled.reason) || settled.reason === VISIT_NOT_ELIGIBLE || settled.reason === NEXT_VISIT_CHANGED)) {
     return estimateChangedSkip(settled.reason);
   }
   if (settled?.status === 'skipped') {

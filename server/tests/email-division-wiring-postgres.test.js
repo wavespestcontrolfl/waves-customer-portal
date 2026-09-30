@@ -757,6 +757,39 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(await guard(atB)).toBeNull();
     });
 
+    test.each([
+      ['rescheduled', (id) => db('scheduled_services').where({ id }).update({ status: 'rescheduled' })],
+      ['cancelled', (id) => db('scheduled_services').where({ id }).update({ status: 'cancelled' })],
+      ['re-dated', (id) => db('scheduled_services').where({ id }).update({ scheduled_date: '2099-11-02' })],
+    ])('B1: the next appointment the email names is %s AFTER the build, before the provider handoff: refused at the boundary, nothing sent', async (_label, change) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      const series = await makeDoneRecurring(customer.id);
+      const nextId = await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'], scheduledServiceId: series });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => change(nextId) }));
+      const run = (await Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      })).results[0].run;
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('next appointment');
+      const skipped = (await events(run.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'next_visit_changed' }));
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
@@ -1148,6 +1181,28 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(skipped).toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
       });
 
+      test('custom treatment chips never render: only targets in the canonical vocabulary count ("technicians treated no pests - prevention" is not a pest)', async () => {
+        const customer = await makeCustomer();
+        const techId = await makeTech();
+        const series = await makeDoneRecurring(customer.id);
+        await makeNextVisit(customer.id);
+        const freeText = await makeVisit({
+          customerId: customer.id, technicianId: techId, scheduledServiceId: series, targets: ['technicians treated no pests - prevention'], notes: 'Treated spiders along the eaves.',
+        });
+        const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', freeText, customer), mode: 'live', deps: baseDeps() });
+        expect(r1.payload.pests_named_list).toBe('spiders'); // the chip is dropped; the notes fallback names the pest
+        expect(r1.payload.pests_named_list).not.toContain('prevention');
+
+        const mixed = await makeCustomer();
+        const series2 = await makeDoneRecurring(mixed.id);
+        await makeNextVisit(mixed.id);
+        const both = await makeVisit({
+          customerId: mixed.id, technicianId: techId, scheduledServiceId: series2, targets: ['Fire ants', 'my own free text chip'], notes: '',
+        });
+        const r2 = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', both, mixed), mode: 'live', deps: baseDeps() });
+        expect(r2.payload.pests_named_list).toBe('fire ants');
+      });
+
       test('a ONE-TIME first pest visit, plus a separately booked future one-off pest appointment, is NOT a recurring plan: skipped (no "re-service between visits" promise)', async () => {
         const customer = await makeCustomer();
         const techId = await makeTech();
@@ -1288,6 +1343,25 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const unlinkedRecord = await makeVisit({ customerId: unlinked.id, technicianId: techId });
         const refused = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', unlinkedRecord, unlinked), mode: 'live', deps: baseDeps() });
         expect(refused).toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
+      });
+
+      test('the free-re-service promise is an ALLOW-LIST: a pest + termite bundle, a pest + lawn bundle, an unrecognised label and a commercial plan are all skipped; a plain residential quarterly pest plan sends', async () => {
+        const techId = await makeTech();
+        const build = async (label) => {
+          const customer = await makeCustomer();
+          await makeNextVisit(customer.id);
+          const root = await makeDoneRecurring(customer.id, { service_type: label });
+          return { customer, recordId: await makeVisit({ customerId: customer.id, technicianId: techId, serviceType: label, scheduledServiceId: root }) };
+        };
+        for (const label of ['Quarterly Pest + Termite Bait Station', 'Quarterly Pest Control & Lawn Care', 'Mystery Plan', 'Commercial Quarterly Pest Control']) {
+          const { customer, recordId } = await build(label);
+          const result = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+          expect({ label, skipped: result.skip === true }).toEqual({ label, skipped: true });
+          expect(['not_single_pest_lane', 'not_residential_plan']).toContain(result.code);
+        }
+        const plain = await build('Quarterly Pest Control Service');
+        const ok = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', plain.recordId, plain.customer), mode: 'live', deps: baseDeps() });
+        expect(ok.ok).toBe(true);
       });
 
       test('a cancelled (or lapsed) series is not an ACTIVE plan: a cancelled recurring root plus a separately booked future pest visit is no B1', async () => {
@@ -1431,7 +1505,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const result = await Builders.buildEmailDivisionPayload({
           run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
         });
-        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'not_single_pest_lane' }));
       });
 
       test('area intel uses the VISIT\'s frozen service city, never customers.city: a multi-property customer; a visit with no frozen city drops the sentence', async () => {
@@ -1553,6 +1627,24 @@ describeOrSkip('email division wiring (Postgres)', () => {
           .toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
       });
 
+      test('B5: the same allow-list - bundles and unrecognised labels are skipped, the plain residential quarterly pest plan sends', async () => {
+        const techId = await makeTech();
+        const deps = baseDeps({ getActivityRatingAverages: async () => cohort });
+        const build = async (label) => {
+          const customer = await makeCustomer();
+          const scheduledId = await makeNextVisit(customer.id, 'quarterly', '2099-12-24', { service_type: label });
+          await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 1, date: '2026-06-20', products: ['taurus'], serviceType: label, scheduledServiceId: scheduledId, createdAt: new Date('2026-06-20T15:00:00Z') });
+          return { customer, recordId: await makeVisit({ customerId: customer.id, technicianId: techId, visitNumber: 2, products: ['taurus', 'talak'], serviceType: label, scheduledServiceId: scheduledId }) };
+        };
+        for (const label of ['Quarterly Pest + Termite Bait Station', 'Quarterly Pest Control & Lawn Care', 'Mystery Plan']) {
+          const { customer, recordId } = await build(label);
+          const result = await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', recordId, customer), deps });
+          expect({ label, code: result.code }).toEqual({ label, code: 'not_single_pest_lane' });
+        }
+        const plain = await build('Quarterly Pest Control Service');
+        expect((await Builders.buildEmailDivisionPayload({ run: runFor('lc.why_91_days', plain.recordId, plain.customer), deps })).ok).toBe(true);
+      });
+
       test('a COMMERCIAL quarterly plan is skipped for B5 too', async () => {
         const customer = await makeCustomer();
         const techId = await makeTech();
@@ -1573,7 +1665,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const result = await Builders.buildEmailDivisionPayload({
           run: runFor('lc.why_91_days', recordId, customer), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
         });
-        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'not_single_pest_lane' }));
       });
 
       test('SKIPs when the service record belongs to a different customer than the run\'s recipient', async () => {

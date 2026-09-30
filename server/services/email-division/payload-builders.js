@@ -133,6 +133,8 @@ function defaultDeps() {
     findActiveRecurringSeries: (...args) => require('../recurring-appointment-seeder').findActiveRecurringSeries(...args),
     treatmentTargetKey: (...args) => require('./visit-products').treatmentTargetKey(...args),
     targetForSentence: (...args) => require('./area-intel').targetForSentence(...args),
+    copyCategoryForEstimate: (...args) => require('../estimate-followup-copy').copyCategoryForEstimate(...args),
+    canonicalTargetVocabulary: (...args) => require('./area-intel').canonicalTargetVocabulary(...args),
     detectServiceLine: (...args) => require('../service-report/service-line-configs').detectServiceLine(...args),
     now: () => new Date(),
   };
@@ -308,14 +310,14 @@ async function nextPestVisit({
     .whereNotIn('status', CLOSED_VISIT_STATUSES)
     .where('scheduled_date', '>=', lowerBound)
     .orderBy('scheduled_date', 'asc')
-    .select('scheduled_date', 'service_type', ...PROPERTY_COLUMNS);
+    .select('id', 'scheduled_date', 'service_type', ...PROPERTY_COLUMNS);
   const pest = upcoming.filter((row) => deps.detectServiceLine(row.service_type) === 'pest');
   if (hasPropertyIdentity(linked, deps)) {
     const next = pest.find((row) => sameProperty(linked, row, deps));
-    return { ymd: next ? dateOnlyString(next.scheduled_date) : '' };
+    return { ymd: next ? dateOnlyString(next.scheduled_date) : '', id: next?.id || null };
   }
   if (!allSameProperty(pest, deps)) return { ambiguous: true };
-  return { ymd: pest[0] ? dateOnlyString(pest[0].scheduled_date) : '' };
+  return { ymd: pest[0] ? dateOnlyString(pest[0].scheduled_date) : '', id: pest[0]?.id || null };
 }
 
 // Commercial plans are not this email's audience: commercial copy stays
@@ -370,6 +372,38 @@ async function activeRecurringPestPlan({ conn, deps, record }) {
   return active.length > 0 && allSameProperty(active, deps);
 }
 
+// THE eligibility for the free-re-service promise both templates make ("a re-service
+// between visits is free"), as ONE ALLOW-LIST — not a growing blocklist. Only a plan
+// that the canonical service-lane parser (estimate-followup-copy
+// copyCategoryForEstimate: the rule behind AGENTS.md's "estimate follow-up truth
+// scope", where rodent / termite / commercial / bundle / unknown lanes stay
+// terms-neutral) classifies as a SINGLE, residential, general-PEST lane passes, and
+// only when it is also an active recurring series and not commercial. Anything the
+// parser cannot classify (a bundle such as "Pest + Termite Bait Station", "Pest &
+// Lawn", an unknown label) is NOT eligible. Every label the plan carries — the
+// record's, the appointment's, the series root's — must parse as that one lane.
+// Commercial and active-series checks are inputs to this predicate. Returns null
+// when eligible, else the skip.
+async function freeReserviceEligible({ conn, deps, record }) {
+  if (await isCommercialPlan({ conn, deps, record })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
+  const labels = [record.service_type];
+  if (record.scheduled_service_id) {
+    const visit = await conn('scheduled_services').where({ id: record.scheduled_service_id }).first('service_type', 'recurring_parent_id');
+    labels.push(visit?.service_type);
+    if (visit?.recurring_parent_id) {
+      labels.push((await conn('scheduled_services').where({ id: visit.recurring_parent_id }).first('service_type'))?.service_type);
+    }
+  }
+  const named = labels.map(clean).filter(Boolean);
+  if (!named.length || named.some((label) => deps.copyCategoryForEstimate({ service_interest: label }) !== 'pest')) {
+    return skip('the plan is not a single residential general-pest service (bundles, other lanes and unrecognised labels stay terms-neutral)', 'not_single_pest_lane');
+  }
+  if (!(await activeRecurringPestPlan({ conn, deps, record }))) {
+    return skip('the visit does not belong to an active recurring pest plan', 'not_recurring_plan');
+  }
+  return null;
+}
+
 // Every condition that makes this THE customer's first performed pest visit
 // for this recipient: returns a skip, or { record, customer }.
 async function firstVisitGate({
@@ -382,7 +416,8 @@ async function firstVisitGate({
     return skip('the visit does not belong to the recipient customer', 'recipient_not_visit_customer');
   }
   if (record.service_line !== 'pest') return skip('not a pest-line visit', 'not_pest_line');
-  if (await isCommercialPlan({ conn, deps, record })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
+  const ineligible = await freeReserviceEligible({ conn, deps, record });
+  if (ineligible) return ineligible;
 
   // First performed visit on the line, judged against records that existed
   // BEFORE this one (a delayed run must not read a later visit as "prior").
@@ -395,13 +430,6 @@ async function firstVisitGate({
   deps.applyPerformedVisitHistoryFilter(earlier, { serviceLine: 'pest' });
   if (await earlier.first('service_records.id')) return skip('not the customer\'s first performed pest visit', 'not_first_visit');
 
-  // The email promises a re-service "between visits" and names a next visit: that
-  // only holds on an ACTIVE recurring pest plan. A one-time first visit with a
-  // separately booked future pest appointment, or a cancelled / lapsed series, is
-  // not one.
-  if (!(await activeRecurringPestPlan({ conn, deps, record }))) {
-    return skip('the visit does not belong to an active recurring pest plan', 'not_recurring_plan');
-  }
   const customer = await loadCustomer(conn, customerId);
   if (!customer) return skip('customer not found', 'customer_missing');
   return { record, customer };
@@ -434,13 +462,20 @@ function petAdvisorySentence(summary) {
 // then through the negation-aware reader ("no ghost ants found; treated spiders"
 // names spiders only). readVisitSummary's own pestsNamed is negation-blind, so it
 // is not used here.
-function pestsRecorded({ products, record, deps }) {
+async function pestsRecorded({
+  products, record, deps, conn,
+}) {
+  // Only targets in the CANONICAL vocabulary (the picker's suggestion lists ∪
+  // products_catalog.target_pests, as area-intel reads it) may render: the picker
+  // also accepts free text, and a hand-typed chip ("technicians treated no pests -
+  // prevention") is not a pest.
+  const vocabulary = await deps.canonicalTargetVocabulary(conn);
   const targets = [];
   for (const product of products || []) {
     if (product.family === 'nutrition' || product.family === 'adjuvant') continue;
     for (const target of product.targets || []) {
       const key = deps.treatmentTargetKey(target);
-      if (key && !targets.includes(key)) targets.push(key);
+      if (key && vocabulary.has(key) && !targets.includes(key)) targets.push(key);
     }
   }
   if (targets.length) return targets.map((key) => deps.targetForSentence(key));
@@ -479,8 +514,14 @@ async function buildFirstVisitPest({
     primary_product_name: clean(primary.productName),
     primary_active_ingredient: clean(primary.activeIngredient),
     primary_product_family_phrase: clean(primary.phrase),
-    pests_named_list: listSentence(pestsRecorded({ products, record, deps })),
+    pests_named_list: listSentence(await pestsRecorded({
+      products, record, deps, conn,
+    })),
     next_visit_date: longDate(nextVisit.ymd || ''),
+    // The appointment the email names: carried so the provider-boundary check can
+    // re-read exactly it (cancelled, rescheduled or re-dated since = not sent).
+    next_visit_id: nextVisit.id || '',
+    next_visit_ymd: nextVisit.ymd || '',
     secondary_products_sentence: secondaryProductsSentence(secondary),
     nonrepellent_band_note: nonrepellentBandNote(primary, deps),
     activity_rating_sentence: activityRatingSentence(record, byVisit, 'pest'),
@@ -608,17 +649,23 @@ const ESTIMATE_NOT_EXPIRED = 'ESTIMATE_NOT_EXPIRED';
 const ESTIMATE_EXPIRY_SUPERSEDED = 'ESTIMATE_EXPIRY_SUPERSEDED';
 const ESTIMATE_FOLLOWUP_BLOCKED = 'ESTIMATE_FOLLOWUP_BLOCKED';
 const VISIT_NOT_ELIGIBLE = 'VISIT_NOT_ELIGIBLE';
+const NEXT_VISIT_CHANGED = 'NEXT_VISIT_CHANGED';
 const ESTIMATE_VERDICT_REASONS = new Set([ESTIMATE_RECIPIENT_CHANGED, ESTIMATE_NOT_EXPIRED, ESTIMATE_EXPIRY_SUPERSEDED, ESTIMATE_FOLLOWUP_BLOCKED]);
 
 // The expiry date (ET, YYYY-MM-DD) the run was created for: the emitter's
 // expires_on, carried on the run's stored payload (and context).
 function runExpiresOn(run) {
+  const on = clean(runStoredPayloadValue(run, 'expires_on'));
+  return /^\d{4}-\d{2}-\d{2}$/.test(on) ? on : '';
+}
+// A value from the run's STORED payload (or context): what the trigger carried, not
+// the live-refreshed copy livePayloadForRun puts on the execution payload.
+function runStoredPayloadValue(run, key) {
   const parse = (value) => {
     if (value && typeof value === 'object') return value;
     try { return JSON.parse(value) || {}; } catch { return {}; }
   };
-  const on = clean(parse(run.payload).expires_on || parse(run.context).expires_on);
-  return /^\d{4}-\d{2}-\d{2}$/.test(on) ? on : '';
+  return parse(run.payload)[key] ?? parse(run.context)[key];
 }
 
 // The ledger's hooks for a run, or null when the template has no rule:
@@ -641,13 +688,27 @@ async function anyRivalAtSameProperty(conn, run, rivals) {
   return false;
 }
 
+// The next appointment the first-visit email NAMES, re-read under a share lock at the
+// provider boundary: it must still exist, still be open (not cancelled, rescheduled,
+// skipped, no-show or completed) and still be on the date the email says.
+async function nextVisitStillValid(trx, payload) {
+  const id = clean(payload.next_visit_id);
+  if (!id) return null; // nothing was named: no claim to keep true
+  const row = await trx('scheduled_services').where({ id }).forShare().first('status', 'scheduled_date');
+  const open = row && !CLOSED_VISIT_STATUSES.includes(clean(row.status));
+  if (!open || dateOnlyString(row.scheduled_date) !== clean(payload.next_visit_ymd)) {
+    return { reason: NEXT_VISIT_CHANGED };
+  }
+  return null;
+}
+
 // Which once-rule (if any) a template has: per customer (B5), per customer and
 // property (B1), or per estimate (C1).
 function onceScopeFor(run) {
   return { 'lc.why_91_days': 'customer', 'lc.first_visit_pest': 'property', 'nurture.expired_1': 'estimate' }[run.template_key] || null;
 }
 
-function ledgerGuardsFor(run) {
+function ledgerGuardsFor(run, payload = {}) {
   const scope = onceScopeFor(run);
   const visitGate = { 'lc.first_visit_pest': firstVisitGate, 'lc.why_91_days': whyPlanGate }[run.template_key];
   if (!scope && !visitGate) return { guard: null, boundaryGuard: null };
@@ -675,10 +736,12 @@ function ledgerGuardsFor(run) {
   return {
     guard: once || null,
     boundaryGuard: async (trx) => {
+      const deps = defaultDeps();
       const gate = await visitGate({
-        run, conn: trx, deps: defaultDeps(), lock: true,
+        run, conn: trx, deps, lock: true,
       });
-      return gate.skip ? { reason: VISIT_NOT_ELIGIBLE, detail: gate.reason } : null;
+      if (gate.skip) return { reason: VISIT_NOT_ELIGIBLE, detail: gate.reason };
+      return run.template_key === 'lc.first_visit_pest' ? nextVisitStillValid(trx, payload) : null;
     },
   };
 }
@@ -696,7 +759,8 @@ async function whyPlanGate({
   }
   // The plan's service line: this email's cohort figures are that line's.
   if (record.service_line !== 'pest') return skip('not a pest-line visit', 'not_pest_line');
-  if (await isCommercialPlan({ conn, deps, record })) return skip('commercial plans are not sent this residential email', 'not_residential_plan');
+  const ineligible = await freeReserviceEligible({ conn, deps, record });
+  if (ineligible) return ineligible;
   const plan = await planService(conn, deps, record);
   if (plan.pattern !== QUARTERLY_PATTERN) return skip('the customer\'s plan is not the quarterly cadence', 'plan_not_quarterly');
   // Sent once, after the plan's SECOND performed visit. The ordinal is the
@@ -707,9 +771,6 @@ async function whyPlanGate({
   // and "second visit" averages).
   const memberIds = await planSeriesMemberIds({ conn, deps, record, series: plan });
   if (!memberIds) return skip('the visit is not part of a recurring pest series at its property', 'plan_series_unknown');
-  if (!(await activeRecurringPestPlan({ conn, deps, record }))) {
-    return skip('the visit does not belong to an active recurring pest plan', 'not_recurring_plan');
-  }
   const planRecordIds = await performedSeriesRecordIds({ conn, deps, record, memberIds });
   if (planRecordIds.indexOf(record.id) !== 1) return skip('not the plan\'s second performed pest visit', 'not_second_visit');
   const planName = clean(record.service_type);
@@ -938,8 +999,19 @@ function estimateSendVerdict(estimate, run, expiresOn = runExpiresOn(run)) {
   if (estimate.status !== 'expired') return { reason: ESTIMATE_NOT_EXPIRED, detail: `status is ${estimate.status}` };
   // Compared only when both sides are recorded (an aged-out estimate with no
   // expires_at has no expiry date to compare).
-  if (expiresOn && estimate.expires_at && etDateString(new Date(estimate.expires_at)) !== expiresOn) {
-    return { reason: ESTIMATE_EXPIRY_SUPERSEDED };
+  // The expiry recorded at trigger time (payload expires_at) is what the estimate's
+  // CURRENT expires_at must still be; the ET-date compare is the fallback for a run
+  // that carries only expires_on. (The effective expires_on can be the earlier FLIP
+  // date for an estimate aged out before its stored expiry, so it is not compared to
+  // expires_at directly.)
+  if (estimate.expires_at) {
+    const triggered = runStoredPayloadValue(run, 'expires_at');
+    const triggeredTime = triggered ? new Date(triggered).getTime() : NaN;
+    if (Number.isFinite(triggeredTime)) {
+      if (new Date(estimate.expires_at).getTime() !== triggeredTime) return { reason: ESTIMATE_EXPIRY_SUPERSEDED };
+    } else if (expiresOn && etDateString(new Date(estimate.expires_at)) !== expiresOn) {
+      return { reason: ESTIMATE_EXPIRY_SUPERSEDED };
+    }
   }
   if (clean(estimate.customer_id) !== clean(run.recipient_id)
     || normalizeEmail(estimate.customer_email) !== normalizeEmail(run.recipient_email)) {
@@ -1067,6 +1139,7 @@ module.exports = {
   ESTIMATE_EXPIRY_SUPERSEDED,
   ESTIMATE_FOLLOWUP_BLOCKED,
   VISIT_NOT_ELIGIBLE,
+  NEXT_VISIT_CHANGED,
   ESTIMATE_VERDICT_REASONS,
   buildFirstVisitPest,
   buildWhy91Days,
