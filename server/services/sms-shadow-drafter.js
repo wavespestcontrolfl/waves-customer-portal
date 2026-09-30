@@ -1414,20 +1414,32 @@ function bookedReserviceLanes(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
   return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane} already booked\\b`).test(line));
 }
-function reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions }) {
+// Codex round-33 P1 (PR #5336): the unconditional SLOT GUARD, run FIRST in validateReserviceOffer — before every early
+// return (owed / not owed, promise / no promise, hand-off suppression). When the reported pest lane decides the reply
+// — bookable ("offer the covered free re-service") or ALREADY BOOKED ("refer to the appointment on the schedule") —
+// the reply may not declare offered_times or add book_appointment, whatever else the inbound asks or says
+// ("The ants are back, cancel my plan and book my lawn visit": the cancellation may suppress the OWED offer, never this).
+function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTimes, actions }) {
   if (!([].concat(offeredTimes || []).length || actions.some((a) => a && a.type === 'book_appointment'))) return null;
-  const booked = bookedReserviceLanes(factsBlock);
-  if (!booked.length || !pestReportSignal(inboundMessage, context)) return null; // pronoun-aware ("they're back" + a pest relationship)
+  if (!pestReportSignal(inboundMessage, context)) return null; // pronoun-aware ("they're back" + a pest relationship)
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const lane = reportedReserviceLane(inboundMessage) || pronounOnlyReportLane(inboundMessage, context); // an excluded specialty never falls back to pest
-  return lane && booked.includes(lane)
-    ? `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`
-    : null;
+  if (!lane) return null;
+  if (bookedReserviceLanes(factsBlock).includes(lane)) {
+    return `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`;
+  }
+  if (eligibleReserviceLanes(factsBlock).includes(lane)) {
+    return `the customer reported a ${lane} issue and FREE RE-SERVICE in the facts says they are eligible — the re-service link shows its own availability, so never declare offered_times or add book_appointment; hand any OTHER request to the office with {"type":"escalate","note":"<the other request>"} and the FOLLOW-UP SLA wording`;
+  }
+  return null;
 }
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
   const actions = [].concat(intendedActions || []);
+  // FIRST, before any early return (round-33 P1): the unconditional slot guard.
+  const slotGuard = reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTimes, actions });
+  if (slotGuard) return { ok: false, violations: [slotGuard] };
   // Codex round-16 P2 (PR #5336): a draft whose intended_actions carry the re-service link action is
   // ALWAYS validated, whether or not the detector recognizes the wording — otherwise a card the model
   // worded in a way the detector misses ("have someone stop by again … no cost to you") skips this
@@ -1437,11 +1449,6 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
   const planCustomer = !reserviceFactShowsNoPlan(factsBlock);
   const promise = isReserviceOfferPromise(planCustomer ? text : withoutGenericInspections(text));
-  // Codex round-26 P2: a pest report whose lane the facts mark ALREADY BOOKED is answered from the appointment on the
-  // schedule — the prompt forbids OPEN TIMES and a paid visit for it, so a reply that offers slots is rejected.
-  // Codex round-32 P1: ALWAYS applied — no text detector relaxes it (a mixed inbound hands its other request to the office).
-  const bookedLaneBlock = reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions });
-  if (bookedLaneBlock) return { ok: false, violations: [bookedLaneBlock] };
   if (!promise) {
     // Codex round-27 P2: when the offer is OWED, the link ACTION alone is not the customer-facing offer — a
     // generic "Sorry to hear that" plus send_reservice_link tells the customer nothing. The reply must carry

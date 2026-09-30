@@ -3550,6 +3550,40 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(booked).toMatchObject({ ok: true });
     });
 
+    // Codex round-33 P1: the slot guard runs BEFORE every early return (a hand-off may suppress the owed offer, never the guard).
+    test('"The ants are back, cancel my plan and book my lawn visit": book_appointment / offered_times are rejected (pest bookable or booked); a hand-off with escalate + SLA converges', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const inboundMessage = 'The ants are back, cancel my plan and book my lawn visit';
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const cancelEscalate = { type: 'escalate', note: 'cancel_request' };
+      for (const factsBlock of [bookableFacts, bookedFacts]) {
+        const withBook = validateReserviceOffer({ reply: "I'm sorry to hear that. I'll book your lawn visit.", factsBlock, intendedActions: [cancelEscalate, { type: 'book_appointment' }], inboundMessage });
+        expect(withBook.ok).toBe(false);
+        expect(withBook.violations[0]).toMatch(/book_appointment|ALREADY BOOKED/);
+        const withTimes = validateReserviceOffer({ reply: 'I can do your lawn visit Friday 9-11am.', factsBlock, intendedActions: [cancelEscalate], inboundMessage, offeredTimes: slot });
+        expect(withTimes.ok).toBe(false);
+        expect(withTimes.violations[0]).toMatch(/offered_times|ALREADY BOOKED/);
+        // plain hand-off: escalate + SLA wording, no times, no booking → converges
+        const handOff = validateReserviceOffer({ reply: "I'm sorry to hear that. I've passed your cancellation and lawn visit request to the office and they'll get back to you within the hour.", factsBlock, intendedActions: [cancelEscalate], inboundMessage });
+        expect(handOff).toMatchObject({ ok: true });
+      }
+    });
+
+    test('the slot guard also runs ahead of the not-owed and promise early returns (grep-level: only the gate-off return precedes it)', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const slot = [{ date: 'Friday, October 9', window: '9-11am' }];
+      const bookableFacts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      // not owed (refund hand-off) + times → rejected
+      expect(validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: bookableFacts, intendedActions: [], inboundMessage: 'the ants are back, I want a refund', offeredTimes: slot }).ok).toBe(false);
+      // pronoun-only report with a pest relationship + times → rejected
+      const ctx = { customer: { id: 'c1' }, serviceHistory: [{ type: 'General Pest Control' }] };
+      expect(validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: bookableFacts, intendedActions: [], inboundMessage: "they're back", offeredTimes: slot, context: ctx }).ok).toBe(false);
+      // a non-pest inbound is untouched by the guard
+      expect(validateReserviceOffer({ reply: 'I can do Friday 9-11am.', factsBlock: bookableFacts, intendedActions: [], inboundMessage: 'can I move my lawn visit?', offeredTimes: slot }).ok).toBe(true);
+    });
+
     // Codex round-31 P1: what the REAL router produces for plain pest reports must not bypass the guards.
     test('the real scheduling-intent detector fires on time words in a plain pest report — the guards still apply', () => {
       const { hasSchedulingIntent } = require('../services/sms-intent');
