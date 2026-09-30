@@ -395,6 +395,57 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(fulfillment).toMatchObject({ verdict: 'fulfilled', record_type: 'email_reply', record_id: reply.id, basis: 'person_reply' });
   });
 
+  test('a staff send with no words of its own (only quoted history) is not a reply witness', async () => {
+    const sourceAt = new Date();
+    const [smsRow] = await mockPg('sms_log').insert({ id: randomUUID(), customer_id: customerId, direction: 'inbound',
+      message_body: 'Can someone call me?', from_phone: '+12025550101', to_phone: '+19418889999',
+      created_at: sourceAt, status: 'received' }).returning('*');
+    const [commitment] = await mockPg('call_commitments').insert({ sms_log_id: smsRow.id, commitment_key: 'waves:other:ask-empty',
+      party: 'waves', kind: 'other', description: 'Can someone call me?', channel: 'sms',
+      due_at: null, due_basis: null, source: 'ai', extractor_version: 'sms-ops-v22',
+      evidence: JSON.stringify([{ quote: 'Can someone call me?', sms_log_id: smsRow.id, matched: true, speaker: 'caller' }]),
+      sms_context: { basis: 'request', due_text: null, property_id: null, customer_id: customerId, source_at: sourceAt.toISOString() } })
+      .returning('*');
+    const inbound = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      received_at: new Date(sourceAt.getTime() - 60000) });
+    const forward = await insertEmail({ gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid',
+      from_address: 'contact@wavespestcontrol.com', customer_id: null, classification: null,
+      body_text: 'On Tue, Sep 22, 2026 at 3:21 PM, Jane <customer@example.invalid> wrote: Can someone call me?',
+      label_ids: JSON.stringify(['SENT']), received_at: new Date(sourceAt.getTime() + 60000) });
+    const { loadSmsFulfillmentEvidence } = require('../services/sms-commitment-fulfillment');
+    const message = { id: smsRow.id, customer_id: customerId, direction: 'inbound', from_phone: '+12025550101', to_phone: '+19418889999', created_at: sourceAt };
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, new Date(forward.received_at.getTime() + 2000));
+    expect(evidence.records.some((r) => r.type === 'email_reply')).toBe(false);
+    expect(replyFulfillment(evidence, commitment)).toBeFalsy();
+  });
+
+  test('intake re-checks the gate under the lock: switched off during extraction, nothing is recorded', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: 'Please send the estimate for my house', subject: 'Estimate' });
+    dispatchWithFallback.mockImplementationOnce(async () => {
+      process.env.GATE_EMAIL_OPERATIONAL_ACTIONS = 'false';
+      return { ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+        description: 'send the estimate', quote: 'Please send the estimate for my house', basis: 'request', property_id: null,
+        due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } };
+    });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(await mockPg('call_commitments').where({ email_id: email.id })).toHaveLength(0);
+    expect((await mockPg('emails').where({ id: email.id }).first()).operational_analysis).toBeNull();
+  });
+
+  test('intake re-checks the source under the lock: an ask reclassified during extraction is not recorded', async () => {
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: 'Please send the estimate for my house', subject: 'Estimate' });
+    dispatchWithFallback.mockImplementationOnce(async () => {
+      await mockPg('emails').where({ id: email.id }).update({ classification: 'spam' });
+      return { ok: true, json: { obligations: [{ party: 'waves', kind: 'send_estimate',
+        description: 'send the estimate', quote: 'Please send the estimate for my house', basis: 'request', property_id: null,
+        due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } };
+    });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(await mockPg('call_commitments').where({ email_id: email.id })).toHaveLength(0);
+  });
+
   // Coordinator correction #3, 2026-09-29 (BUG): to_address is the raw
   // header value ("Name <addr>", or a comma-separated list), never a bare
   // address — a plain `=` comparison never matched it, so 23 real SENT

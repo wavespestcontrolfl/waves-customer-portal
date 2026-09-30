@@ -332,8 +332,11 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // the evidence, never the quoted thread under them (an old line would
       // otherwise ground as fresh proof, and a long thread would trip the
       // 16000-char body cap for the whole check).
+      // A send with no words of its own (only quoted history, only a
+      // signature) is no reply at all, so it never witnesses one.
       return resolved.filter((entry) => String(entry.linkedCustomerId) === String(customerId))
-        .map((entry) => ({ ...entry.row, body_text: stripQuotedAndSignature(entry.row.body_text) }));
+        .map((entry) => ({ ...entry.row, body_text: stripQuotedAndSignature(entry.row.body_text) }))
+        .filter((row) => row.body_text);
     })(),
     // Unowned commercial proposals are sent to the lead, not the customer
     // row; their delivery emails are reached through the estimate they name.

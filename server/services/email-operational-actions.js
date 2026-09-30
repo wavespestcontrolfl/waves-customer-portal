@@ -118,8 +118,18 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['email-operational-actions', String(email.customer_id)]);
     const customer = await trx('customers').where({ id: email.customer_id }).whereNull('deleted_at').forUpdate().first('id');
     if (!customer) return { skipped: 'customer_unavailable' };
-    const source = await trx('emails').where({ id: email.id }).forUpdate().first('id', 'operational_analysis');
-    if (!source || source.operational_analysis) return { skipped: 'source_changed' };
+    // Recheck under the lock what the extraction was run against, as
+    // recordMessageOperations does: the gate, and the source still being the
+    // same eligible email of THIS customer (an ask's own link and
+    // classification; a staff send's re-resolved recipient link).
+    if (!enabled()) return { skipped: 'gate_off' };
+    const source = await trx('emails').where({ id: email.id }).forUpdate()
+      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'gmail_thread_id', 'to_address');
+    if (!source || source.operational_analysis || source.body_text !== email.body_text) return { skipped: 'source_changed' };
+    const stillOwned = direction === 'outbound'
+      ? String(await resolveEmailCustomerLink(trx, source)) === String(customer.id)
+      : eligibleAskEmail(source) && String(source.customer_id) === String(customer.id);
+    if (!stillOwned) return { skipped: 'source_changed' };
     const since = gateEnvTimestamp('GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE');
     if (!since || new Date(email.received_at) < since) return { skipped: 'outside_activation_window' };
     const obligations = extracted.obligations;
