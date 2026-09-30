@@ -997,6 +997,19 @@ describe('convertLeadFromEvent (backfill resolver)', () => {
     expect(out).toMatchObject({ converted: true, count: 1, leadIds: ['Lx'] });
   });
 
+  test('an explicit lead converts on the identity it was read with (customer link, phone, email, estimate) as well as its open status', async () => {
+    const markConverted = jest.fn().mockResolvedValue(true);
+    await convertLeadFromEvent({
+      source: 'preferred_time_booked', customerId: 'c1', leadId: 'Lx',
+      database: makeConvertDb({ leadsById: { Lx: { id: 'Lx', status: 'new', converted_at: null, customer_id: null, phone: '+19415550100', email: 'a@example.com' } } }),
+      leadAttributionService: { markConverted },
+    });
+    expect(markConverted).toHaveBeenCalledWith('Lx', expect.objectContaining({
+      onlyIfStatusIn: expect.arrayContaining(['new']),
+      onlyIfIdentity: { customer_id: null, phone: '+19415550100', email: 'a@example.com', estimate_id: null },
+    }));
+  });
+
   test('matches the unconverted originating lead by contact, preserves values', async () => {
     const markConverted = jest.fn().mockResolvedValue(true);
     const database = makeConvertDb({

@@ -112,6 +112,7 @@ function validatePreferredTimeRequest(body, { now = new Date() } = {}) {
       phone,
       email: /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email) ? email : null,
       addressLine1: clean(b.address_line1, 200) || null,
+      addressLine2: clean(b.address_line2, 100) || null,
       city: clean(b.city, 100) || null,
       state: clean(b.state, 40) || null,
       zip: clean(b.zip, 20) || null,
@@ -192,15 +193,48 @@ async function lockPhone(trx, phone) {
 }
 
 /**
+ * True when this phone's owner booked on /book at or after `since` AND that
+ * booking's conversion took the (just filed) preferred-time lead — via
+ * convertPreferredTimeLeadsOnBooking, the same lifecycle path /confirm runs, so
+ * a Waves Assessment booking or an ambiguous phone still leaves the lead open.
+ * Runs AFTER the submit's commit: a booking that commits later than this check
+ * finds the committed lead and converts it itself; one that committed earlier
+ * is seen here. Never throws.
+ */
+async function reconcileBookingSince(db, { phone, since }) {
+  try {
+    const booked = await db('self_booked_appointments as sba')
+      .leftJoin('customers as c', 'sba.customer_id', 'c.id')
+      .whereRaw("RIGHT(regexp_replace(COALESCE(c.phone, ''), '[^0-9]', '', 'g'), 10) = ?", [phone])
+      .where('sba.created_at', '>=', since)
+      .whereNot('sba.status', 'cancelled')
+      .orderBy('sba.created_at', 'desc')
+      .first('sba.id', 'sba.customer_id');
+    if (!booked) return false;
+    const service = await db('scheduled_services').where({ self_booking_id: booked.id }).first();
+    const out = await convertPreferredTimeLeadsOnBooking(db, { customerId: booked.customer_id, booking: service || null });
+    return out.converted > 0;
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] booking reconcile failed: ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Persist the request. Returns { created, leadId }. A second submit from the
  * same phone within 24h refreshes the one lead (no second row, no second
  * bell). The lookup and write run under a per-phone advisory lock. Never
  * sends to the customer.
  */
 async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serviceKey = null, notify = true } = {}) {
+  // Taken BEFORE the transaction: a booking that commits from here on may have
+  // run its own conversion before this lead became visible (see
+  // reconcileBookingSince below). A minute of slack absorbs app/DB clock skew;
+  // a booking that close before the request is moot for it too.
+  const startedAt = new Date(Date.now() - 60 * 1000);
   const attr = value.attribution || null;
   const clickId = (v) => (v ? String(v).slice(0, 255) : null);
-  const extracted = {
+  const requestFields = {
     source: FIRST_CONTACT_CHANNEL,
     preferred_date: value.preferredDate,
     second_date: value.secondDate,
@@ -208,6 +242,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     note: value.note,
     service_key: serviceKey,
     address_line1: value.addressLine1,
+    address_line2: value.addressLine2 || null,
     state: value.state,
     session_id: value.sessionId,
     customer_messaged: false,
@@ -215,10 +250,18 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     // edits, which stamp updated_at), so suppression and dedupe recency mean
     // "when the customer last asked".
     last_requested_at: new Date().toISOString(),
+  };
+  // First-touch attribution is written once, when the lead is CREATED; a
+  // refresh keeps the original (see the merge in the refresh UPDATE).
+  const extractedNew = {
+    ...requestFields,
     utm: attr?.utm || null,
     referrer: attr?.referrer || null,
     landing_url: attr?.landing_url || null,
   };
+  // leads has no unit column: keep the unit inline with the street line, the
+  // way capture-intent stores it for booking_intents.
+  const streetAddress = [value.addressLine1, value.addressLine2].filter(Boolean).join(', ');
   const summary = buildSummary(value, serviceLabel);
   const phoneE164 = `+1${value.phone}`;
   const sourceMeta = await resolveLeadSource(attr);
@@ -268,12 +311,16 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
           first_name: value.firstName,
           last_name: value.lastName,
           email: value.email,
-          address: value.addressLine1 || '',
+          address: streetAddress,
           city: value.city,
           zip: value.zip,
           service_interest: serviceLabel,
           transcript_summary: summary,
-          extracted_data: JSON.stringify(extracted),
+          // Merge, never replace: only this request's own fields are written;
+          // the lead's first-touch UTM / referrer / landing URL stay (they
+          // agree with its stored lead_source_id and click ids). Done in SQL
+          // so a concurrent staff edit of another key is not lost either.
+          extracted_data: trx.raw("COALESCE(extracted_data, '{}'::jsonb) || ?::jsonb", [JSON.stringify(requestFields)]),
           updated_at: trx.fn.now(),
         });
       if (refreshed) return { leadId: existing.id, created: false };
@@ -283,7 +330,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
       last_name: value.lastName,
       phone: phoneE164,
       email: value.email,
-      address: value.addressLine1 || '',
+      address: streetAddress,
       city: value.city,
       zip: value.zip,
       lead_type: LEAD_TYPE,
@@ -293,7 +340,7 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
       status: 'new',
       is_residential: true,
       transcript_summary: summary,
-      extracted_data: JSON.stringify(extracted),
+      extracted_data: JSON.stringify(extractedNew),
       ...attribution,
     }).returning('*');
 
@@ -308,7 +355,13 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     return { leadId: row.id, created: true };
   });
 
-  if (created && notify) {
+  // A booking that won the race with this submit (its post-commit conversion
+  // ran before this lead was visible) is reconciled here, through the same
+  // bridge, so an already-booked customer neither keeps an open lead nor rings
+  // the bell. Best-effort: on any failure the lead simply stays open and rings.
+  const alreadyBooked = await reconcileBookingSince(db, { phone: value.phone, since: startedAt });
+
+  if (created && notify && !alreadyBooked) {
     try {
       const { triggerNotification } = require('./notification-triggers');
       await triggerNotification('new_lead', {

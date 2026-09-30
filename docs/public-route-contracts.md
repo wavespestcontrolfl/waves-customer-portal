@@ -944,14 +944,29 @@ on both the first commit and the `txResult.existing` replay) hands the booked
 customer's open preferred-time leads to the existing lifecycle —
 `convertLeadFromEvent` with an explicit `leadId` → `markConverted` → funnel
 settle — so staff do not chase someone who already booked and the booking counts
-on the lead's own funnel row (never a raw status write). It sends NOTHING to the customer — no SMS, no email — and
+on the lead's own funnel row (never a raw status write); the explicit-lead
+conversion claims the lead's open status AND the identity it was read with
+(customer link, phone, email, estimate link), so a lead staff re-assigned or
+re-contacted in between is never credited to this booking. A booking that
+committed while a submit was still in flight (its own conversion ran before the
+lead was visible) is reconciled by the submit after its commit through the same
+conversion, and then rings no bell. A repeat submit inside 24h merges only that
+request's own fields into `extracted_data`; the lead's first-touch UTM /
+referrer / landing URL are written once at creation and kept. The service line
+`address_line2` (apartment unit) is kept inline with the street line and in
+`extracted_data.address_line2`. It sends NOTHING to the customer — no SMS, no email — and
 retires every open abandoned-booking intent for the same phone or session, and
 capture-intent skips a phone that filed a request in the last day, and the
 recovery worker itself re-checks for a request filed since the intent was
 captured (fail closed on a lookup error) immediately before every text and
-email — and runs that last look AND the send while holding the same per-phone
-advisory lock a submit takes (`withPreferredTimePhoneLock`), so a submit can
-never commit between the worker's last look and its dispatch: neither a failed
+email. The fence with the worker is the `booking_intents` ROW lock, not the
+per-phone advisory lock: the submit's suppression UPDATE and the worker's final
+check + dispatch (`withLockedRecoveryIntent`, which runs `SELECT ... FOR UPDATE`
+on the intent row and holds it through the send) contend on the same row, so
+exactly one goes first — the worker never takes the advisory lock, which only
+de-duplicates concurrent SUBMITS from one phone. A submit that waited out a
+send commits after it; a worker that arrives after the submit's commit reads the
+row as suppressed and its re-check sees the request. Neither a failed
 suppression write nor a racing capture nor a racing submit can lead to a message
 after the visitor's confirmation. Success is a constant
 `{"ok": true}`.

@@ -17,6 +17,7 @@ let mockCustomer = null;       // what customers .first() returns
 let mockOpenLeads = [];        // what an awaited leads select() resolves to
 let mockLeadUpdateRows = 1;    // rows a conditional leads UPDATE matches (0 = staff closed it since the lookup)
 let mockRetireError = null;    // makes the booking_intents suppression UPDATE throw
+let mockBookedSince = null;    // what the post-commit "booked since the request began" lookup returns
 const mockOrder = [];          // op order inside/after the transaction
 
 function builder(table) {
@@ -33,7 +34,13 @@ function builder(table) {
     orderBy: () => b,
     select: () => b,
     then: (resolve, reject) => Promise.resolve(table === 'leads' ? mockOpenLeads : []).then(resolve, reject),
-    first: () => Promise.resolve(table === 'leads' ? mockExistingLead : (table === 'customers' ? mockCustomer : null)),
+    first: () => Promise.resolve(
+      table === 'leads' ? mockExistingLead
+        : table === 'customers' ? mockCustomer
+          : table === 'self_booked_appointments as sba' ? mockBookedSince
+            : table === 'scheduled_services' && mockBookedSince ? { id: 'ss-1', self_booking_id: mockBookedSince.id }
+              : null,
+    ),
     insert: (row) => {
       mockOps.push({ table, op: 'insert', arg: row });
       mockOrder.push(`insert:${table}`);
@@ -56,7 +63,13 @@ mockDb.transaction = jest.fn(async (cb) => {
   const trx = (table) => builder(table);
   trx.isTrx = true;
   trx.fn = mockDb.fn;
-  trx.raw = jest.fn(async (sql, bindings) => { mockLocks.push({ sql, bindings }); return { rows: [] }; });
+  trx.raw = jest.fn((sql, bindings) => {
+    // An expression fragment (the jsonb merge) is returned as-is, like knex's
+    // Raw; the advisory lock is awaited.
+    if (!/pg_advisory/.test(sql)) return { __raw: sql, bindings };
+    mockLocks.push({ sql, bindings });
+    return Promise.resolve({ rows: [] });
+  });
   return cb(trx);
 });
 
@@ -150,6 +163,7 @@ beforeEach(() => {
   mockOpenLeads = [];
   mockLeadUpdateRows = 1;
   mockRetireError = null;
+  mockBookedSince = null;
   mockOrder.length = 0;
   mockMarkConverted.mockClear();
   mockMarkConverted.mockResolvedValue(true);
@@ -396,6 +410,75 @@ describe('POST /api/booking/preferred-time (gate on)', () => {
     expect(mockStampFunnel).toHaveBeenCalledTimes(1);
   });
 
+  test('a refresh MERGES only the request-specific fields: first-touch UTM / referrer / landing URL are neither sent nor replaced', async () => {
+    mockExistingLead = { id: 'lead-existing' };
+    const r = await post(baseUrl, {
+      ...validBody({
+        note: 'second ask',
+        attribution: { utm: { source: 'direct-revisit' }, referrer: 'https://direct.example/', landing_url: 'https://portal.test/book' },
+      }),
+      capture_token: loopbackToken(),
+    });
+    expect(r.status).toBe(200);
+    const upd = mockOps.find((o) => o.table === 'leads' && o.op === 'update');
+    // A jsonb `||` merge onto the stored row, never a wholesale replacement.
+    expect(upd.arg.extracted_data.__raw).toMatch(/COALESCE\(extracted_data, '\{\}'::jsonb\) \|\| \?::jsonb/);
+    const sent = JSON.parse(upd.arg.extracted_data.bindings[0]);
+    expect(sent).toMatchObject({ note: 'second ask', preferred_date: dayOffset(5) });
+    for (const k of ['utm', 'referrer', 'landing_url']) expect(sent).not.toHaveProperty(k);
+  });
+
+  test('the apartment unit (address_line2) is kept: inline on the lead address and in extracted_data', async () => {
+    const r = await post(baseUrl, {
+      ...validBody({ address_line1: '1 Example Way', address_line2: 'Apt 4B', city: 'Cortez', zip: '34215' }),
+      capture_token: loopbackToken(),
+    });
+    expect(r.status).toBe(200);
+    const lead = mockOps.find((o) => o.table === 'leads' && o.op === 'insert').arg;
+    expect(lead.address).toBe('1 Example Way, Apt 4B');
+    expect(JSON.parse(lead.extracted_data)).toMatchObject({ address_line1: '1 Example Way', address_line2: 'Apt 4B' });
+    // No unit: the address is the street line alone.
+    mockOps.length = 0;
+    await post(baseUrl, { ...validBody({ address_line1: '1 Example Way' }), capture_token: loopbackToken() });
+    expect(mockOps.find((o) => o.table === 'leads' && o.op === 'insert').arg.address).toBe('1 Example Way');
+  });
+
+  test('the client sends the unit', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../../client/src/components/booking/CantFindTimeBlock.jsx'), 'utf8');
+    expect(src).toMatch(/address_line2:\s*address\.line2/);
+  });
+
+  test('a booking that won the race (committed while this submit was in flight): the lead is converted through the bridge and NO bell rings', async () => {
+    mockBookedSince = { id: 'sba-1', customer_id: 'cust-1' };
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }];
+    mockExistingLead = { id: 'lead-1', status: 'new', converted_at: null, customer_id: null, deleted_at: null };
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockMarkConverted).toHaveBeenCalledTimes(1);
+    expect(mockMarkConverted.mock.calls[0][0]).toBe('lead-1');
+    expect(mockMarkConverted.mock.calls[0][1]).toMatchObject({ triggerSource: 'preferred_time_booked', customerId: 'cust-1' });
+    expect(mockTriggerNotification).not.toHaveBeenCalled();
+    expect(mockSendSMS).not.toHaveBeenCalled();
+  });
+
+  test('a race booking whose conversion does not win (assessment / ambiguous / lost claim): the lead stays open and rings as usual', async () => {
+    mockBookedSince = { id: 'sba-1', customer_id: 'cust-1' };
+    mockCustomer = { phone: '+19415550100' };
+    mockOpenLeads = [{ id: 'lead-1' }, { id: 'lead-2' }]; // ambiguous -> nothing converted
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+  });
+
+  test('no booking since the request began: nothing is converted and the bell rings', async () => {
+    const r = await post(baseUrl, { ...validBody(), capture_token: loopbackToken() });
+    expect(r.status).toBe(200);
+    expect(mockMarkConverted).not.toHaveBeenCalled();
+    expect(mockTriggerNotification).toHaveBeenCalledTimes(1);
+  });
+
   test('the refresh source: the id-only UPDATE also carries the open-status / unconverted / not-deleted predicates', () => {
     const svc = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
     const refresh = svc.slice(svc.indexOf("const refreshed = await trx('leads')"), svc.indexOf('if (refreshed)'));
@@ -567,7 +650,7 @@ describe('request recency is the customer\'s own latest submit, not lead edits',
     mockExistingLead = { id: 'lead-existing' };
     await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value, { notify: false });
     const upd = mockOps.find((o) => o.table === 'leads' && o.op === 'update');
-    const stamp = JSON.parse(upd.arg.extracted_data).last_requested_at;
+    const stamp = JSON.parse(upd.arg.extracted_data.bindings[0]).last_requested_at;
     expect(Math.abs(Date.now() - new Date(stamp).getTime())).toBeLessThan(5000);
 
     mockOps.length = 0;

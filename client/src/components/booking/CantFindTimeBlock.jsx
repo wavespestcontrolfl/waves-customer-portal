@@ -86,6 +86,7 @@ export default function CantFindTimeBlock({
           service_id: serviceId || undefined,
           service_type: serviceLabel || undefined,
           address_line1: address.line1 || undefined,
+          address_line2: address.line2 || undefined,
           city: address.city || undefined,
           state: address.state || undefined,
           zip: address.zip || undefined,

@@ -12,7 +12,11 @@
  *   - the lead + its funnel row commit or roll back together, and the
  *     suppression rolls back with them (fail closed, nothing half-written);
  *   - a refresh of an open lead that staff closed in the meantime becomes a NEW
- *     lead instead of writing onto the closed one.
+ *     lead instead of writing onto the closed one;
+ *   - a refresh MERGES its request fields into extracted_data (first-touch keys
+ *     survive, a staff-added key survives);
+ *   - a booking that committed while the submit was in flight converts the
+ *     just-filed lead post-commit (no bell).
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
@@ -24,6 +28,8 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/experimentation/growthbook', () => ({ assignBookingRecoveryExperiment: jest.fn() }));
 jest.mock('../services/lead-source-resolver', () => ({ resolveLeadSource: jest.fn(async () => ({ leadSourceId: null })) }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => ({})) }));
+const mockConvert = jest.fn();
+jest.mock('../services/lead-estimate-link', () => ({ convertLeadFromEvent: (...a) => mockConvert(...a) }));
 const mockStamp = jest.fn();
 jest.mock('../services/lead-funnel-bridge', () => ({ stampLeadFunnelRow: (...a) => mockStamp(...a) }));
 
@@ -66,6 +72,10 @@ jest.setTimeout(60000);
       transcript_summary text, extracted_data jsonb, lead_source_id uuid, gclid text, wbraid text, gbraid text, fbclid text, fbc text, fbp text,
       converted_at timestamptz, deleted_at timestamptz, created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now())`, [schema]);
     await database.raw('CREATE TABLE ??.funnel_rows (lead_id uuid PRIMARY KEY)', [schema]);
+    await database.raw('CREATE TABLE ??.customers (id uuid PRIMARY KEY, phone text)', [schema]);
+    await database.raw(`CREATE TABLE ??.self_booked_appointments (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid, status text DEFAULT 'confirmed', created_at timestamptz DEFAULT now())`, [schema]);
+    await database.raw('CREATE TABLE ??.scheduled_services (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), self_booking_id uuid)', [schema]);
     ({ recordPreferredTimeRequest } = require('../services/booking-preferred-time'));
     ({ _internals: { withLockedRecoveryIntent } } = require('../services/booking-abandon-recovery'));
   });
@@ -78,6 +88,10 @@ jest.setTimeout(60000);
     await database('leads').del();
     await database('booking_intents').del();
     await database('funnel_rows').del();
+    await database('self_booked_appointments').del();
+    await database('scheduled_services').del();
+    await database('customers').del();
+    mockConvert.mockReset();
     mockStamp.mockReset();
     mockStamp.mockImplementation(async (handle, lead) => { await handle('funnel_rows').insert({ lead_id: lead.id }); return lead.id; });
   });
@@ -164,5 +178,53 @@ jest.setTimeout(60000);
     const closed = await database('leads').where({ id: first.leadId }).first();
     expect(closed).toMatchObject({ status: 'lost', first_name: 'Original' });
     expect(await database('leads').count('* as n').first()).toMatchObject({ n: '2' });
+  });
+  test('a refresh merges only its request fields: first-touch UTM / referrer / landing URL and a staff-added key survive', async () => {
+    const attr = { utm: { source: 'google' }, referrer: 'https://www.google.com/', landing_url: 'https://portal.test/book?gclid=1' };
+    const first = await recordPreferredTimeRequest(database, value({ note: 'first', attribution: attr }), { notify: false });
+    await database('leads').where({ id: first.leadId }).update({
+      extracted_data: database.raw("extracted_data || '{\"staff_flag\": true}'::jsonb"),
+    });
+    const again = await recordPreferredTimeRequest(database, value({
+      note: 'second', addressLine2: 'Apt 4B',
+      attribution: { utm: { source: 'direct' }, referrer: 'https://x.example/', landing_url: 'https://portal.test/book' },
+    }), { notify: false });
+    expect(again).toEqual({ created: false, leadId: first.leadId });
+    const row = await database('leads').where({ id: first.leadId }).first();
+    expect(row.extracted_data).toMatchObject({
+      note: 'second', address_line2: 'Apt 4B', staff_flag: true,
+      utm: { source: 'google' }, referrer: 'https://www.google.com/', landing_url: 'https://portal.test/book?gclid=1',
+    });
+  });
+
+  test('a booking committed while the submit was in flight converts the just-filed lead after commit, and no bell rings', async () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    triggerNotification.mockClear();
+    const cust = randomUUID();
+    const slow = gate();
+    mockStamp.mockImplementation(async (handle, lead) => { await slow.p; await handle('funnel_rows').insert({ lead_id: lead.id }); });
+    mockConvert.mockResolvedValue({ converted: true });
+    const submit = recordPreferredTimeRequest(database, value(), { notify: true });
+    await tick();
+    // /confirm commits its booking (and its own conversion finds no lead yet) while the submit is mid-transaction.
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    const sba = await database('self_booked_appointments').insert({ customer_id: cust }).returning('id');
+    await database('scheduled_services').insert({ self_booking_id: sba[0].id });
+    slow.open();
+    const out = await submit;
+    expect(out.created).toBe(true);
+    expect(mockConvert).toHaveBeenCalledWith(expect.objectContaining({ source: 'preferred_time_booked', customerId: cust, leadId: out.leadId }));
+    expect(triggerNotification).not.toHaveBeenCalled();
+  });
+
+  test('a booking made BEFORE the request began (beyond the skew slack) is not this request\'s to reconcile: the bell rings', async () => {
+    const { triggerNotification } = require('../services/notification-triggers');
+    triggerNotification.mockClear();
+    const cust = randomUUID();
+    await database('customers').insert({ id: cust, phone: '+19415550100' });
+    await database('self_booked_appointments').insert({ customer_id: cust, created_at: new Date(Date.now() - 3600000) });
+    await recordPreferredTimeRequest(database, value(), { notify: true });
+    expect(mockConvert).not.toHaveBeenCalled();
+    expect(triggerNotification).toHaveBeenCalledTimes(1);
   });
 });

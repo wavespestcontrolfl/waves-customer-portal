@@ -1712,8 +1712,14 @@ async function convertLeadFromEvent({
       if (resolvedCustomerId) conversion.customerId = resolvedCustomerId;
       else if (lead.customer_id) conversion.customerId = lead.customer_id;
       // An explicit-lead conversion wins only while the lead is still in the
-      // open state it was read in (a staff transition in between wins).
-      if (resolution === 'explicit') conversion.onlyIfStatusIn = OPEN_LEAD_STATUSES;
+      // open state AND on the identity it was read with (customer link, phone,
+      // email, estimate link): a staff transition or a re-assignment /
+      // re-contact in between wins, so this booking is never credited to a
+      // lead that is now another person's opportunity (codex #5399 r6 P1).
+      if (resolution === 'explicit') {
+        conversion.onlyIfStatusIn = OPEN_LEAD_STATUSES;
+        conversion.onlyIfIdentity = identityOf(lead);
+      }
       // Pass revenue fields only when an estimate supplied them — otherwise
       // markConverted preserves whatever the lead already has.
       if (haveEstimateHints) {
