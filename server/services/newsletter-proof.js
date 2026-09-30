@@ -647,7 +647,7 @@ async function maybeHandleProofApproval(email) {
     try {
       await db('newsletter_sends')
         .where({ id: send.id, proof_token: token })
-        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+        .update({ proof_token: null, proof_sent_at: null, proof_approval_email_id: email.id || null, updated_at: new Date() });
       await sendNewsletterProof(send.id);
     } catch (reproofErr) {
       logger.error(`[newsletter-proof] re-proof after stale approval failed for ${send.id}: ${reproofErr.message}`);
@@ -678,10 +678,15 @@ async function maybeHandleProofApproval(email) {
       // proof means the CORRECTED draft needs a fresh proof, and
       // sendNewsletterProof skips any row with proof_sent_at set (codex
       // round 17 P2).
+      // proof_approval_email_id keeps the rejected reply's id on the row (its
+      // audit-trail meaning): with proof_approved_at empty it is the durable
+      // sign that a proof WAS sent and an approval was refused, which the
+      // Pest Insider catch-up reads to re-proof a corrected draft after its
+      // day-10 cutoff.
       try {
         await db('newsletter_sends')
           .where({ id: send.id, proof_token: token })
-          .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+          .update({ proof_token: null, proof_sent_at: null, proof_approval_email_id: email.id || null, updated_at: new Date() });
       } catch (clearErr) {
         logger.error(`[newsletter-proof] failed to release proof claim after validation failure for ${send.id}: ${clearErr.message}`);
       }
@@ -723,7 +728,7 @@ async function maybeHandleProofApproval(email) {
     try {
       await db('newsletter_sends')
         .where({ id: send.id, proof_token: token })
-        .update({ proof_token: null, proof_sent_at: null, updated_at: new Date() });
+        .update({ proof_token: null, proof_sent_at: null, proof_approval_email_id: email.id || null, updated_at: new Date() });
     } catch (clearErr) {
       logger.error(`[newsletter-proof] failed to release proof claim after recheck failure for ${send.id}: ${clearErr.message}`);
     }

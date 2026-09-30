@@ -146,7 +146,7 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
   // so a comeback never switches the row back on.
   if (expired) {
     if (row.status === 'archived') return { action: 'unchanged' };
-    return { action: 'retire', reason: 'expired', keepDeactivation: !row.active && !meta.retired_reason };
+    return { action: 'retire', reason: 'expired', keepDeactivation: row.active === false && !meta.retired_reason };
   }
   if (!legacy && rowHash !== meta.register_hash && !converged) {
     return { action: 'hold', reason: 'edited_by_person', rowHash, shippedHash };
@@ -154,7 +154,7 @@ function planFactSync(fact, row, { today, priorSeed = false } = {}) {
   // active=false with no retirement stamp is a person's deactivation (the
   // admin knowledge routes write arbitrary columns); the register does not
   // switch it back on — nor after it retired and un-retired the row.
-  if (!row.active && (!meta.retired_reason || meta.deactivated_by_person)) return { action: 'hold', reason: 'deactivated_by_person' };
+  if (row.active === false && (!meta.retired_reason || meta.deactivated_by_person)) return { action: 'hold', reason: 'deactivated_by_person' };
   const sameWording = converged || (!legacy && meta.register_hash === shippedHash);
   if (sameWording && !converged && row.active && managedMetadataCurrent(meta, fact)) return { action: 'unchanged' };
   return { action: 'update', legacy, reactivate: !row.active, metadataOnly: sameWording, converged };
@@ -173,7 +173,7 @@ function planStraySync(row) {
   // word for word (retirement never touches the wording) but withdrawn
   // guidance leaves the shared search like expired guidance does (codex
   // round 7 P2); a person's active=false is remembered too.
-  return { action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: !row.active && !meta.retired_reason };
+  return { action: 'retire', reason: 'withdrawn_from_register', keepDeactivation: row.active === false && !meta.retired_reason };
 }
 
 function rowValues(fact, existingMeta, now) {
@@ -702,17 +702,75 @@ const PATCH = /\b(?:(?:brown|large)\s+patch|rhizoctonia\s+solani|r\.\s?solani)\b
 // ("below 80°F", "under 85", "cooler than 90") is never a trigger.
 const HOT_FIGURE = '(?:(?:8|9)\\d|1[0-2]\\d)(?!\\d|,\\d{3})(?:\'?s)?|(?:eighty|ninety)(?:[-\\s](?:one|two|three|four|five|six|seven|eight|nine))?|(?:one|a)\\s+hundred';
 const UPWARD_COMPARATOR = '(?:above|over|past|beyond|exceed(?:s|ed|ing)?|(?:more|greater|higher|warmer|hotter)\\s+than|upwards\\s+of|in\\s+excess\\s+of|north\\s+of|at\\s+least|top(?:s|ped|ping)?|reach(?:es|ed|ing)?|hit(?:s|ting)?|(?:climb(?:s|ed|ing)?|ris(?:e|es|ing|en)|rose|go(?:es|ing)?|went|push(?:es|ed|ing)?|soar(?:s|ed|ing)?|stay(?:s|ed|ing)?|remain(?:s|ed|ing)?|get(?:s|ting)?|got)\\s+(?:up\\s+)?(?:to|past|above|over|into|beyond|at))';
-const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?))';
+const NOT_A_TEMPERATURE = '(?!\\s*(?:%|percent|per\\s*cent|square|sq\\b|acres?|feet|foot|ft\\b|yards?|miles?|pounds?|lbs?|years?|days?|weeks?|months?|hours?|minutes?|dollars?|homes?|houses?|lawns?|yards?|customers?|people|samples?|species|cases?|times?|calls?|visits?|inch(?:es)?|cm|centimet(?:er|re)s?|met(?:er|re)s?|mm))';
+// A temperature unit: 85°F, 85°, 85 degrees, 85-degree, 85 degrees Fahrenheit,
+// 85 Fahrenheit.
+const TEMP_UNIT = '(?:\\s*°\\s*[FC]?(?![A-Za-z])|-?\\s*degrees?(?:\\s+(?:fahrenheit|celsius))?\\b|\\s*(?:fahrenheit|celsius)\\b)';
+const TEMP_TENS = 'twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety';
+const TEMP_UNITS_WORD = 'one|two|three|four|five|six|seven|eight|nine';
+const TEMP_NUM = `(?<![\\d.,])(?:\\d{1,3}(?!\\d|,\\d{3}|\\.\\d)|(?:${TEMP_TENS})(?:[-\\s](?:${TEMP_UNITS_WORD}))?(?![a-z])|(?:one|a)\\s+hundred)`;
+const TENS_VALUE = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const UNIT_VALUE = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+function tempValue(text) {
+  const word = String(text).toLowerCase().trim();
+  if (/^\d+$/.test(word)) return parseInt(word, 10);
+  if (/hundred$/.test(word)) return 100;
+  const [tens, unit] = word.split(/[-\s]+/);
+  return (TENS_VALUE[tens] || 0) + (UNIT_VALUE[unit] || 0);
+}
+const isHotValue = (n) => n >= 80 && n <= 129;
+
+// Temperatures are judged at SENTENCE level, once, BEFORE the sentence is
+// split into clauses (codex #5187 follow-up, rounds 1-2): the splitter breaks
+// on "and" and on dashes, which cut "80°F and below" and "85 to 95 degrees"
+// in half, and every shape the clause regex had to list (copula, adverb,
+// spelled-out unit) was one more way to slip. Each temperature phrase that
+// carries its direction is replaced by ONE token — hottemp<n> (the figure,
+// or the low end of a range, is 80-129 on the hot side) or cooltemp<n>
+// (anything else) — and put back in the clause that is reported. The
+// PATCH_TRIGGER only reads the hot token and a bare figure with a unit.
+//   range        "85 to 95 degrees", "between 85 and 95°F", "85–95°F" -> the LOW end decides
+//   trailing     "80°F or higher", "85 and up" (hot) / "80°F and below" (cool)
+//   leading down "below 80°F", "under 85 degrees", "cooler than 90"    (cool)
+const TEMP_RANGE = new RegExp(`(?:\\b(?:between|from)\\s+)?(${TEMP_NUM})(${TEMP_UNIT})?\\s*(?:\\b(?:to|through|thru|until|and)\\b|[-–—])\\s*(${TEMP_NUM})(${TEMP_UNIT})?`, 'gi');
+const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\\s+(?:(?:a\\s+)?(?:bit|little)\\s+)?(up(?:wards?)?(?!\\s+to\\b)|higher|hotter|warmer|above|more|greater|over|lower|below|less|under|cooler|colder|down(?:wards?)?)\\b${NOT_A_TEMPERATURE}`, 'gi');
+const TEMP_LEADING_DOWN = new RegExp(`\\b(?:below|under|beneath|less\\s+than|lower\\s+than|cooler\\s+than|colder\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+more\\s+than|at\\s+most|up\\s+to)\\s+(?:the\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
+const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
+
+function foldTemperatures(sentence) {
+  const stash = [];
+  const token = (kind, original) => {
+    stash.push(original);
+    return `${kind}${stash.length - 1}`;
+  };
+  let text = String(sentence).replace(TEMP_RANGE, (match, a, unitA, b, unitB) => {
+    if (!unitA && !unitB) return match; // "80 to 90 lawns" is not a temperature
+    const low = Math.min(tempValue(a), tempValue(b));
+    return token(isHotValue(low) ? 'hottemp' : 'cooltemp', match);
+  });
+  text = text.replace(TEMP_TRAILING, (match, figure, _unit, direction) => {
+    const hot = HOT_DIRECTION.test(direction) && isHotValue(tempValue(figure));
+    return token(hot ? 'hottemp' : 'cooltemp', match);
+  });
+  text = text.replace(TEMP_LEADING_DOWN, (match) => token('cooltemp', match));
+  const restore = (clause) => String(clause).replace(/\b(?:hot|cool)temp(\d+)\b/g, (_m, n) => stash[Number(n)] ?? _m);
+  return { text, restore };
+}
+
 const PATCH_TRIGGER = new RegExp(
   '\\b(?:summer(?:s|time)?|june|july|august|september|rainy\\s+season|hot(?:ter|test)?|heat(?:waves?)?|warm(?:er|est)\\s+months?|dog\\s+days)\\b'
   + `|\\b${UPWARD_COMPARATOR}[-\\s]+(?:the\\s+)?(?:${HOT_FIGURE})${NOT_A_TEMPERATURE}`
   + '|\\bthe\\s+(?:(?:upper|high|mid|low|mid-to-upper)[-\\s]+)?(?:(?:8|9)0\'?s|eighties|nineties|100\'?s|hundreds|triple[-\\s]+digits)\\b'
-  + `|\\b(?:at|around|about|near|approximately|roughly|in|during|on)\\s+(?:the\\s+)?(?:${HOT_FIGURE})\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)`
-  // (v) the copular form — "temperatures are 85°F", "temperatures are 80°F
-  // or higher", "it's 90 degrees" — names the same threshold with no
-  // preposition (codex #5187 follow-up). "80°F or lower" / "or below" is the
-  // cool side of the line and never a trigger.
-  + `|\\b(?:is|are|was|were|be|being|been|'s|'re)\\s+(?:(?:about|around|near|nearly|approximately|roughly|just|only|almost)\\s+)?(?:${HOT_FIGURE})(?:\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)(?!\\s*[FC]?\\s*(?:or|and|to)\\s+(?:lower|below|less|under|cooler|colder|down))|\\s+(?:or|and)\\s+(?:higher|hotter|warmer|above|more|greater|up|over)\\b${NOT_A_TEMPERATURE})`,
+  // (iv) a figure of 80+ with a temperature unit ANYWHERE in the clause —
+  // "at 85°F", "in 90-degree weather", "are 85°F", "are consistently 90
+  // degrees or higher" — not only after a preposition or a listed copula:
+  // the unit makes it a temperature, so no verb or adverb shape is
+  // enumerated. The cool side of the line (a downward comparator, "or
+  // lower", a range that starts below 80) was folded away first, see
+  // foldTemperatures.
+  + `|(?<![\\d.,])\\b(?:${HOT_FIGURE})${TEMP_UNIT}`
+  // (v) a phrase foldTemperatures judged hot: a range, "or higher" / "and up".
+  + '|\\bhottemp\\d+\\b',
   'i',
 );
 // A clause that says large patch RECEDES in the heat is the fact, not the
@@ -722,7 +780,7 @@ const PATCH_TRIGGER = new RegExp(
 // still the claim — and must not itself be negated: "Large patch doesn't
 // slow down in summer" asserts the claim, whatever a negation elsewhere
 // would otherwise clear.
-const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|rare|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem))';
+const RECEDE_SOURCE = '(?:stop(?:s|ped|ping)?\\s+spreading|slow(?:s|ed|ing)?(?:\\s+down)?|stop(?:s|ped|ping)?|fad(?:e|es|ed|ing)(?:\\s+away|\\s+out)?|subsid(?:e|es|ed|ing)|(?:go(?:es)?|went|going|gone)\\s+(?:dormant|quiet|away)|dorman(?:t|cy)|back(?:s|ed|ing)?\\s+off|eas(?:e|es|ed|ing)(?:\\s+off|\\s+up)?|declin(?:e|es|ed|ing)|wan(?:e|es|ed|ing)|disappear(?:s|ed|ing)?|clear(?:s|ed|ing)?\\s+up|(?:di(?:e|es|ed)|dying)\\s+(?:back|down|out|off)|shut(?:s|ting)?\\s+down|quiet(?:s|ed|ing)?\\s+down|inactive|recover(?:s|ed|ing)?|(?:grow(?:s|ing)?|grew)\\s+out|retreat(?:s|ed|ing)?|diminish(?:es|ed|ing)?|abat(?:e|es|ed|ing)|halt(?:s|ed|ing)?|end(?:s|ed)?|rare|rarely|seldom|uncommon|unlikely|less\\s+(?:common|likely|active|prevalent|severe|of\\s+a\\s+problem))';
 const RECEDE = new RegExp(`\\b${RECEDE_SOURCE}\\b`, 'i');
 const PATCH_ACTIVE = /\b(?:thriv\w*|flar\w*|spread\w*|peak\w*|explod\w*|surg\w*|take[sn]?\s+off|taking\s+off|took\s+off|worst|strik\w*|attack\w*|appear\w*|show(?:s|ed|ing)?\s+up|develop\w*|active|activit\w*|lov(?:e|es|ed|ing)|prefer\w*|favou?r\w*|grow(?:s|ing)?|kick\w*\s+in|ramp\w*\s+up|common|prevalent|rampant|big\w*\s+problem|problem|damag\w*|kill\w*|infect\w*|return\w*|come\w*\s+back|comes)\b/i;
 const NEGATED_RECEDE = new RegExp(`\\b(?:not|never|no\\s+longer|hardly|rarely|seldom|cannot|\\w+n't)\\s+(?:\\w+\\s+){0,2}?${RECEDE_SOURCE}\\b(?![^]*\\b(?:until|before)\\b)`, 'i');
@@ -793,7 +851,8 @@ function patchVerdictUnit(clauses, i) {
 }
 
 function patchClaimInSentence(sentence, previousSentence = '') {
-  const clauses = splitClauses(sentence);
+  const folded = foldTemperatures(sentence);
+  const clauses = splitClauses(folded.text);
   // The subject carries across clauses the same way it does for termites:
   // "Large patch, rather than chinch damage, is what you see in summer"
   // asserts the claim in its third clause (codex round 8); a leading pronoun
@@ -816,10 +875,10 @@ function patchClaimInSentence(sentence, previousSentence = '') {
     // for the heat), the same as within one clause.
     if (NEGATED_RECEDE.test(judged) && !/\b(?:until|before)\b/i.test(span)) {
       if (MYTH_WORD.test(judged)) continue;
-      return clause;
+      return folded.restore(clause);
     }
     if (patchRecedes(judged) || clauseDenies(judged) || PATCH_CONTRAST.test(span)) continue;
-    return clause;
+    return folded.restore(clause);
   }
   return null;
 }

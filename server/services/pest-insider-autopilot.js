@@ -214,8 +214,9 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   if (!proofGateOn()) return { skipped: true, reason: 'proof gate off' };
   // The day-10 cutoff keeps a stale, never-proofed draft from being proofed
   // late in the month. It does not apply to a CORRECTED draft: one whose
-  // proof was sent and then released by a failed approval (proof_sent_at
-  // cleared) and that passes validation now — without this it could never be
+  // proof was sent and then released by a refused approval (proof_sent_at
+  // cleared, the refused reply's id kept on the row) and that passes
+  // validation now — without this it could never be
   // re-proofed after day 10 (codex #5187 follow-up). That draft is checked
   // below, once it is loaded.
   const pastCutoff = etParts(now).day > PROOF_RETRY_LAST_DAY;
@@ -230,7 +231,7 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
     .where('created_at', '<', end)
     .first();
   if (!draft) return pastCutoff ? pastCutoffSkip : { skipped: true, reason: 'no unproofed draft this month' };
-  if (pastCutoff && !(await proofWasSent(draft.id) && !(await draftFailsValidation(draft)))) {
+  if (pastCutoff && !(approvalWasRefused(draft) && !(await draftFailsValidation(draft)))) {
     return pastCutoffSkip;
   }
 
@@ -263,20 +264,13 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   return { skipped: false, sendId: draft.id, proofSent: proof.sent, reason: proof.reason };
 }
 
-// True when this module recorded a proof actually SENT for the draft. With
-// proof_sent_at now empty, that means an approval-time check released it.
-// Fails closed (false): past the cutoff, doubt means no proof.
-async function proofWasSent(sendId) {
-  try {
-    const sent = await db('audit_log')
-      .where({ action: PROOF_ATTEMPT_ACTION, resource_type: 'newsletter_sends', resource_id: sendId })
-      .whereRaw("metadata->>'sent' = 'true'")
-      .first('id');
-    return Boolean(sent);
-  } catch (e) {
-    logger.warn(`[pest-insider-autopilot] could not read the proof history: ${e.message}`);
-    return false;
-  }
+// True when an approval reply was refused for this draft: the release that
+// clears proof_sent_at (newsletter-proof.js) leaves the rejected reply's id
+// in proof_approval_email_id, and proof_approved_at stays empty. That is
+// durable evidence on the row itself — not a best-effort audit row — that a
+// proof was sent and then invalidated.
+function approvalWasRefused(draft) {
+  return Boolean(draft?.proof_approval_email_id) && !draft.proof_approved_at;
 }
 
 function editedSince(draft, at) {

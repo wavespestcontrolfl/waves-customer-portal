@@ -420,6 +420,8 @@ describe('maybeHandleProofApproval', () => {
     expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: 'ab12cd34' });
     const release = sendsChain.update.mock.calls.find(([patch]) => patch && patch.proof_token === null && patch.proof_sent_at === null);
     expect(release).toBeTruthy();
+    // the refused reply's id stays on the row: durable evidence a proof was sent and refused
+    expect(release[0].proof_approval_email_id).toBe('email-1');
   });
 
   test('non-allowlisted sender cannot approve', async () => {
@@ -580,6 +582,8 @@ describe('maybeHandleProofApproval', () => {
     }));
     // stale proof invalidated (token-scoped clear)
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ proof_token: null, proof_sent_at: null }));
+    // the refused reply's id stays on the row, like every other release path
+    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ proof_token: null, proof_approval_email_id: 'email-1' }));
   });
 
   test('validation failure at approval time blocks the send and notifies', async () => {
