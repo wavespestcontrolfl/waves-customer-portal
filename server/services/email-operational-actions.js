@@ -132,7 +132,7 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     // classification; a staff send's re-resolved recipient link).
     if (!enabled()) return { skipped: 'gate_off' };
     const source = await trx('emails').where({ id: email.id }).forUpdate()
-      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'body_html', 'gmail_thread_id', 'to_address', 'subject');
+      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'body_html', 'gmail_thread_id', 'to_address', 'cc_address', 'bcc_address', 'subject');
     if (!source || source.operational_analysis || emailPlainText(source) !== emailPlainText(email) || subjectOf(source) !== subjectOf(email)) return { skipped: 'source_changed' };
     const stillOwned = direction === 'outbound'
       ? String(await resolveEmailCustomerLink(trx, source)) === String(customer.id)
@@ -255,7 +255,7 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       .where('er.received_at', '>=', since).where('er.received_at', '<=', new Date(now.getTime() - SENT_LINK_GRACE_MS))
       .whereNotExists(noTerminalReceipt('er'))
       .orderBy('er.received_at').orderBy('er.id').limit(PAGE_INTAKE)
-      .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
+      .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
 
     let processed = 0; let failed = 0; let skipped = 0;
     for (const email of askCandidates) {
