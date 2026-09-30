@@ -30,7 +30,6 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const featureGates = require('../../config/feature-gates');
 const { openBalanceInvoices } = require('../open-balance');
-const { isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = require('../invoice-helpers');
 const PayCombined = require('../pay-combined');
 
 // Which hold wins when several apply (highest first). payer_* = payer_anchor
