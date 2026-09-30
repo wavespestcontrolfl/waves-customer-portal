@@ -8,7 +8,7 @@
  * nothing.
  *
  * processSchedule runs, in this order: CLAIM -> customer + prefs -> RECOVER
- * FIRST (the ledger, never the render) -> autopay -> credit -> SET -> stage
+ * FIRST (the ledger, never the render) -> autopay -> SET -> stage
  * catch-up -> template probe -> SEND through sendReminderChannels ->
  * DISPOSITION (one path for every return) -> advance. Every stage returns
  * `null` to continue or an outcome object to stop.
@@ -22,7 +22,7 @@ const { customerOnAutopay } = require('../autopay-eligibility');
 const { reminderProgress, sendReminderChannels } = require('../billing-reminder-delivery');
 const { dunningCustomerScheduleAllowlist } = require('../../config/feature-gates');
 const { OPEN_STATUSES, SOURCE, eventKey } = require('./constants');
-const { resolveDunnableSet, applyCreditBeforeResolve } = require('./balance-set');
+const { resolveDunnableSet } = require('./balance-set');
 const { oldestActive } = require('./seed');
 const Schedule = require('./schedule');
 const Render = require('./render');
@@ -33,30 +33,6 @@ const { STEPS } = Schedule;
 const FINAL_STEP_IDS = ['d60_reminder', 'd90_final_notice'];
 
 const outcome = (kind, extra = {}) => ({ outcome: kind, ...extra });
-
-// ── credit ───────────────────────────────────────────────────────────────
-
-async function drawCredit(customerId) {
-  try {
-    return await applyCreditBeforeResolve(customerId);
-  } catch (err) {
-    logger.warn(`[customer-dunning] account-credit apply before reminder skipped for customer ${customerId}: ${err.message}`);
-    return [];
-  }
-}
-
-/** Reverse this run's draws when nothing was delivered (parity with fireTouch). */
-async function reverseDraws(draws) {
-  if (!draws?.length) return;
-  const { reverseAppliedCredit } = require('../customer-credit');
-  for (const draw of draws) {
-    try {
-      await reverseAppliedCredit({ invoiceId: draw.invoiceId, amount: draw.amount, createdBy: 'system:dun_undelivered' });
-    } catch (err) {
-      logger.warn(`[customer-dunning] credit reversal after undelivered reminder skipped for ${draw.invoiceId}: ${err.message}`);
-    }
-  }
-}
 
 // ── stage 2: customer + preferences ──────────────────────────────────────
 
@@ -225,9 +201,8 @@ async function checkAutopay(run) {
 
 // ── stages 6-8: set, stage, templates ────────────────────────────────────
 
-/** A set that cannot be sent: empty closes, a hold holds. Credit is reversed either way. */
+/** A set that cannot be sent: empty closes, a hold holds (unused account credit is a hold: the office applies it). */
 async function endForSet(run, set) {
-  await reverseDraws(run.draws);
   if (set.kind === 'hold') return hold(run, set.reason);
   const reason = set.reason === 'no_open_invoices' ? 'balance_cleared' : 'no_active_member';
   await Schedule.close(run.schedule, reason, run.now, { database: run.database });
@@ -257,7 +232,6 @@ async function catchUpStage(run, set) {
 async function probeTemplates(run, set) {
   run.sendChannels = await Render.channelsWithTemplates(run.step, set.kind, run.channels, run.database);
   if (run.sendChannels.length) return null;
-  await reverseDraws(run.draws);
   return pause(run, 'no_reachable_channel');
 }
 
@@ -341,12 +315,10 @@ async function dispose(run, facts) {
     if (ok) await markAtRisk(run);
     return outcome(ok ? 'told' : 'stale');
   }
-  await reverseDraws(run.draws);
   return verdict.kind === 'held' ? hold(run, verdict.reason) : pause(run, verdict.reason);
 }
 
 async function sendPhase(run) {
-  run.draws = await drawCredit(run.schedule.customer_id);
   const set = await resolveDunnableSet(run.schedule.customer_id, { now: run.now });
   if (!sendable(set)) return endForSet(run, set);
   const staged = await catchUpStage(run, set) || await probeTemplates(run, set);
@@ -437,7 +409,7 @@ async function shadowSchedule(schedule, now, database) {
 /**
  * The shadow gate's whole job. Every read goes through a READ ONLY
  * transaction (PostgreSQL itself refuses a write), and this function never
- * calls a writer: no promotion, claim, mint, reservation, credit draw, send,
+ * calls a writer: no promotion, claim, mint, reservation, send,
  * or alert. It only logs `[customer-dunning] SHADOW would ...` lines.
  */
 async function shadowRun(now = new Date(), { database = db } = {}) {

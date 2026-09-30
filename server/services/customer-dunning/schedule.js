@@ -34,7 +34,7 @@ const TERMINAL_INVOICE_STATUSES = ['paid', 'prepaid', 'void', 'processing', 'ref
 // D10: a step held this long gets ONE staff alert (and keeps retrying).
 const HELD_ALERT_DAYS = 7;
 // Hold reasons the office must resolve by hand: alerted at once, once.
-const OFFICE_HOLD_REASONS = Object.freeze(['member_paused', 'member_autopay_hold', 'credit_covers_anchor', 'over_cap']);
+const OFFICE_HOLD_REASONS = Object.freeze(['member_paused', 'member_autopay_hold', 'credit_covers_anchor', 'account_credit_available', 'over_cap']);
 const HOUR_MS = 60 * 60 * 1000;
 
 const isFinalIndex = (index) => Number(index) >= FINAL_INDEX;
@@ -469,6 +469,11 @@ async function markTold(schedule, { claimStamp, deliveredAt, now = new Date(), d
   return Number(changed) === 1;
 }
 
+// The engine never applies account credit (owner ruling 2026-09-30): the office does.
+const officeHoldBody = (reason, stepId) => (reason === 'account_credit_available'
+  ? `The customer has unused account credit, so their overdue reminders are held until it is applied. Apply the credit to their open invoices; the reminders then resume on their own. Step ${stepId}.`
+  : `The customer's overdue reminders are held (${reason}); the office should resume or release the schedule. Step ${stepId}.`);
+
 async function alertHeld(schedule, reason, now, database) {
   const stepId = STEPS[schedule.step_index]?.id || `step${schedule.step_index}`;
   const since = new Date(heldSince(schedule, now));
@@ -476,9 +481,9 @@ async function alertHeld(schedule, reason, now, database) {
   const office = OFFICE_HOLD_REASONS.includes(reason);
   if (schedule.hold_alerted_at || (!long && !office)) return false;
   const sent = await alertStaff({
-    title: office ? 'Customer reminders on hold' : 'Customer reminder stuck',
+    title: office ? (reason === 'account_credit_available' ? 'Apply customer account credit' : 'Customer reminders on hold') : 'Customer reminder stuck',
     body: office
-      ? `The customer's overdue reminders are held (${reason}); the office should resume or release the schedule. Step ${stepId}.`
+      ? officeHoldBody(reason, stepId)
       : `A customer's overdue reminder (${stepId}) has been held ${HELD_ALERT_DAYS}+ days (${reason}) and keeps retrying daily.`,
     dedupeKey: `customer-dunning-held:${schedule.id}:${schedule.episode}:${office ? reason : stepId}`,
     customerId: schedule.customer_id,

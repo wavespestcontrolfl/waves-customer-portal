@@ -132,13 +132,9 @@ const mockPolicy = jest.fn();
 jest.mock('../services/collections/rail-guard', () => ({ collectionsChannelPermitted: (...a) => mockPolicy(...a) }));
 
 const mockResolve = jest.fn();
-const mockApplyCredit = jest.fn();
 jest.mock('../services/customer-dunning/balance-set', () => ({
   resolveDunnableSet: (...a) => mockResolve(...a),
-  applyCreditBeforeResolve: (...a) => mockApplyCredit(...a),
 }));
-const mockReverse = jest.fn();
-jest.mock('../services/customer-credit', () => ({ reverseAppliedCredit: (...a) => mockReverse(...a) }));
 const mockNotify = jest.fn(async () => ({}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
 
@@ -252,7 +248,6 @@ beforeEach(() => {
   process.env.GATE_DUNNING_LADDER_90 = 'true';
   delete process.env.GATE_BALANCE_REMINDER_LEGACY_OFF;
   setup();
-  mockApplyCredit.mockResolvedValue([]);
   mockOnAutopay.mockResolvedValue(false);
   mockPolicy.mockResolvedValue({ allowed: true });
   mockLoadContext.mockResolvedValue({ recipient: { name: 'Pat Q', email: 'pat@example.test' }, recipientEmail: 'pat@example.test' });
@@ -318,7 +313,6 @@ describe('recover first (B-10, B-12, B-20, A-8)', () => {
     expect(out).toMatchObject({ outcome: 'advanced', recovered: true });
     expect(Schedule.advance.mock.calls[0][1].deliveredAt).toEqual(ago(0.25));
     expect(mockResolve).not.toHaveBeenCalled();
-    expect(mockApplyCredit).not.toHaveBeenCalled();
     expect(smsTemplates.getTemplate).not.toHaveBeenCalled();
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(mockSendTemplate).not.toHaveBeenCalled();
@@ -480,35 +474,72 @@ describe('the boundary check at every rail (A-1, A-6, A-12, A-13, B-15, B-16, A-
   });
 });
 
-describe('credit before the reminder, reversed if nothing delivered (B-1, D9)', () => {
-  test('credit is applied BEFORE the set is resolved, so the total is net of credit', async () => {
-    const order = [];
-    mockApplyCredit.mockImplementation(async () => { order.push('credit'); return [{ invoiceId: 'inv-a', amount: 25 }]; });
-    mockResolve.mockImplementation(async () => { order.push('resolve'); return live; });
-    await run();
-    expect(order.slice(0, 2)).toEqual(['credit', 'resolve']);
-    expect(mockReverse).not.toHaveBeenCalled(); // delivered => the draw stands
+describe('the engine never applies account credit (owner ruling 2026-09-30)', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(__dirname, '..', 'services', 'customer-dunning');
+
+  test('no customer-dunning module imports or names a credit-applying function', () => {
+    expect(Object.keys(jest.requireActual('../services/customer-dunning/balance-set'))).not.toContain('applyCreditBeforeResolve');
+    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+      const source = fs.readFileSync(path.join(dir, file), 'utf8');
+      expect(source).not.toMatch(/reverseAppliedCredit|applyCreditBeforeResolve|applyCredit\b|drawCredit|reverseDraws/);
+      if (file !== 'balance-set.js') expect(source).not.toMatch(/services\/customer-credit|require\('\.\.\/customer-credit'\)/);
+    }
   });
 
-  test('nothing delivered => this run\'s draw is reversed', async () => {
-    mockApplyCredit.mockResolvedValue([{ invoiceId: 'inv-a', amount: 25 }]);
-    mockSendMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, code: 'OUTSIDE_SEND_WINDOW' });
-    mockSendTemplate.mockResolvedValue({ sent: false, blocked: true, reason: 'x' });
-    const out = await run();
-    expect(out.outcome).toBe('held');
-    expect(mockReverse).toHaveBeenCalledWith({ invoiceId: 'inv-a', amount: 25, createdBy: 'system:dun_undelivered' });
+  // markHeld is a spy in this file; here it runs for real against a stateful
+  // store so "once per hold" is proven by the real hold_alerted_at bookkeeping.
+  function heldStore() {
+    const row = { ...schedule };
+    const store = jest.fn(() => {
+      const q = { where() { return q; }, whereIn() { return q; }, update: async (patch) => { Object.assign(row, patch); return 1; } };
+      return q;
+    });
+    store.fn = { now: () => 'now' };
+    return { row, store };
+  }
+  const creditHold = () => makeSet(['inv-a', 'inv-b', 'inv-c'], { kind: 'hold', reason: 'account_credit_available' });
+
+  test('LIVE: an account_credit_available set holds the schedule, alerts the office ONCE (not on the next daily run), and sends nothing', async () => {
+    const { row, store } = heldStore();
+    const actual = jest.requireActual('../services/customer-dunning/schedule');
+    Schedule.markHeld.mockImplementation((s, reason, opts) => actual.markHeld(s, reason, { ...opts, database: store }));
+    Schedule.claim.mockImplementation(async () => ({ schedule: { ...row }, claimStamp: NOW, memberSeqIds: [] }));
+    live = creditHold();
+
+    expect(await run()).toMatchObject({ outcome: 'held', reason: 'account_credit_available' });
+    expect(row).toMatchObject({ status: 'held', held_reason: 'account_credit_available' });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+    expect(mockNotify).toHaveBeenCalledWith('alert', 'Apply customer account credit', expect.stringMatching(/unused account credit.*Apply the credit/), expect.objectContaining({
+      dedupeKey: `customer-dunning-held:${SCHEDULE_ID}:1:account_credit_available`,
+      metadata: { customer_id: CUSTOMER_ID },
+    }));
+    expect(row.hold_alerted_at).toEqual(NOW);
+
+    // the next daily run: still held, still no second alert
+    expect(await run()).toMatchObject({ outcome: 'held', reason: 'account_credit_available' });
+    expect(mockNotify).toHaveBeenCalledTimes(1);
+
+    // no customer-facing anything, no advance
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockShorten).not.toHaveBeenCalled();
+    expect(mockLedger).toHaveLength(0);
+    expect(Schedule.advance).not.toHaveBeenCalled();
+    expect(interactions).toHaveLength(0);
   });
 
-  test('a hold from the set (paused member) also reverses the draw', async () => {
-    mockApplyCredit.mockResolvedValue([{ invoiceId: 'inv-b', amount: 10 }]);
-    live = makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'member_paused' });
-    expect(await run()).toMatchObject({ outcome: 'held', reason: 'member_paused' });
-    expect(mockReverse).toHaveBeenCalledTimes(1);
-  });
-
-  test('an account-credit failure never blocks the reminder', async () => {
-    mockApplyCredit.mockRejectedValue(new Error('credit down'));
-    expect((await run()).outcome).toBe('advanced');
+  test('SHADOW: the same set is logged as would hold, with no alert and no write', async () => {
+    const logger = require('../services/logger');
+    Schedule.promotionCandidates.mockResolvedValue([]);
+    live = creditHold();
+    const database = jest.fn((table) => { const q = { where() { return q; }, whereIn() { return q; }, then: (r) => r(table === 'customer_dunning_schedules' ? [{ id: SCHEDULE_ID, customer_id: CUSTOMER_ID, step_index: 4 }] : []) }; return q; });
+    await Runner.shadowRun(NOW, { database });
+    expect(logger.info.mock.calls.map(([m]) => String(m)).join('\n')).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=sched-0000-synthetic step=\w+ reason=account_credit_available/);
+    expect(mockNotify).not.toHaveBeenCalled();
+    expect(Schedule.markHeld).not.toHaveBeenCalled();
+    expect(Schedule.alertStaff).not.toHaveBeenCalled();
   });
 });
 
@@ -539,8 +570,7 @@ describe('policy and disposition (A-7, A-10, A-15, B-7, terminal paths)', () => 
     expect(Schedule.markPaused).not.toHaveBeenCalled();
   });
 
-  test('B-7: a partial delivery (email delivered, text held) counts as TOLD: last_touch stamped, step not advanced, one interaction row, credit kept', async () => {
-    mockApplyCredit.mockResolvedValue([{ invoiceId: 'inv-a', amount: 5 }]);
+  test('B-7: a partial delivery (email delivered, text held) counts as TOLD: last_touch stamped, step not advanced, one interaction row', async () => {
     mockSendMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, code: 'OUTSIDE_SEND_WINDOW', deferred: true });
     const out = await run();
     expect(out.outcome).toBe('told');
@@ -549,17 +579,14 @@ describe('policy and disposition (A-7, A-10, A-15, B-7, terminal paths)', () => 
     expect(Schedule.advance).not.toHaveBeenCalled();
     expect(interactions).toHaveLength(1);
     expect(interactions[0].interaction_type).toBe('email_outbound');
-    expect(mockReverse).not.toHaveBeenCalled();
   });
 
-  test('every leg terminal (email suppressed, no phone) => PAUSED with the reason and an alert path; nothing delivered, credit reversed', async () => {
+  test('every leg terminal (email suppressed, no phone) => PAUSED with the reason and an alert path; nothing delivered', async () => {
     customer.phone = null;
-    mockApplyCredit.mockResolvedValue([{ invoiceId: 'inv-a', amount: 5 }]);
     mockLoadContext.mockResolvedValue({ error: mockBlocked('NO_EMAIL_RECIPIENT', 'No billing email recipient is available') });
     const out = await run();
     expect(out).toMatchObject({ outcome: 'paused', reason: 'all_channels_terminal' });
     expect(Schedule.markPaused).toHaveBeenCalledWith(expect.anything(), 'all_channels_terminal', expect.anything());
-    expect(mockReverse).toHaveBeenCalledTimes(1);
   });
 
   test('no reachable channel: explicit text-only choice and no phone => paused, nothing reserved', async () => {
@@ -577,17 +604,15 @@ describe('policy and disposition (A-7, A-10, A-15, B-7, terminal paths)', () => 
     expect(out.outcome).toBe('advanced');
   });
 
-  test('template probe: an SMS template switched off drops the text leg; both off => paused no_reachable_channel and the draw is reversed', async () => {
+  test('template probe: an SMS template switched off drops the text leg; both off => paused no_reachable_channel', async () => {
     smsTemplateRow = { is_active: false };
     await run();
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(mockLedger.map((r) => r.channel)).toEqual(['email']);
     mockLedger.length = 0;
-    mockApplyCredit.mockResolvedValue([{ invoiceId: 'inv-a', amount: 5 }]);
     mockLoadTemplate.mockResolvedValue({ template: { status: 'disabled' }, activeVersion: { id: 'v' } });
     expect(await run()).toMatchObject({ outcome: 'paused', reason: 'no_reachable_channel' });
     expect(mockLedger).toHaveLength(0);
-    expect(mockReverse).toHaveBeenCalledTimes(1);
   });
 
   test('autopay customer: schedule goes autopay_hold (next touch cleared), nothing is sent; unreadable autopay state holds', async () => {
@@ -607,13 +632,11 @@ describe('policy and disposition (A-7, A-10, A-15, B-7, terminal paths)', () => 
     expect(await run()).toMatchObject({ outcome: 'paused', reason: 'customer_deleted' });
   });
 
-  test('a set that is EMPTY closes the schedule (balance_cleared) and reverses the draw; no send', async () => {
-    mockApplyCredit.mockResolvedValue([{ invoiceId: 'inv-a', amount: 5 }]);
+  test('a set that is EMPTY closes the schedule (balance_cleared); no send', async () => {
     live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
     expect(await run()).toMatchObject({ outcome: 'closed', reason: 'balance_cleared' });
     expect(Schedule.close).toHaveBeenCalledWith(expect.anything(), 'balance_cleared', NOW, expect.anything());
     expect(mockSendMessage).not.toHaveBeenCalled();
-    expect(mockReverse).toHaveBeenCalledTimes(1);
   });
 
   test('a set with only quiet members (no cadence driver) closes with no_active_member', async () => {
@@ -869,7 +892,7 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
   const logger = require('../services/logger');
   const shadowLines = () => logger.info.mock.calls.map(([m]) => m).filter((m) => String(m).includes('SHADOW would'));
 
-  test('spy on every writer: no claim/advance/close/mint/reservation/send/credit/alert/insert/update — and the structured lines are logged', async () => {
+  test('spy on every writer: no claim/advance/close/mint/reservation/send/alert/insert/update — and the structured lines are logged', async () => {
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     const writes = [];
     const database = jest.fn((table) => {
@@ -893,14 +916,12 @@ describe('shadow run writes NOTHING and only logs (PR 2 wiring)', () => {
       expect(Schedule[writer]).not.toHaveBeenCalled();
     }
     expect(writes).toEqual([]);
-    expect(mockApplyCredit).not.toHaveBeenCalled();
     expect(mockShorten).not.toHaveBeenCalled();
     expect(mockSendMessage).not.toHaveBeenCalled();
     expect(mockSendTemplate).not.toHaveBeenCalled();
     expect(ContactLedger.recordContact).not.toHaveBeenCalled();
     expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
     expect(mockNotify).not.toHaveBeenCalled();
-    expect(mockReverse).not.toHaveBeenCalled();
     expect(interactions).toEqual([]);
   });
 

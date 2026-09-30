@@ -15,7 +15,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const mockResolve = jest.fn();
 jest.mock('../services/customer-dunning/balance-set', () => ({
   resolveDunnableSet: (...a) => mockResolve(...a),
-  applyCreditBeforeResolve: jest.fn(async () => []),
 }));
 const mockNotify = jest.fn(async () => ({}));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotify(...a) }));
@@ -552,6 +551,18 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     test('a hold the office must resolve (paused member) alerts at once', async () => {
       const { claim } = await claimed();
       await Schedule.markHeld(claim.schedule, 'member_paused', { claimStamp: claim.claimStamp, now: NOW, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+    });
+
+    test('unused account credit (the engine never applies it): alerts the office at once to apply it, then never again while held', async () => {
+      const { s, claim } = await claimed();
+      await Schedule.markHeld(claim.schedule, 'account_credit_available', { claimStamp: claim.claimStamp, now: NOW, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      expect(mockNotify.mock.calls[0][1]).toBe('Apply customer account credit');
+      expect((await fresh(s.id)).hold_alerted_at).not.toBeNull();
+      await Schedule.releaseClaim(claim, { database: app });
+      const again = await Schedule.claim(s.id, new Date(NOW.getTime() + DAY), { database: app });
+      await Schedule.markHeld(again.schedule, 'account_credit_available', { claimStamp: again.claimStamp, now: new Date(NOW.getTime() + DAY), database: app });
       expect(mockNotify).toHaveBeenCalledTimes(1);
     });
 
