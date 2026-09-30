@@ -887,6 +887,21 @@ const RESERVICE_OTHER_PRODUCT_RE = new RegExp(
   + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))',
   'gi',
 );
+// Codex round-26 (PR #5336): a GENERIC free inspection / assessment is a re-service offer only for a customer who
+// HAS a recurring-plan lane. For a prospect (the facts show no lane state at all: "FREE RE-SERVICE: not
+// eligible") the same wording is the Waves Assessment product — a free consultation, not a re-service. The
+// nouns (with a trailing visit/appointment word) are blanked before the detectors run; "free re-service /
+// retreat / follow-up visit / callback" stays an offer for everyone.
+const RESERVICE_GENERIC_INSPECTION_RE = /\b(?:inspections?|inspect|assessments?)(?:\s+(?:visit|appointment|call|trip))?\b/gi;
+function withoutGenericInspections(text) {
+  return String(text || '').replace(RESERVICE_GENERIC_INSPECTION_RE, (m) => ' '.repeat(m.length));
+}
+// Does the facts block show ANY re-service lane state (eligible, or covered-but-booked)? "not eligible" (and no
+// line) is a prospect or a customer with no plan lane.
+function reserviceFactShowsPlan(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL));
+  return !!line && !/^FREE RE-SERVICE:\s*not eligible\s*$/.test(line.trim());
+}
 function reserviceOfferSpans(rawText) {
   const text = rawText.replace(RESERVICE_OTHER_PRODUCT_RE, (m) => ' '.repeat(m.length));
   return RESERVICE_OFFER_SPAN_RES
@@ -1210,6 +1225,20 @@ function reserviceOfferOwed({ inboundMessage, lanes, context }) {
   if (require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe)) return false;
   return reportedPestLane({ inboundMessage, context, lanes }) === 'pest';
 }
+function bookedReserviceLanes(factsBlock) {
+  const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
+  return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane} already booked\\b`).test(line));
+}
+function reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions }) {
+  if (!([].concat(offeredTimes || []).length || actions.some((a) => a && a.type === 'book_appointment'))) return null;
+  const booked = bookedReserviceLanes(factsBlock);
+  if (!booked.length || !PEST_REPORT_TEXT_RE.test(String(inboundMessage || ''))) return null;
+  const { reportedReserviceLane } = require('./reservice-scheduler');
+  const lane = reportedReserviceLane(inboundMessage) || (context && customerHasPestRelationship(context) ? 'pest' : null);
+  return lane && booked.includes(lane)
+    ? `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`
+    : null;
+}
 function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage, offeredTimes, context }) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const text = String(reply || '');
@@ -1221,7 +1250,12 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // while the customer is eligible. Such a draft derives its lane below (named → reported → the single
   // bookable lane) or is rejected. Its body is classified over the WHOLE text for lanes/specialties
   // (reserviceBodyLanes); a detected promise scopes them to its offer spans.
-  const promise = isReserviceOfferPromise(text);
+  const planCustomer = reserviceFactShowsPlan(factsBlock);
+  const promise = isReserviceOfferPromise(planCustomer ? text : withoutGenericInspections(text));
+  // Codex round-26 P2: a pest report whose lane the facts mark ALREADY BOOKED is answered from the appointment on the
+  // schedule — the prompt forbids OPEN TIMES and a paid visit for it, so a reply that offers slots is rejected.
+  const bookedLaneBlock = reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions });
+  if (bookedLaneBlock) return { ok: false, violations: [bookedLaneBlock] };
   if (!promise && !reserviceCarriesLinkAction(actions)) {
     return reserviceOfferOwed({ inboundMessage, lanes: eligibleReserviceLanes(factsBlock), context })
       ? { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] }
@@ -1456,7 +1490,14 @@ async function reserviceLanesStillEligible({ outgoingBody, customerId, promisedL
   // STRUCTURAL BACKSTOP (pre-push audit P1, PR #5336): a decision whose intended_actions carry the
   // send-reservice-link action ALWAYS revalidates its snapshot lanes live, whatever the (possibly
   // edited) body says — body detection only ADDS checks; it is never the only trigger.
-  const promise = isReserviceOfferPromise(body);
+  let promise = isReserviceOfferPromise(body);
+  // Codex round-26 P1: wording that is a promise ONLY through a generic inspection/assessment noun is a re-service
+  // offer only for a customer with a plan lane (a prospect's is the Waves Assessment). Read the live state, and
+  // only in that ambiguous case.
+  if (promise && customerId && !isReserviceOfferPromise(withoutGenericInspections(body))) {
+    const live = await liveReserviceLaneState(customerId);
+    if (!live.eligible.length) promise = false;
+  }
   if (!promise && !reserviceCarriesLinkAction(meta.intendedActions)) return null;
   const fault = reserviceBodyLaneFault(body, promise, promisedLanes);
   if (fault.reason) return fault.reason;
@@ -3376,7 +3417,9 @@ function parseShadowResponse(text) {
   // since it requires converged:true), but this flag is read independently
   // by other consumers (e.g. sms-gratitude-qualification.js), so it must
   // read false on its own too, not only via the convergence gate.
-  if (autoSendSafe && isReserviceOfferPromise(String(parsed.reply || ''))) {
+  // (generic inspections blanked: a prospect's Waves Assessment offer is no re-service promise; validateReserviceOffer
+  // still requires the link action for a plan customer's)
+  if (autoSendSafe && isReserviceOfferPromise(withoutGenericInspections(String(parsed.reply || '')))) {
     const rawActions = Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [];
     const hasSendLinkAction = rawActions.some((a) => a && a.type === 'escalate' && a.note === 'send_reservice_link');
     if (!hasSendLinkAction) autoSendSafe = false;

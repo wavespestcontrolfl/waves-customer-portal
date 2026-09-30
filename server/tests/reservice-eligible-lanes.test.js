@@ -355,6 +355,10 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['we have so many ants in here', true, 'pest', false],
     ['I keep seeing roaches', true, 'pest', false],
     ['weeds are taking over the lawn and the roaches are back', true, 'pest', false],
+    // round-25 P2: specialties are judged in the active-report clause(s) only
+    ['My termite inspection is Tuesday, and the ants are back', true, 'pest', false],
+    ['my rodent trapping follow-up is booked but the roaches are back', true, 'pest', false],
+    ['the termites are back, and my lawn service is Tuesday', true, null, true],
     // excluded specialties, affirmed
     ['the termites are back', true, null, true],
     ['rats in the attic again', true, null, true],

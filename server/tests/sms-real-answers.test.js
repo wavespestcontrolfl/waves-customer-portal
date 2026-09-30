@@ -2406,11 +2406,14 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(namedReserviceLanesInText(reply)).toEqual(['pest']);
     });
 
-    test('"free inspection" is a guarded technician-visit offer (draft + send time)', async () => {
+    // Round-26: guarded for a customer WITH a plan lane (a prospect's is the Waves Assessment — see the describe above).
+    test('"free inspection" is a guarded technician-visit offer for a plan customer (draft + send time)', async () => {
       const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
       const reply = "We'll do a free pest inspection this week.";
-      expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(false);
-      await expect(loadWith({ lanes: [] }).drafter.reservicePromiseStillEligible({ outgoingBody: reply, customerId: 'cust-1', promisedLanes: null })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+      // draft time: a lawn-only plan customer offered a free PEST inspection is rejected
+      expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine(['lawn'])}\nBILLING:`, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(false);
+      // send time: the customer still has a plan lane (lawn) but no pest lane
+      await expect(loadWith({ lanes: ['lawn'] }).drafter.reservicePromiseStillEligible({ outgoingBody: reply, customerId: 'cust-1', promisedLanes: null })).resolves.toMatch(/no longer eligible for a free pest re-service/);
     });
 
     // Codex round-11 P1 #1 (PR #5336): a promise visible only at a coarser
@@ -3174,6 +3177,57 @@ describe('free re-service is an entitlement resolved through the existing mechan
       })).resolves.toBeNull();
       // ...while a free re-service to the same not-eligible customer is still rejected
       expect(validateReserviceOffer({ reply: 'We can send your free pest re-service link.', factsBlock: notEligible, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage: 'ants' }).ok).toBe(false);
+    });
+
+    // Codex round-26 P1 (PR #5336): a GENERIC free inspection/assessment is a re-service offer only for a customer with
+    // a plan lane; for a prospect it is the Waves Assessment product.
+    describe('generic free inspection / assessment: offer for a plan customer, Waves Assessment for a prospect', () => {
+      const GENERIC = ['We can do a free assessment of your home.', 'A free Waves inspection can be scheduled this week.', "We'll do a free pest inspection.", 'A complimentary assessment visit for your lawn.'];
+
+      test('prospect (FREE RE-SERVICE: not eligible): replies converge without any re-service requirements', () => {
+        const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+        const prospect = `X\n${reserviceFactLine([])}\nBILLING:`;
+        for (const reply of GENERIC) {
+          expect(validateReserviceOffer({ reply, factsBlock: prospect, intendedActions: [], inboundMessage: 'do you do inspections?' })).toMatchObject({ ok: true });
+        }
+        // ...but a free RE-SERVICE to that prospect is still rejected
+        expect(validateReserviceOffer({ reply: 'We can send your free pest re-service link.', factsBlock: prospect, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage: 'ants' }).ok).toBe(false);
+      });
+
+      test('plan customer (eligible, or covered-but-booked): the same wording is still a re-service offer', () => {
+        const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+        const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+        const bookedOnly = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08' } })}\nBILLING:`;
+        for (const factsBlock of [eligible, bookedOnly]) {
+          const out = validateReserviceOffer({ reply: "We'll do a free pest inspection.", factsBlock, intendedActions: [], inboundMessage: 'when is my next visit?' });
+          expect(out.ok).toBe(false); // demands the link action / eligibility like any re-service offer
+        }
+        expect(validateReserviceOffer({ reply: "We'll do a free pest inspection and send your free pest re-service link.", factsBlock: eligible, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }], inboundMessage: 'ants are back' }).ok).toBe(true);
+      });
+
+      test('send-time: a prospect\'s generic-inspection body is not held; a plan customer\'s is', async () => {
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        const decision = { id: 'd1', customer_id: 'cust-1', suggested_message: 'x', input_snapshot: JSON.stringify({ intended_actions: [] }), prompt_version: 'house_voice_v12_real_answers2_cf' };
+        loadWith({ lanes: [] });
+        await expect(agentDecisionSendBlockReason({ decision, outgoingBody: 'We can do a free assessment of your home.' })).resolves.toBeNull();
+        loadWith({ lanes: ['pest'] });
+        await expect(agentDecisionSendBlockReason({ decision, outgoingBody: "We'll do a free pest inspection." })).resolves.toMatch(/re-service promise unsendable/);
+      });
+    });
+
+    // Codex round-26 P2: an ALREADY BOOKED reported lane is answered from the appointment — no OPEN TIMES.
+    test('a reply offering OPEN TIMES slots for a reported lane the facts mark ALREADY BOOKED is rejected', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const booked = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+      const slot = [{ date: 'Thursday, October 8', window: '9-11am' }];
+      const out = validateReserviceOffer({ reply: 'I can do Thursday 9-11am.', factsBlock: booked, intendedActions: [], inboundMessage: 'the ants are back', offeredTimes: slot });
+      expect(out.ok).toBe(false);
+      expect(out.violations[0]).toMatch(/ALREADY BOOKED/);
+      expect(validateReserviceOffer({ reply: 'Booking it.', factsBlock: booked, intendedActions: [{ type: 'book_appointment' }], inboundMessage: 'the ants are back' }).ok).toBe(false);
+      // referring to the appointment on the schedule is fine; a different reported lane or non-report is untouched
+      expect(validateReserviceOffer({ reply: 'Your free re-service is already on the schedule for Thursday.', factsBlock: booked, intendedActions: [], inboundMessage: 'the ants are back' }).ok).toBe(true);
+      expect(validateReserviceOffer({ reply: 'I can do Thursday 9-11am.', factsBlock: booked, intendedActions: [], inboundMessage: 'can I move my lawn visit?', offeredTimes: slot }).ok).toBe(true);
+      expect(validateReserviceOffer({ reply: 'I can do Thursday 9-11am.', factsBlock: `X\n${reserviceFactLine(['pest'])}\nBILLING:`, intendedActions: [], inboundMessage: 'can I move my visit?', offeredTimes: slot }).ok).toBe(true);
     });
 
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {

@@ -515,7 +515,12 @@ function reportedReserviceLane(text) {
 // the reply promises). Round 22: only an AFFIRMED specialty counts — "It's not termites — the ants are
 // back" is a pest report.
 function reportedReserviceExcludedSpecialty(text) {
-  const s = reservicePestReportFacts(text).survivingText;
+  const facts = reservicePestReportFacts(text);
+  // Codex round-25 P2: with an active report present, only the clause(s) CARRYING it are judged — "My termite
+  // inspection is Tuesday, and the ants are back" is a pest report. With no active clause (a bare tree/shrub
+  // health complaint, "my termites") every surviving clause is read.
+  const active = activePestClauses(facts.kept);
+  const s = active.length ? active.join(' , ') : facts.survivingText;
   return EXCLUDED_RESERVICE_ALWAYS_SPECIALTY_RE.test(s) || TREE_SHRUB_SPECIALTY_ISSUE_RE.test(s);
 }
 
