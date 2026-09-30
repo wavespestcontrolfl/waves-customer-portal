@@ -122,6 +122,34 @@ function reportLinkFor(n) {
   return `/admin/agents?tab=activity&focus=${encodeURIComponent(n.id)}`;
 }
 
+// An admin row's body is cut to one sentence (notification-service's brevity
+// guard) and the full original text is stored in `detail`. Every admin row
+// but an ops_digest one (its full report is the Activity feed's "Full report"
+// link above) reads that text back inline from the bell.
+function fullTextFor(n, type) {
+  if (type !== 'admin' || !n || n.category === 'ops_digest') return null;
+  return typeof n.detail === 'string' && n.detail.trim() ? n.detail : null;
+}
+
+// "Show full text" / "Hide full text": its own click and key handling, never
+// the row's — the row still navigates to its link and marks itself read only
+// on its own tap. `pre-wrap` keeps a list body's line breaks.
+function FullText({ text, color, marginTop }) {
+  const [shown, setShown] = useState(false);
+  return (
+    <div onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <button type="button" aria-expanded={shown} onClick={() => setShown((v) => !v)}
+        style={{
+          marginTop, padding: 0, border: 0, background: 'none', cursor: 'pointer',
+          fontSize: 14, fontWeight: 600, textDecoration: 'underline', color,
+        }}>{shown ? 'Hide full text' : 'Show full text'}</button>
+      {shown && (
+        <div style={{ marginTop: 4, fontSize: 14, lineHeight: 1.4, color, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{text}</div>
+      )}
+    </div>
+  );
+}
+
 export default function NotificationBell({ type = 'admin', customerId }) {
   // type: 'admin' or 'customer'
   // For admin: polls /api/admin/notifications/unread-count
@@ -645,6 +673,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                 const href = linkFor(n);
                 const chip = digestKindChip(n);
                 const report = reportLinkFor(n);
+                const fullText = fullTextFor(n, type);
                 return (
                 <div key={n.id}
                   role={href ? 'link' : undefined}
@@ -711,6 +740,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                           color: isDark ? '#18181B' : CUSTOMER_SURFACE.text,
                         }}>Full report</button>
                     )}
+                    {fullText && <FullText text={fullText} marginTop={6} color={isDark ? '#18181B' : CUSTOMER_SURFACE.text} />}
                     <div style={{ fontSize: 12, color: isDark ? '#A1A1AA' : CUSTOMER_SURFACE.muted, marginTop: 6 }}>
                       {timeAgo(n.created_at)}
                     </div>
@@ -809,6 +839,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                     const href = linkFor(n);
                     const chip = digestKindChip(n);
                     const report = reportLinkFor(n);
+                    const fullText = fullTextFor(n, type);
                     const title = displayTitle(n);
                     return (
                     <div key={n.id}
@@ -867,6 +898,7 @@ export default function NotificationBell({ type = 'admin', customerId }) {
                               fontSize: 14, fontWeight: 600, textDecoration: 'underline', color: colors.teal,
                             }}>Full report</button>
                         )}
+                        {fullText && <FullText text={fullText} marginTop={4} color={colors.text} />}
                         <div style={{ fontSize: 11, color: colors.muted, marginTop: 4 }}>
                           {timeAgo(n.created_at)}
                         </div>
@@ -940,4 +972,4 @@ function PushEnableStrip({ admin, enabling, error, onClick }) {
 
 // Pure helpers, exported for focused unit tests (avoids a full component
 // render just to pin the prefix strip / chip / focus-link logic).
-export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor };
+export const _test = { displayTitle, digestKindChip, linkFor, reportLinkFor, fullTextFor };

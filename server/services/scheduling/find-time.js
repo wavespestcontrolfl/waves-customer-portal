@@ -26,6 +26,7 @@ const { zoneRouteDaysLive } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
+const { bookGapAdmits, delayWithinGrace } = require('./book-arrival-grace');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
 const { occupiedRows } = require('./visit-capacity');
 const { stopCreditResolver } = require('./occupancy');
@@ -294,6 +295,12 @@ async function findCapacitySlots(opts) {
     // estimate-slot-availability.js ever passes this; see packCapacityEnds'
     // own header for why /book and every other packEnds:true caller must not.
     arrivalGrace: opts.arrivalGrace === true,
+    // /book's online-booking grace (GATE_BOOK_ARRIVAL_GRACE, owner-approved
+    // 2026-09-29) — a DIFFERENT opt-in from arrivalGrace above: it packs
+    // against BOTH route neighbours with the exact rule /book's offer mirror
+    // and commit probe use (book-arrival-grace.js). Only routes/booking.js's
+    // buildBookingAvailability ever passes it, and only with the gate live.
+    bookArrivalGrace: opts.bookArrivalGrace === true,
   }) : slots;
   for (const slot of packed) delete slot._gap;
   packed.sort((a, b) => a.score - b.score || a.waiting_minutes - b.waiting_minutes || a.start_time.localeCompare(b.start_time));
@@ -381,6 +388,11 @@ function capacityGapNeighbours(context, fit, startMin) {
     prevRow: prevId != null ? expandedById.get(prevId) : null,
     nextRow: nextId != null ? expandedById.get(nextId) : null,
     holdRows: expanded.filter((row) => isHoldStop(row)),
+    // Every stop on the day (allocation-expanded, credit attached) —
+    // packCapacityEnds' /book mode (GATE_BOOK_ARRIVAL_GRACE) judges a
+    // candidate against the SAME whole-day stop set /book's own offer mirror
+    // reads, not just the one nearest anchor per side.
+    dayRows: expanded,
   };
 }
 
@@ -400,6 +412,14 @@ function capacityNeighbourEntity(row) {
     lat: row.lat ?? null, lng: row.lng ?? null, windowMinutes,
     expectedMinutes: Number.isFinite(row.expectedMinutes) ? row.expectedMinutes : windowMinutes,
   };
+}
+
+// capacityNeighbourEntity plus the two facts book-arrival-grace.js's waiver
+// reads: whether the stop is a live hold and which technician it is assigned
+// to. The identical shape routes/booking.js's mirror rows carry.
+function capacityStopEntity(row) {
+  const entity = capacityNeighbourEntity(row);
+  return entity ? { ...entity, hold: isHoldStop(row), technician_id: row.technician_id ?? null } : null;
 }
 
 function sameAssignedTech(row, slot) {
@@ -437,7 +457,10 @@ function sameAssignedTech(row, slot) {
 // passed evaluateArrivalPlacement's feasibility check, so "the simulation
 // found it feasible" is a precondition of the slot existing at all here).
 //
-// SCOPED TO THE ESTIMATE PICKER ONLY (Codex r1 P1, #5314): packCapacityEnds
+// SCOPED TO THE ESTIMATE PICKER ONLY (Codex r1 P1, #5314 — /book later got its
+// OWN opt-in, `bookArrivalGrace`, and its own both-neighbour pick below,
+// packCapacityEndsForBook, once its commit could honor a grace-kept slot;
+// GATE_BOOK_ARRIVAL_GRACE, owner-approved 2026-09-29): packCapacityEnds
 // itself runs for every packEnds:true caller (booking.js's
 // buildBookingAvailability too — /book, voice, re-service, inspection, every
 // public reschedule), but that builder's own commit path (createSelfBooking,
@@ -511,7 +534,70 @@ function withinArrivalGrace(arrivalGraceOptIn, slot, caller) {
   return liveHoldsClear(slot, capacityCandidateEntity(slot, caller));
 }
 
+// /book mode (caller.bookArrivalGrace === true, GATE_BOOK_ARRIVAL_GRACE): the
+// SAME per-candidate admission /book's offer mirror applies in
+// routes/booking.js (book-arrival-grace.js bookGapAdmits over the day's
+// stops), so a packed pick is exactly one the mirror keeps.
+//
+// Why this exists (owner-approved 2026-09-29; Fable read-only prod runs: this
+// finder saw 8 bookable Parrish days at cap 30 while /book showed 3): the
+// default pick above tests each group's prev-side candidate against the
+// PREVIOUS stop only and its next-side candidate against the NEXT stop only.
+// A candidate that clears its own neighbour can still crowd the OTHER one; it
+// survived here and was then dropped by the mirror's both-neighbour check,
+// often emptying 4-7-stop days. Here every candidate is checked against every
+// neighbour (and overlap and live hold) BEFORE a group's endpoint is chosen,
+// so a later candidate that clears both is never lost to an earlier one that
+// crowds the far side. Graced waivers follow bookGapAdmits exactly: previous
+// assigned committed stop only, simulation delay within grace, holds clear.
+function packCapacityEndsForBook(slots, caller) {
+  const admitted = new Map();
+  const admits = (slot) => {
+    if (!admitted.has(slot)) {
+      const candidate = capacityCandidateEntity(slot, caller);
+      const grace = selfServeArrivalGraceMinutes({ date: slot.date });
+      const stops = (slot._gap?.dayRows || [])
+        .filter((row) => row.technician_id == null || sameAssignedTech(row, slot))
+        .map(capacityStopEntity).filter(Boolean);
+      admitted.set(slot, delayWithinGrace(slot.arrival_delay_minutes, grace)
+        && (!candidate || !travelGapEnabled()
+          || bookGapAdmits(candidate, stops, {
+            technicianId: slot.technician?.id, grace, arrivalDelayMinutes: slot.arrival_delay_minutes,
+          })));
+    }
+    return admitted.get(slot);
+  };
+  const groups = new Map();
+  for (const slot of slots) {
+    const key = `${slot.date}|${slot.technician.id}|${slot._gap?.prevId ?? ''}|${slot._gap?.nextId ?? ''}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  }
+  const keep = new Set();
+  for (const group of groups.values()) {
+    const prevReal = group[0]._gap?.prevId != null;
+    const nextReal = group[0]._gap?.nextId != null;
+    const survivors = group.slice().sort((a, b) => a.start_time.localeCompare(b.start_time)).filter(admits);
+    if (!survivors.length) continue;
+    if (!prevReal && !nextReal) { for (const s of survivors) keep.add(s); continue; }
+    if (prevReal) keep.add(survivors[0]);
+    if (nextReal) keep.add(survivors[survivors.length - 1]);
+  }
+  return slots.filter((s) => keep.has(s));
+}
+
 function packCapacityEnds(slots, caller = {}) {
+  if (caller.bookArrivalGrace === true) {
+    // /book mode applies only to a date whose grace is positive: a zero-grace
+    // date (same-day pick, env 0) keeps the OLD packing byte for byte — the
+    // same per-date rule routes/booking.js signs its policy tag under.
+    // Groups key on date, so packing the two subsets separately is exact.
+    const graced = slots.filter((s) => selfServeArrivalGraceMinutes({ date: s.date }) > 0);
+    if (graced.length === slots.length) return packCapacityEndsForBook(slots, caller);
+    const plain = packCapacityEnds(slots.filter((s) => !graced.includes(s)), { ...caller, bookArrivalGrace: false });
+    const kept = new Set([...packCapacityEndsForBook(graced, caller), ...plain]);
+    return slots.filter((s) => kept.has(s));
+  }
   const arrivalGraceOptIn = caller.arrivalGrace === true;
   const groups = new Map();
   for (const slot of slots) {

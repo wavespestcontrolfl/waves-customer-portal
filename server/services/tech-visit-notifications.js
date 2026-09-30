@@ -22,6 +22,19 @@
  *   - a failure here never fails the write it follows: every hook runs after
  *     the caller's outermost commit and swallows its own errors.
  *
+ * Ordering: the feed row is written under a FOR SHARE recheck of the visit
+ * row (writeCard), so it is safe across app instances. The push is re-checked
+ * at every device's final provider boundary (push-notifications.js
+ * beforeHandoff — right before each leg, and after FCM's OAuth fetch): a push
+ * the visit row now contradicts, or one a NEWER card for the same tech and
+ * visit has overtaken, is skipped, and the newer change's own push is the one
+ * that lands. Two app instances overlap during a deploy, so this is what
+ * orders pushes across them; the in-process per-visit chain
+ * (enqueueForVisit) orders them within one. No lock is held across the
+ * provider round trip (owner, #5421 r3): the provider does not guarantee
+ * delivery order past the handoff anyway, and a lock there pinned pool
+ * connections and needed timeouts no bound could size.
+ *
  * Not covered here (deliberately): route-order shuffles (whole tech-day
  * rewrites, see route-reorder.js's zero-communication note) and series-scope
  * moves (rescheduleSeries) — both would fan out one card per stop.
@@ -261,7 +274,8 @@ async function loadVisit(visitId, conn, { lock = false } = {}) {
 // overlap (cron-lock.js), so an A→B card prepared on the old instance can
 // run after B→C committed through the new one. A card the row already
 // contradicts is dropped — the writer of the later change tells the tech
-// the current state, and the newest feed row is never stale. Returns the
+// the current state, and the newest feed row is never stale. The same rules
+// gate the PUSH again at the provider boundary (pushStillCurrent). Returns the
 // row's holder (technicians.id or null) when the card stands, else false.
 function cardStands({ kind, technicianId, snapshot, previousStatus }, row) {
   // A voice-agent booking is silent until the office confirms it
@@ -365,27 +379,78 @@ async function writeCard(notice) {
       newTechnicianName = next?.name || null;
     }
     const card = composeCard({ kind: notice.kind, visit, actorText: notice.actorText, previous: notice.previous, newTechnicianName, ended: stands.ended || null });
-    await trx('tech_notifications').insert({
+    const [inserted] = await trx('tech_notifications').insert({
       technician_id: notice.technicianId,
       type: notice.type,
       message: card.message,
       payload: JSON.stringify(card.payload),
-    });
-    return true;
+    }).returning('id');
+    // The inserted row's id: the push recheck asks whether a NEWER card for
+    // the same tech and visit exists (pushStillCurrent).
+    return { id: inserted && typeof inserted === 'object' ? inserted.id : inserted };
   });
 }
 
-// Best-effort push; the card is already durable when this runs.
-async function pushCard(notice) {
+// Does the visit row still satisfy cardStands for this visit_* notice (the
+// same rules that admitted the card — reused, not forked)? Read plainly,
+// never FOR SHARE: a push in flight must not block a schedule write. Rejects
+// on a DB error (pushCard then sends anyway).
+async function pushStillCurrent(notice, conn) {
+  const row = await loadVisit(notice.visitId, conn);
+  return !!row && !!cardStands(notice, row);
+}
+
+// Every card type whose push shares the `visit-<id>` collapse tag: a newer
+// one of ANY of them — a visit_* change or a follow-through tracking alert —
+// owns the tech's lock screen for this visit (codex #5421 r2).
+const VISIT_TAG_CARD_TYPES = [...Object.values(TYPE_BY_KIND), 'follow_through_tracking'];
+
+// Has a NEWER card for this tech and visit been written than the one this
+// notice wrote? Then that card's own push is the one to land. Compared
+// against the row's own (created_at, id) in SQL — a JS Date would truncate
+// the microseconds and mistake an older neighbour for a newer one. A revived
+// tracking row refreshes created_at (recordTrackingNotice), so it counts as
+// the new occurrence it is.
+async function newerCardExists(notice, conn) {
+  const newer = await conn('tech_notifications as n')
+    .where('n.technician_id', notice.technicianId)
+    .whereIn('n.type', VISIT_TAG_CARD_TYPES)
+    .whereRaw("n.payload->>'visit_id' = ?", [String(notice.visitId)])
+    .whereNot('n.id', notice.cardId)
+    .whereRaw('(n.created_at, n.id) > (SELECT o.created_at, o.id FROM tech_notifications o WHERE o.id = ?)', [notice.cardId])
+    .first('n.id');
+  return !!newer;
+}
+
+// Best-effort push; the card is already durable when this runs. Re-checked
+// at every device's final provider boundary (the sender's beforeHandoff):
+// the notice's own rule — `checkCurrent(conn)`, pushStillCurrent for a
+// visit_* card, the detector's still-overdue read for a tracking notice —
+// and, for either, no newer card for this tech and visit. A clean "stale"
+// skips the push; a recheck ERROR sends anyway (owner steer: a missed alert
+// is worse than a rare misordered one).
+async function pushCard(notice, { checkCurrent = null } = {}) {
   try {
     const PushService = require('./push-notifications');
+    let stale = false;
+    const beforeHandoff = async () => {
+      try {
+        if (checkCurrent && (await checkCurrent(db)) === false) stale = true;
+        else if (notice.cardId && await newerCardExists(notice, db)) stale = true;
+      } catch (err) {
+        logger.warn(`[tech-visit-notifications] push recheck failed for visit ${notice.visitId} (${errorTag(err)}); sending`);
+        return true;
+      }
+      return !stale;
+    };
     await PushService.sendToAdminUser(notice.technicianId, {
       title: notice.pushTitle,
       body: '',
       url: '/tech',
       tag: `visit-${notice.visitId}`,
       priority: 'high',
-    });
+    }, { beforeHandoff });
+    if (stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
     logger.warn(`[tech-visit-notifications] push failed for tech ${notice.technicianId} (card already written): ${pushErr.message}`);
   }
@@ -399,13 +464,14 @@ async function deliver(notices) {
   let dropped = 0;
   for (const n of notices.filter((x) => x && x.ok)) {
     try {
-      if (await writeCard(n)) written.push(n);
+      const card = await writeCard(n);
+      if (card) written.push({ ...n, cardId: card.id || null });
       else dropped += 1;
     } catch (err) {
       logger.error(`[tech-visit-notifications] ${n.kind} card not written for visit ${n.visitId} (${errorTag(err)})`);
     }
   }
-  for (const n of written) await pushCard(n);
+  for (const n of written) await pushCard(n, { checkCurrent: (conn) => pushStillCurrent(n, conn) });
   return { written: written.length, dropped };
 }
 
@@ -450,9 +516,12 @@ async function notifyTechVisitChange(args = {}) {
 // hooks for the same visit (A→B, then B→C seconds later) each read the
 // tech, the visit, and the actor before writing; without a queue the later
 // change's reads can finish first and B would see "moved off" before its
-// stale "new visit". A per-visit promise chain (in-process — the portal
-// runs as one server) makes each visit's batch write, then push, before
-// the next batch starts. Entries clear themselves when the chain drains.
+// stale "new visit". A per-visit promise chain makes each visit's batch
+// write, then push, before the next batch starts. The chain is IN-PROCESS: it
+// orders notices within one app instance only. Across instances (two overlap
+// during a deploy) the cards are protected by writeCard's FOR SHARE recheck
+// and the pushes by pushCard's recheck at each device's provider boundary.
+// Entries clear themselves when the chain drains.
 const visitQueues = new Map();
 function enqueueForVisit(visitId, fn) {
   const key = String(visitId);
@@ -574,7 +643,8 @@ async function recordTrackingNotice(trx, { visitId, technicianId, stage, dedupeK
   // soon as they are authenticated (codex P1 round 5, correcting the round-1
   // fix that put the name in the push title).
   const pushTitle = stage === 2 ? 'A visit needs an arrival check' : 'A visit window is underway';
-  return row ? { technicianId, visitId, pushTitle } : null;
+  // cardId: the push recheck's newer-card comparison (newerCardExists).
+  return row ? { technicianId, visitId, pushTitle, cardId: (row && typeof row === 'object' ? row.id : row) || null } : null;
 }
 
 module.exports = {
@@ -583,7 +653,11 @@ module.exports = {
   // commit order (one queue, not two).
   enqueueForVisit,
   recordTrackingNotice,
-  pushTrackingNotice: pushCard,
+  // `checkCurrent(conn)`: the detector's still-overdue read, re-run at each
+  // device's provider boundary so an arrival/completion/reassignment that
+  // commits while the push is under way is never followed by a stale
+  // tracking push.
+  pushTrackingNotice: (notice, { checkCurrent = null } = {}) => pushCard(notice, { checkCurrent }),
   // Reused by no-show-detector.js so a tracking notice reads the same "who
   // / when" a visit_* card does, instead of a second date formatter.
   formatWhen,
@@ -598,5 +672,5 @@ module.exports = {
   notifyAssignmentChange,
   notifyVisitRescheduled,
   notifyVisitCancelled,
-  _test: { formatWhen, composeCard, describeActor, visitQueues },
+  _test: { formatWhen, composeCard, describeActor, visitQueues, pushStillCurrent, newerCardExists },
 };

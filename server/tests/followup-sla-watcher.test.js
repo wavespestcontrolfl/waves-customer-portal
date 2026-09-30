@@ -4,9 +4,13 @@
 // proof is covered in call-commitments tests.
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
+jest.mock('../services/notification-service', () => ({
+  notifyAdmin: jest.fn(),
+  // The real guard, so an in-place rewrite is judged on the text a fresh post stores.
+  normalizeAdminText: (...args) => jest.requireActual('../services/notification-service').normalizeAdminText(...args),
+}));
 jest.mock('../services/internal-test-customers', () => ({ isInternalTestCustomerId: jest.fn((id) => id === 'test-account') }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), gateEnvValue: jest.fn(() => false), adminBodyGuardAllLive: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 jest.mock('../services/callback-cards', () => ({ ...jest.requireActual('../services/callback-cards'), enabled: jest.fn(() => true), prepareCallbackCards: jest.fn() }));
 jest.mock('../services/scheduling/blackout-dates', () => ({ getBlackoutLayers: jest.fn(async () => ({ dates: new Set() })) }));
@@ -217,7 +221,9 @@ test('a listed promise whose details changed is rewritten in place, read state k
   await runFollowUpSlaWatcher({ now: NOW });
   expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
   expect(updates).toHaveLength(1);
-  expect(updates[0].patch.body).toContain('callback promised to Test Caller');
+  // The brevity guard's form: a one-sentence body, the whole list in `detail`.
+  expect(updates[0].patch.body.length).toBeLessThanOrEqual(110);
+  expect(updates[0].patch.detail).toContain('callback promised to Test Caller');
   expect(updates[0].patch.read_at).toBeUndefined();
 });
 
@@ -229,7 +235,7 @@ test('a standing single-miss post from before the link change is rewritten quiet
     await runFollowUpSlaWatcher({ now: NOW });
     return u;
   })())[0].patch;
-  const stored = (link) => ({ ...posted(['a']), read_at: NOW, title: learned.title, body: learned.body, link });
+  const stored = (link) => ({ ...posted(['a']), read_at: NOW, title: learned.title, body: learned.body, detail: learned.detail, link });
 
   const updates = mockDb({ standingRow: stored('/admin/communications#tab=owed') });
   await runFollowUpSlaWatcher({ now: NOW });
@@ -242,6 +248,16 @@ test('a standing single-miss post from before the link change is rewritten quiet
   const quiet = mockDb({ standingRow: stored(learned.link) });
   await runFollowUpSlaWatcher({ now: NOW });
   expect(quiet).toHaveLength(0);
+});
+
+test('a standing post already in the guard\'s form is not rewritten every tick', async () => {
+  listOpenCommitments.mockResolvedValue([row('a')]);
+  const first = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title: 'x', body: 'old text' } });
+  await runFollowUpSlaWatcher({ now: NOW });
+  const { title, body, detail, link } = first[0].patch;
+  const second = mockDb({ standingRow: { ...posted(['a']), read_at: NOW, title, body, detail, link } });
+  await runFollowUpSlaWatcher({ now: NOW });
+  expect(second).toHaveLength(0);
 });
 
 test('a new miss joining the list re-posts it and retires the older post', async () => {
@@ -589,6 +605,7 @@ test('an in-place rewrite stores admin text emoji-stripped, like a fresh post', 
   listOpenCommitments.mockResolvedValue([row('a', { customer_first_name: 'Test\u{1F41B}' })]);
   await runFollowUpSlaWatcher({ now: NOW });
   expect(updates[0].patch.body).not.toMatch(/\u{1F41B}/u);
+  expect(updates[0].patch.detail).not.toMatch(/\u{1F41B}/u);
 });
 
 test('a held-over promise whose call cannot be verified still drops off when later activity proves follow-up', async () => {
