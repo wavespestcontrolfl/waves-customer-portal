@@ -211,7 +211,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
   });
 
   const fire = (automation, {
-    estimateId, customerId, email, expiresOn = '2026-09-20',
+    estimateId, customerId, email, expiresOn = '2026-09-20', immediately = true,
   }) => Executor.processTrigger({
     triggerEventKey: 'estimate.expired',
     triggerEventId: `estimate_expired:${estimateId}`,
@@ -222,7 +222,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
     payload: {
       estimate_id: estimateId, customer_id: customerId, customer_email: email, expires_on: expiresOn,
     },
-    executeImmediately: true,
+    executeImmediately: immediately,
   });
 
   const events = async (runId) => db('email_template_automation_run_events').where({ run_id: runId }).orderBy('created_at', 'asc');
@@ -277,6 +277,46 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'payload_builder', code: 'missing_required' }));
       expect(sendTemplate).not.toHaveBeenCalled();
       expect(await db('marketing_email_ledger').where({ customer_id: customer.id })).toHaveLength(0);
+    });
+
+    test('nurture.expired_1 is skipped, never sent to the old recipient, when the estimate\'s email — then its customer — changes during the delay', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike());
+
+      // The run is created at expiry and waits out the delay (queued here).
+      const emailRun = (await fire(automation, {
+        estimateId, customerId: customer.id, email: customer.email, immediately: false,
+      })).results[0].run;
+      expect(emailRun.status).toBe('queued');
+      await db('estimates').where({ id: estimateId }).update({ customer_email: 'new.email@example.invalid' });
+      const afterEmail = await Executor.executeRun(emailRun.id);
+      expect(afterEmail.status).toBe('skipped');
+      expect(afterEmail.exit_reason).toContain('changed since this run was created');
+      const skipped = (await events(emailRun.id)).find((e) => e.event_type === 'skipped');
+      expect(skipped.metadata).toEqual(expect.objectContaining({ guard: 'payload_builder', code: 'estimate_recipient_changed' }));
+
+      // A case-only difference is the SAME inbox (the ledger's own normalization).
+      const sameInbox = await makeEstimate(customer.id, customer.email.toUpperCase());
+      const sameRun = (await fire(automation, {
+        estimateId: sameInbox, customerId: customer.id, email: customer.email, immediately: false,
+      })).results[0].run;
+      expect((await Executor.executeRun(sameRun.id)).status).toBe('sent');
+      sendTemplate.mockClear();
+
+      // The estimate moves to another customer during the delay.
+      const other = await makeCustomer();
+      const ownerEstimate = await makeEstimate(customer.id, customer.email);
+      const ownerRun = (await fire(automation, {
+        estimateId: ownerEstimate, customerId: customer.id, email: customer.email, expiresOn: '2026-10-20', immediately: false,
+      })).results[0].run;
+      await db('estimates').where({ id: ownerEstimate }).update({ customer_id: other.id });
+      const afterOwner = await Executor.executeRun(ownerRun.id);
+      expect(afterOwner.status).toBe('skipped');
+      expect(afterOwner.exit_reason).toContain('changed since this run was created');
+      expect(sendTemplate).not.toHaveBeenCalled();
     });
 
     test('shadow NEVER dispatches: no provider call, no ledger reservation, run settles shadow', async () => {
@@ -776,6 +816,15 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(result).toEqual(expect.objectContaining({ skip: true, code: 'plan_not_quarterly' }));
       });
 
+      test('SKIPs when the service record belongs to a different customer than the run\'s recipient', async () => {
+        const { recordId } = await scenario();
+        const other = await makeCustomer();
+        const result = await Builders.buildEmailDivisionPayload({
+          run: runFor('lc.why_91_days', recordId, other), deps: baseDeps({ getActivityRatingAverages: async () => cohort }),
+        });
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'recipient_not_visit_customer' }));
+      });
+
       test('SKIPs a non-quarterly plan and any visit that is not the second pest visit', async () => {
         const monthly = await scenario({ pattern: 'monthly' });
         const r1 = await Builders.buildEmailDivisionPayload({
@@ -829,15 +878,15 @@ describeOrSkip('email division wiring (Postgres)', () => {
         expect(dropped.payload.consultation_url).toBe('');
       });
 
-      test('a recipient who is not the estimate\'s own inbox never gets the link (and nothing is probed or minted)', async () => {
+      test('a recipient who is not the estimate\'s own inbox gets no send at all (and nothing is probed or minted)', async () => {
         const customer = await makeCustomer();
         const estimateId = await makeEstimate(customer.id, 'lead.inbox@example.invalid');
         const deps = consultDeps();
         const result = await Builders.buildEmailDivisionPayload({
           run: runFor('nurture.expired_1', estimateId, customer, { recipient_email: customer.email }), mode: 'live', deps,
         });
-        expect(result.ok).toBe(true);
-        expect(result.payload.consultation_url).toBe('');
+        // The whole send is skipped (the estimate's own inbox is not this recipient): no link to anyone.
+        expect(result).toEqual(expect.objectContaining({ skip: true, code: 'estimate_recipient_changed' }));
         expect(deps.probeGoneQuietConsultation).not.toHaveBeenCalled();
         expect(deps.mintGoneQuietConsultationUrl).not.toHaveBeenCalled();
       });
@@ -869,15 +918,17 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const r1 = await Builders.buildEmailDivisionPayload({ run: runFor('nurture.expired_1', revived, customer), mode: 'shadow', deps: consultDeps() });
         expect(r1).toEqual(expect.objectContaining({ skip: true, code: 'estimate_not_expired' }));
         const expired = await makeEstimate(customer.id, customer.email);
+        // An estimate with no customer record and a run with none either: the ledger needs one.
+        const leadOnly = await makeEstimate(null, customer.email);
         const r2 = await Builders.buildEmailDivisionPayload({
-          run: runFor('nurture.expired_1', expired, customer, { recipient_id: '' }), mode: 'shadow', deps: consultDeps(),
+          run: runFor('nurture.expired_1', leadOnly, customer, { recipient_id: '' }), mode: 'shadow', deps: consultDeps(),
         });
         expect(r2).toEqual(expect.objectContaining({ skip: true, code: 'no_customer' }));
-        // A lead id that is not a customers row is "no customer", not a thrown uuid-cast error.
+        // A lead id that is not a customers row never reaches a uuid cast: skipped, not thrown.
         const r3 = await Builders.buildEmailDivisionPayload({
           run: runFor('nurture.expired_1', expired, customer, { recipient_id: 'lead-123' }), mode: 'shadow', deps: consultDeps(),
         });
-        expect(r3).toEqual(expect.objectContaining({ skip: true, code: 'customer_missing' }));
+        expect(r3).toEqual(expect.objectContaining({ skip: true, code: 'estimate_recipient_changed' }));
       });
     });
   });

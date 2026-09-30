@@ -522,6 +522,14 @@ async function buildExpiredNurture({
   const estimate = await conn('estimates').where({ id: run.entity_id }).first();
   if (!estimate) return skip('linked estimate no longer exists', 'estimate_missing');
   if (estimate.status !== 'expired') return skip(`linked estimate is no longer expired (status is ${estimate.status})`, 'estimate_not_expired');
+  // The run was addressed when the trigger fired; the estimate's CURRENT owner
+  // and email must still be that recipient, or the old recipient would receive
+  // the current estimate's bearer link. Same normalization as the ledger's
+  // recipient check (trim + lowercase); skips the whole send, never retargets.
+  if (clean(estimate.customer_id) !== clean(run.recipient_id)
+    || normalizeEmail(estimate.customer_email) !== normalizeEmail(run.recipient_email)) {
+    return skip('the estimate\'s customer or email changed since this run was created; not sent to the old recipient', 'estimate_recipient_changed');
+  }
   if ((await priorSends({ conn, run, estimateId: estimate.id })) === 'sent') {
     return skip('this estimate already has a sent expired-estimate touch', 'already_delivered');
   }
