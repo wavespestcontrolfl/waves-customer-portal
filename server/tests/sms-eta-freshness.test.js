@@ -1259,17 +1259,15 @@ describe('round 16 P1: unclassified ETA backstop', () => {
 
   // "15 klicks out" reads no claim at all, so the backstop is what holds it; "tech: 15
   // min" is read as an ordinary minutes claim (blocked by that path instead).
-  test('"ur tech ≈ 15 klicks out 🚚" is held to the status checks: passes fresh+en_route, blocked when terminal, on site, stale, or GPS-expired', async () => {
-    const body = 'ur tech ≈ 15 klicks out 🚚';
-    expect(await run(body, rowsBy.en_route)).toBeNull();
-    expect(await run(body, rowsBy.completed)).toBe('eta_claim_unclassified');
-    expect(await run(body, rowsBy.on_site)).toBe('eta_claim_unclassified');
+  // Codex round-17 P2: an unparsed NUMERIC signal never passes on freshness +
+  // liveness alone — it must parse and bind exactly, and it did not.
+  test.each(['ur tech ≈ 15 klicks out 🚚', 'Tech ETA ≈ 99 mn'])('%p (an unparsed numeric signal) is blocked on every row state, fresh or not', async (body) => {
+    for (const rows of Object.values(rowsBy)) expect(await run(body, rows)).toBe('eta_claim_unclassified');
     expect(await run(body, rowsBy.en_route, STALE)).toBe('eta_claim_unclassified');
-    expect(await run(body, rowsBy.en_route, FRESH, { entries: [{ ...snapshot.entries[0], fixExpiresAtMs: NOW.getTime() - 1000 }] })).toBe('eta_claim_unclassified');
   });
 
   test('"tech: 15 min" with a terminal or stale entry is blocked', async () => {
-    expect(await run('tech: 15 min', rowsBy.en_route)).toBeNull();
+    expect(await run('tech: 15 min', rowsBy.en_route)).toBeNull(); // parses + binds exactly
     expect(await run('tech: 15 min', rowsBy.completed)).not.toBeNull();
     expect(await run('tech: 15 min', rowsBy.en_route, STALE)).not.toBeNull();
   });
@@ -1325,5 +1323,66 @@ describe('round 16 P2: minutes-null (status-only) snapshot entries', () => {
       liveEtaSnapshot: { entries: [{ minutes: 120, scheduledServiceIds: ['svc-1'] }] }, factsGeneratedAt: FRESH,
       outgoingBody: 'The tech is 1/2 hour away.', now: NOW, dbh: fakeDb(rowsBy.en_route),
     })).toBe('eta_claim_unbound');
+  });
+});
+
+// Codex round-17 P2s (PR #5334).
+describe('round 17 P2s: link URL parsing, on-site wording, long durations on every path', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const snap = { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'] }] };
+  const rowsBy = {
+    en_route: [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE }],
+    on_site: [{ id: 'svc-1', status: 'on_site', track_state: 'on_property', track_view_token: 'tok-1', track_token_expires_at: FUTURE }],
+  };
+  const check = (outgoingBody, rows = rowsBy.en_route) => etaClaimBlockReason({ liveEtaSnapshot: snap, factsGeneratedAt: FRESH, outgoingBody, now: NOW, dbh: fakeDb(rows) });
+
+  test.each([
+    'Track: https://evil.example/?next=portal.wavespestcontrol.com/track/tok-1',
+    'Track: evil.example/?next=https://portal.wavespestcontrol.com/track/tok-1',
+    'Track: https://evil.example/#portal.wavespestcontrol.com/track/tok-1',
+    'Track: https://portal.wavespestcontrol.com@evil.example/track/tok-1',
+    'Track: https://portal.wavespestcontrol.com:pw@evil.example/track/tok-1',
+    'Track: https://portal.wavespestcontrol.com/track/tok-1#frag',
+    'Track: https://portal.wavespestcontrol.com/track/tok-1?x=1',
+    'Track: https://portal.wavespestcontrol.com/x/track/tok-1',
+    'Track: https://portal.wavespestcontrol.com/track/tok-1%2Fmore',
+  ])('%p is untrusted (parsed as a URL: host + exact pathname, no query/fragment/userinfo)', async (body) => {
+    expect(await check(body)).toBe('eta_claim_link_untrusted');
+  });
+  test('the canonical link, with sentence punctuation or parens, still passes', async () => {
+    expect(await check('Track: https://portal.wavespestcontrol.com/track/tok-1.')).toBeNull();
+    expect(await check('(portal.wavespestcontrol.com/track/tok-1)')).toBeNull();
+  });
+
+  test.each([
+    'The technician is on site.', 'The tech is on the property.', 'The tech is at your property.', 'The crew is on-site.',
+  ])('%p is a completed arrival: blocked while en route, passes on property', async (body) => {
+    expect(await check(body, rowsBy.en_route)).toBe('eta_claim_no_longer_en_route');
+    expect(await check(body, rowsBy.on_site)).toBeNull();
+  });
+  test('a negated on-site correction passes en route', async () => {
+    expect(await check('He is not on site yet.', rowsBy.en_route)).toBeNull();
+  });
+
+  test.each(['The tech is 2 days away.', 'The tech will arrive in 3 weeks.'])('%p with NO snapshot fails closed', async (body) => {
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, now: NOW })).toBe('eta_claim_no_snapshot');
+  });
+
+  // Follow-up: day/week/month durations are a TECH-arrival claim only with a
+  // tech subject; ordinary scheduling copy is never a claim, on any path.
+  test.each([
+    'Your visit is 2 days away.', "We'll see you in 2 weeks.", 'Your next treatment is in 3 weeks.', 'Your appointment is 3 weeks away.',
+  ])('%p is ordinary scheduling copy: no claim with no snapshot, and none with a live snapshot', async (body) => {
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, now: NOW })).toBeNull();
+    expect(await check(body, rowsBy.on_site)).toBeNull();
+  });
+  test.each(['The tech is 2 days away.', 'He will arrive in 3 weeks.', 'The technician will arrive in a few days.'])('%p is still a tech claim: eta_claim_no_snapshot with no snapshot', async (body) => {
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: null, factsGeneratedAt: null, outgoingBody: body, now: NOW })).toBe('eta_claim_no_snapshot');
   });
 });

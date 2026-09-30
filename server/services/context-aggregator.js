@@ -544,9 +544,18 @@ function liveEtaDestination(row, customer) {
     customer_zip: customer?.zip,
     customer_city: customer?.city,
   });
-  const lat = finiteNumber(row.service_lat) ?? (diverges ? null : finiteNumber(customer?.latitude));
-  const lng = finiteNumber(row.service_lng) ?? (diverges ? null : finiteNumber(customer?.longitude));
-  return lat == null || lng == null ? null : { lat, lng };
+  // Coordinates are used as a PAIR only (Codex round-17 P2, PR #5334): the
+  // visit's own lat+lng when BOTH are present, else the customer's lat+lng
+  // when both are present (and the stamped address doesn't diverge) — never a
+  // visit latitude mixed with a customer longitude, which is a synthetic point
+  // nobody lives at. No complete pair fails closed (no ETA, status-only).
+  const visitLat = finiteNumber(row.service_lat);
+  const visitLng = finiteNumber(row.service_lng);
+  if (visitLat != null && visitLng != null) return { lat: visitLat, lng: visitLng };
+  if (diverges) return null;
+  const custLat = finiteNumber(customer?.latitude);
+  const custLng = finiteNumber(customer?.longitude);
+  return custLat != null && custLng != null ? { lat: custLat, lng: custLng } : null;
 }
 
 // Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns

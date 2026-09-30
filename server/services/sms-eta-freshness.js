@@ -117,9 +117,10 @@ const ETA_FRESHNESS_WINDOW_MS = 15 * 60 * 1000;
 // unambiguous ("http://localhost", "localhost:5173"). A bare word before
 // "/track/" with neither is not a host. host[:port] is compared to the
 // configured origin's, so a different port is a different host.
-const TRACK_HOST_SRC = '(?:https?:\\/\\/(?:[a-z0-9-]+\\.)*[a-z0-9-]+(?::\\d+)?|(?:[a-z0-9-]+\\.)+[a-z0-9-]+(?::\\d+)?|[a-z0-9-]+:\\d+)';
-const TRACK_URL_RE = new RegExp(`(?:(?<![\\w./@:-])(${TRACK_HOST_SRC}))?\\/track\\/([A-Za-z0-9_-]*)([^\\s]*)`, 'gi');
-const TRAILING_PUNCTUATION_RE = /^[.,;:!?)\]"'>]*$/;
+const TRACK_PATH_RE = /^\/track\/([A-Za-z0-9_-]+)$/i;
+const LINK_LEADING_RE = /^[(<"'[]+/;
+const LINK_TRAILING_RE = /[.,;:!?)\]"'>\u2014\u2013]+$/;
+const SCHEME_RE = /^[a-z][a-z0-9+.-]*:\/\//i;
 
 function canonicalPortalHost() {
   try {
@@ -129,20 +130,45 @@ function canonicalPortalHost() {
   }
 }
 
-function trackLinkIsTrusted(host, token, rest, canonicalHost) {
-  if (!host || !token || !TRAILING_PUNCTUATION_RE.test(rest)) return false;
-  return host.replace(/^https?:\/\//i, '').toLowerCase() === canonicalHost;
+// Whitespace-delimited tokens carrying "/track/" anywhere (Codex round-17 P2):
+// each is PARSED as a URL (https:// prepended when schemeless) and trusted only
+// when host[:port] equals the canonical portal's, the pathname is EXACTLY
+// /track/<token>, and there is no query, fragment or userinfo. A token that
+// mentions /track/ but fails any of that — "evil.example/?next=<portal>/track/x",
+// "#/track/x", "portal@evil.example/track/x" — is untrusted, as is a hostless
+// "/track/x". Sentence punctuation around the link is stripped first.
+function parseTrackLink(rawToken, canonicalHost) {
+  const token = rawToken.replace(LINK_LEADING_RE, '').replace(LINK_TRAILING_RE, '');
+  if (token.startsWith('/')) return null;
+  let url;
+  try {
+    url = new URL(SCHEME_RE.test(token) ? token : `https://${token}`);
+  } catch {
+    return null;
+  }
+  const match = TRACK_PATH_RE.exec(url.pathname);
+  const clean = !url.search && !url.hash && !url.username && !url.password;
+  return match && clean && url.host.toLowerCase() === canonicalHost ? match[1] : null;
+}
+
+function trackLinkTokens(text) {
+  return String(text || '').split(/\s+/).filter((t) => t.toLowerCase().includes('/track/'));
 }
 
 function scanTrackLinks(text) {
   const tokens = new Set();
   let violation = false;
   const canonicalHost = canonicalPortalHost();
-  for (const m of String(text || '').matchAll(new RegExp(TRACK_URL_RE.source, TRACK_URL_RE.flags))) {
-    if (trackLinkIsTrusted(m[1], m[2], m[3], canonicalHost)) tokens.add(m[2]);
+  for (const raw of trackLinkTokens(text)) {
+    const trackToken = parseTrackLink(raw, canonicalHost);
+    if (trackToken) tokens.add(trackToken);
     else violation = true;
   }
   return { tokens: [...tokens], violation };
+}
+
+function stripTrackLinks(text) {
+  return String(text || '').split(/(\s+)/).map((t) => (t.toLowerCase().includes('/track/') ? ' ' : t)).join('');
 }
 
 function extractTrackTokens(text) {
@@ -199,7 +225,9 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
   // Codex round-9 P2: an hour/day/week word normalization could NOT turn
   // into minutes is a timed claim even beside a real minutes figure, once a
   // live ETA context exists to hold the body to.
-  const unreadHours = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true });
+  // Round-17 P2: on EVERY path (counted days/weeks/months, like hours) — with no
+  // snapshot the timed claim then fails closed as eta_claim_no_snapshot.
+  const unreadHours = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true });
   // Codex round-11 P2: a number word that could not be converted to digits
   // ("a thousand minutes") is a timed claim on every path.
   const unreadNumbers = drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unconvertedNumbersOnly: true });
@@ -212,7 +240,7 @@ function classifyEtaBody({ outgoingBody: fullBody, snapshotHasEntries }) {
   // The link itself is not prose: a token like "a-12-b" must never read as a
   // "12" minutes figure, so claim analysis runs on the body without its
   // /track/ URLs.
-  const outgoingBody = String(fullBody || '').replace(new RegExp(TRACK_URL_RE.source, TRACK_URL_RE.flags), ' ');
+  const outgoingBody = stripTrackLinks(fullBody);
   const hasTrackLink = trackTokens.length > 0;
   const liveContext = snapshotHasEntries || hasTrackLink;
   const claims = liveContext
@@ -300,19 +328,6 @@ function bindEtaClaim(claim, entries, freshness) {
   return bindTimedOrMinutesClaim(claim, entries, freshness);
 }
 
-// Round-16 structural backstop: a body with a number beside a time unit or
-// arrival word that no parser classified. Bound like a status claim (token
-// selects among several live entries), then held to the SAME draft/GPS
-// freshness window a stated figure gets AND the bound visit(s) still being en
-// route — every failure is 'eta_claim_unclassified'.
-async function unclassifiedClaimReason({ claim, entries, factsGeneratedAt, now, dbh }) {
-  const bound = bindStatusClaim(claim, entries);
-  if (bound.reason) return 'eta_claim_unclassified';
-  if (bound.entries.some((entry) => draftFreshnessReason(factsGeneratedAt, now, entry))) return 'eta_claim_unclassified';
-  const live = await checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
-  return live ? 'eta_claim_unclassified' : null;
-}
-
 /**
  * null when the outgoing body may go out, else a short reason string the
  * caller logs before blocking/superseding. `liveEtaSnapshot` and
@@ -341,7 +356,12 @@ async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = 
     return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh, trackTokensToVerify: claim.trackTokens });
   }
 
-  if (claim.unclassifiedClaim) return unclassifiedClaimReason({ claim, entries, factsGeneratedAt, now, dbh });
+  // Round-16/17 structural backstop: a NUMERIC signal no parser could read (a
+  // number beside a time unit / arrival word) never passes on freshness and
+  // liveness alone — it could be any figure, so it must parse and bind exactly,
+  // and it did not. (The detector is number-based, so every unclassified
+  // signal is numeric.)
+  if (claim.unclassifiedClaim) return 'eta_claim_unclassified';
   const bound = bindEtaClaim(claim, entries, { factsGeneratedAt, now });
   if (bound.reason) return bound.reason;
   // A minutes/arrival claim that ALSO carries a track link must have that

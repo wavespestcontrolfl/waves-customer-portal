@@ -1615,6 +1615,36 @@ describe('round 16 P2s: Nm, slash fractions, status-only groups, distinct stops'
   });
 });
 
+describe('counted day/week/month durations need a tech subject (round-17 follow-up)', () => {
+  let priorGate;
+  beforeEach(() => { priorGate = process.env[GATE]; process.env[GATE] = 'true'; });
+  afterEach(() => { if (priorGate === undefined) delete process.env[GATE]; else process.env[GATE] = priorGate; });
+  const facts = 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)';
+  test.each(['Your visit is 2 days away.', "We'll see you in 2 weeks.", 'Your next treatment is in 3 weeks.'])('%p passes with and without live facts', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts }).ok).toBe(true);
+    expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE STATUS: tech marked en route to this visit' }).ok).toBe(true);
+  });
+  test.each(['The tech is 2 days away.', 'He will arrive in 3 weeks.'])('%p is rejected', (reply) => {
+    expect(validateLiveEtaMinutes({ reply, factsBlock: facts }).ok).toBe(false);
+  });
+});
+
+// Codex round-17 P2 (PR #5334): destination coordinates are a PAIR.
+describe('liveEtaDestination — lat/lng are used only as a complete pair (round 17 P2)', () => {
+  test('a visit latitude alone never mixes with the customer longitude', () => {
+    expect(liveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.51 });
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: -82.5 }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.51 });
+  });
+  test('a complete visit pair wins; a complete customer pair is the fallback', () => {
+    expect(liveEtaDestination(baseRow(), baseCustomer())).toEqual({ lat: 27.4, lng: -82.5 });
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: null }), baseCustomer())).toEqual({ lat: 27.41, lng: -82.51 });
+  });
+  test('a partial visit pair AND a partial customer pair fails closed', () => {
+    expect(liveEtaDestination(baseRow({ service_lat: 27.4, service_lng: null }), baseCustomer({ longitude: null }))).toBeNull();
+    expect(liveEtaDestination(baseRow({ service_lat: null, service_lng: -82.5 }), baseCustomer({ latitude: null }))).toBeNull();
+  });
+});
+
 describe('buildLiveEtaSnapshot — the send-time freshness snapshot input (independent review finding #2, PR #5334; grouped by distinct ETA — pre-push audit P1, round 2)', () => {
   test('no scheduled_service ever backed a LIVE ETA fact: null', () => {
     expect(buildLiveEtaSnapshot({ liveEtaGroups: [] })).toBeNull();

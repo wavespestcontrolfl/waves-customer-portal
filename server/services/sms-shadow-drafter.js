@@ -983,11 +983,23 @@ function normalizeTimeQuantities(text) {
 // The shared sentence rule for a duration word the parser left unread: an
 // arrival trigger in the sentence; a strong trigger wins; a weak "out"
 // consults the dry-time/wait-before duration exclusions.
+// A TECH subject earlier in the sentence (Codex round-17 follow-up, PR #5334):
+// a counted day/week/month duration is a tech-arrival claim only when a
+// technician-style subject governs it — "the tech is 2 days away", "he will
+// arrive in 3 weeks" — never ordinary scheduling copy ("your visit is 2 days
+// away", "we'll see you in 2 weeks", "your next treatment is in 3 weeks").
+const TECH_SUBJECT_RE = /\b(?:tech(?:nician)?s?|he|she|they|driver|crew|our\s+(?:guy|team|tech(?:nician)?s?))\b/i;
+const LONG_UNIT_END_RE = /(?:days?|weeks?|months?)$/i;
+function hasTechSubjectBefore(str, spans, index) {
+  const [start] = spans.find(([from, to]) => index >= from && index < to) || [0];
+  return TECH_SUBJECT_RE.test(str.slice(start, index));
+}
 function unreadDurationInArrivalSentence(str, wordRe) {
   const spans = sentenceSpans(str);
   const re = new RegExp(wordRe.source, wordRe.flags);
   for (const m of str.matchAll(re)) {
     if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
+    if (LONG_UNIT_END_RE.test(m[0]) && !hasTechSubjectBefore(str, spans, m.index)) continue;
     const sentence = sentenceAt(str, spans, m.index);
     if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
     if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)) return true;
@@ -1016,7 +1028,9 @@ function bodyHasUnconvertedNumberWord(text) {
 // are removed — so the caller can require the bound visit to still be en
 // route and fresh instead of waving the body through as non-ETA copy.
 const ETA_SIGNAL_WORD_RE = /^(?:m|mins?|minutes?|hrs?|hours?|h|s|secs?|seconds?|away|out|arriv\w*|there|here|eta|close|closer|coming|heading|headed|nearby|route|way)$/i;
-const NUMBER_TOKEN_RE = /\d+(?:\.\d+)?/g;
+// The figure with its own unit word attached, so a window check sees "2 hour"
+// (in "a 2 hour arrival window") as one span.
+const NUMBER_TOKEN_RE = /\d+(?:\.\d+)?(?:[\s-]*(?:hours?|hrs?|min(?:ute)?s?|days?|weeks?|months?))?/gi;
 function tokensAround(str, index, length) {
   const wordsOf = (t) => t.toLowerCase().split(/[^a-z]+/).filter(Boolean);
   const before = wordsOf(str.slice(Math.max(0, index - 40), index)).slice(-3);
@@ -1029,8 +1043,10 @@ function bodyHasUnclassifiedEtaSignal(text) {
     if (isNonDurationNumber(str, m.index, m[0].length)) continue;
     if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
     if (durationExcluded(str, m.index, m[0].length) && !STRONG_ARRIVAL_TRIGGER_RE.test(sentenceAt(str, sentenceSpans(str), m.index))) continue;
+    if (LONG_UNIT_END_RE.test(m[0]) && !hasTechSubjectBefore(str, sentenceSpans(str), m.index)) continue;
     const words = tokensAround(str, m.index, m[0].length);
-    if (words.some((w) => ETA_SIGNAL_WORD_RE.test(w))) return true;
+    // A figure that carries its own unit word ("15 minutes") is itself a signal.
+    if (/[a-z]/i.test(m[0]) || words.some((w) => ETA_SIGNAL_WORD_RE.test(w))) return true;
   }
   return false;
 }
@@ -1038,7 +1054,7 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // arrived", "arrived at your home", "the tech is here / outside / at your
 // door", "pulled up" state the tech IS on site — a different fact from "on
 // the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|at\s+(?:your|the)\s+(?:house|home|place|property|door))|pulled\s+up)\b/i;
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|pulled\s+up)\b/i;
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
