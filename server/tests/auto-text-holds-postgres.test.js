@@ -13,7 +13,7 @@ jest.mock('../models/db', () => {
   return proxy;
 });
 
-const { autoTextHoldReason, RECENT_CONVERSATION_MS } = require('../services/messaging/auto-text-holds');
+const { autoTextHoldReason, saidNoTextsOnAnyCall, RECENT_CONVERSATION_MS } = require('../services/messaging/auto-text-holds');
 
 const PHONE = '+19415550100';
 const CALL_AT = new Date('2026-09-26T15:00:00Z');
@@ -155,6 +155,14 @@ jest.setTimeout(30000);
       await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_consent_given: false } }) });
       await priorCall({ v2_extraction_status: 'invalid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) });
       expect(await hold()).toBeNull();
+    });
+
+    test('saidNoTextsOnAnyCall on its own (the dropped-call and outbound-voicemail texts read only this hold)', async () => {
+      expect(await saidNoTextsOnAnyCall(PHONE)).toBe(false);
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) });
+      expect(await saidNoTextsOnAnyCall(PHONE)).toBe(true);
+      expect(await saidNoTextsOnAnyCall('+19415550000')).toBe(false);
+      expect(await saidNoTextsOnAnyCall('')).toBe(false);
     });
   });
 

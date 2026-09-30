@@ -98,6 +98,31 @@ function callsWith(dbi, digits, originCallId) {
       .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }));
 }
 
+// An explicit "no texts" on any call with this number, the one setting
+// this text off included. Only a VALID V2 extraction counts: whether the
+// caller truly declined texts is model judgment, trusted only from a
+// schema-validated row (the booking-link lane's own posture).
+// Also a call where the caller SPOKE this number ("call me at Y, don't
+// text me") from another line: a later missed call or voicemail from Y
+// must still see that decline (the booking-link lane's
+// smsDeclinedOnEarlierCall matches caller.phone_e164 for the same reason).
+// Exported on its own for the automated call texts that honour ONLY this
+// hold, not the whole first-touch set above (owner 2026-09-30): the
+// dropped-call address request and the outbound-voicemail missed-you text.
+async function saidNoTextsOnAnyCall(phone, { originCallId = null, dbi = db } = {}) {
+  const digits = phoneDigits(phone);
+  if (!digits) return false;
+  const row = await dbi('call_log')
+    .modify((q) => whereNotSandboxCall(q))
+    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
+      .orWhereRaw(...matches("(ai_extraction_enriched->'caller'->>'phone_e164')", digits))
+      .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
+    .where('v2_extraction_status', 'valid')
+    .whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
+    .first('id');
+  return !!row;
+}
+
 /**
  * @param {string} phone                        the number about to be texted
  * @param {object} [opts]
@@ -140,23 +165,7 @@ async function autoTextHoldReason(phone, {
     .first('id');
   if (doNotContact) return 'asked_not_to_be_contacted';
 
-  // An explicit "no texts" on any call with this number, the one setting
-  // this text off included. Only a VALID V2 extraction counts: whether the
-  // caller truly declined texts is model judgment, trusted only from a
-  // schema-validated row (the booking-link lane's own posture).
-  // Also a call where the caller SPOKE this number ("call me at Y, don't
-  // text me") from another line: a later missed call or voicemail from Y
-  // must still see that decline (the booking-link lane's
-  // smsDeclinedOnEarlierCall matches caller.phone_e164 for the same reason).
-  const saidNoTexts = await dbi('call_log')
-    .modify((q) => whereNotSandboxCall(q))
-    .where((q) => q.whereRaw(...matches('from_phone', digits)).orWhereRaw(...matches('to_phone', digits))
-      .orWhereRaw(...matches("(ai_extraction_enriched->'caller'->>'phone_e164')", digits))
-      .modify((either) => { if (originCallId) either.orWhere('id', originCallId); }))
-    .where('v2_extraction_status', 'valid')
-    .whereRaw("ai_extraction_enriched->'consent'->>'sms_declined' = 'true'")
-    .first('id');
-  if (saidNoTexts) return 'said_no_texts';
+  if (await saidNoTextsOnAnyCall(phone, { originCallId, dbi })) return 'said_no_texts';
 
   // Only a VALID V2 extraction's nature counts (a schema-failed one can
   // persist a normalized but wrong call_nature); the legacy labels are what
@@ -216,6 +225,7 @@ async function autoTextHoldReason(phone, {
 
 module.exports = {
   autoTextHoldReason,
+  saidNoTextsOnAnyCall,
   deliveredTexts,
   RECENT_CONVERSATION_MS,
   NOT_A_PROSPECT_NATURES,
