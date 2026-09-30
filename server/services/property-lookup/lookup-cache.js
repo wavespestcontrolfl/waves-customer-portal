@@ -478,7 +478,8 @@ async function claimLiveRefresh(address, cooldownSeconds) {
       RETURNING address_hash`, [hash, normalizedAddress, cooldownSeconds]);
     return rows.length > 0;
   } catch (err) {
-    logger.warn('[lookup-cache] live refresh claim failed', { error: err.message });
+    // Driver text can echo bound values (the normalized address): code only.
+    logger.warn('[lookup-cache] live refresh claim failed', { code: err?.code || err?.name || 'error' });
     return false;
   }
 }

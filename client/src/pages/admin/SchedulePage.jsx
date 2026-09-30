@@ -13941,7 +13941,7 @@ export function CompletionPanel({
       return { ...product, areaValue: area, areaUnit: 'sqft', propertyServiceAreaField: true,
         propertyAreaDefault: pending ? { serviceId: service.id, propertyId: currentPropertyAreas.propertyId, kind: propertyAreaKey } : product.propertyAreaDefault,
         totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
-          ? product.totalAmount : lawnDerivedTotal(product, area) };
+          ? product.totalAmount : amountInUnit(lawnDerivedTotal(product, area), baseUnitOf(product.rateUnit), product.amountUnit) };
     });
     if (next.some((product, index) => product !== selectedProducts[index])) {
       invalidateGeneratedReportOnTypedEdit();

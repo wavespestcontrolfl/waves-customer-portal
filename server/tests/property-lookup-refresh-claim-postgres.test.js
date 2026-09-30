@@ -75,8 +75,12 @@ postgres('claimLiveRefresh on PostgreSQL', () => {
 });
 
 describe('claimLiveRefresh without a usable table', () => {
-  test('fails closed so the caller serves the cache', async () => {
-    mockPg = { raw: async () => { throw new Error('relation "property_lookups" does not exist'); } };
+  test('fails closed so the caller serves the cache, logging no address', async () => {
+    mockPg = { raw: async () => { throw Object.assign(new Error(`value "${ADDRESS}" violates a constraint`), { code: '23514' }); } };
     await expect(claimLiveRefresh(ADDRESS, 120)).resolves.toBe(false);
+    // Driver text can echo the bound address: the log keeps the code only.
+    const logger = require('../services/logger');
+    expect(logger.warn).toHaveBeenLastCalledWith('[lookup-cache] live refresh claim failed', { code: '23514' });
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('Fixture');
   });
 });

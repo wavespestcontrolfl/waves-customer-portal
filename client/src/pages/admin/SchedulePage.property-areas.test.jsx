@@ -255,3 +255,22 @@ it('a failed refetch after a stale completion keeps completion blocked until Ret
   await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
   expect(onSubmit.mock.calls[1][1].propertyServiceArea).toMatchObject({ version: 'b'.repeat(64), treatedSqft: 600 });
 });
+
+it('a visit-area change recalculates a following total in the row\'s spoon unit, not the rate unit', async () => {
+  const liquid = { id: 'floz', name: 'Fixture bed drench', category: 'insecticide', application_method: 'soil_drench', default_rate_per_1000: 0.5, rate_unit: 'fl_oz' };
+  // A following row read in spoons (tsp) while its rate is per fl oz.
+  localStorage.setItem('waves_completion_draft_visit-1', JSON.stringify({
+    serviceId: 'visit-1', savedAt: Date.now(), notes: 'Fixture notes',
+    selectedProducts: [{ productId: 'floz', name: 'Fixture bed drench', category: 'insecticide', applicationMethod: 'soil_drench',
+      rate: 0.5, rateUnit: 'fl_oz', amountUnit: 'tsp', totalAmount: 3.6, areaValue: 1200, areaUnit: 'sqft',
+      propertyServiceAreaField: true, propertyAreaDefault: { serviceId: 'visit-1', propertyId: 'property-1', kind: 'beds' } }],
+  }));
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', scheduledDate: '2026-09-27',
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: bedField, nextStepChips: [] } }}
+    products={[...products, liquid]} onClose={() => {}} onSubmit={vi.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByPlaceholderText('Total')).toHaveValue(3.6));
+  fireEvent.change(await screen.findByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
+  // 2,000 sq ft at 0.5 fl oz / 1,000 = 1 fl oz = 6 tsp, never "1 tsp".
+  await waitFor(() => expect(screen.getByPlaceholderText('Total')).toHaveValue(6));
+});
