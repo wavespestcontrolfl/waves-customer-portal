@@ -84,9 +84,12 @@ async function amountsBlock({ decision, outgoingBody }) {
 // visit (a newer visit, a visit today or a changed label refuses). Older-prompt
 // decisions without a snapshot are untouched.
 async function labelFactsBlock({ decision, outgoingBody }) {
-  const snapshot = parseInputSnapshot(decision.input_snapshot)?.label_facts_snapshot || null;
+  const input = parseInputSnapshot(decision.input_snapshot);
+  const snapshot = input?.label_facts_snapshot || null;
   if (!snapshot && !isRealAnswersDecision(decision)) return null;
-  const reason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot, body: outgoingBody });
+  // The customer's own text (stored on the decision) says which label kind was asked, so a bare "yes" /
+  // "it's okay" is held even when the draft copied no sentence; without it only answer-shaped bodies are held.
+  const reason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot, body: outgoingBody, inbound: input?.sms?.body });
   return reason ? `label timing no longer current (${reason})` : null;
 }
 

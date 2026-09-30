@@ -697,7 +697,8 @@ function hasBannedCustomerCopy(text, opts = {}) {
   let t = labelFactsLib.sanctionSafeOnceDry(text);
   if (opts && opts.rainTimeGuard) {
     t = labelFactsLib.stripLabelSentences(t, opts.labelFactsText || '');
-    if (labelFactsLib.hasUngroundedLabelClaim(t)) return true;
+    // ...and a bare yes / ok / "you can" answering a re-entry or rain question the customer asked (opts.asked)
+    if (labelFactsLib.hasUngroundedLabelClaim(t) || labelFactsLib.answersAskedLabelQuestion(t, opts.asked)) return true;
   }
   return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
 }
@@ -707,15 +708,17 @@ function hasBannedCustomerCopy(text, opts = {}) {
 // no longer rest on the prompt. A real-answers reply carrying banned copy is
 // a violation, fed into the same revise/verify loop; exhausting the budget
 // leaves the draft unconverged, which nothing publishes or sends.
-function validateComplianceCopy({ reply, factsBlock } = {}) {
+function validateComplianceCopy({ reply, factsBlock, inboundMessage } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const labelFactsText = labelFactsLib.labelFactsSectionFrom(factsBlock);
-  if (!reply || !hasBannedCustomerCopy(reply, { labelFactsText, rainTimeGuard: true })) return { ok: true, violations: [] };
+  const asked = typeof inboundMessage === 'string' ? labelFactsLib.askedLabelKinds(inboundMessage) : [];
+  if (!reply || !hasBannedCustomerCopy(reply, { labelFactsText, rainTimeGuard: true, asked })) return { ok: true, violations: [] };
+  const answerNote = asked.length ? ' - and when the customer asks about re-entry or rain, never answer yes / no / ok / "you can" / "not yet": copy the LABEL FACTS sentence, or say the technician will confirm' : '';
   // The LABEL FACTS wording only when the section actually carries a sentence.
   const kinds = labelFactsLib.groundedLineKinds(labelFactsText);
   return { ok: false, violations: [(kinds.rain || kinds.reentry)
     ? 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved; rainfast or re-entry timing may be given ONLY by copying a LABEL FACTS sentence word for word (the whole sentence, unchanged, with its visit date) - any other drying, rainfast, re-entry or "you can go back out" wording, number, or clock time is banned; "safe once dry" with the technician confirming timing is also allowed'
-    : 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'] };
+    : 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'].map((v) => v + answerNote) };
 }
 
 // Deterministic backstop: a reply that offers a free visit while the facts
@@ -1396,9 +1399,11 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
 // The LABEL FACTS source a delayed send re-verifies (sms-label-facts
 // labelFactsSendBlockReason): persisted next to open_times_snapshot, null when
 // the final reply copies no label sentence.
-function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock }) {
+function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock, inboundMessage }) {
   if (!labelFacts || !reply) return null;
-  return labelFactsLib.labelFactsSnapshotFor({ labelFacts, reply, sectionText: labelFactsLib.labelFactsSectionFrom(factsBlock) });
+  return labelFactsLib.labelFactsSnapshotFor({
+    labelFacts, reply, sectionText: labelFactsLib.labelFactsSectionFrom(factsBlock), asked: labelFactsLib.askedLabelKinds(inboundMessage),
+  });
 }
 
 // The days a send-time recheck compares against: the picker's that minted the
@@ -2430,7 +2435,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
-      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock }),
+      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage }),
     };
   }
 
@@ -2450,7 +2455,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays, reply: parsed.reply, factsBlock });
     const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock });
-    const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock });
+    const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage });
     for (const check of [reserviceCheck, complianceCheck]) {
       if (!check.ok) {
         timesCheck.ok = false;
@@ -2522,7 +2527,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
     // The LABEL FACTS source, only when the final reply copies a label sentence.
-    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock }),
+    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock, inboundMessage }),
   };
 }
 

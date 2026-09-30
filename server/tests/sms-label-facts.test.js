@@ -465,7 +465,7 @@ describe('label row selection (mock knex)', () => {
     const block = (snapshot, body, conn) => labelFactsLib.labelFactsSendBlockReason({ snapshot, body, conn, today: TODAY });
 
     test('the snapshot names the customer, the visit date, the records and exactly the sentences the reply copies; none copied -> null', () => {
-      expect(snapshotFor(`Sure. ${reentry}`)).toEqual({ customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [reentry] });
+      expect(snapshotFor(`Sure. ${reentry}`)).toEqual({ customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [reentry], asked: [] });
       expect(snapshotFor(`${rainfast} ${reentry}`).sentences).toEqual([rainfast, reentry]);
       expect(snapshotFor('Sounds good, see you Thursday.')).toBeNull();
       expect(snapshotFor('Keep pets off for 4 hours.')).toBeNull();
@@ -870,6 +870,115 @@ describe('r9: a clock time or window with no label context is an appointment off
       'It should be fine at 3:30.', "You're good to go at 3 PM.", 'Kids can play at 3 PM.', 'The lawn is safe at 4 PM.', 'Good to go by 3 PM.', 'Keep the dogs in until 5 PM.',
       'It will be dry at 2 PM.', 'You can water at 4 PM.', 'How about 9:00 AM - 11:00 AM? The pets can go out at 3 PM.',
     ]) expect([t, claims(t)]).toEqual([t, true]);
+  });
+});
+
+describe('r10: an elliptical answer to a re-entry or rain question needs the authorized sentence', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [rain, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, asked(inbound));
+  const RE_Q = 'Can the dogs go out now?';
+  const RAIN_Q = 'Will rain wash it off?';
+
+  test('asked kind: re-entry, rain, both, or none', () => {
+    expect(asked(RE_Q)).toEqual(['reentry']);
+    expect(asked('Is it ok to water?')).toEqual(['reentry']);
+    expect(asked('Is it safe for the kids to play on the lawn?')).toEqual(['reentry']);
+    expect(asked(RAIN_Q)).toEqual(['rain']);
+    expect(asked('Will the sprinklers wash it off?')).toEqual(expect.arrayContaining(['rain']));
+    expect(asked('Can the dogs go out and will rain wash it off?').sort()).toEqual(['rain', 'reentry']);
+    expect(asked('What time are you coming Thursday?')).toEqual([]);
+    expect(asked('Thanks, the dogs loved it')).toEqual([]);
+    expect(asked('Should I keep the dogs inside when you arrive?')).toEqual([]);
+    expect(asked('')).toEqual([]);
+  });
+  test('a bare approval or refusal is held, with or without a matching sentence', () => {
+    for (const reply of ["It's okay.", 'Yes, they can.', 'Sure, go ahead.', 'No, not yet.', 'Yes.', 'Yep, you are good.', 'Fine.', 'They can go out.', 'You can water now.', 'Hold off a bit.']) {
+      expect([reply, guard(reply, RE_Q)]).toEqual([reply, true]);
+      expect([reply, guard(`${reply} ${reentry}`, RE_Q)]).toEqual([reply, true]);
+    }
+    for (const reply of ["It's okay.", 'Yes, it will hold.', 'No, it will not.', 'Sure, rain is fine.', "You're good."]) {
+      expect([reply, guard(reply, RAIN_Q)]).toEqual([reply, true]);
+      expect([reply, guard(`${reply} ${rain}`, RAIN_Q)]).toEqual([reply, true]);
+    }
+    expect(guard("It's okay.", 'Is it ok to water?')).toBe(true);
+  });
+  test('the authorized sentence, the sanctioned idiom, the COMPANY FACTS rain line and hand-offs still answer', () => {
+    expect(guard(reentry, RE_Q)).toBe(false);
+    expect(guard(`Good question! ${reentry} Let us know if you need anything.`, RE_Q)).toBe(false);
+    expect(guard(rain, RAIN_Q)).toBe(false);
+    expect(guard('It is safe once dry, and your technician will confirm the timing.', RE_Q)).toBe(false);
+    expect(guard('A treatment needs to dry and bond to surfaces; after that it holds up to weather.', RAIN_Q)).toBe(false);
+    for (const reply of [
+      "I'll have the office confirm and get back to you.", 'Let me check with your technician and get back to you.', 'Sure, let me check with your technician.',
+      'Your technician will confirm the timing at the visit.', "I'll check on that and follow up shortly.", 'Do you have pets that stay outside?',
+    ]) for (const q of [RE_Q, RAIN_Q]) expect([reply, guard(reply, q)]).toEqual([reply, false]);
+  });
+  test('no label question asked: the same short replies are not held', () => {
+    for (const reply of ["It's okay.", 'Yes, they can.', 'Sure, go ahead.']) expect(guard(reply, 'What time are you coming Thursday?')).toBe(false);
+  });
+  test('through the drafter: validateComplianceCopy holds the bare answer for a label question and not for another question', () => {
+    const drafter = require('../services/sms-shadow-drafter');
+    process.env[GATE] = 'true';
+    const facts = buildFactsBlock(context, { now: NOW, labelFacts: labelFacts([product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })]) });
+    expect(drafter.validateComplianceCopy({ reply: 'Yes, they can.', factsBlock: facts, inboundMessage: RE_Q }).ok).toBe(false);
+    expect(drafter.validateComplianceCopy({ reply: "It's okay.", factsBlock: facts, inboundMessage: RAIN_Q }).ok).toBe(false);
+    expect(drafter.validateComplianceCopy({ reply: 'Yes, they can.', factsBlock: facts, inboundMessage: 'Can you come Thursday?' }).ok).toBe(true);
+    expect(drafter.validateComplianceCopy({ reply: 'Yes, they can.', factsBlock: facts }).ok).toBe(true); // no inbound passed: legacy caller
+    expect(drafter.validateComplianceCopy({ reply: "I'll have the office confirm.", factsBlock: facts, inboundMessage: RE_Q }).ok).toBe(true);
+  });
+  test('send time: the snapshot asked kind, else the stored inbound, else fail closed for answer-shaped bodies only', async () => {
+    const boom = () => { throw new Error('must not read'); };
+    const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [reentry], asked: ['reentry'] };
+    const send = (snapshot, body, inbound) => labelFactsLib.labelFactsSendBlockReason({ snapshot, body, inbound, conn: boom });
+    // snapshot records the asked kind
+    await expect(send(snap, 'Yes, they can.')).resolves.toBe('label_facts_unauthorized_claim');
+    // no snapshot: the decision's stored inbound
+    await expect(send(null, "It's okay.", RE_Q)).resolves.toBe('label_facts_unauthorized_claim');
+    await expect(send(null, "It's okay.", 'What time are you coming?')).resolves.toBeNull();
+    await expect(send(null, "I'll have the office confirm.", RE_Q)).resolves.toBeNull();
+    // inbound unavailable: only an answer-shaped body is held
+    await expect(send(null, 'Yes, they can.')).resolves.toBe('label_facts_unauthorized_claim');
+    await expect(send(null, 'Sounds good, see you Thursday.')).resolves.toBeNull();
+    // a legacy snapshot (no asked key) with no inbound behaves the same way
+    await expect(send({ ...snap, asked: undefined, sentences: [] }, 'Sure, go ahead.')).resolves.toBe('label_facts_unauthorized_claim');
+    // the snapshot's own record wins over a missing inbound
+    await expect(send({ ...snap, sentences: [], asked: [] }, "It's okay.")).resolves.toBeNull();
+  });
+  test('through agent-decision-send-checks: the stored inbound on a real-answers decision', async () => {
+    const { labelFactsBlock } = require('../services/agent-decision-send-checks');
+    const decision = (body) => ({ prompt_version: 'house_voice_v12_x', input_snapshot: JSON.stringify({ sms: { body } }) });
+    await expect(labelFactsBlock({ decision: decision(RE_Q), outgoingBody: "It's okay." })).resolves.toMatch(/label timing no longer current/);
+    await expect(labelFactsBlock({ decision: decision('What time are you coming?'), outgoingBody: "It's okay." })).resolves.toBeNull();
+    await expect(labelFactsBlock({ decision: { prompt_version: 'house_voice_v12_x', input_snapshot: '{}' }, outgoingBody: 'Yes, they can.' })).resolves.toMatch(/label timing no longer current/);
+  });
+});
+
+describe('r10: a month or season named on its own is another visit unless it is the visit month', () => {
+  const V = '2026-09-29';
+  const T = '2026-09-30';
+  const other = (text) => labelFactsLib.inboundRefersToOtherVisit(text, V, T);
+  test('a different month or a season names another visit', () => {
+    for (const text of [
+      'the May treatment - is it ok for dogs?', 'back in May you sprayed, will rain wash it off?', 'in August you treated, kids ok?', 'last spring you sprayed - pets?',
+      'the summer spray, is it dry?', 'the June visit, can the dogs go out', 'since March, rain?', 'in the fall you treated', 'this winter, dogs ok?', 'the Oct treatment, is it safe',
+      'the Aug spray - rain?', 'during the summer you sprayed, pets?', 'the January visit',
+    ]) expect([text, other(text)]).toEqual([text, true]);
+  });
+  test("the visit's own month keeps the facts", () => {
+    for (const text of ['the September treatment - is it ok for dogs?', 'back in September you sprayed, rain?', 'the Sept spray, pets ok?', 'since September, kids ok?', 'in september you treated, is it dry?']) {
+      expect([text, other(text)]).toEqual([text, false]);
+    }
+  });
+  test('"may" as a verb is not a month', () => {
+    for (const text of ['May I ask when the dogs can go out?', 'you may spray, right? when can dogs go out', 'it may rain later, will it wash off?', 'may the dogs go out now', 'How long until the pets may go out?', 'You may want to know: is it dry?']) {
+      expect([text, other(text)]).toEqual([text, false]);
+    }
+    expect(other('the May treatment')).toBe(true);
+    expect(other('in May')).toBe(true);
+    expect(labelFactsLib.inboundRefersToOtherVisit('the May treatment', '2026-05-12', '2026-05-20')).toBe(false); // the visit IS in May
   });
 });
 
@@ -1358,7 +1467,7 @@ describe('C: the section is for the latest visit only - a text about another vis
       const r = await run('How long until the dogs can go out?', [draft(RE)]);
       expect(r.factsBlock).toContain(`- ${RE}`);
       expect(r.converged).toBe(true);
-      expect(r.labelFactsSnapshot).toEqual({ customer_id: 'cust-1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [RE] });
+      expect(r.labelFactsSnapshot).toEqual({ customer_id: 'cust-1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [RE], asked: ['reentry'] });
     });
 
     test('a question about a coming visit gets the none-on-file section for that draft, and the sentence is then held', async () => {

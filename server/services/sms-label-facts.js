@@ -769,16 +769,68 @@ function sanctionSafeOnceDry(text) {
   return hedged ? t : t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
 }
 
-/** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine). */
-function replyClaimsUngroundedLabelTiming(body, sectionText) {
-  return hasUngroundedLabelClaim(stripLabelSentences(sanctionSafeOnceDry(body), sectionText));
+// ---- What the customer asked, and answering it without the sentence -------
+// A reply like "It's okay." / "Yes, they can." / "No, not yet." carries no label word, so the clause
+// rules cannot see it. When the INBOUND asks a label kind (re-entry: people, pets, going out, watering,
+// mowing, safe; rain: rain, wash off, sprinklers), the reply may answer it only with the authorized
+// sentence, "safe once dry" + the technician confirming, the COMPANY FACTS rain line, or a hand-off.
+const ASKED_QUESTION_RE = /\?|(?:^|[.!\n]\s*)(?:can|could|will|would|should|may|is|are|do|does|when|how|what|which|ok|okay)\b|\b(?:wondering|want\s+to\s+know|need\s+to\s+know|curious)\b/;
+const ASKED_REENTRY_RE = new RegExp([BEING_RE.source, ACTIVITY_RE.source, REENTRY_TOPIC_RE.source, DRY_RE.source, /\bsafe\b|\bgo\s+(?:out|outside|back)\b|\blet\s+\w+\s+out\b/.source].join('|'));
+const ASKED_RAIN_RE = new RegExp([RAIN_WORD_RE.source, RAINFAST_RE.source, /\bwater(?:ing)?\s+in\b/.source].join('|'));
+// "should I keep the dogs in when you arrive?" asks about access, not re-entry.
+const ASKED_ACCESS_RE = /\b(?:when|before|while|as)\s+(?:you|y'?all|we|the\s+(?:tech|technician|guy|team))\s+(?:arrive|arrives|come|comes|get|gets|show|stop|are\s+here|is\s+here)\b/;
+
+/** ['reentry' | 'rain'] the inbound message asks about ([] = no label question). */
+function askedLabelKinds(inboundText) {
+  const text = canonText(inboundText).toLowerCase();
+  if (!text || !ASKED_QUESTION_RE.test(text)) return [];
+  if (ASKED_ACCESS_RE.test(text) && !POST_TREATMENT_SIGNAL_RE.test(text)) return [];
+  return [ASKED_REENTRY_RE.test(text) && 'reentry', ASKED_RAIN_RE.test(text) && 'rain'].filter(Boolean);
+}
+
+const ANSWER_LEAD_RE = /^(?:(?:hi|hello|hey|thanks|thank\s+you|great\s+question|good\s+question)[^a-z]*\s*)?(?:yes|no|yeah|yep|yup|nope|sure|ok|okay|fine|alright|absolutely|definitely|certainly|of\s+course|correct|right|go\s+ahead|not\s+yet|not\s+really|not\s+quite)\b/;
+const ANSWER_BODY_RE = new RegExp([
+  /\b(?:go\s+ahead|you'?re\s+good|you\s+are\s+good|not\s+yet|(?:they|you|he|she|everyone|everybody|it)\s+(?:can|could|may)|(?:it'?s|it\s+is|that'?s|that\s+is|is|are|be)\s+(?:safe|ok|okay|fine|good|alright)|hold\s+off|wait|all\s+clear|good\s+to\s+go)\b/.source,
+  PRONOUN_CLEARANCE_RE.source, PLACE_CLEARANCE_RE.source, DAY_CLEARANCE_RE.source,
+].join('|'));
+const DEFERRAL_RE = /\b(?:i|we|i'll|we'll|let\s+me|let\s+us|the\s+office|our\s+office|your\s+technician|the\s+technician|a\s+teammate|someone|our\s+team|the\s+team)\b[^.]{0,60}\b(?:confirm|check|follow\s+up|get\s+back|look\s+into|find\s+out|reach\s+out|verify|ask|text\s+you|call\s+you|let\s+you\s+know)\b/;
+const WAIT_FOR_STAFF_RE = /\bwait(?:ing)?\s+(?:for|on)\s+(?:your|the|our)\s+(?:tech\w*|office|team)\b/;
+const COMPANY_RAIN_LINE_RE = /\bdr(?:y|ied)\s+and\s+bond(?:ed)?\b[^.]*\bholds?\s+up\s+to\s+weather\b/;
+
+function answerShapedSentence(sentence) {
+  const t = sentence.replace(WAIT_ALLOWED_RE, ' ').replace(WAIT_FOR_STAFF_RE, ' ').trim();
+  const body = ANSWER_BODY_RE.test(t);
+  if (!body && !ANSWER_LEAD_RE.test(t)) return false;
+  if (COMPANY_RAIN_LINE_RE.test(t)) return false;
+  return body || !DEFERRAL_RE.test(t);
+}
+
+/**
+ * True when `strippedText` (stripLabelSentences output, sanctioned idiom already swapped out) still
+ * ANSWERS a label question the customer asked (`asked` from askedLabelKinds): an answer-shaped
+ * sentence that is not a question, a hand-off or the COMPANY FACTS rain line.
+ */
+function answersAskedLabelQuestion(strippedText, asked) {
+  if (!Array.isArray(asked) || !asked.length) return false;
+  const parts = canonText(strippedText).toLowerCase().split(/([!?\n;]+|\.(?!\d))/);
+  for (let i = 0; i < parts.length; i += 2) {
+    if (/\?/.test(parts[i + 1] || '')) continue;
+    if (answerShapedSentence(parts[i].trim())) return true;
+  }
+  return false;
+}
+
+/** True when `body` claims label timing beyond the sentences of `sectionText` (its own copies, verbatim, are fine), or answers a label question in `asked` without one. */
+function replyClaimsUngroundedLabelTiming(body, sectionText, asked = []) {
+  const stripped = stripLabelSentences(sanctionSafeOnceDry(body), sectionText);
+  return hasUngroundedLabelClaim(stripped) || answersAskedLabelQuestion(stripped, asked);
 }
 
 // ---- Send-time recheck ---------------------------------------------------
 // What a decision persists (input_snapshot.label_facts_snapshot) when its
 // final reply copies a LABEL FACTS sentence: which customer and visit the
 // figures came from and exactly which sentences went out.
-function labelFactsSnapshotFor({ labelFacts, reply, sectionText }) {
+function labelFactsSnapshotFor({ labelFacts, reply, sectionText, asked = [] }) {
   const copied = labelSentencesCopiedIn(reply, sectionText).map((s) => s.text);
   if (!copied.length || !labelFacts) return null;
   return {
@@ -786,6 +838,8 @@ function labelFactsSnapshotFor({ labelFacts, reply, sectionText }) {
     visit_date: labelFacts.serviceDate,
     record_ids: Array.isArray(labelFacts.recordIds) ? labelFacts.recordIds.map(String).sort() : [],
     sentences: copied,
+    // which label kinds the customer asked (a snapshot without this key predates it: unknown)
+    asked,
   };
 }
 
@@ -804,9 +858,16 @@ function labelFactsSnapshotFor({ labelFacts, reply, sectionText }) {
  *      left needs no visit read.
  * Returns null when it may go out, else a short reason.
  */
-async function labelFactsSendBlockReason({ snapshot, body, conn = db, today } = {}) {
+// The label kinds the customer asked, for the send-time answer check: the snapshot's own record, else the
+// decision's stored inbound text, else unknown (both kinds: only an answer-shaped reply is then held).
+function askedForSend(snapshot, inbound) {
+  if (snapshot && Array.isArray(snapshot.asked)) return snapshot.asked;
+  return typeof inbound === 'string' ? askedLabelKinds(inbound) : ['reentry', 'rain'];
+}
+
+async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, today } = {}) {
   const sentences = snapshot && Array.isArray(snapshot.sentences) ? snapshot.sentences : [];
-  if (replyClaimsUngroundedLabelTiming(body, sentences.map((s) => `- ${s}`).join('\n'))) return 'label_facts_unauthorized_claim';
+  if (replyClaimsUngroundedLabelTiming(body, sentences.map((s) => `- ${s}`).join('\n'), askedForSend(snapshot, inbound))) return 'label_facts_unauthorized_claim';
   const present = sentences.filter((s) => copiesSentence(body, s));
   if (!present.length) return null;
   if (!snapshot.customer_id) return 'label_facts_recheck_no_customer';
@@ -855,6 +916,12 @@ const DAY_MONTH_DATE_RE = new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+
 const NUMERIC_DATE_RE = /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g;
 const DASHED_DATE_RE = /(?<![\d./-])(\d{1,2})[-.](\d{1,2})[-.](\d{2}|\d{4})(?![\d/-])/g;
 const ISO_DATE_RE = /(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])/g;
+// A month or season named on its own ("the May treatment", "back in August", "last spring"). "may" is a verb
+// as often as a month, so it is read from the original-case text and only as "May" with a visit word or a
+// preposition/determiner before it. A season is ambiguous, so it always names another visit.
+const MONTH_ALONE_RE = /\b(jan(?:uary)?|feb(?:ruary)?|march|apr(?:il)?|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b/g;
+const MAY_ALONE_RE = /\b(?:(?:in|back\s+in|since|during|last|that|the|this|from|early|late|mid)\s+May\b|May\s+(?:treatment|visit|service|spray|spraying|application|appointment)\b)/g;
+const SEASON_RE = /\b(?:last|this|the|in|during|early|late|next|every|that|past|previous)\s+(?:spring|summer|fall|autumn|winter)(?:time)?\b/g;
 const FUTURE_OR_OLDER_RE = new RegExp(`${FUTURE_VISIT_RE.source}|${OLDER_VISIT_RE.source}`, 'g');
 const yearOf = (m, vy) => (m ? (m.length === 2 ? 2000 + Number(m) : Number(m)) : vy);
 const monthNumber = (name) => MONTH_NAMES.findIndex((n) => n.startsWith(name.slice(0, 3))) + 1;
@@ -882,6 +949,9 @@ const VISIT_REFERENCES = [
     },
   },
   // an explicit date ("Sep 29", "September 29th", "9/29", "9/29/26") must be the visit's date
+  { re: MONTH_ALONE_RE, differs: (m, v) => monthNumber(m[1]) !== v.month },
+  { re: MAY_ALONE_RE, raw: true, differs: (m, v) => v.month !== 5 },
+  { re: SEASON_RE, differs: () => true },
   // (a year written after the date must match too: "September 29, 2025" is not the 2026 visit)
   { re: MONTH_DATE_RE, differs: (m, v) => otherYmd(v, monthNumber(m[1]), Number(m[2]), tailYear(m[3], m[4])) },
   { re: DAY_MONTH_DATE_RE, differs: (m, v) => otherYmd(v, monthNumber(m[2]), Number(m[1]), tailYear(m[3], m[4])) },
@@ -912,7 +982,8 @@ function inboundRefersToOtherVisit(inboundText, visitDate, today = etDateString(
     date: visitDate, today, weekday: WEEKDAYS[visit.getUTCDay()], year, month, day,
     sinceVisit: Math.round((new Date(`${today}T12:00:00Z`) - visit) / 86400000),
   };
-  return VISIT_REFERENCES.some((ref) => [...text.matchAll(ref.re)].some((m) => ref.differs(m, v)));
+  const rawText = canonText(inboundText);
+  return VISIT_REFERENCES.some((ref) => [...(ref.raw ? rawText : text).matchAll(ref.re)].some((m) => ref.differs(m, v)));
 }
 
 module.exports = {
@@ -940,6 +1011,8 @@ module.exports = {
   inboundRefersToOtherVisit,
   sanctionSafeOnceDry,
   replyClaimsUngroundedLabelTiming,
+  askedLabelKinds,
+  answersAskedLabelQuestion,
   looksNonEnglish,
   nonEnglishTimingWords,
   labelFactsForInbound,
