@@ -5,7 +5,7 @@
 process.env.GATE_CALL_DISPOSITION_V1 = 'true';
 const fs = require('fs');
 const { decideDisposition } = require('../services/call-disposition');
-const { stampBookedDispositionForStreetLevelHold } = require('../services/outbound-review-confirm');
+const { stampBookedDispositionForStreetLevelHold, reconcileStreetLevelHoldAfterStamp } = require('../services/outbound-review-confirm');
 
 const heldCard = (extra = {}) => ({ payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'visit-1', ...extra } });
 
@@ -90,5 +90,60 @@ describe('office confirm stamps booked', () => {
     expect(stamp).toBeGreaterThan(0);
     expect(stamp).toBeLessThan(s.indexOf("status: 'resolved', updated_at: trx.fn.now()", stamp));
     expect(s).toContain("if (!isEnabled('callDispositionV1')) return false;");
+  });
+});
+
+describe('interleaving: the processor wrote AFTER the hook but BEFORE the stamp', () => {
+  const svc = { id: 'visit-1', source_call_log_id: 'call-1' };
+  // A stateful fake of the call row and its cards: the processor already
+  // overwrote disposition with the pending value and reopened review_status.
+  const makeDb = ({ hasCard = true } = {}) => {
+    const state = { disposition: 'lead_response_flow_triggered', review_status: 'open', openCards: 0, locked: false };
+    const dbh = (table) => {
+      const q = {
+        where(arg) { q._where = arg; return q; }, whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, count() { return q; },
+        first: async () => {
+          if (table === 'triage_items' && q._count) return { n: state.openCards };
+          if (table === 'triage_items') return hasCard ? { id: 't1', status: 'resolved', payload: { street_level_address: true, scheduled_service_id: 'visit-1' } } : undefined;
+          return { n: state.openCards };
+        },
+        update: async (u) => {
+          if (table === 'call_log' && u.disposition) {
+            if (q._where?.disposition === state.disposition) { state.disposition = u.disposition; return 1; }
+            return 0;
+          }
+          if (table === 'call_log' && u.review_status) { state.review_status = u.review_status; return 1; }
+          return 0;
+        },
+      };
+      const c = q.count; q.count = () => { q._count = true; return q; };
+      void c;
+      return q;
+    };
+    dbh.raw = async () => { state.locked = true; return { rows: [{}] }; };
+    dbh.transaction = async (fn) => fn(dbh);
+    return { dbh, state };
+  };
+
+  test('after the stamp lands, the call is booked and review_status closed (no open card left)', async () => {
+    const { dbh, state } = makeDb();
+    expect(await reconcileStreetLevelHoldAfterStamp(dbh, svc)).toBe(true);
+    expect(state.locked).toBe(true);
+    expect(state.disposition).toBe('booked');
+    expect(state.review_status).toBe('resolved');
+  });
+  test('an open card keeps the review open; a non street-level visit is untouched', async () => {
+    const withOpen = makeDb();
+    withOpen.state.openCards = 1;
+    await reconcileStreetLevelHoldAfterStamp(withOpen.dbh, svc);
+    expect(withOpen.state.review_status).toBe('open');
+    const plain = makeDb({ hasCard: false });
+    expect(await reconcileStreetLevelHoldAfterStamp(plain.dbh, svc)).toBe(false);
+    expect(plain.state.disposition).toBe('lead_response_flow_triggered');
+    expect(plain.state.review_status).toBe('open');
+  });
+  test('both stamp sites (the office-confirm route and the lazy activation) reconcile after a successful stamp', () => {
+    const s = fs.readFileSync(require.resolve('../services/outbound-review-confirm.js'), 'utf8');
+    expect(s.split('if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(').length - 1).toBe(2);
   });
 });

@@ -743,6 +743,33 @@ async function stampBookedDispositionForStreetLevelHold(trx, svc) {
 }
 
 /**
+ * Runs AFTER customer_confirmed is stamped. The hook's own disposition / review
+ * legs run before the stamp, so a call-processor pass still in flight can read
+ * the visit as unconfirmed and write the pending disposition or reopen
+ * review_status after them. Once the stamp has landed, put both right under the
+ * shared per-call lock: disposition booked (compare-and-swap on the pending
+ * value) and review_status recomputed from the call's open cards. Street-level
+ * holds only; best-effort, never throws.
+ */
+async function reconcileStreetLevelHoldAfterStamp(dbh, svc) {
+  try {
+    if (!svc?.source_call_log_id) return false;
+    const card = await findStreetLevelHoldCard(dbh, { callLogId: svc.source_call_log_id, visitId: svc.id });
+    if (!card) return false;
+    const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
+    await dbh.transaction(async (trx) => {
+      await lockTriageCall(trx, svc.source_call_log_id);
+      await stampBookedDispositionForStreetLevelHold(trx, svc);
+      await syncCallReviewStatus(trx, svc.source_call_log_id);
+    });
+    return true;
+  } catch (e) {
+    logger.warn(`[street-level-hold] post-stamp reconcile failed for ${svc?.id}: ${e.message}`);
+    return false;
+  }
+}
+
+/**
  * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
  * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
  * OR a voice-agent booking, which is created with the same pending/
@@ -821,6 +848,7 @@ async function activateLegacyOutboundReviewRowIfNeeded(db, serviceId, routeTag =
       // stamp a cancelled/skipped row confirmed (Codex #3361 r8 P1).
       .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
+    if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(db, row);
     return stamped > 0;
   } catch (e) {
     logger.warn(`[${routeTag}] legacy outbound activation failed for ${serviceId}: ${e.message}`);
@@ -883,6 +911,7 @@ async function runOfficeConfirmActivation(dbh, svc, routeTag = 'office-confirm',
       // cancelled/skipped row confirmed (same guard as the lazy helper).
       .whereNotIn('status', ['cancelled', 'skipped', 'rescheduled'])
       .update({ customer_confirmed: true, confirmed_at: new Date() });
+    if (stamped > 0) await reconcileStreetLevelHoldAfterStamp(dbh, svc);
     return stamped > 0;
   } catch (e) {
     logger.error(`[${routeTag}] office-confirm stamp failed for ${svc.id}: ${e.message}`);
@@ -967,6 +996,7 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 
 module.exports = {
   fileOwedFollowUpForStreetLevelHold,
+  reconcileStreetLevelHoldAfterStamp,
   stampBookedDispositionForStreetLevelHold,
   runOutboundReviewConfirmHook,
   runOfficeConfirmActivation,
