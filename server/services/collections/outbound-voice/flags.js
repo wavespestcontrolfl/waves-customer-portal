@@ -94,22 +94,75 @@ async function placeDisputeHold(customerId, { summary, createdBy } = {}) {
   return res;
 }
 
-/** Wrong-party answer where the answerer says the customer is unknown here. */
-async function flagWrongNumber(customerId, { detail, createdBy } = {}) {
+/**
+ * Canonical do-not-text record for a wrong number reported on a call.
+ *
+ * collections_flags.wrong_number is read only by the collections
+ * ContactPolicy; every other customer-comms rail (reminders, review asks,
+ * tech-arrived, invoice sends...) gates on messaging_suppression, the
+ * application-wide store the SMS wrong-number path writes through
+ * recordSuppression (reason 'wrong_number'). The voice lane writes the same
+ * row through the same helper, keyed on the number the call was DIALED to
+ * (recordSuppression normalizes to E.164, exactly as the SMS path does) —
+ * that number reached the stranger, whatever customers.phone says now.
+ *
+ * Never throws; resolves { ok, reason? } so the caller can tell the admin
+ * the truth when the canonical write did not land.
+ */
+async function recordWrongNumberSuppression({ phone, callLogId, capturedBody } = {}) {
+  const { toE164 } = require('../../../utils/phone');
+  const canonical = toE164(phone);
+  if (!canonical || !/^\+\d{8,15}$/.test(canonical)) return { ok: false, reason: 'no_valid_phone' };
+  try {
+    const { recordSuppression } = require('../../messaging/validators/suppression');
+    const res = await recordSuppression({
+      phone: canonical,
+      reason: 'wrong_number',
+      source: callLogId ? `collections_voice_call:${callLogId}` : 'collections_voice_call',
+      capturedBody,
+    });
+    if (!res || res.ok === false) return { ok: false, reason: 'suppression_write_failed' };
+    return { ok: true, phone: canonical };
+  } catch (err) {
+    logger.error(`[collections-flags] wrong-number suppression threw: ${err.message}`);
+    return { ok: false, reason: 'suppression_write_failed' };
+  }
+}
+
+/**
+ * Wrong-party answer where the answerer says the customer is unknown here.
+ *
+ * Two durable writes: the collections_flags row (collections lane) AND the
+ * canonical messaging_suppression row for the dialed phone (every other
+ * rail). Both are attempted independently; the returned `suppression`
+ * carries the canonical write's outcome. The admin card states only what
+ * actually landed.
+ */
+async function flagWrongNumber(customerId, { detail, createdBy, phone, callLogId, capturedBody } = {}) {
   const res = await writeFlag({
     customerId,
     flag: 'wrong_number',
     reason: detail || 'answerer reported wrong number on outbound call',
     createdBy,
   });
+  const suppression = await recordWrongNumberSuppression({ phone, callLogId, capturedBody });
+  if (!suppression.ok) {
+    logger.error(`[collections-flags] WRONG-NUMBER SUPPRESSION NOT WRITTEN customer=${customerId} callLog=${callLogId || 'n/a'}: ${suppression.reason} — other SMS rails may still text this number`);
+  }
   if (res.ok) {
-    await fileFlagCard({
+    const last4 = suppression.phone ? suppression.phone.slice(-4) : null;
+    const filed = await fileFlagCard({
       customerId,
       flag: 'wrong_number',
-      detail: 'An outbound billing follow-up call reached someone who says this number does not belong to the customer. Calls, texts and App notices to this customer are blocked pending a number review; payment emails still go to the email on file.',
+      detail: suppression.ok
+        ? `An outbound billing follow-up call reached someone who says this number does not belong to the customer. The number${last4 ? ` ending ${last4}` : ''} is now on the do-not-text list for every text and App notice, and collections calls and texts to this customer are blocked pending a number review; payment emails still go to the email on file. The old number stays suppressed after you correct the customer's phone.`
+        : 'An outbound billing follow-up call reached someone who says this number does not belong to the customer. Collections calls and texts to this customer are blocked, BUT the do-not-text record for this number could NOT be written: appointment reminders, review requests and other texts may still go to it. Add the number to the do-not-contact list or correct the customer\'s phone by hand now.',
     });
+    if (!filed && !suppression.ok) {
+      logger.error(`[collections-flags] wrong-number card ALSO failed customer=${customerId} — canonical suppression missing and no admin card`);
+    }
   }
-  return res;
+  return { ...res, suppression };
 }
 
 /** Active (unreleased) flags on a customer, oldest first. */
@@ -147,5 +200,6 @@ module.exports = {
   revokeAutomatedVoiceConsent,
   placeDisputeHold,
   flagWrongNumber,
+  recordWrongNumberSuppression,
   fileFlagCard,
 };

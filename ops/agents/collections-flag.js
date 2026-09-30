@@ -86,6 +86,9 @@ const initials = (c) => `${(c.first_name || '?')[0]}.${(c.last_name || '?')[0]}.
         const res = await releaseFlag({ customerId, flag });
         console.log(res.ok ? `released ${res.released}.` : `release FAILED: ${res.reason}`);
         if (!res.ok) process.exit(1);
+        if (flag === 'wrong_number') {
+          console.log('note: this releases the collections flag only. The wrong number\'s messaging_suppression row (reason wrong_number) is left in place on purpose — it belongs to the phone, not the customer, and is cleared only by a START text from that number.');
+        }
       }
       return;
     }

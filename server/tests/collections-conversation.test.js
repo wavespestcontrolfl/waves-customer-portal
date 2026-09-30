@@ -258,6 +258,18 @@ test('number_unknown wrong party writes the wrong_number flag', async () => {
   expect(flags.flagWrongNumber).toHaveBeenCalledWith('cust-1', expect.anything());
 });
 
+test('number_unknown wrong party hands the flag writer the DIALED phone, call id and caller words for the canonical suppression (B14)', async () => {
+  const { convo } = makeConvo();
+  mockScriptedMessages.push(toolUse('confirm_right_party', { result: 'wrong_party', number_unknown: true }));
+  await turn(convo, 'There is no Pat at this number.');
+  expect(flags.flagWrongNumber).toHaveBeenCalledWith('cust-1', expect.objectContaining({
+    phone: convo._ctx.dialedPhone || convo._ctx.customer.phone,
+    callLogId: convo._ctx.callLogId,
+    capturedBody: 'There is no Pat at this number.',
+  }));
+  expect(convo._ctx.callLogId).toBeTruthy();
+});
+
 test('verification: match on customer-supplied ZIP unlocks DISCLOSE; expected values never leak', async () => {
   const { convo } = makeConvo();
   mockScriptedMessages.push(
