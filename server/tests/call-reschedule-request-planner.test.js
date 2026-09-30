@@ -96,6 +96,7 @@ describe('reviewed request planner', () => {
     const v2 = {
       ...requestExtraction({
         agent_committed_booking: true, caller_accepted_slot: true, confirmed_start_at: CONFIRMED,
+        definite_commitment: true, relative_date_used: false, moved_appointment_relative_date_used: false,
         agreed_slot_words: { day: 'Friday September 11', hour: '4', period: 'PM' },
       }),
       confidence: { scheduling_window: 0.99 },
