@@ -165,6 +165,14 @@ describe('notifyTechVisitChange', () => {
     expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
+  test('a visit skipped by a plan pause tells its tech the stop left the route; an unskipped live row does not', async () => {
+    prime({ visit: { ...VISIT, status: 'skipped' } });
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1', previousStatus: 'confirmed' })).toEqual({ sent: true });
+    expect(mockWriteCard.mock.calls[0][1]).toMatchObject({ type: 'visit_cancelled' });
+    prime();
+    expect(await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'cancelled', technicianId: 'tech-1', previousStatus: 'confirmed' })).toEqual({ sent: false, skipped: 'stale' });
+  });
+
   test('a moved-off card on a visit that has since ended names the terminal state, never "Now with B" (the previous holder still hears it)', async () => {
     prime({ visit: { ...VISIT, status: 'completed', technician_id: ADAM_ID } });
     await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'unassigned', technicianId: 'tech-1', actorId: ADAM_ID });
