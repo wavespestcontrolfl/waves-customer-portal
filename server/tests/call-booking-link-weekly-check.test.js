@@ -14,7 +14,7 @@ jest.mock('../models/db', () => {
 
 const {
   runCallBookingLinkWeeklyCheck,
-  _private: { composeWeeklyCheck, dedupeKeyFor, reasonLabel, SUMMARY_MAX },
+  _private: { composeWeeklyCheck, windowStart, dedupeKeyFor, reasonLabel, SUMMARY_MAX },
 } = require('../services/call-booking-link-weekly-check');
 
 const NOW = new Date('2026-10-05T12:13:00.000Z'); // Monday 8:13 AM ET
@@ -153,6 +153,21 @@ describe('reasonLabel', () => {
     expect(reasonLabel('sms_declined_earlier_call')).toBe('said no texts before');
     expect(reasonLabel('triage_flag_out_of_service_area')).toBe('out of service area');
     expect(reasonLabel('some_new_reason')).toBe('some new reason');
+  });
+});
+
+// codex #5358 r3 P1: the window starts at the same ET wall clock seven
+// calendar days back, so runs either side of a DST change meet exactly.
+describe('windowStart', () => {
+  test('the Monday after the fall change reaches back to the previous run', () => {
+    const before = new Date('2026-10-26T12:13:00.000Z'); // Mon Oct 26 8:13 EDT
+    const after = new Date('2026-11-02T13:13:00.000Z'); // Mon Nov 2 8:13 EST
+    expect(windowStart(after).toISOString()).toBe(before.toISOString());
+  });
+  test('the Monday after the spring change reaches back to the previous run', () => {
+    const before = new Date('2027-03-08T13:13:00.000Z'); // Mon Mar 8 8:13 EST
+    const after = new Date('2027-03-15T12:13:00.000Z'); // Mon Mar 15 8:13 EDT
+    expect(windowStart(after).toISOString()).toBe(before.toISOString());
   });
 });
 

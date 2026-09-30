@@ -2072,6 +2072,26 @@ async function recordRetryableDecision(conn, call, entry, leadId, now, result, s
   return { sent: false, skipped: result.code || result.reason || 'send_retryable', deferred: true };
 }
 
+// The refusals a working lane is EXPECTED to hit: the person opted out, is
+// suppressed or on do-not-call, has no consent, the number cannot take a
+// text, or a customer hold applies. Any other outcome that reaches the
+// blocked branch — a provider rejection, or a blocked result from the
+// pipeline itself (CONTRACT_VIOLATION, UNKNOWN_POLICY, a failed lookup) —
+// is a lane failure the weekly check must surface (codex #5358 r3 P1).
+// Listing the healthy codes, not the broken ones, means a new pipeline code
+// fails loud instead of reading as a normal skip.
+const EXPECTED_REFUSAL_CODES = new Set([
+  'SMS_OPTED_OUT', 'PURPOSE_OPTED_OUT', 'SUPPRESSED_OPT_OUT', 'SUPPRESSED_WRONG_NUMBER',
+  'SUPPRESSED_MANUAL_DNC', 'SUPPRESSED_NON_MOBILE', 'SUPPRESSED_OTHER', 'DNC_SUPPRESSED',
+  'DELIVERY_SUPPRESSED', 'NON_MOBILE_SMS_RECIPIENT', 'NO_CONSENT_RECORD', 'NO_MARKETING_CONSENT',
+  'REASSIGNED_NUMBER_RISK', 'IDENTITY_TRUST_TOO_LOW', 'CHANNEL_EMAIL_ONLY', 'MOVE_HOLD',
+  'CALLBACK_NUMBER_HOLD', 'QUIET_HOURS_HOLD',
+]);
+
+function isExpectedRefusal(result) {
+  return result.blocked === true && EXPECTED_REFUSAL_CODES.has(result.code);
+}
+
 function blockedOutcomeReason(result) {
   if (result.blocked) return result.code || result.reason || 'policy_block';
   return result.code || result.reason || 'provider_failed';
@@ -2092,10 +2112,10 @@ async function recordSendOutcome(conn, call, entry, leadId, now, result) {
   // Twilio terminal rejection, not merely a pre-dispatch policy refusal) —
   // see clearDispatchMarkers' own doc comment for why this is unconditional.
   await clearDispatchMarkers(call);
-  // A policy block (opt-out, suppression) is a correct skip; anything else
-  // is a delivery that failed. `failed` lets the weekly check tell the two
-  // apart without knowing every provider code.
-  return skip(blockedOutcomeReason(result), result.blocked ? {} : { failed: true });
+  // An expected refusal (opt-out, suppression, no consent) is a correct
+  // skip; anything else is a failure. `failed` lets the weekly check tell
+  // the two apart without knowing every code.
+  return skip(blockedOutcomeReason(result), isExpectedRefusal(result) ? {} : { failed: true });
 }
 
 // A 'claimed' row a whole sweep tick failed to bring to a terminal status
@@ -2375,7 +2395,7 @@ module.exports = {
   // dispatchClaimedCall alone (its own pre-send deadline check already
   // gates the identical (entry, now) pair) — a direct reach-in test-only
   // export, same convention as the rest of this bag.
-  _private: {
+  _private: { isExpectedRefusal,
     leadIdOf, extractionOf, parseMetadata, bookedSinceCall, linkSentRecently, recordRetryableDecision, smsDeclinedOnEarlierCall,
   },
 };

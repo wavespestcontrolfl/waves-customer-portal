@@ -20,7 +20,7 @@ const logger = require('./logger');
 const db = require('../models/db');
 const { deliverOpsDigest } = require('./ops-digest');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
-const { etWeekStart } = require('../utils/datetime-et');
+const { etWeekStart, addETDaysAtWallClock } = require('../utils/datetime-et');
 const { isEnabled } = require('../config/feature-gates');
 const { GATE, METADATA_KEY, activationBoundary } = require('./call-booking-link-text');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
@@ -85,8 +85,11 @@ function reasonLabel(reason) {
 // outcomes by the time they happened.
 const LOOKBACK_EXTRA_MS = 3 * 24 * 60 * 60 * 1000;
 
+// Same Eastern wall-clock time seven calendar days back, so consecutive
+// Monday runs cover back-to-back windows across a DST change (a flat 168h
+// would drop or double-count an hour; codex #5358 r3 P1).
 function windowStart(now) {
-  return new Date(now.getTime() - WINDOW_DAYS * 24 * 60 * 60 * 1000);
+  return addETDaysAtWallClock(now, -WINDOW_DAYS);
 }
 
 async function loadWeek(now = new Date()) {
@@ -321,5 +324,5 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
 
 module.exports = {
   runCallBookingLinkWeeklyCheck,
-  _private: { composeWeeklyCheck, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
+  _private: { composeWeeklyCheck, windowStart, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
 };

@@ -3129,3 +3129,21 @@ describe('recoverStaleClaims', () => {
     await expect(recoverStaleClaims(conn, NOW)).resolves.toBe(0);
   });
 });
+
+// codex #5358 r3 P1: only a known refusal is a healthy skip. A blocked
+// result from the pipeline itself, or a provider rejection, is a failure
+// the weekly check must surface.
+describe('isExpectedRefusal', () => {
+  const { isExpectedRefusal } = _private;
+  test('opt-outs, suppression and missing consent are expected refusals', () => {
+    for (const code of ['SMS_OPTED_OUT', 'SUPPRESSED_MANUAL_DNC', 'NO_CONSENT_RECORD', 'NON_MOBILE_SMS_RECIPIENT']) {
+      expect(isExpectedRefusal({ sent: false, blocked: true, code })).toBe(true);
+    }
+  });
+  test('pipeline and provider failures are not', () => {
+    for (const code of ['CONTRACT_VIOLATION', 'UNKNOWN_POLICY', 'CONSENT_LOOKUP_FAILED', 'SOME_NEW_CODE']) {
+      expect(isExpectedRefusal({ sent: false, blocked: true, code })).toBe(false);
+    }
+    expect(isExpectedRefusal({ sent: false, code: 'SMS_OPTED_OUT' })).toBe(false);
+  });
+});
