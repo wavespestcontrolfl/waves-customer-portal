@@ -19,7 +19,6 @@ const {
   streetLevelVisitLink,
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
-  refileStreetLevelReviewCard,
 } = CallRecordingProcessor._test;
 
 const GATE = 'GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL';
@@ -670,59 +669,39 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(s).toContain('link: streetLevelVisitLink(visitId, visitDate),');
   });
 
-  test('r10: an open street-level hold is call-level review state (bridgeNeedsConfirmation -> review_status, lead needs_confirmation)', () => {
+  test('r10/r12: an open street-level hold is call-level review state, raised only once the booking became the hold', () => {
     const s = src();
+    // Not at decision time...
     const decide = s.indexOf('v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });');
-    const push = s.indexOf("bridgeNeedsConfirmation.push('street_level_address_review');", decide);
-    expect(push).toBeGreaterThan(decide);
-    expect(push - decide).toBeLessThan(900);
-    expect(s.slice(decide, push)).toContain('if (v2StreetLevelHold && !bridgeNeedsConfirmation.includes(\'street_level_address_review\'))');
-    // Pushed BEFORE the bridge is consumed by the lead's needs_confirmation merge and the triage notes.
-    expect(push).toBeLessThan(s.indexOf('const mergedNeedsConfirmation = mergeNeedsConfirmation(priorNeedsConfirmation, bridgeNeedsConfirmation);'));
-    expect(push).toBeLessThan(s.indexOf("triageNotes.push(`⚠ CONFIRM BEFORE DISPATCH:"));
-    // And it reads as a plain instruction on the lead's activity.
+    expect(decide).toBeGreaterThan(0);
+    expect(s.slice(decide, decide + 700)).not.toContain('street_level_address_review');
+    // ...but at booking time, inside the branch that sets pendingOfficeReview.
+    const branch = s.indexOf('if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {\n                pendingOfficeReview = true;');
+    expect(branch).toBeGreaterThan(0);
+    const push = s.indexOf("bridgeNeedsConfirmation.push('street_level_address_review');", branch);
+    expect(push).toBeGreaterThan(branch);
+    expect(push - branch).toBeLessThan(900);
+    // No lead artifact is written with it before the booking: the only writer is that push, and the
+    // lead's ai_triage activity is refreshed by the existing late-hold path (a length comparison).
+    expect(s.split("'street_level_address_review'").length - 1).toBeLessThanOrEqual(3);
+    expect(push).toBeGreaterThan(s.indexOf('bridgeConfirmationsAtTriageWrite = [...bridgeNeedsConfirmation];'));
+    expect(push).toBeLessThan(s.indexOf('bridgeNeedsConfirmation.length > bridgeConfirmationsAtTriageWrite.length'));
+    // It reads as a plain instruction on the lead's activity.
     expect(s).toMatch(/street_level_address_review: 'web-form address: Google matched only the street/);
-    // ...and dropped again before finalization when the booking never became the hold (no card carries it).
-    const drop = s.indexOf("if (!pendingOfficeReview) {\n      const staleAt = bridgeNeedsConfirmation.indexOf('street_level_address_review');");
-    expect(drop).toBeGreaterThan(push);
-    expect(drop).toBeLessThan(s.indexOf('const liveLeadConversation = isLiveLeadConversation({', drop));
-    // Gate off: buildStreetLevelHold is null (no knownCaller.onFileStreetLevel), so nothing is pushed.
+    // Gate off: buildStreetLevelHold is null (no knownCaller.onFileStreetLevel), so no hold exists.
     expect(buildStreetLevelHold({ knownCaller: { addressLine1: '1 X St' }, routingResult: { usesOnFileAddress: true } })).toBeNull();
   });
 
-  test('r11 recording replacement: the superseded card is re-filed open on the reprocess (same payload, follow_up_plan included); an open card stands', async () => {
-    const visit = { id: 'v-1', source_call_log_id: 'call-1', source_action: 'voice_agent', status: 'pending', customer_confirmed: false };
-    const plan = { scheduled_date: '2026-10-19', window_start: '09:00' };
-    const make = (card) => {
-      const inserts = [];
-      const q = (table) => {
-        const b = {
-          where() { return b; }, whereRaw() { return b; }, orderBy() { return b; }, whereIn() { return b; }, count() { return b; },
-          first: async () => (table === 'triage_items' && b._count ? { n: 1 } : card),
-          insert(row) { inserts.push(row); return b; },
-          onConflict() { return b; }, ignore() { return b; },
-          returning: async () => [{ id: 'new-card' }],
-          update: async () => 1,
-        };
-        return b;
-      };
-      q.raw = async () => ({ rows: [{}] });
-      q.transaction = async (fn) => fn(q);
-      return { conn: q, inserts };
-    };
-    const superseded = { id: 't-old', status: 'resolved', summary: 'Web-form address x', payload: { origin: 'voice_agent', street_level_address: true, scheduled_service_id: 'v-1', lead_id: 'lead-1', follow_up_plan: plan } };
-    const a = make(superseded);
-    expect(await refileStreetLevelReviewCard(visit, 'call-1', a.conn)).toBe(true);
-    expect(a.inserts).toHaveLength(1);
-    expect(a.inserts[0].reason_code).toBe('outbound_booking_review');
-    expect(JSON.stringify(a.inserts[0].payload)).toContain('follow_up_plan');
-    expect(JSON.stringify(a.inserts[0].payload)).toContain('lead-1');
-    // An open card stands; no card at all files nothing.
-    const b = make({ ...superseded, status: 'open' });
-    expect(await refileStreetLevelReviewCard(visit, 'call-1', b.conn)).toBe(false);
-    expect(b.inserts).toHaveLength(0);
-    expect(await refileStreetLevelReviewCard(visit, 'call-1', make(undefined).conn)).toBe(false);
-    // Wired on the reuse path, right where the hold is recognized.
-    expect(src()).toContain('await refileStreetLevelReviewCard(svc, call.id);');
+  test('r12 recording replacement: the street-level review card survives the supersede sweep (both sites share one predicate); nothing re-files it', () => {
+    const gates = require('../services/call-routing-gates');
+    expect(gates.SUPERSEDE_KEPT_CARD_SQL).toBe("NOT (reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true')");
+    for (const f of ['../routes/twilio-voice-webhook.js', '../routes/admin-call-recordings.js']) {
+      const s = read(f);
+      const at = s.indexOf('.whereNotIn(\'reason_code\', SUPERSEDE_KEPT_REASON_CODES)');
+      expect(at).toBeGreaterThan(0);
+      expect(s.slice(at, at + 200)).toContain('.whereRaw(SUPERSEDE_KEPT_CARD_SQL)');
+    }
+    const proc = src();
+    expect(proc).not.toContain('refileStreetLevelReviewCard');
   });
 });

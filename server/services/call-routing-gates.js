@@ -953,7 +953,16 @@ const SUPERSEDE_KEPT_REASON_CODES = Object.freeze([
   'email_bounce_reverify',
 ]);
 
+// Owner ruling 2026-09-30: a street-level address hold's review card (the
+// outbound_booking_review card whose payload.street_level_address is set) also
+// survives a recording swap. It lives exactly as long as its visit is
+// unconfirmed — confirm, correct or cancel resolve it — so a replacement that no
+// longer books never strands the pending visit without its task. Two-valued
+// (COALESCE) so an ordinary card, or one with no payload, still retires.
+const SUPERSEDE_KEPT_CARD_SQL = "NOT (reason_code = 'outbound_booking_review' AND COALESCE(payload->>'street_level_address', '') = 'true')";
+
 module.exports = {
+  SUPERSEDE_KEPT_CARD_SQL,
   excludeReviewedDecisions,
   updateUnreviewedRouteDecisions,
   withLockedRouteDecisions,

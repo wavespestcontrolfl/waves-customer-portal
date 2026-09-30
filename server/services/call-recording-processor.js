@@ -1757,37 +1757,6 @@ async function isStreetLevelHoldRow(conn, row) {
     return true;
   }
 }
-// Re-opens a street-level hold's review card when a recording replacement
-// superseded it: copies the latest card for the visit (payload, summary, severity)
-// as a fresh open card. No-op when an open card stands. Best-effort: the visit,
-// the bell and the durable signal (the resolved card) all survive a miss.
-async function refileStreetLevelReviewCard(visit, callLogId, conn = db) {
-  try {
-    const card = await findStreetLevelHoldCard(conn, { callLogId: visit.source_call_log_id, visitId: visit.id });
-    if (!card || ['open', 'in_progress'].includes(card.status)) return false;
-    const { buildTriageItem } = require('./call-routing-gates');
-    const fresh = buildTriageItem({
-      callLogId: visit.source_call_log_id || callLogId,
-      flag: 'outbound_booking_review',
-      extraction: { meta: { call_summary: card.summary || null } },
-      severity: 'advisory',
-      extraPayload: card.payload,
-    });
-    const inserted = await conn.transaction(async (trx) => {
-      await lockTriageCall(trx, fresh.call_log_id);
-      const rows = await trx('triage_items')
-        .insert(fresh)
-        .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore()
-        .returning('id');
-      if (rows.length) await syncCallReviewStatus(trx, fresh.call_log_id);
-      return rows.length > 0;
-    });
-    return inserted;
-  } catch (err) {
-    logger.warn(`[call-proc] street-level review card re-file failed for visit ${visit?.id}: ${err.code || err.name || 'error'}`);
-    return false;
-  }
-}
 function dateOnlyISO(v) {
   if (!v) return null;
   if (v instanceof Date) return v.toISOString().slice(0, 10);
@@ -10822,12 +10791,6 @@ const CallRecordingProcessor = {
             // existing office-review pending path — decided here, applied at the
             // insert, announced by one admin bell after commit.
             v2StreetLevelHold = buildStreetLevelHold({ knownCaller, routingResult });
-            // The open review is call-level state too: without a reason here the call
-            // reads fully processed (review_status, the lead's needs_confirmation,
-            // review_open metrics) while its address hold waits for the office.
-            if (v2StreetLevelHold && !bridgeNeedsConfirmation.includes('street_level_address_review')) {
-              bridgeNeedsConfirmation.push('street_level_address_review');
-            }
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
             // them as ADVISORY review items so the office confirms the field
@@ -17900,10 +17863,12 @@ const CallRecordingProcessor = {
               // voice agent) keeps its exact prior behavior.
               if (isPendingOutboundReviewBooking(svc) && await isStreetLevelHoldRow(db, svc)) {
                 pendingOfficeReview = true;
-                // A recording replacement / adoption supersedes (resolves) the review
-                // card while the visit stays pending; the reprocess reuses the visit,
-                // so put the office's card back (same payload, follow_up_plan included).
-                await refileStreetLevelReviewCard(svc, call.id);
+                // The open review is call-level state too, raised only now that the
+                // booking really became the hold (so a booking that never does can
+                // leave nothing stale on the call or the lead). Like every late
+                // scheduling hold, it reaches review_status and, through the late
+                // refresh below, the lead's ai_triage activity.
+                if (!bridgeNeedsConfirmation.includes('street_level_address_review')) bridgeNeedsConfirmation.push('street_level_address_review');
                 if (v2StreetLevelHold) {
                   try {
                     const alert = buildStreetLevelHoldAlert({
@@ -20268,14 +20233,6 @@ const CallRecordingProcessor = {
       }).catch((e) => logger.warn(`[call-proc] late-scheduling-hold lead-activity refresh failed for ${maskSid(callSid)}: ${e.message}`));
     }
 
-    // The street-level review reason was raised when the hold was DECIDED; if the
-    // booking never became that hold (the on-file authority did not bind, or the
-    // booking was skipped or failed) no card carries it, so it must not keep the
-    // call's review state open.
-    if (!pendingOfficeReview) {
-      const staleAt = bridgeNeedsConfirmation.indexOf('street_level_address_review');
-      if (staleAt !== -1) bridgeNeedsConfirmation.splice(staleAt, 1);
-    }
     const liveLeadConversation = isLiveLeadConversation({
       call, extracted, leadId, finalStatus, nonLeadCall, voicemailLeadPath, transcription,
     });
@@ -21630,7 +21587,6 @@ CallRecordingProcessor._test = {
   streetLevelVisitLink,
   streetLevelVisitWhen,
   isStreetLevelHoldRow,
-  refileStreetLevelReviewCard,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,
