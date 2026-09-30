@@ -839,10 +839,30 @@ const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arr
 function bodyClaimsCompletedArrival(text) {
   return COMPLETED_ARRIVAL_RE.test(String(text || ''));
 }
-// Does the body talk about the tech arriving at all? The send-time freshness
-// check uses this as a backstop for ETA wording the claim parser can't read.
+// Does the body AFFIRMATIVELY say the tech is on the way? (Codex pre-push P1,
+// round 14, PR #5334.) The send-time freshness check treats such a body as an
+// en-route STATUS claim and rechecks it against the live tracker state — it
+// used to fire on any strong arrival TRIGGER word (arriv*, left, …), which
+// also matched non-claims: "I'll confirm your arrival window within the
+// hour", "Your arrival window is 2 hours", "You have 2 visits left this
+// year" then blocked valid replies once the visit was on site. Now only an
+// affirmative status phrase counts — on the way / en route / heading over /
+// has left for you / will be there / is close or nearby / is arriving /
+// pulling up / getting there — and never one that is
+//   - a conditional ("I'll text you once he's on the way", "when the tech
+//     is en route"), or
+//   - part of a scheduling window (isWindowQuantity).
+const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
+const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
 function bodyMentionsArrival(text) {
-  return STRONG_ARRIVAL_TRIGGER_RE.test(String(text || ''));
+  const str = String(text || '');
+  for (const m of str.matchAll(new RegExp(EN_ROUTE_STATUS_RE.source, EN_ROUTE_STATUS_RE.flags))) {
+    const before = str.slice(Math.max(0, m.index - 60), m.index);
+    if (CONDITIONAL_BEFORE_RE.test(before)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    return true;
+  }
+  return false;
 }
 // Vague/approximate duration wording (Codex round-5 P2, PR #5334): a
 // reviewer or the model rewriting an exact "20 minutes away" claim as "half

@@ -37,7 +37,7 @@ const {
 } = require('../services/context-aggregator');
 const {
   buildFactsBlock, buildSystemPrompt, validateLiveEtaMinutes, findEtaMinutesClaims,
-  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, bodyHasTimedArrivalPhrase,
+  replyClaimsEtaMinutes, buildLiveEtaSnapshot, normalizeTimeQuantities, normalizeNumberWords, bodyHasTimedArrivalPhrase, bodyMentionsArrival,
 } = require('../services/sms-shadow-drafter');
 const { buildVerifierSystemPrompt } = require('../services/sms-draft-verifier');
 
@@ -1426,6 +1426,23 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
   test('gate off: never runs (byte-identical to before)', () => {
     delete process.env[GATE];
     expect(validateLiveEtaMinutes({ reply: 'The tech should make it in 20.', factsBlock: 'LIVE ETA: about 9 minutes' })).toEqual({ ok: true, violations: [] });
+  });
+});
+
+// Codex pre-push P1 (round 14, PR #5334): bodyMentionsArrival is the
+// AFFIRMATIVE en-route status predicate, not a broad arrival-word trigger.
+describe('bodyMentionsArrival — affirmative en-route status only (round 14 P1)', () => {
+  test.each([
+    'The tech is on the way.', 'Your tech is en route.', 'The tech has left for your place.', 'The tech is close.',
+    'He will be there shortly.', 'He is heading over now.', 'The tech is arriving in 2 minutes.',
+  ])('%p is an en-route status claim', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(true);
+  });
+  test.each([
+    "I'll confirm your arrival window within the hour.", 'Your arrival window is 2 hours.', 'You have 2 visits left this year.',
+    "I'll text you once he's on the way.", 'If the tech is en route we will let you know.',
+  ])('%p is not', (body) => {
+    expect(bodyMentionsArrival(body)).toBe(false);
   });
 });
 

@@ -1137,3 +1137,47 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
     });
   });
 });
+
+// Codex pre-push P1 (round 14, PR #5334): the status fallback needs an
+// AFFIRMATIVE en-route claim, not a broad arrival trigger word — non-claims
+// like "arrival window" / "visits left" must not be rechecked against the
+// tracker (and blocked once the visit is on site or done).
+describe('round 14 P1: status-only recheck requires an affirmative en-route claim', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    for (const name of ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures']) {
+      drafter[name].mockReset().mockImplementation(real[name]);
+    }
+  });
+  const snapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
+  const rowsBy = {
+    en_route: [{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }],
+    on_site: [{ id: 'svc-1', status: 'on_site', track_state: 'on_property' }],
+    completed: [{ id: 'svc-1', status: 'completed', track_state: 'complete' }],
+  };
+  const run = (outgoingBody, rows) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody, now: NOW, dbh: fakeDb(rows) });
+
+  test.each([
+    "I'll confirm your arrival window within the hour.",
+    'Your arrival window is 2 hours.',
+    'You have 2 visits left this year.',
+    "I'll text you once he's on the way.",
+    'Your arrival window opens at 9.',
+  ])('%p is not a status claim — null on en_route, on_site and completed rows alike', async (body) => {
+    for (const rows of Object.values(rowsBy)) expect(await run(body, rows)).toBeNull();
+  });
+
+  test.each([
+    'The tech is on the way.',
+    'Your tech is en route.',
+    'The tech has left for your place.',
+    'The tech is close.',
+    'He will be there.',
+    'He is heading over now.',
+  ])('%p is still a status claim — passes en_route, blocked once on site or done', async (body) => {
+    expect(await run(body, rowsBy.en_route)).toBeNull();
+    expect(await run(body, rowsBy.on_site)).toBe('eta_claim_no_longer_en_route');
+    expect(await run(body, rowsBy.completed)).toBe('eta_claim_no_longer_en_route');
+  });
+});
