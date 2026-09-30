@@ -718,12 +718,12 @@ describe('gate on — a new visit is offered through the /book funnel picker', (
     expect(r.openTimesSnapshot.lookup).toEqual(expect.objectContaining({ source: 'book', serviceKey: 'lawn_care' }));
   });
 
-  test('engine_default (no service known) → withheld: /book books a named service only; zone finder NOT used', async () => {
+  test('engine_default (no service known) → general pest control through /book (owner 2026-09-30); zone finder NOT used', async () => {
     const drafter = freshDrafter();
-    const r = await drafter.generateGroundedDraft(argsFor(makeClient(plainReply()), baseContext([], [])));
-    expect(book.availabilityForExistingCustomer).not.toHaveBeenCalled();
+    const r = await drafter.generateGroundedDraft(argsFor(makeClient(OFFER_REPLY()), baseContext([], [])));
+    expect(book.availabilityForExistingCustomer).toHaveBeenCalledWith({ customerId: 'cust-9', serviceKey: 'pest_control' });
     expect(oldFinder).not.toHaveBeenCalled();
-    expect(r.openTimesSnapshot).toBeNull();
+    expect(r.openTimesSnapshot.lookup).toEqual(expect.objectContaining({ source: 'book', serviceKey: 'pest_control' }));
   });
 
   // The explicit funnel table (sms-book-funnel-map.js), not a keyword guess.

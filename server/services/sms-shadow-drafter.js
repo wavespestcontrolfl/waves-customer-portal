@@ -426,6 +426,9 @@ async function bookFunnelKeyFor(identity) {
   try {
     const map = require('./sms-book-funnel-map');
     if (identity?.serviceKey) return map.funnelKeyForCatalogKey(identity.serviceKey);
+    // Owner ruling 2026-09-30: a brand-new customer who names no service is
+    // offered general pest control times (the zone finder's old default).
+    if (identity?.reason === 'engine_default') return 'pest_control';
     const label = String(identity?.serviceType || '').trim();
     if (!label) return '';
     const byName = map.funnelKeyForServiceName(label);
