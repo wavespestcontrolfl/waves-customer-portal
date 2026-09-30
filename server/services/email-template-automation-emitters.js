@@ -71,6 +71,20 @@ function safeErrorText(err) {
 const RECIPIENT_EMAIL_REQUIRED_CODE = 'AUTOMATION_RECIPIENT_EMAIL_REQUIRED';
 function isDeterministicAutomationError(err) {
   if (!err) return false;
+  // Per-automation isolation (pre-live fix): processTrigger visits EVERY
+  // automation on the trigger before rethrowing, tagging the error with each
+  // automation's own failure. A failure of an automation's own CONFIGURATION
+  // (blank/invalid idempotency template, a key variable the payload never
+  // provides) is fixable in the admin editor, and the marker is SHARED by
+  // every automation on the event — settling it 'unrecoverable' on the first
+  // such 400 would leave the fixed automation (and any that failed
+  // transiently) unable to ever replay the event. So it stays 'pending' for
+  // the bounded retry budget (MAX_INTENT_ATTEMPTS, then the 24h shelf life);
+  // only a failure set made ENTIRELY of the permanent recipient error (a
+  // payload fact no automation edit can change) terminalizes immediately.
+  if (Array.isArray(err.automationFailures) && err.automationFailures.length) {
+    return err.automationFailures.every((f) => f && f.code === RECIPIENT_EMAIL_REQUIRED_CODE);
+  }
   return err.code === RECIPIENT_EMAIL_REQUIRED_CODE || Number(err.status) === 400;
 }
 
@@ -135,7 +149,10 @@ async function emitTrigger(eventKey, args, intentId = null) {
     await settleIntent(intentId, { status: 'processed' });
     return result;
   } catch (err) {
-    const errorText = safeErrorText(err);
+    const failedKeys = Array.isArray(err && err.automationFailures)
+      ? err.automationFailures.map((f) => f.automation_key).filter(Boolean)
+      : [];
+    const errorText = safeErrorText(err) + (failedKeys.length ? ` [automations: ${failedKeys.join(', ')}]` : '');
     if (isDeterministicAutomationError(err)) {
       await settleIntent(intentId, { status: 'unrecoverable', last_error: errorText, attempts: db.raw('attempts + 1') });
     } else {

@@ -361,4 +361,18 @@ describe('payment_failed durable notification enqueue', () => {
       customerInitiated: true,
     }));
   });
+
+  test('the failure email is handed the failed intent and Stripe\'s event time (card label + attempt date, GATE_BILLING_EMAIL_DETAILS)', async () => {
+    const lifecycleEmail = require('../services/payment-lifecycle-email');
+    const cardFailure = achBouncePI({ metadata: {}, last_payment_error: {
+      message: 'declined', code: 'card_declined', payment_method: { type: 'card', card: { brand: 'visa', last4: '4242' } },
+    } });
+    await handlePaymentIntentFailed(cardFailure, 'evt_card', 1790000000);
+    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenLastCalledWith(expect.objectContaining({
+      paymentIntent: cardFailure,
+      failedAt: new Date(1790000000 * 1000),
+    }));
+    await handlePaymentIntentFailed(cardFailure, 'evt_card_no_time');
+    expect(lifecycleEmail.sendPaymentFailed).toHaveBeenLastCalledWith(expect.objectContaining({ failedAt: null }));
+  });
 });

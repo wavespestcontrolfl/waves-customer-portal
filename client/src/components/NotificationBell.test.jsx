@@ -732,3 +732,62 @@ describe('NotificationBell "Full report" link (codex r3 P0 on #5236)', () => {
     }
   });
 });
+
+describe('NotificationBell admin "Show full text" (brevity guard detail)', () => {
+  const FULL = 'Follow-up promises overdue:\n• first item nobody answered\n• second item nobody answered';
+  const rows = () => ([
+    { id: 'f1', category: 'follow_up', title: 'Follow-ups overdue', body: 'Follow-up promises overdue…', detail: FULL,
+      created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
+    { id: 'f2', category: 'ops_digest', title: 'Comms digest', body: 'Short.', detail: 'Digest report text',
+      metadata: { kind: 'ACT' }, created_at: new Date().toISOString(), read_at: null, link: '/admin/communications' },
+    { id: 'f3', category: 'follow_up', title: 'Short alert', body: 'Short body.', detail: null,
+      created_at: new Date().toISOString(), read_at: null, link: null },
+  ]);
+  const setup = () => {
+    global.fetch = vi.fn(async (url) => {
+      if (String(url).includes('/unread-count')) return jsonResponse({ count: 3 });
+      if (String(url).includes('/read')) return jsonResponse({ success: true });
+      return jsonResponse({ notifications: rows() });
+    });
+  };
+
+  it('is offered only on a non-digest admin row that has a detail', () => {
+    const { fullTextFor } = _test;
+    const [long, digest, short] = rows();
+    expect(fullTextFor(long, 'admin')).toBe(FULL);
+    expect(fullTextFor(digest, 'admin')).toBeNull();
+    expect(fullTextFor(short, 'admin')).toBeNull();
+    expect(fullTextFor(long, 'customer')).toBeNull();
+  });
+
+  it.each([['desktop', 1280], ['phone', 390]])('expands and collapses the full text without navigating or marking read (%s)', async (_label, width) => {
+    const previousWidth = window.innerWidth;
+    const previousLocation = window.location;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+    setup();
+    const hrefSpy = vi.fn();
+    try {
+      render(<NotificationBell type="admin" />);
+      fireEvent.click(screen.getByRole('button', { name: /notifications/i }));
+      const toggle = await screen.findByRole('button', { name: 'Show full text' });
+      // One toggle only: the digest row keeps "Full report", the short row has none.
+      expect(screen.getAllByRole('button', { name: 'Show full text' })).toHaveLength(1);
+      expect(screen.getByRole('button', { name: 'Full report' })).toBeInTheDocument();
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...window.location, set href(v) { hrefSpy(v); } },
+      });
+      fireEvent.click(toggle);
+      const text = await screen.findByText((_c, el) => el?.textContent === FULL && el.style.whiteSpace === 'pre-wrap');
+      expect(text).toBeInTheDocument();
+      fireEvent.click(text);
+      fireEvent.click(screen.getByRole('button', { name: 'Hide full text' }));
+      expect(screen.queryByText((_c, el) => el?.textContent === FULL && el.style.whiteSpace === 'pre-wrap')).toBeNull();
+      expect(hrefSpy).not.toHaveBeenCalled();
+      expect(global.fetch.mock.calls.some(([url]) => String(url).includes('/read'))).toBe(false);
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: previousWidth });
+      Object.defineProperty(window, 'location', { configurable: true, value: previousLocation });
+    }
+  });
+});

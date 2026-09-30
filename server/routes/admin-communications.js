@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
@@ -865,7 +866,7 @@ router.post('/sms', async (req, res, next) => {
         const ReviewService = require('../services/review-request');
         const rr = await db('review_requests')
           .where({ id: String(reviewRequestId) })
-          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token');
+          .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token', 'service_record_id', 'created_at');
         if (!rr || rr.triggered_by !== 'auto_inline') {
           return abortUnsent(409, 'The inserted review link could not be verified — remove it from the message and re-insert.');
         }
@@ -926,6 +927,9 @@ router.post('/sms', async (req, res, next) => {
             if (!consent.allowed) return { consent };
             const gate = await ReviewService.checkUnscheduledAskGates(rr.customer_id);
             if (!gate.allowed) return { gate };
+            // The send-time click guard every review sender uses: a customer who
+            // tapped a tracked review link since this draft's anchor is not asked again.
+            if (await ClickGuard.askSuppressedByClick(rr)) return { clicked: true };
             // Both stamps the owed email leg on the claim itself, so the
             // Quick Links retry path has persisted evidence this ask asked
             // for an email (GH Codex #3856 r8 P1).
@@ -994,6 +998,9 @@ router.post('/sms', async (req, res, next) => {
         }
         if (seam.consent) {
           return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
+        }
+        if (seam.clicked) {
+          return abortUnsent(409, `${ClickGuard.REVIEW_LINK_CLICKED_REASON} Remove the review link before sending.`);
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
@@ -2818,6 +2825,7 @@ const EMAIL_LEG_REASONS = {
   // Post-dispatch throw: the provider MAY hold it — never "try again".
   email_uncertain: "The review email may or may not have gone out — check the customer's email log before sending it again",
   already_reviewed: 'This customer is already marked as having left a review',
+  review_link_clicked: ClickGuard.REVIEW_LINK_CLICKED_REASON,
   no_customer: 'That customer could not be found',
   // The email WENT but the row could not be stamped (twice): the ask is
   // invisible to the cooldown, so the operator must not click again.
@@ -2901,7 +2909,15 @@ async function emailReviewAskNow(primaryId) {
     return { status: 409, body: { error: "Could not check this customer's pending review email — try again", outcome: 'error', reason: 'owed_lookup_failed' } };
   }
   if (awaiting?.id) {
-    const copy = await ReviewService.sendInlineEmailCopy(awaiting.id);
+    // Under the same review-send lock as the ordinary Both delivery, so a tap
+    // on the delivered text cannot land between the click check inside
+    // sendInlineEmailCopy and the email provider call.
+    const { runExclusive, wasLockSkipped } = require('../utils/cron-lock');
+    const copy = await runExclusive(`review-send:${primaryId}`, () => ReviewService.sendInlineEmailCopy(awaiting.id),
+      { recordHealth: false, waitForSlot: false });
+    if (wasLockSkipped(copy)) {
+      return { status: 409, body: { error: 'A review request to this customer is already being sent. Try again in a moment.', outcome: 'blocked', code: 'REVIEW_SEND_BUSY' } };
+    }
     if (copy?.sent) {
       const firstName = await emailContactFirstName(primaryId);
       return { status: 200, body: { kind: 'review_request', channel: 'email', sent: true, requestId: awaiting.id, firstName, retriedInline: true } };

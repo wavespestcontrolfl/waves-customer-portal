@@ -33,7 +33,7 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
   api.getNextService.mockResolvedValue({ next: null });
   api.getServices.mockResolvedValue({ services: [] });
-  api.getPendingSatisfaction.mockResolvedValue({ pending: [] });
+  api.getGoogleReviewCard.mockResolvedValue({ card: null });
   api.getTodayTracker.mockResolvedValue({ tracker: null });
   api.getActiveTracker.mockResolvedValue({ tracker: null });
   api.getPropertyPreferences.mockResolvedValue({ preferences: {} });
@@ -46,19 +46,19 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe('Home under a saved-property selection', () => {
-  // The satisfaction prompt is a per-house read: a prompt served under
+  // The Google review card is a per-house read: a card served under
   // another house than Home shows (the echo disagrees) is dropped and the
   // selection re-read (GitHub codex #4207 r11 P2).
-  it('drops a satisfaction prompt echoed under another house and re-reads the selection', async () => {
+  it('drops a review card echoed under another house and re-reads the selection', async () => {
     const refresh = vi.fn();
-    api.getPendingSatisfaction.mockResolvedValue({ pending: [{ id: 'rec-1', service_type: 'Quarterly Pest Control', service_date: '2026-09-01' }], propertyScope: { enabled: true, propertyId: 'pa', closed: false } });
+    api.getGoogleReviewCard.mockResolvedValue({ card: { serviceRecordId: 'rec-1', serviceType: 'Quarterly Pest Control', technicianName: null, reviewLink: 'https://g.page/r/test/review', officeName: 'Bradenton' }, propertyScope: { enabled: true, propertyId: 'pa', closed: false } });
     render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} onSavedScopeUnavailable={refresh} />);
-    await waitFor(() => expect(api.getPendingSatisfaction).toHaveBeenCalled());
+    await waitFor(() => expect(api.getGoogleReviewCard).toHaveBeenCalled());
     await waitFor(() => expect(refresh).toHaveBeenCalled());
     expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
   });
-  it('asks the satisfaction prompt when the echo matches the shown house', async () => {
-    api.getPendingSatisfaction.mockResolvedValue({ pending: [{ id: 'rec-1', service_type: 'Quarterly Pest Control', service_date: '2026-09-01' }], propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
+  it('shows the review card when the echo matches the shown house', async () => {
+    api.getGoogleReviewCard.mockResolvedValue({ card: { serviceRecordId: 'rec-1', serviceType: 'Quarterly Pest Control', technicianName: null, reviewLink: 'https://g.page/r/test/review', officeName: 'Bradenton' }, propertyScope: { enabled: true, propertyId: 'pb', closed: false } });
     render(<DashboardTab customer={customer} properties={[primary, secondary]} activePropertyId="cust-1:pb" onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
     expect(await screen.findByText('Visit Feedback')).toBeInTheDocument();
   });

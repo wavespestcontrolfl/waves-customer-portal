@@ -110,6 +110,7 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
     ...built,
     title: cleanTitle(redactSensitiveText(built.title || 'Notification')),
     body: built.body === null || built.body === undefined ? built.body : cleanBody(redactSensitiveText(built.body)),
+    ...(built.detail ? { detail: cleanBody(redactSensitiveText(built.detail)) } : {}),
   };
 }
 
@@ -293,6 +294,9 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: `SMS from ${p.fromName || (p.fromPhone ? maskPhone(p.fromPhone) : 'unknown')}`,
       body: redactSensitiveText(p.message || '').slice(0, 140),
+      // The whole text, for the bell's "Show full text": the 140-character
+      // body above (also the push text) used to be all the bell ever kept.
+      ...(String(p.message || '').length > 140 ? { detail: redactSensitiveText(p.message).slice(0, 1600) } : {}),
       // threadId is the customer id (see twilio-webhook). CommunicationsPageV2
       // reads ?thread=<customerId> and opens that customer's SMS conversation.
       link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
@@ -1097,7 +1101,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
             trigger.category,
             built.title,
             built.body,
-            { link: built.link, metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
+            { link: built.link, ...(built.detail ? { detail: built.detail } : {}), metadata: { triggerKey, priority: trigger.priority, payload: safePayload },
               ...(dedupeKey ? { dedupeKey } : {}),
               ...(shouldContinue ? { shouldContinue } : {}),
               ...(relayFailureCall ? { relayFailureCall, dedupeKey: `relay-failure:${relayFailureCall.callSid}` } : {}) }

@@ -106,7 +106,8 @@ describe('a qualified domain with a free signup-lane path', () => {
     expect(db._tables.seo_link_acquisition_paths[0].authority_last_decided).toBe('OWNER_FREE');
     expect(domainState(db)).toBe('qualified'); // awaiting the owner
     expect(notify).toHaveBeenCalledTimes(1);
-    expect(notify.mock.calls[0][2]).toMatchObject({ bell: true, link: '/admin/seo', dedupeKey: 'link-authority:2026-09-03', refreshOnDedupe: true, metadata: { lane: 'link_authority', parked: WAVES_LOCATIONS.length, domains: ['example.org'] } });
+    expect(notify.mock.calls[0][0]).toMatchObject({ area: 'Content', action: `approve ${WAVES_LOCATIONS.length} link placements`, why: 'Parked awaiting your approval: example.org.', severity: 'needs-you', link: '/admin/seo', subject: { type: 'check', id: 'link-authority' }, doneWhen: 'placements_decided', who: 'person' });
+    expect(notify.mock.calls[0][1]).toMatchObject({ bell: true, dedupeKey: 'link-authority:2026-09-03', refreshOnDedupe: true, detail: `${WAVES_LOCATIONS.length} placements parked awaiting your approval: example.org`, metadata: { lane: 'link_authority', parked: WAVES_LOCATIONS.length, domains: ['example.org'] } });
   });
   test('auto_free_acquisition on ⇒ AUTO_FREE, stays prospect, domain ready_to_acquire, no bell', async () => {
     const { db } = scenario({ policy: { auto_free_acquisition: true } });

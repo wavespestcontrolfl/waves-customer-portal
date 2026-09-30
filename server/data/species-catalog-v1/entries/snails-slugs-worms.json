@@ -31,7 +31,7 @@
     "look_alikes": [
       {
         "slug": "giant-african-land-snail",
-        "difference": "Garden snail shell is under 1.5 inches; giant African land snail shell is much larger, often 4 to 8 inches, and more elongated",
+        "difference": "Adult shell under 1.5 inches and round; giant African land snail adults reach 4 to 8 inches, but its juveniles are small, so size never rules it out",
         "next_photo": "From a safe distance, zoom in on the shell's overall length for size.",
         "photo_can_confirm": true
       }
@@ -94,19 +94,20 @@
       "what_it_means": "A common, slow-moving nibbler of ornamentals and citrus that's rarely a serious threat on its own, but numbers can build up in mulch and damp shrub beds. Ragged leaf holes plus slime trails on a valued plant are worth a look if they're spreading.",
       "fact": "It tucks itself into leaf litter and closes off its shell opening with a dried mucus layer to ride out dry spells."
     },
-    "tech_notes": "Confirm shell size under ~1.5 inches to rule out giant African land snail before recommending any treatment; reducing mulch depth and damp harborage helps alongside baiting.",
+    "tech_notes": "Do not rule out giant African land snail by shell size alone; juveniles are small. Compare shell shape and markings with the FDACS identification guide, photograph uncertain snails, and handle only with gloves. Reducing mulch depth and damp harborage helps alongside baiting.",
     "links": {
       "site_page": null,
       "guides": []
     },
     "legacy_slugs": [],
     "sources": [
+      "https://www.fdacs.gov/Agriculture-Industry/Pests-and-Diseases/Plant-Pests-and-Diseases/Invasive-Mollusks/Giant-African-Land-Snail",
       "https://en.wikipedia.org/wiki/Zachrysia_provisoria"
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Owner approved 2026-09-27 (all fact-check-clean entries, after #5106).",
-      "approval_hash": "688beb57c222a02c53686c10712f230ab533f40e9dc2232aba615fd15873ac40"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "7751f867cbed9cd60adc42cfd570acd78501edba396af6b879cc232048249643"
     },
     "role": "plant_pest",
     "risk": "low",
@@ -146,7 +147,7 @@
     "look_alikes": [
       {
         "slug": "garden-snails",
-        "difference": "Giant African land snail shell is much larger, often 4 to 8 inches and more elongated; garden snail shell is under 1.5 inches and rounder",
+        "difference": "Adults reach 4 to 8 inches and are elongated; garden snails stay under 1.5 inches, but juveniles here are small too, so compare shell shape, not size",
         "next_photo": "From a safe distance, zoom in on the shell's overall length for size.",
         "photo_can_confirm": true
       }
@@ -222,8 +223,8 @@
     ],
     "review": {
       "status": "owner_approved",
-      "notes": "Confirmed directly against the live FDACS page: active quarantines remain in Broward and Pasco counties (outside SWFL); it explicitly states GALS \"was also eradicated in 2026 from a detection in 2022 in Lee County after being free of live snails for over three years,\" matching this entry's copy.fact exactly. The page also confirms it is unlawful to move the snail or regulated articles from a quarantine area, and that it's illegal to import or possess without a permit -- so regulated: true and the report_fdacs referral are both correct and current. CDC's rat lungworm page confirms snails/slugs generally (not GALS by name) as the intermediate host that can sicken people who eat them raw/undercooked, supporting disease_vector as the right, standard field for this human-health risk (rather than a plant-disease vector). Owner approved 2026-09-27 (all fact-check-clean entries, after #5106); that decision completes any re-review this note describes as pending.",
-      "approval_hash": "7e99fa04ebf34fe7519bf66ab526466ab7130079d472af47253c22545dec433c"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "81b8a551bd340d2b47779e15c4dd2d6528160098b8dcd3b072d214b57903f6bf"
     },
     "role": "health_pest",
     "risk": "medical",

@@ -6,11 +6,19 @@
 // resolve false to fail the insert.
 const mockWriteCard = jest.fn().mockResolvedValue(undefined);
 const mockSendToAdminUser = jest.fn().mockResolvedValue({ sent: 1 });
+const mockSendOpts = [];
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/push-notifications', () => ({
-  sendToAdminUser: (...args) => mockSendToAdminUser(...args),
+  // Options are recorded apart, so the copy assertions below stay about the
+  // notification itself. Like the real sender, beforeHandoff runs at the
+  // device's final boundary; false sends nothing.
+  sendToAdminUser: async (id, notification, opts) => {
+    mockSendOpts.push(opts);
+    if (opts && typeof opts.beforeHandoff === 'function' && (await opts.beforeHandoff()) === false) return { superseded: true };
+    return mockSendToAdminUser(id, notification);
+  },
 }));
 
 const db = require('../models/db');
@@ -18,13 +26,29 @@ const db = require('../models/db');
 const transactions = [];
 db.transaction = (fn) => { transactions.push(fn); return fn(db); };
 db.raw = jest.fn((sql) => sql);
+let cardSeq = 0;
 function cardsTable() {
   return {
-    insert: jest.fn(async (row) => {
-      const ok = await mockWriteCard(row.technician_id, { ...row, payload: JSON.parse(row.payload) });
-      if (ok === false) throw new Error('insert failed');
-    }),
+    insert: jest.fn((row) => ({
+      returning: jest.fn(async () => {
+        const ok = await mockWriteCard(row.technician_id, { ...row, payload: JSON.parse(row.payload) });
+        if (ok === false) throw new Error('insert failed');
+        cardSeq += 1;
+        return [{ id: `card-${cardSeq}` }];
+      }),
+    })),
   };
+}
+// The push recheck's "is there a NEWER card for this tech + visit?" query,
+// answered by newerCard (null = this notice's card is still the newest).
+let newerCard = null;
+let lastNewerChain = null;
+function newerCardsQuery() {
+  const c = {};
+  for (const m of ['where', 'whereIn', 'whereRaw', 'whereNot']) c[m] = jest.fn(() => c);
+  c.first = jest.fn(async () => newerCard);
+  lastNewerChain = c;
+  return c;
 }
 const logger = require('../services/logger');
 const notices = require('../services/tech-visit-notifications');
@@ -46,6 +70,7 @@ function chain(first, firstImpl = null) {
 
 // technicians rows by id; one visit row for scheduled_services.
 function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT } = {}) {
+  newerCard = null;
   db.mockImplementation((table) => {
     if (table === 'technicians') {
       const c = chain(null);
@@ -54,6 +79,7 @@ function prime({ techs = { 'tech-1': TECH, [ADAM_ID]: ADAM }, visit = VISIT } = 
     }
     if (table === 'scheduled_services as s') return chain(visit);
     if (table === 'tech_notifications') return cardsTable();
+    if (table === 'tech_notifications as n') return newerCardsQuery();
     throw new Error(`unexpected table ${table}`);
   });
 }
@@ -271,6 +297,92 @@ describe('notifyTechVisitChange', () => {
     expect(out).toEqual({ sent: true });
     expect(mockWriteCard).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('push failed'));
+  });
+
+  test('a current push is re-checked at the provider boundary and sent', async () => {
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    // The recheck is the sender's beforeHandoff (each device's final
+    // boundary, after FCM's OAuth too) — codex #5421 r2/r3.
+    expect(mockSendOpts[mockSendOpts.length - 1].beforeHandoff).toEqual(expect.any(Function));
+    // The newer-card check compares against the card this notice wrote, and
+    // every card type sharing the visit- collapse tag counts (tracking too).
+    expect(lastNewerChain.whereNot).toHaveBeenCalledWith('n.id', 'card-' + cardSeq);
+    expect(lastNewerChain.whereRaw).toHaveBeenCalledWith("n.payload->>'visit_id' = ?", ['visit-1']);
+    expect(lastNewerChain.whereIn).toHaveBeenCalledWith('n.type', expect.arrayContaining(['visit_assigned', 'follow_through_tracking']));
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+  });
+
+  test('a stale push is skipped when a NEWER card exists for the same tech and visit (the newer push lands)', async () => {
+    newerCard = { id: 'card-newer' };
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    // The card is durable; only the push is withheld.
+    expect(out).toEqual({ sent: true });
+    expect(mockWriteCard).toHaveBeenCalledTimes(1);
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('stale assigned push skipped'));
+  });
+
+  test('the push is skipped when the visit row no longer satisfies cardStands at send time', async () => {
+    // The card's own read (FOR SHARE, in its transaction) sees tech-1; the
+    // plain read at the provider boundary sees the visit already moved to tech-2.
+    db.mockImplementation((table) => {
+      if (table === 'technicians') {
+        const c = chain(null);
+        c.where = jest.fn((arg) => { c.first = jest.fn(async () => ({ 'tech-1': TECH, [ADAM_ID]: ADAM })[arg.id] || null); return c; });
+        return c;
+      }
+      if (table === 'scheduled_services as s') {
+        const c = chain(null);
+        c.first = jest.fn(async () => (c.forShare.mock.calls.length ? VISIT : { ...VISIT, technician_id: 'tech-2' }));
+        return c;
+      }
+      if (table === 'tech_notifications') return cardsTable();
+      if (table === 'tech_notifications as n') return newerCardsQuery();
+      throw new Error(`unexpected table ${table}`);
+    });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    expect(mockWriteCard).toHaveBeenCalledTimes(1);
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+  });
+
+  test('a recheck ERROR still sends (a missed alert is worse than a rare misordered one) and never throws', async () => {
+    newerCard = null;
+    const realFirst = newerCardsQuery;
+    db.mockImplementation((table) => {
+      if (table === 'tech_notifications as n') { const c = realFirst(); c.first = jest.fn(async () => { throw new Error('boom'); }); return c; }
+      if (table === 'technicians') {
+        const c = chain(null);
+        c.where = jest.fn((arg) => { c.first = jest.fn(async () => ({ 'tech-1': TECH, [ADAM_ID]: ADAM })[arg.id] || null); return c; });
+        return c;
+      }
+      if (table === 'scheduled_services as s') return chain(VISIT);
+      if (table === 'tech_notifications') return cardsTable();
+      throw new Error(`unexpected table ${table}`);
+    });
+    const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
+    expect(out).toEqual({ sent: true });
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
+  });
+
+  test('a tracking push re-runs the detector\'s check at the provider boundary and stands down for a newer card (codex #5421 r1/r2)', async () => {
+    const tracking = { technicianId: 'tech-1', visitId: 'visit-1', pushTitle: 'A visit window is underway', cardId: 'card-t' };
+    // Current: detector says still overdue, no newer card → sent.
+    const checkCurrent = jest.fn(async () => true);
+    await notices.pushTrackingNotice(tracking, { checkCurrent });
+    expect(checkCurrent).toHaveBeenCalledWith(db);
+    expect(mockSendToAdminUser).toHaveBeenCalledTimes(1);
+    expect(lastNewerChain.whereNot).toHaveBeenCalledWith('n.id', 'card-t');
+    // The detector says it is no longer overdue (arrival/completion/reassignment) → not sent.
+    mockSendToAdminUser.mockClear();
+    await notices.pushTrackingNotice(tracking, { checkCurrent: async () => false });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
+    // A newer visit_* card for the same tech and visit → not sent.
+    newerCard = { id: 'card-newer' };
+    await notices.pushTrackingNotice(tracking, { checkCurrent: async () => true });
+    expect(mockSendToAdminUser).not.toHaveBeenCalled();
   });
 
   test('a read failure never throws to the writer', async () => {

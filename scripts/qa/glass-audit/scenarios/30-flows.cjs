@@ -145,40 +145,26 @@ const prepGuide = {
 
 // ---------------------------------------------------------------------------
 // /rate/:token  (RatePage.jsx ← server/routes/review-gate.js)
-// The page is a 1–10 scale, not stars: the "five-stars" interaction taps 10
-// (the top of the scale), which reveals the standout chips + review CTA.
+// The 1-10 rating is retired: the page is a thank-you plus one Open Google
+// button pointing at the tracked /go link.
 // ---------------------------------------------------------------------------
 const RATE_PAYLOAD = {
   firstName: 'Jordan',
   techName: 'Alex Morgan',
   techPhotoUrl: null,
-  serviceType: 'Pest Control',
-  hasServiceType: true,
   serviceDate: '2026-09-08',
   locationName: 'Waves Pest Control – Venice',
-  googleReviewUrl: 'https://example.invalid/google-review',
+  reviewUrl: 'https://example.invalid/api/rate/go',
 };
 const rate = {
   id: 'rate', family: 'flow', surface: 'customer', role: 'public token', route: '/rate/:token',
-  url: `/rate/${HEX64_C}`, ready: "how'd we do", settle: 900,
+  url: `/rate/${HEX64_C}`, ready: 'Open Google', settle: 900,
   handle: ({ method, path }) => {
     if (method === 'GET' && path === `/api/rate/${HEX64_C}`) return ok(RATE_PAYLOAD);
-    if (method === 'POST' && path === `/api/rate/${HEX64_C}/score`) return ok({ saved: true, category: 'promoter' });
     return null;
   },
   states: [
-    {
-      name: 'default',
-      interactions: [
-        {
-          name: 'five-stars', fullPage: true,
-          run: async (page) => {
-            await page.getByRole('button', { name: '10', exact: true }).click();
-            await page.getByText('What stood out?').waitFor();
-          },
-        },
-      ],
-    },
+    { name: 'default' },
     { name: 'error', ready: 'load that feedback request', handle: () => serverError() },
   ],
 };

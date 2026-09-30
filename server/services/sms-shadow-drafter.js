@@ -353,19 +353,29 @@ function openTimesDayLabel(d) {
   return d?.fullDate || [d?.dayOfWeek, d?.month, d?.dayNum].filter(Boolean).join(' ');
 }
 
-// ── Scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER, owner ruling 2026-09-29, slice 1) ──
-// For a text about ONE upcoming visit, offered times are the times the
-// customer's own reschedule link would show for that visit: the same visit
-// loader, the same page eligibility verdict (grouped / missed / notice-window
-// / inactive account all refuse), the same booking range and the same
-// buildBookingAvailability picker (service time frames, proximity routing,
-// planning minutes, detour cap) — reused from routes/reschedule-public.js,
-// not copied. Required lazily: that module pulls in the express router.
-// SLICE 1 SCOPE: only an identity that IS an upcoming visit takes this path.
-// Open-estimate / new_service / last_completed / engine_default identities
-// keep the zone-based finder (fetchOpenTimesData above) even with the gate on;
-// new-visit offers move to the /book finder in the next slice.
+// ── Scheduler-backed offers (GATE_SMS_OFFERS_SCHEDULER, owner ruling 2026-09-29) ──
+// With the gate on, every appointment time the texting AI offers comes from
+// the picker that would COMMIT that visit, never the zone-based finder:
+//   - scheduler: a text about ONE upcoming visit is offered the times its own
+//     reschedule link would show — the same visit loader, page eligibility
+//     verdict (grouped / missed / notice-window / inactive account all
+//     refuse), booking range and buildBookingAvailability picker (service time
+//     frames, proximity routing, planning minutes, detour cap), reused from
+//     routes/reschedule-public.js, not copied;
+//   - estimate: an open or linked estimate is offered the times its public
+//     page would show (estimate-slot-availability behind the page's own gate,
+//     routes/estimate-slots-public.js) — the picker /reserve commits from;
+//   - book: a new / other service, a return visit or a brand-new customer is
+//     offered the times the /book funnel would show that customer for that
+//     funnel service (routes/booking.js availabilityForExistingCustomer) —
+//     the picker createSelfBooking commits from.
+// Required lazily: those modules pull in the express routers. A source with
+// no picker to commit through (no id, another customer's estimate, no funnel
+// service for the text, no resolvable location) gets NO OPEN TIMES — the zone
+// finder is never a fallback with the gate on.
 const SCHEDULER_OFFER_SOURCE = 'scheduler';
+const ESTIMATE_OFFER_SOURCE = 'estimate';
+const BOOK_OFFER_SOURCE = 'book';
 const SCHEDULER_VISIT_REASONS = new Set(['single_upcoming', 'named_scheduled_visit']);
 // The picker chain (visit load, page eligibility, booking config, the
 // service's availability build with a possible geocode and the find-time
@@ -423,6 +433,90 @@ async function loadSchedulerVisitDays({ customerId, scheduledServiceId }) {
   return availability ? { days: availability.days || [], currentWindow: visitCurrentWindow(svc) } : null;
 }
 
+// The estimate page's slots for an open or linked estimate, regrouped into the
+// picker-day shape the renderers read (the page lists primary chips and an
+// expander; both are offers). null when the page would show none, or the
+// estimate is not this customer's.
+// `fresh` is the send-time recheck's: uncached, uncapped (see
+// offerableEstimateSlots); the draft reads the page's default cut.
+async function loadEstimateDays({ customerId, estimateId, fresh = false }) {
+  const offerable = estimateId ? require('../routes/estimate-slots-public')._internals.offerableEstimateSlots : null;
+  const result = offerable
+    ? await (fresh ? offerable(estimateId, customerId, { fresh: true }) : offerable(estimateId, customerId))
+    : null;
+  if (!result) return null;
+  const byDate = new Map();
+  for (const slot of [...(result.primary || []), ...(result.expander || [])]) {
+    if (!slot?.date || !slot.windowStart) continue;
+    if (!byDate.has(slot.date)) byDate.set(slot.date, []);
+    byDate.get(slot.date).push({ startTime24: slot.windowStart });
+  }
+  return { days: [...byDate.keys()].sort().map((date) => ({ date, slots: byDate.get(date) })) };
+}
+
+// The /book funnel's days for this customer and funnel service. null when
+// /book would offer nothing to commit against (see availabilityForExistingCustomer).
+async function loadBookDays({ customerId, serviceKey }) {
+  if (!serviceKey) return null;
+  const availability = await require('../routes/booking')._internals.availabilityForExistingCustomer({ customerId, serviceKey });
+  return availability ? { days: availability.days || [] } : null;
+}
+
+// The days (plus, for a visit, its own current window) the picker that would
+// commit this offer shows. `offer` is { source, scheduledServiceId? |
+// estimateId? | serviceKey? } — what the snapshot lookup carries so the
+// send-time recheck asks the SAME picker. null = nothing to offer. Errors
+// throw — callers fail closed.
+async function loadSchedulerDays(offer, customerId, { fresh = false } = {}) {
+  if (offer.source === SCHEDULER_OFFER_SOURCE) return offer.scheduledServiceId ? loadSchedulerVisitDays({ customerId, scheduledServiceId: offer.scheduledServiceId }) : null;
+  if (offer.source === ESTIMATE_OFFER_SOURCE) return loadEstimateDays({ customerId, estimateId: offer.estimateId, fresh });
+  if (offer.source === BOOK_OFFER_SOURCE) return loadBookDays({ customerId, serviceKey: offer.serviceKey });
+  return null;
+}
+
+// The /book funnel service a text's service is, or '' when it names none the
+// funnel books (createSelfBooking refuses an empty key). An EXPLICIT table
+// (sms-book-funnel-map.js), never a keyword heuristic:
+//   1. the catalog service_key the identity step's model pick carried
+//      (new_booking) — authoritative when present, mapped or withheld;
+//   2. an exact known display name (the funnel's labels, known catalog names);
+//   3. an exact match of the name against the bookable catalog's own rows
+//      (a completed visit carries a display name, not a key), through the
+//      same key table — ambiguous or unmapped = withheld.
+// Actual bait, WDO, palm-injection and every unlisted service map to nothing.
+async function bookFunnelKeyFor(identity) {
+  try {
+    const map = require('./sms-book-funnel-map');
+    if (identity?.serviceKey) return map.funnelKeyForCatalogKey(identity.serviceKey);
+    // Owner ruling 2026-09-30: a brand-new customer who names no service is
+    // offered general pest control times (the zone finder's old default).
+    if (identity?.reason === 'engine_default') return 'pest_control';
+    const label = String(identity?.serviceType || '').trim();
+    if (!label) return '';
+    const byName = map.funnelKeyForServiceName(label);
+    if (byName) return byName;
+    const lower = label.toLowerCase();
+    const services = await require('./call-booking-catalog').loadBookableCallServices(db);
+    const keys = new Set((services || [])
+      .filter((s) => s && [s.name, s.short_name].some((n) => String(n || '').trim().toLowerCase() === lower))
+      .map((s) => map.funnelKeyForCatalogKey(s.service_key)));
+    return keys.size === 1 ? [...keys][0] : '';
+  } catch (err) {
+    logger.warn(`[sms-shadow] funnel service lookup failed (${err.message}); OPEN TIMES withheld`);
+    return '';
+  }
+}
+
+// Where OPEN TIMES come from with GATE_SMS_OFFERS_SCHEDULER on: the picker
+// that commits the job this text is about. An estimate (linked by the caller,
+// or the open estimate the identity step chose) wins; then an upcoming visit;
+// everything else is a new visit through /book.
+async function schedulerOfferFor(identity, estimateId) {
+  if (estimateId) return { source: ESTIMATE_OFFER_SOURCE, estimateId };
+  if (SCHEDULER_VISIT_REASONS.has(identity.reason)) return { source: SCHEDULER_OFFER_SOURCE, scheduledServiceId: identity.scheduledServiceId || null };
+  return { source: BOOK_OFFER_SOURCE, serviceKey: await bookFunnelKeyFor(identity) };
+}
+
 // Up to OPEN_TIMES_MAX_SLOTS_PER_DAY starts per day whose 2-hour arrival
 // windows do not overlap (the picker lists every feasible start, often close
 // together; quoting 8:00-10:00 and 8:15-10:15 as two choices is noise).
@@ -460,20 +554,16 @@ function excludeCurrentWindowSlots(slots, startMinutes) {
   });
 }
 
-async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
-  if (!scheduledServiceId) {
-    logger.info('[sms-shadow] OPEN TIMES withheld — upcoming visit has no id to offer times for');
-    return { block: null, days: [] };
-  }
+async function fetchSchedulerOpenTimesData({ customerId, schedulerOffer }) {
   let timer = null;
   const startedAt = Date.now();
   try {
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('open-times timeout')), SCHEDULER_OPEN_TIMES_TIMEOUT_MS);
     });
-    const loaded = await Promise.race([loadSchedulerVisitDays({ customerId, scheduledServiceId }), timeout]);
+    const loaded = await Promise.race([loadSchedulerDays(schedulerOffer, customerId), timeout]);
     if (!loaded) {
-      logger.info('[sms-shadow] OPEN TIMES withheld — visit is not reschedulable through the scheduler');
+      logger.info(`[sms-shadow] OPEN TIMES withheld — no ${schedulerOffer.source} picker offers times for this text`);
       return { block: null, days: [] };
     }
     const lines = [];
@@ -507,14 +597,13 @@ async function fetchSchedulerOpenTimesData({ customerId, scheduledServiceId }) {
 // [{date, windows: [...]}]), which validateOfferedTimes checks the model's
 // own offered_times declaration against — one fetch, two views of the same
 // data, so they can never drift apart.
-async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null, serviceType = null, offersFromScheduler = false, scheduledServiceId = null } = {}) {
+async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimateId = null, serviceType = null, schedulerOffer = null } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { block: null, days: [] };
-  if (!schedulingIntent || (!city && !offersFromScheduler)) return { block: null, days: [] };
-  // GATE_SMS_OFFERS_SCHEDULER: the identity step resolved to ONE upcoming
-  // visit, so its times come from the reschedule link's own picker. Never
-  // falls back to the zone finder below — a visit the picker refuses (or one
-  // with no id carried) gets no OPEN TIMES at all.
-  if (offersFromScheduler) return fetchSchedulerOpenTimesData({ customerId, scheduledServiceId });
+  if (!schedulingIntent || (!city && !schedulerOffer)) return { block: null, days: [] };
+  // GATE_SMS_OFFERS_SCHEDULER: times come from the picker that would commit
+  // this job (schedulerOfferFor). Never falls back to the zone finder below —
+  // a job whose picker offers nothing gets no OPEN TIMES at all.
+  if (schedulerOffer) return fetchSchedulerOpenTimesData({ customerId, schedulerOffer });
   let timer = null;
   try {
     const Availability = require('./availability');
@@ -1710,7 +1799,7 @@ function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
-  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking' };
+  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
   if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
 }
@@ -2232,7 +2321,7 @@ function replyQuotesUngroundedAmount(reply, context, opts = {}) {
 // offered_times declaration (owner-directed structural fix) rather than
 // re-deriving quoted pairs from reply text. null when there's nothing to
 // recheck: no OPEN TIMES was fetched, or the draft declared no times.
-function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId, serviceType = null, scheduledServiceId = null }) {
+function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customerId, estimateId, serviceType = null, schedulerOffer = null }) {
   if (!openTimesBlock) return null;
   const quotedWindows = Array.isArray(offeredTimes)
     ? offeredTimes
@@ -2242,25 +2331,30 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
   if (!quotedWindows.length) return null;
   // serviceType only when known — keeps the persisted shape unchanged for
   // every caller that has none (and every existing snapshot row).
-  // scheduledServiceId (+ source marker) ONLY when the scheduler path
-  // produced the offer (GATE_SMS_OFFERS_SCHEDULER): the send-time recheck
-  // then asks the same picker about the same visit. Absent, the snapshot
-  // keeps its old shape and the old finder rechecks it.
+  // The offer's source + the ids its picker needs (a visit id, or the
+  // funnel service key; an estimate's id is already on the lookup) ONLY when
+  // the scheduler path produced the offer (GATE_SMS_OFFERS_SCHEDULER): the
+  // send-time recheck then asks the same picker the same question. Absent,
+  // the snapshot keeps its old shape and the old finder rechecks it.
   return {
     lookup: {
       city, customerId: customerId || null, estimateId: estimateId || null, ...(serviceType ? { serviceType } : {}),
-      ...(scheduledServiceId ? { scheduledServiceId, source: SCHEDULER_OFFER_SOURCE } : {}),
+      ...(schedulerOffer ? {
+        source: schedulerOffer.source,
+        ...(schedulerOffer.scheduledServiceId ? { scheduledServiceId: schedulerOffer.scheduledServiceId } : {}),
+        ...(schedulerOffer.source === BOOK_OFFER_SOURCE ? { serviceKey: schedulerOffer.serviceKey } : {}),
+      } : {}),
     },
     quotedWindows,
   };
 }
 
-// The days a send-time recheck compares against: the scheduler picker's for
-// a snapshot that carries a visit id, else the zone finder's. null = the
-// visit is no longer one the picker offers times for.
-async function currentOfferedDays({ city, customerId, estimateId, serviceType, scheduledServiceId }) {
-  if (scheduledServiceId) {
-    const loaded = await loadSchedulerVisitDays({ customerId, scheduledServiceId });
+// The days a send-time recheck compares against: the picker's that minted the
+// snapshot (its `source`), else the zone finder's for a legacy snapshot. null
+// = that picker no longer offers times for this job.
+async function currentOfferedDays({ city, customerId, estimateId, serviceType, schedulerOffer }) {
+  if (schedulerOffer) {
+    const loaded = await loadSchedulerDays(schedulerOffer, customerId, { fresh: true });
     return loaded ? { days: loaded.days, labelOf: schedulerDayLabel, currentWindow: loaded.currentWindow } : null;
   }
   const Availability = require('./availability');
@@ -2276,9 +2370,16 @@ async function currentOfferedDays({ city, customerId, estimateId, serviceType, s
 // all resolve to "not still offered" — the one thing this function must
 // never do is silently assume a quoted time is fine when it couldn't
 // actually confirm that.
-async function openTimesStillOffered({ city, customerId, estimateId = null, serviceType = null, scheduledServiceId = null, quotedWindows } = {}) {
+async function openTimesStillOffered({ city, customerId, estimateId = null, serviceType = null, source = null, scheduledServiceId = null, serviceKey = null, quotedWindows } = {}) {
   if (!Array.isArray(quotedWindows) || !quotedWindows.length) return { ok: true };
-  if (!city && !scheduledServiceId) return { ok: false, reason: 'open_times_recheck_no_city' };
+  // A snapshot minted by the scheduler path (`source` on its lookup) is
+  // rechecked through the same picker for the same job; a legacy snapshot
+  // without one keeps the zone finder.
+  // A slice-1 snapshot carries a visit id + source; a bare visit id still
+  // reads as the scheduler's.
+  const offerSource = source || (scheduledServiceId ? SCHEDULER_OFFER_SOURCE : null);
+  const schedulerOffer = offerSource ? { source: offerSource, scheduledServiceId, estimateId, serviceKey } : null;
+  if (!city && !schedulerOffer) return { ok: false, reason: 'open_times_recheck_no_city' };
   let timer = null;
   const startedAt = Date.now();
   try {
@@ -2286,15 +2387,13 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(
         () => reject(new Error('open-times recheck timeout')),
-        scheduledServiceId ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
+        schedulerOffer ? SCHEDULER_OPEN_TIMES_TIMEOUT_MS : OPEN_TIMES_TIMEOUT_MS,
       );
     });
-    // A snapshot minted by the scheduler path (scheduledServiceId on its
-    // lookup) is rechecked through the same picker for the same visit; a
-    // legacy snapshot without one keeps the zone finder. A visit the picker
-    // no longer offers times for reads as every quoted window gone.
+    // A job the picker no longer offers times for reads as every quoted
+    // window gone.
     const current = await Promise.race([
-      currentOfferedDays({ city, customerId, estimateId, serviceType, scheduledServiceId }),
+      currentOfferedDays({ city, customerId, estimateId, serviceType, schedulerOffer }),
       timeout,
     ]);
     if (!current) return { ok: false, reason: 'open_times_no_longer_offered', goneWindows: quotedWindows };
@@ -2334,7 +2433,7 @@ async function openTimesStillOffered({ city, customerId, estimateId = null, serv
   } finally {
     // Same leaked-handle fix as fetchOpenTimesBlock's own timer.
     if (timer) clearTimeout(timer);
-    if (scheduledServiceId) logger.info(`[sms-shadow] scheduler open-times recheck took ${Date.now() - startedAt}ms`);
+    if (schedulerOffer) logger.info(`[sms-shadow] scheduler open-times recheck took ${Date.now() - startedAt}ms`);
   }
 }
 
@@ -3233,9 +3332,9 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // no extra model call.
   // A live draft (liveOpenTimes: only draftShadowReply passes it — replay and
   // backfill callers pass no city on purpose) may also fetch with no customer
-  // city under GATE_SMS_OFFERS_SCHEDULER: the scheduler path locates the visit
-  // from the visit row itself; the zone finder still needs a city and returns
-  // nothing without one.
+  // city under GATE_SMS_OFFERS_SCHEDULER: the scheduler pickers locate the job
+  // from the visit, the estimate or the customer's own booking pin; the zone
+  // finder still needs a city and returns nothing without one.
   // Codex round-28 P2: the re-service lane state is resolved FIRST. For an active pest report whose lane is bookable
   // (offer the covered free re-service) or already booked (refer to the appointment), a converged reply may NOT use
   // normal OPEN TIMES — so the service-identity provider call, the catalog read and the availability build are
@@ -3258,13 +3357,11 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   if (willFetchOpenTimes && !identityCertain) {
     logger.info(`[sms-shadow] OPEN TIMES withheld — service identity uncertain (${identity.reason})`);
   }
-  // GATE_SMS_OFFERS_SCHEDULER (slice 1): a text the identity step resolved to
-  // ONE upcoming visit is offered that visit's times from the reschedule
-  // link's own picker. Everything else (estimate, new_service,
-  // last_completed, engine_default) stays on the zone finder for now.
-  const offersFromScheduler = willFetchOpenTimes && !estimateId && identityCertain
-    && SCHEDULER_VISIT_REASONS.has(identity.reason) && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER');
-  const scheduledServiceId = offersFromScheduler ? (identity.scheduledServiceId || null) : null;
+  // GATE_SMS_OFFERS_SCHEDULER: the times come from the picker that would
+  // commit the job this text is about (schedulerOfferFor) — an estimate's page,
+  // a visit's reschedule link, or /book for a new visit — never the zone finder.
+  const schedulerOffer = willFetchOpenTimes && identityCertain && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')
+    ? await schedulerOfferFor(identity, pricingEstimateId) : null;
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
   // null there so no send-time snapshot is minted for a draft nothing sends.
@@ -3272,7 +3369,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
-      ...(offersFromScheduler ? { offersFromScheduler: true, scheduledServiceId } : {}),
+      schedulerOffer,
     });
   const reserviceLanes = reserviceState ? reserviceState.lanes : null;
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
@@ -3372,7 +3469,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     return {
       parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, reserviceBooked,
       openTimesSnapshot: computeOpenTimesSnapshot({
-        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
+        openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
       }),
     };
   }
@@ -3467,7 +3564,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     // earlier draft may have quoted a window a REVISION dropped, or vice
     // versa; only what's actually about to be sent matters here.
     openTimesSnapshot: computeOpenTimesSnapshot({
-      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
+      openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, schedulerOffer,
     }),
   };
 }
