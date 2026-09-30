@@ -112,7 +112,7 @@ function callExtractionV2PrimaryEnabled() {
   }
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
-const { normalizeState, normalizeStreetLine } = require('../utils/address-normalizer');
+const { normalizeState, normalizeStreetLine, parseRawAddress } = require('../utils/address-normalizer');
 const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -1553,15 +1553,6 @@ function streetNameKey(line) {
   return normalizeStreetLine(bare).toLowerCase().replace(/[.,#]/g, ' ').split(/\s+/).filter(Boolean)
     .map((t) => DIRECTIONAL_ABBREV[t] || t).join('').replace(/[^a-z0-9]/g, '');
 }
-// True when the typed form address BEGINS with the street named by `name`
-// (a street line, or a whole line with the city and ZIP after it).
-function typedAddressStartsWithStreet(typed, name) {
-  const tokens = String(typed || '').trim().split(/\s+/).filter(Boolean);
-  for (let n = tokens.length; n >= 2; n -= 1) {
-    if (streetNameKey(tokens.slice(0, n).join(' ')) === name) return true;
-  }
-  return false;
-}
 const zip5Of = (zip) => (String(zip || '').match(/^\d{5}/) || [''])[0];
 // True when the customer's on-file street is what their own web form typed:
 // a live form lead linked to the customer whose address is the same house
@@ -1581,11 +1572,21 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
       .select('address', 'zip')
       .limit(25);
     const zip = zip5Of(knownCaller.addressZip);
+    const city = String(knownCaller.addressCity || '').toLowerCase().replace(/[^a-z0-9]/g, '');
     return rows.some((row) => {
       const typed = String(row.address || '').trim();
       if (!typed || (typed.match(/^\d+/) || [''])[0] !== house) return false;
       if (row.zip && zip5Of(row.zip) !== zip) return false;
-      return typedAddressStartsWithStreet(typed, name);
+      // The WHOLE street must match, type and directional included — a form
+      // typing "Sample Palm Drive East" is not the saved "Sample Palm Dr".
+      // Whatever follows the street (city, state, ZIP) is parsed off first, so
+      // an extra street word can never hide as a city: the parsed city must be
+      // the one on file, and a ZIP, when given, the same ZIP.
+      const parsed = parseRawAddress(typed);
+      if (streetNameKey(parsed.line1) !== name) return false;
+      if (parsed.city && parsed.city.toLowerCase().replace(/[^a-z0-9]/g, '') !== city) return false;
+      if (parsed.zip && zip5Of(parsed.zip) !== zip) return false;
+      return true;
     });
   } catch (err) {
     logger.warn(`[call-proc] form-address lookup skipped for new lead ${knownCaller?.id}: ${err.message}`);

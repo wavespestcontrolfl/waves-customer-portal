@@ -245,6 +245,24 @@ describe('street type is part of the street (codex pre-push P1)', () => {
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Court, Parrish, FL 34219'))).toBe(false);
     expect(await onFileAddressIsFromWebForm(known, conn('1234 Sample Palm Ct Parrish FL 34219'))).toBe(false);
   });
+
+  test('the WHOLE street must match: an extra directional or street word never hides as a city (codex pre-push r2 P1)', async () => {
+    const known = lead({ address_line1: '1234 Sample Palm Dr' });
+    const conn = (address) => () => ({ where() { return this; }, whereIn() { return this; }, whereNull() { return this; }, select() { return this; }, limit: async () => [{ address, zip: null }] });
+    for (const typed of [
+      '1234 Sample Palm Drive East',
+      '1234 Sample Palm Drive East, Parrish, FL 34219',
+      '1234 Sample Palm Drive East Parrish FL 34219',
+      '1234 Sample Palm Drive Circle',
+      '1234 Sample Palm Drive Circle Parrish FL 34219',
+      '1234 Sample Palm Dr Bradenton FL 34219',
+    ]) {
+      expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(false);
+    }
+    for (const typed of ['1234 Sample Palm Dr', '1234 Sample Palm Drive, Parrish', '1234 Sample Palm Dr, Parrish, FL 34219']) {
+      expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(true);
+    }
+  });
 });
 
 describe('onFileAddressIsFromWebForm', () => {
