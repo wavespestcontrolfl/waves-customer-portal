@@ -507,6 +507,126 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     });
   });
 
+  describe('the move mirrors the bulk mover', () => {
+    test('stamps a date exception, resets stale lifecycle evidence, clears legacy labels, refreshes the token expiry', async () => {
+      const pair = await buildPair();
+      const approved = await approvedFor(pair);
+      const [first, second] = approved.results[0].move;
+      await trx('scheduled_services').where({ id: first.id }).update({
+        time_window: '9-12', window_display: 'Morning', en_route_at: new Date('2098-01-01T12:00:00Z'), arrival_sms_sent_at: null,
+      });
+      const untouchedBefore = await trx('scheduled_services').where({ id: second.id }).first();
+      await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+
+      const moved = await trx('scheduled_services').where({ id: first.id }).first();
+      // Stamp: this-visit-only exception, cadence position = the date it left.
+      expect(moved.date_exception).toBe(true);
+      expect(moved.date_exception_source).toBe('rider_onetime_move');
+      expect(dateOnly(moved.date_exception_cadence_date)).toBe(first.from);
+      expect(moved.date_exception_at).toBeTruthy();
+      // Lifecycle: stale evidence rewound under the lock, status untouched.
+      expect(moved.en_route_at).toBeNull();
+      expect(moved.track_state).toBe('scheduled');
+      expect(moved.status).toBe('pending');
+      // Legacy labels cleared with the window.
+      expect(moved.time_window).toBeNull();
+      expect(moved.window_display).toBeNull();
+      // Track token expiry recomputed for the new date/window end (ET end of day + 1 day).
+      expect(new Date(moved.track_token_expires_at).getTime()).toBeGreaterThan(new Date(`${first.to}T12:00:00Z`).getTime());
+      expect(moved.route_order).toBeNull();
+      // A second row with no stale evidence keeps its (already reset) lifecycle: no rewind needed.
+      const other = await trx('scheduled_services').where({ id: second.id }).first();
+      expect(other.date_exception).toBe(true);
+      expect(other.track_state).toBe(untouchedBefore.track_state);
+    });
+
+    test('rollback restores the stamp, labels, token expiry and due date verbatim, and does not "rewind" back', async () => {
+      const pair = await buildPair();
+      const approved = await approvedFor(pair);
+      const [first] = approved.results[0].move;
+      await trx('scheduled_services').where({ id: first.id }).update({
+        time_window: '9-12', window_display: 'Morning', en_route_at: new Date('2098-01-01T12:00:00Z'),
+      });
+      const original = await trx('scheduled_services').where({ id: first.id }).first();
+      const out = rollbackPath();
+      await applyApproved(trx, approved, { apply: true, rollbackOut: out });
+      const doc = JSON.parse(fs.readFileSync(out, 'utf8'));
+      const entry = doc.moves.find((e) => e.id === first.id);
+      expect(entry.before).toMatchObject({ time_window: '9-12', window_display: 'Morning', date_exception: false });
+      expect(entry.after).toMatchObject({ time_window: null, window_display: null, date_exception: true, date_exception_source: 'rider_onetime_move' });
+
+      const res = await rollbackApplied(trx, doc, { apply: true });
+      expect(res.results.find((r) => r.id === first.id).status).toBe('reverted');
+      const back = await trx('scheduled_services').where({ id: first.id }).first();
+      expect(back.time_window).toBe('9-12');
+      expect(back.window_display).toBe('Morning');
+      expect(back.date_exception).toBe(original.date_exception);
+      expect(back.date_exception_source).toBeNull();
+      expect(back.date_exception_cadence_date).toBeNull();
+      expect(new Date(back.track_token_expires_at).getTime()).toBe(new Date(original.track_token_expires_at).getTime());
+      // The lifecycle reset is not undone (nothing live to go back to).
+      expect(back.en_route_at).toBeNull();
+      expect(dateOnly(back.scheduled_date)).toBe(first.from);
+    });
+
+    test('takes the source and destination tech-day fences, after the date lock and before customer-comms', async () => {
+      const pair = await buildPair({ pestTech: techId });
+      const approved = await approvedFor(pair);
+      const [first] = approved.results[0].move;
+      const seen = [];
+      const onQuery = (q) => {
+        if (/pg_(try_)?advisory_xact_lock/i.test(q.sql)) seen.push((q.bindings || []).map(String).join('|'));
+      };
+      database.client.on('query', onQuery);
+      try {
+        await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      } finally {
+        database.client.removeListener('query', onQuery);
+      }
+      const at = (needle) => seen.findIndex((k) => k.includes(needle));
+      const dateLock = at(`occupancy:${first.to}`);
+      const source = at(`${techId}:${first.from}`);
+      const dest = at(`${techId}:${first.to}`);
+      const unassignedDest = at(`unassigned:${first.to}`);
+      const comms = at(`customer-comms:${customerId}`);
+      expect(dateLock).toBeGreaterThanOrEqual(0);
+      expect(source).toBeGreaterThan(dateLock);
+      expect(dest).toBeGreaterThan(dateLock);
+      expect(unassignedDest).toBeGreaterThan(dateLock);
+      expect(comms).toBeGreaterThan(Math.max(source, dest, unassignedDest));
+    });
+
+    test('a tech-day fence held elsewhere skips the pair', async () => {
+      const { lockTechDays } = require('../services/scheduling/tech-day-lock');
+      const pair = await buildPair({ pestTech: techId });
+      const approved = await approvedFor(pair);
+      const other = await database.transaction();
+      try {
+        await lockTechDays(other, [{ techId, date: approved.results[0].move[0].from }]);
+        const before = await snapshot();
+        const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+        expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'technician_day_locked' });
+        expect(await snapshot()).toBe(before);
+      } finally {
+        await other.rollback();
+      }
+    });
+
+    test('the next series extension anchors on the cadence slot, not the moved date (seriesExtendAnchor uses the stamp)', async () => {
+      const { seriesExtendAnchor } = require('../routes/admin-schedule')._test;
+      const { recurrenceOrdinalOptions } = require('../services/rebooker');
+      const pair = await buildPair();
+      const approved = await approvedFor(pair);
+      const [first] = approved.results[0].move;
+      await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+      const moved = await trx('scheduled_services').where({ id: first.id }).first();
+      const rOpts = { ...recurrenceOrdinalOptions(pair.pestParent.scheduled_date, {}), intervalDays: null };
+      expect(seriesExtendAnchor(moved, 'quarterly', rOpts)).toBe(first.from);
+      // Without the stamp the lawn landing would have become the cadence position.
+      expect(seriesExtendAnchor({ ...moved, date_exception: false, date_exception_cadence_date: null }, 'quarterly', rOpts)).toBe(first.to);
+    });
+  });
+
   test('rollback restores every moved row, and refuses a row that changed since the apply', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);

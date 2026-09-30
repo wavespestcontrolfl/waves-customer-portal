@@ -39,8 +39,9 @@
  *                            own). Reported per move as tech=host|own|unassigned.
  *   recurring_dispatch_due_date via recurringDispatchDuePatch, route_order NULL
  *   updated_at
- * time_window / window_display are left alone (only read as a fallback when
- * window_start is null, which a move never leaves it). The row's price,
+ * plus the rest of the bulk mover's composition (date-exception stamp, lifecycle
+ * rewind, tech-day fences, legacy label clearing, track token expiry): see the
+ * step-by-step mirror comment above composeForwardUpdates. The row's price,
  * add-ons, status, invoice flags and everything else are untouched.
  *
  * WHAT IT REFUSES (the whole pair is skipped, nothing of it is written):
@@ -79,14 +80,18 @@
  * equality against the row's CURRENT add-ons, and billability. Rollback also
  * refuses a row whose moved columns no longer hold the values the apply wrote.
  *
- * ORDER OF LOCKS (scheduling/occupancy.js ORDERING CONTRACT). Every target date
- * of the whole run is collected up front and its date-wide occupancy lock is
- * try-acquired in sorted order FIRST, before any customer-comms, series or row
- * lock; a pair (or rollback entry) with a date it could not lock is skipped.
- * Then per pair: customer comms, host series, pest series, pest rows (FOR UPDATE
- * NOWAIT), and the chosen host occurrence (FOR UPDATE NOWAIT, revalidated:
- * date, window, technician, property) before it is planned against. The dry run
- * takes no locks.
+ * ORDER OF LOCKS (scheduling/occupancy.js ORDERING CONTRACT + tech-day-lock.js).
+ * For the whole run, up front and all try-locks: (1) the date-wide occupancy lock
+ * of every target date, sorted; (3) the technician-day fences (lockTechDays) for
+ * every move's SOURCE tech-day and DESTINATION tech-day(s) (host tech, pinned
+ * template tech, 'unassigned'); a pair or entry that misses either is skipped.
+ * Only then, per pair (or rollback entry): (6) customer comms, host series, pest
+ * series, pest rows (FOR UPDATE NOWAIT), and the chosen host occurrence (FOR
+ * UPDATE NOWAIT, revalidated: date, window, technician, property) before it is
+ * planned against. planMove re-verifies under those locks that the row's source
+ * tech-day and the resolved destination tech-day are among the fenced keys. The
+ * two contracts agree (dates -> technician -> comms -> rows); tech-day-lock.js
+ * only adds that keys are deduped and sorted. The dry run takes no locks.
  *
  * CANDIDATE DISCOVERY is re-run inside the apply transaction for the pair's
  * customer (server/services/rider-series-candidates.js, the report script's own
@@ -124,7 +129,22 @@
 const fs = require('fs');
 
 const PENDING_STATUSES = ['pending', 'confirmed'];
-const TOUCHED_COLUMNS = ['scheduled_date', 'window_start', 'window_end', 'technician_id', 'route_order', 'recurring_dispatch_due_date'];
+// Source tag this script stamps on the date exception (date_exception_source is
+// varchar(30)).
+const MOVE_SOURCE = 'rider_onetime_move';
+// Everything a move writes that a rollback restores verbatim (the snapshot kept
+// in the rollback file). The lifecycle reset is NOT restored: there is nothing
+// live to rewind back to.
+const SNAPSHOT_COLUMNS = [
+  'scheduled_date', 'window_start', 'window_end', 'technician_id', 'route_order', 'recurring_dispatch_due_date',
+  'time_window', 'window_display', 'track_token_expires_at',
+  'date_exception', 'date_exception_source', 'date_exception_at', 'date_exception_cadence_date',
+];
+// Compared for "still holds what the apply wrote" (timestamps excluded: they
+// round-trip through JSON).
+const CHECKED_COLUMNS = SNAPSHOT_COLUMNS.filter((c) => !['date_exception_at', 'track_token_expires_at'].includes(c));
+const SCHEDULE_COLUMNS = ['scheduled_date', 'window_start', 'window_end', 'technician_id'];
+const DATE_COLUMNS = ['scheduled_date', 'recurring_dispatch_due_date', 'date_exception_cadence_date'];
 
 class PairSkip extends Error {
   constructor(reason, detail) {
@@ -137,6 +157,21 @@ class PairSkip extends Error {
 function d10(value) {
   return require('../server/services/rider-series-preview')._internals.dateOnly(value);
 }
+
+function snapValue(row, c) {
+  const v = row[c];
+  if (DATE_COLUMNS.includes(c)) return v ? d10(v) : null;
+  if (v instanceof Date) return v.toISOString();
+  return v === undefined ? null : v;
+}
+
+function snapshotOf(row, cols, list = SNAPSHOT_COLUMNS) {
+  const out = {};
+  for (const c of list) if (cols[c]) out[c] = snapValue(row, c);
+  return out;
+}
+
+const techDayKey = (techId, date) => `${techId || 'unassigned'}:${date}`;
 
 function moveKey(m) { return `${m.id}|${d10(m.from)}|${d10(m.to)}`; }
 
@@ -366,19 +401,151 @@ async function assertAddonsAndBillable(sp, ctx, row, to) {
   if (unbillable) throw new PairSkip('unbillable', `${row.id}:${unbillable.code || 'unbillable'}`);
 }
 
+// ---- THE MOVE WRITE: a faithful mirror of the admin bulk mover ---------------------
+// Reference composition: routes/admin-schedule.js, `case 'reschedule'` of the
+// bulk board mover (line numbers below are in that file unless another file is
+// named). EVERY step it performs on a date/window/tech move, and what this
+// script does with it:
+//
+//  1. 9826  validScheduleDate(target)            DONE: target must be beyond the near-term
+//                                                floor (assertRowMovable), stricter than "not past".
+//  2. 9847  acquireOccupancyLock(target date)    DONE: rung 1, taken for every target date of the
+//                                                run FIRST (lockTargetDates), try-lock, sorted.
+//  3. 9853  terminal statuses refused            DONE: only pending/confirmed rows move.
+//  4. 9861  collective-move gate refuses         N/A BY DESIGN: the owner-approved plan moves an
+//                                                explicit set of this series' rows; every moved row is
+//                                                stamped a date exception (step 6) so a later collective
+//                                                move shifts it by delta instead of regenerating it.
+//  5. 9876-9920 grouped / frozen visit refused   DONE: visit_id must be null (row_grouped).
+//  6. 9923  dateExceptionStamp(row,'admin_bulk') DONE: dateExceptionStamp(row, MOVE_SOURCE) on the
+//                                                write; its four fields are in the rollback snapshot
+//                                                and restored verbatim (rebooker.js:323).
+//  7. 9974-10035 window derivation + assertAdminAppointmentWindow
+//                                                DONE via normalizeTopUpWindow (which runs the same
+//                                                assertAdminAppointmentWindow) in resolveHostJoin;
+//                                                'unplaceable' refuses the move.
+//  8. 9995  sameDayWindowElapsed                 N/A: the target is >= 8 days out.
+//  9. 10049 probeSlotOverlap (advisory)          DONE, STRICTER: the occupancy.js global probe aborts on
+//                                                any hit (assertNoWindowConflict).
+// 10. 10063 wasLive / applyLiveMoveHistory(10176) N/A: only pending/confirmed rows move, so no live
+//                                                status flip and no job_status_history row.
+// 11. 10082 needsLifecycleRewind(row) -> LIVE_LIFECYCLE_RESET
+//                                                DONE, under the row lock: stale tracker evidence
+//                                                (track_state, en_route_at, arrived_at,
+//                                                actual_start_time, check_in_time, SMS guards) is
+//                                                reset in the same UPDATE; status untouched. Not
+//                                                restored on rollback (nothing live to go back to).
+// 12. 10113-10123 lockTechDays(source day, dest day) + route_order = null
+//                                                DONE: source and destination tech-day keys (plus the
+//                                                'unassigned' and pinned-template tech on the
+//                                                destination day) are taken with lockTechDays
+//                                                (tech-day-lock.js) AFTER the date locks and BEFORE
+//                                                customer-comms, series and row locks, all for the
+//                                                whole run up front; planMove then verifies the
+//                                                resolved source/destination tech-days are among the
+//                                                held keys (technician_day_not_fenced). route_order is
+//                                                nulled and restored verbatim on rollback.
+// 13. 10130 applyTrackLifecycleCas + status/date/window_start/window_end/visit_id CAS
+//                                                DONE: writeMove uses the same CAS on the row as read
+//                                                under the lock, plus customer_id.
+// 14. 10145 recurringDispatchDuePatch(row, updates) + updated_at
+//                                                DONE (rollback restores the recorded due date).
+// 15. rebooker.js:1817 / schedule-tools.js:1391 explicit track_token_expires_at
+//                                                DONE: scheduledServiceTrackTokenExpiry on the write
+//                                                (the bulk mover leaves it to the
+//                                                scheduled_services_default_track_token_expiry
+//                                                trigger, which only recomputes for live track states);
+//                                                snapshotted and restored verbatim on rollback.
+// 16. legacy time_window / window_display        DONE: nulled on the move (rebooker.js:3094/3208 do the
+//                                                same when a window is abandoned) so no stale label
+//                                                outlives the new window; snapshotted, restored on
+//                                                rollback. The bulk mover leaves them alone.
+// 17. 10162 tech move notice (tech-visit-notifications) N/A: silence ruling, no push.
+// 18. 10185 trx('reschedule_log').insert        N/A: it is the customer-facing reschedule history
+//                                                and feeds the max-auto-reschedules escalation; a
+//                                                one-time ops move is not a customer reschedule. The
+//                                                rollback file is this script's audit trail.
+// 19. 10206-10273 reminder resync (AppointmentReminders.handleReschedule + re-arm)
+//                                                N/A: the scheduled_services_sync_reminder trigger
+//                                                already moves the reminder silently; handleReschedule
+//                                                and the confirmation re-arm write appointment_reminders
+//                                                (customer-comms bookkeeping), which this script never does.
+// 20. 10231 applyLiveMovePostCommitEffects      N/A: tech_status release + customer socket refresh apply
+//                                                only to a live visit; this is a CLI process, no sockets.
+// 21. 10256 activateLegacyOutboundReviewRowIfNeeded
+//                                                REFUSED instead: a row it would act on (office-review
+//                                                pending source_action, not customer confirmed) is
+//                                                skipped (row_office_review_pending).
+// 22. 10298 shiftCallFollowUpsForParentMove     REFUSED instead: a row with a live call-created
+//                                                follow-up child is skipped (row_has_followup_children)
+//                                                because this script would not shift the child.
+// 23. 10316 qualityDates -> route quality refresh
+//                                                N/A: post-commit, global connection, repairs whole
+//                                                routes; the moved rows have route_order null and the
+//                                                nightly reorder (which our tech-day fences protect) sequences them.
+
+// Ownership, status, property, fence, conflicts, add-ons, billability and the
+// refusals from steps 21-22 for ONE move, forward or rollback.
+async function assertFenced(ctx, row, to, target) {
+  if (!ctx.fenced) return;
+  const need = [techDayKey(row.technician_id, d10(row.scheduled_date)), techDayKey(target.technicianId, to)];
+  const missing = need.find((k) => !ctx.fenced.has(k));
+  if (missing) throw new PairSkip('technician_day_not_fenced', `${row.id}:${missing}`);
+}
+
+async function assertNoSideEffectRows(sp, row, ctx) {
+  const { OFFICE_REVIEW_PENDING_SOURCE_ACTIONS } = require('../server/services/call-booking-source-actions');
+  const { ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../server/services/scheduling/window-rules');
+  if (row.source_action && OFFICE_REVIEW_PENDING_SOURCE_ACTIONS.includes(row.source_action) && !row.customer_confirmed) {
+    throw new PairSkip('row_office_review_pending', row.id);
+  }
+  if (ctx.cols.followup_source_service_id) {
+    const child = await sp('scheduled_services')
+      .where({ followup_source_service_id: row.id })
+      .whereNotIn('status', ADMIN_OCCUPANCY_EXCLUDE_STATUSES)
+      .first('id');
+    if (child) throw new PairSkip('row_has_followup_children', row.id);
+  }
+}
+
+function composeForwardUpdates(sp, row, { to, target, cols }) {
+  const { dateExceptionStamp, needsLifecycleRewind, LIVE_LIFECYCLE_RESET } = require('../server/services/rebooker');
+  const { recurringDispatchDuePatch } = require('../server/services/scheduling/recurring-dispatch-due');
+  const { scheduledServiceTrackTokenExpiry } = require('../server/services/track-token-expiry');
+  const changes = {
+    scheduled_date: to, window_start: target.windowStart, window_end: target.windowEnd, technician_id: target.technicianId,
+  };
+  const rewind = needsLifecycleRewind(row);
+  const updates = {
+    ...changes,
+    ...(cols.date_exception ? dateExceptionStamp(row, MOVE_SOURCE) : {}),
+    ...(rewind ? LIVE_LIFECYCLE_RESET : {}),
+    ...(cols.recurring_dispatch_due_date ? recurringDispatchDuePatch(row, changes) : {}),
+    ...(cols.route_order ? { route_order: null } : {}),
+    ...(cols.time_window ? { time_window: null } : {}),
+    ...(cols.window_display ? { window_display: null } : {}),
+    ...(cols.track_token_expires_at ? { track_token_expires_at: scheduledServiceTrackTokenExpiry(sp, to, target.windowEnd) } : {}),
+    updated_at: new Date(),
+  };
+  return { updates, rewind };
+}
+
 // THE shared path for forward moves and rollbacks: validates a move of one row to
 // (to, target window, target technician) and returns the guarded update to run.
 //   expect: { rowId, customerId, pestParentId, recurringParentId?, fromDate }
 //   target: { windowStart, windowEnd, technicianId, tech, restore? }
+//           restore = the recorded snapshot to write verbatim (rollback; no
+//           stamp, no rewind); absent = the forward composition above.
 //   exemptIds: rows that may share the window (the row itself, the host lawn row)
 async function planMove(sp, ctx, {
   expect, to, target, exemptIds,
 }) {
-  const { recurringDispatchDuePatch } = require('../server/services/scheduling/recurring-dispatch-due');
   const { cols } = ctx;
   const row = await sp('scheduled_services').where({ id: expect.rowId }).first();
   await assertRowMovable(sp, row, { expect, to, ctx });
   assertRowAtPairProperty(row, ctx);
+  await assertFenced(ctx, row, to, target);
+  await assertNoSideEffectRows(sp, row, ctx);
 
   const occupant = await occupantOnDate(sp, {
     customerId: expect.customerId, to, exceptIds: [row.id, ...exemptIds], pestParentId: expect.pestParentId,
@@ -389,41 +556,55 @@ async function planMove(sp, ctx, {
   });
   await assertAddonsAndBillable(sp, ctx, row, to);
 
-  const changes = {
-    scheduled_date: to, window_start: target.windowStart, window_end: target.windowEnd, technician_id: target.technicianId,
-  };
-  const updates = {
-    ...changes,
-    updated_at: new Date(),
-    ...(target.restore
-      ? target.restore
-      : {
-        ...(cols.recurring_dispatch_due_date ? recurringDispatchDuePatch(row, changes) : {}),
-        ...(cols.route_order ? { route_order: null } : {}),
-      }),
-  };
-  const before = {};
-  for (const c of TOUCHED_COLUMNS) if (cols[c]) before[c] = c.endsWith('_date') ? (row[c] ? d10(row[c]) : null) : (row[c] ?? null);
+  let updates;
+  let rewind = false;
+  if (target.restore) {
+    updates = {
+      scheduled_date: to,
+      window_start: target.windowStart,
+      window_end: target.windowEnd,
+      technician_id: target.technicianId,
+      ...target.restore,
+      updated_at: new Date(),
+    };
+  } else {
+    ({ updates, rewind } = composeForwardUpdates(sp, row, { to, target, cols }));
+  }
   return {
-    id: row.id, from: expect.fromDate, to, tech: target.tech, before, updates, recurringParentId: row.recurring_parent_id ?? null,
+    id: row.id,
+    from: expect.fromDate,
+    to,
+    tech: target.tech,
+    before: snapshotOf(row, cols),
+    updates,
+    row,
+    rewind,
+    recurringParentId: row.recurring_parent_id ?? null,
   };
 }
 
-// Guarded write of one planned move. Returns the rollback entry.
+// Guarded write of one planned move (the bulk mover's CAS: observed status,
+// date, window, grouping and the full tracker/lifecycle snapshot). Returns the
+// rollback entry.
 async function writeMove(sp, p, ctx, ids) {
-  const returned = await sp('scheduled_services')
+  const { applyTrackLifecycleCas } = require('../server/services/rebooker');
+  const { row } = p;
+  const query = sp('scheduled_services')
+    .where({ id: p.id, customer_id: ids.customerId })
+    .where('status', row.status)
     .where({
-      id: p.id, scheduled_date: p.from, customer_id: ids.customerId,
-    })
-    .whereIn('status', PENDING_STATUSES)
-    .whereNull('visit_id')
+      scheduled_date: p.from, window_start: row.window_start ?? null, window_end: row.window_end ?? null, visit_id: null,
+    });
+  const returned = await applyTrackLifecycleCas(query, row)
     .update(p.updates)
-    .returning(['id', ...TOUCHED_COLUMNS.filter((c) => ctx.cols[c])]);
+    .returning(['id', ...SNAPSHOT_COLUMNS.filter((c) => ctx.cols[c])]);
   if (returned.length !== 1) throw new PairSkip('row_changed_during_write', p.id);
-  const after = {};
-  for (const c of Object.keys(p.before)) after[c] = c.endsWith('_date') ? (returned[0][c] ? d10(returned[0][c]) : null) : (returned[0][c] ?? null);
   return {
-    id: p.id, ...ids, recurringParentId: p.recurringParentId, before: p.before, after,
+    id: p.id,
+    ...ids,
+    recurringParentId: p.recurringParentId,
+    before: p.before,
+    after: snapshotOf(returned[0], ctx.cols, CHECKED_COLUMNS),
   };
 }
 
@@ -521,7 +702,9 @@ async function planForwardMove(sp, ctx, ids, approvedPair, move) {
   };
 }
 
-async function processPair(trx, approvedPair, { apply, todayStr, lockedDates }) {
+async function processPair(trx, approvedPair, {
+  apply, todayStr, lockedDates, fence,
+}) {
   const ids = {
     lawnParentId: approvedPair.lawnParentId, pestParentId: approvedPair.pestParentId, customerId: approvedPair.customerId,
   };
@@ -532,6 +715,7 @@ async function processPair(trx, approvedPair, { apply, todayStr, lockedDates }) 
   if (approvedPair.eligible !== true) return { ...out, reason: 'approved_pair_not_eligible' };
   const unlocked = approvedPair.move.map((m) => d10(m.to)).find((d) => !lockedDates.has(d));
   if (unlocked) return { ...out, reason: 'occupancy_date_locked', detail: unlocked };
+  if (fence?.skip) return { ...out, reason: fence.skip };
 
   const entries = [];
   try {
@@ -548,13 +732,14 @@ async function processPair(trx, approvedPair, { apply, todayStr, lockedDates }) 
           pestParentId: ids.pestParentId, customerId: ids.customerId, dates, apply, todayStr,
         }),
         hostParent,
+        fenced: fence?.keys || null,
       };
       const planned = [];
       for (const move of approvedPair.move) planned.push(await planForwardMove(sp, ctx, ids, approvedPair, move));
       for (const p of planned) {
         if (apply) entries.push(await writeMove(sp, p, ctx, ids));
         out.moves.push({
-          id: p.id, from: p.from, to: p.to, hostRowId: p.hostRowId, tech: p.tech, window: p.window,
+          id: p.id, from: p.from, to: p.to, hostRowId: p.hostRowId, tech: p.tech, window: p.window, rewind: p.rewind,
         });
       }
     });
@@ -568,6 +753,46 @@ async function processPair(trx, approvedPair, { apply, todayStr, lockedDates }) 
     entries.length = 0;
   }
   return { ...out, entries };
+}
+
+// ---- tech-day fences (rung 3, tech-day-lock.js) ----------------------------------
+// Taken for the whole run right after the date locks and before any
+// customer-comms / series / row lock (occupancy.js ORDERING CONTRACT: rung 1
+// date -> rung 3 technician -> rung 6 customer-comms -> row locks). The keys come
+// from an UNLOCKED pre-read; planMove re-verifies, under the row locks, that the
+// row's source tech-day and the resolved destination tech-day are among the held
+// keys. All try-locks, so a miss skips the pair instead of waiting.
+async function forwardFenceKeys(trx, pair) {
+  const cols = await trx('scheduled_services').columnInfo();
+  const pest = await trx('scheduled_services').where({ id: pair.pestParentId }).first();
+  const host = await trx('scheduled_services').where({ id: pair.lawnParentId }).first();
+  if (!pest || !host) return [];
+  const keys = [];
+  for (const m of pair.move) {
+    const to = d10(m.to);
+    const row = await trx('scheduled_services').where({ id: m.id }).first('technician_id', 'scheduled_date');
+    if (row) keys.push({ techId: row.technician_id, date: d10(row.scheduled_date) }, { techId: row.technician_id, date: to });
+    const hostRow = await findHostRow(trx, { hostParent: host, cols, to });
+    if (hostRow) keys.push({ techId: hostRow.technician_id, date: to });
+    keys.push({ techId: pest.recurring_technician_id ?? null, date: to }, { techId: null, date: to });
+  }
+  return keys;
+}
+
+function rollbackFenceKeys(entry) {
+  const to = entry.before.scheduled_date;
+  return [
+    { techId: entry.after.technician_id, date: entry.after.scheduled_date },
+    { techId: entry.before.technician_id, date: to },
+    { techId: null, date: to },
+  ];
+}
+
+async function acquireFence(trx, keys, apply) {
+  if (!apply) return { keys: null };
+  const { lockTechDays } = require('../server/services/scheduling/tech-day-lock');
+  const held = await lockTechDays(trx, keys, { wait: false });
+  return held ? { keys: new Set(held) } : { skip: 'technician_day_locked' };
 }
 
 // ---- forward run ----------------------------------------------------------------
@@ -613,8 +838,17 @@ async function applyApproved(conn, approved, { apply = false, rollbackOut = null
       .filter((r) => r.eligible === true)
       .flatMap((r) => r.move.map((m) => d10(m.to)));
     const lockedDates = await lockTargetDates(trx, targetDates, apply);
+    const fences = new Map();
+    if (apply) {
+      for (const pair of approved.results) {
+        if (pair.eligible !== true || !pair.move.length || !pair.move.every((m) => lockedDates.has(d10(m.to)))) continue;
+        fences.set(pair, await acquireFence(trx, await forwardFenceKeys(trx, pair), apply));
+      }
+    }
     for (const approvedPair of approved.results) {
-      const result = await processPair(trx, approvedPair, { apply, todayStr, lockedDates });
+      const result = await processPair(trx, approvedPair, {
+        apply, todayStr, lockedDates, fence: fences.get(approvedPair),
+      });
       const { entries: e, ...rest } = result;
       pairs.push(rest);
       if (e) entries.push(...e);
@@ -622,7 +856,7 @@ async function applyApproved(conn, approved, { apply = false, rollbackOut = null
     if (apply) {
       const doc = {
         kind: 'rider-onetime-move-rollback',
-        version: 2,
+        version: 3,
         createdAt: new Date().toISOString(),
         approvedGeneratedAt: approved.generatedAt || null,
         moves: entries,
@@ -641,13 +875,14 @@ async function applyApproved(conn, approved, { apply = false, rollbackOut = null
 function assertUnchangedSinceApply(row, entry) {
   if (!row) throw new PairSkip('row_missing');
   for (const c of Object.keys(entry.after)) {
-    const now = c.endsWith('_date') ? (row[c] ? d10(row[c]) : null) : (row[c] ?? null);
-    if (String(now ?? '') !== String(entry.after[c] ?? '')) throw new PairSkip('row_changed_since_apply', c);
+    if (String(snapValue(row, c) ?? '') !== String(entry.after[c] ?? '')) throw new PairSkip('row_changed_since_apply', c);
   }
 }
 
 // The recorded original technician, run through the same date-aware assignability
 // check as the forward path. No longer assignable -> refuse (never unassigned).
+// Everything else the apply changed (stamp, labels, route order, due date, token
+// expiry) is restored verbatim from the snapshot; the lifecycle rewind is not.
 async function resolveRollbackTarget(sp, ctx, entry) {
   const { assignableRecurringTemplateTechnicianId } = require('../server/routes/admin-schedule')._test;
   const original = entry.before.technician_id ?? null;
@@ -658,20 +893,20 @@ async function resolveRollbackTarget(sp, ctx, entry) {
     }, entry.before.scheduled_date);
     if (!technicianId) throw new PairSkip('original_technician_not_assignable', entry.id);
   }
+  const restore = {};
+  for (const c of SNAPSHOT_COLUMNS) {
+    if (!SCHEDULE_COLUMNS.includes(c) && ctx.cols[c] && Object.prototype.hasOwnProperty.call(entry.before, c)) restore[c] = entry.before[c];
+  }
   return {
     windowStart: entry.before.window_start,
     windowEnd: entry.before.window_end,
     technicianId,
     tech: technicianId ? 'original' : 'unassigned',
-    // The recorded originals are restored verbatim.
-    restore: {
-      ...(ctx.cols.recurring_dispatch_due_date ? { recurring_dispatch_due_date: entry.before.recurring_dispatch_due_date ?? null } : {}),
-      ...(ctx.cols.route_order ? { route_order: entry.before.route_order ?? null } : {}),
-    },
+    restore,
   };
 }
 
-async function revertEntry(sp, entry, { apply, todayStr }) {
+async function revertEntry(sp, entry, { apply, todayStr, fence }) {
   const to = entry.before.scheduled_date;
   if (apply) {
     await lockSeries(sp, { customerId: entry.customerId, parentIds: [[entry.pestParentId, 'pest_series_locked']] });
@@ -679,9 +914,12 @@ async function revertEntry(sp, entry, { apply, todayStr }) {
   }
   const current = await sp('scheduled_services').where({ id: entry.id }).first();
   assertUnchangedSinceApply(current, entry);
-  const ctx = await buildMoveContext(sp, {
-    pestParentId: entry.pestParentId, customerId: entry.customerId, dates: [to, entry.after.scheduled_date], apply, todayStr,
-  });
+  const ctx = {
+    ...await buildMoveContext(sp, {
+      pestParentId: entry.pestParentId, customerId: entry.customerId, dates: [to, entry.after.scheduled_date], apply, todayStr,
+    }),
+    fenced: fence?.keys || null,
+  };
   const target = await resolveRollbackTarget(sp, ctx, entry);
   const plan = await planMove(sp, ctx, {
     expect: {
@@ -706,11 +944,17 @@ async function rollbackApplied(conn, doc, { apply = false } = {}) {
   const run = async (trx) => {
     await enterMode(trx, apply, !!conn.isTransaction);
     const lockedDates = await lockTargetDates(trx, doc.moves.map((e) => e.before.scheduled_date), apply);
+    const fences = new Map();
+    for (const entry of doc.moves) {
+      if (lockedDates.has(entry.before.scheduled_date)) fences.set(entry, await acquireFence(trx, rollbackFenceKeys(entry), apply));
+    }
     for (const entry of doc.moves) {
       const res = { id: entry.id, status: 'skipped', reason: null };
       try {
         if (!lockedDates.has(entry.before.scheduled_date)) throw new PairSkip('occupancy_date_locked', entry.before.scheduled_date);
-        await trx.transaction((sp) => revertEntry(sp, entry, { apply, todayStr }));
+        const fence = fences.get(entry);
+        if (fence?.skip) throw new PairSkip(fence.skip);
+        await trx.transaction((sp) => revertEntry(sp, entry, { apply, todayStr, fence }));
         res.status = apply ? 'reverted' : 'would_revert';
       } catch (err) {
         if (!(err instanceof PairSkip)) throw err;
