@@ -160,6 +160,35 @@ function composeWriterRulesPrompt([header, ...parts]) {
 const TECHNICIAN_NOTE_HEADER = "[TECHNICIAN NOTE — the technician's own words, often dictated; it may mix work done, what was seen, what the customer said, and advice for later: sort each sentence]";
 const CUSTOMER_WORDS_HEADER = 'WHAT THE CUSTOMER TOLD US (their own texts and emails, and AI summaries of calls; context only, never a finding)';
 
+// scheduled_services.customer_request* (why the customer booked; filled by
+// the re-service page, self-booking and AI call bookings).
+const BOOKED_REASON_SOURCES = Object.freeze({
+  picker: 'typed on the re-service page',
+  text: 'sent by text',
+  call: 'from a phone call; an AI summary of what they said, not their exact words',
+  office: 'taken down by the office',
+});
+const MAX_BOOKED_REASON_CHARS = 300;
+function bookedReasonBlock(row, redact = (text) => text) {
+  let pests = row?.customer_request_pests;
+  if (typeof pests === 'string') {
+    try { pests = JSON.parse(pests); } catch { pests = []; }
+  }
+  const pestWords = (Array.isArray(pests) ? pests : [])
+    .map((pest) => String(pest || '').replace(/[_-]+/g, ' ').trim())
+    .filter(Boolean);
+  const text = redact(String(row?.customer_request || '').trim()).slice(0, MAX_BOOKED_REASON_CHARS).trim();
+  if (!text && !pestWords.length) return '';
+  const source = Object.hasOwn(BOOKED_REASON_SOURCES, row?.customer_request_source)
+    ? BOOKED_REASON_SOURCES[row.customer_request_source]
+    : 'recorded at booking';
+  return [
+    `BOOKED REASON (why the customer booked this visit, ${source}; attribute it with "You asked us…" or "You mentioned…", never a finding)`,
+    text ? `Reason: ${text}` : null,
+    pestWords.length ? `Pests picked: ${pestWords.join(', ')}` : null,
+  ].filter(Boolean).join('\n');
+}
+
 function withheldProductsLine(count) {
   return count > 0
     ? `Products applied: ${count} recorded. Names, amounts and rates are withheld on purpose; APPLICATION DETAILS, when present, gives each product's job, method and area.`
@@ -432,6 +461,7 @@ module.exports = {
   TECHNICIAN_NOTE_HEADER,
   CUSTOMER_WORDS_HEADER,
   withheldProductsLine,
+  bookedReasonBlock,
   COMMON_ACTIVE_INGREDIENTS,
   activeIngredientsMentioned,
   writerRulesRejection,

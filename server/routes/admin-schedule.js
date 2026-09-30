@@ -74,7 +74,7 @@ const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
-  activeIngredientsMentioned,
+  activeIngredientsMentioned, bookedReasonBlock,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -25150,7 +25150,19 @@ Customer concern (as reported, not a verified finding): ${promptConcern || 'None
 Recommendations: ${promptRecs.length ? promptRecs.join('; ') : 'None'}
 
 Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a count alone supplies no visual facts; ${photoCountProvenanceNote})`;
-    const fullUserMessage = `${userMessage}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
+    // Why the customer booked (scheduled_services.customer_request*, filled
+    // by re-service bookings), which no writer read before. Writer rules
+    // and authorized grounding only; a failed read just leaves it out.
+    let bookedReason = '';
+    if (writerRulesOn && groundingCustomerId && scheduledServiceId) {
+      try {
+        const booked = await db('scheduled_services').where({ id: scheduledServiceId })
+          .first('customer_request', 'customer_request_source', 'customer_request_pests');
+        const block = bookedReasonBlock(booked, redactAccessCodes);
+        if (block) bookedReason = `\n\n${block}`;
+      } catch { /* no booked reason: the paragraph leads with the work */ }
+    }
+    const fullUserMessage = `${userMessage}${bookedReason}${typedFindingsBlock}${photoObservationsBlock}${contextText}${commsBlock}`;
     // v9: canonical remaining-service modules join the dedicated writers.
     // Both the selected system
     // prompt and all visit facts participate in the cache identity.

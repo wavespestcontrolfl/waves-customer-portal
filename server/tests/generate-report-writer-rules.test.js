@@ -9,6 +9,7 @@ let mockProfile = { serviceKey: 'pest_general_quarterly', findingsType: null };
 let mockServiceType = 'Quarterly Pest Control Service';
 let mockCatalogRows = [];
 let mockCatalogFails = false;
+let mockBooked = {};
 const mockProvider = jest.fn();
 const mockBuildContext = jest.fn(async () => ({ contextText: '', signals: {} }));
 const mockComms = jest.fn(async () => ({ text: '', promptHint: '' }));
@@ -44,7 +45,7 @@ jest.mock('../models/db', () => {
       return chain;
     };
     chain.first = async () => (table === 'scheduled_services'
-      ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1' } : null);
+      ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1', ...mockBooked } : null);
     chain.then = (resolve, reject) => (table === 'products_catalog' && mockCatalogFails
       ? Promise.reject(new Error('catalog read failed'))
       : Promise.resolve(table === 'products_catalog' ? mockCatalogRows.filter((row) => !match || match(row)) : [])).then(resolve, reject);
@@ -86,6 +87,7 @@ beforeEach(() => {
   mockServiceType = 'Quarterly Pest Control Service';
   mockCatalogRows = [];
   mockCatalogFails = false;
+  mockBooked = {};
   delete process.env.GATE_REPORT_WRITER_RULES;
 });
 afterEach(() => { delete process.env.GATE_REPORT_WRITER_RULES; });
@@ -334,5 +336,38 @@ describe('typed product application record', () => {
     const block = buildTypedFindingsPromptBlock({ findingsType: 'termite_treatment', values });
     expect(block).toContain('Product application record');
     expect(block).toContain('Termidor SC');
+  });
+});
+
+describe('booked reason', () => {
+  beforeEach(() => {
+    mockProfile = { serviceKey: 'pest_re_service', findingsType: null };
+    mockServiceType = 'Pest Re-Service';
+    mockBooked = {
+      customer_request: 'Ants on the kitchen counter again. Gate code 4821.',
+      customer_request_source: 'picker',
+      customer_request_pests: ['ants'],
+    };
+  });
+
+  test('gate on: the writer gets why the customer booked, attributed and scrubbed', async () => {
+    process.env.GATE_REPORT_WRITER_RULES = 'true';
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ghost ants at the slider (booked reason case).' }), res);
+    expect(res.statusCode).toBe(200);
+    const { text, system } = mockProvider.mock.calls[0][0];
+    expect(text).toContain('BOOKED REASON (why the customer booked this visit, typed on the re-service page');
+    expect(text).toContain('Reason: Ants on the kitchen counter again. Gate code [redacted].');
+    expect(text).not.toContain('4821');
+    expect(system).toContain('CROSS-SERVICE MODIFIER — CALLBACK / RESERVICE');
+  });
+
+  test('gate off: the booked reason stays unread', async () => {
+    const res = mkRes();
+    await handler(mkReq({ serviceNotes: 'Ghost ants at the slider (booked reason off case).' }), res);
+    const { text, system } = mockProvider.mock.calls[0][0];
+    expect(text).not.toContain('BOOKED REASON');
+    expect(text).not.toContain('Ants on the kitchen counter again');
+    expect(system).not.toContain('CALLBACK / RESERVICE');
   });
 });
