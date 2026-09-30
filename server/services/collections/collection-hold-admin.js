@@ -37,12 +37,16 @@ async function listCollectionHolds(customerId) {
 // blind release of whatever hold is active now.
 //
 // A dispute that was raised on top of an ACTIVE wrong-number / wrong-party
-// fallback hold shares that one row (one active row per customer+flag), with the
+// fallback hold shares that row (one active row per customer+flag), with the
 // fallback's reason kept in a trailer (collection-hold.js). Releasing the DISPUTE
-// must not lift the fallback's all-channel outreach block: the row is downgraded
-// back to the fallback reason and stays active (released_at untouched), and the
-// result says so (`fallbackRestored: true`). `released` still counts the dispute
-// as released, so charging resumes exactly as for a plain dispute hold.
+// must not lift the fallback's all-channel outreach block, so the dispute row is
+// released (released_at stamped, its id retired) and the fallback is written back
+// as a NEW active row with its original reason, actor and time
+// (`fallbackRestored: true`). A NEW id matters: a stale screen, a repeated request
+// or a later dispute on the restored fallback can never release the wrong episode,
+// because a holdId names exactly one dispute and dies with its release (released: 0,
+// the route's 409). `released` counts the dispute, so charging resumes exactly as
+// for a plain dispute hold.
 async function releaseCollectionHold(customerId, { holdId, trx = null } = {}) {
   if (!holdId) return { ok: false, reason: 'hold_id_required' };
   const run = async (t) => {
@@ -50,16 +54,23 @@ async function releaseCollectionHold(customerId, { holdId, trx = null } = {}) {
       .where({ id: holdId, customer_id: customerId, flag: HOLD_FLAG })
       .whereNull('released_at')
       .forUpdate()
-      .first('id', 'reason');
+      .first('id', 'reason', 'created_by', 'created_at');
     if (!row) return { ok: true, released: 0 };
-    // Only a DISPUTE hold is released here (that is all the office is shown a Release for).
-    // A row that is no longer a dispute is a fallback hold left standing by an earlier
-    // release of this same dispute: a repeated request, or a second admin releasing the
-    // holdId they loaded, must not lift it. released: 0 is the caller's 409 "hold changed".
+    // Only a DISPUTE hold is released here (that is all the office is shown a Release for):
+    // a fallback hold's id must never lift it. released: 0 is the caller's 409 "hold changed".
     if (!isDisputeHoldReason(row.reason)) return { ok: true, released: 0 };
     const restore = priorHoldReasonOf(row.reason);
-    if (!restore) return releaseFlag({ customerId, flag: HOLD_FLAG, id: holdId, trx: t });
-    await t('collections_flags').where({ id: holdId }).update({ reason: restore.prior });
+    const released = await releaseFlag({ customerId, flag: HOLD_FLAG, id: holdId, trx: t });
+    if (!restore || !released.ok || released.released < 1) return released;
+    // The dispute row is released; put the fallback back as a fresh active row. ON CONFLICT
+    // DO NOTHING: if another writer already placed an active hold in this instant, that hold
+    // stands and there is nothing to restore (no failed statement inside the transaction).
+    await t.raw(
+      `INSERT INTO collections_flags (customer_id, flag, reason, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (customer_id, flag) WHERE released_at IS NULL DO NOTHING`,
+      [customerId, HOLD_FLAG, restore.prior, row.created_by || null, row.created_at],
+    );
     return { ok: true, released: 1, fallbackRestored: true };
   };
   try {

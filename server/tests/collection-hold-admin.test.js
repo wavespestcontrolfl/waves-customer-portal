@@ -1,6 +1,6 @@
 /** B10 C: staff can see and release a collections hold; release resumes charging. */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const mockDbRow = { row: null, updates: [] };
+const mockDbRow = { row: null, inserts: [] };
 const mockTrx = (table) => {
   if (table !== 'collections_flags') throw new Error(`unexpected table ${table}`);
   const qb = {
@@ -8,10 +8,10 @@ const mockTrx = (table) => {
     whereNull: () => qb,
     forUpdate: () => qb,
     first: async () => mockDbRow.row,
-    update: async (patch) => { mockDbRow.updates.push(patch); return 1; },
   };
   return qb;
 };
+mockTrx.raw = async (sql, bindings) => { mockDbRow.inserts.push({ sql, bindings }); return { rowCount: 1 }; };
 jest.mock('../models/db', () => {
   const db = (t) => mockTrx(t);
   db.transaction = async (fn) => fn(mockTrx);
@@ -36,23 +36,23 @@ test('lists only collection_hold rows and says which ones stop charges', async (
   expect(holds[1].stops_charges).toBe(false);
 });
 
-beforeEach(() => { mockDbRow.row = null; mockDbRow.updates = []; mockRelease.mockReset(); });
+beforeEach(() => { mockDbRow.row = null; mockDbRow.inserts = []; mockRelease.mockReset(); });
 
 test('release goes through the one writer, only for collection_hold, and names the exact row', async () => {
   mockDbRow.row = { id: 'hold-1', reason: 'dispute on call: bill wrong' };
   mockRelease.mockResolvedValue({ ok: true, released: 1 });
   expect(await releaseCollectionHold('c-1', { holdId: 'hold-1' })).toEqual({ ok: true, released: 1 });
   expect(mockRelease).toHaveBeenCalledWith({ customerId: 'c-1', flag: 'collection_hold', id: 'hold-1', trx: mockTrx });
-  expect(mockDbRow.updates).toEqual([]);
+  expect(mockDbRow.inserts).toEqual([]);
 });
 
-// Codex P1: after the dispute is released the SAME row stands as the fallback. A repeated
-// request (or a second admin's stale holdId) must not lift it.
-test('a repeated release of the same holdId finds a fallback row and releases nothing', async () => {
+// A fallback row's id is never releasable here (only a dispute is), so a stale holdId that
+// now names a fallback can never lift the outreach block.
+test('a holdId that names a fallback row releases nothing', async () => {
   mockDbRow.row = { id: 'hold-1', reason: 'wrong-party answer on billing follow-up call; review card failed to file' };
   expect(await releaseCollectionHold('c-1', { holdId: 'hold-1' })).toEqual({ ok: true, released: 0 });
   expect(mockRelease).not.toHaveBeenCalled();
-  expect(mockDbRow.updates).toEqual([]);
+  expect(mockDbRow.inserts).toEqual([]);
 });
 
 test('a hold that is no longer active releases nothing (the caller reports a conflict)', async () => {
@@ -66,20 +66,33 @@ test('a hold that is no longer active releases nothing (the caller reports a con
 test.each([
   ['wrong-number', 'wrong-number report on billing follow-up call; wrong_number flag write failed'],
   ['wrong-party', 'wrong-party answer on billing follow-up call; review card failed to file'],
-])('releasing a dispute over an active %s fallback restores the fallback and keeps the row active', async (_n, prior) => {
+])('releasing a dispute over an active %s fallback restores the fallback as a new active row', async (_n, prior) => {
   const { embedPriorHoldReason } = require('../services/collections/collection-hold');
-  mockDbRow.row = { id: 'hold-1', reason: embedPriorHoldReason('dispute on call: bill wrong', prior) };
+  mockDbRow.row = { id: 'hold-1', reason: embedPriorHoldReason('dispute on call: bill wrong', prior), created_by: 'system:collections_voice', created_at: 'T0' };
+  mockRelease.mockResolvedValue({ ok: true, released: 1 });
   const out = await releaseCollectionHold('c-1', { holdId: 'hold-1' });
   expect(out).toEqual({ ok: true, released: 1, fallbackRestored: true });
-  expect(mockRelease).not.toHaveBeenCalled(); // released_at is never stamped
-  expect(mockDbRow.updates).toEqual([{ reason: prior }]);
+  // The dispute row (and its id) is released; the fallback returns as a NEW active row.
+  expect(mockRelease).toHaveBeenCalledWith({ customerId: 'c-1', flag: 'collection_hold', id: 'hold-1', trx: mockTrx });
+  expect(mockDbRow.inserts).toHaveLength(1);
+  expect(mockDbRow.inserts[0].sql).toMatch(/ON CONFLICT \(customer_id, flag\) WHERE released_at IS NULL DO NOTHING/);
+  expect(mockDbRow.inserts[0].bindings).toEqual(['c-1', 'collection_hold', prior, 'system:collections_voice', 'T0']);
 });
 
 test('a dispute over a reason-less active hold restores a reason-less active hold', async () => {
   const { embedPriorHoldReason } = require('../services/collections/collection-hold');
   mockDbRow.row = { id: 'hold-1', reason: embedPriorHoldReason('dispute raised on call', null) };
+  mockRelease.mockResolvedValue({ ok: true, released: 1 });
   expect(await releaseCollectionHold('c-1', { holdId: 'hold-1' })).toMatchObject({ released: 1, fallbackRestored: true });
-  expect(mockDbRow.updates).toEqual([{ reason: null }]);
+  expect(mockDbRow.inserts[0].bindings[2]).toBeNull();
+});
+
+test('a release that lands nothing (row lost the race) restores nothing', async () => {
+  const { embedPriorHoldReason } = require('../services/collections/collection-hold');
+  mockDbRow.row = { id: 'hold-1', reason: embedPriorHoldReason('dispute raised on call', 'wrong-party answer') };
+  mockRelease.mockResolvedValue({ ok: true, released: 0 });
+  expect(await releaseCollectionHold('c-1', { holdId: 'hold-1' })).toEqual({ ok: true, released: 0 });
+  expect(mockDbRow.inserts).toEqual([]);
 });
 
 test('a failing read never reports a release', async () => {
