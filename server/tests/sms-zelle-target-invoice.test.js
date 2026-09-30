@@ -207,3 +207,75 @@ describe('the Payment options fact for the three Zelle situations (Codex round-2
     expect(r({ openInvoices: [open2[0]] }, 'Zelle?').invoiceId).toBe('a');
   });
 });
+
+// Codex round-27 P2: explicit target CONFLICTS get their own fact, never the "several open invoices" wording.
+describe('conflict vs ambiguity wording (Codex round-27 P2)', () => {
+  const { buildFactsBlock } = require('../services/sms-shadow-drafter');
+  const GATE = 'GATE_SMS_REAL_ANSWERS';
+  const line = (extras) => {
+    process.env[GATE] = 'true';
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    try {
+      return buildFactsBlock({ summary: 'T', billing: { outstandingBalance: 0, recentPayments: [] } }, { now: new Date('2026-09-29T15:00:00Z'), zelleEligible: false, ...extras })
+        .split('\n').find((l) => l.startsWith('- Payment options:'));
+    } finally { delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; }
+  };
+  test('conflict: the named invoice is not open — target-specific, not "SEVERAL", not "unavailable"', () => {
+    const l = line({ zelleTargetConflict: true });
+    expect(l).toContain('does NOT match an open invoice');
+    expect(l).toContain('do not offer Zelle for it and do not say Zelle is unavailable in general');
+    expect(l).not.toContain('SEVERAL');
+    expect(l).not.toContain('ask which invoice');
+    expect(l).not.toContain('or Zelle to');
+    expect(l.startsWith('- Payment options:')).toBe(true);
+  });
+  test('genuine multiple-open ambiguity still asks which invoice', () => {
+    const l = line({ zelleTargetAmbiguous: true });
+    expect(l).toContain('SEVERAL open invoices');
+    expect(l).toContain('ask which invoice');
+  });
+  test('the drafter classifies the resolver reasons: with ONE open invoice a named-but-different invoice / amount is a conflict, never "several"', async () => {
+    const draftFacts = async (inboundMessage, open) => {
+      jest.resetModules();
+      process.env[GATE] = 'true';
+      process.env.ZELLE_RECIPIENT = 'pay@example.com';
+      process.env.SHADOW_DRAFT_VERIFY = 'false';
+      process.env.SHADOW_FEWSHOT = 'false';
+      jest.doMock('../models/db', () => jest.fn(() => ({ where: jest.fn(() => ({ first: jest.fn(async () => null) })) })));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+      jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ zone: 'z', days: [] })) }));
+      jest.doMock('../services/context-aggregator', () => ({
+        getContextForCustomer: jest.fn(async () => ({ summary: 'QA', flags: [], smsHistory: [], customer: { id: 'customer-1', billingLane: null }, billing: { outstandingBalance: 0, recentPayments: [], openInvoice: open[0], openInvoices: open } })),
+        authorizedDuesCents: jest.fn(() => []),
+      }));
+      jest.doMock('../routes/pay-v2', () => ({ payPageZelleVisibility: jest.fn(async () => ({ visible: true })) }));
+      jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
+      jest.doMock('../services/voice-profile-distiller', () => ({ getApprovedVoiceProfile: jest.fn(async () => null) }));
+      jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
+      jest.doMock('../services/llm/call', () => ({
+        dispatchWithFallback: jest.fn(async (policy, payload) => (payload?.laneId === 'sms_service_identity'
+          ? { ok: true, json: { about: 'none', visit: null, service: null } }
+          : { ok: true, text: JSON.stringify({ reply: 'ok', intended_actions: [], missing_info: null }), model: 'm' })),
+      }));
+      jest.doMock('../services/sms-suggest-mode', () => ({ hasRedactionPlaceholder: jest.fn(() => false), hasPriceQuote: jest.fn(() => false) }));
+      const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
+      const context = await require('../services/context-aggregator').getContextForCustomer({ id: 'customer-1' });
+      const out = await generateGroundedDraft({ client: {}, context, inboundMessage, intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 }, schedulingIntent: false, city: 'Venice' });
+      delete process.env[GATE]; delete process.env.ZELLE_RECIPIENT; delete process.env.SHADOW_DRAFT_VERIFY; delete process.env.SHADOW_FEWSHOT;
+      jest.resetModules();
+      return out.factsBlock;
+    };
+    const one = [{ id: 'inv-1', invoiceNumber: 'WPC-2026-0101', status: 'sent', amountDue: 120 }];
+    const two = [...one, { id: 'inv-2', invoiceNumber: 'WPC-2026-0202', status: 'sent', amountDue: 95 }];
+    const f1 = await draftFacts('Can I Zelle invoice WPC-2026-0999?', one);
+    expect(f1).toContain('does NOT match an open invoice');
+    expect(f1).not.toContain('SEVERAL');
+    const f2 = await draftFacts('Can I Zelle the $95 invoice?', one);
+    expect(f2).toContain('does NOT match an open invoice');
+    const f3 = await draftFacts('Can I pay by Zelle?', two);
+    expect(f3).toContain('SEVERAL open invoices');
+    expect(f3).not.toContain('does NOT match');
+    const f4 = await draftFacts('Can I Zelle invoice WPC-2026-0999?', two);
+    expect(f4).toContain('does NOT match an open invoice'); // an explicit conflict even with several open
+  });
+});

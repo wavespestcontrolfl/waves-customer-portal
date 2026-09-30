@@ -46,6 +46,8 @@ async function loadPaymentHistory(customerId, dbh = db) {
         [customerId],
       )
       .orderBy('payments.payment_date', 'desc')
+      .orderBy('payments.created_at', 'desc') // deterministic tie-break for same-day attempts (Codex round-27 P1)
+      .orderBy('payments.id', 'desc')
       .limit(PAYMENT_HISTORY_CAP + 1);
     return { rows: rows.slice(0, PAYMENT_HISTORY_CAP), complete: rows.length <= PAYMENT_HISTORY_CAP };
   } catch (err) {
@@ -66,10 +68,21 @@ function claimsNegatedAck(text) {
     return typeof drafter.paymentAckPolarity === 'function' && drafter.paymentAckPolarity(String(text || '')) === 'negated';
   } catch { return false; }
 }
+// Does the reply make ANY payment claim the drafter would validate (a recognized status / receipt claim or an
+// unrecognized payment assertion)? Lazy require; a stub without the export = no trigger.
+function makesPaymentClaim(text) {
+  try {
+    const drafter = require('./sms-shadow-drafter');
+    return typeof drafter.paymentClauseNeedsValidation === 'function' && drafter.paymentClauseNeedsValidation(String(text || ''), {});
+  } catch { return false; }
+}
 async function ensureAbsenceHistory(context, replyText, dbh = db) {
   const billing = context?.billing;
   if (!billing || typeof billing !== 'object' || billing.paymentHistory !== undefined) return context;
-  if (!billing.recentPaymentsTruncated || !(containsAbsencePhrase(replyText) || claimsNegatedAck(replyText))) return context;
+  // Codex round-27 P1: when the 3-row display window is truncated, ANY status / receipt claim binds against
+  // incomplete rows (hidden same-day attempts) — load the authoritative history before binding, at draft AND
+  // send (both call this). Absence phrases and negated acks were the original triggers.
+  if (!billing.recentPaymentsTruncated || !(containsAbsencePhrase(replyText) || claimsNegatedAck(replyText) || makesPaymentClaim(replyText))) return context;
   billing.paymentHistory = await loadPaymentHistory(context.customer?.id, dbh);
   return context;
 }

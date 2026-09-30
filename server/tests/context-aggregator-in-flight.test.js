@@ -132,3 +132,15 @@ describe('collectible own invoices (partially_paid included, withdrawn packet in
     expect(billing.invoiceStatuses.map((x) => x.id)).toEqual(['i2']); // void is shown (its status is a fact); draft + payer-billed are not
   });
 });
+
+// Codex round-27 P1: the Recent payments read is DETERMINISTIC for same-day attempts.
+test('the Recent payments query orders by payment_date, then created_at, then id (all descending)', async () => {
+  const db = require('../models/db');
+  db.__queries.length = 0;
+  hasInFlightMoney.mockResolvedValue(false);
+  await build();
+  const q = db.__queries.find(([t]) => t === 'payments')[1];
+  expect(q.orderBy.mock.calls.map(([col, dir]) => [col, dir])).toEqual([
+    ['payments.payment_date', 'desc'], ['payments.created_at', 'desc'], ['payments.id', 'desc'],
+  ]);
+});

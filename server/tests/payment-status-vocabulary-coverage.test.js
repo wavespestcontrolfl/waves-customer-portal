@@ -877,7 +877,9 @@ describe('round-21: amount-free, date-free, tender-free status claims are judged
     expect(rq('Your payment is processing.', ctx([row('processing', '2026-09-10')]), ASK)).toBe(false);
     expect(rq('Your payment failed.', ctx([row('failed', '2026-09-10')]), ASK)).toBe(false);
     // an explicit date/amount/tender in the reply or the inbound switches to the identity rule (older row is fine)
-    expect(rq('Your $110 payment from Sep 10 is processing.', ctx(newerPaidOlderProcessing), ASK)).toBe(false);
+    // (round-27: with a GENERIC inbound the reply may not reach back to an older payment on its own — see below)
+    expect(rq('Your $110 payment from Sep 10 is processing.', ctx(newerPaidOlderProcessing), ASK)).toBe(true);
+    expect(rq('Your $110 payment from Sep 10 is processing.', ctx(newerPaidOlderProcessing))).toBe(false); // no inbound at all: a proactive message
     expect(rq('Your payment is processing.', ctx(newerPaidOlderProcessing), 'Is my Sep 10 payment still processing?')).toBe(false);
   });
   test('absence claims are not scoped to the newest payment', () => {
@@ -1044,5 +1046,99 @@ describe('round-26: conflicting statuses under a date-only / tender-only / combi
   test('absence claims and same-family rows are unaffected', () => {
     expect(rq('Your card payment from Sep 12 failed.', ctx([row('failed'), row('failed', { amount: 45 })]))).toBe(false);
     expect(rq("We haven't received your card payment from Sep 12.", ctx([row('failed')]))).toBe(false);
+  });
+});
+
+// Codex round-27 P1 (2): a GENERIC inbound leaves the reply's claim about the MOST RECENT payment.
+describe('round-27: a generic inbound binds the reply to the most recent payment (date, then created_at)', () => {
+  const rq = (r, rows, inboundMessage) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows } }, { byMeaning: true, inboundMessage });
+  const row = (status, date, created, over = {}) => ({ amount: 120, status, payment_date: date, created_at: created, payment_method_type: 'card', ...over });
+  const ASK = 'Did my payment go through?';
+
+  test('the auditor case: newest is FAILED, an older $120 payment is PAID — "We received your $120 payment from Sep 12" is ungrounded', () => {
+    const rows = [row('failed', '2026-09-20', '2026-09-20T15:00:00Z', { amount: 80 }), row('paid', '2026-09-12', '2026-09-12T15:00:00Z')];
+    expect(rq('We received your $120 payment from Sep 12.', rows, ASK)).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 is paid.', rows, ASK)).toBe(true);
+    expect(rq('Your payment failed.', rows, ASK)).toBe(false); // the newest one did
+    expect(rq('Your $80 payment from Sep 20 failed.', rows, ASK)).toBe(false); // identity matches the newest
+  });
+  test('a reply identity that does not match the most recent payment is ungrounded (amount, date or tender)', () => {
+    const rows = [row('paid', '2026-09-20', '2026-09-20T15:00:00Z', { amount: 80 }), row('paid', '2026-09-12', '2026-09-12T15:00:00Z')];
+    expect(rq('We received your $80 payment from Sep 20.', rows, ASK)).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12.', rows, ASK)).toBe(true);
+    expect(rq('We received your $80 card payment from Sep 20.', rows, ASK)).toBe(false);
+    expect(rq('We received your $80 Zelle payment from Sep 20.', rows, ASK)).toBe(true); // wrong tender for the newest
+  });
+  test('created_at breaks same-day ties: the LATER attempt is the payment the customer means', () => {
+    const failedThenPaid = [row('failed', '2026-09-12', '2026-09-12T10:00:00Z'), row('paid', '2026-09-12', '2026-09-12T16:00:00Z')];
+    expect(rq('Your payment failed.', failedThenPaid, ASK)).toBe(true); // the retry went through
+    expect(rq('We received your $120 payment from Sep 12.', failedThenPaid, ASK)).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12.', [...failedThenPaid].reverse(), ASK)).toBe(false); // row order is irrelevant
+  });
+  test('an inbound that NAMES a payment identity, or no inbound at all, is unchanged', () => {
+    const rows = [row('failed', '2026-09-20', '2026-09-20T15:00:00Z', { amount: 80 }), row('paid', '2026-09-12', '2026-09-12T15:00:00Z')];
+    expect(rq('We received your $120 payment from Sep 12.', rows, 'Did my $120 payment from Sep 12 go through?')).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12.', rows)).toBe(false); // proactive message, no inbound
+    expect(rq('We received your $120 payment from Sep 12.', rows, 'What time is my visit Tuesday?')).toBe(false); // inbound is not about a payment
+  });
+});
+
+// Codex round-27 P1 (3): a partial-refund disclosure is tracked by the payment ROW it is bound to.
+describe('round-27: a partial refund disclosure only lets a receipt bind THAT partially refunded row', () => {
+  const rq = (r, rows) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows } }, { byMeaning: true });
+  const partialA = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card', refund_status: 'partial', refund_amount: 30 };
+  const partialB = { amount: 200, status: 'paid', payment_date: '2026-09-05', payment_method_type: 'card', refund_status: 'partial', refund_amount: 50 };
+  const rows = [partialA, partialB];
+
+  test('disclosure about $120 (A) does NOT let a receipt claim bind $200 (B), in either order', () => {
+    const disclosureA = 'part of your $120 payment from Sep 12 was refunded';
+    expect(rq(`${disclosureA}. We received your $200 payment from Sep 5.`, rows)).toBe(true);
+    expect(rq(`We received your $200 payment from Sep 5. Also, ${disclosureA}.`, rows)).toBe(true);
+  });
+  test('a receipt for the SAME row the disclosure is bound to is fine (either order, also refund-subject wording)', () => {
+    expect(rq('We received your $120 payment from Sep 12. Part of your $120 payment from Sep 12 was refunded.', rows)).toBe(false);
+    expect(rq('Part of your $200 payment from Sep 5 was refunded. We received your $200 payment from Sep 5.', rows)).toBe(false);
+    expect(rq('We received your $120 payment from Sep 12. Your $30 refund was issued.', rows)).toBe(false);
+  });
+  test('an anaphoric disclosure follows the receipt\'s own row (the antecedent), not another', () => {
+    expect(rq('We received your $120 payment from Sep 12, but it was partially refunded.', rows)).toBe(false);
+    expect(rq('We received your $200 payment from Sep 5, but it was partially refunded.', rows)).toBe(false);
+  });
+  test('no disclosure at all: a partially refunded row never backs "received"', () => {
+    expect(rq('We received your $120 payment from Sep 12.', rows)).toBe(true);
+    expect(rq('We received your $200 payment from Sep 5.', rows)).toBe(true);
+  });
+  test('a disclosure about a row that is not partially refunded discloses nothing', () => {
+    const plain = { amount: 90, status: 'paid', payment_date: '2026-09-01', payment_method_type: 'card' };
+    expect(rq('Part of your $90 payment from Sep 1 was refunded. We received your $120 payment from Sep 12.', [partialA, plain])).toBe(true);
+  });
+});
+
+// Codex round-27 P1 (1b): the authoritative history rows are what claims bind against once it is loaded.
+describe('round-27: with a truncated window, claims bind against the loaded HISTORY (hidden same-day attempts)', () => {
+  const day = '2026-09-12';
+  const att = (id, status, created, over = {}) => ({ id, amount: 120, status, payment_date: day, created_at: created, payment_method_type: 'card', ...over });
+  const all = [att('e', 'failed', '2026-09-12T18:00:00Z'), att('d', 'failed', '2026-09-12T17:00:00Z'), att('c', 'failed', '2026-09-12T16:00:00Z'), att('b', 'paid', '2026-09-12T15:00:00Z'), att('a', 'processing', '2026-09-12T14:00:00Z')];
+  const window3 = all.slice(0, 3);
+  const ctxWith = (billing) => ({ billing: { outstandingBalance: 0, recentPayments: window3, recentPaymentsTruncated: true, ...billing } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const FAILED = 'Your $120 card payment from Sep 12 failed.';
+
+  test('the 3-row window alone looks unambiguous ("failed")...', () => {
+    expect(rq(FAILED, ctxWith({}))).toBe(false);
+  });
+  test('...but with the 5 same-day attempts loaded (failed x3, paid, processing) the claim is ambiguous => ungrounded', () => {
+    expect(rq(FAILED, ctxWith({ paymentHistory: { rows: all, complete: true } }))).toBe(true);
+    expect(rq('We received your $120 card payment from Sep 12.', ctxWith({ paymentHistory: { rows: all, complete: true } }))).toBe(true);
+  });
+  test('a truncated window whose history could not be read (null) fails closed for receipts and status claims', () => {
+    expect(rq(FAILED, ctxWith({ paymentHistory: null }))).toBe(true);
+    expect(rq('We received your $120 card payment from Sep 12.', ctxWith({ paymentHistory: null }))).toBe(true);
+  });
+  test('a paid row that only the history holds (older than the window) still grounds a receipt once loaded', () => {
+    const older = att('z', 'paid', '2026-06-12T10:00:00Z', { payment_date: '2026-06-12', amount: 77 });
+    const c = ctxWith({ paymentHistory: { rows: [...all, older], complete: true } });
+    expect(rq('We received your $77 card payment from Jun 12.', c)).toBe(false);
+    expect(rq('We received your $77 card payment from Jun 12.', ctxWith({}))).toBe(true); // window only: not there
   });
 });

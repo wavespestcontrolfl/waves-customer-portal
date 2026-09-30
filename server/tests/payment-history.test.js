@@ -34,6 +34,8 @@ describe('loadPaymentHistory', () => {
     expect(dbh.calls.find(([m]) => m === 'limit')[1]).toEqual([PAYMENT_HISTORY_CAP + 1]);
     // only an EXPLICIT 'upcoming' row is excluded — NULL-status rows stay (Codex round-15 P1)
     expect(dbh.calls.some(([m, a]) => m === 'whereNot' && a[1] === 'upcoming')).toBe(false);
+    // deterministic order for same-day attempts (Codex round-27 P1)
+    expect(dbh.calls.filter(([m]) => m === 'orderBy').map(([, a]) => a)).toEqual([['payments.payment_date', 'desc'], ['payments.created_at', 'desc'], ['payments.id', 'desc']]);
     const grouped = dbh.calls.find(([m, a]) => m === 'where' && typeof a[0] === 'function')[1][0];
     const inner = [];
     const rec = { whereNull: (c) => { inner.push(['whereNull', c]); return rec; }, orWhereNot: (c, v) => { inner.push(['orWhereNot', c, v]); return rec; } };
@@ -64,11 +66,25 @@ describe('ensureAbsenceHistory (lazy)', () => {
   test('no read unless the reply makes an ABSENCE claim AND the display window may be truncated', async () => {
     const dbh = fakeDb([{ id: 1 }]);
     const notAbsence = ctx({ recentPayments: [], recentPaymentsTruncated: true });
-    await ensureAbsenceHistory(notAbsence, 'We received your $120 payment from Sep 12.', dbh);
+    await ensureAbsenceHistory(notAbsence, 'See you Tuesday, thanks!', dbh);
     expect(dbh).not.toHaveBeenCalled();
     expect(notAbsence.billing.paymentHistory).toBeUndefined();
     const notTruncated = ctx({ recentPayments: [], recentPaymentsTruncated: false });
     await ensureAbsenceHistory(notTruncated, "Your payment isn't showing yet.", dbh);
+    expect(dbh).not.toHaveBeenCalled();
+  });
+
+  // Codex round-27 P1: ANY status / receipt claim binds against incomplete rows when the window is truncated.
+  test('a receipt / status claim (not only an absence claim) loads the authoritative history when the window is truncated', async () => {
+    for (const reply of ['We received your $120 payment from Sep 12.', 'Your payment failed.', 'Your payment settled.', 'Your invoice is paid.']) {
+      const dbh = fakeDb([{ id: 1, status: 'paid' }]);
+      const c = ctx({ recentPayments: [], recentPaymentsTruncated: true });
+      await ensureAbsenceHistory(c, reply, dbh);
+      expect({ reply, loaded: c.billing.paymentHistory !== undefined }).toEqual({ reply, loaded: true });
+    }
+    const dbh = fakeDb([]);
+    const notTruncated = ctx({ recentPayments: [], recentPaymentsTruncated: false });
+    await ensureAbsenceHistory(notTruncated, 'We received your $120 payment from Sep 12.', dbh);
     expect(dbh).not.toHaveBeenCalled();
   });
 
@@ -174,5 +190,28 @@ describe('surfaceReferencedPayments', () => {
     const context = ctx();
     await expect(surfaceReferencedPayments(context, 'Did you get my $120 payment from June 12?', fakeDb([], { fail: true }))).resolves.toBe(context);
     expect(context.billing.recentPayments).toHaveLength(3);
+  });
+});
+
+// Codex round-27 P1: end to end — a truncated window + a receipt / status claim loads the history, and the claim is judged on ALL same-day attempts.
+describe('draft/send flow with 4+ same-day attempts', () => {
+  const { replyQuotesUngroundedAmount } = require('../services/sms-shadow-drafter');
+  const att = (id, status, created) => ({ id, amount: 120, status, payment_date: '2026-09-12', created_at: created, payment_method_type: 'card' });
+  const all = [att('e', 'failed', '2026-09-12T18:00:00Z'), att('d', 'failed', '2026-09-12T17:00:00Z'), att('c', 'failed', '2026-09-12T16:00:00Z'), att('b', 'paid', '2026-09-12T15:00:00Z'), att('a', 'processing', '2026-09-12T14:00:00Z')];
+  const truncatedCtx = () => ({ customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: all.slice(0, 3), recentPaymentsTruncated: true } });
+  test('the reply\'s claim triggers the history load and is then ungrounded (ambiguous statuses that day)', async () => {
+    const context = truncatedCtx();
+    const dbh = fakeDb(all);
+    const reply = 'Your $120 card payment from Sep 12 failed.';
+    expect(replyQuotesUngroundedAmount(reply, context, { byMeaning: true })).toBe(false); // window only: looks fine
+    await ensureAbsenceHistory(context, reply, dbh);
+    expect(dbh).toHaveBeenCalledTimes(1);
+    expect(replyQuotesUngroundedAmount(reply, context, { byMeaning: true })).toBe(true);
+  });
+  test('a failed history read (null) leaves the truncated window unusable for binding', async () => {
+    const context = truncatedCtx();
+    await ensureAbsenceHistory(context, 'Your $120 card payment from Sep 12 failed.', fakeDb([], { fail: true }));
+    expect(context.billing.paymentHistory).toBeNull();
+    expect(replyQuotesUngroundedAmount('Your $120 card payment from Sep 12 failed.', context, { byMeaning: true })).toBe(true);
   });
 });

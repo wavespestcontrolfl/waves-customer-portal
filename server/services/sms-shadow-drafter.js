@@ -1425,6 +1425,13 @@ function paymentStatusClaimKind(clause) {
 // `settledOnly` keeps only payments that went through (Codex r7 —
 // recentPayments is attempted history and carries failed / pending /
 // overdue rows too, none of which back "your payment went through").
+// The payments rows a claim binds against: the AUTHORITATIVE history once it has been loaded (a truncated
+// 3-row window can hide same-day attempts — Codex round-27 P1), else the recent-payments window.
+function paymentRowsForBinding(context) {
+  const billing = context?.billing;
+  const hist = billing?.paymentHistory;
+  return Array.isArray(hist?.rows) ? hist.rows : (billing?.recentPayments || []);
+}
 function billingAmountCents(context, { settledOnly = false } = {}) {
   const billing = context?.billing || {};
   const centsOf = (v) => (v == null ? NaN : Math.round(Number(v) * 100));
@@ -1435,7 +1442,7 @@ function billingAmountCents(context, { settledOnly = false } = {}) {
       centsOf(billing.openInvoice?.amountDue),
       ...require('./context-aggregator').authorizedDuesCents(context),
     ]),
-    paid: finiteSet((billing.recentPayments || [])
+    paid: finiteSet(paymentRowsForBinding(context)
       .filter((p) => !settledOnly || !UNSUCCESSFUL_PAYMENT_STATUSES.has(String(p?.status || '').toLowerCase()))
       .map((p) => centsOf(p?.amount))),
   };
@@ -1730,7 +1737,7 @@ function paymentRowCandidates({ family, amountCents, claimedDate, rows, partialW
     // Round-17 P1: an unqualified "was refunded" binds only FULLY refunded rows; explicitly partial wording
     // binds only a partially refunded row (with the actual refund amount) — never the other way round.
     const statusOk = (anyStatus || wanted.has(String(p.status || '').toLowerCase()) || (unknownCounts && !String(p.status || '').trim()))
-      && !(family === 'paid' && partial && !allowPartialPaid)
+      && !(family === 'paid' && partial && !(typeof allowPartialPaid === 'function' ? allowPartialPaid(p) : allowPartialPaid))
       && !(reversalFamily && partialWording);
     // "Your $30 refund was processed": the figure of a REFUND-subject claim is the refunded amount, which is
     // what identifies a partial refund (no partial wording needed when it equals the recorded refund amount).
@@ -1768,23 +1775,33 @@ function identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows 
 // The rows tied for the MOST RECENT payment date (rows with no readable date rank oldest; if none has a
 // date they all tie).
 function mostRecentPaymentRows(rows) {
-  const dated = rows.filter(Boolean).map((p) => ({ p, d: paymentRowDateParts(p) }));
-  const key = (d) => (d ? d.year * 10000 + d.month * 100 + d.day : -1);
-  const newest = Math.max(-1, ...dated.map((x) => key(x.d)));
-  return dated.filter((x) => key(x.d) === newest).map((x) => x.p);
+  const dateKey = (p) => { const d = paymentRowDateParts(p); return d ? d.year * 10000 + d.month * 100 + d.day : -1; };
+  const createdKey = (p) => { const t = new Date(p?.created_at || '').getTime(); return Number.isFinite(t) ? t : -1; };
+  const live = rows.filter(Boolean);
+  const newestDate = Math.max(-1, ...live.map(dateKey));
+  const sameDay = live.filter((p) => dateKey(p) === newestDate);
+  // Codex round-27 P1: same-day attempts order by created_at (a row without one ranks oldest; true ties stay tied)
+  const newestCreated = Math.max(-1, ...sameDay.map(createdKey));
+  return sameDay.filter((p) => createdKey(p) === newestCreated);
 }
 function bindPaymentRow({
   family = 'paid', amountCents = null, context, claimedTender = null, claimedDate = null,
   inboundNamedPayment = false, requireDate = family === 'paid', onAmbiguous = null, rows = null, partialWording = false, allowPartialPaid = false, refundSubject = false,
+  mostRecentOnly = false,
 }) {
   if (requireDate && !claimedDate) return null;
-  const allRows = rows || context?.billing?.recentPayments || [];
+  // The window was truncated and the authoritative history could not be read (null): the rows are known to be
+  // INCOMPLETE — fail closed for a presence / receipt claim (Codex round-27 P1). (Not loaded at all = a caller
+  // that never needed it, e.g. a non-truncated context.)
+  if (!rows && context?.billing?.recentPaymentsTruncated === true && context?.billing?.paymentHistory === null
+      && (family === 'paid' || PRESENCE_STATUS_FAMILIES.has(family))) return onAmbiguous;
+  const allRows = rows || paymentRowsForBinding(context);
   // Codex round-19 P1: the identity (amount / date / tender) is matched across EVERY status FIRST. Two
   // attempts with the same identity but different status families (a failed + a paid $120 card payment
   // on the same day) cannot be told apart by a status claim — it needs disambiguation, so it binds to
   // NEITHER row (filtering to the asserted family first would let "your payment failed" pick the failed one).
   // Round-26 P1: for ANY identity — amount, date, tender or any combination (not only an amount).
-  if ((amountCents != null || claimedDate || claimedTender) && PRESENCE_STATUS_FAMILIES.has(family)
+  if (!mostRecentOnly && (amountCents != null || claimedDate || claimedTender) && PRESENCE_STATUS_FAMILIES.has(family)
       && identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows: allRows }).size > 1) return onAmbiguous;
   // Codex round-21 P1: a status claim with NO identity at all (no amount, date or tender — clause or inbound)
   // is about "my payment" = the customer's MOST RECENT payment. It must be true of THAT payment: rows tied
@@ -1792,7 +1809,13 @@ function bindPaymentRow({
   // another status can never back it ("Your payment is processing" with a newer paid row and an older
   // processing row is false).
   let scopedRows = allRows;
-  if (amountCents == null && !claimedDate && !claimedTender && PRESENCE_STATUS_FAMILIES.has(family)) {
+  // Codex round-27 P1: a GENERIC inbound ("Did my payment go through?") names no payment, so the reply's claim
+  // is about the customer's MOST RECENT payment (date, then created_at) — and a reply identity that does not
+  // match that payment is ungrounded (it can never reach back to an older row).
+  if (mostRecentOnly && PRESENCE_STATUS_FAMILIES.has(family)) {
+    scopedRows = mostRecentPaymentRows(allRows);
+    if (new Set(scopedRows.map(statusFamilyOfRow)).size > 1) return onAmbiguous;
+  } else if (amountCents == null && !claimedDate && !claimedTender && PRESENCE_STATUS_FAMILIES.has(family)) {
     scopedRows = mostRecentPaymentRows(allRows);
     if (new Set(scopedRows.map(statusFamilyOfRow)).size > 1) return onAmbiguous;
   }
@@ -1847,7 +1870,10 @@ function paymentClaimBinding(clauseText, inboundText) {
   if (claimedTender === TENDER_AMBIGUOUS) return null;
   const claimedDate = replyDate || inboundDate || null;
   const inboundNamedPayment = !!inboundText && /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?)\b/i.test(inboundText);
-  return { claimedTender, claimedDate, inboundNamedPayment };
+  // the customer's message is about a payment but names NO amount / date / tender (Codex round-27 P1)
+  const inboundGeneric = !!inboundText && inboundNamedPayment && !amountCentsIn(inboundText).length
+    && !inboundDate && !tenderLabelsIn(inboundText).size;
+  return { claimedTender, claimedDate, inboundNamedPayment, inboundGeneric };
 }
 
 // Codex round-18 P2: the payment identity (amount / date / tender) a message names — what the customer's
@@ -1885,6 +1911,31 @@ function paymentRowMatchesIdentity(row, identity) {
 // validator's comment.
 const amountCentsIn = (t) => (String(t || '').match(AMOUNT_MASK_RE) || []).map((a) => Math.round(Number(a.replace(/[^\d.]/g, '')) * 100));
 
+// Which partially refunded rows does this reply DISCLOSE as partially refunded? Per clause: partial wording
+// ("part of", "partially refunded", "$30 of your $120 …") or a refund-subject claim, plus a refund word, bound
+// to the rows its own identity (amount — payment or refunded amount — date, tender) matches. An anaphoric
+// disclosure ("…but it was partially refunded") names no row of its own: it is flagged so the antecedent row
+// (checked by validateAnaphoricClaim) carries it.
+function partialRefundDisclosures(text, context, inboundText) {
+  const rowsOut = new Set();
+  let anaphoric = false;
+  const rows = paymentRowsForBinding(context).filter((p) => isPartiallyRefunded(p));
+  for (const clause of String(text || '').split(CLAUSE_SPLIT_RE)) {
+    const partialWording = partialRefundWording(clause);
+    const refundSubject = /\brefunds?\b/i.test(clause);
+    if (!/refund/i.test(clause) || !(partialWording || refundSubject)) continue;
+    const amounts = amountCentsIn(clause);
+    if (isAnaphoricPaymentClause(clause, amounts)) { if (partialWording) anaphoric = true; continue; }
+    const binding = paymentClaimBinding(clause, inboundText);
+    if (!binding) continue;
+    for (const a of (amounts.length ? amounts : [null])) {
+      for (const p of paymentRowCandidates({ family: 'refunded', amountCents: a, claimedDate: binding.claimedDate, rows, partialWording, refundSubject })) {
+        if (!binding.claimedTender || paymentTenderLabel(p) === binding.claimedTender) rowsOut.add(p);
+      }
+    }
+  }
+  return { rows: rowsOut, anaphoric };
+}
 function buildGroundingEnv(reply, context, opts) {
   const text = String(reply || '');
   // Gate on: only payments that actually went through back an acknowledgement.
@@ -1912,9 +1963,13 @@ function buildGroundingEnv(reply, context, opts) {
     // made a payment claim (so a bare "it failed" is read as a payment claim, not ignored).
     antecedent: null,
     paymentContext: false,
-    // the reply itself says (in some clause) that a refund was PARTIAL — the only case where "received"
-    // may bind a partially refunded row (that clause is validated on its own, against the same row)
-    partialRefundDisclosed: text.split(CLAUSE_SPLIT_RE).some((clause) => partialRefundWording(clause) && /refund/i.test(clause)),
+    // Codex round-27 P1: a partial-refund DISCLOSURE is tracked by the payment ROW it binds to, not reply-wide.
+    // A receipt claim may back a partially refunded row only if a disclosure in this reply is bound to THAT row
+    // (or an anaphoric "…but it was partially refunded" follows — validated against the antecedent row itself).
+    ...(() => {
+      const d = partialRefundDisclosures(text, context, String(opts.inboundMessage || ''));
+      return { disclosedPartialRows: d.rows, partialPaidAllowedFor: (row) => d.rows.has(row) || d.anaphoric };
+    })(),
     replyAmounts: amountCentsIn(text),
     // A zero-balance claim ("Your balance is zero.") reads as price grammar but states no price — the gate is
     // evaluated with ONLY that span blanked (anything else in the clause still trips it; Codex round-17 P1).
@@ -2060,7 +2115,11 @@ function validateAck(c, env) {
   const binding = claimBinding(c, env);
   if (!binding) return true;
   // a partially refunded row may back "received" ONLY when the same reply itself discloses the partial refund
-  return bindAllTargets(c.amounts, env, (a) => bindPaymentRow({ family: 'paid', amountCents: a, context: env.context, ...binding, allowPartialPaid: env.partialRefundDisclosed }));
+  return bindAllTargets(c.amounts, env, (a) => bindPaymentRow({
+    family: 'paid', amountCents: a, context: env.context, ...binding, mostRecentOnly: binding.inboundGeneric,
+    // a partially refunded row may back "received" ONLY if a disclosure in this reply is bound to THAT row
+    allowPartialPaid: env.partialPaidAllowedFor,
+  }));
 }
 // Every target must bind; the FIRST bound row becomes the clause's payment identity for a later
 // anaphoric clause ("...but it was refunded") — Codex round-17 P1. true = ungrounded.
@@ -2082,7 +2141,7 @@ function validateStatusClaim(c, env) {
   if (!binding) return true;
   const partialWording = partialRefundWording(c.text);
   return bindAllTargets(claimTargets(c.amounts, env), env, (a) => bindPaymentRow({
-    family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false, partialWording,
+    family: c.family, amountCents: a, context: env.context, ...binding, requireDate: false, partialWording, mostRecentOnly: binding.inboundGeneric,
     refundSubject: /\brefunds?\b/i.test(c.text),
   }));
 }
@@ -2883,7 +2942,11 @@ function buildFactsBlock(context, extras = {}) {
     // neither offered nor DENIED — the fact tells the model to ask which invoice. (Design call: even when every
     // open invoice happens to be Zelle-eligible we still ask, rather than claim availability without a target —
     // the offer, and the send-time recheck, are always about ONE named invoice.)
-    if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetAmbiguous) {
+    if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetConflict) {
+      // the customer NAMED an invoice / amount that is not their open invoice: a target-specific fact, never the
+      // "several open invoices" wording (Codex round-27 P2)
+      billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; the invoice (number or amount) this customer named does NOT match an open invoice on their account — do not offer Zelle for it and do not say Zelle is unavailable in general; tell them that invoice is not open and that the office can confirm which invoice they mean');
+    } else if (configuredZelleRecipient && !zelleRecipient && extras.zelleTargetAmbiguous) {
       billingLines.push('- Payment options: card or bank account (ACH) through their personal pay link — {"type":"send_payment_link"} texts their personal pay link; this customer has SEVERAL open invoices and whether Zelle works depends on WHICH invoice they mean — do not offer Zelle and do not say it is unavailable; ask which invoice they want to pay (its number or amount)');
     } else
     billingLines.push(zelleRecipient
@@ -3389,8 +3452,12 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // "generated now" instant of its own — it returns null.
   const factsAt = presetFactsBlock ? null : new Date();
   // several open invoices and no way to tell which one: neither offer nor deny Zelle (buildFactsBlock asks which)
-  const zelleTargetAmbiguous = !presetFactsBlock && !zelleTarget.invoiceId && zelleTarget.reason !== 'no_open_invoice';
-  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, zelleEligible, zelleTargetAmbiguous, now: factsAt });
+  // GENUINELY ambiguous (which of several?) vs an explicit CONFLICT (the customer named an invoice / amount that
+  // is not the open one) — different facts (Codex round-27 P2).
+  const ZELLE_CONFLICT_REASONS = ['named_invoice_not_open', 'named_amount_differs', 'reference_conflict'];
+  const zelleTargetConflict = !presetFactsBlock && !zelleTarget.invoiceId && ZELLE_CONFLICT_REASONS.includes(zelleTarget.reason);
+  const zelleTargetAmbiguous = !presetFactsBlock && !zelleTarget.invoiceId && zelleTarget.reason !== 'no_open_invoice' && !zelleTargetConflict;
+  const factsBlock = presetFactsBlock || buildFactsBlock(context, { openTimesBlock, reserviceLanes, zelleEligible, zelleTargetAmbiguous, zelleTargetConflict, now: factsAt });
   // Few-shot voice grounding: intent-matched real human replies (redacted),
   // baked into the prompt once so they persist across the verify/revise loop.
   // Empty when the corpus has no rows for this intent → identical to v6.

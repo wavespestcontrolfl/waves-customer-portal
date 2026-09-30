@@ -174,8 +174,13 @@ describe('a valid reply about an older referenced payment is not blocked at send
     ContextAggregator.getContextForCustomer.mockResolvedValue(freshCtx());
     await expect(outgoingAmountsStale({ customerId: 'c1', body: REPLY, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh, inboundMessage: ASK })).resolves.toEqual({ stale: false });
   });
-  test('the same reply without the referencing inbound has no such row in view => stale (the surfacing is what makes it valid)', async () => {
+  test('without the referencing inbound the authoritative history (loaded because the window is truncated and the reply makes a claim) still holds the row => not stale', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(freshCtx());
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: REPLY, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh, inboundMessage: null })).resolves.toEqual({ stale: false });
+    // ...but a payment that is NOT in the history is still stale
+    const ctx2 = freshCtx();
+    ctx2.billing.paymentHistory = { rows: [...newest], complete: true };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx2);
     await expect(outgoingAmountsStale({ customerId: 'c1', body: REPLY, promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh, inboundMessage: null })).resolves.toEqual(STALE);
   });
   test('the amount-free/absence path surfaces too; a genuinely missing payment is still a stale denial-of-nothing', async () => {
