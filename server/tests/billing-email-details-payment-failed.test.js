@@ -336,6 +336,20 @@ describe('round 8: the card label needs payment / invoice / intent ownership to 
     expect((await sendFailed({ paymentIntent: intent(undefined), failedAt: FAILED_AT })).payment_method_label).toBe('Mastercard ending in 4444');
   });
 
+  test('known Stripe ids that differ blank even an owned snapshot', async () => {
+    mockDetailsLive = true;
+    mockQueues(build({
+      payment: owned({ card_brand: 'Visa', card_last_four: '1111' }),
+      customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' },
+    }));
+    expect((await sendFailed({ paymentIntent: intent('cus_someone_else'), failedAt: FAILED_AT })).payment_method_label).toBe('');
+    mockQueues(build({
+      payment: owned({ card_brand: 'Visa', card_last_four: '1111' }),
+      customer: { ...CUSTOMER, stripe_customer_id: 'cus_mine' },
+    }));
+    expect((await sendFailed({ paymentIntent: intent('cus_mine'), failedAt: FAILED_AT })).payment_method_label).toBe('Visa ending in 1111');
+  });
+
   test('gate off: the payload is untouched by the ownership check', async () => {
     mockDetailsLive = false;
     mockQueues(build({ payment: owned({ customer_id: 'someone-else', card_brand: 'Visa', card_last_four: '1111' }) }));

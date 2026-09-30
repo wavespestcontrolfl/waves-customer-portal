@@ -631,6 +631,22 @@ async function intentCardOwnedByCustomer({ emailedCustomerId, paymentIntent }) {
   }
 }
 
+// Positive evidence of a cross-link: the failed intent's Stripe customer and the
+// emailed customer's stripe_customer_id are BOTH known and differ. Then no card
+// label is shown at all, not even an owned snapshot or saved method. A lookup
+// failure counts as a conflict (fail closed).
+async function intentCustomerConflicts({ emailedCustomerId, paymentIntent }) {
+  const intentCustomer = intentStripeCustomerId(paymentIntent);
+  if (!intentCustomer || !emailedCustomerId) return false;
+  try {
+    const row = await db('customers').where({ id: emailedCustomerId }).first('stripe_customer_id');
+    const known = clean(row?.stripe_customer_id);
+    return !!known && known !== intentCustomer;
+  } catch {
+    return true;
+  }
+}
+
 // The retry the dunning ladder ACTUALLY armed for this failure — a stored
 // payments.next_retry_at (billing-cron's RETRY_DELAYS_DAYS ladder writes it),
 // never a computed guess. A pay-page failure the ladder does not retry has no
@@ -709,9 +725,11 @@ async function sendPaymentFailed({
     // ANY card label needs the payments row and invoice to agree with the
     // customer this email goes to, else the row stays blank rather than name
     // another customer's card. The failed intent's card needs more: both Stripe
-    // customer ids known and equal (intentCardOwnedByCustomer).
+    // customer ids known and equal (intentCardOwnedByCustomer). Known Stripe
+    // ids that DIFFER blank every card label (intentCustomerConflicts).
     const emailedCustomerId = customerId || invoice?.customer_id || payment?.customer_id || null;
-    if (!paymentOwnershipAgrees({ emailedCustomerId, payment, invoice })) {
+    if (!paymentOwnershipAgrees({ emailedCustomerId, payment, invoice })
+      || await intentCustomerConflicts({ emailedCustomerId, paymentIntent })) {
       payload.payment_method_label = '';
     } else if (!payload.payment_method_label) {
       // A lookup blip must never throw out of the webhook: blank row instead.
