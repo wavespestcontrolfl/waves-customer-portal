@@ -529,6 +529,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         return { ok: false, blocked: !!result.blocked, error: refusal.reason || 'Email suppressed',
           code: refusal.code, deliveryOutcome: boundaryRefusal ? 'not_sent' : result.deliveryOutcome,
           ...(refusal.retryable ? { retryable: true } : {}),
+          ...(refusal.deferred ? { deferred: true, nextAllowedAt: refusal.nextAllowedAt } : {}),
           recipient: recipientPayload };
       }
       const evidence = acceptedInvoiceEmailEvidence(result);
@@ -569,6 +570,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
     if (verdict.ok !== true) return { ok: false, error: verdict.reason, code: verdict.code,
       deliveryOutcome: boundaryRefusal ? 'not_sent' : undefined,
       ...(verdict.retryable ? { retryable: true } : {}),
+      ...(verdict.deferred ? { deferred: true, nextAllowedAt: verdict.nextAllowedAt } : {}),
       recipient: recipientPayload };
     await markEmailDelivered();
     logger.info(`[invoice-email] Invoice email sent for ${invoice.invoice_number} to ${recipient.role || 'recipient'} ${invoice.customer_id || 'unknown'}`);

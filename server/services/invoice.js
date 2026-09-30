@@ -7115,6 +7115,8 @@ const InvoiceService = {
         if (r?.sentAt) email.sentAt = r.sentAt;
         if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
+        if (r?.deferred) email.deferred = true;
+        if (r?.nextAllowedAt) email.nextAllowedAt = r.nextAllowedAt;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
         if (r?.recipient) email.recipient = r.recipient;
@@ -7915,13 +7917,20 @@ const InvoiceService = {
       // 19:59→20:01 race) is a deferral, not a failure: move the due time
       // to the window open and leave the attempt counter alone — five
       // overnight cron passes must not permanently fail the send.
+      // A collections dispute hold reported by EITHER undelivered leg (the Text/App
+      // boundary or the separate branded Email boundary) is the same deferral: wait,
+      // spend no attempt, so a hold that outlasts the ladder never strands the invoice.
+      const holdLeg = [result.sms, result.email]
+        .find((leg) => leg?.code === "COLLECTION_HOLD_DEFER" && leg?.nextAllowedAt);
       const smsHeld =
         // Holds that are not bounded by the clock spend an attempt instead:
         // APP_PROVIDER_RETRY takes the native backoff below, and a suppression
         // or Email preparation outage must not reschedule for free indefinitely.
-        REPLAY_HOLD_CODES.includes(result.sms?.code)
+        (REPLAY_HOLD_CODES.includes(result.sms?.code)
         && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
-        && result.sms?.nextAllowedAt;
+        && result.sms?.nextAllowedAt)
+        || holdLeg?.nextAllowedAt;
+      const heldUntil = holdLeg?.nextAllowedAt || result.sms?.nextAllowedAt;
       const durableSendError = result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
         ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
         : error;
@@ -7930,7 +7939,7 @@ const InvoiceService = {
         deferred += 1;
         restored = await restoreClaimedInvoice({
           status: "scheduled",
-          scheduled_send_at: new Date(result.sms.nextAllowedAt),
+          scheduled_send_at: new Date(heldUntil),
           scheduled_send_error: durableSendError,
           updated_at: new Date(),
         });
@@ -7965,7 +7974,7 @@ const InvoiceService = {
       }
       if (smsHeld) {
         logger.info(
-          `[invoice] Scheduled send for ${inv.invoice_number} outside 8AM-8PM ET send window — deferred to ${result.sms.nextAllowedAt}`,
+          `[invoice] Scheduled send for ${inv.invoice_number} held (send window or collections dispute hold) — deferred to ${heldUntil}`,
         );
       } else {
         logger.error(

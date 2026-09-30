@@ -262,6 +262,30 @@ run('the direct invoice sender checks the dispute hold default-on (postgres)', (
       } finally { skipped.mockRestore(); templates.mockRestore(); }
     });
 
+    test('a hold that lands before the branded EMAIL leg defers the scheduled invoice WITHOUT spending an attempt (Text cannot deliver)', async () => {
+      const c = await newCustomer();
+      // no phone: the Text leg cannot deliver; only the branded email leg is left
+      await db('customers').where({ id: c }).update({ phone: '', email: `${c}@example.invalid` });
+      const inv = await newInvoice(c, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 60000), scheduled_send_attempts: 4 });
+      const emailReached = jest.fn();
+      const templates = jest.spyOn(require('../services/email-template-library'), 'sendTemplate').mockImplementation(async (opts) => {
+        const verdict = await opts.withProviderHandoff(async () => { emailReached(); });
+        return verdict.ok ? { sent: true, message: { provider_message_id: 'm1' } } : { sent: false, blocked: true, reason: verdict.reason };
+      });
+      const real = Hold.dueInvoiceHeldByDisputeHold;
+      let calls = 0;
+      const spy = jest.spyOn(Hold, 'dueInvoiceHeldByDisputeHold').mockImplementation(async (...args) => {
+        calls += 1;
+        return calls <= 1 ? real(...args) : { held: true, reason: 'hold' };
+      });
+      try { await Invoices.processScheduledSends(); } finally { spy.mockRestore(); templates.mockRestore(); }
+      expect(emailReached).not.toHaveBeenCalled();
+      const row = await invoice(inv);
+      // the LAST allowed attempt (4 spent, cap 5) was not burned: still 4, still queued, claim released, pushed out
+      expect(row).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 4, send_claim_token: null });
+      expect(row.scheduled_send_at.getTime()).toBeGreaterThan(Date.now());
+    });
+
     test('an operator/customer exemption is not stopped at the boundary either', async () => {
       const c = await newCustomer();
       const inv = await newInvoice(c);
