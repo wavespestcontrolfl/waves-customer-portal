@@ -180,6 +180,13 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   const covered = await findBillingCoveredVisits(db, inPause);
   const toMove = inPause.filter((v) => covered.has(v.id));
   const toSkip = inPause.filter((v) => !covered.has(v.id));
+  // A prepaid visit sharing a stop (visit group) cannot move alone: the
+  // rebooker moves a grouped row as its whole stop, dragging the other
+  // services with it, and "just this service" is the office's split
+  // action. Refused before anything is written.
+  if (toMove.some((v) => v.visit_id)) {
+    throw codedError('hold_visits_unmovable', 'One of your prepaid visits shares a stop with another service — call our office and we will set the hold up by hand');
+  }
 
   // Moves FIRST (codex r1 P1): if a prepaid visit will not move, revert the
   // ones that did and refuse the hold instead of suspending billing around

@@ -197,6 +197,18 @@ describe('startHold (ruling C-4)', () => {
     expect(Number(mockState.tables.plan_holds[0].held_monthly_rate)).toBe(90);
   });
 
+  test('a prepaid visit that shares a stop is refused before anything moves — the rebooker would carry the whole stop', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }],
+      visits: [lawnVisit('p1', daysOut(5), { visit_id: 'stop-1' }), lawnVisit('s1', daysOut(12))],
+    });
+    mockCovered.mockResolvedValue(new Set(['p1']));
+    await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) }))
+      .rejects.toMatchObject({ code: 'hold_visits_unmovable' });
+    expect(mockReschedule).not.toHaveBeenCalled();
+    expect(mockState.tables.plan_holds).toHaveLength(0);
+  });
+
   test('a prepaid visit inside the pause is MOVED (first to the return date, spacing kept, single-visit), never skipped', async () => {
     seed({
       customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }],
