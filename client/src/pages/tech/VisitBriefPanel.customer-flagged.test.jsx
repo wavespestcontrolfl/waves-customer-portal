@@ -181,6 +181,53 @@ describe('VisitBriefPanel — Customer flagged section', () => {
     )).toBeInTheDocument();
   });
 
+  describe('combined Lawn & Pest read (owner ruling 2026-09-30): BOTH notes', () => {
+    const PEST_PART = {
+      status: 'done', wordingTier: 'likely', commonName: 'German cockroach',
+      matches: ['Two dark stripes behind the head'], stillNeed: [], referralKind: null, hazards: null,
+    };
+    const PLANT_PART = {
+      status: 'done', kind: 'plant', subjectType: 'lawn', wordingTier: 'likely', headline: 'Likely: Brown Patch',
+      plantCommonName: 'St. Augustinegrass', conditionName: 'Brown Patch',
+      fits: ['Roughly circular brown patch'], notYet: [], nextStepText: 'A technician checks this on your next visit.', referralKind: null, safetyLines: [],
+    };
+
+    it('shows the pest note and the lawn note as two lines', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: PEST_PART, plant: PLANT_PART } }] });
+      expect(screen.getByText(
+        'Photo read — pest (AI suggestion, not confirmed): Likely: German cockroach. Matches: Two dark stripes behind the head.',
+      )).toBeInTheDocument();
+      expect(screen.getByText(
+        'Photo read — lawn (AI suggestion, not confirmed): Likely: Brown Patch. Plant: St. Augustinegrass. Fits: Roughly circular brown patch. A technician checks this on your next visit.',
+      )).toBeInTheDocument();
+    });
+
+    it('labels a tree & shrub plant note as such', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: PEST_PART, plant: { ...PLANT_PART, subjectType: 'tree_shrub' } } }] });
+      expect(screen.getByText(/^Photo read — tree & shrub \(AI suggestion, not confirmed\): Likely: Brown Patch/)).toBeInTheDocument();
+    });
+
+    it('a partial combo shows only the part that worked', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: PEST_PART, plant: null } }] });
+      expect(screen.getByText(/^Photo read — pest /)).toBeInTheDocument();
+      expect(screen.queryByText(/^Photo read — lawn/)).not.toBeInTheDocument();
+      cleanup();
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: null, plant: PLANT_PART } }] });
+      expect(screen.getByText(/^Photo read — lawn /)).toBeInTheDocument();
+      expect(screen.queryByText(/^Photo read — pest/)).not.toBeInTheDocument();
+    });
+
+    it('a combo with neither part renders nothing', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'done', kind: 'combo', pest: null, plant: null } }] });
+      expect(screen.queryByText(/Photo read/)).not.toBeInTheDocument();
+    });
+
+    it('a pending combo read shows "Photo read pending" and keeps the brief refreshing', () => {
+      renderPanel({ customerFlagged: [{ ...CUSTOMER_FLAGGED[0], read: { status: 'pending' } }] });
+      expect(screen.getByText('Photo read pending')).toBeInTheDocument();
+    });
+  });
+
   it('names the weeds a lawn read found (Codex #5320 r13)', () => {
     renderPanel({ customerFlagged: [{
       ...CUSTOMER_FLAGGED[0],
