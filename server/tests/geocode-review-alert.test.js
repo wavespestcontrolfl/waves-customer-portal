@@ -123,10 +123,25 @@ describe('runGeocodeReviewAlert', () => {
     expect(deliverOpsDigest).not.toHaveBeenCalled();
   });
 
-  test('a non-internal recipient is refused (owner inboxes only)', async () => {
+  test('with the bell dark, a non-internal email recipient is refused (owner inboxes only)', async () => {
+    inAppEnabled.mockReturnValue(false);
     process.env.GEOCODE_REVIEW_ALERT_EMAIL = 'someone@example.com';
-    const result = await runGeocodeReviewAlert({ loadBlockedReviews: async () => [row('c1', 'needs_pin')] });
+    const result = await runGeocodeReviewAlert({
+      loadBlockedReviews: async () => [row('c1', 'needs_pin')],
+      emailFallbackRecently: async () => false,
+    });
     expect(result.skipped).toBe('recipient');
     expect(deliverOpsDigest).not.toHaveBeenCalled();
+  });
+
+  // Email-only problems must never stop the in-app bell.
+  test('with the bell live, an unconfigured mailer or outside recipient still posts the bell', async () => {
+    const sendgrid = require('../services/sendgrid-mail');
+    sendgrid.isConfigured.mockReturnValue(false);
+    process.env.GEOCODE_REVIEW_ALERT_EMAIL = 'someone@example.com';
+    const result = await runGeocodeReviewAlert({ loadBlockedReviews: async () => [row('c1', 'needs_pin')] });
+    expect(result.sent).toBe(true);
+    expect(deliverOpsDigest).toHaveBeenCalledTimes(1);
+    sendgrid.isConfigured.mockReturnValue(true);
   });
 });

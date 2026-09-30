@@ -187,17 +187,21 @@ async function runGeocodeReviewAlert(opts = {}) {
     return { skipped: 'recent_send', ...composed };
   }
 
+  // The mailer and recipient checks guard the email fallback only:
+  // deliverOpsDigest sends email only while the in-app bell is dark, so a
+  // mail problem must never stop the bell itself from posting.
   const mailer = opts.sendgrid || sendgrid;
-  if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
-    logger.warn('[geocode-review-alert] mailer not configured — skipping send');
-    return { skipped: 'unconfigured', ...composed };
-  }
-
-  // FAIL CLOSED: owner/internal inboxes only.
   const to = watcherEmail();
-  if (!isInternalEmailRecipient(to)) {
-    logger.warn('[geocode-review-alert] recipient is not an internal address — skipping send; set a valid GEOCODE_REVIEW_ALERT_EMAIL');
-    return { skipped: 'recipient', ...composed };
+  if (!appEnabled) {
+    if (typeof mailer.isConfigured === 'function' && !mailer.isConfigured()) {
+      logger.warn('[geocode-review-alert] mailer not configured — skipping send');
+      return { skipped: 'unconfigured', ...composed };
+    }
+    // FAIL CLOSED: owner/internal inboxes only.
+    if (!isInternalEmailRecipient(to)) {
+      logger.warn('[geocode-review-alert] recipient is not an internal address — skipping send; set a valid GEOCODE_REVIEW_ALERT_EMAIL');
+      return { skipped: 'recipient', ...composed };
+    }
   }
 
   let result;
