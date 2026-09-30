@@ -207,15 +207,21 @@ function bookArrivalGraceOffersLive() {
   return bookInsertionOffersLive() && bookArrivalGraceLive();
 }
 
-// The signed-offer policy the /confirm verifier computes from LIVE state —
-// the mirror of buildBookingAvailability's per-build offerPolicy. Both read
-// bookOfferPolicy so a gate flip between mint and confirm, in either
-// direction, fails the HMAC.
-function bookOfferPolicyLive(date) {
-  // Grace mode applies to a slot only when ITS date's grace is positive — the
-  // exact per-slot rule the offer mints under (bookSlotGrace), so a zero-grace
-  // date (same-day pick, env 0) keeps the plain insertion tag and wire shape.
-  const graceLive = bookArrivalGraceOffersLive() && bookArrivalGraceMinutes({ date }) > 0;
+// The signed-offer policy the /confirm verifier expects. The gate and the
+// capacity mode are read LIVE (a flip of either between mint and confirm fails
+// the HMAC, in either direction) but the grace itself is NOT: the offer's own
+// slot_sig field claims the exact grace it was minted under (`<exp>.<grace>.
+// <sig>`, or `<exp>.<sig>` for 0), and the HMAC then authenticates that claim
+// — the verifier signs over the claimed grace AND this policy tag, so a forged
+// shape fails. Re-reading the env here would invalidate every in-flight offer
+// whenever SELF_SERVE_ARRIVAL_GRACE_MINUTES crosses zero (Codex r4 P2): a
+// graced offer would fail once the value became 0 and a strict one once it
+// became positive. Grace 0 keeps the plain insertion tag and wire shape
+// (byte-identical to gate off, the round-3 invariant), so a strict offer needs
+// no grace state at all. Mirrors buildBookingAvailability's per-slot
+// offerPolicyFor.
+function bookOfferPolicyLive(slotSig) {
+  const graceLive = bookArrivalGraceOffersLive() && slotOfferFieldGrace(slotSig) > 0;
   return bookOfferPolicy({ insertion: bookInsertionOffersLive(), graceLive });
 }
 
@@ -1534,8 +1540,9 @@ function idleMinutesAgainst(dayOccupied, startMin, endMin, candidate = {}) {
 // under, since verifyArrivalCapacity would refuse it at confirm.
 function bookSlotGrace(graceBuild, slot) {
   // Capacity mode (a graced build requires it) only ever produces
-  // arrival-window slots, so this depends on the DATE alone — the same input
-  // /confirm's bookOfferPolicyLive(date) reads, keeping mint and verify equal.
+  // arrival-window slots, so this depends on the DATE alone. /confirm does not
+  // re-read it: it takes the grace from the signed slot_sig field
+  // (bookOfferPolicyLive), so a later env change cannot orphan this offer.
   if (!graceBuild) return 0;
   const grace = bookArrivalGraceMinutes({ date: slot.date });
   return delayWithinGrace(slot.arrival_delay_minutes, grace) ? grace : -1;
@@ -3003,7 +3010,7 @@ async function createSelfBooking(payload = {}) {
       startMinutes: timeToMin(slot_start),
       technicianId: technician_id || null,
       durationMinutes: duration,
-      policy: bookOfferPolicyLive(slotDateStr),
+      policy: bookOfferPolicyLive(slot_sig),
     }, slot_sig))) {
       return { ok: false, status: 409, error: 'That time slot is no longer available — please pick your time again.' };
     }
