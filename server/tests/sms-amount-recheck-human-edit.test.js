@@ -309,3 +309,46 @@ describe('an edited unrecognized payment assertion is not "fresh" at send time',
     await expect(amountFreeStatusClaimStale({ customerId: null, body: 'Your payment settled.', strict: true, dbh })).resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
   });
 });
+
+// Codex round-29 P1 (1): a reviewer EDIT that names a different invoice re-targets the Zelle offer.
+describe('an edited Zelle offer that names another invoice is rechecked against THAT invoice', () => {
+  const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+  const pay = require('../routes/pay-v2');
+  const open = [
+    { id: 'inv-A', invoiceNumber: 'WPC-2026-0001', status: 'sent', amountDue: 95 },
+    { id: 'inv-B', invoiceNumber: 'WPC-2026-0002', status: 'sent', amountDue: 210 },
+  ];
+  const withOpen = { billing: { outstandingBalance: 0, recentPayments: [], openInvoice: open[0], openInvoices: open } };
+  let visibility;
+  beforeEach(() => {
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    visibility = jest.spyOn(pay, 'payPageZelleVisibility').mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-A' || invoice.id === 'inv-B', reason: null }));
+    ContextAggregator.getContextForCustomer.mockResolvedValue(withOpen);
+  });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; visibility.mockRestore(); });
+  const idDb = (table) => ({ where: (w) => ({ first: async () => (table === 'invoices' ? { id: w.id, customer_id: 'c1', status: 'sent' } : { id: 'c1' }) }) });
+  const run = (body, snapshotId) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v11', zelleInvoiceId: snapshotId, inboundMessage: null, trustOwedAmounts: true, dbh: idDb });
+
+  test('the edit names invoice B while the snapshot is A: B is checked (not A)', async () => {
+    const checked = [];
+    const dbh = (table) => ({ where: (w) => ({ first: async () => { if (table === 'invoices') checked.push(w.id); return table === 'invoices' ? { id: w.id, customer_id: 'c1', status: 'sent' } : { id: 'c1' }; } }) });
+    await outgoingAmountsStale({ customerId: 'c1', body: 'You can Zelle invoice WPC-2026-0002 to pay@example.com.', promptVersion: 'house_voice_v11', zelleInvoiceId: 'inv-A', trustOwedAmounts: true, dbh });
+    expect(checked).toEqual(['inv-B']);
+  });
+  test('B is not eligible => the edited offer blocks even though the snapshot invoice A still is', async () => {
+    visibility.mockImplementation(async ({ invoice }) => ({ visible: invoice.id !== 'inv-B', reason: 'not_eligible' }));
+    await expect(run('You can Zelle invoice #0002 to pay@example.com.', 'inv-A')).resolves.toMatchObject({ stale: true, reason: 'zelle_invoice_ineligible' });
+  });
+  test('the edit names an invoice that is not open / cannot be resolved => blocked (unresolved)', async () => {
+    await expect(run('You can Zelle invoice WPC-2026-0999 to pay@example.com.', 'inv-A')).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+    await expect(run('You can Zelle the $77 invoice to pay@example.com.', 'inv-A')).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+  });
+  test('the edit names the SAME invoice as the snapshot, or no invoice at all: the snapshot is used as before', async () => {
+    const checked = [];
+    const dbh = (table) => ({ where: (w) => ({ first: async () => { if (table === 'invoices') checked.push(w.id); return table === 'invoices' ? { id: w.id, customer_id: 'c1', status: 'sent' } : { id: 'c1' }; } }) });
+    await outgoingAmountsStale({ customerId: 'c1', body: 'You can Zelle invoice WPC-2026-0001 to pay@example.com.', promptVersion: 'house_voice_v11', zelleInvoiceId: 'inv-A', trustOwedAmounts: true, dbh });
+    await outgoingAmountsStale({ customerId: 'c1', body: 'You can Zelle us at pay@example.com.', promptVersion: 'house_voice_v11', zelleInvoiceId: 'inv-A', trustOwedAmounts: true, dbh });
+    expect(checked).toEqual(['inv-A', 'inv-A']);
+    await expect(run('You can Zelle us at pay@example.com.', 'inv-A')).resolves.toEqual({ stale: false });
+  });
+});

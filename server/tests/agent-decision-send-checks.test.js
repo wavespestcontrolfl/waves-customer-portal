@@ -10,6 +10,8 @@ jest.mock('../services/sms-shadow-drafter', () => ({
   // the amount pattern sms-amount-recheck reads off the drafter (bodyAmountCents); without it the pattern is
   // undefined and every body looks like it carries an amount
   AMOUNT_MASK_RE: /\$\s?\d[\d,]*(?:\.\d{1,2})?/g,
+  // the REAL precise classifier (bodyMakesPaymentClaim reads it off the drafter)
+  paymentClauseNeedsValidation: (...args) => jest.requireActual('../services/sms-shadow-drafter').paymentClauseNeedsValidation(...args),
 }));
 // slaDraftedAt is kept REAL (only followupPromiseBlockReason is mocked) so
 // this suite proves the actual facts_generated_at → created_at fallback the
@@ -251,5 +253,20 @@ describe('customerless decisions (round 28)', () => {
     await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: 'See you Tuesday, thanks!' })).resolves.toBeNull();
     await expect(agentDecisionSendBlockReason({ decision: noCustomer({ prompt_version: 'house_voice_v12_real_answers_cf_pf' }), outgoingBody: 'See you Tuesday, thanks!' })).resolves.toBeNull();
     await expect(agentDecisionSendBlockReason({ decision: noCustomer({ prompt_version: 'house_voice_v12_real_answers_cf_pf' }), outgoingBody: "Zelle isn't available right now." })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
+  });
+});
+
+// Codex round-29 P2: the customerless fail-closed uses the PRECISE classifier, not the broad prescreen.
+describe('customerless decisions: precise classifier (round 29)', () => {
+  const noCustomer = (over = {}) => decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', customer_id: null, ...over });
+  test.each([
+    'Your invoice is attached.', 'We updated your account details.', 'Your invoice is ready below.', 'See you Tuesday!', 'Your card on file is a Visa ending 4242.', 'You can pay online with the link.',
+  ])('benign copy is NOT blocked: %s', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: body })).resolves.toBeNull();
+  });
+  test.each([
+    'Your payment was received.', 'Your invoice is settled.', 'Your card was declined.', "Zelle isn't available right now.", 'You can use Zelle.', 'You owe $95.', 'Your payment settled.',
+  ])('payment claims / offers / denials are still blocked: %s', async (body) => {
+    await expect(agentDecisionSendBlockReason({ decision: noCustomer(), outgoingBody: body })).resolves.toBe('amount no longer authorized (amount_recheck_no_customer)');
   });
 });

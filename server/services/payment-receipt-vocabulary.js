@@ -135,7 +135,11 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
   }),
   failed: Object.freeze({
     rowStatuses: Object.freeze(['failed', 'declined', 'canceled', 'cancelled', 'void', 'voided']),
-    phrases: Object.freeze(['failed', 'declined', "didn't go through", 'did not go through', 'was returned', 'bounced', 'unsuccessful']),
+    phrases: Object.freeze([
+      'failed', 'declined', "didn't go through", 'did not go through', 'was returned', 'bounced', 'unsuccessful',
+      // Codex round-29 P1: the common "card didn't work" family — a failure assertion whatever the subject
+      "didn't work", 'did not work', "wasn't accepted", 'was not accepted', 'got rejected', 'was rejected', 'were rejected', 'got declined',
+    ]),
   }),
   // Codex round-9 P1: a refund and a dispute are DIFFERENT reversals — each
   // phrase binds only to its own row status; only the generic "was reversed"
@@ -252,7 +256,7 @@ const inboundNamesPayment = (text) => INBOUND_PAYMENT_RE.test(String(text || '')
 // through", "haven't received", "isn't showing") are members of their family
 // and are matched first, so they keep their positive meaning.
 const NEGATOR_BEFORE_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s*$/i;
-const NEGATED_STEM_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s+(?:fail|declin|refund|disput|bounc|revers|return|process|pend|charg(?=ed\s*back))(?:e|ed|d|ing|es|s)?\b/i;
+const NEGATED_STEM_RE = /(?:\b(?:not|never|no\s+longer|cannot)|n['\u2019]t)\b(?:\s+\w+){0,3}\s+(?:fail|declin|refund|disput|bounc|revers|return|process|pend|reject|accept|work|charg(?=ed\s*back))(?:e|ed|d|ing|es|s)?\b/i;
 const POSITIVE_FAMILIES = new Set(['pending', 'failed', 'refunded', 'disputed', 'reversed']);
 // Codex round-12 P1: question suppression is scoped to the status phrase ITSELF
 // — it is a question only when the first sentence terminator at/after it is a
@@ -405,10 +409,14 @@ const BENIGN_INVOICE_PREDICATE_RE = /\b(?:attached|enclosed|ready|below|above|in
 // fine") — not the saved-method facts ("your card on file is a Visa ending 4242").
 const TENDER_SUBJECT_STATUS_RE = new RegExp(`\\b(?:your|the|our|my)\\s+(?:\\w+\\s+){0,2}?${TENDER_SUBJECT_ALT}\\b(?:\\s+[\\w']+){0,3}?\\s+(?:is|was|has|have|are|were|got|went|didn['\u2019]t|wasn['\u2019]t|hasn['\u2019]t|failed|declined)\\b`, 'i');
 const BENIGN_TENDER_PREDICATE_RE = /\b(?:on\s+file|ending|expires?|expiring|expired|last\s+four|brand|saved|updated|added|removed|visa|mastercard|amex|discover|autopay|default|primary|active)\b/i;
+// The "on file / ending / expires" exemption is for clauses that ONLY describe the stored method. Any status
+// predicate ("Your card on file didn't work", "…was declined / bounced / rejected / went through") is an assertion
+// again (Codex round-29 P1).
+const TENDER_STATUS_PREDICATE_RE = /\b(?:didn['\u2019]t\s+work|did\s+not\s+work|failed|declined|bounced|rejected|wasn['\u2019]t\s+accepted|was\s+not\s+accepted|didn['\u2019]t\s+go\s+through|did\s+not\s+go\s+through|went\s+through|was\s+charged|got\s+charged|isn['\u2019]t\s+working|is\s+not\s+working|stopped\s+working|maxed|over\s+the\s+limit)\b/i;
 function paymentStatusHit(sub) {
   return PAYMENT_STATUS_NOUN_RE.test(sub) || SETTLEMENT_PHRASE_RE.test(sub) || ZERO_BALANCE_RE.test(sub)
     || (INVOICE_NOUN_RE.test(sub) && !BENIGN_INVOICE_PREDICATE_RE.test(sub))
-    || (TENDER_SUBJECT_STATUS_RE.test(sub) && !BENIGN_TENDER_PREDICATE_RE.test(sub));
+    || (TENDER_SUBJECT_STATUS_RE.test(sub) && !(BENIGN_TENDER_PREDICATE_RE.test(sub) && !TENDER_STATUS_PREDICATE_RE.test(sub)));
 }
 // Codex round-25 P1: the non-assertive exemption is judged on the payment phrase's OWN sub-clause — split on
 // so / because / while / however / and / but / punctuation — so "Your payment settled so please call if you
@@ -440,7 +448,29 @@ function mayAssertPaymentStatus(text) {
   return PAYMENT_STATUS_PRESCREEN_RE.test(String(text || '')) || ZERO_BALANCE_RE.test(String(text || ''));
 }
 
+// Sub-clause ranges of a clause ({ start, end, text }), using the SAME splitter as the unrecognized-assertion rule, so a
+// caller can classify each status phrase by the sub-clause it sits in (Codex round-29 P1).
+function subclauseRanges(text) {
+  const t = String(text || '');
+  const pieces = t.split(SUBCLAUSE_SPLIT_RE);
+  const ranges = [];
+  let pos = 0;
+  for (let i = 0; i < pieces.length; i += 1) {
+    const piece = pieces[i] || '';
+    if (i % 2 === 0) ranges.push({ start: pos, end: pos + piece.length, text: piece });
+    pos += piece.length;
+  }
+  return ranges;
+}
+// Is the sub-clause holding character `index` an INVOICE / BILL status clause?
+function invoiceSubjectAt(text, index) {
+  const range = subclauseRanges(text).find((r) => index >= r.start && index <= r.end);
+  return !!range && invoiceSubjectClause(range.text);
+}
+
 module.exports = {
+  subclauseRanges,
+  invoiceSubjectAt,
   unrecognizedPaymentAssertion,
   isNonAssertivePaymentClause,
   REFUND_COMPLETION_RE,

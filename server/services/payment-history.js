@@ -107,24 +107,31 @@ async function ensureAbsenceHistory(context, replyText, dbh = db) {
 // payer_id NULL. true when a payment is pending/processing/requires_action OR an
 // invoice is processing. Returns null when the read fails (unknown => callers
 // fail closed). payments.metadata is JSONB, so ->> is total.
-const IN_FLIGHT_SQL = `SELECT (
-  EXISTS (
-    SELECT 1 FROM payments p
-    WHERE p.customer_id = ? AND p.payer_id IS NULL
-      AND lower(p.status) IN ('pending', 'processing', 'requires_action')
-      AND NOT EXISTS (SELECT 1 FROM invoices pi WHERE pi.id = ${uuidFromMetadata('p')} AND pi.customer_id = ? AND pi.payer_id IS NOT NULL)
-  )
-  OR EXISTS (
-    SELECT 1 FROM invoices i
-    WHERE i.customer_id = ? AND i.payer_id IS NULL AND lower(i.status) = 'processing'
-  )
-) AS in_flight`;
+// Codex round-29 P2: "own" money is judged by the SAME shared payer-linkage predicate as the history (services/
+// payer-linkage.js) — not just metadata.invoice_id: candidate in-flight payments come back from SQL (payer_id NULL,
+// pending / processing / requires_action, capped) and are filtered in JS through every linkage; a processing INVOICE
+// counts only if it is the homeowner's (payer_id NULL and not withdrawn to a payer by stamp).
+const IN_FLIGHT_PAYMENTS_LIMIT = 200;
+const IN_FLIGHT_PAYMENTS_SQL = `SELECT id, metadata, stripe_payment_intent_id, stripe_charge_id, description
+  FROM payments
+  WHERE customer_id = ? AND payer_id IS NULL
+    AND lower(status) IN ('pending', 'processing', 'requires_action')
+  LIMIT ${IN_FLIGHT_PAYMENTS_LIMIT}`;
+const IN_FLIGHT_INVOICE_SQL = `SELECT 1 AS in_flight FROM invoices
+  WHERE customer_id = ? AND payer_id IS NULL AND lower(status) = 'processing'
+    AND (scheduled_send_error IS NULL OR scheduled_send_error NOT LIKE 'payer_billed:%')
+  LIMIT 1`;
+const rowsOf = (res) => (res && (res.rows || (Array.isArray(res) ? res : []))) || [];
 async function hasInFlightMoney(customerId, dbh = db) {
   if (!customerId) return null;
   try {
-    const res = await dbh.raw(IN_FLIGHT_SQL, [customerId, customerId, customerId]);
-    const row = (res && (res.rows ? res.rows[0] : res[0])) || null;
-    return row ? row.in_flight === true : null;
+    const linkage = await loadPayerLinkage(customerId, dbh);
+    if (linkage.failed) return null; // ownership unknown => unknown (callers read null as in flight)
+    const candidates = rowsOf(await dbh.raw(IN_FLIGHT_PAYMENTS_SQL, [customerId]));
+    if (candidates.some((p) => !linkage.isPayerLinked(p))) return true;
+    // every candidate was payer-linked but the read was FULL: rows beyond the cap are unseen => unknown, not "clear"
+    if (candidates.length >= IN_FLIGHT_PAYMENTS_LIMIT) return null;
+    return rowsOf(await dbh.raw(IN_FLIGHT_INVOICE_SQL, [customerId])).length > 0;
   } catch (err) {
     logger.warn(`[payment-history] in-flight read failed for customer ${customerId}: ${err.message}`);
     return null;
@@ -162,4 +169,4 @@ async function surfaceReferencedPayments(context, inboundMessage, dbh = db) {
   return context;
 }
 
-module.exports = { loadPaymentHistory, ensureAbsenceHistory, surfaceReferencedPayments, hasInFlightMoney, IN_FLIGHT_SQL, PAYMENT_HISTORY_CAP };
+module.exports = { loadPaymentHistory, ensureAbsenceHistory, surfaceReferencedPayments, hasInFlightMoney, IN_FLIGHT_PAYMENTS_SQL, IN_FLIGHT_INVOICE_SQL, PAYMENT_HISTORY_CAP };

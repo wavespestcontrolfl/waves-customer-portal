@@ -1196,3 +1196,61 @@ describe('round-28: an anaphoric partial disclosure is bound to its antecedent r
     expect(rq('We received your $200 payment from Sep 5, and we received your $120 payment from Sep 12, but it was partially refunded.', [A, B])).toBe(true);
   });
 });
+
+// Codex round-29 P1 (2): subject is classified PER SUB-CLAUSE; an invoice claim survives a payment noun elsewhere.
+describe('round-29: invoice and payment subjects in one clause are both validated', () => {
+  const rq = (r, { rows = [], invoices = [] } = {}) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: invoices } }, { byMeaning: true });
+  const inv = (status) => ({ id: 'i1', invoiceNumber: 'WPC-2026-0123', status, total: 120, amountDue: status === 'sent' ? 120 : 0 });
+  const pay = (status) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card' });
+  const R = 'Invoice #0123 is still processing because your payment is still processing.';
+
+  test('the auditor sentence yields an INVOICE claim and a PAYMENT claim', () => {
+    const claims = require('../services/sms-shadow-drafter').enumeratePaymentClaims(R, {}).claims;
+    expect(claims.map((c) => [c.kind, c.family, c.subject || 'payment'])).toEqual([['status', 'pending', 'invoice'], ['status', 'pending', 'payment']]);
+  });
+  test('grounded only when BOTH hold: the invoice is processing AND a payment is processing', () => {
+    expect(rq(R, { invoices: [inv('processing')], rows: [pay('processing')] })).toBe(false);
+    expect(rq(R, { invoices: [inv('sent')], rows: [pay('processing')] })).toBe(true); // the invoice claim was being dropped
+    expect(rq(R, { invoices: [inv('processing')], rows: [pay('paid')] })).toBe(true); // the payment claim fails
+    expect(rq(R, { invoices: [inv('processing')], rows: [] })).toBe(true);
+    expect(rq(R, {})).toBe(true);
+  });
+  test('mirror order and other connectors', () => {
+    const M = 'Your payment is still processing so invoice #0123 is still processing.';
+    expect(rq(M, { invoices: [inv('processing')], rows: [pay('processing')] })).toBe(false);
+    expect(rq(M, { invoices: [inv('sent')], rows: [pay('processing')] })).toBe(true);
+    expect(rq('Invoice #0123 is paid while your payment is processing.', { invoices: [inv('paid')], rows: [pay('processing')] })).toBe(false);
+    expect(rq('Invoice #0123 is paid while your payment is processing.', { invoices: [inv('sent')], rows: [pay('processing')] })).toBe(true);
+  });
+  test('a single-subject clause is unchanged', () => {
+    expect(rq('Your invoice is still processing.', { invoices: [inv('processing')] })).toBe(false);
+    expect(rq('Your payment is still processing.', { rows: [pay('processing')] })).toBe(false);
+  });
+});
+
+// Codex round-29 P1 (3): the benign "on file" exemption only covers clauses that merely DESCRIBE the stored method.
+describe('round-29: "Your card on file didn\'t work" is a failure assertion', () => {
+  const V6 = require('../services/payment-receipt-vocabulary');
+  const rq = (r, rows = []) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } }, { byMeaning: true });
+  const failedRow = { amount: 120, status: 'failed', payment_date: '2026-09-12', payment_method_type: 'card' };
+  test('status predicates in an "on file" clause are claims / assertions', () => {
+    for (const s of ["Your card on file didn't work.", 'Your card on file was declined.', 'Your card on file got rejected.', "Your card on file wasn't accepted.", 'Your default card went through.']) {
+      expect({ s, r: V6.unrecognizedPaymentAssertion(s) }).toEqual({ s, r: true });
+    }
+    // "bounced" is a recognized FAILED phrase: it makes a claim, so the fallback is not even needed
+    expect(require('../services/sms-shadow-drafter').enumeratePaymentClaims('Your card on file bounced.', {}).claims.map((c) => c.family)).toEqual(['failed']);
+  });
+  test('the new "didn\'t work / wasn\'t accepted / rejected" forms are FAILED-family phrases and bind a failed row', () => {
+    for (const s of ["Your card didn't work.", "Your card wasn't accepted.", 'Your card was rejected.', 'Your card got rejected.', "Your payment didn't work.", 'Your card on file did not work.']) {
+      expect({ s, fam: [...new Set(V6.paymentStatusPhraseMatches(s, false).matches.map((m) => m.family))] }).toEqual({ s, fam: ['failed'] });
+      expect({ s, failed: rq(s, [failedRow]) }).toEqual({ s, failed: false });
+      expect({ s, none: rq(s, []) }).toEqual({ s, none: true });
+      expect({ s, paid: rq(s, [{ ...failedRow, status: 'paid' }]) }).toEqual({ s, paid: true });
+    }
+  });
+  test('pure stored-method descriptions stay benign', () => {
+    for (const s of ['Your card on file is a Visa ending 4242.', 'Your card on file expires next month.', 'Your default card was updated.', 'Your saved card is active.']) {
+      expect({ s, r: V6.unrecognizedPaymentAssertion(s) }).toEqual({ s, r: false });
+    }
+  });
+});

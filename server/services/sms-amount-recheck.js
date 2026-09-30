@@ -420,6 +420,23 @@ async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null } 
   }
 }
 
+// Codex round-29 P2: the PRECISE classifier — does this body actually make a payment claim the recheck would judge
+// (an amount, a Zelle offer or denial, a recognized claim / unrecognized payment assertion in any clause, or price
+// grammar)? Unlike bodyNeedsPaymentRecheck (the broad prescreen that decides whether a billing READ is worth doing)
+// it does not fire on "Your invoice is attached" or "We updated your account details". A stubbed drafter falls back to
+// the broad prescreen per clause (fail closed).
+function bodyMakesPaymentClaim(body) {
+  const text = String(body || '');
+  if (!text) return false;
+  if (bodyAmountCents(text).length) return true;
+  if (hasAffirmativeZelleMention(text) || hasNegativeZelleAvailabilityClaim(text)) return true;
+  const needs = typeof drafter.paymentClauseNeedsValidation === 'function'
+    ? (clause) => drafter.paymentClauseNeedsValidation(clause, {})
+    : (clause) => mayAssertPaymentStatus(clause);
+  if (text.split(CLAUSE_SPLIT_RE).some(needs)) return true;
+  try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
+}
+
 async function outgoingAmountsStale({
   customerId, body, promptVersion = null, zelleInvoiceId = null, dbh = db, trustOwedAmounts = false,
   // Independent-review P1 (round 6, PR #5331): the customer's own inbound
@@ -456,12 +473,23 @@ async function outgoingAmountsStale({
     // zelleInvoiceStillEligible's own "no id ⇒ zelle_invoice_unresolved"
     // rule) when there is none, or the lookup itself errors.
     let effectiveZelleInvoiceId = zelleInvoiceId;
-    if (!effectiveZelleInvoiceId && customerId) {
+    // Codex round-29 P1: the snapshot invoice is the one the DRAFT was written for. A reviewer EDIT that names a
+    // different invoice (number, or an amount tied to an invoice) re-targets the offer — resolve what the edited body
+    // names with the same resolver and check THAT invoice afresh; if it can't be resolved (not open, ambiguous) the
+    // offer is unverifiable and blocks.
+    const { resolveZelleTargetInvoice, explicitInvoiceReference } = require('./zelle-target-invoice');
+    const editedNamesInvoice = explicitInvoiceReference(text);
+    if (customerId && (!effectiveZelleInvoiceId || editedNamesInvoice)) {
       try {
         const customerRow = await dbh('customers').where({ id: customerId }).first();
         const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
-        // several open invoices: the one the customer's message names, else abstain => zelle_invoice_unresolved
-        effectiveZelleInvoiceId = require('./zelle-target-invoice').resolveZelleTargetInvoice(ctx?.billing, inboundMessage).invoiceId;
+        if (!effectiveZelleInvoiceId) {
+          // several open invoices: the one the customer's message names, else abstain => zelle_invoice_unresolved
+          effectiveZelleInvoiceId = resolveZelleTargetInvoice(ctx?.billing, inboundMessage).invoiceId;
+        } else {
+          const edited = resolveZelleTargetInvoice(ctx?.billing, text).invoiceId;
+          if (edited !== effectiveZelleInvoiceId) effectiveZelleInvoiceId = edited; // re-targeted (null => unresolved => blocked below)
+        }
       } catch (err) {
         logger.warn(`[sms-amount-recheck] open-invoice lookup for Zelle recheck failed for customer ${customerId}: ${err.message}; blocking send`);
         return { stale: true, reason: 'zelle_recheck_failed' };
@@ -538,6 +566,6 @@ async function outgoingAmountsStale({
 
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, zelleDenialStale, classifyZelleClause,
+  hasAffirmativeZelleMention, hasNegativeZelleAvailabilityClaim, zelleDenialStale, classifyZelleClause, bodyMakesPaymentClaim,
   amountFreeStatusClaimStale, bodyNeedsPaymentRecheck,
 };

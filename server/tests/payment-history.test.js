@@ -140,27 +140,54 @@ describe('Codex round-12 P0: the aggregator\'s Recent payments read excludes pay
 
 // Codex round-13 P1: hasProcessingPayment is an authoritative EXISTENCE query, not a window read.
 describe('hasInFlightMoney', () => {
-  const { hasInFlightMoney, IN_FLIGHT_SQL } = require('../services/payment-history');
-  const rawDb = (impl) => ({ raw: jest.fn(impl) });
+  const { hasInFlightMoney, IN_FLIGHT_PAYMENTS_SQL, IN_FLIGHT_INVOICE_SQL } = require('../services/payment-history');
+  // dbh: the shared payer-linkage lookup (invoices query chain) + two raw reads (candidate payments, processing invoice)
+  function flightDb({ candidates = [], invoiceRows = [], payerInvoices = [], linkageFails = false, rawThrows = false } = {}) {
+    const inv = {};
+    ['where', 'select', 'whereNotNull', 'orWhere'].forEach((m) => { inv[m] = jest.fn(() => inv); });
+    inv.catch = (h) => (linkageFails ? Promise.resolve(h(new Error('down'))) : Promise.resolve(payerInvoices));
+    const dbh = jest.fn(() => inv);
+    dbh.raw = jest.fn(async (sql) => {
+      if (rawThrows) throw new Error('db down');
+      return { rows: sql === IN_FLIGHT_PAYMENTS_SQL ? candidates : invoiceRows };
+    });
+    return dbh;
+  }
+  const APAY = { id: 'ap', stripe_payment_intent_id: 'pi_ap', stripe_charge_id: 'ch_ap', invoice_number: 'WPC-2026-0500' };
 
-  test('one existence query over payments AND invoices, own (non-payer) rows only, JSONB ->> with no window/limit', () => {
-    expect(IN_FLIGHT_SQL).toMatch(/FROM payments p/);
-    expect(IN_FLIGHT_SQL).toMatch(/p\.payer_id IS NULL/);
-    expect(IN_FLIGHT_SQL).toMatch(/IN \('pending', 'processing', 'requires_action'\)/);
-    expect(IN_FLIGHT_SQL).toMatch(/NOT EXISTS \(SELECT 1 FROM invoices pi WHERE pi\.id = \(CASE WHEN p\.metadata->>'invoice_id' ~\*/);
-    expect(IN_FLIGHT_SQL).not.toMatch(/::text/);
-    expect(IN_FLIGHT_SQL).toMatch(/FROM invoices i[\s\S]*i\.payer_id IS NULL AND lower\(i\.status\) = 'processing'/);
-    expect(IN_FLIGHT_SQL).not.toMatch(/LIMIT|ORDER BY/i);
+  test('two reads: candidate in-flight payments (payer_id NULL, capped) filtered in JS, and a processing invoice (not withdrawn)', () => {
+    expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/FROM payments/);
+    expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/payer_id IS NULL/);
+    expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/IN \('pending', 'processing', 'requires_action'\)/);
+    expect(IN_FLIGHT_PAYMENTS_SQL).toMatch(/LIMIT 200/);
+    expect(IN_FLIGHT_INVOICE_SQL).toMatch(/FROM invoices/);
+    expect(IN_FLIGHT_INVOICE_SQL).toMatch(/payer_id IS NULL AND lower\(status\) = 'processing'/);
+    expect(IN_FLIGHT_INVOICE_SQL).toMatch(/scheduled_send_error NOT LIKE 'payer_billed:%'/);
   });
-
-  test('true / false from the row; an older processing row is found regardless of newer rows (no window in the query)', async () => {
-    expect(await hasInFlightMoney('c1', rawDb(async () => ({ rows: [{ in_flight: true }] })))).toBe(true);
-    expect(await hasInFlightMoney('c1', rawDb(async () => ({ rows: [{ in_flight: false }] })))).toBe(false);
+  test('an own in-flight payment => true; nothing => false; a processing own invoice => true', async () => {
+    expect(await hasInFlightMoney('c1', flightDb({ candidates: [{ id: 'p1', metadata: null }] }))).toBe(true);
+    expect(await hasInFlightMoney('c1', flightDb({}))).toBe(false);
+    expect(await hasInFlightMoney('c1', flightDb({ invoiceRows: [{ in_flight: 1 }] }))).toBe(true);
   });
-
-  test('a failed read or no customer is null (unknown => the aggregator reads it as in flight)', async () => {
-    expect(await hasInFlightMoney('c1', rawDb(async () => { throw new Error('db down'); }))).toBeNull();
-    expect(await hasInFlightMoney(null, rawDb(async () => ({ rows: [] })))).toBeNull();
+  test('payer-linked in-flight rows do NOT count, through EVERY linkage (not just metadata.invoice_id)', async () => {
+    const linked = [
+      { id: 'a', metadata: { invoice_id: 'ap' } }, { id: 'b', metadata: { dispute_invoice_id: 'ap' } }, { id: 'c', metadata: { waves_invoice_id: 'ap' } },
+      { id: 'd', stripe_payment_intent_id: 'pi_ap' }, { id: 'e', stripe_charge_id: 'ch_ap' }, { id: 'f', description: 'Invoice WPC-2026-0500 — zelle' },
+    ];
+    for (const row of linked) {
+      expect({ id: row.id, r: await hasInFlightMoney('c1', flightDb({ candidates: [row], payerInvoices: [APAY] })) }).toEqual({ id: row.id, r: false });
+    }
+    // ...while an OWN row alongside them still counts
+    expect(await hasInFlightMoney('c1', flightDb({ candidates: [...linked, { id: 'own', metadata: null }], payerInvoices: [APAY] }))).toBe(true);
+  });
+  test('a FULL candidate read that is entirely payer-linked leaves unseen rows => unknown (null), not "clear"', async () => {
+    const full = Array.from({ length: 200 }, (_, i) => ({ id: `x${i}`, stripe_payment_intent_id: 'pi_ap' }));
+    expect(await hasInFlightMoney('c1', flightDb({ candidates: full, payerInvoices: [APAY] }))).toBeNull();
+  });
+  test('a failed read, a failed payer-linkage lookup, or no customer is null (unknown => the aggregator reads it as in flight)', async () => {
+    expect(await hasInFlightMoney('c1', flightDb({ rawThrows: true }))).toBeNull();
+    expect(await hasInFlightMoney('c1', flightDb({ linkageFails: true }))).toBeNull();
+    expect(await hasInFlightMoney(null, flightDb({}))).toBeNull();
   });
 });
 

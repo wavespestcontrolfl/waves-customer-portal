@@ -81,4 +81,11 @@ function resolveZelleTargetInvoice(billing, inboundMessage) {
   return { invoiceId: null, reason: 'multiple_open_unreferenced' };
 }
 
-module.exports = { resolveZelleTargetInvoice, invoiceNumbersNamed };
+// Does this text name a specific INVOICE (a number, or an amount tied to an invoice / bill)? Used to tell whether an
+// EDITED body re-targets the Zelle offer away from the invoice the draft was written for (Codex round-29 P1).
+function explicitInvoiceReference(text) {
+  const named = invoiceNumbersNamed(text);
+  return named.full.length > 0 || named.tail.length > 0 || invoiceAmountsNamed(text).length > 0;
+}
+
+module.exports = { resolveZelleTargetInvoice, invoiceNumbersNamed, explicitInvoiceReference };

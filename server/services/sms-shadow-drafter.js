@@ -1332,7 +1332,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, unrecognizedPaymentAssertion, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseMatches, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, zeroBalanceClaim, withoutZeroBalanceSpan, invoiceSubjectClause, invoiceSubjectAt, unrecognizedPaymentAssertion, PAYMENT_EVENT_SUBJECT, EVENT_STATUS_VERB_PATTERN, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -2017,7 +2017,7 @@ function detectPaymentClaims(masked, hasAmounts, env) {
   const { negated, matches } = paymentStatusPhraseMatches(text, hasAmounts || inboundNamesPayment(env.inboundText) || !!env.paymentContext);
   if (negated) claims.unshift({ kind: 'negated' });
   for (const family of [...new Set(matches.map((m) => m.family))]) {
-    claims.push({ kind: familyClaimKind(family), family });
+    claims.push({ kind: familyClaimKind(family), family, starts: matches.filter((m) => m.family === family).map((m) => m.start) });
   }
   for (const m of matches) spans.push({ start: m.start, end: m.end });
   // 3. RECEIPT: completed-payment EVENTS ("your transfer cleared") and ACK phrases ("we received your payment").
@@ -2028,7 +2028,7 @@ function detectPaymentClaims(masked, hasAmounts, env) {
   spans.push(...acks);
   const ackPol = acks.length ? (PAYMENT_NEGATION_RE.test(text) ? 'negated' : 'positive') : null;
   const receiptShaped = ackPol === 'positive' || events.length > 0;
-  return { claims, spans, negated, ackPol, receiptShaped, hasEvent: events.length > 0 };
+  return { claims, spans, negated, ackPol, receiptShaped, hasEvent: events.length > 0, receiptStarts: [...events, ...acks].map((sp) => sp.start) };
 }
 function enumerateMaskedClaims(masked, hasAmounts, env) {
   const d = detectPaymentClaims(masked, hasAmounts, env);
@@ -2038,15 +2038,32 @@ function enumerateMaskedClaims(masked, hasAmounts, env) {
   // ("still processing", "failed", "is paid") are claims about the INVOICE's own status — tagged here, bound
   // to the authoritative invoice status by validateInvoiceStatusClaim, never to a payments row.
   const invoiceSubject = invoiceSubjectClause(masked);
-  if (invoiceSubject) {
-    for (const c of claims) if (c.kind === 'status' || c.kind === 'unpaid') c.subject = 'invoice';
+  // Codex round-29 P1: the subject is classified PER SUB-CLAUSE, per status phrase — "Invoice #0123 is still
+  // processing because your payment is still processing" makes an INVOICE claim and a PAYMENT claim; a clause-wide
+  // "has a payment noun" veto used to drop the invoice one. A family asserted in both kinds of sub-clause is split
+  // into two claims (each validated against its own subject).
+  const splitClaims = [];
+  for (const c of claims) {
+    if ((c.kind === 'status' || c.kind === 'unpaid') && Array.isArray(c.starts)) {
+      const inv = c.starts.filter((st) => invoiceSubjectAt(masked, st));
+      const pay = c.starts.filter((st) => !invoiceSubjectAt(masked, st));
+      if (inv.length) splitClaims.push({ ...c, subject: 'invoice', starts: inv });
+      if (pay.length) splitClaims.push({ ...c, starts: pay });
+    } else splitClaims.push(c);
   }
+  claims.length = 0;
+  claims.push(...splitClaims);
   if (d.ackPol === 'negated') {
     claims.push({ kind: 'negated_ack' });
-  } else if (d.receiptShaped && invoiceSubject) {
-    claims.push({ kind: 'status', family: 'paid', subject: 'invoice' }); // "Your invoice is paid"
   } else if (d.receiptShaped) {
-    claims.push(hasAmounts ? classifyAmountClause(masked, d.ackPol, d.hasEvent ? 'event' : null, env) : { kind: 'ack' });
+    // per SUB-CLAUSE (round 29): "Invoice #0123 is paid while your payment is processing" has an INVOICE receipt and a
+    // payment claim; a receipt phrase inside an invoice-subject sub-clause is the invoice's own status
+    const invReceipt = d.receiptStarts.some((st) => invoiceSubjectAt(masked, st));
+    const payReceipt = d.receiptStarts.some((st) => !invoiceSubjectAt(masked, st));
+    if (invReceipt) claims.push({ kind: 'status', family: 'paid', subject: 'invoice' }); // "Your invoice is paid"
+    if (payReceipt || !invReceipt) {
+      claims.push(hasAmounts ? classifyAmountClause(masked, d.ackPol, d.hasEvent ? 'event' : null, env) : { kind: 'ack' });
+    }
   } else if (hasAmounts && !amountConsumed) {
     // a figure no status/receipt claim accounts for: it must be an owed figure (or is ambiguous => rejected)
     claims.push(classifyAmountClause(masked, null, null, env));

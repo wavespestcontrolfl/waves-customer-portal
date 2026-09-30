@@ -91,7 +91,7 @@ function followupBlock({ decision, outgoingBody }) {
 // fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
   const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
-  const { outgoingAmountsStale, hasAffirmativeZelleMention, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
+  const { outgoingAmountsStale, hasAffirmativeZelleMention, bodyNeedsPaymentRecheck, bodyMakesPaymentClaim } = require('./sms-amount-recheck');
   const hasZelleOffer = hasAffirmativeZelleMention(outgoingBody);
   // Codex round-23 P2: the SAME gate the scheduler's fire-time seam uses (bodyNeedsPaymentRecheck: an amount, an
   // affirmative Zelle offer, a payment-status claim, price grammar — AND a negative Zelle availability claim),
@@ -101,7 +101,8 @@ async function amountsBlock({ decision, outgoingBody }) {
   if (!decision.customer_id) {
     // Codex round-28 P2: with no customer to re-read billing for, ANY body the recheck gate selects (an amount, a
     // Zelle offer or DENIAL, a payment-status claim, price grammar) cannot be verified — fail closed, not just Zelle offers.
-    return (hasZelleOffer || bodyNeedsPaymentRecheck(outgoingBody)) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
+    // PRECISE classifier (round 29): the broad prescreen would block benign copy like "Your invoice is attached"
+    return (hasZelleOffer || bodyMakesPaymentClaim(outgoingBody)) ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
   }
   // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
   // built for, so a body carrying a Zelle contact is rechecked against that
