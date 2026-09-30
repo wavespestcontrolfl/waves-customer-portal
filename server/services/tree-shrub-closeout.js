@@ -9,6 +9,11 @@ const VALID_POLLINATOR_STATUSES = new Set([
   'no_insecticide_applied',
 ]);
 
+// A dose stated in mL ("20 mL", "20ml", "5 cc", "2 milliliters"): nothing a tech
+// records is in mL (owner ruling 2026-09-27; every service 2026-09-29). Mirrors
+// hasMlAmount in client/src/lib/measure-units.js.
+const ML_AMOUNT_TEXT = /(?:^|[^a-z])(?:ml|mls|milliliters?|millilitres?|cc)(?![a-z])/i;
+
 function text(value) {
   return String(value || '').trim();
 }
@@ -412,6 +417,7 @@ function validateTreeShrubCloseout({
     if (!injection.sizeClassOrDbh) pushBlock(blocks, 'tree_shrub_injection_size_required', 'Injection record requires DBH or palm size class.', 'injectionRecord.sizeClassOrDbh');
     if (!injection.product) pushBlock(blocks, 'tree_shrub_injection_product_required', 'Injection record requires product.', 'injectionRecord.product');
     if (!injection.dose) pushBlock(blocks, 'tree_shrub_injection_dose_required', 'Injection record requires dose.', 'injectionRecord.dose');
+    else if (ML_AMOUNT_TEXT.test(injection.dose)) pushBlock(blocks, 'tree_shrub_injection_dose_ml', 'Injection dose must be in tsp or fl oz, not mL.', 'injectionRecord.dose');
     if (injection.numberOfPorts === null) pushBlock(blocks, 'tree_shrub_injection_ports_required', 'Injection record requires number of ports.', 'injectionRecord.numberOfPorts');
     if (!injection.targetIssue) pushBlock(blocks, 'tree_shrub_injection_target_required', 'Injection record requires target issue.', 'injectionRecord.targetIssue');
     if (!injection.followUpDate) pushBlock(blocks, 'tree_shrub_injection_follow_up_required', 'Injection record requires follow-up date.', 'injectionRecord.followUpDate');
