@@ -206,6 +206,7 @@ function printHuman(pair, preview) {
     if (preview.move.length) process.stdout.write(`  move (${preview.move.length}): ${preview.move.map((r) => `${r.id} ${r.from} -> ${r.to}`).join(', ')}\n`);
     if (preview.insert.length) process.stdout.write(`  insert (${preview.insert.length}): ${preview.insert.join(', ')}\n`);
     if (preview.cancel.length) process.stdout.write(`  cancel (${preview.cancel.length}): ${preview.cancel.map((r) => `${r.id}@${r.date}`).join(', ')}\n`);
+    if (preview.beyondSchedule && preview.beyondSchedule.length) process.stdout.write(`  beyond lawn schedule (${preview.beyondSchedule.length}): ${preview.beyondSchedule.map((r) => `${r.id}@${r.date}`).join(', ')}\n`);
     if (preview.retained && preview.retained.length) process.stdout.write(`  retained (${preview.retained.length}): ${preview.retained.map((r) => `${r.id}@${r.date}`).join(', ')}\n`);
   }
   // Outside the anchor branch: a no_anchor preview can still carry live
@@ -239,7 +240,7 @@ async function main() {
         });
       } catch (err) {
         preview = err.preview || {
-          eligible: false, reasons: ['error'], error: err.message, anchor: null, plan: [], keep: [], move: [], insert: [], cancel: [], retained: [], pinned: [],
+          eligible: false, reasons: ['error'], error: err.message, anchor: null, plan: [], keep: [], move: [], insert: [], cancel: [], retained: [], beyondSchedule: [], pinned: [],
         };
       }
       // Reasons this script's OWN candidate-finding decided

@@ -366,15 +366,15 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
 
   // --- series gates (reused, read-only, from admin-schedule.js) -----------
   describe('series gates', () => {
-    test('annual_prepay_series: a stamped future prepaid_method row excludes the whole series', async () => {
+    test('an annual-prepay rider still rides (owner ruling 2026-09-29): no annual_prepay_series refusal, the prepaid visit stays pinned', async () => {
       const { lawnParent, pestParent } = await buildValidPair();
-      const cols = await trx('scheduled_services').columnInfo();
-      if (!cols.prepaid_method) return; // schema variance guard, matches the engine's own posture
-      await trx('scheduled_services').where({ recurring_parent_id: pestParent.id })
-        .limit(1)
-        .update({ prepaid_method: 'annual_prepay_invoice' });
+      const [prepaidRow] = await trx('scheduled_services').where({ recurring_parent_id: pestParent.id }).orderBy('scheduled_date', 'asc');
+      await trx('scheduled_services').where({ id: prepaidRow.id })
+        .update({ prepaid_method: 'annual_prepay_invoice', prepaid_amount: 120 });
       const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
-      expect(preview.reasons).toContain('annual_prepay_series');
+      expect(preview.reasons).not.toContain('annual_prepay_series');
+      expect(preview.eligible).toBe(true);
+      expect(preview.pinned).toEqual(expect.arrayContaining([expect.objectContaining({ id: prepaidRow.id, why: 'prepaid' })]));
     });
 
     test('duplicate_series: a second active ongoing pest series for the same customer blocks both', async () => {
@@ -1020,5 +1020,17 @@ postgres('rider-series preview against migrated PostgreSQL', () => {
     const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
     expect(preview.reasons).toContain('host_reschedule_pending');
     expect(preview.eligible).toBe(false);
+  });
+
+  test('a movable visit after the horizon is reported beyond the lawn schedule, never as a cancellation', async () => {
+    const { lawnParent, pestParent } = await buildValidPair();
+    const far = await row({
+      recurring_parent_id: pestParent.id, status: 'pending', is_recurring: true, recurring_pattern: 'quarterly',
+      service_type: 'Quarterly Pest Control', scheduled_date: addDays(ANCHOR, 500),
+    });
+    const preview = await previewRiderPair(trx, { riderParentId: pestParent.id, hostParentId: lawnParent.id });
+    expect(dateOnlyStr(far.scheduled_date) > preview.horizon).toBe(true);
+    expect(preview.beyondSchedule).toEqual([{ id: far.id, date: dateOnlyStr(far.scheduled_date) }]);
+    expect(preview.cancel.map((c) => c.id)).not.toContain(far.id);
   });
 });
