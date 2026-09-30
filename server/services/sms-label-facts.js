@@ -23,7 +23,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { classifyProduct, PRODUCT_FAMILIES } = require('./email-division/visit-products');
-const { applyPerformedVisitHistoryFilter } = require('./pest-pressure/first-visit');
+const { NON_PERFORMED_VISIT_OUTCOMES } = require('./pest-pressure/first-visit');
+const { serviceRecordSuppressesCustomerArtifacts } = require('./pest-pressure/history-filter');
+const { dateOnlyString } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 
 // Every gate-on facts block carries a LABEL FACTS header (sealed-eval contract
 // marker): the full section when the last visit has verified label timing, the
@@ -47,57 +50,92 @@ const escapeRegex = (t) => String(t).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
 const LABEL_SECTION_REGEX_SRC = `(?:${escapeRegex(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''))}|LABEL FACTS \\(from the labels of products applied at the last visit on [^()\n]{1,60}\\):(?:\n- [^\n]{1,${LABEL_LINE_MAX}}){1,${LABEL_LINES_MAX}})`;
 const LABEL_FACTS_HEADER_PREFIX = 'LABEL FACTS (from the labels of products applied at the last visit on ';
 const LABEL_FACTS_TIMEOUT_MS = 3000;
-// Rows of the most recent service date (a customer can have a pest and a lawn
-// record on the same day); never an older visit — its products are not "the
-// last visit's".
-const MAX_SAME_DAY_RECORDS = 5;
-
-// Water conditioners / buffers are non-pesticide tank additives, kept out
-// like adjuvants (classifyProduct already excludes surfactants/spreaders).
 const WATER_CONDITIONER_RE = /water\s*condition|buffer|acidifier|\bph\b|conditioner/i;
 // The catalog's generic placeholder is not a re-entry statement.
 const REENTRY_PLACEHOLDER_RE = /^Follow the product label and technician service report/i;
-
-function dayString(value) {
-  if (!value) return null;
-  if (value instanceof Date) {
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
-  }
-  const m = String(value).match(/^(\d{4}-\d{2}-\d{2})/);
-  return m ? m[1] : null;
-}
 
 function singleLine(text, cap) {
   return String(text || '').replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, cap);
 }
 
+// A visit TODAY (live scheduled visit, an unfinished record, or a completed
+// visit whose service record has not landed yet) means "the last visit" is
+// stale for any question about today's application.
+async function hasVisitToday(conn, customerId, today) {
+  const liveToday = await conn('scheduled_services')
+    .where({ customer_id: customerId, scheduled_date: today })
+    .whereNotIn('status', ['cancelled', 'skipped', 'no_show', 'rescheduled'])
+    .select('status');
+  const recordsToday = await conn('service_records')
+    .where({ customer_id: customerId, service_date: today })
+    .select('status');
+  if (liveToday.some((r) => r.status !== 'completed')) return true;
+  if (recordsToday.some((r) => r.status !== 'completed')) return true;
+  return liveToday.length > 0 && !recordsToday.some((r) => r.status === 'completed');
+}
+
+// One joined row -> a customer-visible verified product, 'unverified' (counted,
+// omitted) or null (adjuvant / water conditioner / not customer-visible).
+function productFromRow(row) {
+  const family = classifyProduct({
+    productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
+    catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
+  });
+  const def = PRODUCT_FAMILIES[family];
+  if (!def || !def.customerVisible) return null;
+  if ([row.product_category, row.catalog_category, row.catalog_product_type, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)))) return null;
+  if (!row.label_verified_at) return 'unverified';
+  return {
+    // A neutral customer-facing type ("an insecticide"), never the brand.
+    phrase: def.phrase || 'a product',
+    rainfastMinutes: row.rainfast_minutes == null ? null : Number(row.rainfast_minutes),
+    reiHours: row.rei_hours == null ? null : Number(row.rei_hours),
+    reentrySummary: row.reentry_summary || null,
+    reentryText: row.reentry_text || null,
+    labelVerifiedAt: row.label_verified_at,
+  };
+}
+
 /**
  * Read the label timing facts for the products applied at the customer's most
- * recent performed visit. Returns null when there is nothing to say (no
- * customer, no visit, no verified product with timing). Throws on DB errors —
- * the caller (fetchLabelFacts) turns those into "section omitted".
+ * recent PERFORMED visit. Returns null when there is nothing to say. Throws on
+ * DB errors — the caller (fetchLabelFacts) turns those into "section omitted".
  *
- * Selection: applyPerformedVisitHistoryFilter (completed, customer-visible,
- * not a no-show/skip outcome) ordered newest first; the newest service_date
- * wins and only records on that date are read. Products come from
- * service_products joined to products_catalog on product_id. Fail closed:
- *   - unverified label (label_verified_at null) -> omitted, counted;
- *   - adjuvant / water conditioner              -> omitted;
- *   - no rainfast time and no re-entry data     -> nothing to say, omitted.
+ * Selection (never searches backward):
+ *   1. the newest service_date of a completed, performed record (no
+ *      no-show/skip/inspection-only outcome), REGARDLESS of report posture;
+ *   2. ALL of that date's performed records, no cap;
+ *   3. if any of them is suppressed from customer artifacts (typedReportDelivery
+ *      other than auto_send), that visit is not usable -> none on file, and an
+ *      older visit is never substituted;
+ *   4. a customer with a visit TODAY (a live scheduled visit, a completed visit
+ *      whose service record has not landed, or an unfinished record) gets none
+ *      on file: the last visit's figures must never answer about today's
+ *      application.
+ * Products come from service_products joined to products_catalog on
+ * product_id. Fail closed: an unverified label is omitted and counted, an
+ * adjuvant / water conditioner is omitted.
  */
-async function readLastVisitLabelFacts({ customerId, conn = db } = {}) {
+async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateString() } = {}) {
   if (!customerId) return null;
-  const visitQuery = conn('service_records').where('service_records.customer_id', customerId);
-  applyPerformedVisitHistoryFilter(visitQuery, { alias: 'service_records' });
-  const visits = await visitQuery
-    .orderBy([{ column: 'service_records.service_date', order: 'desc' }, { column: 'service_records.created_at', order: 'desc' }])
-    .limit(MAX_SAME_DAY_RECORDS)
-    .select('service_records.id', 'service_records.service_date');
-  if (!visits.length) return null;
-  const serviceDate = dayString(visits[0].service_date);
+
+  if (await hasVisitToday(conn, customerId, today)) return null;
+
+  const performed = () => conn('service_records')
+    .where('service_records.customer_id', customerId)
+    .where('service_records.status', 'completed')
+    .whereRaw(
+      `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,
+      NON_PERFORMED_VISIT_OUTCOMES,
+    );
+  const newest = await performed().max('service_records.service_date as service_date').first();
+  const serviceDate = dateOnlyString(newest && newest.service_date);
   if (!serviceDate) return null;
-  const recordIds = visits.filter((v) => dayString(v.service_date) === serviceDate).map((v) => v.id);
+  const visits = await performed()
+    .where('service_records.service_date', serviceDate)
+    .select('service_records.id', 'service_records.structured_notes');
+  if (!visits.length || visits.some((v) => serviceRecordSuppressesCustomerArtifacts(v))) return null;
+  const recordIds = visits.map((v) => v.id);
 
   const rows = await conn('service_products as sp')
     .leftJoin('products_catalog as pc', 'pc.id', 'sp.product_id')
@@ -112,23 +150,9 @@ async function readLastVisitLabelFacts({ customerId, conn = db } = {}) {
   const products = [];
   let unverified = 0;
   for (const row of rows) {
-    const family = classifyProduct({
-      productName: row.product_name, activeIngredient: row.active_ingredient, productCategory: row.product_category,
-      catalogCategory: row.catalog_category, catalogProductType: row.catalog_product_type,
-    });
-    const def = PRODUCT_FAMILIES[family];
-    if (!def || !def.customerVisible) continue;
-    if ([row.product_category, row.catalog_category, row.catalog_product_type, row.product_name].some((c) => c && WATER_CONDITIONER_RE.test(String(c)))) continue;
-    if (!row.label_verified_at) { unverified += 1; continue; }
-    products.push({
-      // A neutral customer-facing type ("an insecticide"), never the brand.
-      phrase: def.phrase || 'a product',
-      rainfastMinutes: row.rainfast_minutes == null ? null : Number(row.rainfast_minutes),
-      reiHours: row.rei_hours == null ? null : Number(row.rei_hours),
-      reentrySummary: row.reentry_summary || null,
-      reentryText: row.reentry_text || null,
-      labelVerifiedAt: row.label_verified_at,
-    });
+    const p = productFromRow(row);
+    if (p === 'unverified') unverified += 1;
+    else if (p) products.push(p);
   }
   if (unverified) logger.info(`[sms-label-facts] ${unverified} applied product(s) omitted — label not verified`);
   return products.length ? { serviceDate, products, unverifiedCount: unverified } : null;
@@ -172,11 +196,17 @@ function rainfastClause(minutes) {
 // 0 (the shortest, "until dry"); anything else is unknown, and one unknown
 // product makes the whole-visit re-entry unstatable (line omitted).
 const UNTIL_DRY_RE = /\buntil\b[^.]{0,30}\bdr(?:y|ied)\b/i;
+// A summary/text that states its own duration (a number, a spelled-out figure,
+// overnight, next day, weeks) makes rei_hours = 0 untrustworthy: unknown.
+const STATED_DURATION_RE = /\d\s*-?\s*(?:minutes?|mins?|hours?|hrs?|days?|weeks?)\b|\bovernight\b|\bnext\s+day\b|\bweeks?\b/i;
+function statesOwnDuration(product) {
+  return [product.reentrySummary, product.reentryText].some((t) => t && (STATED_DURATION_RE.test(String(t)) || new RegExp(SPELLED_TIME_RE.source, 'i').test(String(t))));
+}
 function reentryLevelHours(product) {
   if (Number.isFinite(product.reiHours) && product.reiHours > 0) return product.reiHours;
-  if (product.reiHours === 0) return 0;
+  if (product.reiHours === 0) return statesOwnDuration(product) ? null : 0;
   const summary = singleLine(product.reentrySummary || product.reentryText, 160);
-  return summary && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) ? 0 : null;
+  return summary && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) && !statesOwnDuration(product) ? 0 : null;
 }
 const WHOLE_VISIT_LABEL = 'Whole visit (the longest across every product applied)';
 function wholeVisitReentryClause(products, isBanned) {
@@ -281,23 +311,37 @@ function sentenceAt(text, i) {
 }
 
 // Which KIND of label time a duration is, from the words it is grammatically
-// attached to: the sentence must carry a rainfast / wash-off word (rain kind)
-// or a dry / re-entry / stay-off / go-back-out word (re-entry kind) within a
-// short span of the duration itself; the nearest one wins. A duration next to
-// an arrival, window or appointment word ("we'll be there in 2 hours, rain is
-// expected", "arriving in a 2-hour window, keep the dogs in") is scheduling,
-// not a label time: null.
+// attached to: within a short span of the duration itself, in the same
+// clause, a rainfast / wash-off / rain word (rain kind), a re-entry / stay-off /
+// go-back-out / wait word (re-entry kind) or a dry / drying word (dry kind);
+// the nearest wins. A duration next to an arrival, window, appointment or
+// "we'll be back" word is scheduling ('schedule'); a duration with no
+// trigger at all is null.
+//
+// The labels give a re-entry time and a rainfast time, never a "dry" time, so
+// the dry kind is grounded by nothing.
 const RAIN_TRIGGER_RE = /\brain[-\s]?fast\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this\s+|that\s+|them\s+)?(?:off|away|out)\b/gi;
-const REENTRY_TRIGGER_RE = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\bdr(?:y|ies|ied|ying)\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.!?\n]{0,25}\boff\b|\b(?:stay|stays|staying|keep|keeps|keeping)\s+(?:out|away|inside|indoors)\b|\bwait(?:ing)?\b|\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|on\s+(?:it|the\s+(?:lawn|grass|yard|treated)))\b|\b(?:walk|play|sit|lie|run)(?:ing)?\s+on\b|\bthe\s+(?:kids?|children|dogs?|cats?|pets?)\s+(?:out|outside|back)\b/gi;
-const SCHEDULE_BEFORE_RE = /\b(?:arriv\w*|arrival|be\s+there|be\s+out|be\s+by|come\s+(?:by|out)|coming\s+(?:by|out)|stop(?:ping)?\s+by|between|eta|scheduled?|appointment|technician\s+(?:will|is)|tech\s+(?:will|is))\b[^.!?\n]{0,25}$/i;
+// Ordinary rain wording counts only when directly connected to the duration
+// (no comma between them): "Rain is fine after 2 hours", "if it rains within
+// 2 hours" - but not "we'll be there in 2 hours, rain is expected".
+const RAIN_WORD_TRIGGER_RE = /\b(?:rain(?:s|ed|ing|fall|y)?|showers?|storms?|thunderstorms?|downpours?|sprinklers?|irrigation)\b/gi;
+const REENTRY_TRIGGER_RE = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.!?\n]{0,25}\boff\b|\b(?:stay|stays|staying|keep|keeps|keeping)\s+(?:out|away|inside|indoors)\b|\bwait(?:ing)?\b|\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|on\s+(?:it|the\s+(?:lawn|grass|yard|treated)))\b|\b(?:walk|play|sit|lie|run)(?:ing)?\s+on\b|\bthe\s+(?:kids?|children|dogs?|cats?|pets?|pups?)\s+(?:out|outside|back)\b|\bgood\s+to\s+go\b/gi;
+const DRY_TRIGGER_RE = /\bdr(?:y|ies|ied|ying)\b/gi;
+const SCHEDULE_BEFORE_RE = /\b(?:arriv\w*|arrival|be\s+there|be\s+out|be\s+by|come\s+(?:by|out)|coming\s+(?:by|out)|stop(?:ping)?\s+by|between|eta|scheduled?|appointment|technician\s+(?:will|is)|tech\s+(?:will|is))\b[^.!?\n]{0,25}$|\b(?:we|i|tech(?:nician)?|team)(?:'ll|'re|\s+will|\s+can|\s+are|\s+would)?\s+(?:be\s+|come\s+|coming\s+|get\s+)?back(?:\s+(?:out|by|over))?\b[^.!?\n]{0,15}$/i;
 const SCHEDULE_AFTER_RE = /^[^.!?\n]{0,6}\b(?:window|arrival|appointment)\b/i;
 const TRIGGER_SPAN_BEFORE = 45;
 const TRIGGER_SPAN_AFTER = 40;
-function nearestTrigger(re, before, after) {
+// Distance from the duration to the nearest match of `re` in the same clause.
+// `clause` cuts the text at commas as well as semicolons.
+function nearestTrigger(re, beforeRaw, afterRaw, { clause = false } = {}) {
+  const cut = clause ? /[,;:—–]/ : /;/;
+  const beforeParts = beforeRaw.split(cut);
+  const before = beforeParts[beforeParts.length - 1];
+  const after = afterRaw.split(cut)[0];
   let best = Infinity;
-  re.lastIndex = 0;
-  for (let m = re.exec(before); m; m = re.exec(before)) best = Math.min(best, before.length - (m.index + m[0].length));
-  const a = new RegExp(re.source, re.flags.replace('g', '')).exec(after);
+  const g = new RegExp(re.source, 'gi');
+  for (let m = g.exec(before); m; m = g.exec(before)) best = Math.min(best, before.length - (m.index + m[0].length));
+  const a = new RegExp(re.source, 'i').exec(after);
   if (a) best = Math.min(best, a.index);
   return best;
 }
@@ -306,11 +350,16 @@ function timeKind(src, index, length) {
   const rel = index - start;
   const before = sentence.slice(Math.max(0, rel - TRIGGER_SPAN_BEFORE), rel);
   const after = sentence.slice(rel + length, rel + length + TRIGGER_SPAN_AFTER);
-  if (SCHEDULE_BEFORE_RE.test(sentence.slice(Math.max(0, rel - 30), rel)) || SCHEDULE_AFTER_RE.test(sentence.slice(rel + length))) return null;
-  const rain = nearestTrigger(RAIN_TRIGGER_RE, before, after);
-  const reentry = nearestTrigger(REENTRY_TRIGGER_RE, before, after);
-  if (rain === Infinity && reentry === Infinity) return null;
-  return rain <= reentry ? 'rain' : 'reentry';
+  if (SCHEDULE_BEFORE_RE.test(sentence.slice(Math.max(0, rel - 30), rel)) || SCHEDULE_AFTER_RE.test(sentence.slice(rel + length))) return 'schedule';
+  const d = {
+    dry: nearestTrigger(DRY_TRIGGER_RE, before, after),
+    rain: Math.min(nearestTrigger(RAIN_TRIGGER_RE, before, after), nearestTrigger(RAIN_WORD_TRIGGER_RE, before, after, { clause: true })),
+    reentry: nearestTrigger(REENTRY_TRIGGER_RE, before, after),
+  };
+  const best = Math.min(d.dry, d.rain, d.reentry);
+  if (best === Infinity) return null;
+  // ties: the stricter kind (dry grounds nothing) wins
+  return d.dry === best ? 'dry' : (d.rain === best ? 'rain' : 'reentry');
 }
 
 /**
@@ -330,7 +379,7 @@ function neutralizeGroundedTimes(text, sectionText) {
   return src.replace(TIME_EXPR_RE, (whole, _a, _b, _u, offset) => {
     const key = timeKey([whole, _a, _b, _u]);
     const kind = timeKind(src, offset, whole.length);
-    const grounded = (kind === 'rain' && rain.has(key)) || (kind !== 'rain' && reentry.has(key));
+    const grounded = (kind === 'rain' && rain.has(key)) || ((kind === 'reentry' || kind === null || kind === 'schedule') && reentry.has(key));
     return grounded ? 'LABELTIME' : whole;
   });
 }
@@ -349,12 +398,18 @@ function hasUngroundedLabelTime(text, sectionText) {
   const src = String(text || '');
   const { rain, reentry } = groundedTimeKeys(sectionText);
   for (const m of src.matchAll(TIME_EXPR_RE)) {
+    const key = timeKey(m);
     const k = timeKind(src, m.index, m[0].length);
-    if (k === 'rain' && !rain.has(timeKey(m))) return true;
-    if (k === 'reentry' && !reentry.has(timeKey(m))) return true;
+    if (k === 'dry') return true; // no label states a drying time
+    if (k === 'rain' && !rain.has(key)) return true;
+    if (k === 'reentry' && !reentry.has(key)) return true;
+    // no trigger at all: a figure that is only ever the RAINFAST time must not
+    // be used as some other time ("give it 2 hours and the pups are good to go")
+    if (k === null && rain.has(key) && !reentry.has(key)) return true;
   }
   for (const m of src.matchAll(SPELLED_TIME_RE)) {
-    if (timeKind(src, m.index, m[0].length)) return true;
+    const k = timeKind(src, m.index, m[0].length);
+    if (k && k !== 'schedule') return true;
   }
   return false;
 }

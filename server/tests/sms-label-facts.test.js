@@ -142,6 +142,19 @@ describe('gate on — section rendering', () => {
     expect(section([lawn, product({ reiHours: null, reentrySummary: null })]).text).not.toContain('keep people');
   });
 
+  test('rei_hours = 0 never wins over a summary/text that states its own duration -> re-entry unknown, line omitted', () => {
+    for (const summary of ['Keep people and pets off treated areas for 12 hours.', 'Do not re-enter for 2 days.', 'Stay off overnight.', 'Wait at least two hours after it dries.']) {
+      const t = section([product({ rainfastMinutes: 180, reiHours: 0, reentrySummary: summary })]).text;
+      expect(t).toContain('rainfast after 3 hours');
+      expect(t).not.toContain('re-entry');
+      expect(section([product({ reiHours: 0, reentrySummary: null, reentryText: summary })]).text).not.toContain('keep people');
+    }
+    // "until dry" with a stated duration is not a plain until-dry either
+    expect(section([product({ reiHours: null, reentrySummary: 'Keep off until dry, at least 24 hours.' })]).text).not.toContain('keep people');
+    // the plain until-dry statements still work
+    expect(section([product({ reiHours: 0 })]).text).toContain('until dry');
+  });
+
   test('fail closed: any unverified product at the visit means no whole-visit figures at all', () => {
     const facts = buildFactsBlock(context, { now: NOW, labelFacts: { ...labelFacts([product({ rainfastMinutes: 180 })]), unverifiedCount: 1 } });
     expect(facts).toContain('LABEL FACTS (none on file for the last visit):');
@@ -169,19 +182,24 @@ describe('gate on — section rendering', () => {
 });
 
 describe('label row selection (mock knex)', () => {
-  function fakeConn({ visits, rows }) {
+  const TODAY = '2026-06-10';
+  // A chainable, awaitable fake: results keyed by table and by which query it is.
+  function fakeConn({ newest = '2026-06-05', visits, rows, scheduledToday = [], recordsToday = [] }) {
     const calls = [];
     const conn = (table) => {
       const q = {
         table, ops: [],
-        where(...a) { this.ops.push(['where', ...a]); return this; },
-        whereIn(...a) { this.ops.push(['whereIn', ...a]); return this; },
-        whereRaw(...a) { this.ops.push(['whereRaw', ...a]); return this; },
-        leftJoin(...a) { this.ops.push(['leftJoin', ...a]); return this; },
-        orderBy(...a) { this.ops.push(['orderBy', ...a]); return this; },
-        limit(n) { this.ops.push(['limit', n]); return this; },
-        select(...a) { this.ops.push(['select', ...a]); calls.push(this); return Promise.resolve(table === 'service_records' ? visits : rows); },
+        resolve() {
+          if (table === 'scheduled_services') return scheduledToday;
+          if (table === 'service_products as sp') return rows;
+          if (this.ops.some((o) => o[0] === 'where' && o[1] && typeof o[1] === 'object' && 'service_date' in o[1])) return recordsToday;
+          return visits;
+        },
       };
+      for (const m of ['where', 'whereIn', 'whereNotIn', 'whereRaw', 'leftJoin', 'orderBy']) q[m] = (...a) => { q.ops.push([m, ...a]); return q; };
+      q.max = (...a) => { q.ops.push(['max', ...a]); return q; };
+      q.first = () => { calls.push(q); return Promise.resolve(q.ops.some((o) => o[0] === 'max') ? (newest ? { service_date: newest } : { service_date: null }) : null); };
+      q.select = (...a) => { q.ops.push(['select', ...a]); calls.push(q); return Promise.resolve(q.resolve()); };
       return q;
     };
     conn.calls = calls;
@@ -193,14 +211,13 @@ describe('label row selection (mock knex)', () => {
     rainfast_minutes: 180, rei_hours: 0, reentry_summary: 'Keep people and pets off treated areas until dry.', reentry_text: null,
     label_verified_at: '2026-05-28', ...over,
   });
+  const read = (opts) => labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, ...opts });
+  const two = [{ id: 'r2', structured_notes: null }, { id: 'r3', structured_notes: { typedReportDelivery: 'auto_send' } }];
 
-  test('most recent performed visit only; joins service_products to products_catalog; unverified and adjuvants are omitted and counted', async () => {
+  test('newest performed date first, then ALL its records (no cap); joins service_products to products_catalog; unverified and adjuvants omitted and counted', async () => {
+    const many = Array.from({ length: 9 }, (_, i) => ({ id: `r${i}`, structured_notes: null }));
     const conn = fakeConn({
-      visits: [
-        { id: 'r2', service_date: '2026-06-05' },
-        { id: 'r3', service_date: '2026-06-05' },
-        { id: 'r1', service_date: '2026-05-01' }, // an older visit is never mixed in
-      ],
+      visits: many,
       rows: [
         row({ id: 1 }),
         row({ id: 2, product_name: 'Unverified Thing', label_verified_at: null, rainfast_minutes: 60 }),
@@ -208,26 +225,58 @@ describe('label row selection (mock knex)', () => {
         row({ id: 4, product_name: 'Buffer', active_ingredient: 'acidifier', product_category: 'water conditioner', catalog_category: 'water conditioner' }),
       ],
     });
-    const out = await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', conn });
+    const out = await read({ conn });
     expect(out.serviceDate).toBe('2026-06-05');
     expect(out.unverifiedCount).toBe(1);
     expect(out.products).toHaveLength(1);
     expect(out.products[0]).toMatchObject({ phrase: 'an insecticide', rainfastMinutes: 180, reiHours: 0 });
-    // the rows read are those of the newest date only
+    // no limit anywhere; the date is selected first with a max(), then every record of that date
+    expect(conn.calls.some((q) => q.ops.some((o) => o[0] === 'limit'))).toBe(false);
+    expect(conn.calls.some((q) => q.ops.some((o) => o[0] === 'max'))).toBe(true);
     const productQuery = conn.calls.find((q) => q.table === 'service_products as sp');
-    expect(productQuery.ops).toContainEqual(['whereIn', 'sp.service_record_id', ['r2', 'r3']]);
+    expect(productQuery.ops).toContainEqual(['whereIn', 'sp.service_record_id', many.map((m) => m.id)]);
     expect(productQuery.ops.some((o) => o[0] === 'leftJoin' && o[1] === 'products_catalog as pc')).toBe(true);
-    // performed-visit filter (completed, customer-visible, not a no-show)
-    const visitQuery = conn.calls.find((q) => q.table === 'service_records');
-    expect(visitQuery.ops.some((o) => o[0] === 'where' && o[1] === 'service_records.status' && o[2] === 'completed')).toBe(true);
+    // performed = completed + not a non-performed outcome; report posture is NOT part of the selection
+    const performedQ = conn.calls.filter((q) => q.table === 'service_records' && q.ops.some((o) => o[0] === 'max' || (o[0] === 'select' && o[1] === 'service_records.id')));
+    expect(performedQ).toHaveLength(2);
+    for (const q of performedQ) {
+      expect(q.ops).toContainEqual(['where', 'service_records.status', 'completed']);
+      expect(q.ops.some((o) => o[0] === 'whereRaw' && /visitOutcome/.test(o[1]) && !/typedReportDelivery/.test(o[1]))).toBe(true);
+    }
+  });
+
+  test('the date goes through date-only normalization (a Date from pg is fine)', async () => {
+    const out = await read({ conn: fakeConn({ newest: new Date('2026-06-05T00:00:00Z'), visits: two, rows: [row()] }) });
+    expect(out.serviceDate).toBe('2026-06-05');
+  });
+
+  test('a suppressed newest visit means none on file - never an older visit', async () => {
+    for (const posture of ['internal_only', 'disabled', 'manual']) {
+      const conn = fakeConn({ visits: [{ id: 'r9', structured_notes: { typedReportDelivery: posture } }], rows: [row()] });
+      expect(await read({ conn })).toBeNull();
+      expect(conn.calls.some((q) => q.table === 'service_products as sp')).toBe(false);
+    }
+    // one suppressed record among the day's records also fails closed
+    expect(await read({ conn: fakeConn({ visits: [...two, { id: 'r4', structured_notes: JSON.stringify({ typedReportDelivery: 'internal_only' }) }], rows: [row()] }) })).toBeNull();
+  });
+
+  test('a visit TODAY (live scheduled visit, completed visit without its record, unfinished record) -> none on file', async () => {
+    const base = { visits: two, rows: [row()] };
+    for (const status of ['pending', 'confirmed', 'en_route', 'on_site', 'in_progress']) {
+      expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ status }] }) })).toBeNull();
+    }
+    // completed today but its service record has not landed yet
+    expect(await read({ conn: fakeConn({ ...base, scheduledToday: [{ status: 'completed' }] }) })).toBeNull();
+    // an unfinished record dated today
+    expect(await read({ conn: fakeConn({ ...base, recordsToday: [{ status: 'in_progress' }] }) })).toBeNull();
+    // ...but a completed visit whose record has landed is today's real last visit; cancelled/skipped rows never block
+    expect(await read({ conn: fakeConn({ ...base, newest: TODAY, scheduledToday: [{ status: 'completed' }], recordsToday: [{ status: 'completed' }] }) })).not.toBeNull();
   });
 
   test('no visit, no customer, or nothing verified -> null', async () => {
     expect(await labelFactsLib.readLastVisitLabelFacts({ customerId: null })).toBeNull();
-    expect(await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', conn: fakeConn({ visits: [], rows: [] }) })).toBeNull();
-    expect(await labelFactsLib.readLastVisitLabelFacts({
-      customerId: 'c1', conn: fakeConn({ visits: [{ id: 'r', service_date: '2026-06-05' }], rows: [row({ label_verified_at: null })] }),
-    })).toBeNull();
+    expect(await read({ conn: fakeConn({ newest: null, visits: [], rows: [] }) })).toBeNull();
+    expect(await read({ conn: fakeConn({ visits: two, rows: [row({ label_verified_at: null })] }) })).toBeNull();
   });
 
   test('fetchLabelFacts is fail-safe: a DB error resolves to null', async () => {
@@ -293,6 +342,44 @@ describe('compliance grounding', () => {
     expect(check('Rain within 2 hours will wash it off.').ok).toBe(false);
     expect(check('Once 3 hours have passed, rain will not wash it off.').ok).toBe(true);
     expect(check('Keep the kids off the lawn for two hours.').ok).toBe(false);
+  });
+
+  test('ordinary rain wording is rain timing (items: rains, rainfall, showers, storm)', () => {
+    const f = factsWith([product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })]); // rainfast 3 h, re-entry 4 h
+    for (const reply of [
+      'Rain is fine after 2 hours.',
+      'If it rains within 2 hours it will be fine.',
+      'Rainfall after 2 hours will not matter.',
+      'Showers within 2 hours are okay.',
+      'A storm after 2 hours is fine.',
+    ]) expect(check(reply, f).ok).toBe(false);
+    expect(check('Rain is fine after 3 hours.', f).ok).toBe(true);
+    // rain word NOT connected to the duration stays a non-label time
+    expect(check("We'll be there in 2 hours, rain is expected.", f).ok).toBe(true);
+    expect(check('After 2 hours, rain is expected.', f).ok).toBe(true);
+  });
+
+  test('a duration with no trigger that is only the rainfast figure is held; the re-entry figure is not', () => {
+    const f = factsWith([product({ rainfastMinutes: 120, reiHours: 0 })]); // rainfast 2 h, re-entry until dry
+    expect(check('Give it 2 hours and the pups are good to go.', f).ok).toBe(false);
+    expect(check('Give it 3 hours and you are all set.', f).ok).toBe(true); // not a label figure at all: base lists decide
+    const g = factsWith([product({ rainfastMinutes: 240, reiHours: 4, reentrySummary: null })]); // same figure both kinds
+    expect(check('Give it 4 hours and the pups are good to go.', g).ok).toBe(true);
+  });
+
+  test('"dry"/"drying" is its own kind that nothing grounds, even when the number is the re-entry figure', () => {
+    const f = factsWith([product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })]);
+    expect(check("It'll be dry in 4 hours.", f).ok).toBe(false);
+    expect(check('Drying takes about 4 hours.', f).ok).toBe(false);
+    expect(check('Keep the pets off for 4 hours until it is dry.', f).ok).toBe(true); // stay-off is nearest
+    expect(check('Keep people and pets off treated areas until dry.', f).ok).toBe(true);
+  });
+
+  test('clause scoping: an explicit rainfast time next to a stay-off time, and "we\'ll be back out" scheduling', () => {
+    const f = factsWith([product({ rainfastMinutes: 120, reiHours: 4, reentrySummary: null })]);
+    expect(check('Rainfast after 2 hours; keep pets off the treated areas for 4 hours.', f).ok).toBe(true);
+    expect(check("We'll be back out in 3 days to check on it.", f).ok).toBe(true);
+    expect(check("We'll be back out in 3 days, keep the dogs off the lawn until then.", f).ok).toBe(true);
   });
 
   test('a spelled-out figure never grounds', () => {
