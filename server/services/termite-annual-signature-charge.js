@@ -55,6 +55,7 @@
 const crypto = require('crypto');
 const db = require('../models/db');
 const logger = require('./logger');
+const { isCollectionHoldRefusal } = require('./collections/collection-hold');
 
 const ANNUAL_TEMPLATE_KEY = 'service_agreement.termite_annual_protection';
 const PAY_LINK_OUTCOMES = new Set(['declined', 'skipped']);
@@ -374,8 +375,10 @@ async function runClaimedCharge({ conn, ctx, trigger }) {
     // RETRYABLE, never a terminal outcome — hand the claim back so the daily
     // sweep resumes once the office releases the hold. Not a decline, not a
     // payer refusal, no pay link.
-    if (err?.code === 'INVOICE_COLLECTION_STOPPED') {
-      await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold; the daily sweep will retry once the office releases it' });
+    // Also covers COLLECTION_HOLD_CHECK_FAILED: the locked hold lookup itself
+    // failed after a good preflight (still pre-Stripe) — same retry.
+    if (isCollectionHoldRefusal(err)) {
+      await ringBell('charge_deferred', { ...ctx, reason: 'the customer has an active collections billing hold (or it could not be checked); the daily sweep will retry once the office releases it' });
       return { release: true, reason: 'collection_hold' };
     }
     return classifyChargeError(err);

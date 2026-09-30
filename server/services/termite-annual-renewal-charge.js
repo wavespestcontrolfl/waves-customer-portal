@@ -252,6 +252,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
+const { isCollectionHoldRefusal } = require('./collections/collection-hold');
 const { etDateString, addETDays, parseETDateTime } = require('../utils/datetime-et');
 const { addMonthsSameDay, dateOnlyString } = require('../utils/date-only');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -2268,7 +2269,7 @@ async function decideAndCharge(successor, parentTerm, conn = db) {
     // A collections dispute hold (B10) caught by the binding check under the
     // charge locks is a pre-Stripe, RETRYABLE refusal — never a decline, a
     // payer refusal or a handled outcome (see deferRenewalForCollectionHold).
-    if (err?.code === 'INVOICE_COLLECTION_STOPPED') return deferRenewalForCollectionHold(successor, conn, { releaseFence: true });
+    if (isCollectionHoldRefusal(err)) return deferRenewalForCollectionHold(successor, conn, { releaseFence: true });
     if (await handleChargeFailure(successor, err, conn)) await stampNeverReachedStripeHandled(successor, conn);
     return { status: 'failed', reason: err.message };
   }

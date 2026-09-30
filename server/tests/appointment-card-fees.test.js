@@ -691,9 +691,9 @@ describe('chargeAppointmentCardForRecapCompletion — recap closeout lane (Codex
     expect(mockLogAutopay).toHaveBeenCalledWith('cust-1', 'charge_failed', expect.anything());
   });
 
-  test('B10: a collections dispute hold refusal → collection_hold office review, never reported as a declined/failed charge', async () => {
+  test.each(['INVOICE_COLLECTION_STOPPED', 'COLLECTION_HOLD_CHECK_FAILED'])('B10: a collections hold refusal (%s) → collection_hold office review, never reported as a declined/failed charge', async (code) => {
     recapHandlers();
-    mockChargeSavedCard.mockRejectedValueOnce(Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code: 'INVOICE_COLLECTION_STOPPED' }));
+    mockChargeSavedCard.mockRejectedValueOnce(Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code }));
     const res = await chargeAppointmentCardForRecapCompletion({ scheduledServiceId: 'svc-1', serviceRecordId: 'sr-1' });
     expect(res.reason).toBe('collection_hold');
     expect(mockNotifyAdmin).toHaveBeenCalledWith('billing', expect.any(String), expect.stringContaining('collection_hold'), expect.anything());

@@ -1010,7 +1010,7 @@ async function chargeCardHoldOnCompletion({ scheduledServiceId, invoiceId, expec
     // A collections dispute hold (B10) refusal is the same retryable
     // posture (hold back to 'held', nothing terminal recorded), reported as
     // its own reason so it never reads as a failed/declined card.
-    if (err.code === 'INVOICE_COLLECTION_STOPPED') {
+    if (require('./collections/collection-hold').isCollectionHoldRefusal(err)) {
       logger.warn('[estimate-card-holds] completion charge withheld — customer has an active collections hold; card hold left held', { scheduledServiceId });
       return { charged: false, reason: 'collection_hold', error: err.message };
     }

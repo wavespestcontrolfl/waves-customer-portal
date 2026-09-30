@@ -73,6 +73,18 @@ describe('collection-hold lookup', () => {
     expect((await m.collectionHoldInvoiceIds([])).size).toBe(0);
   });
 
+  test('the LOCKED check wraps a lock/read failure as COLLECTION_HOLD_CHECK_FAILED (retryable, pre-Stripe) — never the raw DB error', async () => {
+    const m = load({ collections_flags: [] }, { failTable: 'collections_flags' });
+    const trx = makeFakeDb({ collections_flags: [] }, { failTable: 'collections_flags' });
+    await expect(m.customerHasActiveCollectionHoldLocked(trx, 'cust-1')).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', cause: expect.objectContaining({ message: 'db down' }) });
+    const lockFails = makeFakeDb({ collections_flags: [] });
+    lockFails.raw = jest.fn(async () => { throw new Error('lock_timeout'); });
+    await expect(m.customerHasActiveCollectionHoldLocked(lockFails, 'cust-1')).rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED' });
+    expect(m.isCollectionHoldRefusal({ code: 'COLLECTION_HOLD_CHECK_FAILED' })).toBe(true);
+    expect(m.isCollectionHoldRefusal({ code: 'INVOICE_COLLECTION_STOPPED' })).toBe(true);
+    expect(m.isCollectionHoldRefusal(new Error('card_declined'))).toBe(false);
+  });
+
   test('a lookup failure throws — never reads as "no hold"', async () => {
     const m = load({ invoices: INVOICES, collections_flags: [] }, { failTable: 'collections_flags' });
     await expect(m.customerHasActiveCollectionHold('cust-1')).rejects.toThrow('db down');
@@ -155,6 +167,14 @@ describe('completion balance sweep with a dispute hold', () => {
     expect(result.charged).toBe(2);
     // the binding check still rides every charge
     expect(mockCharge.mock.calls[0][2]).toMatchObject({ refuseWhenDunningStopped: true });
+  });
+
+  test.each(['INVOICE_COLLECTION_STOPPED', 'COLLECTION_HOLD_CHECK_FAILED'])('a binding hold refusal from the charge (%s) stops the sweep quietly — counted failed, logged, no customer messaging path', async (code) => {
+    flags[0].released_at = new Date(); // preflight passes; the locked charge check is what refuses
+    mockCharge.mockRejectedValueOnce(Object.assign(new Error('hold'), { code }));
+    const result = await runCompletionBalanceSweep(args);
+    expect(result).toMatchObject({ charged: 0, failed: 1 });
+    expect(mockCharge).toHaveBeenCalledTimes(1); // stop-on-failure
   });
 
   test('a hold-lookup failure fails closed: no charge, never throws', async () => {
@@ -258,7 +278,7 @@ describe('chargeInvoiceWithSavedCard binding check (refuseWhenDunningStopped)', 
   test('a hold-lookup failure fails closed: the charge throws before Stripe', async () => {
     const { StripeService, stripeClient } = setup({ holdRows: [], holdThrows: true });
     await expect(StripeService.chargeInvoiceWithSavedCard('inv-1', 'pm-1', { refuseWhenDunningStopped: true }))
-      .rejects.toThrow('flags table unreadable');
+      .rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', message: expect.stringContaining('flags table unreadable') });
     expect(stripeClient.paymentIntents.create).not.toHaveBeenCalled();
   });
 
@@ -324,7 +344,7 @@ describe('applyAccountCreditToInvoice (refuseWhenDunningStopped) honors the hold
   test('a lookup failure throws (fail closed) rather than applying credit', async () => {
     const { credit, trx } = load({ ...base(), collections_flags: [] }, { failTable: 'collections_flags' });
     await expect(credit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', customerRequested: true, refuseWhenDunningStopped: true }, trx))
-      .rejects.toThrow('db down');
+      .rejects.toMatchObject({ code: 'COLLECTION_HOLD_CHECK_FAILED', message: expect.stringContaining('db down') });
   });
 
   test('a released hold no longer short-circuits with dunning_stopped', async () => {

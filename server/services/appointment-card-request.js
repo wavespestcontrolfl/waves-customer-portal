@@ -3527,7 +3527,7 @@ async function chargeAppointmentCardForRecapCompletion({ scheduledServiceId, ser
     } catch (err) {
       // A collections dispute hold (B10) is a pre-charge, office-review
       // refusal — reported as such, never as a failed/declined charge.
-      const onHold = err?.code === 'INVOICE_COLLECTION_STOPPED';
+      const onHold = require('./collections/collection-hold').isCollectionHoldRefusal(err);
       logger.error(`[appt-card-request] recap completion charge ${onHold ? 'withheld (collections hold)' : 'failed'} for visit ${scheduledServiceId}: ${err.message}`);
       await alertRecapApptCardNeedsReview({ scheduledServiceId, customerId: svc.customer_id, reason: onHold ? 'collection_hold' : 'charge_failed' });
       // Awaited so a rejected audit write is caught here, never an

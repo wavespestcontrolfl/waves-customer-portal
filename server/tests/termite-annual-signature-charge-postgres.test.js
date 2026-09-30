@@ -476,8 +476,11 @@ describeOrSkip('termite annual signature charge — real Postgres', () => {
     expect(chargeInvoiceWithSavedCard.mock.calls[0][2]).toMatchObject({ refuseWhenCollectionHold: true });
   });
 
-  test('B10: a hold that lands BETWEEN the preflight and the submission (binding refusal) RELEASES the claim — not terminal, no pay link; the sweep resumes after release', async () => {
-    const holdErr = Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code: 'INVOICE_COLLECTION_STOPPED' });
+  test.each([
+    ['INVOICE_COLLECTION_STOPPED', 'a hold that lands BETWEEN the preflight and the submission (binding refusal)'],
+    ['COLLECTION_HOLD_CHECK_FAILED', 'a locked hold check that FAILS after a good preflight'],
+  ])('B10: %2$s (%1$s) RELEASES the claim — not terminal, no pay link; the sweep resumes after release', async (code) => {
+    const holdErr = Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code });
     let refuse = true;
     const { run, chargeInvoiceWithSavedCard, db, notifyAdmin } = load({
       chargeImpl: async (invoiceId) => {

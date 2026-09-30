@@ -61,12 +61,33 @@ async function lockCustomerHoldExclusive(trx, customerId) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [lockKey(customerId)]);
 }
 
+// Codes a charge / credit path throws BEFORE any Stripe call because of the
+// collections hold. Both are pre-charge and RETRYABLE: callers must treat
+// them as "not attempted, try again after the hold is released / the lookup
+// recovers" — never as a decline, a payer refusal or a handled outcome, and
+// never with a pay link or payment-failed message.
+//   INVOICE_COLLECTION_STOPPED     an active hold was found
+//   COLLECTION_HOLD_CHECK_FAILED   the lock / read itself failed (fail closed)
+const HOLD_REFUSED_CODE = 'INVOICE_COLLECTION_STOPPED';
+const HOLD_CHECK_FAILED_CODE = 'COLLECTION_HOLD_CHECK_FAILED';
+const isCollectionHoldRefusal = (err) => err?.code === HOLD_REFUSED_CODE || err?.code === HOLD_CHECK_FAILED_CODE;
+
 // Charge / credit side: take the shared lock FIRST, then read. Held until
-// the surrounding transaction ends. Returns true when a hold is active.
+// the surrounding transaction ends. Returns true when a hold is active. A
+// failure of the lock or the read throws a COLLECTION_HOLD_CHECK_FAILED
+// error (fail closed, still before Stripe) instead of the raw DB error, so
+// callers can keep it retryable.
 async function customerHasActiveCollectionHoldLocked(trx, customerId) {
   if (!customerId) return false;
-  await trx.raw('SELECT pg_advisory_xact_lock_shared(hashtextextended(?, 0))', [lockKey(customerId)]);
-  return customerHasActiveCollectionHold(customerId, trx);
+  try {
+    await trx.raw('SELECT pg_advisory_xact_lock_shared(hashtextextended(?, 0))', [lockKey(customerId)]);
+    return await customerHasActiveCollectionHold(customerId, trx);
+  } catch (err) {
+    throw Object.assign(new Error(`Collection hold could not be verified (${err.message}). Review before charging.`), {
+      code: HOLD_CHECK_FAILED_CODE,
+      cause: err,
+    });
+  }
 }
 
 // Set of (stringified) invoice ids whose customer has an active hold.
@@ -88,6 +109,9 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
 
 module.exports = {
   HOLD_FLAG,
+  HOLD_REFUSED_CODE,
+  HOLD_CHECK_FAILED_CODE,
+  isCollectionHoldRefusal,
   customerHasActiveCollectionHold,
   customerHasActiveCollectionHoldLocked,
   lockCustomerHoldExclusive,

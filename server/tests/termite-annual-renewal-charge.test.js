@@ -34,7 +34,7 @@ describe('termite annual renewal charge', () => {
     // the payer tests override this.
     jest.doMock('../services/payer', () => ({ resolveForInvoice: jest.fn(async () => ({ payerId: null })) }));
     // B10: no collections dispute hold by default; the hold tests override.
-    jest.doMock('../services/collections/collection-hold', () => ({ customerHasActiveCollectionHold: jest.fn(async () => false) }));
+    jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => false) }));
     jest.doMock('../models/db', () => {
       const dbFn = jest.fn();
       dbFn.schema = { hasTable: jest.fn().mockResolvedValue(true) };
@@ -1549,8 +1549,8 @@ describe('termite annual renewal charge', () => {
       const quoteInvoiceSavedCardCharge = jest.fn();
       jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge }));
 
+      jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => true) }));
       const { _private } = require('../services/termite-annual-renewal-charge');
-      jest.doMock('../services/collections/collection-hold', () => ({ customerHasActiveCollectionHold: jest.fn(async () => true) }));
       const { conn, deferredUpdate } = makeClaimConn();
       const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
 
@@ -1570,8 +1570,8 @@ describe('termite annual renewal charge', () => {
       const chargeInvoiceWithSavedCard = jest.fn();
       jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge: jest.fn() }));
 
+      jest.doMock('../services/collections/collection-hold', () => ({ ...jest.requireActual('../services/collections/collection-hold'), customerHasActiveCollectionHold: jest.fn(async () => { throw new Error('flags unreadable'); }) }));
       const { _private } = require('../services/termite-annual-renewal-charge');
-      jest.doMock('../services/collections/collection-hold', () => ({ customerHasActiveCollectionHold: jest.fn(async () => { throw new Error('flags unreadable'); }) }));
       const { conn } = makeClaimConn();
       const outcome = await _private.decideAndCharge(baseSuccessor(), baseParent(), conn);
 
@@ -1931,7 +1931,10 @@ describe('termite annual renewal charge', () => {
       expect(sendCustomerMessage).not.toHaveBeenCalled();
     });
 
-    test('B10: a collection hold that lands AFTER the preflight (binding refusal under the charge locks) is RETRYABLE — fence handed back, no decline, no payer refusal, no pay link, not stamped handled', async () => {
+    test.each([
+      ['a hold that lands AFTER the preflight (binding refusal)', 'INVOICE_COLLECTION_STOPPED'],
+      ['a locked hold check that FAILS after a good preflight', 'COLLECTION_HOLD_CHECK_FAILED'],
+    ])('B10: %s is RETRYABLE — fence handed back, no decline, no payer refusal, no pay link, not stamped handled', async (_label, code) => {
       mockCommon();
       mockGraceHelpers({ graceDays: 30 });
       const sendViaSMSAndEmail = jest.fn(async () => ({ ok: true }));
@@ -1944,7 +1947,7 @@ describe('termite annual renewal charge', () => {
       // The shared classifier would map a 'deferred' outcome to payer_refused — it must NOT be consulted.
       const classifyChargeErrorImpl = jest.fn(() => ({ status: 'deferred', reason: 'payer_billed_guard' }));
       mockSignatureChargePrivate({ classifyChargeErrorImpl });
-      const holdErr = Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code: 'INVOICE_COLLECTION_STOPPED' });
+      const holdErr = Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), { code });
       const chargeInvoiceWithSavedCard = jest.fn(async () => { throw holdErr; });
       jest.doMock('../services/stripe', () => ({ assertNoInvoiceChargeReconciliationPending: jest.fn(async () => undefined), chargeInvoiceWithSavedCard, quoteInvoiceSavedCardCharge: jest.fn(async () => ({ total: 249 })) }));
       const sendCustomerMessage = jest.fn();
