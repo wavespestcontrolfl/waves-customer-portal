@@ -136,6 +136,22 @@ async function isAddedPropertyToday({ customerId, email, ownKey, property }) {
   return !earlier.some((e) => e.address && e.address === here);
 }
 
+// Two acceptances for the same account seconds apart (two properties) must not
+// both see "no signup email yet today" and both send the full email: the
+// full-vs-short decision and its send run one at a time per account, under a
+// transaction-scoped advisory lock (GH Codex r7 P2). The second waits until the
+// first's send has returned, so its email_messages row is settled and visible.
+async function serializedPerAccount(customerId, fn) {
+  const self = customerId ? await db('customers').where({ id: customerId }).first('account_id') : null;
+  const key = `signup-email:${self?.account_id || customerId || 'none'}`;
+  let out;
+  await db.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [key]);
+    out = await fn();
+  });
+  return out;
+}
+
 // Everything the combined email adds to the payload, plus which template
 // carries it. Never throws — a section that cannot be built is simply absent
 // (and its separate email then goes out as it does today).
@@ -146,10 +162,15 @@ async function buildSignupEmail({ customerId, estimateId, appointment, email, si
       return null;
     }
   };
-  const property = await safe('property', () => propertyForEstimate({ estimateId, customerId, appointment }));
   const plan = signup.membershipEmail
     ? await safe('plan', () => require('./account-membership-email').buildMembershipStartedSection({ ...signup.membershipEmail, recipientEmail: email }))
     : null;
+  // No plan folded in (e.g. the email is going to the estimate's contact, not
+  // the account holder) → nothing in this email needs the transactional_required
+  // stream, so send the plain, unsubscribe-respecting email exactly as today and
+  // let membership.started go out on its own (GH Codex r7 P2).
+  if (!plan) return null;
+  const property = await safe('property', () => propertyForEstimate({ estimateId, customerId, appointment }));
   // A later same-day acceptance for a DIFFERENT property is an added property —
   // but only when the email can name it; otherwise the full email (which names
   // nothing it can't) is the honest one.
@@ -343,10 +364,13 @@ async function sendEstimateAcceptedOnboarding(args = {}) {
     // ONE SIGNUP EMAIL: only for a caller that passed `signup`, only while the
     // gate is on at this moment. Otherwise the send is the email as it has
     // always been.
-    const wanted = signup && signupGateLive()
-      ? await buildSignupEmail({ ...args, email: recipient.email, ownKey })
-      : null;
-    const { result, variant } = await sendOnboardingTemplate({ ...args, recipient, acceptanceNote, ownKey }, wanted);
+    const decideAndSend = async () => {
+      const wanted = await buildSignupEmail({ ...args, email: recipient.email, ownKey });
+      return sendOnboardingTemplate({ ...args, recipient, acceptanceNote, ownKey }, wanted);
+    };
+    const { result, variant } = signup && signupGateLive()
+      ? await serializedPerAccount(customerId, decideAndSend)
+      : await sendOnboardingTemplate({ ...args, recipient, acceptanceNote, ownKey }, null);
     const copyMissing = await stampAcceptanceCopy({ acceptanceNote, acceptanceId, estimateId, result });
     // Covered only by a send the provider accepted whose rendered output carries
     // the whole plan section. Every other outcome (no address, a failure, a
@@ -368,5 +392,5 @@ module.exports = {
   acceptedOnboardingKey,
   ACCEPTANCE_COPY_MARKER,
   accountCustomerIds,
-  _private: { appointmentLineFor, acceptanceNoteFor, renderedCarriesAcceptanceCopy, propertyForEstimate, isAddedPropertyToday, buildSignupEmail },
+  _private: { serializedPerAccount, appointmentLineFor, acceptanceNoteFor, renderedCarriesAcceptanceCopy, propertyForEstimate, isAddedPropertyToday, buildSignupEmail },
 };

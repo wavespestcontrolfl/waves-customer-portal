@@ -63,6 +63,9 @@ function mockDb(state = {}) {
     qbs.push(qb);
     return qb;
   });
+  // The per-account advisory lock around the full-vs-short decision.
+  s.locks = [];
+  db.transaction = jest.fn(async (fn) => fn({ raw: jest.fn(async (sql, bindings) => { s.locks.push({ sql, bindings }); }) }));
   s.qbs = qbs;
   return s;
 }
@@ -151,6 +154,37 @@ describe('the onboarding email itself', () => {
       await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
       const to = EmailTemplates.sendTemplate.mock.calls[0][0].to;
       expect(Membership.buildMembershipStartedSection).toHaveBeenCalledWith(expect.objectContaining({ recipientEmail: to }));
+    });
+
+    test('no plan folded in (email going to someone other than the account holder): the plain, unsubscribe-respecting email (GH Codex r7 P2)', async () => {
+      mockDb();
+      Membership.buildMembershipStartedSection.mockResolvedValue(null);
+      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+      const res = await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+      const call = EmailTemplates.sendTemplate.mock.calls[0][0];
+      expect(call.templateKey).toBe('estimate.accepted_onboarding');
+      expect(call.categories).toEqual(['estimate_accepted_onboarding']);
+      expect(call.payload.property_address).toBeUndefined();
+      expect(res.coversMembership).toBeUndefined();
+    });
+
+    test('the full-vs-short decision and its send run under a per-account advisory lock (GH Codex r7 P2)', async () => {
+      const s = mockDb({ customer: { id: 'cust-1', first_name: 'Taylor', email: 'taylor@example.com', account_id: 'acct-9' } });
+      EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
+      await sendEstimateAcceptedOnboarding({ ...base, signup: SIGNUP });
+      expect(s.locks).toEqual([{ sql: expect.stringContaining('pg_advisory_xact_lock'), bindings: ['signup-email:acct-9'] }]);
+    });
+
+    test('lock serializes: the second decision starts only after the first send returned', async () => {
+      mockDb();
+      const { serializedPerAccount } = require('../services/estimate-accepted-email')._private;
+      let chainTail = Promise.resolve();
+      db.transaction = jest.fn((fn) => { const run = chainTail.then(() => fn({ raw: jest.fn(async () => {}) })); chainTail = run.catch(() => {}); return run; });
+      const order = [];
+      const job = (name) => async () => { order.push(`${name}:start`); await new Promise((r) => setTimeout(r, 5)); order.push(`${name}:end`); return name; };
+      const [a, b] = await Promise.all([serializedPerAccount('cust-1', job('a')), serializedPerAccount('cust-1', job('b'))]);
+      expect([a, b]).toEqual(['a', 'b']);
+      expect(order).toEqual(['a:start', 'a:end', 'b:start', 'b:end']);
     });
 
     describe('does the send cover membership.started? (decided here, at send time)', () => {
