@@ -1014,3 +1014,43 @@ it("scrolls an unknown sender's deep link to the alerted message too", async () 
   setup(); await tick();
   expect(scrolled).toEqual(["sms-message-s-first"]);
 });
+
+it("asks the log for the customer AND the sid together, so an alerted message older than the loaded page is recovered", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const other = inboundFrom("o", "Newer text from someone else", "+19415550111", { customerId: "cust-other", customerName: "Other Person" });
+  const newer = inboundFrom("z-newer", "Later follow-up", "+19415550166", { customerId: "cust-z", customerName: "Z Person", twilioSid: "SMnewer", createdAt: "2024-07-01T12:05:00Z" });
+  const anchor = inboundFrom("z-anchor", "Original alert text", "+19415550166", { customerId: "cust-z", customerName: "Z Person", twilioSid: "SM+odd/sid=1", createdAt: "2024-07-01T12:00:00Z" });
+  loadLog = logFor((q) => (q.get("customerId") === "cust-z" ? [newer, anchor] : [other]));
+  window.history.replaceState({}, "", `/?thread=cust-z&message=${encodeURIComponent("SM+odd/sid=1")}`);
+  setup(); await tick();
+  const lookup = logRequests().find(([url]) => String(url).includes("customerId=cust-z"));
+  expect(lookup).toBeDefined();
+  expect(new URL(String(lookup[0]), "http://localhost").searchParams.get("twilioSid")).toBe("SM+odd/sid=1");
+  expect(scrolled).toEqual(["sms-message-z-anchor"]);
+});
+
+it("fetches the anchor when the customer's thread is loaded but the alerted message is not among its messages, merging rather than replacing", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const loadedOnly = inboundFrom("w-new", "Newest loaded text", "+19415550177", { customerId: "cust-w", customerName: "W Person", twilioSid: "SMw2", createdAt: "2024-07-01T12:05:00Z" });
+  const old = inboundFrom("w-old", "Old alerted text", "+19415550177", { customerId: "cust-w", customerName: "W Person", twilioSid: "SMw1", createdAt: "2024-07-01T12:00:00Z" });
+  loadLog = logFor((q) => (q.get("twilioSid") === "SMw1" ? [loadedOnly, old] : [loadedOnly]));
+  window.history.replaceState({}, "", "/?thread=cust-w&message=SMw1");
+  setup(); await tick();
+  expect(logRequests().some(([url]) => String(url).includes("customerId=cust-w") && String(url).includes("twilioSid=SMw1"))).toBe(true);
+  expect(scrolled).toEqual(["sms-message-w-old"]);
+  expect(screen.getAllByText("Newest loaded text").length).toBeGreaterThan(0); // still there
+});
+
+it("opens the thread that holds the alerted message when the customer texts from two numbers, with no extra fetch", async () => {
+  const scrolled = [];
+  Element.prototype.scrollIntoView = vi.fn(function scroll() { scrolled.push(this.id); });
+  const a = inboundFrom("v-a", "From the cell", "+19415550188", { customerId: "cust-v", customerName: "V Person", twilioSid: "SMv-a", createdAt: "2024-07-01T12:10:00Z" });
+  const b = inboundFrom("v-b", "From the landline", "+19415550199", { customerId: "cust-v", customerName: "V Person", twilioSid: "SMv-b", createdAt: "2024-07-01T12:00:00Z" });
+  loadLog = logFor(() => [a, b]);
+  window.history.replaceState({}, "", "/?thread=cust-v&message=SMv-b");
+  setup(); await tick();
+  expect(scrolled).toEqual(["sms-message-v-b"]);
+  expect(logRequests().some(([url]) => String(url).includes("twilioSid="))).toBe(false);
+});

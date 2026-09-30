@@ -56,16 +56,18 @@ async function insertThread({
   body = 'Synthetic inbound',
   metadata = {},
   twilioSid = null,
+  createdAt = new Date(),
+  customerId = null,
 }) {
   const conversationId = randomUUID();
   await mockPg('conversations').insert({
     id: conversationId, channel: 'sms', our_endpoint_id: ourEndpoint,
-    unknown_contact: true, contact_phone: contactPhone,
+    unknown_contact: !customerId, contact_phone: contactPhone, customer_id: customerId,
   });
   await mockPg('messages').insert({
     id: randomUUID(), conversation_id: conversationId, channel: 'sms', direction: 'inbound',
     body, author_type: 'customer', metadata: JSON.stringify(metadata), twilio_sid: twilioSid,
-    created_at: new Date(),
+    created_at: createdAt,
   });
   return conversationId;
 }
@@ -294,6 +296,43 @@ postgres('GET /log unlinked-sender customer fallback — NANP vs international i
     const miss = await getLog('?twilioSid=SMdoesnotexist');
     expect(miss.status).toBe(200);
     expect(miss.body.messages).toEqual([]);
+  });
+
+  // The anchored message is always in the response, even when more than a page
+  // of newer messages from the same contact push it out of the newest-first cap.
+  test('twilioSid keeps the anchored row when newer messages fill the page, and hasMore stays truthful', async () => {
+    const at = (minutes) => new Date(Date.UTC(2026, 8, 1, 12, minutes));
+    await insertThread({ contactPhone: '+19415550150', body: 'Synthetic anchor', twilioSid: 'SMsyntheticanchor', createdAt: at(0) });
+    for (let i = 1; i <= 3; i += 1) await insertThread({ contactPhone: '+19415550150', body: `Synthetic newer ${i}`, createdAt: at(i) });
+
+    const { body } = await getLog('?twilioSid=SMsyntheticanchor&limit=2');
+    expect(body.messages.map((m) => m.body)).toEqual(['Synthetic newer 3', 'Synthetic newer 2', 'Synthetic anchor']);
+    expect(body.messages.at(-1).twilioSid).toBe('SMsyntheticanchor');
+    expect(body.hasMore).toBe(true); // ordinary pages still continue past the page
+
+    const inPage = await getLog('?twilioSid=SMsyntheticanchor&limit=10');
+    expect(inPage.body.messages).toHaveLength(4); // no duplicate when the page already holds it
+  });
+
+  test('customerId + twilioSid scopes to that customer, keeps its anchor past the cap, and never returns a foreign sid\'s row', async () => {
+    const mine = randomUUID();
+    const theirs = randomUUID();
+    await mockPg('customers').insert([
+      { id: mine, phone: '+19415550160', first_name: 'Mina', last_name: 'Ortiz' },
+      { id: theirs, phone: '+19415550161', first_name: 'Theo', last_name: 'Vance' },
+    ]);
+    const at = (minutes) => new Date(Date.UTC(2026, 8, 1, 12, minutes));
+    await insertThread({ contactPhone: '+19415550160', customerId: mine, body: 'Synthetic mine anchor', twilioSid: 'SMmineanchor', createdAt: at(0) });
+    for (let i = 1; i <= 3; i += 1) await insertThread({ contactPhone: '+19415550160', customerId: mine, body: `Synthetic mine newer ${i}`, createdAt: at(i) });
+    await insertThread({ contactPhone: '+19415550161', customerId: theirs, body: 'Synthetic foreign', twilioSid: 'SMforeign', createdAt: at(2) });
+
+    const own = await getLog(`?customerId=${mine}&twilioSid=SMmineanchor&limit=2`);
+    expect(own.body.messages.map((m) => m.body)).toEqual(['Synthetic mine newer 3', 'Synthetic mine newer 2', 'Synthetic mine anchor']);
+
+    const foreign = await getLog(`?customerId=${mine}&twilioSid=SMforeign&limit=2`);
+    expect(foreign.status).toBe(200);
+    expect(foreign.body.messages.map((m) => m.body)).toEqual(['Synthetic mine newer 3', 'Synthetic mine newer 2']);
+    expect(JSON.stringify(foreign.body)).not.toContain('Synthetic foreign');
   });
 
   test('an unlinked +44 sender sharing a US customer\'s last 10 digits resolves to NO customer', async () => {

@@ -2826,11 +2826,13 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
 
   // Deep-link from a notification: /admin/communications?thread=<customerId>
   // (a known sender; the sms_reply bell carries the customer id as its thread
-  // id, see notification-triggers.js) or ?message=<Twilio MessageSid> (an
-  // unknown sender, named by the message because a link must not carry their
-  // number). The conversation opens even when it is not in the loaded page of
-  // the log: its messages are fetched directly (by customer, or by the sid's
-  // own contact) and merged in. Runs once, after the first load.
+  // id, see notification-triggers.js) and/or ?message=<Twilio MessageSid> (the
+  // message the alert is about; alone, an unknown sender, named by the message
+  // because a link must not carry their number). The conversation opens even
+  // when it is not in the loaded page of the log, and so does the alerted
+  // message when it is older than that page: the log is asked for the customer
+  // and/or the sid (the server always includes the anchor row) and the result
+  // is merged into, never over, what is loaded. Runs once, after the first load.
   const threadDeepLinkDone = useRef(false);
   const [deepLinkThreadKey, setDeepLinkThreadKey] = useState(null);
   useEffect(() => {
@@ -2840,23 +2842,32 @@ export function SmsTab({ active, customer = null, customerMessages = [], custome
     const threadCustomerId = params.get("thread");
     const messageSid = params.get("message");
     if (!threadCustomerId && !messageSid) return;
-    const loaded = threadCustomerId && threads.find(
-      (t) => t.customerId && String(t.customerId) === String(threadCustomerId),
-    );
-    if (loaded) {
+    const ofCustomer = (t) => !threadCustomerId || (t.customerId && String(t.customerId) === String(threadCustomerId));
+    const hasAnchor = (t) => t.messages.some((m) => m.twilioSid === messageSid);
+    // The thread that holds the alerted message wins over the customer's
+    // newest thread (a customer can text from more than one number).
+    const loaded = (messageSid && threads.find((t) => ofCustomer(t) && hasAnchor(t)))
+      || (threadCustomerId && threads.find(ofCustomer));
+    if (loaded && (!messageSid || hasAnchor(loaded))) {
       setDeepLinkThreadKey(smsThreadKey(loaded.contactPhone));
       return;
     }
-    const scope = threadCustomerId
-      ? `customerId=${encodeURIComponent(threadCustomerId)}`
-      : `twilioSid=${encodeURIComponent(messageSid)}`;
+    const scope = [
+      threadCustomerId && `customerId=${encodeURIComponent(threadCustomerId)}`,
+      messageSid && `twilioSid=${encodeURIComponent(messageSid)}`,
+    ].filter(Boolean).join("&");
     adminFetch(`/admin/communications/log?limit=${SMS_LOG_PAGE_SIZE}&${scope}`)
       .then((data) => {
-        if (!Array.isArray(data?.messages) || data.error || !data.messages.length) return; // stay on the list
+        if (!Array.isArray(data?.messages) || data.error || !data.messages.length) {
+          if (loaded) setDeepLinkThreadKey(smsThreadKey(loaded.contactPhone)); // the anchor is gone; the thread still opens
+          return; // else stay on the list
+        }
         setMessages((prev) => mergeSmsMessages(prev, data.messages));
-        setDeepLinkThreadKey(smsMessageThreadKey(data.messages[0]));
+        const anchor = messageSid && data.messages.find((m) => m.twilioSid === messageSid);
+        setDeepLinkThreadKey(anchor ? smsMessageThreadKey(anchor)
+          : loaded ? smsThreadKey(loaded.contactPhone) : smsMessageThreadKey(data.messages[0]));
       })
-      .catch(() => {}); // the list is still there
+      .catch(() => { if (loaded) setDeepLinkThreadKey(smsThreadKey(loaded.contactPhone)); }); // the list is still there
   }, [active, customer, loading, threads]);
   // Open the thread once it is among the loaded ones, and bring the message
   // the alert was about (?message=<sid>) into view and briefly mark it; with

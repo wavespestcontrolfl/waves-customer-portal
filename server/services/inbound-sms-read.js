@@ -70,7 +70,12 @@ async function retargetOrClearUnknownSenderBell(phone, cutoff, role) {
           [phone],
         );
       if (remaining?.twilio_sid) {
-        await liveBell().update({ metadata: trx.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]) });
+        // The link names the message the bell opens, so it follows the target
+        // (a bare-link bell gains ?message=<sid> here).
+        await liveBell().update({
+          link: `${UNLINKED_BELL_LINK}?message=${encodeURIComponent(remaining.twilio_sid)}`,
+          metadata: trx.raw("jsonb_set(metadata, '{payload,twilioSid}', to_jsonb(?::text))", [remaining.twilio_sid]),
+        });
         return 0;
       }
       // Appends take this phone lock too. Recheck in the UPDATE for other
