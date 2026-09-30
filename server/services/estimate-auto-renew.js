@@ -219,8 +219,17 @@ const EstimateAutoRenew = {
                     }
                   }
                 } catch (e) {
-                  if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
-                  logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                  if (Array.isArray(e?.partialResults) && e.partialResults.length) {
+                    // Another automation on this trigger already sent or
+                    // queued the customer's email; only a sibling failed.
+                    // Falling back now would send a second email (codex
+                    // #5418 r4). The failure is logged, never retried here.
+                    logger.error(`[est-auto-renew] Email automation partially failed for estimate ${est.id} (${e.partialResults.length} handled): ${e.message}`);
+                    sentWithTemplateLibrary = true;
+                  } else {
+                    if (!canFallbackFromTemplateEmailError(e) && !canFallbackFromAutomationEmailError(e)) throw e;
+                    logger.warn(`[est-auto-renew] Template unavailable for estimate ${est.id}; falling back to SMTP: ${e.message}`);
+                  }
                 }
               }
               if (!sentWithTemplateLibrary) {

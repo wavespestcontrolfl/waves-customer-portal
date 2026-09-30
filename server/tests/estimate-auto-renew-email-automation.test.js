@@ -252,6 +252,32 @@ describe('estimate auto-renew email automation cutover', () => {
     expect(mockEmailSend).not.toHaveBeenCalled();
   });
 
+  test('a partial automation failure (one sibling sent, one misconfigured) never falls back to a second email (codex #5418 r4)', async () => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('active template not found'), {
+      automationFailures: [{ automation_key: 'broken', message: 'active template not found' }],
+      partialResults: [{ run: { id: 'run-1', status: 'sent' } }],
+    }));
+
+    await expect(EstimateAutoRenew.checkAll()).resolves.toEqual({ renewed: 1 });
+
+    expect(mockSendTemplate).not.toHaveBeenCalled();
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
+  test('…while a fallback-classified failure with NO handled sibling still falls back', async () => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('active template not found'), { partialResults: [] }));
+
+    await EstimateAutoRenew.checkAll();
+
+    // It takes the SMTP fallback branch (not the partial-success one).
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('falling back to SMTP'));
+    expect(mockLogger.error).not.toHaveBeenCalledWith(expect.stringContaining('partially failed'));
+  });
+
   test('a zero-comms opted-out estimate is never renewed or emailed (uncapped audit r4 P1)', async () => {
     // Publish-without-delivery mints (report click-to-estimate) stamp
     // estimate_data.noEngagementAutomation — renewal would both EXTEND the
