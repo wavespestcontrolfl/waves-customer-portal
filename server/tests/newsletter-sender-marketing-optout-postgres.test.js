@@ -189,6 +189,33 @@ postgres('newsletter sender — explicit marketing opt-out at send time (real Po
     expect(await audienceIds([earlierAlias.id, laterPlain.id])).toEqual([earlierAlias.id]);
   });
 
+  // Codex P2 (:235) — the canonical pick runs only over rows that can be
+  // mailed on their own. An older alias linked to an ARCHIVED customer, or
+  // one whose exact address carries a global bounce, must not win the pick
+  // and then be dropped by the archive/suppression predicate, leaving the
+  // live sibling excluded as non-canonical (the mailbox got nothing).
+  test('older alias linked to an archived customer: the newer live-linked alias is canonical and sent', async () => {
+    const t = tag().replace(/-/g, '');
+    const archived = await customer({ deleted_at: new Date() });
+    const live = await customer();
+    const older = await subscriber(`archcanon${t}@gmail.com`, { customer_id: archived.id, created_at: new Date(Date.now() - 60000) });
+    const newer = await subscriber(`a.r.c.h.c.a.n.o.n${t}+x@gmail.com`, { customer_id: live.id, created_at: new Date() });
+    expect(await audienceIds([older.id, newer.id])).toEqual([newer.id]);
+  });
+
+  test('older alias with an active global bounce on its exact address: the newer alias is canonical and sent', async () => {
+    const t = tag().replace(/-/g, '');
+    const olderEmail = `bouncecanon${t}@gmail.com`;
+    const older = await subscriber(olderEmail, { created_at: new Date(Date.now() - 60000) });
+    const newer = await subscriber(`b.o.u.n.c.e.c.a.n.o.n${t}+x@gmail.com`, { created_at: new Date() });
+    await db('email_suppressions').insert({ email: olderEmail, suppression_type: 'bounce', status: 'active' });
+    try {
+      expect(await audienceIds([older.id, newer.id])).toEqual([newer.id]);
+    } finally {
+      await db('email_suppressions').where({ email: olderEmail }).del();
+    }
+  });
+
   test('an exact-duplicate-free normal active subscriber is unaffected by the new duplicate-active check', async () => {
     const t = tag().replace(/-/g, '');
     const solo = await subscriber(`solo${t}@gmail.com`);

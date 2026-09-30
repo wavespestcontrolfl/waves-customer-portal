@@ -622,6 +622,19 @@ async function applyOrphanLink(conn, subscriberId) {
     const target = await orphanLinkTarget(trx, subscriberId);
     if (!target) return false;
     await lockCustomerComms(trx, target);
+    // Codex P2 (:626) — customer-email-write.js edits customers.email under
+    // a customers-row FOR UPDATE and never takes the comms lock, and its
+    // subscriber fanout cannot see this uncommitted link. Hold the target
+    // row FOR SHARE (lock order as decideAddress: comms lock, then the
+    // row): an edit already in flight commits first and the UPDATE's own
+    // re-evaluation below no longer matches the old address, so the orphan
+    // stays unlinked; an edit arriving later waits for this commit and its
+    // fanout then sees the linked row.
+    const locked = await trx.raw(
+      'SELECT id FROM customers WHERE id = ? AND deleted_at IS NULL FOR SHARE',
+      [target],
+    );
+    if (!(locked.rows || []).length) return { linked: false, zoneFilled: false };
     const { sql, bindings } = orphanTargetSql(subscriberId);
     const result = await trx.raw(
       `UPDATE newsletter_subscribers ns

@@ -164,6 +164,11 @@ function makeConn(state) {
       }
       return { rows: [] };
     }
+    // applyOrphanLink's FOR SHARE hold on the target customer row.
+    if (sql.includes('SELECT id FROM customers WHERE id = ?') && sql.includes('FOR SHARE')) {
+      const c = state.customers.find((x) => x.id === bindings[0] && !x.deleted_at);
+      return { rows: c ? [{ id: c.id }] : [] };
+    }
     if (sql.includes('SELECT pick.twin_id')) {
       const target = orphanTarget(bindings[bindings.length - 1]);
       return { rows: target ? [{ id: target }] : [] };

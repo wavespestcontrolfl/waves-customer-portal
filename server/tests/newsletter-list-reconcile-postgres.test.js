@@ -555,6 +555,43 @@ postgres('newsletter-list-reconcile — real Postgres', () => {
     }
   });
 
+  // Codex P2 (:626): an operator email edit (customer-email-write.js) holds
+  // the customers row FOR UPDATE and takes no comms lock. The orphan link
+  // must wait for it and then refuse — the orphan's address no longer
+  // matches — never link an orphan to a profile whose email just moved.
+  // A lead-stage twin keeps the candidate-import phase off this profile,
+  // so only the orphan link can be the one that waits.
+  test('orphan linking waits on an in-flight customer email edit and then refuses the stale address', async () => {
+    const twin = synthCustomer({ pipeline_stage: 'new_lead' });
+    await seedCommitted([twin]);
+    const orphanEmail = twin.email.toLowerCase();
+    const movedEmail = `synth-${randomUUID().slice(0, 8)}@example.invalid`;
+    await db('newsletter_subscribers').insert({ email: orphanEmail, status: 'active', source: 'test_orphan' });
+    const holder = knexFactory({ client: 'pg', connection, pool: POOL });
+    const connA = knexFactory({ client: 'pg', connection, pool: POOL });
+    let holderTrx;
+    try {
+      holderTrx = await holder.transaction();
+      await holderTrx('customers').where({ id: twin.id }).forUpdate().first();
+      await holderTrx('customers').where({ id: twin.id }).update({ email: movedEmail });
+
+      let settled = false;
+      const resultPromise = reconcileCustomers({ dryRun: false, conn: connA }).then((r) => { settled = true; return r; });
+      await new Promise((resolve) => { setTimeout(resolve, 300); });
+      expect(settled).toBe(false); // blocked on the target's row lock
+
+      await holderTrx.commit();
+      await resultPromise;
+      const orphan = await db('newsletter_subscribers').where({ email: orphanEmail }).first();
+      expect(orphan.customer_id).toBeNull();
+    } finally {
+      if (holderTrx && !holderTrx.isCompleted()) await holderTrx.rollback();
+      await holder.destroy();
+      await connA.destroy();
+      await cleanupCommitted([twin.id], [orphanEmail, movedEmail]);
+    }
+  });
+
   // ── Canonical link / identity / zone (the SAME picker every linker runs) ──
 
   async function canonicalTwinId(conn, email) {

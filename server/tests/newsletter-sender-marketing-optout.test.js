@@ -93,7 +93,11 @@ describe('excludeMailboxNotMailable', () => {
   test('every excludeArchivedCustomers call in the sender is wrapped by excludeMailboxNotMailable', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/newsletter-sender.js'), 'utf8');
     const calls = [...src.matchAll(/excludeArchivedCustomers\(/g)].map((m) => m.index)
-      .filter((i) => !src.slice(Math.max(0, i - 9), i).endsWith('function '));
+      .filter((i) => !src.slice(Math.max(0, i - 9), i).endsWith('function '))
+      // The canonical-row CTE inside the predicate itself filters its pick
+      // set with this helper (codex #5165 :235) — an input to the
+      // predicate, not an audience read.
+      .filter((i) => !src.slice(src.lastIndexOf('\nconst ', i), i).startsWith('\nconst CANONICAL_ACTIVE_MAILBOX_SQL'));
     expect(calls.length).toBeGreaterThanOrEqual(4); // selection, refetch, chunk re-check, outstandingEligibleDeliveries
     for (const i of calls) {
       expect(src.slice(Math.max(0, i - 'excludeMailboxNotMailable('.length), i)).toBe('excludeMailboxNotMailable(');

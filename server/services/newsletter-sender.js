@@ -227,12 +227,21 @@ const MAILBOX_KEY_SQL = (fieldExpr) => {
 // (customers' twin picker, the reconcile candidate order), applied here
 // directly on newsletter_subscribers's own columns; genuinely one row per
 // key, so it hash-joins as cheaply as opted_out_profiles.
+//
+// The pick runs only over rows that can actually be mailed on their own —
+// active AND past the archived-customer and global-suppression predicates
+// (codex #5165 :235). Otherwise an oldest alias linked to an archived
+// customer (or carrying an exact-address bounce) wins the pick, is then
+// dropped by that predicate, and the live sibling is dropped as
+// non-canonical: the mailbox gets nothing. The CTE is built on the
+// unaliased table so both shared helpers apply to it unchanged.
 const CANONICAL_ACTIVE_MAILBOX_SQL = (qb) => {
-  qb.distinctOn(db.raw(MAILBOX_KEY_SQL('s.email')))
-    .select(db.raw(`${MAILBOX_KEY_SQL('s.email')} as mailbox_key`), 's.id as canonical_id')
-    .from('newsletter_subscribers as s')
-    .where('s.status', 'active')
-    .orderByRaw(`${MAILBOX_KEY_SQL('s.email')}, s.created_at ASC, s.id ASC`);
+  excludeArchivedCustomers(excludeGloballySuppressed(
+    qb.distinctOn(db.raw(MAILBOX_KEY_SQL('newsletter_subscribers.email')))
+      .select(db.raw(`${MAILBOX_KEY_SQL('newsletter_subscribers.email')} as mailbox_key`), 'newsletter_subscribers.id as canonical_id')
+      .from('newsletter_subscribers')
+      .where('newsletter_subscribers.status', 'active'),
+  )).orderByRaw(`${MAILBOX_KEY_SQL('newsletter_subscribers.email')}, newsletter_subscribers.created_at ASC, newsletter_subscribers.id ASC`);
 };
 function excludeMailboxNotMailable(query) {
   return query
