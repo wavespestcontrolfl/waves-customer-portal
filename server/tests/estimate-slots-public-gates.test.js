@@ -59,6 +59,7 @@ jest.mock('../routes/estimate-public', () => ({
   // selection from it); no priced frequencies unless a case sets one.
   buildPricingBundle: jest.fn(async () => ({})),
   estimateRendersMonthlyBilling: jest.fn(async () => false),
+  reconcileFrozenMembershipSnapshot: jest.fn(async () => undefined),
   // The page's acceptance contract (/data): the slot picker renders only for
   // standard_slot_pick, so the texting AI offers times only then.
   resolveEstimateAcceptance: jest.fn(async () => ({ acceptance: { mode: 'standard_slot_pick' } })),
@@ -573,6 +574,29 @@ describe('offerableEstimateSlots — the page\'s acceptance contract', () => {
     expect(buildPricingBundle.mock.calls[0][1]).toEqual({ monthlyBilled: false });
     expect(resolveEstimateAcceptance.mock.calls[0][2]).toBe(pricing);
     expect(getAvailableSlots).toHaveBeenCalledTimes(1);
+  });
+
+  test('a stale membership snapshot is reconciled first, as /data does: pricing, contract and selection read the reconciled row', async () => {
+    const { reconcileFrozenMembershipSnapshot } = require('../routes/estimate-public');
+    currentEstimate = { ...OWN };
+    const order = [];
+    reconcileFrozenMembershipSnapshot.mockImplementationOnce(async (row) => {
+      order.push('reconcile');
+      Object.assign(row, { estimate_data: JSON.stringify({ membershipLapsedRequote: true }) });
+    });
+    buildPricingBundle.mockImplementationOnce(async (row) => {
+      order.push('pricing');
+      expect(JSON.parse(row.estimate_data)).toEqual({ membershipLapsedRequote: true });
+      return {};
+    });
+    resolveEstimateAcceptance.mockImplementationOnce(async (row, estData) => {
+      expect(estData).toEqual({ membershipLapsedRequote: true });
+      return { acceptance: { mode: 'quote_required' } };
+    });
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(order).toEqual(['reconcile', 'pricing']);
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(OWN.estimate_data).toBeUndefined();
   });
 
   test('the contract failing to resolve withholds (never guesses)', async () => {

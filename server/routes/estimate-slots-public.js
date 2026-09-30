@@ -1137,10 +1137,15 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
   // existing appointment, invoice-only, commercial site-confirmation → no
   // picker, so no time the customer could pick), and its pricing bundle is
   // what the picker's first fetch derives the default selection from.
+  // /data reconciles a stale frozen membership snapshot (in memory, never
+  // persisted) before building either, so this does too: a lapsed plan can
+  // reprice the default selection or make the estimate quote-required.
   let pricing;
+  let full;
   try {
-    const full = await db('estimates').where({ id: estimate.id }).first();
+    full = await db('estimates').where({ id: estimate.id }).first();
     if (!full) return null;
+    await reconcileFrozenMembershipSnapshot(full);
     pricing = await buildPricingBundle(full, { monthlyBilled: await estimateRendersMonthlyBilling(full) });
     const { acceptance } = await resolveEstimateAcceptance(full, parseEstimateData(full), pricing);
     if (acceptance?.mode !== 'standard_slot_pick') return null;
@@ -1148,13 +1153,13 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
     logger.warn(`[estimate-slots-public:offerable] page contract lookup failed (${err.message}); estimate times withheld`);
     return null;
   }
-  const serviceMode = resolveSlotServiceMode(estimate, '');
+  const serviceMode = resolveSlotServiceMode(full, '');
   // The page's own first fetch (SlotPicker.jsx) always carries the default
   // selectedFrequency / serviceCadences of a recurring estimate — without them
   // the picker sizes the visit from frequencies[0] and unmodified companion
   // rows, a different duration / service mix than the customer's default.
   let selection = {};
-  if (serviceMode !== 'one_time' && !hasSavedCustomerSelection(estimate)) {
+  if (serviceMode !== 'one_time' && !hasSavedCustomerSelection(full)) {
     const derived = pageDefaultSlotSelection(pricing);
     if (!derived) return null;
     selection = {
