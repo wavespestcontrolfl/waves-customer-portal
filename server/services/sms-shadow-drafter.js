@@ -718,6 +718,45 @@ function replaceQuantity(text, re, convert) {
     return isWindowQuantity(whole, offset, m.length) ? m : convert(m, ...args);
   });
 }
+// Office follow-up timing vs technician arrival timing (Codex pre-push P1,
+// round 13, PR #5334): "I'll confirm your arrival window within the hour."
+// and "I'll get back to you within the hour about your arrival." carry an
+// approved follow-up-SLA duration (sms-followup-sla SLA_PHRASES) that has
+// nothing to do with when the tech shows up — yet "arrival" in the sentence
+// made it read as an ETA. A duration is bound to the VERB that governs it:
+// the NEAREST verb phrase in its own sentence, office follow-up (confirm,
+// get back to you, text/call you back, follow up, check, let you know, send,
+// be in touch) or technician arrival (arrive, be there, on the way, en
+// route, pull/show up, away, out, get there / to you, reach you). Office
+// wins only when it is strictly nearer (a tie fails closed to ETA); a
+// duration that IS an SLA phrase with no arrival verb anywhere in the
+// sentence is office timing too. Shared by every ETA check (claim
+// tokenizers, leftover-word checks, vague phrases) so they cannot drift.
+const OFFICE_FOLLOWUP_VERB_RE = /\b(?:confirm(?:ing)?|get(?:ting)?\s+back\s+to\s+you|(?:text|call|email|message|ping)(?:ing)?\s+you(?:\s+back)?|reach(?:ing)?\s+out|follow(?:ing)?[\s-]+up|check(?:ing)?|let(?:ting)?\s+you\s+know|send(?:ing)?|update\s+you|circle\s+back|be\s+in\s+touch|touch\s+base)\b/gi;
+const TECH_ARRIVAL_VERB_RE = /\b(?:arrive[sd]?|arriving|be\s+there|be\s+(?:at\s+your|with\s+you)|on\s+(?:the|his|her|their|my|our)\s+way|en\s*route|heading\s+(?:over|your\s+way|to\s+you)|pull(?:ing)?\s+up|show(?:ing)?\s+up|away|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you|(?<!reach\s)out)\b/gi;
+// Characters between a verb match and the figure [a, b); 0 when they overlap.
+function nearestVerbGap(local, verbRe, a, b) {
+  let best = Infinity;
+  for (const m of local.matchAll(new RegExp(verbRe.source, verbRe.flags))) {
+    const end = m.index + m[0].length;
+    const gap = end <= a ? a - end : (m.index >= b ? m.index - b : 0);
+    best = Math.min(best, gap);
+  }
+  return best;
+}
+function isOfficeFollowupDuration(str, index, length) {
+  const [s, e] = sentenceSpans(str).find(([from, to]) => index >= from && index < to) || [0, str.length];
+  const local = str.slice(s, e);
+  const a = index - s;
+  const office = nearestVerbGap(local, OFFICE_FOLLOWUP_VERB_RE, a, a + length);
+  const tech = nearestVerbGap(local, TECH_ARRIVAL_VERB_RE, a, a + length);
+  if (office !== Infinity) return office < tech;
+  const lowered = local.toLowerCase();
+  return tech === Infinity && followupSla.SLA_PHRASES.some((p) => {
+    const at = lowered.indexOf(p.toLowerCase());
+    return at !== -1 && a >= at && a < at + p.length;
+  });
+}
 function hoursToMinutes(h) {
   return Math.round(parseFloat(h) * HOURS_TO_MINUTES);
 }
@@ -768,7 +807,7 @@ function unreadDurationInArrivalSentence(str, wordRe) {
   const spans = sentenceSpans(str);
   const re = new RegExp(wordRe.source, wordRe.flags);
   for (const m of str.matchAll(re)) {
-    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
     const sentence = sentenceAt(str, spans, m.index);
     if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
     if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)) return true;
@@ -822,7 +861,7 @@ function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false, unconv
   const re = new RegExp(TIMED_ARRIVAL_PHRASE_RE.source, 'gi');
   let m;
   while ((m = re.exec(str))) {
-    if (isWindowQuantity(str, m.index, m[0].length)) continue;
+    if (isWindowQuantity(str, m.index, m[0].length) || isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
     const sentence = sentenceFor(m.index);
     if (!ARRIVAL_TRIGGER_RE.test(sentence)) continue;
     if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) return true;
@@ -908,6 +947,9 @@ function findEtaMinutesClaims(text) {
     for (const m of str.matchAll(re)) {
       const figureSpans = token.groups.map((g) => m.indices[g]);
       if (figureSpans.some((fs) => consumed.some((c) => spansOverlap(fs, c)))) continue;
+      // Office follow-up timing (round 13): never a tech ETA. 'always' tokens
+      // ("be there in 20") carry their own arrival subject and are exempt.
+      if (token.judge !== 'always' && isOfficeFollowupDuration(str, m.index, m[0].length)) continue;
       if (!ETA_CLAIM_JUDGES[token.judge](str, m, sentenceAt(str, spans, m.index))) continue;
       for (const g of token.groups) claims.push({ minutes: Number(m[g]), index: m.index });
       consumed.push(...figureSpans);
@@ -1018,7 +1060,8 @@ function findGroundedMinutesFigures(text) {
     if (minutes >= 1 && minutes <= 180) claims.push({ minutes, index: ishm.index });
   }
 
-  return claims;
+  // Office follow-up timing (round 13) is never an ETA — see isOfficeFollowupDuration.
+  return claims.filter((c) => !isOfficeFollowupDuration(str, c.index, 1));
 }
 // Backstop for sms-eta-freshness.js (round 6): does the outgoing body carry
 // an arrival-triggered sentence with a digit findEtaMinutesClaims could NOT

@@ -1181,6 +1181,37 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
       expect(validateLiveEtaMinutes({ reply: 'The tech is 12-minute away.', factsBlock: facts(12) }).ok).toBe(true);
     });
 
+  // Codex pre-push P1 (round 13, PR #5334): a duration governed by an OFFICE
+  // follow-up verb ("within the hour" is an approved sms-followup-sla phrase)
+  // is never a tech ETA, even when "arrival" shares the sentence.
+  describe('office follow-up timing is not a tech ETA; tech arrival timing still is (round 13 P1)', () => {
+    const facts = (n) => `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)`;
+    test.each([
+      "I'll confirm your arrival window within the hour.",
+      "I'll get back to you within the hour about your arrival.",
+      "We'll text you back within an hour about your arrival.",
+      'Someone will call you back within 30 minutes to confirm arrival.',
+      "I'll let you know within the hour when the tech is on the way.",
+      'Within the hour.',
+    ])('%p passes with live facts present', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) })).toEqual({ ok: true, violations: [] });
+    });
+
+    test.each([
+      'The tech will arrive within the hour.',
+      "I'll confirm the tech is on the way in 20 minutes.",
+      "The tech is 20 minutes away, I'll confirm.",
+      "I'll check — he is about 20 minutes away.",
+      "He will be there in 20. I'll confirm.",
+    ])('%p is still an ETA claim, rejected against a live 2', (reply) => {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(false);
+    });
+
+    test('the SLA phrase list is the shared follow-up module\'s, not a copy', () => {
+      expect(require('../services/sms-followup-sla').SLA_PHRASES).toContain('within the hour');
+    });
+  });
+
     test('the normalizer and the leftover-word checks agree on windows', () => {
       const body = 'Your arrival window is 2 hours.';
       expect(normalizeTimeQuantities(body)).toBe(body);

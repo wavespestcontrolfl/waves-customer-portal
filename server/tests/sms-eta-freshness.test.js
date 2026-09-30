@@ -1025,4 +1025,26 @@ describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live
     });
     expect(reason).toBe('eta_claim_unbound');
   });
+
+  // Codex pre-push P1 (round 13): office follow-up timing is not a tech ETA.
+  test.each([
+    "I'll confirm your arrival window within the hour.",
+    "I'll get back to you within the hour about your arrival.",
+  ])('%p with a live snapshot is not an unbound ETA claim', async (outgoingBody) => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody, now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBeNull();
+  });
+
+  test('"The tech will arrive within the hour." against a live 2 is still unbound', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 2, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody: 'The tech will arrive within the hour.', now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
 });
