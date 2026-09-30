@@ -20,8 +20,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/review-request', () => ({
   sendGatedAsk: jest.fn(),
-  livePortalReviewUrlFor: jest.fn(),
-  pendingAskState: jest.fn(),
+  futureAskState: jest.fn(),
 }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
@@ -42,7 +41,9 @@ const ReviewService = require('../services/review-request');
 const { resolveReviewLocation } = require('../config/locations');
 
 const office = resolveReviewLocation({ nearest_location_id: 'bradenton' }, { storedLocationId: 'bradenton' });
-const TOKEN_URL = 'https://portal.test/api/rate/tok/go';
+const { publicPortalUrl } = require('../utils/portal-url');
+const TOKEN_URL = `${publicPortalUrl()}/api/rate/${'t'.repeat(40)}/go`;
+const NONE = { possible: false, reasons: [], stoppable: true, stoppableToken: null };
 const VISIT = { id: 'rec-1', service_type: 'Pest Control', service_date: '2026-09-28', technician_name: 'Alex' };
 
 let server; let base;
@@ -59,8 +60,7 @@ beforeEach(() => {
   global.__LEFT__ = false;
   db.state.visits = [VISIT];
   db.state.clicked = null;
-  ReviewService.pendingAskState.mockResolvedValue({ oneOff: null, cadence: false });
-  ReviewService.livePortalReviewUrlFor.mockResolvedValue(null);
+  ReviewService.futureAskState.mockResolvedValue(NONE);
 });
 
 const card = async () => (await fetch(`${base}/satisfaction/review-card`)).json();
@@ -70,8 +70,8 @@ const expectNothingSent = () => {
 };
 
 describe('GET /review-card — a link, never a send', () => {
-  test('customer WITH a live tracked token: the card carries that token link', async () => {
-    ReviewService.livePortalReviewUrlFor.mockResolvedValue(TOKEN_URL);
+  test('a live tracked token: the card carries its /go link (nothing else pending or stoppable-only)', async () => {
+    ReviewService.futureAskState.mockResolvedValue({ ...NONE, stoppableToken: 't'.repeat(40) });
     expect(await card()).toEqual({
       card: { serviceRecordId: 'rec-1', serviceType: 'Pest Control', technicianName: 'Alex', reviewLink: TOKEN_URL, officeName: office.name },
       propertyScope: expect.anything(),
@@ -79,7 +79,7 @@ describe('GET /review-card — a link, never a send', () => {
     expectNothingSent();
   });
 
-  test('customer WITHOUT a live token: the card carries the office Google review URL', async () => {
+  test('no live token and nothing possible: the office Google review URL', async () => {
     const body = await card();
     expect(body.card.reviewLink).toBe(office.googleReviewUrl);
     expect(body.card.officeName).toBe(office.name);
@@ -90,7 +90,7 @@ describe('GET /review-card — a link, never a send', () => {
     global.__LEFT__ = true;
     expect(await card()).toEqual({ card: null });
     expect(db).not.toHaveBeenCalled();
-    expect(ReviewService.livePortalReviewUrlFor).not.toHaveBeenCalled();
+    expect(ReviewService.futureAskState).not.toHaveBeenCalled();
     expectNothingSent();
   });
 
@@ -104,22 +104,19 @@ describe('GET /review-card — a link, never a send', () => {
     expect((await card()).card).toBeNull();
   });
 
-  test.each(['already_queued', 'in_flight'])('a one-off ask %s: no card, even with a live token (its own text would still go out)', async (outcome) => {
-    ReviewService.pendingAskState.mockResolvedValue({ oneOff: { outcome }, cadence: false });
-    ReviewService.livePortalReviewUrlFor.mockResolvedValue(TOKEN_URL);
+  test('something possible with a stoppable token: only that /go link; without one: hidden — never the office URL', async () => {
+    const possible = { possible: true, reasons: [{ key: 'cadence_active', stoppable: true }], stoppable: true };
+    ReviewService.futureAskState.mockResolvedValue({ ...possible, stoppableToken: 't'.repeat(40) });
+    expect((await card()).card.reviewLink).toBe(TOKEN_URL);
+    ReviewService.futureAskState.mockResolvedValue({ ...possible, stoppableToken: null });
+    expect((await card()).card).toBeNull();
+    ReviewService.futureAskState.mockResolvedValue({ possible: true, reasons: [{ key: 'unsent_sending', stoppable: false }], stoppable: false, stoppableToken: null });
     expect((await card()).card).toBeNull();
     expectNothingSent();
   });
 
-  test('in a cadence: the live token only — never the bare URL', async () => {
-    ReviewService.pendingAskState.mockResolvedValue({ oneOff: null, cadence: true });
-    expect((await card()).card).toBeNull();
-    ReviewService.livePortalReviewUrlFor.mockResolvedValue(TOKEN_URL);
-    expect((await card()).card.reviewLink).toBe(TOKEN_URL);
-  });
-
-  test('the pending-state read fails closed: an error is a 500, never a card', async () => {
-    ReviewService.pendingAskState.mockRejectedValue(new Error('db down'));
+  test('the state read fails closed: an error is a 500, never a card', async () => {
+    ReviewService.futureAskState.mockRejectedValue(new Error('db down'));
     const res = await fetch(`${base}/satisfaction/review-card`);
     expect(res.status).toBe(500);
   });

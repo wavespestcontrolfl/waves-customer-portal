@@ -11,7 +11,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ gates: {}, isEnabled: jest.fn(() => false) }));
 jest.mock('../services/review-request', () => ({
   REVIEW_TOKEN_RE: /^[A-Za-z0-9_-]{32,64}$/,
-  stopReviewSequence: jest.fn(async () => {}),
+  stopFutureAsks: jest.fn(async () => {}),
 }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/customer-contact', () => ({ getServiceContact: jest.fn(() => ({ name: 'Pat' })) }));

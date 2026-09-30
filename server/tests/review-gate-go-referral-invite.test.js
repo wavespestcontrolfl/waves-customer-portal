@@ -10,7 +10,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ gates: {}, isEnabled: jest.fn() }));
 jest.mock('../services/review-request', () => ({
   REVIEW_TOKEN_RE: /^[A-Za-z0-9_-]{32,64}$/,
-  stopReviewSequence: jest.fn(async () => {}),
+  stopFutureAsks: jest.fn(async () => {}),
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => {}) }));
 jest.mock('../services/referral-invite-email', () => ({ sendReferralInviteEmail: jest.fn(async () => null) }));
@@ -43,7 +43,7 @@ jest.mock('../models/db', () => {
 const express = require('express');
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
-const { stopReviewSequence } = require('../services/review-request');
+const { stopFutureAsks } = require('../services/review-request');
 const { sendReferralInviteEmail } = require('../services/referral-invite-email');
 const { WAVES_LOCATIONS } = require('../config/locations');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -61,8 +61,7 @@ beforeAll((done) => {
 afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
-  db.state.activeSeq = { id: 'seq-1', customer_id: 'cust-1', status: 'active' };
-  db.state.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', has_left_google_review: false };
+    db.state.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', has_left_google_review: false };
   db.state.request = {
     id: 'rr-1', token: TOKEN, customer_id: 'cust-1', location_id: loc.id, status: 'sent',
     sequence_id: null, expires_at: null, opened_at: null, redirected_at: null,
@@ -87,7 +86,7 @@ describe.each([true, false])('GATE_REVIEW_DIRECT_LINK=%s (review sequences ON) â
     // Tracked: the click is stamped (first-click claim + open) and the cadence stops.
     expect(db.state.request).toMatchObject({ google_review_clicked: true, redirected_to_google: true, google_location: loc.id });
     expect(db.state.request.redirected_at).toBeInstanceOf(Date);
-    expect(stopReviewSequence).toHaveBeenCalledWith('seq-1', 'clicked');
+    expect(stopFutureAsks).toHaveBeenCalledWith('cust-1', { sequenceId: null, reason: 'clicked' });
   });
 
   test('a second click on the same request does not call the invite again (first-click claim already taken)', async () => {
@@ -110,8 +109,17 @@ describe.each([true, false])('GATE_REVIEW_DIRECT_LINK=%s (review sequences ON) â
     expect(res.status).toBe(302);
     await flush();
     expect(sendReferralInviteEmail).not.toHaveBeenCalled();
-    expect(stopReviewSequence).not.toHaveBeenCalled();
+    expect(stopFutureAsks).not.toHaveBeenCalled();
     if (_n !== 'an expired link') expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
+  });
+
+  test('if stopping the later asks fails, the customer stays on the rate page: no Google redirect, no invite', async () => {
+    stopFutureAsks.mockRejectedValueOnce(new Error('db down'));
+    const res = await go();
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
+    await flush();
+    expect(sendReferralInviteEmail).not.toHaveBeenCalled();
   });
 
   test('a link-scanner / bot fetch records nothing and sends no invite', async () => {

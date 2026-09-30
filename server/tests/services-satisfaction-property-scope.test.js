@@ -9,7 +9,7 @@ jest.mock('../models/db', () => { const fn = jest.fn(); fn.raw = jest.fn((s) => 
 jest.mock('../services/photos', () => ({ getPhotosForService: jest.fn(async () => []), photoUrl: jest.fn(() => null) }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn() }));
-jest.mock('../services/review-request', () => ({ livePortalReviewUrlFor: jest.fn(), pendingAskState: jest.fn() }));
+jest.mock('../services/review-request', () => ({ livePortalReviewUrlFor: jest.fn(), futureAskState: jest.fn() }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
   return { ...actual, resolveSessionScope: jest.fn(async () => global.__SCOPE__) };

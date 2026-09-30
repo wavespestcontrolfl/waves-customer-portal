@@ -186,23 +186,20 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       return res.redirect(302, ratePageFallback);
     }
 
-    // They acted on the ask — stop the cadence so no further touches chase
-    // a customer who already visited the review form. A one-off/legacy link
-    // has no sequence_id, but the CUSTOMER may still have an active cadence
-    // (older unexpired link clicked mid-cadence) — stop that one too
-    // (Codex P2, r1).
+    // They acted on the ask — stop EVERY path that could still ask them again
+    // (ReviewService.futureAskState lists them, and the portal card relies on
+    // this): the clicked request's cadence and any other active / deferred
+    // cadence of the customer, a cadence parked for summary recovery, queued
+    // asks, and due Day-3 follow-ups. Any failure keeps them on the rate page
+    // instead of Google, so nothing keeps chasing a customer who already
+    // reached the review form (Codex P2, r1).
     try {
-      const ReviewService = require('../services/review-request');
-      if (request.sequence_id) {
-        await ReviewService.stopReviewSequence(request.sequence_id, 'clicked');
-      } else {
-        const activeSeq = await db('review_sequences')
-          .where({ customer_id: request.customer_id, status: 'active' })
-          .first();
-        if (activeSeq) await ReviewService.stopReviewSequence(activeSeq.id, 'clicked');
-      }
+      await require('../services/review-request').stopFutureAsks(request.customer_id, {
+        sequenceId: request.sequence_id || null,
+        reason: 'clicked',
+      });
     } catch (err) {
-      logger.warn(`[review-gate] cadence stop on click failed — rate-page fallback: ${err.message}`);
+      logger.warn(`[review-gate] stopping later asks on click failed — rate-page fallback: ${err.message}`);
       return res.redirect(302, ratePageFallback);
     }
 
