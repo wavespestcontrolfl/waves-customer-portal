@@ -3713,17 +3713,23 @@ function AppliedProductsSection({ data, mode = 'live' }) {
                 )}
                 {/* Owner-approved product wording (GATE_REPORT_PRODUCT_COPY,
                     2026-09-28) — customer-display only, never fed into the
-                    AI report writer. "Also labeled for" describes the
-                    LABEL, never what was treated on this visit, so it never
-                    reads next to "Why used today" above. LESCO carries no
-                    also_labeled_for key at all (owner ruling). */}
+                    AI report writer. also_labeled_for describes the LABEL,
+                    never what was treated on this visit, so it never reads
+                    next to "Why used today" above. Since 2026-09-29 the
+                    line itself is a full sentence ("Labeled for 75+
+                    Bradenton pests") rather than a named pest list, so the
+                    cell label reads "On the label" instead of "Also labeled
+                    for" to avoid "Also labeled for: Labeled for ..."
+                    (owner ruling 2026-09-29). Narrow products (gel baits,
+                    granular bait, IGRs) and LESCO carry no also_labeled_for
+                    key at all (owner ruling). */}
                 {reportCopy && (
                   <div className="product-why">
                     <div className="sr-cell-label">How it works</div>
                     <p>{reportCopy.how_it_works}</p>
                     {reportCopy.also_labeled_for && (
                       <>
-                        <div className="sr-cell-label">Also labeled for</div>
+                        <div className="sr-cell-label">On the label</div>
                         <p>{reportCopy.also_labeled_for}</p>
                       </>
                     )}

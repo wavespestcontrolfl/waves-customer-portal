@@ -727,12 +727,14 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
   // `product.report_copy` entirely when the gate is off or the product has
   // no approved wording — the client renders purely off that key's presence,
   // so these two payloads stand in for gate-off and gate-on.
-  it('renders "How it works" / "Also labeled for" / "Pets & kids" when the server includes report_copy', async () => {
+  it('renders "How it works" / "On the label" / "Pets & kids" when the server includes report_copy', async () => {
     const withCopy = JSON.parse(JSON.stringify(legacyLawnReport));
     withCopy.applications[0].product.name = 'Taurus SC';
     withCopy.applications[0].product.report_copy = {
       how_it_works: 'Pests can’t detect it, so they walk right through the treated band.',
-      also_labeled_for: 'Big-headed, crazy, carpenter and pharaoh ants.',
+      // Owner ruling 2026-09-29: a rounded count + city sentence, not a
+      // named pest list.
+      also_labeled_for: 'Labeled for 25+ Bradenton pests',
       pets_kids: 'Keep people and pets off treated areas until the spray has dried.',
     };
     const { container } = renderReport(withCopy);
@@ -740,13 +742,13 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     const card = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'Taurus SC' }).closest('.applied-product-card');
     expect(within(card).getByText('How it works')).toBeInTheDocument();
     expect(within(card).getByText(/walk right through the treated band/)).toBeInTheDocument();
-    expect(within(card).getByText('Also labeled for')).toBeInTheDocument();
-    expect(within(card).getByText(/Big-headed, crazy, carpenter and pharaoh ants/)).toBeInTheDocument();
+    expect(within(card).getByText('On the label')).toBeInTheDocument();
+    expect(within(card).getByText('Labeled for 25+ Bradenton pests')).toBeInTheDocument();
     expect(within(card).getByText('Pets & kids')).toBeInTheDocument();
     expect(within(card).getByText(/Keep people and pets off treated areas/)).toBeInTheDocument();
   });
 
-  it('never renders "Also labeled for" when report_copy carries no such key (the LESCO ruling), and renders nothing when report_copy is absent', async () => {
+  it('never renders "On the label" when report_copy carries no also_labeled_for key (narrow products / the LESCO ruling), and renders nothing when report_copy is absent', async () => {
     const lescoCopy = JSON.parse(JSON.stringify(legacyLawnReport));
     lescoCopy.applications[0].product.name = 'LESCO 90/10 Nonionic Surfactant';
     lescoCopy.applications[0].product.report_copy = {
@@ -757,7 +759,7 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     await screen.findByText('Visit Summary');
     const lescoCard = within(container.querySelector('#products-applied')).getByRole('heading', { name: 'LESCO 90/10 Nonionic Surfactant' }).closest('.applied-product-card');
     expect(within(lescoCard).getByText('How it works')).toBeInTheDocument();
-    expect(within(lescoCard).queryByText('Also labeled for')).toBeNull();
+    expect(within(lescoCard).queryByText('On the label')).toBeNull();
     expect(within(lescoCard).getByText('Pets & kids')).toBeInTheDocument();
 
     // Base fixture (no report_copy on any application) — gate-off shape.
@@ -765,7 +767,7 @@ describe('ReportViewPage — legacy lawn fallback (historical tokens, reportV2 n
     await screen.findByText('Visit Summary');
     const plainProducts = plainContainer.querySelector('#products-applied');
     expect(within(plainProducts).queryByText('How it works')).toBeNull();
-    expect(within(plainProducts).queryByText('Also labeled for')).toBeNull();
+    expect(within(plainProducts).queryByText('On the label')).toBeNull();
     expect(within(plainProducts).queryByText('Pets & kids')).toBeNull();
   });
 
