@@ -141,6 +141,17 @@ async function askSuppressedByClick(request, database = db) {
   return reviewLinkClickedSince(request.customer_id, anchor, database);
 }
 
+// The same guard for an ask known only by its id (a bundled completion ask):
+// the row is read here so every caller judges the same columns. A missing row
+// is not suppressed; a failed read throws, and callers fail closed.
+// review_requests has no scheduled_service_id column: an ask's visit is its
+// service record.
+async function askIdSuppressedByClick(reviewRequestId, database = db) {
+  const request = await database('review_requests').where({ id: reviewRequestId })
+    .first('id', 'customer_id', 'service_record_id', 'created_at', 'template_key');
+  return askSuppressedByClick(request, database);
+}
+
 // The guard for a cadence / outreach touch that has no request row yet: the
 // visit, else `fallbackAnchor` (a cadence's own start), else — when
 // `newestVisitFallback` — the customer's newest completed visit.
@@ -153,4 +164,4 @@ async function touchSuppressedByClick(customerId, { serviceRecordId = null, sche
 
 const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, so no further review request is sent.';
 
-module.exports = { reviewLinkClickedSince, askSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };
+module.exports = { reviewLinkClickedSince, askSuppressedByClick, askIdSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };

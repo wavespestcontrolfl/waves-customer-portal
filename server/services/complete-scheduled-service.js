@@ -12628,6 +12628,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // no other caller, so it is removed with it; computeAssessmentScoreParts
         // stays — sendAssessmentNotification (unlinked assessments, manual
         // re-send) still uses it.
+        // Send-time click guard for the bundled review line: the provider
+        // call below runs under the per-customer review lock, right after
+        // the click check (queued completions run the same gate inside
+        // dispatchReviewAsk). A tap since this visit drops the line and
+        // suppresses the ask; an unreadable click state or a busy lock drops
+        // it and re-arms the ask for the standalone sender, which checks
+        // again before it texts. The completion text itself always goes out.
+        const dropBundledReviewLine = async (drop) => {
+          sentSmsBody = require('./scheduled-sms-delivery').stripCompletionReviewLine(sentSmsBody);
+          try {
+            if (drop === 'clicked') {
+              await db('review_requests').where({ id: bundledReviewRequestId, status: 'pending' }).whereNull('sms_sent_at')
+                .update({ status: 'suppressed', scheduled_for: null });
+            } else {
+              await require('../services/review-request').markInlineRetryable(bundledReviewRequestId, bundledReviewRetryAt());
+            }
+          } catch (e) {
+            logger.warn(`[dispatch] Bundled review ${drop} mark failed for ${bundledReviewRequestId}: ${e.message}`);
+          }
+          logger.info(`[dispatch] Bundled review line dropped at send time (${drop}) for record ${record.id}`);
+          bundledReviewRequestId = null;
+          bundledReviewUrl = null;
+        };
         if (sentSmsBody) {
           // smsNotesDelta accumulates every key this SMS leg owns — each
           // persisted write below merges the delta only (mergeRecordNotesKeys),
@@ -12699,29 +12722,48 @@ async function completeScheduledService(completionInput, packetContext = null) {
             invoiceLinkAllowed: allowCompletionInvoiceLink,
             deliveryUnverifiedAt: smsNotesDelta.completionSmsDeliveryUnverifiedAt,
           };
-          let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
-          if (smsResult.channel === 'push') {
-            sentSmsChannel = 'push';
-            completionSmsAcceptedSnapshot.channel = 'push';
-          }
-          if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
-            logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
-            const fallbackMetadata = { ...smsMetadata };
-            delete fallbackMetadata.mediaUrls;
-            delete fallbackMetadata.allowMediaUrls;
-            fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
-            completionSmsAcceptedSnapshot.channel = 'sms';
-            smsResult = throwIfDeliveryUnverified(await sendCustomerMessage({
-              ...sendInput,
-              metadata: fallbackMetadata,
-            }));
-            sentSmsChannel = 'sms';
-            mmsFallbackToSms = true;
-            smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
-            smsNotesDelta.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
-            sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
-            sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
-          }
+          const sendCompletionSms = async (drop) => {
+            if (drop) {
+              await dropBundledReviewLine(drop);
+              // The stripped body replaces the persisted one before the
+              // provider call, so a resume never replays the dropped line.
+              const droppedDelta = { completionSmsBody: sentSmsBody, completionSmsBundledReviewRequestId: null, completionSmsBundledReviewUrl: null };
+              Object.assign(smsNotesDelta, droppedDelta);
+              Object.assign(sendingNotes, droppedDelta);
+              delete smsMetadata.bundled_review_request_id;
+              sendInput.body = sentSmsBody;
+              completionSmsAcceptedSnapshot.body = sentSmsBody;
+              completionSmsAcceptedSnapshot.reviewCarried = true;
+              await mergeRecordNotesKeys(record.id, droppedDelta);
+            }
+            let smsResult = throwIfDeliveryUnverified(await sendCustomerMessage(sendInput));
+            if (smsResult.channel === 'push') {
+              sentSmsChannel = 'push';
+              completionSmsAcceptedSnapshot.channel = 'push';
+            }
+            if (!smsResult.sent && !smsResult.blocked && attemptedMms) {
+              logger.warn(`[dispatch] MMS service report send failed for ${record.id}; retrying SMS-only`);
+              const fallbackMetadata = { ...smsMetadata };
+              delete fallbackMetadata.mediaUrls;
+              delete fallbackMetadata.allowMediaUrls;
+              fallbackMetadata.mms_fallback_reason = smsResult.reason || smsResult.code || 'provider_failure';
+              completionSmsAcceptedSnapshot.channel = 'sms';
+              smsResult = throwIfDeliveryUnverified(await sendCustomerMessage({
+                ...sendInput,
+                metadata: fallbackMetadata,
+              }));
+              sentSmsChannel = 'sms';
+              mmsFallbackToSms = true;
+              smsNotesDelta.completionSmsMmsFallbackAt = new Date().toISOString();
+              smsNotesDelta.completionSmsMmsFallbackReason = fallbackMetadata.mms_fallback_reason;
+              sendingNotes.completionSmsMmsFallbackAt = smsNotesDelta.completionSmsMmsFallbackAt;
+              sendingNotes.completionSmsMmsFallbackReason = smsNotesDelta.completionSmsMmsFallbackReason;
+            }
+            return smsResult;
+          };
+          const smsResult = bundledReviewRequestId && bundledReviewUrl && sentSmsBody.includes(bundledReviewUrl)
+            ? await require('./review-ask-dispatch').withBundledAskGate(svc.customer_id, bundledReviewRequestId, sendCompletionSms)
+            : await sendCompletionSms(null);
           completionSmsProviderAccepted = smsResult.sent === true;
           // Send-window hold: a late completion (catch-up bookkeeping after
           // 8 PM) must not text at night, but this is a ONE-SHOT sender — no

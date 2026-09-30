@@ -18,7 +18,7 @@ const { requiresDurableFinalize } = require('./messaging/deferred-replay-registr
 const { REVIEW_ASK_MARKER, reserveForRequest } = require('./messaging/review-ask-reservation');
 
 // dispatchReviewAsk results that hold a queued review text for later.
-const REVIEW_HOLD_CODES = ['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY'];
+const REVIEW_HOLD_CODES = ['REVIEW_ASK_SPACING', 'REVIEW_HISTORY_UNAVAILABLE', 'REVIEW_SEND_BUSY', 'REVIEW_CLICK_STATE_UNAVAILABLE'];
 
 // The one sentence a dispatch completion text appends to invite a review.
 // complete-scheduled-service.js builds the suffix from it and the strip below
@@ -28,6 +28,7 @@ const COMPLETION_REVIEW_SUFFIX_RE = new RegExp(
   `\\n\\n${COMPLETION_REVIEW_INVITE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} (?:https?:\\/\\/)?[^\\s]+(?=\\s*(?:Reply STOP to (?:unsubscribe|opt out)\\.?)?\\s*$)`,
   'i',
 );
+const stripCompletionReviewLine = (body) => String(body || '').replace(COMPLETION_REVIEW_SUFFIX_RE, '').trim();
 
 async function acceptedScheduledSms(id, err) {
   if (err?.providerOutcome?.deliveryOutcome === 'accepted') return err.providerOutcome;
@@ -209,37 +210,21 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   };
   if (!reviewAsk) return dispatch();
   // A dispatch completion text may carry one bundled review invitation as its
-  // last line. Send-time click guard: a customer who has since tapped a
-  // tracked review link loses only that invitation; the completion itself
-  // always goes out.
+  // last line. dispatchReviewAsk runs the send-time click guard for it under
+  // the same lock hold as the provider call: a tracked tap since the visit
+  // (REVIEW_LINK_CLICKED) drops the line and suppresses the ask; an unreadable
+  // click state (REVIEW_CLICK_STATE_UNAVAILABLE) is a hold like spacing, so the
+  // line is never sent blind. The completion itself always goes out.
   const bundledReviewRequestId = meta.entry_point === 'dispatch_completion_deferred' ? meta.bundled_review_request_id : null;
-  let clicked = false;
-  let result;
-  if (bundledReviewRequestId) {
-    try {
-      const ask = await db('review_requests').where({ id: bundledReviewRequestId })
-        .first('id', 'customer_id', 'service_record_id', 'scheduled_service_id', 'created_at', 'template_key');
-      clicked = Boolean(ask) && await require('./review-click-guard').askSuppressedByClick(ask);
-    } catch (err) {
-      // Fail closed: with the click state unknown the invitation is never sent
-      // blind. It is handled like a spacing hold below: stripped from the
-      // completion and re-armed for the standalone sender, which re-checks the
-      // click before it texts.
-      logger.warn(`[scheduled-sms] click-guard lookup failed; bundled review line held (smsLogId=${msg.id} errType=${err?.name})`);
-      result = { code: 'REVIEW_CLICK_STATE_UNAVAILABLE' };
-    }
-  }
-  if (clicked) result = {};
-  if (!result) {
-    result = await dispatchReviewAsk(msg.customer_id, dispatch);
-    if (!REVIEW_HOLD_CODES.includes(result?.code)) return result;
-  }
+  const result = await dispatchReviewAsk(msg.customer_id, dispatch, { clickAskId: bundledReviewRequestId });
+  const clicked = result?.code === 'REVIEW_LINK_CLICKED';
+  if (!clicked && !REVIEW_HOLD_CODES.includes(result?.code)) return result;
   // Completion delivery must not wait behind its optional review invitation.
   // Remove only the exact suffix we generated, preserving every receipt,
   // invoice and report link. Persist body and linkage together before send.
   // A clicked customer's completion goes out even when that line cannot be
   // stripped cleanly (sent as-is and logged); only the invitation is dropped.
-  const stripped = bundledReviewRequestId && msg.message_body.replace(COMPLETION_REVIEW_SUFFIX_RE, '').trim();
+  const stripped = bundledReviewRequestId && stripCompletionReviewLine(msg.message_body);
   const strippedClean = Boolean(stripped) && stripped !== msg.message_body && !looksLikeReviewAsk(stripped);
   if (strippedClean || clicked) {
     const body = strippedClean ? stripped : msg.message_body;
@@ -314,4 +299,4 @@ async function dispatchScheduledSms(msg, meta, send, purpose, maxAttempts = 3) {
   return { ...result, scheduledHold: true };
 }
 
-module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms, COMPLETION_REVIEW_INVITE };
+module.exports = { acceptedScheduledSms, markScheduledSmsSent, dispatchScheduledSms, COMPLETION_REVIEW_INVITE, stripCompletionReviewLine };

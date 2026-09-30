@@ -55,7 +55,11 @@ describe('bundled completion review suffix vs the send-time click guard', () => 
   const run = async ({ clicked }) => {
     const createInline = jest.fn(async () => ({ url: 'https://portal.test/l/abc', requestId: 'rr-inline' }));
     const touchSuppressedByClick = jest.fn(async () => clicked);
-    const req = (name) => (name.endsWith('review-click-guard') ? { touchSuppressedByClick } : { createInline });
+    const req = (name) => {
+      if (name.endsWith('review-click-guard')) return { touchSuppressedByClick };
+      if (name.endsWith('scheduled-sms-delivery')) return require('../services/scheduled-sms-delivery');
+      return { createInline };
+    };
     const fn = new Function('require', 'svc', 'record', 'logger', 'shouldBundleReview', `return (async () => { ${block}; return { bundledReviewUrl, bundledReviewRequestId, reviewSuffix }; })();`);
     const out = await fn(req, { id: 'ss-1', customer_id: 'cust-1' }, { id: 'rec-1' }, { error: jest.fn(), warn: jest.fn() }, true);
     return { out, createInline, touchSuppressedByClick };
@@ -73,6 +77,63 @@ describe('bundled completion review suffix vs the send-time click guard', () => 
     expect(createInline).toHaveBeenCalledWith({ customerId: 'cust-1', serviceRecordId: 'rec-1' });
     expect(out.bundledReviewUrl).toBe('https://portal.test/l/abc');
     expect(out.bundledReviewRequestId).toBe('rr-inline');
-    expect(out.reviewSuffix).toContain('https://portal.test/l/abc');
+    expect(out.reviewSuffix).toBe(`\n\n${require('../services/scheduled-sms-delivery').COMPLETION_REVIEW_INVITE} https://portal.test/l/abc`);
+  });
+});
+
+describe('immediate completion text: the bundled line is re-checked under the review lock held across the send', () => {
+  const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
+  const from = source.indexOf('        // Send-time click guard for the bundled review line');
+  const block = source.slice(from, source.indexOf('        if (sentSmsBody) {', from));
+  const { COMPLETION_REVIEW_INVITE } = require('../services/scheduled-sms-delivery');
+  const URL = 'https://portal.test/l/abc';
+  const COMPLETION = 'Your service is complete: https://portal.test/report/r1';
+  const run = async (state) => {
+    const updates = [];
+    const fakeDb = (table) => {
+      const q = { where: () => q, whereNull: () => q, update: async (patch) => { updates.push({ table, patch }); return 1; } };
+      return q;
+    };
+    const markInlineRetryable = jest.fn(async () => {});
+    const req = (name) => {
+      if (name.endsWith('scheduled-sms-delivery')) return require('../services/scheduled-sms-delivery');
+      if (name.endsWith('review-request')) return { markInlineRetryable };
+      throw new Error(`unexpected require ${name}`);
+    };
+    const retryAt = new Date('2026-09-30T12:05:00Z');
+    const fn = new Function('require', 'db', 'svc', 'record', 'logger', 'bundledReviewRetryAt', 'state',
+      'bundledReviewRequestId', 'bundledReviewUrl', 'sentSmsBody',
+      `return (async () => { ${block}; if (state) await dropBundledReviewLine(state); return { sentSmsBody, bundledReviewRequestId, bundledReviewUrl }; })();`);
+    const out = await fn(req, fakeDb, { customer_id: 'cust-1' }, { id: 'rec-1' }, { info: jest.fn(), warn: jest.fn() },
+      () => retryAt, state, 'rr-inline', URL, `${COMPLETION}\n\n${COMPLETION_REVIEW_INVITE} ${URL}`);
+    return { out, updates, markInlineRetryable, retryAt };
+  };
+
+  test('a tap that landed after the mint: the text goes without the line and the ask is suppressed', async () => {
+    const { out, updates, markInlineRetryable } = await run('clicked');
+    expect(out).toEqual({ sentSmsBody: COMPLETION, bundledReviewRequestId: null, bundledReviewUrl: null });
+    expect(updates).toEqual([{ table: 'review_requests', patch: { status: 'suppressed', scheduled_for: null } }]);
+    expect(markInlineRetryable).not.toHaveBeenCalled();
+  });
+
+  test.each(['unknown', 'busy'])('%s: the text goes without the line and the ask is re-armed for the standalone sender', async (state) => {
+    const { out, updates, markInlineRetryable, retryAt } = await run(state);
+    expect(out).toEqual({ sentSmsBody: COMPLETION, bundledReviewRequestId: null, bundledReviewUrl: null });
+    expect(markInlineRetryable).toHaveBeenCalledWith('rr-inline', retryAt);
+    expect(updates).toEqual([]);
+  });
+
+  test('no tap: the line rides as composed', async () => {
+    const { out } = await run(null);
+    expect(out).toEqual({ sentSmsBody: `${COMPLETION}\n\n${COMPLETION_REVIEW_INVITE} ${URL}`, bundledReviewRequestId: 'rr-inline', bundledReviewUrl: URL });
+  });
+
+  test('both provider calls (first send and the MMS-to-SMS retry) run inside the gated send', () => {
+    const at = source.indexOf('const sendCompletionSms = async (drop) => {');
+    const fnBody = source.slice(at, source.indexOf('\n          };\n', at));
+    expect(fnBody.match(/await sendCustomerMessage\(/g)).toHaveLength(2);
+    expect(fnBody).toContain('await dropBundledReviewLine(drop)');
+    expect(fnBody).toContain('await mergeRecordNotesKeys(record.id, droppedDelta)');
+    expect(source.slice(at)).toMatch(/withBundledAskGate\(svc\.customer_id, bundledReviewRequestId, sendCompletionSms\)/);
   });
 });
