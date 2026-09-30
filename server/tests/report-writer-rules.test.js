@@ -117,6 +117,11 @@ describe('prompt rewrites', () => {
     }
   });
 
+  test('the gauge rule keeps the activity level in words', () => {
+    expect(OWNER_RULES).toMatch(/activity gauge's number or scale/);
+    expect(OWNER_RULES).toMatch(/activity level in words .* belongs in the paragraph/);
+  });
+
   test('the owner style rules ride along with the grounding exception', () => {
     expect(OWNER_RULES).toContain(HUMAN_PROSE_RULES);
     expect(OWNER_RULES).toMatch(/hedges .* keep them/);

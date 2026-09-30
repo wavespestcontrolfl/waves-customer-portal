@@ -287,7 +287,13 @@ describe('buildCompletionCommsContext', () => {
           // Operational text in notes is never customer speech.
           { created_at: mk(2), direction: 'inbound', notes: 'Twilio create failed: 21211' },
         ],
-        sms_log: [],
+        // Mixed letter-and-digit codes texted back with nothing around them;
+        // an ordinal stays readable.
+        sms_log: [
+          { created_at: mk(4), direction: 'inbound', message_body: 'A12B' },
+          { created_at: mk(5), direction: 'inbound', message_body: 'Blue42 works for the side gate' },
+          { created_at: mk(6), direction: 'inbound', message_body: 'This is my 2nd text about the ants' },
+        ],
         // A bare code as the whole body, with no quote and no anchor.
         emails: [{ received_at: mk(3), subject: 'Re: access', body_text: '3355', from_address: 'pat@example.com', label_ids: ['INBOX'] }],
       }),
@@ -296,6 +302,9 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toContain('BLUE');
     expect(ctx.text).not.toContain('3355');
     expect(ctx.text).not.toContain('Twilio create failed');
+    expect(ctx.text).not.toContain('A12B');
+    expect(ctx.text).not.toContain('Blue42');
+    expect(ctx.text).toContain('This is my 2nd text about the ants');
   });
 
   test('customer words: each line is dated in Eastern time', async () => {

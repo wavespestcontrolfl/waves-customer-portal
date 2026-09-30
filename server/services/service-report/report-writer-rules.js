@@ -31,7 +31,7 @@ The customer reads your two sections joined into ONE paragraph, with no headings
 9. No prices, "free", "included", "covered", warranty, guarantee, bond, or "per visit". If a cadence must be named, say "per application".
 10. The company is "Waves Pest Control", or "we". Never "Waves Pest Control & Lawn Care", "Waves Lawn Care" or "Waves Lawn & Pest".
 11. No timeframes ("7–14 days", "a few days", "two weeks") and no next-visit date, day or arrival window. A recorded next step may be named without one ("at your next visit").
-12. Do not repeat what the report prints on its own: the product list, re-entry and aftercare guidance, the next visit's date and time, the technician's tip, the "What to expect", rain and spider cards, the "What you flagged" card, and the activity gauge.
+12. Do not repeat what the report prints on its own: the product list, re-entry and aftercare guidance, the next visit's date and time, the technician's tip, the "What to expect", rain and spider cards, the "What you flagged" card, and the activity gauge's number or scale. The activity level in words ("light activity along the fence") is what the technician saw and belongs in the paragraph.
 13. The report refuses these words, so never use them: infestation, infested, eliminated, eradicated, exterminated, resolved, solved, gone, cleared, "all clear", "is clear", "clear of pests", pest-free, any "-proof" word, guarantee, guaranteed, toxic, poison, poisonous, dangerous, deadly, unsafe.
 14. Never mention a treatment map, a traced route or a treated outline.
 15. Season, weather, prior visits and product labels are background. Never present them as something found today.

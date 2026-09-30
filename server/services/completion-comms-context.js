@@ -292,12 +292,16 @@ async function buildCompletionCommsContext({
 // mentioned…" copy.
 
 // Every customer-words line is scrubbed the same way: the canonical redactor,
-// then anything credential-shaped (three or more digits, an all-caps word)
-// masked outright. The context that anchors a bare code ("4821", "BLUE") is
+// then anything credential-shaped masked outright: three or more digits, an
+// all-caps word, or a token mixing letters and digits ("A12B", "Blue42";
+// ordinals like "2nd" pass). The context that anchors a bare code ("4821", "BLUE") is
 // often gone here (the Waves question is left out, a quote is stripped, a
 // summary drops the noun), and these lines become "You mentioned…" copy.
 function scrub(text) {
-  return redactAccessCodes(String(text || '')).replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
+  return redactAccessCodes(String(text || ''))
+    .replace(/\b(?!\d+(?:st|nd|rd|th)\b)(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z\d]{2,}\b/g, '[redacted]')
+    .replace(/\d{3,}/g, '[redacted]')
+    .replace(/\b[A-Z]{3,}\b/g, '[redacted]');
 }
 // The communication's calendar day in Eastern time (an 8 PM text is still
 // that day in Florida).
