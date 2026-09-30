@@ -20,19 +20,10 @@ const { runExclusive } = require('../../utils/cron-lock');
 const { sha256Hex, normalizeEmail, normalizePhone } = require('./data-manager')._private;
 const { whereLiveCustomer } = require('../customer-stages');
 const { filterMarketingSuppressed, partitionMarketingSuppressed, loadMarketingSuppression, canonicalEmail } = require('./ad-audience-consent');
-const matchFields = require('./ad-match-fields');
 
 const GRAPH = 'https://graph.facebook.com';
 const STATE_TABLE = 'ad_audience_syncs';
-// Meta multi-key schemas; data rows align to their order. BASE_SCHEMA is the
-// row IDENTITY (state, delta, and the removal of legacy rows). ADD_SCHEMA is
-// what new/enriched members are uploaded with: the same EMAIL/PHONE plus the
-// extra match keys. Every one of those keys is SHA-256 hashed (Meta accepts
-// EXTERN_ID unhashed, but our CAPI external_id is hashed and the two must be
-// byte-identical to match).
-const BASE_SCHEMA = ['EMAIL', 'PHONE'];
-const EXTRA_KEYS = ['fn', 'ln', 'zp', 'ct', 'st', 'co', 'xid']; // e-object keys, in ADD_SCHEMA order
-const ADD_SCHEMA = [...BASE_SCHEMA, 'FN', 'LN', 'ZIP', 'CT', 'ST', 'COUNTRY', 'EXTERN_ID'];
+const SCHEMA = ['EMAIL', 'PHONE']; // Meta multi-key schema; data rows align to this order
 const MAX_USERS_PER_CALL = 1000; // Meta allows up to 10k/call; keep batches modest
 const DEFAULT_LEAD_WINDOW_DAYS = 180;
 
@@ -91,18 +82,8 @@ async function collectCustomerMembers({ partition = false, suppression = null } 
   // use the canonical live-customer predicate, not just `active`.
   const rows = await whereLiveCustomer(db('customers'))
     .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
-    .select('id', 'email', 'phone', 'first_name', 'last_name', 'city', 'state', 'zip');
-  const members = rows.map((r) => ({
-    key: `customer:${r.id}`,
-    email: r.email,
-    phone: r.phone,
-    firstName: r.first_name,
-    lastName: r.last_name,
-    city: r.city,
-    state: r.state,
-    zip: r.zip,
-    externalId: matchFields.externalIdFor({ customerId: r.id }),
-  }));
+    .select('id', 'email', 'phone');
+  const members = rows.map((r) => ({ key: `customer:${r.id}`, email: r.email, phone: r.phone }));
   // identifiers-only: this audience is the prospecting EXCLUSION list — an
   // opted-out customer must STAY in it or they start seeing prospecting ads
   // again. Only invalid identifiers (wrong_number = a stranger's phone) are
@@ -119,37 +100,20 @@ async function collectUnbookedLeadMembers({ windowDays = DEFAULT_LEAD_WINDOW_DAY
   // linked back, which would drop the biggest retargeting source. Instead exclude only
   // leads whose linked customer is a LIVE customer.
   const rows = await db('leads')
-    // The linked (prospect) customer only supplies name/address/id fallbacks.
-    .leftJoin('customers as lc', 'lc.id', 'leads.customer_id')
-    .whereRaw(`LOWER(COALESCE(leads.status, '')) NOT IN (${placeholders})`, LEAD_CLOSED)
-    .whereNull('leads.deleted_at')
-    .where('leads.created_at', '>=', cutoff)
-    .where((q) => q.whereNotNull('leads.email').orWhereNotNull('leads.phone'))
+    .whereRaw(`LOWER(COALESCE(status, '')) NOT IN (${placeholders})`, LEAD_CLOSED)
+    .whereNull('deleted_at')
+    .where('created_at', '>=', cutoff)
+    .where((q) => q.whereNotNull('email').orWhereNotNull('phone'))
     .whereNotExists(function existsLiveCustomer() {
       whereLiveCustomer(this.select(db.raw('1')).from('customers as c').whereRaw('c.id = leads.customer_id'));
     })
-    .select(
-      'leads.id', 'leads.email', 'leads.phone', 'leads.customer_id',
-      'leads.first_name', 'leads.last_name', 'leads.city', 'leads.zip',
-      'lc.first_name as customer_first_name', 'lc.last_name as customer_last_name',
-      'lc.city as customer_city', 'lc.state as customer_state', 'lc.zip as customer_zip',
-    );
-  const members = rows.map((r) => ({
-    key: `lead:${r.id}`,
-    email: r.email,
-    phone: r.phone,
-    ...matchFields.mergeIdentity(
-      { firstName: r.first_name, lastName: r.last_name, city: r.city, zip: r.zip },
-      { firstName: r.customer_first_name, lastName: r.customer_last_name, city: r.customer_city, state: r.customer_state, zip: r.customer_zip },
-    ),
-    // Same id the Lead/Purchase conversions use: linked customer id, else lead:<id>.
-    externalId: matchFields.externalIdFor({ customerId: r.customer_id, leadId: r.id }),
-  }));
+    .select('id', 'email', 'phone');
+  const members = rows.map((r) => ({ key: `lead:${r.id}`, email: r.email, phone: r.phone }));
   const opts = { audienceKey: 'unbooked_leads', suppression };
   return partition ? partitionMarketingSuppressed(members, opts) : filterMarketingSuppressed(members, opts);
 }
 
-// ── PII hashing → the BASE_SCHEMA identity row, or null if no match keys ──
+// ── PII hashing → a data row aligned to SCHEMA, or null if no match keys ──
 function hashMember(member) {
   const email = normalizeEmail(member && member.email);
   const phone = normalizePhone(member && member.phone); // -> +1XXXXXXXXXX | null
@@ -158,26 +122,6 @@ function hashMember(member) {
   if (!emailHash && !phoneHash) return null;
   return [emailHash, phoneHash];
 }
-
-// Hashed extra match keys for a member, or null. Only keys we have; the caller
-// only ever uploads them alongside a row that already has email/phone (a
-// member with neither never enters an audience, so extras cannot create one).
-function hashExtras(member) {
-  const id = matchFields.normalizeIdentity(member);
-  const e = {};
-  if (id.fn) e.fn = sha256Hex(id.fn);
-  if (id.ln) e.ln = sha256Hex(id.ln);
-  if (id.zp) e.zp = sha256Hex(id.zp);
-  if (id.ct) e.ct = sha256Hex(id.ct);
-  if (id.st) e.st = sha256Hex(id.st);
-  if (Object.keys(e).length) e.co = sha256Hex('us');
-  const xid = matchFields.normalizeExternalId(member && member.externalId);
-  if (xid) e.xid = sha256Hex(xid);
-  return Object.keys(e).length ? e : null;
-}
-
-// A data row in ADD_SCHEMA order from a state entry's hashed parts.
-const fullRow = (d, e) => [d[0], d[1], ...EXTRA_KEYS.map((k) => (e && e[k]) || '')];
 
 // ── Meta Graph helper ────────────────────────────────────────────────
 async function graph(path, { method = 'GET', body, fetchImpl = global.fetch } = {}) {
@@ -225,11 +169,11 @@ async function ensureAudience(audienceKey, def) {
   return created.id;
 }
 
-async function pushUsers(audienceId, rows, method, schema = BASE_SCHEMA) {
+async function pushUsers(audienceId, rows, method) {
   let count = 0;
   for (let i = 0; i < rows.length; i += MAX_USERS_PER_CALL) {
     const batch = rows.slice(i, i + MAX_USERS_PER_CALL);
-    await graph(`${audienceId}/users`, { method, body: { payload: { schema, data: batch } } });
+    await graph(`${audienceId}/users`, { method, body: { payload: { schema: SCHEMA, data: batch } } });
     count += batch.length;
   }
   return count;
@@ -271,14 +215,7 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       // never be matched from d alone — c survives deletion and lets a later
       // sync recognize the opt-out (still a SHA-256 hash, no plaintext PII).
       const canonical = canonicalEmail(m.email);
-      const entry = { k: m.key, d: data, c: canonical ? sha256Hex(canonical) : '' };
-      // e: the hashed extra keys uploaded with this row. Persisted so a later
-      // removal can send the exact row that was uploaded, and so a change in
-      // the extras (or their first appearance on an already-uploaded member)
-      // is detected and re-sent. d stays the identity, so this never churns.
-      const extras = hashExtras(m);
-      if (extras) entry.e = extras;
-      current.push(entry);
+      current.push({ k: m.key, d: data, c: canonical ? sha256Hex(canonical) : '' });
     }
     const hashId = (d) => `${d[0]}|${d[1]}`;
 
@@ -298,19 +235,12 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     // if ANY identifier in the row matches, so a stale row that still shares a current
     // identifier must NOT be deleted (it would drop a person we keep) — we retain it
     // and retry once that identifier leaves the audience.
-    // A member uploaded before keeps EVERY extras variant that went up (latest
-    // in e, earlier ones in o), even if its source fields changed or vanished.
-    for (const [h, cur] of currentByHash) {
-      const before = priorByHash.get(h);
-      if (before) currentByHash.set(h, matchFields.carryVariants(before, cur));
-    }
-
-    // Handles = email/phone hashes plus the external id and the name+ZIP
-    // triple of rows uploaded with extras (entryHandles). Legacy rows carry
-    // only email/phone handles, so their decisions are exactly as before.
     const currentHashes = new Set();
-    for (const e of currentByHash.values()) for (const h of matchFields.entryHandles(e)) currentHashes.add(h);
-    const safeToDelete = (entry) => !matchFields.entryHandles(entry).some((h) => currentHashes.has(h));
+    for (const e of currentByHash.values()) {
+      if (e.d[0]) currentHashes.add(e.d[0]);
+      if (e.d[1]) currentHashes.add(e.d[1]);
+    }
+    const safeToDelete = (d) => !((d[0] && currentHashes.has(d[0])) || (d[1] && currentHashes.has(d[1])));
 
     // Identifier hashes of active marketing opt-outs (and wrong_number phones),
     // hashed exactly like uploaded members. A prior row carrying one of these
@@ -349,9 +279,6 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     // Match by raw identifier hash OR by the row's persisted canonical consent
     // hash (rows written before this field exists simply lack c and fall back
     // to raw-hash matching until the next state rewrite refreshes them).
-    // Opt-outs are recorded by email/phone only, so this matches d (and c);
-    // the extras of an opted-out row leave with it because the removal below
-    // deletes the exact row (incl. extras) that was uploaded.
     const hasSuppressedId = (e) => !!(
       (e.d[0] && suppressedIdHashes.has(e.d[0]))
       || (e.d[1] && suppressedIdHashes.has(e.d[1]))
@@ -359,7 +286,7 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     );
 
     const addRows = [];
-    for (const [h, e] of currentByHash) if (!priorByHash.has(h)) addRows.push(fullRow(e.d, e.e));
+    for (const [h, e] of currentByHash) if (!priorByHash.has(h)) addRows.push(e.d);
 
     const removeRows = [];
     const retained = []; // uploaded rows no longer current but unsafe to delete now
@@ -369,12 +296,13 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       if (currentByHash.has(h)) continue; // still a current member
       if (hasSuppressedId(e)) {
         // Consent removal overrides shared-identifier retention.
-        removeRows.push(e);
+        removeRows.push(e.d);
         consentRemovals += 1;
-        for (const h of matchFields.entryHandles(e)) removedSuppressedIds.add(h);
+        if (e.d[0]) removedSuppressedIds.add(e.d[0]);
+        if (e.d[1]) removedSuppressedIds.add(e.d[1]);
         continue;
       }
-      if (safeToDelete(e)) removeRows.push(e); else retained.push(e);
+      if (safeToDelete(e.d)) removeRows.push(e.d); else retained.push(e);
     }
 
     // Persist current rows + retained orphans, so a future sync deletes each orphan
@@ -384,17 +312,11 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     // (which runs AFTER this run's adds) may knock them out too; absent from state,
     // the next sync re-adds them. One-cycle flicker, guaranteed consent removal.
     const persisted = [];
-    const enrichRows = [];
     let deferredReAdds = 0;
     for (const e of currentByHash.values()) {
-      const sharesRemoved = matchFields.entryHandles(e).some((h) => removedSuppressedIds.has(h));
+      const sharesRemoved = (e.d[0] && removedSuppressedIds.has(e.d[0])) || (e.d[1] && removedSuppressedIds.has(e.d[1]));
       if (sharesRemoved) { deferredReAdds += 1; continue; }
       persisted.push(e);
-      // Already uploaded, but its extra keys are new or changed since the
-      // last upload: re-POST the full row (an add is an idempotent upsert —
-      // no removal, so no audience churn). Legacy rows enrich once, here.
-      const before = priorByHash.get(hashId(e.d));
-      if (before && e.e && matchFields.extrasSig(e.e) !== matchFields.extrasSig(before.e)) enrichRows.push(fullRow(e.d, e.e));
     }
     persisted.push(...retained);
 
@@ -407,7 +329,6 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
       withMatchKeys: currentByHash.size,
       skippedNoKeys,
       toAdd: addRows.length,
-      toEnrich: enrichRows.length,
       toRemove: removeRows.length,
       retained: retained.length,
       consentRemovals,
@@ -419,15 +340,8 @@ async function syncAudience(audienceKey, { validateOnly = false } = {}) {
     }
 
     const audienceId = await ensureAudience(audienceKey, def);
-    const upserts = [...addRows, ...enrichRows];
-    const added = upserts.length ? await pushUsers(audienceId, upserts, 'POST', ADD_SCHEMA) : 0;
-    // Meta matches a DELETE row by ALL of its keys, so removal sends BOTH the
-    // legacy email/phone row (how every member was first uploaded) and, for
-    // rows uploaded with extras, the exact full row of EVERY variant that was
-    // uploaded. Legacy rows: email/phone only.
-    const removed = removeRows.length ? await pushUsers(audienceId, removeRows.map((e) => e.d), 'DELETE', BASE_SCHEMA) : 0;
-    const removeFull = removeRows.flatMap((e) => matchFields.entryVariants(e).map((v) => fullRow(e.d, v)));
-    if (removeFull.length) await pushUsers(audienceId, removeFull, 'DELETE', ADD_SCHEMA);
+    const added = addRows.length ? await pushUsers(audienceId, addRows, 'POST') : 0;
+    const removed = removeRows.length ? await pushUsers(audienceId, removeRows, 'DELETE') : 0;
 
     await saveState(audienceKey, {
       meta_audience_id: audienceId,
@@ -498,10 +412,6 @@ module.exports = {
     collectCustomerMembers,
     collectUnbookedLeadMembers,
     hashMember,
-    hashExtras,
-    fullRow,
-    ADD_SCHEMA,
-    BASE_SCHEMA,
     uploadsAllowed,
   },
 };

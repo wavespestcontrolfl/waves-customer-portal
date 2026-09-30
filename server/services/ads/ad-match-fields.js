@@ -2,10 +2,10 @@
 /**
  * Extra ad-platform match keys beyond email/phone: first/last name, city,
  * state, ZIP, country and our own customer id (Meta external_id). Pure
- * normalization + source-picking helpers shared by all four upload lanes
- * (Meta CAPI, Google Data Manager conversions, Meta Custom Audiences, Google
- * Customer Match). Hashing stays in each lane (they hash with their own
- * sha256Hex) — this module only produces the NORMALIZED plaintext.
+ * normalization + source-picking helpers for the two CONVERSION lanes (Meta
+ * CAPI, Google Data Manager). The audience lanes (Custom Audiences, Customer
+ * Match) deliberately stay email+phone only. Hashing stays in each lane —
+ * this module only produces the NORMALIZED plaintext.
  *
  * Rules verified against the official docs (checked 2026-09-29):
  *   Meta CAPI customer information parameters — fn/ln: lowercase, no
@@ -13,9 +13,6 @@
  *   ANSI lowercase; zp: first 5 digits, no spaces/dash; country: lowercase
  *   ISO 3166-1 alpha-2; external_id: any unique advertiser id. All hashed.
  *   https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/customer-information-parameters
- *   Meta Custom Audience multi-key schema (FN, LN, ZIP, CT, ST, COUNTRY,
- *   EXTERN_ID) — same rules; DELETE /users matches multi-key rows by ALL keys.
- *   https://developers.facebook.com/docs/marketing-api/audiences/guides/custom-audiences
  *   Google Data Manager AddressInfo — givenName/familyName lowercase, no
  *   punctuation, no honorific prefix / generational suffix, SHA-256; regionCode
  *   (ISO alpha-2) and postalCode NOT hashed; all four fields mandatory.
@@ -139,8 +136,8 @@ function mergeIdentity(preferred, fallback) {
 // Google AddressInfo needs ALL of givenName, familyName, regionCode and
 // postalCode; names are SHA-256 hashed (by the caller's `hash`), regionCode and
 // postalCode are sent as-is. null unless both names and a 5-digit ZIP exist.
-// Shared by both Google lanes (conversions + Customer Match) so they format
-// identically.
+// Used by the Google conversion lane (data-manager.js); kept here so the
+// address format lives next to the other normalizers.
 function googleAddressParts(src, hash) {
   const id = normalizeIdentity(src);
   if (!id.fn || !id.ln || !id.zp) return null;
@@ -165,61 +162,6 @@ function externalIdFor({ customerId, leadId }) {
   return null;
 }
 
-// ── audience state helpers ──────────────────────────────────────────
-// A persisted audience entry is { k, d:[emailHash, phoneHash], c?, e?, o? }.
-// d is the row IDENTITY, unchanged, so rows uploaded before extras existed keep
-// matching. `e` is the LATEST hashed extras uploaded with the row; `o` is a
-// small bounded list (newest first) of EARLIER variants that were also
-// uploaded. Every variant that ever went up must stay known: removal has to
-// delete each one (Meta matches a multi-key DELETE by all keys) and the
-// shared-handle guards must see them, even after the source fields change or
-// disappear. Variants leave state only with the entry, once removal is confirmed.
-const EXTRA_ORDER = ['fn', 'ln', 'zp', 'ct', 'st', 'co', 'xid'];
-const MAX_OLDER_VARIANTS = 4;
-function extrasSig(e) {
-  return e ? EXTRA_ORDER.map((k) => e[k] || '').join('|') : '';
-}
-// Every extras variant uploaded for this entry, newest first.
-function entryVariants(entry) {
-  return [entry.e, ...(Array.isArray(entry.o) ? entry.o : [])].filter(Boolean);
-}
-// The entry to persist for a member that was uploaded before: the current
-// identity with `e` = latest extras (the freshly computed ones, or — when the
-// source fields shrank/vanished so there is nothing new to send — the
-// previously uploaded ones) and `o` = every other variant still out there.
-function carryVariants(before, current) {
-  const prior = entryVariants(before);
-  if (!prior.length) return current;
-  const out = { ...current };
-  let older;
-  // Nothing new to say (source fields vanished or shrank, e.g. only the id is
-  // left): keep what was uploaded, send nothing.
-  const subsetOfLatest = current.e && Object.keys(current.e).every((k) => current.e[k] === prior[0][k]);
-  if (current.e && !subsetOfLatest) {
-    const sig = extrasSig(current.e);
-    older = prior.filter((v) => extrasSig(v) !== sig);
-  } else {
-    out.e = prior[0];
-    older = prior.slice(1);
-  }
-  older = older.slice(0, MAX_OLDER_VARIANTS);
-  if (older.length) out.o = older; else delete out.o;
-  return out;
-}
-// Every key an audience DELETE for this entry could match on, across all
-// uploaded variants. Removal must never knock out a current member that
-// shares any of them.
-function entryHandles(entry) {
-  const out = [];
-  if (entry.d[0]) out.push(entry.d[0]);
-  if (entry.d[1]) out.push(entry.d[1]);
-  for (const e of entryVariants(entry)) {
-    if (e.xid) out.push(`x:${e.xid}`);
-    if (e.fn && e.ln && e.zp) out.push(`n:${e.fn}|${e.ln}|${e.zp}`);
-  }
-  return out;
-}
-
 module.exports = {
   normalizeName,
   normalizeCity,
@@ -233,8 +175,4 @@ module.exports = {
   externalIdFor,
   IDENTITY_FIELDS,
   nullIdentityFields,
-  extrasSig,
-  entryVariants,
-  carryVariants,
-  entryHandles,
 };

@@ -6,7 +6,7 @@ const inserts = [];
 
 const mockDb = jest.fn((table) => {
   const b = {};
-  ['leftJoin', 'where', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereIn', 'whereRaw', 'andWhere', 'whereNotExists'].forEach((m) => {
+  ['where', 'whereNull', 'whereNotNull', 'orWhereNotNull', 'whereIn', 'whereRaw', 'andWhere', 'whereNotExists'].forEach((m) => {
     b[m] = jest.fn(() => b);
   });
   b.select = jest.fn(() => Promise.resolve(tableData[table] || []));
@@ -85,29 +85,12 @@ describe('member collection', () => {
   test('customers → customer:<id> keys', async () => {
     tableData.customers = [{ id: 'c1', email: 'c1@x.com', phone: '9412975749' }];
     const m = await collectCustomerMembers();
-    expect(m).toEqual([expect.objectContaining({ key: 'customer:c1', email: 'c1@x.com', phone: '9412975749', externalId: 'c1' })]);
-  });
-  test('customers carry name + address + our customer id as external id', async () => {
-    tableData.customers = [{ id: 'c1', email: 'c1@x.com', phone: null, first_name: 'Jo', last_name: 'Lee', city: 'Parrish', state: 'FL', zip: '34219' }];
-    const [m] = await collectCustomerMembers();
-    expect(m).toEqual({
-      key: 'customer:c1', email: 'c1@x.com', phone: null, externalId: 'c1',
-      firstName: 'Jo', lastName: 'Lee', city: 'Parrish', state: 'FL', zip: '34219',
-    });
+    expect(m).toEqual([{ key: 'customer:c1', email: 'c1@x.com', phone: '9412975749' }]);
   });
   test('leads → lead:<id> keys', async () => {
     tableData.leads = [{ id: 'l1', email: 'l1@x.com', phone: null }];
     const m = await collectUnbookedLeadMembers();
-    expect(m).toEqual([expect.objectContaining({ key: 'lead:l1', email: 'l1@x.com', phone: null, externalId: 'lead:l1' })]);
-  });
-  test('lead uses its own name/ZIP, borrows state from the linked customer, and shares the customer external id', async () => {
-    tableData.leads = [{
-      id: 'l1', email: 'l1@x.com', phone: null, customer_id: 'cust9',
-      first_name: 'Jo', last_name: 'Lee', city: null, zip: '34219',
-      customer_first_name: 'Joanne', customer_last_name: 'Lee', customer_city: 'Parrish', customer_state: 'FL', customer_zip: '34219',
-    }];
-    const [m] = await collectUnbookedLeadMembers();
-    expect(m).toMatchObject({ firstName: 'Jo', lastName: 'Lee', city: 'Parrish', state: 'FL', zip: '34219', externalId: 'cust9' });
+    expect(m).toEqual([{ key: 'lead:l1', email: 'l1@x.com', phone: null }]);
   });
 });
 
@@ -180,9 +163,7 @@ describe('syncAudience', () => {
     expect(r.removed).toBe(1);
     const post = global.fetch.mock.calls.find((c) => c[1].method === 'POST' && /\/users$/.test(c[0]));
     const del = global.fetch.mock.calls.find((c) => c[1] && c[1].method === 'DELETE');
-    expect(JSON.parse(post[1].body).payload.data).toEqual([['h:new@x.com', '', '', '', '', '', '', '', 'h:c1']]);
-    // a legacy row (uploaded before extras existed) is removed with the same email/phone row it went up with
-    expect(JSON.parse(del[1].body).payload.schema).toEqual(['EMAIL', 'PHONE']);
+    expect(JSON.parse(post[1].body).payload.data).toEqual([['h:new@x.com', '']]);
     expect(JSON.parse(del[1].body).payload.data).toEqual([['h:old@x.com', '']]);
   });
 
@@ -237,8 +218,8 @@ describe('syncAudience', () => {
     // users payload carries the hashed multi-key schema
     const usersCall = global.fetch.mock.calls.find((c) => /\/users$/.test(c[0]));
     const body = JSON.parse(usersCall[1].body);
-    expect(body.payload.schema).toEqual(['EMAIL', 'PHONE', 'FN', 'LN', 'ZIP', 'CT', 'ST', 'COUNTRY', 'EXTERN_ID']);
-    expect(body.payload.data).toEqual([['h:c1@x.com', 'h:19412975749', '', '', '', '', '', '', 'h:c1']]);
+    expect(body.payload.schema).toEqual(['EMAIL', 'PHONE']);
+    expect(body.payload.data).toEqual([['h:c1@x.com', 'h:19412975749']]);
   });
 
   test('explicit validateOnly forces dry run even when uploads allowed', async () => {
@@ -379,172 +360,5 @@ describe('consent (r4)', () => {
     await MetaAudiences.syncAudience('unbooked_leads', {});
     const loads = mockDb.mock.calls.filter((c) => c[0] === 'messaging_suppression').length;
     expect(loads).toBe(1);
-  });
-});
-
-
-// ── extra match keys (name / ZIP / city / state / country / external id) ──
-describe('extra match keys', () => {
-  const JO = { first_name: 'Jo-Ann', last_name: "O'Neil Jr.", city: 'Palmetto', state: 'Florida', zip: '34221-1234' };
-  const jo = { fn: 'h:joann', ln: 'h:oneil', zp: 'h:34221', ct: 'h:palmetto', st: 'h:fl', co: 'h:us', xid: 'h:c1' };
-  const FULL_SCHEMA = ['EMAIL', 'PHONE', 'FN', 'LN', 'ZIP', 'CT', 'ST', 'COUNTRY', 'EXTERN_ID'];
-  const calls = (method, matcher = /\/users$/) => global.fetch.mock.calls
-    .filter((c) => c[1] && c[1].method === method && matcher.test(c[0]))
-    .map((c) => JSON.parse(c[1].body).payload);
-  const savedState = () => JSON.parse(inserts.filter((x) => x.table === 'ad_audience_syncs').pop().row.member_keys);
-
-  test('hashExtras normalizes per Meta rules, then hashes each key', () => {
-    expect(MetaAudiences._private.hashExtras({
-      firstName: 'Jo-Ann', lastName: "O'Neil Jr.", city: 'Palm  Harbor.', state: 'Florida', zip: '34221-1234', externalId: 'C1',
-    })).toEqual({ ...jo, ct: 'h:palmharbor', xid: 'h:c1' });
-  });
-  test('country only rides with an address/name key; nothing usable → null', () => {
-    expect(MetaAudiences._private.hashExtras({ firstName: 'Jo' }).co).toBe('h:us');
-    expect(MetaAudiences._private.hashExtras({ externalId: 'c1' })).toEqual({ xid: 'h:c1' });
-    expect(MetaAudiences._private.hashExtras({ firstName: 'Unknown', zip: 'K1A 0B1' })).toBeNull();
-  });
-  test('a new member uploads the full row and persists its hashed extras next to the identity row', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: null, ...JO }];
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [] };
-    await MetaAudiences.syncAudience('customers', {});
-    const [post] = calls('POST');
-    expect(post.schema).toEqual(FULL_SCHEMA);
-    expect(post.data).toEqual([['h:a@x.com', '', 'h:joann', 'h:oneil', 'h:34221', 'h:palmetto', 'h:fl', 'h:us', 'h:c1']]);
-    expect(savedState()).toEqual([expect.objectContaining({ d: ['h:a@x.com', ''], e: jo })]);
-  });
-  test('a member with only extras (no email/phone) never enters an audience', async () => {
-    configure();
-    tableData.customers = [{ id: 'c1', email: null, phone: null, ...JO }];
-    const r = await MetaAudiences.syncAudience('customers', {});
-    expect(r.withMatchKeys).toBe(0);
-    expect(r.toAdd).toBe(0);
-  });
-
-  test('ROLLOUT: already-uploaded members are enriched by re-adding — never removed, no churn', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.customers = [
-      { id: 'c1', email: 'a@x.com', phone: null, ...JO },
-      { id: 'c2', email: 'b@x.com', phone: null }, // no name/address: only the external id is new
-    ];
-    // both were uploaded under the old email/phone-only shape (no `e`)
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [
-      { k: 'customer:c1', d: ['h:a@x.com', ''] },
-      { k: 'customer:c2', d: ['h:b@x.com', ''] },
-    ] };
-    const r = await MetaAudiences.syncAudience('customers', {});
-    expect(r).toMatchObject({ toAdd: 0, toRemove: 0, retained: 0, toEnrich: 2, memberCount: 2 });
-    expect(calls('DELETE')).toEqual([]);
-    expect(calls('POST')[0].data).toEqual([
-      ['h:a@x.com', '', 'h:joann', 'h:oneil', 'h:34221', 'h:palmetto', 'h:fl', 'h:us', 'h:c1'],
-      ['h:b@x.com', '', '', '', '', '', '', '', 'h:c2'],
-    ]);
-    expect(savedState()).toHaveLength(2);
-    // second run: extras unchanged → nothing to send
-    stateRow = { meta_audience_id: 'AUDX', member_keys: savedState() };
-    global.fetch = okFetch({});
-    const r2 = await MetaAudiences.syncAudience('customers', {});
-    expect(r2).toMatchObject({ toAdd: 0, toRemove: 0, toEnrich: 0 });
-    expect(global.fetch).not.toHaveBeenCalled();
-  });
-  test('a changed address re-adds the full row; the identity row is unchanged (no remove)', async () => {
-    configure();
-    tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: null, ...JO, zip: '34222' }];
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }] };
-    expect(await MetaAudiences.syncAudience('customers', {})).toMatchObject({ toAdd: 0, toRemove: 0, toEnrich: 1 });
-  });
-
-  test('consent removal of an enriched row deletes BOTH the legacy email/phone row and the exact full row', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.leads = [];
-    tableData.email_suppressions = [{ email: 'opted@x.com' }];
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'lead:l1', d: ['h:opted@x.com', ''], e: jo }] };
-    const r = await MetaAudiences.syncAudience('unbooked_leads', {});
-    expect(r.consentRemovals).toBe(1);
-    const dels = calls('DELETE');
-    expect(dels).toEqual([
-      { schema: ['EMAIL', 'PHONE'], data: [['h:opted@x.com', '']] },
-      { schema: FULL_SCHEMA, data: [['h:opted@x.com', '', 'h:joann', 'h:oneil', 'h:34221', 'h:palmetto', 'h:fl', 'h:us', 'h:c1']] },
-    ]);
-  });
-  test('an opted-out lead is dropped whole: none of its name/ZIP/external id is uploaded', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.leads = [
-      { id: 'l1', email: 'opted@x.com', phone: null, ...JO },
-      { id: 'l2', email: 'fine@x.com', phone: null, first_name: 'Kay', last_name: 'Ray', zip: '34202' },
-    ];
-    tableData.email_suppressions = [{ email: 'opted@x.com' }];
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [] };
-    await MetaAudiences.syncAudience('unbooked_leads', {});
-    const sent = JSON.stringify(calls('POST'));
-    expect(sent).toContain('h:kay');
-    for (const gone of ['opted', 'joann', 'oneil', 'h:34221', 'lead:l1', 'h:palmetto']) expect(sent).not.toContain(gone);
-  });
-  test('suppression audience KEEPS opted-out customers WITH extras (exclusion list — more keys = better exclusion)', async () => {
-    configure();
-    tableData.customers = [{ id: 'c1', email: 'opted@x.com', phone: null, ...JO }];
-    tableData.email_suppressions = [{ email: 'opted@x.com' }];
-    const r = await MetaAudiences.syncAudience('customers', {});
-    expect(r.toAdd).toBe(1);
-  });
-  test('a stale row sharing a current member\'s name+ZIP handle is retained, not deleted', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.customers = [{ id: 'c1', email: 'new@x.com', phone: null, ...JO }];
-    // same person, previously uploaded under another email; the old row's DELETE could match the current member by name+ZIP
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:old@x.com', ''], e: { ...jo, xid: 'h:other' } }] };
-    const r = await MetaAudiences.syncAudience('customers', {});
-    expect(r).toMatchObject({ toAdd: 1, toRemove: 0, retained: 1 });
-    expect(calls('DELETE')).toEqual([]);
-  });
-
-  test('source fields cleared after enrichment: nothing is sent, the uploaded extras stay remembered, and removal deletes them', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: null }]; // name/ZIP wiped, no external id in the way
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }] };
-    const r = await MetaAudiences.syncAudience('customers', {});
-    // the external id is re-derived (same id), so this row still matches the stored latest variant → nothing to send
-    expect(r).toMatchObject({ toAdd: 0, toRemove: 0 });
-    const kept = savedState();
-    expect(kept).toEqual([expect.objectContaining({ d: ['h:a@x.com', ''], e: jo })]);
-    // later the member is removed (gone from source) → the uploaded full row is deleted too
-    stateRow = { meta_audience_id: 'AUDX', member_keys: kept };
-    global.fetch = okFetch({});
-    tableData.customers = [];
-    await MetaAudiences.syncAudience('customers', {});
-    expect(calls('DELETE').map((p) => p.schema)).toEqual([['EMAIL', 'PHONE'], FULL_SCHEMA]);
-    expect(calls('DELETE')[1].data).toEqual([['h:a@x.com', '', 'h:joann', 'h:oneil', 'h:34221', 'h:palmetto', 'h:fl', 'h:us', 'h:c1']]);
-  });
-  test('address change: the new row is sent, the old variant is remembered, and removal deletes BOTH full rows', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.customers = [{ id: 'c1', email: 'a@x.com', phone: null, ...JO, zip: '34222' }];
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:a@x.com', ''], e: jo }] };
-    const r = await MetaAudiences.syncAudience('customers', {});
-    expect(r).toMatchObject({ toEnrich: 1, toRemove: 0 });
-    expect(calls('POST')[0].data).toHaveLength(1);
-    const saved = savedState();
-    expect(saved[0].e.zp).toBe('h:34222');
-    expect(saved[0].o).toEqual([jo]);
-    // member leaves → both variants deleted
-    stateRow = { meta_audience_id: 'AUDX', member_keys: saved };
-    global.fetch = okFetch({});
-    tableData.customers = [];
-    await MetaAudiences.syncAudience('customers', {});
-    const full = calls('DELETE').find((p) => p.schema.length === 9);
-    expect(full.data.map((row) => row[4]).sort()).toEqual(['h:34221', 'h:34222']);
-  });
-  test('shared-handle guards consider EARLIER variants too (a stale row is retained when an old variant shares a handle)', async () => {
-    configure({ allow: true });
-    global.fetch = okFetch({ id: 'AUDX' });
-    tableData.customers = [{ id: 'c1', email: 'new@x.com', phone: null, ...JO }];
-    const older = { ...jo, xid: 'h:other' };
-    stateRow = { meta_audience_id: 'AUDX', member_keys: [{ k: 'customer:c1', d: ['h:old@x.com', ''], e: { fn: 'h:zz', ln: 'h:zz', zp: 'h:zz' }, o: [older] }] };
-    expect(await MetaAudiences.syncAudience('customers', {})).toMatchObject({ toAdd: 1, toRemove: 0, retained: 1 });
   });
 });
