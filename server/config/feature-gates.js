@@ -3611,6 +3611,24 @@ const gates = {
   // "unset = byte-identical." Also guarded against overwriting a
   // churned/archived customer's stage. Unset = byte-identical.
   balanceReminderLegacyOff: process.env.GATE_BALANCE_REMINDER_LEGACY_OFF === 'true',
+
+  // Customer-level overdue reminders (dunning consolidation, PR 1: inert
+  // foundations — nothing reads these yet). A customer with 2+ actively-
+  // dunned open invoices gets ONE customer_dunning_schedules row that owns
+  // the cadence, instead of one reminder per invoice. Both gates ship DARK:
+  // off unless exactly 'true'. These three entries are for logGateStatus
+  // only; the readers live in services/customer-dunning/ (later PRs), which
+  // read the env at call time. SHADOW computes and logs only (no rows, no
+  // mints, no reservations, no sends); the live gate additionally needs
+  // GATE_DUNNING_LADDER_90 and the pay-page balance gate (payIncludeBalance)
+  // on. dunningCustomerScheduleAllowlist reads ENABLED when
+  // DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST (comma list of customer uuids) is
+  // CONFIGURED — unset = everyone, configured = only the valid ids, and a
+  // configured list with no valid id = nobody (logGateStatus says so). The
+  // one-customer canary before a full flip.
+  dunningCustomerScheduleShadow: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true',
+  dunningCustomerSchedule: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true',
+  dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
 };
 
 // Parse a gate env var at CALL time (for request-time availability checks
@@ -4131,6 +4149,13 @@ function logGateStatus() {
   for (const [name, enabled] of Object.entries(gates)) {
     console.log(`  ${enabled ? '✅' : '🔒'} ${name}: ${enabled ? 'ENABLED' : 'DISABLED'}`);
   }
+  const allow = dunningCustomerScheduleAllowlistStatus();
+  if (allow.configured) {
+    console.log(allow.valid.length
+      ? `  ↳ dunning customer-schedule allowlist: ${allow.valid.length} customer(s)`
+      : '  ↳ dunning customer-schedule allowlist configured but has no valid ids → nobody');
+    if (allow.invalidCount) console.log(`  ↳ dunning customer-schedule allowlist ignored ${allow.invalidCount} malformed entr${allow.invalidCount === 1 ? 'y' : 'ies'}`);
+  }
 }
 
 // GATE_OUTLINK_TRACKING read at CALL time — strict `=== 'true'`, same
@@ -4141,6 +4166,57 @@ function logGateStatus() {
 // kill. The `outlinkTracking` gates-map entry above is for logGateStatus only.
 function outlinkTrackingLive() {
   return process.env.GATE_OUTLINK_TRACKING === 'true';
+}
+
+// Customer-level dunning gates read at CALL time — strict `=== 'true'`. The
+// `dunningCustomerSchedule*` gates-map entries above are for logGateStatus
+// only. Both ship dark; the live reader is separate from the shadow reader so
+// a shadow run can never be mistaken for authority to send. BOTH readers also
+// require the prerequisites the schedule depends on and fail closed without
+// them: GATE_DUNNING_LADDER_90 (the Day 60/90 cadence, read as
+// invoice-followups.js reads it) and the pay-page balance gate
+// (payIncludeBalance, read as pay-combined.js reads it, via the gates map) —
+// without the first the cadence is the legacy Day 30 one, without the second
+// the page shows one invoice while a reminder names the set.
+function dunningCustomerSchedulePrereqsLive() {
+  return process.env.GATE_DUNNING_LADDER_90 === 'true' && gates.payIncludeBalance === true;
+}
+
+function dunningCustomerScheduleShadowLive() {
+  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true' && dunningCustomerSchedulePrereqsLive();
+}
+
+function dunningCustomerScheduleLive() {
+  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true' && dunningCustomerSchedulePrereqsLive();
+}
+
+// DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST — comma-separated customer ids (uuids),
+// read at CALL time. It only ever NARROWS the live gate (a canary); it never
+// turns anything on by itself. Three states, deliberately distinct:
+//   unset / whitespace only        -> null      (no allowlist: everyone)
+//   configured, >= 1 valid uuid    -> Set       (only those customers)
+//   configured, NO valid uuid      -> empty Set (nobody — a typo'd canary must
+//                                    fail closed, never widen to everyone)
+// A malformed entry (not a uuid) is dropped and only COUNTED in
+// dunningCustomerScheduleAllowlistStatus() / logGateStatus — an entry is never
+// logged (it may be a mistyped id or something that should not be in a log).
+const ALLOWLIST_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function dunningCustomerScheduleAllowlistStatus() {
+  const raw = String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '');
+  if (raw.trim() === '') return { configured: false, valid: [], invalidCount: 0 };
+  const valid = [];
+  let invalidCount = 0;
+  for (const id of raw.split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (!ALLOWLIST_UUID.test(id)) invalidCount += 1;
+    else if (!valid.includes(id.toLowerCase())) valid.push(id.toLowerCase());
+  }
+  return { configured: true, valid, invalidCount };
+}
+
+function dunningCustomerScheduleAllowlist() {
+  const status = dunningCustomerScheduleAllowlistStatus();
+  return status.configured ? new Set(status.valid) : null;
 }
 
 // GATE_ZONE_ROUTE_DAYS read at CALL time — strict `=== 'true'`, same
@@ -4164,6 +4240,11 @@ module.exports.signupSingleEmailLive = signupSingleEmailLive;
 module.exports.leadEmailLinksLive = leadEmailLinksLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
 module.exports.callCommercialDictatedBookingLive = callCommercialDictatedBookingLive;
+module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
+module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
+module.exports.dunningCustomerScheduleLive = dunningCustomerScheduleLive;
+module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowlist;
+module.exports.dunningCustomerScheduleAllowlistStatus = dunningCustomerScheduleAllowlistStatus;
 module.exports.zoneRouteDaysLive = zoneRouteDaysLive;
 module.exports.callAddressOnFileAssistLive = callAddressOnFileAssistLive;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
