@@ -490,10 +490,10 @@ async function recomputedLiveEtaMinutes(entry, dbh) {
   try {
     const dest = (entry.destinations || []).map((d) => d?.resolved).find((r) => r && Number.isFinite(Number(r.lat)) && Number.isFinite(Number(r.lng)) && r.lat != null && r.lng != null);
     if (!dest) return null;
-    const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'updated_at');
+    const tech = await dbh('technicians').where({ id: entry.technicianId }).first('bouncie_imei', 'bouncie_imei_changed_at');
     if (!tech) return null;
     const fact = await require('./context-aggregator').resolveLiveEtaMinutesUncached(
-      { technician_id: entry.technicianId, tech_bouncie_imei: tech.bouncie_imei, tech_updated_at: tech.updated_at },
+      { technician_id: entry.technicianId, tech_bouncie_imei: tech.bouncie_imei, tech_mapping_changed_at: tech.bouncie_imei_changed_at },
       { lat: Number(dest.lat), lng: Number(dest.lng) },
     );
     return fact && Number.isFinite(fact.minutes) ? fact.minutes : null;

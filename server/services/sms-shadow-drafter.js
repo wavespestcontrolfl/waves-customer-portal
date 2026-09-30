@@ -1131,7 +1131,7 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // payment has arrived at our office" is not a visit claim. Up to two words may
 // sit between the subject and the verb ("the tech, Sam, has arrived" / "your tech
 // Sam just arrived").
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+)?arrived|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?arrived|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
@@ -1185,8 +1185,33 @@ const COMPLETED_ARRIVAL_SUBJECT_GROUPS = [
   '(?:crew|team)',
   '(?:tech(?:nician)?|he|she|they|driver|crew)',
 ];
+// Carry a technician subject across COORDINATED predicates (Codex round-35 P2):
+// "The technician isn't there yet, but is on the way" — the second predicate has
+// no subject of its own, so it is read with the nearest technician-type subject
+// (or recorded name) that precedes the conjunction in the same sentence, BEFORE
+// the negation/question/conditional exemptions run. Only when the conjunct starts
+// with a verb-ish token (a subjectless predicate); "…on the way and we'll follow
+// up" (a new subject) is left alone. Text is rewritten for classification only.
+const CARRY_SUBJECT_RE_SRC = "\\b(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they|we";
+const CARRY_CONJUNCTION_RE = /,?\s+(?:but|and|though|however|yet)\s+(?=(?:is|are|was|were|has|have|had|will|should|'ll|'s|now|just|already|almost|en[\s-]?route\b|on\s+(?:the|his|her|their|our|my)\s+way\b|running\b|coming\b|heading\b|headed\b|driving\b|arriv\w*|pulling\b|pull(?:ed)?\b|showing\b|nearby\b|close\b)\b)/gi;
+function carrySubjectAcrossConjunctions(str, techNames = []) {
+  const alt = nameAlt(techNames);
+  const subjectRe = new RegExp(`${CARRY_SUBJECT_RE_SRC}${alt ? `|${alt}` : ''})\\b`, 'gi');
+  let out = '';
+  let last = 0;
+  for (const m of str.matchAll(CARRY_CONJUNCTION_RE)) {
+    const sentenceStart = Math.max(str.lastIndexOf('.', m.index), str.lastIndexOf('!', m.index), str.lastIndexOf('?', m.index), str.lastIndexOf('\n', m.index), str.lastIndexOf(';', m.index)) + 1;
+    const before = str.slice(sentenceStart, m.index);
+    const subjects = [...before.matchAll(subjectRe)];
+    if (!subjects.length) continue;
+    const subject = subjects[subjects.length - 1][0];
+    out += `${str.slice(last, m.index + m[0].length)}${subject} `;
+    last = m.index + m[0].length;
+  }
+  return last ? out + str.slice(last) : str;
+}
 function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
-  const str = String(text || '');
+  const str = carrySubjectAcrossConjunctions(String(text || ''), techNames);
   for (const m of str.matchAll(new RegExp(statusRegexFor('completed', techNames).source, 'gi'))) {
     if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length, techNames)) return true;
   }
@@ -1219,7 +1244,7 @@ function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
 // on the way"); "team ... here to help" stays non-status via the lookahead below.
 const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?s?|drivers?|crews?|teams?|he|she|they)";
 function techStatusPrefix(subj) {
-  return `${subj}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+`;
+  return `${subj}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet|was|were|had)\\b)\\w+,?){0,3}?\\s+`;
 }
 const TECH_STATUS_PREFIX = techStatusPrefix(VISIT_STATUS_SUBJECT);
 const ROUTE_IDIOM = '(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way)';
@@ -1331,7 +1356,7 @@ function isFutureDayStatus(str, index, length = 0, now = new Date()) {
   return WEEKDAY_NAMES.some((day) => day !== today && new RegExp(`\\b${day}\\b`, 'i').test(sentence));
 }
 function bodyMentionsArrival(text, { techNames = [] } = {}) {
-  const str = String(text || '');
+  const str = carrySubjectAcrossConjunctions(String(text || ''), techNames);
   for (const m of str.matchAll(new RegExp(statusRegexFor('enRoute', techNames).source, 'gi'))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;
@@ -1365,7 +1390,7 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
   // Superset of every en-route predicate bodyMentionsArrival classifies, so the
   // default-deny vocabulary can never be narrower than the specific classifier.
   + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT}`
-  + `|${SUBJ}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
+  + `|${SUBJ}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet|was|were|had)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
   // Positional status forms (here / there / outside / nearby / close / on site /
   // at your door / almost there) count ONLY with a technician-type subject
   // (round-21 P2): "We are here to help" / "we're here" are not a claim.
@@ -1376,7 +1401,7 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
 }
 const VISIT_STATUS_RE = buildVisitStatusRe();
 function bodyMentionsVisitStatus(text, { techNames = [] } = {}) {
-  const str = String(text || '');
+  const str = carrySubjectAcrossConjunctions(String(text || ''), techNames);
   for (const m of str.matchAll(new RegExp(statusRegexFor('visit', techNames).source, 'gi'))) {
     const before = str.slice(Math.max(0, m.index - 60), m.index);
     if (isConditionalBefore(before)) continue;

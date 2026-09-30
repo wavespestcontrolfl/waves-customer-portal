@@ -94,7 +94,15 @@ router.put('/vehicles/:technicianId', async (req, res, next) => {
   try {
     const { bouncie_imei, bouncie_vin, vehicle_name } = req.body;
     const updates = { updated_at: new Date() };
-    if (bouncie_imei !== undefined) updates.bouncie_imei = bouncie_imei || null;
+    if (bouncie_imei !== undefined) {
+      updates.bouncie_imei = bouncie_imei || null;
+      // Stamp the tracker-remap instant ONLY when the IMEI actually changes (round-35
+      // P2): tech_status stores no device identity, so cached fixes older than this are
+      // not trusted for the new device. technicians.updated_at is restamped by every
+      // ordinary edit and cannot say this. An unchanged re-save must not restart it.
+      const current = await db('technicians').where({ id: req.params.technicianId }).first('bouncie_imei');
+      if (String(current?.bouncie_imei ?? '') !== String(updates.bouncie_imei ?? '')) updates.bouncie_imei_changed_at = new Date();
+    }
     if (bouncie_vin !== undefined) updates.bouncie_vin = bouncie_vin || null;
     if (vehicle_name !== undefined) updates.vehicle_name = vehicle_name || null;
     await db('technicians').where({ id: req.params.technicianId }).update(updates);

@@ -675,13 +675,12 @@ async function resolveLiveEtaMinutesUncached(row, dest) {
     const position = await resolveFreshTechPosition({
       techId: row.technician_id,
       bouncieImei: row.tech_bouncie_imei,
-      // Round-24 P2: tech_status carries no device identity, so a cached fix
-      // reported before the technician's tracker mapping was last edited (the
-      // admin geofence PUT stamps technicians.updated_at) may be the OLD
-      // vehicle's. Such a fix is bypassed for the configured device's own
-      // position. An unreadable edit time cannot prove the device -> bypass the
-      // cache entirely (fail closed: the Bouncie lookup by IMEI or no fact).
-      cachedNotBefore: techMappingCutoff(row.tech_updated_at),
+      // Round-24/35 P2: tech_status carries no device identity, so a cached fix
+      // reported before the technician's tracker mapping last CHANGED
+      // (technicians.bouncie_imei_changed_at, set only when bouncie_imei changes;
+      // NULL = no known remap = no cutoff) may be the OLD vehicle's and is bypassed
+      // for the configured device's own position. Shared with the public tracker.
+      cachedNotBefore: techMappingCutoff(row.tech_mapping_changed_at),
       logPrefix: 'sms-shadow-live-eta',
     });
     if (!position) return null;
@@ -842,7 +841,7 @@ const UPCOMING_SERVICE_COLUMNS = [
   // tracking page requires for a live vehicle, never raw status alone,
   // or it can advertise "Track live" for a stop the tracking page
   // itself still renders as scheduled. See customerTrackState below.
-  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_token_expires_at', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei', 'tech.updated_at as tech_updated_at',
+  'ss.id', 'ss.technician_id', 'ss.property_id', 'ss.track_view_token', 'ss.track_token_expires_at', 'ss.track_state', 'tech.bouncie_imei as tech_bouncie_imei', 'tech.bouncie_imei_changed_at as tech_mapping_changed_at',
   'ss.lat as service_lat', 'ss.lng as service_lng',
   'ss.service_address_line1', 'ss.service_address_zip', 'ss.service_address_city',
 ];

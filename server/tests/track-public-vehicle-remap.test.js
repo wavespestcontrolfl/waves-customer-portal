@@ -1,7 +1,7 @@
 /**
  * Public tracker vehicle lookup honors the tracker-remap cutoff (Codex round-34 P2,
  * PR #5334): a cached tech_status fix reported before the technician's tracker
- * mapping was last edited (technicians.updated_at) may be the OLD vehicle's, so
+ * mapping last CHANGED (technicians.bouncie_imei_changed_at, set only when bouncie_imei changes) may be the OLD vehicle's, so
  * buildVehicle passes the SAME cutoff the SMS ETA path passes — the text and the
  * tracking page never show different vehicles. Synthetic data only.
  */
@@ -19,7 +19,7 @@ const { calculateBoundedTrackingEta, techMappingCutoff } = require('../services/
 const trackPublicRouter = require('../routes/track-public');
 
 const service = (extra = {}) => ({
-  technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_updated_at: '2026-09-30T10:00:00.000Z', latitude: 27.4, longitude: -82.5, ...extra,
+  technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: '2026-09-30T10:00:00.000Z', latitude: 27.4, longitude: -82.5, ...extra,
 });
 
 beforeEach(() => {
@@ -35,9 +35,14 @@ test('buildVehicle passes the technician row\'s mapping timestamp as the cached-
   }));
 });
 
-test('an unreadable mapping timestamp bypasses the cache entirely (fails closed to "now")', async () => {
+test('NO remap time (NULL) means no cutoff: an ordinary technician edit leaves the cached fix trusted', async () => {
+  await trackPublicRouter._test.buildVehicle(service({ tech_mapping_changed_at: null, tech_updated_at: new Date().toISOString() }));
+  expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBeNull();
+});
+
+test('a present-but-unreadable remap time bypasses the cache entirely (fails closed to "now")', async () => {
   const before = Date.now();
-  await trackPublicRouter._test.buildVehicle(service({ tech_updated_at: null }));
+  await trackPublicRouter._test.buildVehicle(service({ tech_mapping_changed_at: 'not-a-date' }));
   const floor = resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore;
   expect(floor).toBeInstanceOf(Date);
   expect(floor.getTime()).toBeGreaterThanOrEqual(before);
@@ -46,12 +51,13 @@ test('an unreadable mapping timestamp bypasses the cache entirely (fails closed 
 test('the SMS path and the public tracker share one cutoff rule', () => {
   expect(techMappingCutoff('2026-09-30T10:00:00.000Z')).toBe('2026-09-30T10:00:00.000Z');
   expect(techMappingCutoff(new Date('2026-09-30T10:00:00.000Z'))).toEqual(new Date('2026-09-30T10:00:00.000Z'));
-  for (const bad of [null, undefined, '', 'not-a-date']) expect(techMappingCutoff(bad)).toBeInstanceOf(Date);
+  for (const none of [null, undefined, '']) expect(techMappingCutoff(none)).toBeNull();
+  expect(techMappingCutoff('not-a-date')).toBeInstanceOf(Date);
 });
 
 test('the public query selects the technician mapping timestamp', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/track-public.js'), 'utf8');
-  expect(src).toContain("'t.updated_at as tech_updated_at'");
+  expect(src).toContain("'t.bouncie_imei_changed_at as tech_mapping_changed_at'");
 });
 
 test('no technician or no destination pin: no vehicle, no lookup (unchanged)', async () => {

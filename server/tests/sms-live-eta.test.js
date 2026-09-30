@@ -306,16 +306,19 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
   });
   // Codex round-24 P2: tech_status has no device identity, so the resolver hands
   // the lookup the technician row's last-edit time as a floor for cached fixes.
-  test('the cached-fix floor is the technician row\'s last edit; an unreadable edit time bypasses the cache entirely', async () => {
+  test('the cached-fix floor is the tracker-mapping change time; NULL = no known remap = no cutoff; a present-but-unreadable value bypasses the cache', async () => {
     process.env[GATE] = 'true';
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
     calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
-    const edited = '2026-09-30T10:00:00.000Z';
-    await resolveLiveEtaFact(baseRow({ tech_updated_at: edited, tech_bouncie_imei: 'DEV-A' }), baseCustomer());
-    expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBe(edited);
+    const changed = '2026-09-30T10:00:00.000Z';
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: changed, tech_bouncie_imei: 'DEV-A' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBe(changed);
+    // Round 35: an ordinary technician edit (name/phone/payroll) never sets a cutoff — the row has no remap time.
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: null, tech_bouncie_imei: 'DEV-B' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls[1][0].cachedNotBefore).toBeNull();
     const before = Date.now();
-    await resolveLiveEtaFact(baseRow({ tech_updated_at: undefined, tech_bouncie_imei: 'DEV-B' }), baseCustomer());
-    const floor = resolveFreshTechPosition.mock.calls[1][0].cachedNotBefore;
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: 'garbage', tech_bouncie_imei: 'DEV-C' }), baseCustomer());
+    const floor = resolveFreshTechPosition.mock.calls[2][0].cachedNotBefore;
     expect(floor).toBeInstanceOf(Date);
     expect(floor.getTime()).toBeGreaterThanOrEqual(before);
   });
@@ -324,11 +327,11 @@ describe('resolveLiveEtaFact — cross-request memo (Codex round-4 P2, PR #5334)
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
     calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6 });
     const edited = '2026-09-30T10:00:00.000Z';
-    const fact = await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_updated_at: edited }, { lat: 27.4, lng: -82.5 });
+    const fact = await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: edited }, { lat: 27.4, lng: -82.5 });
     expect(fact.minutes).toBe(6);
     expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({ techId: 'tech-1', bouncieImei: 'DEV-A', cachedNotBefore: edited }));
     calculateBoundedTrackingEta.mockResolvedValue({ ...ETA_RESULT, minutes: 6, source: 'haversine' });
-    expect(await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_updated_at: edited }, { lat: 27.4, lng: -82.5 })).toBeNull();
+    expect(await resolveLiveEtaMinutesUncached({ technician_id: 'tech-1', tech_bouncie_imei: 'DEV-A', tech_mapping_changed_at: edited }, { lat: 27.4, lng: -82.5 })).toBeNull();
   });
   test('the group and snapshot carry the fix timestamp', () => {
     const today = require('../utils/datetime-et').etDateString();
@@ -1940,6 +1943,52 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-36 P2s (PR #5334): coordinated predicates and past-tense route history.
+describe('round 36 P2s: subject carried across coordinated predicates; past-tense route history', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "The technician isn't there yet, but is on the way.", "The technician hasn't arrived, but is en route.", "He isn't here yet and is running late.",
+    "The tech isn't at your home yet, though is nearby.", "We aren't there yet, but are on our way.",
+  ])('%p: the second predicate keeps the subject, so it is a live status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('a recorded tech name is carried the same way; another name is not', () => {
+    expect(bodyMentionsArrival("Sam isn't there yet, but is on the way.", { techNames: ['Sam'] })).toBe(true);
+    expect(bodyMentionsArrival("Dana isn't there yet, but is on the way.", { techNames: ['Sam'] })).toBe(false);
+  });
+  test.each([
+    "The tech is not on the way and is not coming today.", "Your tech is on the way and we'll follow up tomorrow.".replace('on the way and', 'ready and'),
+    'Your receipt is on the way and is due Friday.', "The tech is fine, and is happy to help.",
+  ])('%p: still not a live route claim (negated conjunct / new subject / non-technician subject)', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+  });
+  test.each([
+    'The technician was on the way earlier.', 'The tech was en route and had been running late.', 'They were on the way an hour ago.',
+  ])('%p is past-tense route history, not a current claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('"was on the way earlier, but has now arrived": no current en-route claim, but a completed-arrival claim', () => {
+    const t = 'The technician was on the way earlier, but has now arrived.';
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyClaimsCompletedArrival('The technician has now arrived.')).toBe(true);
+    expect(bodyClaimsCompletedArrival('Sam was on the way earlier, but has now arrived.', { techNames: ['Sam'] })).toBe(true);
+  });
+  test('present-perfect continuing route ("has been on the way") is still current', () => {
+    expect(bodyMentionsArrival('The technician has been on the way for 10 minutes.')).toBe(true);
+  });
+  test('at draft time an on-site fact accepts "was on the way earlier, but has now arrived" and rejects a current on-the-way', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      const facts = 'Quarterly Pest TODAY, LIVE STATUS: tech marked on site at this visit';
+      expect(validateLiveEtaMinutes({ reply: 'The technician was on the way earlier, but has now arrived.', factsBlock: facts }).ok).toBe(true);
+      expect(validateLiveEtaMinutes({ reply: "The technician isn't there yet, but is on the way.", factsBlock: facts }).ok).toBe(false);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+});
+
 // Codex round-35 P2 (PR #5334): route wording is authorized by an EN-ROUTE fact only.
 describe('round 35 P2: on-site facts authorize only arrived/on-site wording', () => {
   const onSiteFacts = 'Quarterly Pest TODAY, LIVE STATUS: tech marked on site at this visit';
@@ -1972,12 +2021,17 @@ describe('round 35 P2: on-site facts authorize only arrived/on-site wording', ()
   test('gate off: the validator never fires', () => {
     expect(validateLiveEtaMinutes({ reply: 'Your tech is on the way.', factsBlock: onSiteFacts }).ok).toBe(true);
   });
-  test('a null mapping timestamp is unreadable: it bypasses the cache (the resolver never passes a null floor)', async () => {
+  test('IMEI change -> the cutoff bypasses an older cached fix; a name/phone edit (updated_at only) leaves the cache trusted', async () => {
     process.env[GATE] = 'true';
     resolveFreshTechPosition.mockResolvedValue(FRESH_POSITION);
     calculateBoundedTrackingEta.mockResolvedValue(ETA_RESULT);
-    await resolveLiveEtaFact(baseRow({ tech_updated_at: null, tech_bouncie_imei: 'DEV-N' }), baseCustomer());
-    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].cachedNotBefore).toBeInstanceOf(Date);
+    // The row carries an unrelated restamped technicians.updated_at but no remap time: no cutoff.
+    await resolveLiveEtaFact(baseRow({ tech_updated_at: new Date().toISOString(), tech_mapping_changed_at: null, tech_bouncie_imei: 'DEV-N' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].cachedNotBefore).toBeNull();
+    // After an IMEI change the cutoff is the change time.
+    const changed = new Date().toISOString();
+    await resolveLiveEtaFact(baseRow({ tech_mapping_changed_at: changed, tech_bouncie_imei: 'DEV-M' }), baseCustomer());
+    expect(resolveFreshTechPosition.mock.calls.at(-1)[0].cachedNotBefore).toBe(changed);
   });
 });
 

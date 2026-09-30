@@ -1628,7 +1628,7 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       const FIX = Date.parse('2026-09-29T14:28:00.000Z');
       const fDest = { ...dest, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } };
       const fSnap = () => snap({ fixAtMs: FIX, destinations: [fDest] });
-      const TECH = { bouncie_imei: '356938035643809', updated_at: new Date('2026-09-01T00:00:00Z') };
+      const TECH = { bouncie_imei: '356938035643809', bouncie_imei_changed_at: new Date('2026-09-01T00:00:00Z') };
       const dbWithStatus = (rows, status, tech = TECH) => (table) => {
         if (table === 'tech_status') return { where: () => ({ first: async () => status }) };
         if (table === 'technicians') return { where: () => ({ first: async () => tech }) };
@@ -1646,7 +1646,7 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
         resolveLiveEtaMinutesUncached.mockResolvedValue({ minutes: 9, fixAtMs: FIX + 30e3 });
         expect(await runF({ location_updated_at: new Date(FIX + 30e3) })).toBeNull();
         expect(resolveLiveEtaMinutesUncached).toHaveBeenCalledWith(
-          expect.objectContaining({ technician_id: 'tech-1', tech_bouncie_imei: '356938035643809', tech_updated_at: TECH.updated_at }),
+          expect.objectContaining({ technician_id: 'tech-1', tech_bouncie_imei: '356938035643809', tech_mapping_changed_at: TECH.bouncie_imei_changed_at }),
           { lat: 27.4, lng: -82.5 },
         );
       });
@@ -1924,5 +1924,29 @@ describe('plural route claims bind every snapshot entry, link or not', () => {
   test('a plural en-route claim ignores an on-site entry (only en-route stops can be on the way)', async () => {
     const mixed = { entries: [entry('svc-1', 'tok-1', { state: 'on_property' }), entry('svc-2', 'tok-2')] };
     expect(await run('Your techs are on the way.', [row('svc-1', 'tok-1', { status: 'on_site', track_state: 'on_property' }), row('svc-2', 'tok-2')], mixed)).toBe(null);
+  });
+});
+
+// Codex round-36 P2s (PR #5334): coordinated predicates / past-tense history at send time.
+describe('coordinated predicates and route history at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const snapshot = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route' }] };
+  const rows = (extra) => [{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const done = { status: 'completed', track_state: 'completed' };
+  const run = (body, extra) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows(extra)) });
+  test.each(["The technician isn't there yet, but is on the way.", "The technician hasn't arrived, but is en route."])('%p is rechecked: blocked once the visit is done', async (body) => {
+    expect(await run(body)).toBeNull();
+    expect(await run(body, done)).toBe('eta_claim_no_longer_en_route');
+  });
+  test('past-tense route history is not a live claim (sends even on a done visit)', async () => {
+    expect(await run('The technician was on the way earlier.', done)).toBeNull();
+  });
+  test('"was on the way earlier, but has now arrived" needs the on-property state', async () => {
+    const body = 'The technician was on the way earlier, but has now arrived.';
+    expect(await run(body)).toBe('eta_claim_no_longer_en_route'); // still en route, not on property
+    expect(await run(body, { status: 'on_site', track_state: 'on_property' })).toBeNull();
   });
 });
