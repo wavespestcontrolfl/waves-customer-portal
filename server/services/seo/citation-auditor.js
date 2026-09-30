@@ -174,6 +174,14 @@ function addressStrings(address) {
   return { parsed, raw, display };
 }
 
+// A JSON-LD text value as stated: string, first-class array or {"@value"}; anything else is
+// kept as its JSON so it is still judged (and fails) rather than read as unstated.
+function statedText(v) {
+  const one = Array.isArray(v) ? v.map((x) => (x && x['@value']) ?? x).filter((x) => x != null && String(x).trim() !== '').join(' ') : (v && typeof v === 'object' && '@value' in v ? v['@value'] : v);
+  if (one == null || (typeof one !== 'object' && String(one).trim() === '')) return null;
+  return typeof one === 'object' ? JSON.stringify(one) : String(one).trim();
+}
+
 // What the page says. `entity` is the Waves JSON-LD entity's own stated fields (null when the
 // page has none); `textPhones` is every phone in the visible text and tel: links.
 function extractNap(html) {
@@ -185,9 +193,13 @@ function extractNap(html) {
   }
   const title = (String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
   const node = wavesEntity(html);
+  // "Stated" is tracked apart from "parsed": a field the entity gives but we cannot read is a
+  // stated field that fails, never an unstated one that page text may fill in.
+  const rawPhones = [].concat(node ? node.telephone ?? [] : []).map((p) => String(p).trim()).filter(Boolean);
   const entity = node && {
-    name: node.name || null,
-    phones: [].concat(node.telephone || []).map(phoneKey).filter((k) => k.length === 10),
+    name: statedText(node.name),
+    rawPhones,
+    phones: rawPhones.map(phoneKey).filter((k) => k.length === 10),
     address: addressStrings(node.address),
   };
   return { text, textPhones: [...textPhones], title: title.replace(/\s+/g, ' ').trim(), entity };
@@ -211,12 +223,13 @@ function judgeAddress(nap, office) {
   if (a) {
     const { parsed, raw } = a;
     const mismatches = [];
-    if (parsed.street && parsed.street !== office.street) mismatches.push({ field: 'address', expected: office.address, seen: a.display });
-    if (parsed.city && !office.cities.includes(parsed.city)) mismatches.push({ field: 'city', expected: office.cityLabel, seen: raw.city });
-    if (parsed.postal && parsed.postal !== office.postal) mismatches.push({ field: 'postal_code', expected: office.postal, seen: raw.postal });
-    if (parsed.region && parsed.region !== office.region) mismatches.push({ field: 'region', expected: 'FL', seen: raw.region });
+    const stated = (v) => v != null && String(v).trim() !== ''; // stated, even if it did not parse
+    if (stated(raw.street) && parsed.street !== office.street) mismatches.push({ field: 'address', expected: office.address, seen: a.display });
+    if (stated(raw.city) && !office.cities.includes(parsed.city)) mismatches.push({ field: 'city', expected: office.cityLabel, seen: raw.city });
+    if (stated(raw.postal) && parsed.postal !== office.postal) mismatches.push({ field: 'postal_code', expected: office.postal, seen: raw.postal });
+    if (stated(raw.region) && parsed.region !== office.region) mismatches.push({ field: 'region', expected: 'FL', seen: raw.region });
     if (mismatches.length) return { confirmed: false, checked: true, mismatches, unconfirmed: null, observed: a.display };
-    if (parsed.street) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: a.display };
+    if (stated(raw.street)) return { confirmed: true, checked: true, mismatches, unconfirmed: null, observed: a.display };
   }
   const seen = nap.text.match(ADDRESS_LIKE_RE) || [];
   const normalizedText = normalizeStreet(nap.text);
@@ -250,16 +263,18 @@ function classifyListing(page, candidates) {
   // visible text. With several candidate offices, judge against the one whose phone matched
   // (else the first, the default office).
   const { entity } = nap;
-  const phones = entity && entity.phones.length ? entity.phones : nap.textPhones;
+  const phoneStated = Boolean(entity && entity.rawPhones.length);
+  const phones = phoneStated ? entity.phones : nap.textPhones;
   const expected = candidates.find((c) => phones.includes(c.phoneKey)) || candidates[0];
   const nameText = entity && entity.name ? entity.name : `${nap.text} ${nap.title}`;
   const namePresent = alnum(nameText).includes(alnum(expected.name));
-  if (!namePresent && !phones.length) return blocked('no_nap_found');
+  if (!namePresent && !phones.length && !phoneStated) return blocked('no_nap_found');
 
   const mismatches = [];
   if (!namePresent) mismatches.push({ field: 'name', expected: expected.name, seen: (entity && entity.name) || nap.title || null });
   const phoneOk = phones.includes(expected.phoneKey);
-  if (phones.length && !phoneOk) mismatches.push({ field: 'phone', expected: candidates.map((c) => c.phone).join(' or '), seen: phones.slice(0, 3).map(fmtPhone) });
+  if (phoneStated && !phones.length) mismatches.push({ field: 'phone', expected: candidates.map((c) => c.phone).join(' or '), seen: entity.rawPhones.slice(0, 3) });
+  else if (phones.length && !phoneOk) mismatches.push({ field: 'phone', expected: candidates.map((c) => c.phone).join(' or '), seen: phones.slice(0, 3).map(fmtPhone) });
 
   const address = judgeAddress(nap, expected);
   mismatches.push(...address.mismatches);
@@ -267,7 +282,7 @@ function classifyListing(page, candidates) {
   // Stored values are what the page showed, never the office's canonical values.
   const observed = {
     nap_name: (entity && entity.name) || (nap.text.match(BRAND_RE) || [null])[0],
-    nap_phone: phones.length ? fmtPhone(phoneOk ? expected.phoneKey : phones[0]) : null,
+    nap_phone: phones.length ? fmtPhone(phoneOk ? expected.phoneKey : phones[0]) : (phoneStated ? entity.rawPhones[0] : null),
     nap_address: address.observed,
   };
   const base = { http_status: page.status, final_url: page.finalUrl, office: expected.locationId, address_checked: address.checked };

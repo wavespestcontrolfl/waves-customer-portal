@@ -268,6 +268,40 @@ describe('classifyListing', () => {
         expect(wrong.detail.mismatches.map((m) => m.field)).toEqual(['phone']);
       });
 
+      describe('stated vs parsed: a stated field we cannot read fails, it is never treated as unstated', () => {
+        test("telephone '941-555-014' (9 digits) with the correct number in the footer -> mismatched on phone, raw value seen", () => {
+          const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: '941-555-014' }, footer);
+          expect(r.status).toBe('mismatched');
+          expect(r.detail.mismatches).toEqual([{ field: 'phone', expected: WAVES_LOCATIONS.map((l) => l.phone).join(' or '), seen: ['941-555-014'] }]);
+          expect(r.nap.nap_phone).toBe('941-555-014');
+        });
+
+        test('an entity with NO telephone (absent, empty or blank) and the right number in the text is still verified', () => {
+          for (const telephone of [undefined, '', '  ', []]) {
+            expect(listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', ...(telephone === undefined ? {} : { telephone }) }, footer).status).toBe('verified');
+          }
+        });
+
+        test('an unparseable telephone beside a correct one is not a mismatch (ours is stated)', () => {
+          expect(listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: ['n/a', BRAND.phone] }, footer).status).toBe('verified');
+        });
+
+        test('an unparseable postal code or street fails; a blank one is unstated', () => {
+          const bad = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '13649 Luxe Ave', postalCode: '3421' } }, footer);
+          expect(bad.detail.mismatches).toEqual([{ field: 'postal_code', expected: '34211', seen: '3421' }]);
+          const noStreet = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: '#' } }, footer);
+          expect(noStreet.detail.mismatches.map((m) => m.field)).toEqual(['address']);
+          const blank = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, address: { streetAddress: ' ', postalCode: '' } }, footer);
+          expect(blank.status).toBe('verified'); // street unstated -> the footer's full address confirms
+        });
+
+        test('a name given as an object without a usable value fails; {"@value"} and arrays are read', () => {
+          expect(listing({ '@type': 'LocalBusiness', name: { foo: 1 }, telephone: BRAND.phone }, footer).detail.mismatches.map((m) => m.field)).toEqual(['name']);
+          expect(listing({ '@type': 'LocalBusiness', name: { '@value': 'Waves Pest Control' }, telephone: BRAND.phone }, footer).status).toBe('verified');
+          expect(listing({ '@type': 'LocalBusiness', name: ['Waves Pest Control', 'WPC'], telephone: BRAND.phone }, footer).status).toBe('verified');
+        });
+      });
+
       test('unassigned brand row: entity phone matches Venice but the address matches Sarasota -> mismatched against Venice', () => {
         const r = listing({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: VENICE.phone, address: { streetAddress: '1450 Pine Warbler Pl', addressLocality: 'Sarasota' } }, `<footer>${SARASOTA.address}</footer>`);
         expect(r.status).toBe('mismatched');
