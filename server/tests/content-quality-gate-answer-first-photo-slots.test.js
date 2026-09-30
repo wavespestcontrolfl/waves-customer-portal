@@ -908,6 +908,8 @@ describe('verdict box with a JSX spread fails closed', () => {
     ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." {...{recommendation: "Call today."}} />'],
     ['<BottomLineBox {...{verdict: "Yes, they sting."}} recommendation="Seal gaps." />'],
     ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps." { /* c */ ...props} />'],
+    ['<BottomLineBox verdict="Yes, they sting." recommendation="Seal gaps."{...{recommendation: "Call today."}} />'],
+    ['<BottomLineBox verdict={"Yes, they sting."}{...props} recommendation="Seal gaps." />'],
   ])('%s', (tag) => {
     const body = `${tag}\n\nMore.`;
     expect(checkCtaAfterVerdictBox({ frontmatter: { post_type: 'diagnostic' }, body }, brief()))

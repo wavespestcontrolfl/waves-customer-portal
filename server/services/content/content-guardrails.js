@@ -226,7 +226,10 @@ function hasAttrSpreadAfter(attrs, from = 0) {
     const c = s[i];
     if (c === '"' || c === "'" || c === '`') { i += 1; while (i < s.length && s[i] !== c) { if (s[i] === '\\') i += 1; i += 1; } continue; }
     if (c !== '{') continue;
-    const attrPos = i === 0 || /\s/.test(s[i - 1]);
+    // Attribute position unless it is a value (`name={…}`): JSX needs no
+    // whitespace before a spread (`verdict="x"{...y}`), and quoted values
+    // and expressions are skipped whole above (#5380 r1).
+    const attrPos = !/=\s*$/.test(s.slice(0, i));
     if (attrPos && /^\{(?:\s|\/\*[\s\S]*?\*\/)*\.\.\./.test(s.slice(i))) return true;
     const e = closeOfExpressionAt(s, i);
     if (e < 0) return true;
