@@ -54,6 +54,18 @@ describe('isNeverAttemptedHoldDeferral', () => {
     expect(isNeverAttemptedHoldDeferral({ ...collected, stripe_payment_intent_id: 'pi_synthetic' })).toBe(false);
   });
 
+  test('a placeholder the retry sweep resolved as absorbed by annual prepay (self-superseded) is still a placeholder', () => {
+    const absorbed = holdRow({
+      id: 'pl-1', retry_count: 0, next_retry_at: null, superseded_by_payment_id: 'pl-1',
+      metadata: { deferred_reason: 'collection_hold', deferred_resolution: 'absorbed_annual_prepay' },
+    });
+    expect(isNeverAttemptedHoldDeferral(absorbed)).toBe(true);
+    // Without the resolution stamp a self-superseded row is the orphan-charge marker: visible.
+    expect(isNeverAttemptedHoldDeferral({ ...absorbed, metadata: { deferred_reason: 'collection_hold' } })).toBe(false);
+    // The stamp alone never hides a different reason.
+    expect(isNeverAttemptedHoldDeferral({ ...absorbed, metadata: { deferred_reason: 'lock_contention', deferred_resolution: 'absorbed_annual_prepay' } })).toBe(false);
+  });
+
   test('a real attempt, a disarmed row, or another reason still counts as a failure', () => {
     expect(isNeverAttemptedHoldDeferral(holdRow({ stripe_payment_intent_id: 'pi_synthetic' }))).toBe(false);
     expect(isNeverAttemptedHoldDeferral(holdRow({ retry_count: 1 }))).toBe(false);
@@ -72,7 +84,8 @@ describe('excludeNeverAttemptedHoldDeferrals', () => {
     expect(excludeNeverAttemptedHoldDeferrals(qb)).toBe(qb);
     excludeNeverAttemptedHoldDeferrals(qb, 'p');
     expect(calls[0][0]).toContain("COALESCE(payments.metadata->>'deferred_reason', '') = ?");
-    expect(calls[0][1]).toEqual(['collection_hold']);
+    expect(calls[0][1]).toEqual(['collection_hold', 'absorbed_annual_prepay']);
+    expect(calls[0][0]).toContain("COALESCE(payments.metadata->>'deferred_resolution', '') = ?");
     expect(calls[1][0]).toContain('p.stripe_payment_intent_id IS NULL');
   });
 });
