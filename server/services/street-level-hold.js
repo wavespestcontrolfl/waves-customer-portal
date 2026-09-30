@@ -136,4 +136,43 @@ async function hasOwedFollowUpForStreetLevelVisit(conn, visit) {
   return !!owed;
 }
 
-module.exports = { hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };
+// The other ordering: a cancellation COMPENSATED after the close (the tech went live,
+// so cancellation-processor restores the prior status through the shared transition)
+// must bring the hold's review card back. On a terminal -> live transition, reopen the
+// latest street-level card for the visit and recompute the call's review_status, under
+// the per-call lock, only while the visit is an unconfirmed hold again. Idempotent and
+// order-independent with closeHoldCardForEndedVisit (which rechecks the live status).
+async function reopenHoldCardForRestoredVisit(visitId, conn = db) {
+  try {
+    const visit = await conn('scheduled_services').where({ id: visitId, source_action: 'voice_agent' }).first('id', 'source_call_log_id');
+    if (!visit?.source_call_log_id) return false;
+    const card = await findStreetLevelHoldCard(conn, { callLogId: visit.source_call_log_id, visitId });
+    if (!card || ['open', 'in_progress'].includes(card.status)) return false;
+    const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
+    return await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, visit.source_call_log_id);
+      const live = await trx('scheduled_services').where({ id: visitId }).forUpdate().first('status', 'customer_confirmed');
+      if (!live || live.customer_confirmed || ['cancelled', 'skipped', 'rescheduled'].includes(String(live.status))) return false;
+      // The partial unique index allows one open card per call and reason.
+      const standing = await trx('triage_items')
+        .where({ call_log_id: visit.source_call_log_id, reason_code: 'outbound_booking_review' })
+        .whereIn('status', ['open', 'in_progress'])
+        .first('id');
+      if (standing) return false;
+      const reopened = await trx('triage_items')
+        .where({ id: card.id })
+        .whereIn('status', ['resolved', 'dismissed'])
+        .update({
+          status: 'open', resolved_at: null, resolution_source: null, updated_at: new Date(),
+          resolution_note: 'Reopened: the visit was restored, so the address hold applies again.',
+        });
+      await syncCallReviewStatus(trx, visit.source_call_log_id);
+      return reopened > 0;
+    });
+  } catch (err) {
+    logger.warn(`[street-level-hold] reopening the hold card for ${visitId} failed: ${err.code || err.name || 'error'}`);
+    return false;
+  }
+}
+
+module.exports = { reopenHoldCardForRestoredVisit, hasOwedFollowUpForStreetLevelVisit, heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit, refreshHoldFollowUpPlan };

@@ -2,7 +2,7 @@
 // closes with a cancelled / skipped visit, and an unconfirmed hold takes no
 // self-book daily-cap capacity. Synthetic data only.
 const fs = require('fs');
-const { closeHoldCardForEndedVisit, heldVisitSubquery, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit, isStreetLevelHoldVisit } = require('../services/street-level-hold');
+const { reopenHoldCardForRestoredVisit, closeHoldCardForEndedVisit, heldVisitSubquery, refreshHoldFollowUpPlan, hasOwedFollowUpForStreetLevelVisit, isStreetLevelHoldVisit } = require('../services/street-level-hold');
 
 const card = (status = 'open') => ({ id: 't1', status, payload: { street_level_address: true, scheduled_service_id: 'visit-1' }, summary: 'x' });
 
@@ -188,5 +188,78 @@ describe('r14: owned follow-up, review status after rejection, bell recheck, voi
     expect(block).toContain(".where('window_start', windowStart)");
     // Source action unchanged (owner ruling 2026-09-30).
     expect(s).toContain('source_action: VOICE_AGENT_BOOKING_SOURCE_ACTION,');
+  });
+});
+
+describe('r16: order-independent close / reopen around a compensated cancellation', () => {
+  // A stateful fake: one visit, one street-level card, one call. Both helpers run against it.
+  const makeWorld = ({ visitStatus = 'pending', cardStatus = 'open', confirmed = false, otherOpen = false } = {}) => {
+    const w = { visit: { id: 'v1', source_call_log_id: 'c1', source_action: 'voice_agent', status: visitStatus, customer_confirmed: confirmed },
+      card: { id: 't1', status: cardStatus, summary: 'x', payload: { street_level_address: true, scheduled_service_id: 'v1' } }, review: 'open', otherOpen, locked: 0 };
+    const conn = (table) => {
+      const q = {
+        where(arg) { q._where = arg; return q; }, whereIn() { return q; }, whereRaw() { return q; }, orderBy() { return q; }, forUpdate() { q._fu = true; return q; },
+        count() { q._count = true; return q; },
+        first: async () => {
+          if (table === 'scheduled_services') return q._fu ? { status: w.visit.status, customer_confirmed: w.visit.customer_confirmed } : w.visit;
+          if (q._count) return { n: (['open', 'in_progress'].includes(w.card.status) ? 1 : 0) + (w.otherOpen ? 1 : 0) };
+          if (q._where && q._where.reason_code && !q._where.call_log_id === false && q._standing) return undefined;
+          return w.card;
+        },
+        update: async (u) => {
+          if (table === 'triage_items') { Object.assign(w.card, u); return 1; }
+          if (table === 'call_log') { w.review = u.review_status; return 1; }
+          return 0;
+        },
+      };
+      // The "standing open card" probe (whereIn on status before first) must see the card's live status.
+      const wi = q.whereIn; q.whereIn = (...a) => { q._standing = true; return wi(...a); };
+      const f = q.first; q.first = async () => { if (table === 'triage_items' && q._standing && !q._count) return ['open', 'in_progress'].includes(w.card.status) ? w.card : undefined; return f(); };
+      return q;
+    };
+    conn.raw = async () => { w.locked += 1; return { rows: [{}] }; };
+    conn.transaction = async (fn) => fn(conn);
+    return { w, conn };
+  };
+
+  test('ordering A: the close ran first (visit still cancelled), then the restoration reopens the card and recomputes review_status', async () => {
+    const { w, conn } = makeWorld({ visitStatus: 'cancelled', cardStatus: 'resolved' });
+    w.review = 'resolved';
+    w.visit.status = 'pending';                      // the compensation restored the prior status
+    expect(await reopenHoldCardForRestoredVisit('v1', conn)).toBe(true);
+    expect(w.card.status).toBe('open');
+    expect(w.card.resolved_at).toBeNull();
+    expect(w.card.resolution_note).toContain('Reopened');
+    expect(w.review).toBe('open');
+    expect(w.locked).toBeGreaterThan(0);
+  });
+
+  test('ordering B: the restoration ran first, so the close finds the visit live and leaves the card open', async () => {
+    const { w, conn } = makeWorld({ visitStatus: 'pending', cardStatus: 'open' });
+    expect(await closeHoldCardForEndedVisit('v1', 'cancelled', conn)).toBe(false);
+    expect(w.card.status).toBe('open');
+    // ...and a reopen then has nothing to do.
+    expect(await reopenHoldCardForRestoredVisit('v1', conn)).toBe(false);
+  });
+
+  test('a restored visit that is confirmed, ended again, or already has an open card does not reopen; non-holds are untouched', async () => {
+    for (const opts of [{ confirmed: true }, { visitStatus: 'cancelled' }, { visitStatus: 'skipped' }]) {
+      const { w, conn } = makeWorld({ cardStatus: 'resolved', ...opts });
+      expect(await reopenHoldCardForRestoredVisit('v1', conn)).toBe(false);
+      expect(w.card.status).toBe('resolved');
+    }
+    const plain = makeWorld({ cardStatus: 'resolved' });
+    plain.w.visit.source_action = 'ai_call_pipeline';
+    plain.conn = (() => { const c = plain.conn; return (t) => { const q = c(t); const fst = q.first; q.first = async () => (t === 'scheduled_services' && !q._fu ? null : fst()); return q; }; })();
+    expect(await reopenHoldCardForRestoredVisit('v1', plain.conn)).toBe(false);
+  });
+
+  test('the shared transition wires both directions: terminal -> live reopens, live -> terminal closes', () => {
+    const s = fs.readFileSync(require.resolve('../services/job-status.js'), 'utf8');
+    expect(s).toContain("if (['cancelled', 'skipped'].includes(String(fromStatus || ''))) {\n        void require('./street-level-hold').reopenHoldCardForRestoredVisit(jobId)");
+    expect(s).toContain("void require('./street-level-hold').closeHoldCardForEndedVisit(jobId, toStatus)");
+    // The compensation goes through that shared point.
+    const cp = fs.readFileSync(require.resolve('../services/cancellation-processor.js'), 'utf8');
+    expect(cp).toContain("fromStatus: 'cancelled',\n              toStatus: svc.status,");
   });
 });

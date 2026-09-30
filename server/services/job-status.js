@@ -984,6 +984,14 @@ async function transitionJobStatus({
       void handleFollowupChildRevival({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up revival hook failed for ${jobId}: ${e.message}`);
       });
+      // A cancelled / skipped street-level hold restored to a live status (a compensated
+      // cancellation) gets its review card back — the close-on-cancel may have run first.
+      // Gated on the card signal inside the helper; a no-op for every other visit.
+      if (['cancelled', 'skipped'].includes(String(fromStatus || ''))) {
+        void require('./street-level-hold').reopenHoldCardForRestoredVisit(jobId).catch((e) => {
+          logger.warn(`[job-status] street-level hold reopen failed for ${jobId}: ${e.message}`);
+        });
+      }
       // Visit-group seam, reverse direction (codex #3590 r6, narrowed
       // r7): ONLY a compensated terminal reversal regroups — the terminal
       // hook may have detached the row (and dissolved its visit), so

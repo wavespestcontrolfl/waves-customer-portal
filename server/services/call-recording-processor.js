@@ -1796,8 +1796,7 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
     customer_name: knownCaller.name || null,
   };
 }
-// The one admin bell for a held visit (NotificationService.notifyAdmin,
-// bell:true, deduped on the visit id). No existing bell fires for a pending
+// The one admin bell for a held visit (raiseAdminAlert, bell:true, deduped on the visit id). No existing bell fires for a pending
 // office-review call booking (voice-agent rows file an outbound_booking_review
 // triage card instead), so this is the only one.
 // The dispatch schedule link for a held visit: ?appointment opens the visit,
@@ -1808,29 +1807,50 @@ function streetLevelVisitLink(visitId, visitDate) {
 function streetLevelVisitWhen(scheduledDate, windowStart) {
   return [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
 }
+// "Mon Oct 5, 1 PM" — a weekday and short date a person would say (docs/admin-notifications.md
+// keeps ISO dates and 24-hour clock strings out of a headline or a why).
+function spokenVisitWhen(scheduledDate, windowStart) {
+  const iso = dateOnlyISO(scheduledDate);
+  const parts = [];
+  if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    parts.push(new Date(`${iso}T12:00:00Z`).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' }).replace(',', ''));
+  }
+  const m = String(windowStart || '').match(/^(\d{1,2}):(\d{2})/);
+  if (m) {
+    const h = Number(m[1]);
+    parts.push(`${h % 12 || 12}${m[2] === '00' ? '' : `:${m[2]}`} ${h >= 12 ? 'PM' : 'AM'}`);
+  }
+  return parts.join(', ');
+}
+// The one admin bell for a held visit, raised through raiseAdminAlert
+// (docs/admin-notifications.md): headline "Schedule — Confirm address before dispatch",
+// a one-sentence why of at most 110 characters (customer, address, when, and that Google
+// matched only the street). The address gives way first when the line runs long.
 function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDate, windowStart }) {
   const visitDate = dateOnlyISO(scheduledDate);
-  const when = [visitDate, windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
+  const when = spokenVisitWhen(scheduledDate, windowStart);
   const who = hold.customer_name || 'New lead';
-  // Owner ruling 2026-09-30: headline "Area — what to do" (<= 60), body "why" (<= 110).
-  // The address gives way first when the line runs long; the tail never does.
-  const tail = '. Google matched the street only.';
+  const tail = '; Google matched the street only.';
   const clip = (text, room) => (room <= 0 ? '' : text.length <= room ? text : `${text.slice(0, Math.max(room - 1, 0)).trimEnd()}…`);
   const whenPart = when ? `, ${when}` : '';
   const room = 110 - tail.length - whenPart.length - `${who}, `.length;
-  let body = `${who}, ${clip(hold.address_on_file, room)}${whenPart}${tail}`;
-  if (body.length > 110) body = `${clip(who, 110 - tail.length - whenPart.length)}${whenPart}${tail}`.slice(0, 110);
+  let why = `${who}, ${clip(hold.address_on_file, room)}${whenPart}${tail}`;
+  if (why.length > 110) why = `${clip(who, 110 - tail.length - whenPart.length)}${whenPart}${tail}`.slice(0, 110);
+  const link = streetLevelVisitLink(visitId, visitDate);
   return {
     category: 'schedule',
     title: 'Schedule — Confirm address before dispatch',
-    body,
+    body: why,
+    spec: {
+      area: 'Schedule', action: 'Confirm address before dispatch', why, severity: 'needs-you', link,
+      subject: { type: 'visit', id: String(visitId) }, doneWhen: 'visit_confirmed', who: 'person',
+    },
     opts: {
       icon: '📍',
-      // Dispatch schedule tab: ?appointment opens the visit, ?date selects its day.
-      link: streetLevelVisitLink(visitId, visitDate),
+      link,
       bell: true,
       dedupeKey: `street-level-address-hold:${visitId}`,
-      // Ids only: the name and address are in the body the owner asked for; the visit link carries the rest.
+      // Ids only: the name and address are in the why the owner asked for; the visit link carries the rest.
       metadata: { scheduledServiceId: visitId, callSid },
     },
   };
@@ -1849,7 +1869,7 @@ async function ringStreetLevelHoldBell({ hold, visit, callSid }) {
     const alert = buildStreetLevelHoldAlert({
       hold, visitId: visit.id, callSid, scheduledDate: visit.scheduled_date, windowStart: visit.window_start,
     });
-    await require('./notification-service').notifyAdmin(alert.category, alert.title, alert.body, alert.opts);
+    await require('./admin-alert-compose').raiseAdminAlert(alert.category, alert.spec, alert.opts);
     return true;
   } catch (notifyErr) {
     logger.warn(`[call-proc] street-level confirm-address admin bell failed for ${maskSid(callSid)}: ${notifyErr.code || notifyErr.name || 'error'}`);

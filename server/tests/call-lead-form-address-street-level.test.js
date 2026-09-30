@@ -499,13 +499,17 @@ describe('office-review pending path (owner ruling 2026-09-30)', () => {
     expect(a.title).toBe('Schedule — Confirm address before dispatch');
     expect(a.title.length).toBeLessThanOrEqual(60);
     expect(a.body.length).toBeLessThanOrEqual(110);
-    expect(a.body).toMatch(/Google matched the street only\.$/);
-    expect(a.body).toContain('Form Lead, 1234 Sample Newbuild Trl, Parrish, FL, 34219, 2026-10-05 13:00');
+    expect(a.body).toMatch(/; Google matched the street only\.$/);
+    expect(a.body).toContain('Form Lead, 1234 Sample Newbuild Trl, Parrish, FL, 34219, Mon Oct 5, 1 PM');
     expect(a.opts).toMatchObject({ bell: true, dedupeKey: 'street-level-address-hold:visit-9', link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=visit-9' });
     expect(a.opts.metadata).toMatchObject({ scheduledServiceId: 'visit-9', callSid: 'CA1' });
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-9' }).opts.dedupeKey).toBe(a.opts.dedupeKey);
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-10' }).opts.dedupeKey).not.toBe(a.opts.dedupeKey);
-    expect(src()).toMatch(/notifyAdmin\(alert\.category, alert\.title, alert\.body, alert\.opts\)/);
+    expect(src()).toContain('raiseAdminAlert(alert.category, alert.spec, alert.opts)');
+    // The spec passes the admin-notification rule (headline <= 60, one-sentence why <= 110, no ISO dates).
+    const { composeAdminAlert } = require('../services/admin-alert-compose');
+    expect(composeAdminAlert(a.spec)).toMatchObject({ headline: 'Schedule — Confirm address before dispatch', link: a.opts.link });
+    expect(a.spec).toMatchObject({ area: 'Schedule', severity: 'needs-you', subject: { type: 'visit', id: 'visit-9' }, doneWhen: 'visit_confirmed', who: 'person' });
   });
 });
 
@@ -586,7 +590,7 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     const a = buildStreetLevelHoldAlert({ hold, visitId: 'v1', scheduledDate: '2026-10-05', windowStart: '13:00:00' });
     expect(a.body.length).toBeLessThanOrEqual(110);
     expect(a.body).toContain('…');
-    expect(a.body).toMatch(/, 2026-10-05 13:00\. Google matched the street only\.$/);
+    expect(a.body).toMatch(/, Mon Oct 5, 1 PM; Google matched the street only\.$/);
     expect(a.body.startsWith('Form Lead With A Rather Long Synthetic Name, 1234')).toBe(true);
     // No visit time: still within budget.
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'v1' }).body.length).toBeLessThanOrEqual(110);
@@ -673,7 +677,7 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     const summary = s.slice(s.indexOf('const cardWhen = streetLevelVisitWhen'), at);
     expect(summary).toContain('Web-form address ');
     expect(summary).toContain('confirm, correct, or cancel the visit');
-    expect(s).toContain('link: streetLevelVisitLink(visitId, visitDate),');
+    expect(s).toContain('const link = streetLevelVisitLink(visitId, visitDate);');
   });
 
   test('r10/r12: an open street-level hold is call-level review state, raised only once the booking became the hold', () => {
