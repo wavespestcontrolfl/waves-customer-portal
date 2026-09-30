@@ -10581,6 +10581,17 @@ function LawnAssessmentCompletionBlock({
   );
 }
 
+// The one line a visit's shared property coverage describes. A combined
+// visit ("Lawn + Tree & Shrub") normalizes to one line while its raw type —
+// what the server classifies the frozen coverage from — names another; it
+// covers two areas, so it records no single shared coverage (null) and its
+// products and findings keep their own areas.
+function propertyAreaLineFor(service) {
+  const normalized = serviceLineFromType(service?.serviceType || service?.service_type || "");
+  const raw = service?.serviceTypeRaw ? serviceLineFromType(service.serviceTypeRaw) : normalized;
+  return raw === normalized ? normalized : null;
+}
+
 function serviceLineFromType(serviceType = "") {
   const text = String(serviceType || "").toLowerCase();
   if (/\bpalmetto\b/.test(text)) return "pest";
@@ -12322,6 +12333,10 @@ export function CompletionPanel({
   // visit area (propertyVisitArea / lawnAreaOverride) is kept as entered.
   const [propertyAreasRefreshToken, setPropertyAreasRefreshToken] = useState(0);
   const [propertyAreasRefreshing, setPropertyAreasRefreshing] = useState(false);
+  // The visit whose first area read has answered (data, or unavailable). Until
+  // then a restored draft's area-derived quantities are unreconciled, and a
+  // completion would go out with no version check at all.
+  const [propertyAreasSettledFor, setPropertyAreasSettledFor] = useState(null);
   const currentPropertyAreas = propertyAreas?.serviceId === service.id ? propertyAreas : null;
   const propertyAreasVisitRef = useRef(service.id);
   // The visit whose property areas answered "not available" (feature off,
@@ -13011,6 +13026,7 @@ export function CompletionPanel({
   // the dispatch payload embedded the registry schema slice for it.
   const typedFindingsSchema = service.findingsSchema || null;
   const findingsDisplaySchema = currentPropertyAreas && service.findingsSchema?.type === "tree_shrub"
+    && propertyAreaLineFor(service) === "tree_shrub"
     ? { ...service.findingsSchema, fields: service.findingsSchema.fields.filter(field => field.key !== "bed_sqft_serviced") }
     : service.findingsSchema || null;
   const isTypedFindings = !!(
@@ -13474,14 +13490,16 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
-  // Property areas classify the RAW service type, as the server snapshot does:
-  // a combined "Lawn + Tree & Shrub" visit normalizes to Tree & Shrub above
-  // but its persisted type (and so its frozen coverage) is lawn.
-  const propertyAreaLine = serviceLineFromType(service.serviceTypeRaw || serviceTypeForArea);
+  const propertyAreaLine = propertyAreaLineFor(service);
   const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
+  const propertyAreasBlocked = propertyAreasRefreshing || (!!propertyAreaKey && propertyAreasSettledFor !== service.id);
   const reviewedPropertyArea = currentPropertyAreas?.areas[propertyAreaKey];
+  // Coverage belongs to the property row AT its address: a restored draft's
+  // coverage for a row since re-addressed is withheld (older drafts carry no
+  // address and are withheld too).
   const propertyVisitOverride = propertyVisitArea?.serviceId === service.id
     && propertyVisitArea?.propertyId === currentPropertyAreas?.propertyId
+    && (propertyVisitArea?.addressKey ?? null) === (currentPropertyAreas?.addressKey ?? null)
     && propertyVisitArea?.kind === propertyAreaKey ? propertyVisitArea.area : undefined;
   const propertyTreatedArea = propertyAreaLine === "lawn" ? lawnVisitArea
     : propertyVisitOverride ?? (reviewedPropertyArea?.reviewedAt ? reviewedPropertyArea.sqft : "");
@@ -13500,7 +13518,7 @@ export function CompletionPanel({
     if (entered !== "" && entered !== bedCoverageSeenRef.current && propertyVisitOverride === undefined
       && Number.isFinite(Number(entered)) && Number(entered) >= 0 && Number(entered) <= 1000000) {
       bedCoverageSeenRef.current = entered;
-      setPropertyVisitArea({ serviceId: service.id, propertyId: currentPropertyAreas.propertyId, kind: "beds", area: entered });
+      setPropertyVisitArea({ serviceId: service.id, propertyId: currentPropertyAreas.propertyId, addressKey: currentPropertyAreas.addressKey ?? null, kind: "beds", area: entered });
       return;
     }
     invalidateGeneratedReportOnTypedEdit();
@@ -17185,7 +17203,7 @@ export function CompletionPanel({
     if (submitting && !resumingPoll) return;
     // Draft discovery still settling (see baseCompletionCtaLabel): the button
     // is disabled, but a keyboard/programmatic submit must not race it.
-    if (draftLoading || propertyAreasRefreshing) return;
+    if (draftLoading || propertyAreasBlocked) return;
     setSubmitError("");
     // A committed chain replays the pinned body byte-for-byte — the stored
     // body already passed every pre-submit gate when it committed, and the
@@ -18687,15 +18705,16 @@ export function CompletionPanel({
     serviceLine={propertyAreaLine} disabled={submitting || generating}
     visitArea={propertyAreaLine === "lawn" ? lawnAreaOverride : propertyVisitOverride}
     refreshToken={propertyAreasRefreshToken}
-    onMeasurements={data => { setPropertyAreas(data ? { ...data, serviceId: service.id } : null); if (data) setPropertyAreasRefreshing(false); }}
+    onMeasurements={data => { setPropertyAreas(data ? { ...data, serviceId: service.id } : null); if (data) { setPropertyAreasRefreshing(false); setPropertyAreasSettledFor(service.id); } }}
     // A failed load after a stale-version 409 keeps completion blocked (the
     // next submit would otherwise skip the version check); only a fresh
     // version, or the feature being off, releases it. The panel offers Retry.
-    onUnavailable={({ failed = false } = {}) => { propertyAreasUnavailableRef.current = service.id; if (!failed) setPropertyAreasRefreshing(false); }}
+    // A failed FIRST read settles the visit: the tech enters the area by hand.
+    onUnavailable={({ failed = false } = {}) => { propertyAreasUnavailableRef.current = service.id; setPropertyAreasSettledFor(service.id); if (!failed) setPropertyAreasRefreshing(false); }}
     onVisitAreaChange={area => {
       invalidateGeneratedReportOnTypedEdit();
       if (propertyAreaLine === "lawn") setLawnAreaOverride(area === null ? undefined : area);
-      else setPropertyVisitArea(area === null ? null : { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId, kind: propertyAreaKey, area });
+      else setPropertyVisitArea(area === null ? null : { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId, addressKey: currentPropertyAreas?.addressKey ?? null, kind: propertyAreaKey, area });
     }} />;
   const lawnProgressPanel = completionImprovements && isLawn && (
     !currentLawnPlanReady ? <p role="status" style={{ fontSize: 14 }}>Loading lawn plan…</p>
@@ -21210,7 +21229,7 @@ export function CompletionPanel({
                 generating ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
-                    treeShrubCompletionBlocked || propertyAreasRefreshing ||
+                    treeShrubCompletionBlocked || propertyAreasBlocked ||
                     protocolActualsCompletionBlocked))
               }
               style={{
@@ -21220,7 +21239,7 @@ export function CompletionPanel({
                   draftLoading ||
                   (!committedReplayReady &&
                     (completionPricingPending || closeoutAdvisoriesPending ||
-                      treeShrubCompletionBlocked || propertyAreasRefreshing ||
+                      treeShrubCompletionBlocked || propertyAreasBlocked ||
                       protocolActualsCompletionBlocked))
                     ? 0.5
                     : 1,
@@ -23413,7 +23432,7 @@ export function CompletionPanel({
               generating ||
               (!committedReplayReady &&
                 (completionPricingPending || closeoutAdvisoriesPending ||
-                  treeShrubCompletionBlocked || propertyAreasRefreshing ||
+                  treeShrubCompletionBlocked || propertyAreasBlocked ||
                   protocolActualsCompletionBlocked))
             }
             style={{
@@ -23431,7 +23450,7 @@ export function CompletionPanel({
                 draftLoading ||
                 (!committedReplayReady &&
                   (completionPricingPending || closeoutAdvisoriesPending ||
-                    treeShrubCompletionBlocked || propertyAreasRefreshing ||
+                    treeShrubCompletionBlocked || propertyAreasBlocked ||
                     protocolActualsCompletionBlocked))
                   ? 0.6
                   : 1,

@@ -20,9 +20,10 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     await knex.raw('CREATE SCHEMA ??', [schema]);
     await knex.schema.createTable('customers', t => {
       t.uuid('id').primary(); t.string('address_line1'); t.string('address_line2'); t.string('city'); t.string('zip');
-      t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at');
+      t.integer('bed_sqft'); t.integer('property_sqft'); t.timestamp('updated_at'); t.string('state');
     });
     await knex.schema.createTable('customer_properties', t => {
+      t.string('address_key'); t.decimal('latitude', 10, 7); t.decimal('longitude', 10, 7);
       t.uuid('id').primary(); t.uuid('customer_id').references('id').inTable('customers');
       t.boolean('active').defaultTo(true); t.boolean('is_primary').defaultTo(false);
       for (const key of ['address_line1','address_line2','city','state','zip']) t.string(key);
@@ -183,6 +184,20 @@ describeDb('reviewed property service areas in PostgreSQL', () => {
     expect((await knex('customer_properties').where({ id: primary.id }).first()).property_sqft).toBe(4700);
     expect((await knex('customers').where({ id: customerId }).first()).property_sqft).toBe(4700);
     expect((await knex('customer_properties').where({ id: second.id }).first()).service_area_measurements.areas.lawn.sqft).toBe(1200);
+  });
+  test('a primary address move clears only the mirrors a review of the former address wrote', async () => {
+    await knex('customer_turf_profiles').insert({ customer_id: customerId, lawn_sqft: 3000 });
+    const first = await read(scope());
+    await save(scope(), first.version, { lawn: { sqft: 4000, source: 'field' }, beds: { sqft: 900, source: 'field' } });
+    // A later hand-entered bed size on the customer is not the review's value.
+    await knex('customers').where({ id: customerId }).update({ bed_sqft: 950 });
+    await knex('customers').where({ id: customerId }).update({ address_line1: '300 Moved Street', zip: '34202' });
+    const { syncPrimaryAddress } = require('../services/customer-properties');
+    await knex.transaction(trx => syncPrimaryAddress(customerId, trx));
+    const property = await knex('customer_properties').where({ id: primary.id }).first();
+    expect(property).toMatchObject({ address_line1: '300 Moved Street', bed_sqft: null, property_sqft: null, service_area_measurements: {} });
+    expect(await knex('customers').where({ id: customerId }).first()).toMatchObject({ bed_sqft: 950, property_sqft: null });
+    expect((await knex('customer_turf_profiles').where({ customer_id: customerId }).first()).lawn_sqft).toBeNull();
   });
   test('rolls back the property and mirrors if the required audit fails', async () => {
     const first = await read(scope());

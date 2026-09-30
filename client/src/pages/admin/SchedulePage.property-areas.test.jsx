@@ -275,17 +275,25 @@ it('a visit-area change recalculates a following total in the row\'s spoon unit,
   await waitFor(() => expect(screen.getByPlaceholderText('Total')).toHaveValue(6));
 });
 
-it('a combined lawn + tree & shrub visit freezes lawn coverage, the kind the server classifies from the raw type', async () => {
+it('a combined lawn + tree & shrub visit records no single shared coverage: bed field stays, products keep their own areas', async () => {
   measurements = { ...measurements, areas: { ...measurements.areas, lawn: { sqft: 4000, source: 'field', reviewedAt: '2026-09-27' } } };
   const onSubmit = vi.fn().mockResolvedValue({ success: true });
   render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', serviceTypeRaw: 'Lawn + Tree & Shrub',
     scheduledDate: '2026-09-27', completionProfile: { findingsType: 'tree_shrub', requiresProducts: false },
     findingsSchema: { type: 'tree_shrub', fields: bedField, nextStepChips: [] } }}
-    products={products} onClose={() => {}} onSubmit={onSubmit} />);
-  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(4000));
+    products={[...products, sequestar]} onClose={() => {}} onSubmit={onSubmit} />);
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: 'Sequestar' } });
+  fireEvent.click(screen.getByText('Sequestar'));
+  // No shared panel, the T&S bed actual stays editable, and the drench never takes the lawn area.
+  expect(screen.queryByRole('button', { name: 'Review areas' })).toBeNull();
+  const bedInput = (await screen.findByText(/Beds serviced/)).closest('div').parentElement.querySelector('input');
+  expect(bedInput).toBeTruthy();
+  expect(screen.queryByDisplayValue('4000')).toBeNull();
+  fireEvent.change(bedInput, { target: { value: '700' } });
   fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
   await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-  expect(onSubmit.mock.calls[0][1].propertyServiceArea).toMatchObject({ kind: 'lawn', treatedSqft: 4000 });
+  expect(onSubmit.mock.calls[0][1].propertyServiceArea).toBeUndefined();
+  expect(fetch.mock.calls.some(([url]) => url.includes('property-areas'))).toBe(false);
 });
 
 it('an untouched product default rebinds to the new property after the visit is reassigned', async () => {
@@ -303,4 +311,30 @@ it('an untouched product default rebinds to the new property after the visit is 
   await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
   await waitFor(() => expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(800));
   expect(screen.getByPlaceholderText('Total')).toHaveValue(1.84);
+});
+
+it('completion waits for the first area read, so a restored draft never submits unreconciled quantities', async () => {
+  const held = heldAreas();
+  const onSubmit = vi.fn().mockResolvedValue({ success: true });
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', scheduledDate: '2026-09-27',
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: bedField, nextStepChips: [] } }}
+    products={products} onClose={() => {}} onSubmit={onSubmit} />);
+  const complete = await screen.findByRole('button', { name: /complete & send recap/i });
+  expect(complete).toBeDisabled();
+  await act(async () => held.release(respond(measurements)));
+  await waitFor(() => expect(screen.getByRole('button', { name: /complete & send recap/i })).toBeEnabled());
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0][1].propertyServiceArea).toMatchObject({ version: 'a'.repeat(64), kind: 'beds' });
+});
+
+it.each([['old-address', 600], ['new-address-only', 1200]])('restored visit coverage is reused only at the address it was entered for (%s)', async (savedKey, shown) => {
+  measurements = { ...measurements, addressKey: savedKey === 'old-address' ? 'old-address' : 'new-address' };
+  localStorage.setItem('waves_completion_draft_visit-1', JSON.stringify({
+    serviceId: 'visit-1', savedAt: Date.now(), notes: 'Fixture notes', selectedProducts: [],
+    propertyVisitArea: { serviceId: 'visit-1', propertyId: 'property-1', addressKey: 'old-address', kind: 'beds', area: '600' },
+  }));
+  mount('Tree & Shrub Care');
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(shown));
 });
