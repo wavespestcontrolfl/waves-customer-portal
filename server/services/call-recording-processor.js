@@ -1583,7 +1583,7 @@ function houseNumberOf(line) {
 // leads.extracted_data.stage values the web forms stamp. A form typed onto a
 // lead a call created (the voicemail text-back and phone-match attaches keep
 // first_contact_channel 'call') leaves its own typed address here too.
-const FORM_LEAD_STAGES = new Set(['lead_webhook_received', 'property_lookup_started', 'quote_calculated']);
+const FORM_LEAD_STAGES = new Set(['lead_webhook_received', 'property_lookup_started', 'property_lookup_complete', 'quote_calculated']);
 function parseJsonObjectSafe(v) {
   if (v && typeof v === 'object') return v;
   try { const o = JSON.parse(v); return o && typeof o === 'object' ? o : null; } catch { return null; }
@@ -1718,7 +1718,8 @@ function buildStreetLevelHold({ knownCaller, routingResult } = {}) {
 // office-review call booking (voice-agent rows file an outbound_booking_review
 // triage card instead), so this is the only one.
 function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDate, windowStart }) {
-  const when = [dateOnlyISO(scheduledDate), windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
+  const visitDate = dateOnlyISO(scheduledDate);
+  const when = [visitDate, windowStart ? String(windowStart).slice(0, 5) : null].filter(Boolean).join(' ');
   const who = hold.customer_name || 'New lead';
   // Owner ruling 2026-09-30: headline "Area — what to do" (<= 60), body "why" (<= 110).
   // The address gives way first when the line runs long; the tail never does.
@@ -1734,7 +1735,8 @@ function buildStreetLevelHoldAlert({ hold, visitId, callSid = null, scheduledDat
     body,
     opts: {
       icon: '📍',
-      link: `/admin/schedule?serviceId=${encodeURIComponent(visitId)}`,
+      // Dispatch schedule tab: ?appointment opens the visit, ?date selects its day.
+      link: `/admin/dispatch?tab=schedule${visitDate ? `&date=${visitDate}` : ''}&appointment=${encodeURIComponent(visitId)}`,
       bell: true,
       dedupeKey: `street-level-address-hold:${visitId}`,
       metadata: { scheduledServiceId: visitId, callSid, address_on_file: hold.address_on_file, google_street: hold.google_street },

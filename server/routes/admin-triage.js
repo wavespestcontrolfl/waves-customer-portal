@@ -346,6 +346,26 @@ async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTa
   return new Date(lead.email_confirmed_at).getTime() > new Date(cardCreatedAt).getTime();
 }
 
+// A street-level address hold (call-recording-processor): the office-review
+// card whose payload.street_level_address is set. It is settled by the linked
+// visit — confirmed (runOutboundReviewConfirmHook resolves it), corrected, or
+// cancelled — never by a generic call verdict / Resolve / Dismiss, which would
+// hide the work while the visit stays pending. True only while the visit is
+// still pending and unconfirmed.
+const STREET_LEVEL_HOLD_OPEN_SQL = `(triage_items.reason_code = 'outbound_booking_review'
+  AND triage_items.payload->>'street_level_address' = 'true'
+  AND EXISTS (SELECT 1 FROM scheduled_services hold_ss
+    WHERE hold_ss.id::text = triage_items.payload->>'scheduled_service_id'
+      AND hold_ss.status = 'pending' AND hold_ss.customer_confirmed = false))`;
+async function streetLevelHoldStillPending(conn, item) {
+  if (!item || item.reason_code !== 'outbound_booking_review') return false;
+  const payload = typeof item.payload === 'string' ? (() => { try { return JSON.parse(item.payload); } catch { return null; } })() : item.payload;
+  if (!payload?.street_level_address || !payload.scheduled_service_id) return false;
+  const svc = await conn('scheduled_services').where({ id: payload.scheduled_service_id }).first('status', 'customer_confirmed');
+  return !!svc && svc.status === 'pending' && !svc.customer_confirmed;
+}
+const STREET_LEVEL_HOLD_MESSAGE = 'This card is an address hold on a pending visit: confirm the address with the customer, then confirm (or correct or cancel) the visit itself. It resolves when the visit does.';
+
 // Status transition WITHOUT touching res, so callers can gate side effects (like
 // the feedback write) on actually winning the compare-and-swap. Returns an
 // outcome the caller maps to HTTP: 'ok' | 'not_found' | 'already' | 'conflict'.
@@ -353,6 +373,9 @@ async function transitionCore({ id, nextStatus, note, assignedTo, expectedUpdate
   const item = await conn('triage_items').where({ id }).first();
   if (!item) return { outcome: 'not_found' };
   if (!OPEN_STATES.includes(item.status)) return { outcome: 'already', current: item.status };
+  if (await streetLevelHoldStillPending(conn, item)) {
+    throw Object.assign(new Error(STREET_LEVEL_HOLD_MESSAGE), { statusCode: 409, code: 'STREET_LEVEL_HOLD_PENDING' });
+  }
 
   // Per-call advisory lock + transaction: the shared lockTriageCall contract
   // with the nightly auto-resolve sweep. Serializing per call removes both
@@ -1730,6 +1753,10 @@ router.post('/:id/verdict', async (req, res) => {
     if (item.reason_code === 'attached_booking_followup_unbooked') {
       return res.status(400).json({ error: 'This card is an owed follow-up visit, not a call verdict — book the follow-up and use Resolve instead.' });
     }
+    // A street-level address hold is settled by its visit, not by a verdict.
+    if (await streetLevelHoldStillPending(db, item)) {
+      return res.status(409).json({ error: STREET_LEVEL_HOLD_MESSAGE, code: 'STREET_LEVEL_HOLD_PENDING' });
+    }
 
     // Call-level compare-and-swap: resolve ALL open triage rows for this call in
     // one update. The affected-row count is the win check — the first verdict
@@ -1976,6 +2003,9 @@ router.post('/:id/verdict', async (req, res) => {
         // open, and they must be reviewed on their own (codex r33 P1).
         .modify((q) => { if (item.reason_code === 'auto_booking_skipped_after_approval') q.where({ id: item.id }); })
         .whereRaw("payload->'reschedule_proposal' IS NULL")
+        // …and a street-level address hold whose visit is still pending: the
+        // verdict is a call judgment, the hold is settled by its visit.
+        .whereRaw(`NOT ${STREET_LEVEL_HOLD_OPEN_SQL}`)
         .whereIn('status', OPEN_STATES)
         .update({
           status: 'resolved',
@@ -2270,4 +2300,4 @@ module.exports = router;
 module.exports.transitionCore = transitionCore;
 module.exports.__private = {
   heldConflictTaskDecision, sanitizeWrongFields, denyRejectsUnitEvidence, WRONG_FIELDS, VERDICTS,
-  clearCallbackNumberHold, emailDisagreementConfirmed };
+  clearCallbackNumberHold, emailDisagreementConfirmed, streetLevelHoldStillPending, STREET_LEVEL_HOLD_OPEN_SQL };

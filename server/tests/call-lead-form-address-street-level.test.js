@@ -493,7 +493,7 @@ describe('office-review pending path (owner ruling 2026-09-30)', () => {
     expect(a.body.length).toBeLessThanOrEqual(110);
     expect(a.body).toMatch(/Google matched the street only\.$/);
     expect(a.body).toContain('Form Lead, 1234 Sample Newbuild Trl, Parrish, FL, 34219, 2026-10-05 13:00');
-    expect(a.opts).toMatchObject({ bell: true, dedupeKey: 'street-level-address-hold:visit-9', link: '/admin/schedule?serviceId=visit-9' });
+    expect(a.opts).toMatchObject({ bell: true, dedupeKey: 'street-level-address-hold:visit-9', link: '/admin/dispatch?tab=schedule&date=2026-10-05&appointment=visit-9' });
     expect(a.opts.metadata).toMatchObject({ scheduledServiceId: 'visit-9', callSid: 'CA1' });
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-9' }).opts.dedupeKey).toBe(a.opts.dedupeKey);
     expect(buildStreetLevelHoldAlert({ hold, visitId: 'visit-10' }).opts.dedupeKey).not.toBe(a.opts.dedupeKey);
@@ -625,5 +625,22 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(s).not.toMatch(/if \(isPendingOutboundReviewBooking\(svc\)\) \{\s*pendingOfficeReview = true;/);
     // The confirm hook's own conversion is untouched (no deferConversion passed there).
     expect(read('../services/outbound-review-confirm.js')).not.toContain('deferConversion');
+  });
+
+  test('the bell links to the dispatch schedule tab (?appointment opens the visit, ?date selects the day)', () => {
+    const hold = { address_on_file: '1234 Sample Newbuild Trl, Parrish, FL, 34219', customer_name: 'Form Lead' };
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'v-1', scheduledDate: new Date('2026-10-05T00:00:00Z'), windowStart: '13:00:00' }).opts.link)
+      .toBe('/admin/dispatch?tab=schedule&date=2026-10-05&appointment=v-1');
+    expect(buildStreetLevelHoldAlert({ hold, visitId: 'v-1' }).opts.link).toBe('/admin/dispatch?tab=schedule&appointment=v-1');
+  });
+
+  test('a completed property-lookup form (stage property_lookup_complete) still counts as the lead\'s own form address', async () => {
+    const row = formRow('1234 Sample Newbuild Trail, Parrish, FL 34219', '34219');
+    const conn = (stage) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [{ ...row, extracted_data: { ...row.extracted_data, stage } }] });
+    expect(await onFileAddressIsFromWebForm(lead(), conn('property_lookup_complete'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(lead(), conn('lead_webhook_received'))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(lead(), conn('voicemail_callback'))).toBe(false);
+    // The stage string is the one public-property-lookup.js actually writes.
+    expect(read('../routes/public-property-lookup.js')).toContain("stage: 'property_lookup_complete'");
   });
 });

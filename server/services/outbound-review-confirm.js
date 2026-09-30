@@ -394,6 +394,7 @@ async function runOutboundReviewConfirmHook(db, svc, routeTag = 'outbound-review
       const { lockTriageCall } = require('../utils/triage-locks');
       await db.transaction(async (trx) => {
         await lockTriageCall(trx, svc.source_call_log_id);
+        await fileOwedFollowUpForStreetLevelHold(trx, svc);
         await trx('triage_items')
           .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
           .whereIn('status', ['open', 'in_progress'])
@@ -673,6 +674,53 @@ async function verifyReminderSlotAfterRegistration(dbh, { serviceId, slotDate, s
 }
 
 /**
+ * A street-level address hold (call-recording-processor: the review card
+ * carries payload.street_level_address) deferred the promised second visit
+ * instead of booking it at an unverified address. Once the office confirms the
+ * visit, that follow-up must not vanish: file the existing owed-follow-up card
+ * (attached_booking_followup_unbooked, carrying follow_up_plan) that the office
+ * books by hand and Resolves — the same card the settled house-number dispute
+ * files. Idempotent: nothing is filed when a child visit already exists, when
+ * an owed-follow-up card was already handled, and an open card just takes the
+ * current plan. Runs inside the caller's transaction, before the review card
+ * is resolved.
+ */
+async function fileOwedFollowUpForStreetLevelHold(trx, svc) {
+  const card = await trx('triage_items')
+    .where({ call_log_id: svc.source_call_log_id, reason_code: 'outbound_booking_review' })
+    .whereIn('status', ['open', 'in_progress'])
+    .orderBy('created_at', 'desc')
+    .first('payload');
+  const payload = typeof card?.payload === 'string' ? JSON.parse(card.payload) : (card?.payload || null);
+  if (!payload?.street_level_address || !payload.follow_up_plan
+    || String(payload.scheduled_service_id || '') !== String(svc.id)) return false;
+  const owned = await trx('scheduled_services')
+    .where((q) => q.where({ parent_service_id: svc.id }).orWhere({ followup_source_service_id: svc.id }))
+    .first('id');
+  if (owned) return false;
+  const handled = await trx('triage_items')
+    .where({ call_log_id: svc.source_call_log_id, reason_code: 'attached_booking_followup_unbooked' })
+    .whereIn('status', ['resolved', 'dismissed'])
+    .first('id');
+  if (handled) return false;
+  const { buildTriageItem } = require('./call-routing-gates');
+  await trx('triage_items')
+    .insert(buildTriageItem({
+      callLogId: svc.source_call_log_id,
+      flag: 'attached_booking_followup_unbooked',
+      extraction: { meta: { call_summary: 'Address confirmed — the follow-up visit promised on the call is still unbooked' }, scheduling: { status: 'confirmed' } },
+      extraPayload: { follow_up_plan: payload.follow_up_plan, skipped_reason: 'street_level_address_confirmed_follow_up_unbooked' },
+    }))
+    .onConflict(trx.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')'))
+    .merge({
+      payload: trx.raw("COALESCE(triage_items.payload, '{}'::jsonb) || EXCLUDED.payload"),
+      summary: trx.raw('EXCLUDED.summary'),
+      updated_at: new Date(),
+    });
+  return true;
+}
+
+/**
  * Lazy activation for a PENDING OFFICE-REVIEW row — a legacy outbound-review
  * row (created pending before the 2026-08-11 review-hold removal, PR #3361)
  * OR a voice-agent booking, which is created with the same pending/
@@ -896,6 +944,7 @@ async function sweepStrandedLegacyOutboundActivations(dbh = db, { limit = 25 } =
 }
 
 module.exports = {
+  fileOwedFollowUpForStreetLevelHold,
   runOutboundReviewConfirmHook,
   runOfficeConfirmActivation,
   activateLegacyOutboundReviewRowIfNeeded,
