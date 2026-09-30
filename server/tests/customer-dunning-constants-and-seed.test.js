@@ -20,7 +20,7 @@ const fs = require('fs');
 const path = require('path');
 const C = require('../services/customer-dunning/constants');
 const Followups = require('../services/invoice-followups');
-const { promotionSeed, oldestActive } = require('../services/customer-dunning/seed');
+const { promotionSeed, seedRefusal, oldestActive, PAST_FINAL_STEP } = require('../services/customer-dunning/seed');
 
 const SCHEDULE = { id: '3f2b1c9e-0000-4000-8000-00000000abcd', episode: 12 };
 
@@ -129,10 +129,38 @@ describe('promotionSeed', () => {
     expect(seed.next_touch_at).toEqual(tenAmET('2026-10-01'));
   });
 
-  test('the final notice is never skipped: every day past => the final step, on the next run', () => {
-    const seed = promotionSeed([row('a', '2026-04-01T15:00:00Z', 0), row('b', '2026-04-02T15:00:00Z', 0)], NOW);
+  test('the final notice is never skipped while it is still sendable: Day 90 due today => the final step, on the next run', () => {
+    // Day 90 on Jul 2 15:00Z is Sep 30 10:00 ET = 16 minutes ago: not stale.
+    const rows = [row('a', '2026-07-02T15:00:00Z', 0), row('b', '2026-07-03T15:00:00Z', 0)];
+    const seed = promotionSeed(rows, NOW);
     expect(seed).toMatchObject({ step_index: 5, step_id: 'd90_final_notice' });
     expect(seed.next_touch_at).toEqual(tenAmET('2026-10-01'));
+    expect(seedRefusal(rows, NOW)).toBeNull();
+  });
+
+  test('past the final step: no seed and reason past_final_step (adoption leaves it for a person, the ladder stale-completes it)', () => {
+    const rows = [row('a', '2026-04-01T15:00:00Z', 0), row('b', '2026-04-02T15:00:00Z', 0)];
+    expect(promotionSeed(rows, NOW)).toBeNull();
+    expect(seedRefusal(rows, NOW)).toBe(PAST_FINAL_STEP);
+    expect(PAST_FINAL_STEP).toBe('past_final_step');
+    // agrees with adoption: nothing left to land on
+    expect(Followups.adoptionLanding(Followups.sequenceAnchor(rows[0]), NOW)).toBeNull();
+  });
+
+  test('boundary: the final step is stale exactly past the 20 h grace, not before', () => {
+    // Anchor whose Day 90 is Sep 29 10:00 ET (fires Tue Sep 29 14:00Z); grace is 20 h.
+    const anchor = '2026-07-01T15:00:00Z';
+    const rows = [row('a', anchor, 5), row('b', '2026-07-02T15:00:00Z', 5)];
+    const due = Followups.firstEligibleFireAt(Followups.computeNextTouchAt(Followups.sequenceAnchor(rows[0]), 5));
+    const grace = 20 * 60 * 60 * 1000;
+    const justInside = new Date(due.getTime() + grace);
+    const justPast = new Date(due.getTime() + grace + 1);
+    expect(promotionSeed(rows, justInside)).toMatchObject({ step_id: 'd90_final_notice' });
+    expect(promotionSeed(rows, justPast)).toBeNull();
+    expect(seedRefusal(rows, justPast)).toBe('past_final_step');
+    // adoption agrees at the same instants
+    expect(Followups.adoptionLanding(Followups.sequenceAnchor(rows[0]), justInside)).not.toBeNull();
+    expect(Followups.adoptionLanding(Followups.sequenceAnchor(rows[0]), justPast)).toBeNull();
   });
 
   test('last_touch_at and touches_sent are the max across active members', () => {
@@ -146,12 +174,13 @@ describe('promotionSeed', () => {
 
   test('no active member => no seed; quiet members are simply not passed in', () => {
     expect(promotionSeed([], NOW)).toBeNull();
+    expect(seedRefusal([], NOW)).toBe('no_active_member');
     expect(oldestActive([])).toBeNull();
   });
 
   test('cadence off the Day 90 ladder caps at the legacy final step', () => {
     delete process.env.GATE_DUNNING_LADDER_90;
-    const seed = promotionSeed([row('a', '2026-04-01T15:00:00Z', 0), row('b', '2026-04-02T15:00:00Z', 0)], NOW);
+    const seed = promotionSeed([row('a', '2026-08-31T15:00:00Z', 0), row('b', '2026-09-01T15:00:00Z', 0)], NOW);
     expect(seed).toMatchObject({ step_index: 3, step_id: 'd30_final' });
   });
 

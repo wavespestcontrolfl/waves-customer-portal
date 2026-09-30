@@ -40,6 +40,7 @@ const HOLD_PRECEDENCE = Object.freeze([
   'member_paused',
   'member_autopay_hold',
   'credit_covers_anchor',
+  'anchor_reconciliation',
   'payer_anchor',
   'payer_unresolved',
   'incomplete',
@@ -136,6 +137,19 @@ async function anchorProblem(anchorRow, database) {
   if (!isInvoiceCollectibleStatus(anchorRow.status)) return 'balance_incomplete';
   if (anchorRow.payer_id || anchorRow.payer_statement_id || invoiceWithdrawnFromCustomer(anchorRow)) return 'payer_anchor';
   if (await PayCombined.invoiceCreditWouldFullyCover(anchorRow, { database })) return 'credit_covers_anchor';
+  // The page's rejectIfInvoiceCollectionPending (routes/pay-v2.js) refuses an
+  // anchor with a received-but-unapplied estimate deposit OR a pending charge
+  // reconciliation, so a reminder must not send the customer to a page that
+  // would refuse them. Both checks mirrored, both read-only (lock: false; the
+  // reconciliation fence never releases or promotes a stale claim). Any throw
+  // (a pending fence, or an unreadable state) holds — never a send.
+  try {
+    await require('../estimate-deposits').assertInvoiceDepositSettlementReady(database, anchorRow, { lock: false });
+    await require('../stripe').assertNoInvoiceChargeReconciliationPending(anchorRow.id, database, { readOnly: true });
+  } catch (err) {
+    logger.info(`[customer-dunning] anchor ${anchorRow.id} fenced (${err.code || 'unreadable'}): ${err.message}`);
+    return 'anchor_reconciliation';
+  }
   return null;
 }
 
@@ -283,12 +297,20 @@ async function resolveDunnableSet(customerId, { database = db, now = new Date() 
  * (not stopped, paused, autopay-held, completed or microdeposit-pending).
  * Returns the draws `[{ invoiceId, amount }]` so the caller can reverse them
  * (customer-credit.reverseAppliedCredit) when nothing was delivered.
+ *
+ * Deliberately takes NO database handle: every draw is its own transaction,
+ * committed here. autoApplyAccountCreditIfEnabled only runs the full-coverage
+ * side effects (stop dunning, activate an annual-prepay term) when it owns the
+ * transaction; handed a caller's `trx` it skips them and leaves them to that
+ * caller, so threading a handle in would strand a credit-covered invoice with
+ * dunning still armed. The reads below use the shared pool for the same reason
+ * (a draw must never be visible only inside an uncommitted caller handle).
  */
-async function applyCreditBeforeResolve(customerId, { database = db } = {}) {
+async function applyCreditBeforeResolve(customerId) {
   const { autoApplyAccountCreditIfEnabled } = require('../customer-credit');
   const draws = [];
-  const open = await openBalanceInvoices(customerId, { database });
-  const seqMap = await readSequences(open.map((i) => i.id), database);
+  const open = await openBalanceInvoices(customerId, { database: db });
+  const seqMap = await readSequences(open.map((i) => i.id), db);
   for (const inv of open) {
     const status = seqMap.get(String(inv.id))?.status || 'none';
     if (status !== 'active' && status !== 'none') continue;

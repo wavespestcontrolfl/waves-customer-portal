@@ -2,8 +2,9 @@
 // customer-dunning resolver and its dry-run read the pay page's sibling set
 // inside a READ ONLY transaction. The writing fence releases or promotes
 // stale saved-card claims; in a read-only transaction that UPDATE aborts the
-// transaction (pre-push audit P1). Read-only mode must reach the same verdict
-// without writing. Runs in a disposable schema on a private QA / isolated CI
+// transaction (pre-push audit P1). Read-only mode must reach a verdict without
+// writing, and must never conclude "released": a stale pre-submit claim's
+// worker can still commit its submission, so it stays fenced (in progress). Runs in a disposable schema on a private QA / isolated CI
 // database (skipped without APP_TEST_DATABASE_URL, run for real in CI).
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
@@ -92,12 +93,23 @@ postgres('reconciliation fence read-only mode (PostgreSQL)', () => {
     expect((await app('stripe_invoice_charge_attempts').where({ id: f.id }).first('status')).status).toBe('claimed');
   });
 
-  test('stale PRE-SUBMIT claim: treated as released, no write, transaction stays usable', async () => {
+  test('stale PRE-SUBMIT claim: stays fenced as in progress (its worker may still commit), no write, transaction stays usable', async () => {
     const f = await staleClaim({ submitted: false });
     const err = await inReadOnly((trx) => verdict(f.invoiceId, trx, { readOnly: true }));
-    expect(err).toBeNull();
+    expect(err && err.code).toBe('STRIPE_CHARGE_IN_PROGRESS');
     const row = await app('stripe_invoice_charge_attempts').where({ id: f.id }).first('status', 'resolved_at');
     expect(row).toMatchObject({ status: 'claimed', resolved_at: null });
+  });
+
+  test('fresh claim: in progress in read-only mode, no write', async () => {
+    const invoiceId = randomUUID();
+    const id = randomUUID();
+    await app('stripe_invoice_charge_attempts').insert({
+      id, invoice_id: invoiceId, status: 'claimed', idempotency_key: `inv_card_on_file_${invoiceId}_${id}`,
+      created_at: new Date(), updated_at: new Date(),
+    });
+    const err = await inReadOnly((trx) => verdict(invoiceId, trx, { readOnly: true }));
+    expect(err && err.code).toBe('STRIPE_CHARGE_IN_PROGRESS');
   });
 
   test('writing mode unchanged: a stale pre-submit claim is released', async () => {

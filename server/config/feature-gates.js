@@ -3964,13 +3964,23 @@ function outlinkTrackingLive() {
 // Customer-level dunning gates read at CALL time — strict `=== 'true'`. The
 // `dunningCustomerSchedule*` gates-map entries above are for logGateStatus
 // only. Both ship dark; the live reader is separate from the shadow reader so
-// a shadow run can never be mistaken for authority to send.
+// a shadow run can never be mistaken for authority to send. BOTH readers also
+// require the prerequisites the schedule depends on and fail closed without
+// them: GATE_DUNNING_LADDER_90 (the Day 60/90 cadence, read as
+// invoice-followups.js reads it) and the pay-page balance gate
+// (payIncludeBalance, read as pay-combined.js reads it, via the gates map) —
+// without the first the cadence is the legacy Day 30 one, without the second
+// the page shows one invoice while a reminder names the set.
+function dunningCustomerSchedulePrereqsLive() {
+  return process.env.GATE_DUNNING_LADDER_90 === 'true' && gates.payIncludeBalance === true;
+}
+
 function dunningCustomerScheduleShadowLive() {
-  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true';
+  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true' && dunningCustomerSchedulePrereqsLive();
 }
 
 function dunningCustomerScheduleLive() {
-  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true';
+  return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true' && dunningCustomerSchedulePrereqsLive();
 }
 
 // DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST — comma-separated customer ids, read at
@@ -3991,6 +4001,7 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
+module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrereqsLive;
 module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
 module.exports.dunningCustomerScheduleLive = dunningCustomerScheduleLive;
 module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowlist;

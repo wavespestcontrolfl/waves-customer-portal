@@ -12,8 +12,13 @@
  *    members (completed / no row) never drive the cadence.
  *  - step_index = the first index >= oldest.step_index whose date on oldest's
  *    anchor is not stale (isStaleTouch), capped at the final step — the final
- *    notice is never skipped. Seeding from the MIN step instead would resend
- *    a stage already delivered.
+ *    notice is never skipped while it is still sendable. Seeding from the MIN
+ *    step instead would resend a stage already delivered.
+ *  - past the final step (even the final step's date on the oldest anchor is
+ *    stale) => NO seed (null, reason 'past_final_step'). adoptionLanding
+ *    leaves such an invoice for a person and the per-invoice ladder
+ *    stale-completes it, so promotion must never schedule a final notice
+ *    nobody else would send.
  *  - next_touch_at = that date, or — when it is already due — the next run's
  *    anchor (adoption's rule): promotion NEVER sends in its own run.
  *  - last_touch_at / touches_sent = the max across active members.
@@ -49,8 +54,11 @@ function firstLiveStep(anchor, fromIndex, now) {
     index += 1;
     dueAt = Followups.computeNextTouchAt(anchor, index);
   }
-  return { index, dueAt, stepId: steps[index].id };
+  const pastFinal = index === finalIndex && !!dueAt && Followups.isStaleTouch(dueAt, now);
+  return { index, dueAt, stepId: steps[index].id, pastFinal };
 }
+
+const PAST_FINAL_STEP = 'past_final_step';
 
 /**
  * @param {Array} activeRows sequence rows joined with their invoice's
@@ -58,13 +66,15 @@ function firstLiveStep(anchor, fromIndex, now) {
  *   invoice_sms_sent_at, invoice_created_at) — the runPending row shape.
  * @param {Date} now
  * @returns {{ step_index, step_id, next_touch_at, last_touch_at, touches_sent,
- *   oldest_seq_id, oldest_invoice_id } | null}
+ *   oldest_seq_id, oldest_invoice_id } | null} null = no promotion (no active
+ *   member, or past the final step — see seedRefusal for which).
  */
 function promotionSeed(activeRows, now = new Date()) {
   const oldest = oldestActive(activeRows);
   if (!oldest) return null;
   const anchor = Followups.sequenceAnchor(oldest);
-  const { index, dueAt, stepId } = firstLiveStep(anchor, oldest.step_index, now);
+  const { index, dueAt, stepId, pastFinal } = firstLiveStep(anchor, oldest.step_index, now);
+  if (pastFinal) return null;
   const nextAt = !dueAt || dueAt.getTime() <= now.getTime()
     ? Followups.firstEligibleFireAt(Followups.anchorTo10amNY(now, 1, config.sendWindow.hour))
     : dueAt;
@@ -79,4 +89,12 @@ function promotionSeed(activeRows, now = new Date()) {
   };
 }
 
-module.exports = { promotionSeed, oldestActive, firstLiveStep };
+/** Why promotionSeed returned null for these rows: 'no_active_member' | 'past_final_step' | null (a seed exists). */
+function seedRefusal(activeRows, now = new Date()) {
+  const oldest = oldestActive(activeRows);
+  if (!oldest) return 'no_active_member';
+  const { pastFinal } = firstLiveStep(Followups.sequenceAnchor(oldest), oldest.step_index, now);
+  return pastFinal ? PAST_FINAL_STEP : null;
+}
+
+module.exports = { promotionSeed, seedRefusal, oldestActive, firstLiveStep, PAST_FINAL_STEP };

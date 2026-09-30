@@ -6,7 +6,15 @@
 // synthetic; the database, Stripe, payer lookup and the open read are fakes
 // driven by one `state` object.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
-jest.mock('../models/db', () => jest.fn(() => { throw new Error('the pool handle must not be used when a database is passed'); }));
+// The pool handle must never serve a resolve (a database is always passed);
+// only applyCreditBeforeResolve, which takes no handle, may use it.
+const mockPool = { allowed: false, handle: null };
+jest.mock('../models/db', () => (...a) => {
+  if (!mockPool.allowed) throw new Error('the pool handle must not be used when a database is passed');
+  return mockPool.handle(...a);
+});
+const mockDepositReady = jest.fn();
+jest.mock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: (...a) => mockDepositReady(...a) }));
 
 const mockGates = { autoApplyAccountCredit: true, divertMicrodepositDunning: true };
 const mockEnabled = { payIncludeBalance: true };
@@ -102,6 +110,9 @@ beforeEach(() => {
   mockMd.mockImplementation(async (i) => state.md.has(i.id));
   mockRetrievePi.mockImplementation(async (id) => ({ id, status: 'processing', created: Math.floor(Date.now() / 1000), metadata: {} }));
   mockReconcile.mockResolvedValue(undefined);
+  mockDepositReady.mockResolvedValue(undefined);
+  mockPool.allowed = false;
+  mockPool.handle = null;
   mockAutoApply.mockResolvedValue(null);
 });
 
@@ -177,6 +188,41 @@ describe('parity with pay-v2\'s preview set for the same anchor', () => {
     const set = await resolve();
     expect(set.kind).toBe('hold');
     expect(set.reason).toBe(reason);
+  });
+
+  test('hold: an anchor with a pending charge reconciliation is fenced read-only on the caller\'s database, and no sibling set is read', async () => {
+    mockReconcile.mockImplementation(async (invoiceId) => {
+      if (invoiceId === 'A') throw Object.assign(new Error('charge reconciliation pending'), { code: 'INVOICE_CHARGE_RECONCILIATION_PENDING' });
+    });
+    const set = await resolve();
+    expect(set).toMatchObject({ kind: 'hold', reason: 'anchor_reconciliation' });
+    expect(set.kind).not.toBe('multi');
+    expect(set.reason).not.toBeNull();
+    const anchorCalls = mockReconcile.mock.calls.filter((c) => c[0] === 'A');
+    expect(anchorCalls).toHaveLength(1);
+    expect(anchorCalls[0][1]).toBe(database);
+    expect(anchorCalls[0][2]).toEqual({ readOnly: true });
+    // the page's sibling read never ran (only the anchor was fenced)
+    expect(mockReconcile.mock.calls.every((c) => c[0] === 'A')).toBe(true);
+  });
+
+  test('hold: a received-but-unapplied estimate deposit on the anchor holds like the page\'s deposit fence, read-only', async () => {
+    mockDepositReady.mockRejectedValue(Object.assign(new Error('A received deposit is awaiting invoice reconciliation'), { code: 'DEPOSIT_RECONCILIATION_REQUIRED' }));
+    const set = await resolve();
+    expect(set).toMatchObject({ kind: 'hold', reason: 'anchor_reconciliation' });
+    expect(mockDepositReady).toHaveBeenCalledWith(database, expect.objectContaining({ id: 'A' }), { lock: false });
+  });
+
+  test('an unfenced anchor is not held by the reconciliation check', async () => {
+    expect((await resolve()).kind).toBe('multi');
+    expect(mockReconcile.mock.calls.some((c) => c[0] === 'A' && c[2]?.readOnly === true)).toBe(true);
+  });
+
+  test('a credit-covered anchor holds as credit_covers_anchor before the fence is asked', async () => {
+    state.customerCredit = { account_credits: 500, auto_apply_account_credit: true };
+    mockReconcile.mockRejectedValue(new Error('pending'));
+    expect((await resolve()).reason).toBe('credit_covers_anchor');
+    expect(mockReconcile.mock.calls.filter((c) => c[0] === 'A')).toHaveLength(0);
   });
 
   test('hold: an incomplete open read stops before anything else is asked', async () => {
@@ -290,9 +336,9 @@ describe('classification matrix', () => {
 });
 
 describe('hold precedence', () => {
-  test('balance_incomplete > member_paused > member_autopay_hold > credit_covers_anchor > payer_* > incomplete > over_cap > gate_off', () => {
+  test('balance_incomplete > member_paused > member_autopay_hold > credit_covers_anchor > anchor_reconciliation > payer_* > incomplete > over_cap > gate_off', () => {
     expect(HOLD_PRECEDENCE).toEqual([
-      'balance_incomplete', 'member_paused', 'member_autopay_hold', 'credit_covers_anchor',
+      'balance_incomplete', 'member_paused', 'member_autopay_hold', 'credit_covers_anchor', 'anchor_reconciliation',
       'payer_anchor', 'payer_unresolved', 'incomplete', 'over_cap', 'gate_off',
     ]);
   });
@@ -362,9 +408,17 @@ describe('applyCreditBeforeResolve (runner only)', () => {
   test('draws oldest first onto active / no-row invoices only, and returns the draws for reversal', async () => {
     reset([inv('A'), inv('B'), inv('C'), inv('D'), inv('E')], { A: 'active', B: 'paused', C: 'stopped', D: 'completed' /* E: no row */ });
     mockAutoApply.mockImplementation(async (id) => ({ applied: id === 'A' ? 20 : 0 }));
-    const draws = await applyCreditBeforeResolve(CUSTOMER, { database });
+    mockPool.allowed = true; mockPool.handle = database;
+    const draws = await applyCreditBeforeResolve(CUSTOMER);
     expect(mockAutoApply.mock.calls.map(([id]) => id)).toEqual(['A', 'E']);
     expect(draws).toEqual([{ invoiceId: 'A', amount: 20 }]);
+    // each draw is its own transaction: no caller trx is threaded in, so the
+    // credit helper still runs the full-coverage side effects itself
+    for (const call of mockAutoApply.mock.calls) expect(call).toHaveLength(1);
+  });
+
+  test('takes no database handle (a caller\'s handle would make the helper skip its full-coverage side effects)', () => {
+    expect(applyCreditBeforeResolve.length).toBe(1);
   });
 
   test('never draws onto a microdeposit-pending invoice, or one whose Stripe state is unreadable', async () => {
@@ -376,7 +430,8 @@ describe('applyCreditBeforeResolve (runner only)', () => {
       return false;
     });
     mockAutoApply.mockResolvedValue({ applied: 5 });
-    const draws = await applyCreditBeforeResolve(CUSTOMER, { database });
+    mockPool.allowed = true; mockPool.handle = database;
+    const draws = await applyCreditBeforeResolve(CUSTOMER);
     expect(mockAutoApply.mock.calls.map(([id]) => id)).toEqual(['C']);
     expect(draws).toEqual([{ invoiceId: 'C', amount: 5 }]);
   });

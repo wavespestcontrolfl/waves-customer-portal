@@ -21,11 +21,22 @@
 //
 // Prints invoice / sequence / customer ids only — never a customer name.
 //
-// Usage (repo root). `railway run --service Postgres` does not carry the web
-// service's gates; export them for the run or the report uses the wrong
-// cadence and the resolver reports gate_off (the script warns when unset):
+// Usage (repo root). `railway run --service Postgres` carries neither the web
+// service's gates nor STRIPE_SECRET_KEY / NODE_ENV, and the resolver depends on
+// all of them: feature-gates.js reads autoApplyAccountCredit and
+// divertMicrodepositDunning as `isProd ? env === 'true' : true` (so off-prod
+// they read true whatever the env says), and without Stripe the microdeposit
+// check throws (every PaymentIntent-stamped customer holds) and PaymentIntent
+// retrieval returns null (PI-stamped siblings read as live, so the set
+// under-combines). Export NODE_ENV=production and STRIPE_SECRET_KEY (read both
+// from the WEB service's Railway variables) alongside the gates:
+//   NODE_ENV=production STRIPE_SECRET_KEY=<web service value> \
 //   GATE_DUNNING_LADDER_90=true GATE_PAY_INCLUDE_BALANCE=true \
+//   GATE_AUTO_APPLY_ACCOUNT_CREDIT=<web value> GATE_MICRODEPOSIT_DUNNING_DIVERSION=<web value> \
 //   railway run --service Postgres -- node server/scripts/dunning-customer-schedule-dry-run.js
+// The script REFUSES to run (exit 1) when STRIPE_SECRET_KEY is missing or
+// NODE_ENV is not production. --allow-degraded overrides that for a rough
+// look; the results are then over-held / under-combined and say so loudly.
 
 const path = require('path');
 
@@ -46,6 +57,31 @@ function prepareDatabaseEnv() {
     process.env.DATABASE_URL = process.env.DATABASE_PUBLIC_URL;
     if (!/sslmode=/.test(process.env.DATABASE_URL) && !process.env.PGSSLMODE) process.env.PGSSLMODE = 'no-verify';
   }
+}
+
+// The run only mirrors production with Stripe reachable and NODE_ENV=production
+// (see the usage note). Returns the problems found; empty = faithful.
+function fidelityProblems(env = process.env) {
+  const problems = [];
+  if (!String(env.STRIPE_SECRET_KEY || '').trim()) {
+    problems.push('STRIPE_SECRET_KEY is not set (microdeposit checks would throw so every PaymentIntent-stamped customer holds as balance_incomplete, and PaymentIntent retrieval returns null so PI-stamped siblings read as live)');
+  }
+  if (env.NODE_ENV !== 'production') {
+    problems.push(`NODE_ENV is ${env.NODE_ENV ? `"${env.NODE_ENV}"` : 'unset'}, not "production" (feature-gates.js resolves GATE_AUTO_APPLY_ACCOUNT_CREDIT and GATE_MICRODEPOSIT_DUNNING_DIVERSION to true off-prod whatever the env says)`);
+  }
+  return problems;
+}
+
+// The gate values the resolver and cadence ACTUALLY use, not raw env: the
+// feature-gates readers (evaluated with NODE_ENV as loaded) and the live
+// cadence's step count.
+function resolvedGates({ featureGates, followups }) {
+  return {
+    dunningLadder90: followups.followupSteps().length > 4,
+    payIncludeBalance: featureGates.isEnabled('payIncludeBalance') === true,
+    autoApplyAccountCredit: featureGates.gates.autoApplyAccountCredit === true,
+    divertMicrodepositDunning: featureGates.gates.divertMicrodepositDunning === true,
+  };
 }
 
 // invoices.status values that end a follow-up (invoice-followups.js
@@ -90,18 +126,25 @@ const iso = (d) => (d ? new Date(d).toISOString() : null);
  * One customer's report. `deps` is injectable for tests; production passes the
  * real resolver and seed. `database` must be a read-only handle.
  */
-async function buildCustomerReport(customerId, { database, now, resolve, seed, stepIdAt }) {
+async function buildCustomerReport(customerId, { database, now, resolve, seed, seedRefusal, stepIdAt }) {
   const set = await resolve(customerId, { database, now });
   const rows = await activeSequenceRows(database, customerId);
   const activeIds = new Set(set.members.filter((m) => m.seqStatus === 'active').map((m) => m.invoice_id));
   const memberRows = rows.filter((r) => activeIds.has(String(r.invoice_id)));
-  const wouldPromote = set.kind === 'multi' && set.activeCount >= 2;
+  const setPromotable = set.kind === 'multi' && set.activeCount >= 2;
+  // A promotable set can still be refused by the seed: past even the final
+  // step the per-invoice ladder stale-completes and adoption leaves it for a
+  // person, so the engine must not promote it into a final notice.
+  const seedResult = setPromotable ? seed(memberRows, now) : null;
+  const wouldPromote = setPromotable && !!seedResult;
+  const notPromotedReason = setPromotable && !seedResult ? ((seedRefusal && seedRefusal(memberRows, now)) || 'past_final_step') : null;
   return {
     customer_id: customerId,
     kind: set.kind,
     reason: set.reason,
     would_promote: wouldPromote,
     would_hold: set.kind === 'hold',
+    not_promoted_reason: notPromotedReason,
     anchor_invoice_id: set.anchor?.id || null,
     member_count: set.members.length,
     total_cents: set.totalCents,
@@ -117,7 +160,7 @@ async function buildCustomerReport(customerId, { database, now, resolve, seed, s
       next_touch_at: iso(r.next_touch_at),
       last_touch_at: iso(r.last_touch_at),
     })),
-    seed: wouldPromote ? seedOut(seed(memberRows, now)) : null,
+    seed: wouldPromote ? seedOut(seedResult) : null,
     absorbed: wouldPromote
       ? memberRows.map((r) => ({ invoice_id: String(r.invoice_id), step_id: stepIdAt(r.step_index), next_touch_at: iso(r.next_touch_at) }))
       : [],
@@ -139,7 +182,7 @@ function seedOut(s) {
 function printReport(r) {
   const verdict = r.reason ? `${r.kind}:${r.reason}` : r.kind;
   console.log(`customer ${r.customer_id}  set=${verdict}  members=${r.member_count}  total=$${(r.total_cents / 100).toFixed(2)}  anchor=${r.anchor_invoice_id || '-'}  `
-    + `excluded stopped=${r.excluded.stopped.length} md=${r.excluded.md.length}  ${r.would_promote ? 'WOULD PROMOTE' : 'not promoted'}${r.would_hold ? '  WOULD BE HELD' : ''}`);
+    + `excluded stopped=${r.excluded.stopped.length} md=${r.excluded.md.length}  ${r.would_promote ? 'WOULD PROMOTE' : (r.not_promoted_reason === 'past_final_step' ? 'not promoted: past final step' : 'not promoted')}${r.would_hold ? '  WOULD BE HELD' : ''}`);
   for (const m of r.members) {
     console.log(`  member invoice ${m.invoice_id}  seq ${m.seq_id || '-'}  ${m.seq_status}${m.quiet ? ' (quiet)' : ''}  $${(m.cents / 100).toFixed(2)}`);
   }
@@ -164,38 +207,53 @@ async function inReadOnlyTransaction(db, fn) {
 }
 
 async function main() {
+  const allowDegraded = process.argv.includes('--allow-degraded');
+  const problems = fidelityProblems(process.env);
+  if (problems.length && !allowDegraded) {
+    console.error('[dunning-customer-schedule] REFUSING to run: this environment does not mirror production, so the report would be wrong:');
+    for (const p of problems) console.error(`  - ${p}`);
+    console.error('Export NODE_ENV=production and STRIPE_SECRET_KEY (from the web service\'s Railway variables) alongside the gates; see the usage note at the top of this script. Pass --allow-degraded for a rough, over-held look.');
+    process.exit(1);
+  }
   prepareDatabaseEnv();
+  if (problems.length) {
+    console.warn('[dunning-customer-schedule] WARNING (--allow-degraded): results are DEGRADED and over-held / under-combined; do NOT use them to judge production:');
+    for (const p of problems) console.warn(`  - ${p}`);
+  }
+  // Required only now: feature-gates.js reads NODE_ENV once, at load.
+  const featureGates = require(path.join(__dirname, '..', 'config', 'feature-gates'));
   const db = require(path.join(__dirname, '..', 'models', 'db'));
   const Followups = require(path.join(__dirname, '..', 'services', 'invoice-followups'));
   const { resolveDunnableSet } = require(path.join(__dirname, '..', 'services', 'customer-dunning', 'balance-set'));
-  const { promotionSeed } = require(path.join(__dirname, '..', 'services', 'customer-dunning', 'seed'));
+  const { promotionSeed, seedRefusal } = require(path.join(__dirname, '..', 'services', 'customer-dunning', 'seed'));
   try {
-    const gate = (name) => process.env[name] === 'true';
-    console.log(`[dunning-customer-schedule] gates in this run: GATE_DUNNING_LADDER_90=${gate('GATE_DUNNING_LADDER_90')} GATE_PAY_INCLUDE_BALANCE=${gate('GATE_PAY_INCLUDE_BALANCE')} GATE_AUTO_APPLY_ACCOUNT_CREDIT=${gate('GATE_AUTO_APPLY_ACCOUNT_CREDIT')} GATE_MICRODEPOSIT_DUNNING_DIVERSION=${gate('GATE_MICRODEPOSIT_DUNNING_DIVERSION')}`);
-    if (!gate('GATE_DUNNING_LADDER_90') || !gate('GATE_PAY_INCLUDE_BALANCE')) {
+    const g = resolvedGates({ featureGates, followups: Followups });
+    console.log(`[dunning-customer-schedule] resolved gates in this run: dunningLadder90=${g.dunningLadder90} payIncludeBalance=${g.payIncludeBalance} autoApplyAccountCredit=${g.autoApplyAccountCredit} divertMicrodepositDunning=${g.divertMicrodepositDunning} (NODE_ENV=${process.env.NODE_ENV || 'unset'})`);
+    if (!g.dunningLadder90 || !g.payIncludeBalance) {
       console.warn('[dunning-customer-schedule] WARNING: a prerequisite gate is unset here — the cadence falls back to the legacy Day 30 steps and/or the resolver reports gate_off for every customer, so this run may not match production. '
-        + 'Export the web service\'s values for the run, e.g. GATE_DUNNING_LADDER_90=true GATE_PAY_INCLUDE_BALANCE=true railway run --service Postgres -- node …');
+        + 'Export the web service\'s values for the run, e.g. GATE_DUNNING_LADDER_90=true GATE_PAY_INCLUDE_BALANCE=true.');
     }
     const now = new Date();
     const steps = Followups.followupSteps();
     const stepIdAt = (i) => steps[Number(i)]?.id || null;
     const customerIds = await findCandidateCustomerIds(db);
     console.log(`[dunning-customer-schedule] DRY RUN (read-only) — ${customerIds.length} customer(s) with 2+ active follow-up sequences`);
-    const tally = { promote: 0, hold: 0, single: 0, empty: 0, multi: 0, failed: 0 };
+    const tally = { promote: 0, pastFinal: 0, hold: 0, single: 0, empty: 0, multi: 0, failed: 0 };
     for (const customerId of customerIds) {
       try {
         const report = await inReadOnlyTransaction(db, (trx) => buildCustomerReport(customerId, {
-          database: trx, now, resolve: resolveDunnableSet, seed: promotionSeed, stepIdAt,
+          database: trx, now, resolve: resolveDunnableSet, seed: promotionSeed, seedRefusal, stepIdAt,
         }));
         printReport(report);
         tally[report.kind] += 1;
         if (report.would_promote) tally.promote += 1;
+        if (report.not_promoted_reason === 'past_final_step') tally.pastFinal += 1;
       } catch (err) {
         tally.failed += 1;
         console.error(`customer ${customerId}  report failed: ${err.message}`);
       }
     }
-    console.log(`[dunning-customer-schedule] summary: would promote ${tally.promote}; multi ${tally.multi}, single ${tally.single}, empty ${tally.empty}, hold ${tally.hold}, failed ${tally.failed}`);
+    console.log(`[dunning-customer-schedule] summary: would promote ${tally.promote}; not promoted (past final step) ${tally.pastFinal}; multi ${tally.multi}, single ${tally.single}, empty ${tally.empty}, hold ${tally.hold}, failed ${tally.failed}`);
   } finally {
     await db.destroy();
   }
@@ -205,4 +263,4 @@ if (require.main === module) {
   main().catch((e) => { console.error('[dunning-customer-schedule] failed:', e.message); process.exitCode = 1; });
 }
 
-module.exports = { findCandidateCustomerIds, buildCustomerReport, inReadOnlyTransaction, activeSequenceRows };
+module.exports = { fidelityProblems, resolvedGates, printReport, findCandidateCustomerIds, buildCustomerReport, inReadOnlyTransaction, activeSequenceRows };
