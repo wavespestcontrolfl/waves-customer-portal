@@ -74,7 +74,10 @@ async function confirmPhotoSubject(topic) {
     return null;
   }
   if (!candidate) return null;
-  const text = String(topic || '').trim().slice(0, MAX_TOPIC_CHARS);
+  // The model must see the WHOLE topic its answer authorizes photos for —
+  // a longer topic gets no photo rather than a truncated judgment.
+  const text = String(topic || '').trim();
+  if (text.length > MAX_TOPIC_CHARS) return null;
   try {
     const result = await dispatchWithFallback(
       MODELS.TEXT_POLICIES.fastStructured,

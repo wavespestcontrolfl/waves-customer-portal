@@ -77,6 +77,14 @@ describe('connectorBlockedCandidate (code finds the candidate)', () => {
 });
 
 describe('confirmPhotoSubject (LLM may only confirm)', () => {
+  test('a topic longer than the model input limit gets no photo and no call (the model must see all of it)', async () => {
+    const topic = `where do fire ants come from${' in southwest florida yards'.repeat(12)} and gnats`;
+    expect(topic.length).toBeGreaterThan(300);
+    expect(lib.connectorBlockedCandidate(topic)).not.toBeNull();
+    dispatchWithFallback.mockResolvedValue(confirms('fire-ant'));
+    await expect(confirmPhotoSubject(topic)).resolves.toBeNull();
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+  });
   const topic = 'where do fire ants come from';
 
   test('confirms on single_subject true + the candidate slug, through the registered lane and FAST structured policy', async () => {
