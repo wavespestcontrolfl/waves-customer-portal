@@ -38,17 +38,25 @@ async function writeFlag({ customerId, flag, reason, createdBy = 'system:collect
   }
 }
 
-async function fileFlagCard({ customerId, flag, detail }) {
+async function fileFlagCard({ customerId, flag, detail, manualAction = false }) {
   try {
     const NotificationService = require('../../notification-service');
     const card = await NotificationService.notifyAdmin(
       'billing',
       `Billing follow-up call: ${flag.replace(/_/g, ' ')}`,
       detail,
-      { link: `/admin/customers?customerId=${customerId}`, metadata: { customerId, flag, source: 'collections_voice' } },
+      {
+        link: `/admin/customers?customerId=${customerId}`,
+        metadata: { customerId, flag, source: 'collections_voice' },
+        // A manual-action card is the only staff signal for a problem no row
+        // records; it rings past the bell policy's category defaults.
+        ...(manualAction ? { bell: true } : {}),
+      },
     );
     // notifyAdmin resolves null on a failed insert (gh prb-r4) — a card
-    // that never persisted is not filed.
+    // that never persisted is not filed. A manual-action card counts only
+    // when a row actually exists (a suppressed sentinel is not a card).
+    if (manualAction) return Boolean(card && card.id);
     return Boolean(card && (card.id || card.suppressed));
   } catch (err) {
     logger.warn(`[collections-flags] admin card failed for customer ${customerId} (${flag}): ${err.message}`);
@@ -133,22 +141,101 @@ async function placeDisputeHold(customerId, { summary, createdBy } = {}) {
   return res;
 }
 
-/** Wrong-party answer where the answerer says the customer is unknown here. */
-async function flagWrongNumber(customerId, { detail, createdBy } = {}) {
+/**
+ * Canonical do-not-text record for a wrong number reported on a call.
+ *
+ * collections_flags.wrong_number is read only by the collections
+ * ContactPolicy; every other customer-comms rail (reminders, review asks,
+ * tech-arrived, invoice sends...) gates on messaging_suppression, the
+ * application-wide store the SMS wrong-number path writes through
+ * recordSuppression (reason 'wrong_number'). The voice lane writes the same
+ * row through the same helper, keyed on the number the call was DIALED to
+ * (recordSuppression normalizes to E.164, exactly as the SMS path does) —
+ * that number reached the stranger, whatever customers.phone says now.
+ *
+ * Never throws; resolves { ok, reason? } so the caller can tell the admin
+ * the truth when the canonical write did not land.
+ */
+async function recordWrongNumberSuppression({ phone, callLogId, capturedBody } = {}) {
+  const { toE164 } = require('../../../utils/phone');
+  const canonical = toE164(phone);
+  if (!canonical || !/^\+\d{8,15}$/.test(canonical)) return { ok: false, reason: 'no_valid_phone' };
+  try {
+    const { recordSuppression } = require('../../messaging/validators/suppression');
+    const res = await recordSuppression({
+      phone: canonical,
+      reason: 'wrong_number',
+      source: callLogId ? `collections_voice_call:${callLogId}` : 'collections_voice_call',
+      capturedBody,
+    });
+    if (!res || res.ok === false) return { ok: false, reason: 'suppression_write_failed', phone: canonical };
+    // recordSuppression keeps a standing manual_dnc and still resolves ok:
+    // read the effective reason so the card describes what is really there.
+    let effectiveReason = null;
+    try {
+      const row = await db('messaging_suppression').where({ phone: canonical, active: true }).first('reason');
+      effectiveReason = row?.reason || null;
+    } catch (readErr) {
+      logger.warn(`[collections-flags] wrong-number suppression re-read failed: ${readErr.message}`);
+    }
+    return { ok: true, phone: canonical, effectiveReason };
+  } catch (err) {
+    logger.error(`[collections-flags] wrong-number suppression threw: ${err.message}`);
+    return { ok: false, reason: 'suppression_write_failed', phone: canonical };
+  }
+}
+
+/**
+ * Wrong-party answer where the answerer says the customer is unknown here.
+ *
+ * Two durable writes: the collections_flags row (collections lane) AND the
+ * canonical messaging_suppression row for the dialed phone (every other
+ * rail). Both are attempted independently; the returned `suppression`
+ * carries the canonical write's outcome. The admin card states only what
+ * actually landed.
+ */
+async function flagWrongNumber(customerId, { detail, createdBy, phone, callLogId, capturedBody } = {}) {
   const res = await writeFlag({
     customerId,
     flag: 'wrong_number',
     reason: detail || 'answerer reported wrong number on outbound call',
     createdBy,
   });
-  if (res.ok) {
-    await fileFlagCard({
+  const suppression = await recordWrongNumberSuppression({ phone, callLogId, capturedBody });
+  if (!suppression.ok) {
+    logger.error(`[collections-flags] WRONG-NUMBER SUPPRESSION NOT WRITTEN customer=${customerId} callLog=${callLogId || 'n/a'}: ${suppression.reason} — other SMS rails may still text this number`);
+  }
+  // A card is filed for every outcome and its copy states only what landed.
+  // Whichever half failed, this is the only staff signal: the caller's
+  // collection_hold fallback files a card of its own only when the hold
+  // ALSO fails.
+  {
+    const last4 = suppression.phone ? suppression.phone.slice(-4) : null;
+    const collectionsBlocked = res.ok
+      ? 'Collections calls and texts to this customer are blocked'
+      : 'The collections wrong-number flag could not be saved either (a billing hold may have been placed instead)';
+    const numberLabel = `The number${last4 ? ` ending ${last4}` : ''}`;
+    let detailText;
+    if (!suppression.ok) {
+      detailText = `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${collectionsBlocked}, BUT the do-not-text record for ${last4 ? `the number ending ${last4}` : 'this number'} could NOT be written: appointment reminders, review requests and other texts may still go to it. Add that number to the do-not-contact list or correct the customer's phone by hand now.`;
+    } else if (!res.ok) {
+      detailText = `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${numberLabel} is on the do-not-text list for every text and App notice${suppression.effectiveReason === 'manual_dnc' ? ' (the staff do-not-contact entry, which also blocks payment emails, stays in place)' : ''}, BUT the collections wrong-number flag could not be saved (a billing hold may have been placed instead). Review and correct the customer's phone, then release any hold.`;
+    } else if (suppression.effectiveReason === 'manual_dnc') {
+      detailText = `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${numberLabel} was already on the staff do-not-contact list, which stays in place and blocks every text, App notice and payment email to it; collections calls and texts to this customer are blocked pending a number review.`;
+    } else {
+      detailText = `An outbound billing follow-up call reached someone who says this number does not belong to the customer. ${numberLabel} is now on the do-not-text list for every text and App notice, and collections calls and texts to this customer are blocked pending a number review; payment emails still go to the email on file. The old number stays suppressed after you correct the customer's phone.`;
+    }
+    const filed = await fileFlagCard({
       customerId,
       flag: 'wrong_number',
-      detail: 'An outbound billing follow-up call reached someone who says this number does not belong to the customer. Calls, texts and App notices to this customer are blocked pending a number review; payment emails still go to the email on file.',
+      detail: detailText,
+      manualAction: !suppression.ok || !res.ok,
     });
+    if (!filed && (!suppression.ok || !res.ok)) {
+      logger.error(`[collections-flags] wrong-number card ALSO failed customer=${customerId} (suppression ${suppression.ok ? 'ok' : 'MISSING'}, flag ${res.ok ? 'ok' : 'MISSING'}) — no admin card`);
+    }
   }
-  return res;
+  return { ...res, suppression };
 }
 
 /** Active (unreleased) flags on a customer, oldest first. */
@@ -186,5 +273,6 @@ module.exports = {
   revokeAutomatedVoiceConsent,
   placeDisputeHold,
   flagWrongNumber,
+  recordWrongNumberSuppression,
   fileFlagCard,
 };

@@ -174,6 +174,8 @@ describe('processInboundSms — grounded LLM review draft', () => {
     const call = generateGroundedDraft.mock.calls[0][0];
     expect(call.inboundMessage).toBe('Hello what happened this morning');
     expect(call.intent.intent).toBe('service_scheduling_window_reply');
+    // A live, sendable draft: may reach the scheduler path with no city.
+    expect(call.liveOpenTimes).toBe(true);
     // Real-answers OPEN TIMES (pre-push audit P1): without this, a matched
     // customer's known city never reaches fetchOpenTimesBlock, and the
     // gate-on prompt would ask the model to offer times it has none of.

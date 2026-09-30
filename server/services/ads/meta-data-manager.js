@@ -22,6 +22,7 @@ const { etDateString, addETDays } = require('../../utils/datetime-et');
 const {
   collectCandidates, sha256Hex, normalizeEmail, normalizePhone,
 } = require('./data-manager')._private;
+const matchFields = require('./ad-match-fields');
 
 const GRAPH = 'https://graph.facebook.com';
 const DEFAULT_CURRENCY = 'USD';
@@ -81,14 +82,34 @@ function buildUserData(candidate, eventTimeSeconds) {
   }
   if (fbc) ud.fbc = fbc;
   if (candidate.fbp) ud.fbp = candidate.fbp;
+  // Extra match keys ride only on an event that already has a strong key
+  // (em/ph/fbc/fbp) — they enrich matching, they never make an otherwise
+  // unmatchable event sendable. Consent-suppressed candidates arrive with all
+  // of these nulled next to email/phone (data-manager.applyMarketingConsent).
+  if (hasStrongKey(ud)) Object.assign(ud, extraUserData(candidate));
   return ud;
+}
+
+// fn/ln/ct/st/zp/country/external_id — normalized per Meta, then SHA-256.
+function extraUserData(candidate) {
+  const id = matchFields.normalizeIdentity(candidate);
+  const out = {};
+  for (const key of ['fn', 'ln', 'ct', 'st', 'zp']) if (id[key]) out[key] = [sha256Hex(id[key])];
+  if (Object.keys(out).length) out.country = [sha256Hex('us')];
+  const extId = matchFields.normalizeExternalId(candidate.externalId);
+  if (extId) out.external_id = [sha256Hex(extId)];
+  return out;
+}
+
+function hasStrongKey(ud) {
+  return !!(ud.em || ud.ph || ud.fbc || ud.fbp);
 }
 
 function buildEvent(candidate) {
   const eventTime = toUnixSeconds(candidate.eventTimestamp);
   if (!eventTime) return null;
   const userData = buildUserData(candidate, eventTime);
-  if (!Object.keys(userData).length) return null; // no match key -> unsendable
+  if (!hasStrongKey(userData)) return null; // no match key -> unsendable
   const event = {
     event_name: EVENT_NAMES[candidate.conversionType],
     event_time: eventTime,
@@ -121,12 +142,18 @@ function skipReason(candidate) {
 }
 
 function matchKeySummary(candidate) {
+  const id = matchFields.normalizeIdentity(candidate);
   return {
     fbc: !!candidate.fbc,
     fbclid: !!candidate.fbclid,
     fbp: !!candidate.fbp,
     email: !!normalizeEmail(candidate.email),
     phone: !!normalizePhone(candidate.phone),
+    name: !!(id.fn && id.ln),
+    zip: !!id.zp,
+    city: !!id.ct,
+    state: !!id.st,
+    externalId: !!matchFields.normalizeExternalId(candidate.externalId),
   };
 }
 

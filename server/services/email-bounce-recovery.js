@@ -464,6 +464,9 @@ async function insertRecoveryMessage(bouncedMessage, correctedEmail, recoveryId)
     suppression_group_key_snapshot: bouncedMessage.suppression_group_key_snapshot || '',
     recipient_type: bouncedMessage.recipient_type || null,
     recipient_id: bouncedMessage.recipient_id || null,
+    // Same lead / estimate the bounced mail was tied to.
+    lead_id: bouncedMessage.lead_id || null,
+    estimate_id: bouncedMessage.estimate_id || null,
     recipient_email_snapshot: correctedEmail,
     from_name_snapshot: bouncedMessage.from_name_snapshot || 'Waves Pest Control',
     from_email_snapshot: bouncedMessage.from_email_snapshot || 'contact@wavespestcontrol.com',

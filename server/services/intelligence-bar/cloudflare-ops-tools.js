@@ -16,11 +16,14 @@
  * item 1, owner ruling 2026-09-28) are the outside-write tools: structurally
  * two-step (write-gates.js OUTSIDE_WRITE_TOOL_NAMES), full-access-only
  * (ib-access.js ibFullAccess, enforced in routes/admin-intelligence-bar.js —
- * not here). THIS PR IS PREVIEW ONLY: called with confirmed:true, both
- * refuse — the commit path (an actual Cloudflare purge/retry POST) ships in
- * a follow-up PR. CF_API_TOKEN is read-scoped today; a write needs Zone
- * Cache Purge + Zone Settings Edit + Account Pages Edit added (see the IB
- * scope doc's token checklist).
+ * not here). Confirmed, each acts ONLY on the pinned identifiers
+ * /confirm-action verified against the live preview's fingerprint
+ * (`_verified_cloudflare_zone_id` / `_verified_cloudflare_project_name` +
+ * `_verified_cloudflare_deployment_id`, threaded in by
+ * admin-intelligence-bar.js) — never a re-resolve of zone_name/project_name
+ * from the confirmed call's own input. CF_API_TOKEN needs Zone Cache Purge +
+ * Account Pages Edit for the write calls to succeed; a 401/403 surfaces as a
+ * plain "the token is read-only" error.
  */
 
 const logger = require('../logger');
@@ -70,7 +73,7 @@ Use for: "is the site throwing errors at the edge?", "traffic spike or attack on
   },
   {
     name: 'purge_cloudflare_cache',
-    description: `Purge the ENTIRE Cloudflare edge cache for one zone (domain) — every cached asset re-fetches from origin on the next request. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Cloudflare.
+    description: `Purge the ENTIRE Cloudflare edge cache for one zone (domain) — every cached asset re-fetches from origin on the next request. Owner login only, through a confirmation card.
 Use for: "purge the cache for bradentonflpestcontrol.com", "flush the CDN, the old page is still showing"`,
     input_schema: {
       type: 'object',
@@ -82,7 +85,7 @@ Use for: "purge the cache for bradentonflpestcontrol.com", "flush the CDN, the o
   },
   {
     name: 'retry_cloudflare_pages_build',
-    description: `Retry the LATEST Cloudflare Pages deployment for one spoke-site project (only useful when it failed). Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Cloudflare.
+    description: `Retry the LATEST Cloudflare Pages deployment for one spoke-site project (only useful when it failed). Owner login only, through a confirmation card.
 Use for: "retry the bradenton site build", "that Pages deploy failed, kick it off again"`,
     input_schema: {
       type: 'object',
@@ -94,11 +97,14 @@ Use for: "retry the bradenton site build", "that Pages deploy failed, kick it of
   },
 ];
 
-const NOT_YET_IMPLEMENTED_MESSAGE = 'Cloudflare write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const READ_ONLY_TOKEN_MESSAGE = 'The Cloudflare token is read-only — it needs write scope (Zone Cache Purge, Account Pages Edit) before this action can commit.';
 
 const NOT_CONFIGURED_MESSAGE = 'Cloudflare access is not configured. Add the CF_API_TOKEN service variable (a scoped Cloudflare API token) in the Railway dashboard.';
 
-async function cfRequest(path, { method = 'GET', body } = {}) {
+// `forWrite` picks the 401/403 message: a read missing a scope names the
+// scopes reads need, a write missing scope names the write-only ones — same
+// endpoint, different actionable text depending on which call failed.
+async function cfRequest(path, { method = 'GET', body, forWrite = false } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -112,12 +118,28 @@ async function cfRequest(path, { method = 'GET', body } = {}) {
       signal: controller.signal,
     });
     if (res.status === 401 || res.status === 403) {
-      throw new Error('Cloudflare rejected the token for this resource — CF_API_TOKEN may need an extra scope (Zone Read / Pages Read / Analytics Read).');
+      const err = new Error(forWrite
+        ? READ_ONLY_TOKEN_MESSAGE
+        : 'Cloudflare rejected the token for this resource — CF_API_TOKEN may need an extra scope (Zone Read / Pages Read / Analytics Read).');
+      err.status = res.status;
+      if (forWrite) err.writeAccessRequired = true;
+      throw err;
     }
-    if (!res.ok) throw new Error(`Cloudflare API returned HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(`Cloudflare API returned HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
     const json = await res.json();
     if (json.success === false) {
       const first = json.errors?.[0];
+      // Cloudflare can report an authorization failure as a 2xx envelope with
+      // success:false (10000 = authentication error, 9109 = unauthorized).
+      if (forWrite && [10000, 9109].includes(Number(first?.code))) {
+        const err = new Error(READ_ONLY_TOKEN_MESSAGE);
+        err.writeAccessRequired = true;
+        throw err;
+      }
       throw new Error(`Cloudflare API error: ${first?.message || 'unknown error'}`);
     }
     return json;
@@ -249,8 +271,8 @@ async function getCloudflareEdgeErrors(input) {
 }
 
 // Unconfirmed: resolve the zone live so the card names the real zone, never
-// purges anything. Confirmed: the commit path (a Cloudflare purge POST) is
-// not built in this PR. Full access is enforced by the route (ib-access.js).
+// purges anything. Confirmed: POSTs the purge to the pinned zone id. Full
+// access is enforced by the route (ib-access.js).
 async function purgeCloudflareCache(input) {
   const zoneName = String(input.zone_name || '').trim();
   if (!zoneName) throw new Error('zone_name is required.');
@@ -260,17 +282,28 @@ async function purgeCloudflareCache(input) {
       preview: true,
       tool: 'purge_cloudflare_cache',
       // The pinned canonical identity (id + exact name) — never the
-      // operator's raw string — is what a future commit path must act on.
+      // operator's raw string — is what the confirmed commit acts on.
       zone: { id: zone.id, zone: zone.name, status: zone.status, paused: Boolean(zone.paused) },
       note: `Purge the ENTIRE Cloudflare edge cache for "${zone.name}" — every cached asset re-fetches from origin on the next request.`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned zone id /confirm-action verified
+  // against the live preview above — never re-resolve zone_name from this
+  // call's own input, which is untrusted at this point.
+  const pinnedZoneId = input._verified_cloudflare_zone_id;
+  if (!pinnedZoneId) {
+    return {
+      error: 'Missing the verified zone identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  await cfRequest(`/zones/${pinnedZoneId}/purge_cache`, { method: 'POST', body: { purge_everything: true }, forWrite: true });
+  return { success: true, tool: 'purge_cloudflare_cache', zone_id: pinnedZoneId };
 }
 
 // Unconfirmed: resolve the project's latest deployment live so the card
 // names the actual build that would be retried (and its current status),
-// never retries anything. Confirmed: refuses — see purgeCloudflareCache.
+// never retries anything. Confirmed: retries the pinned deployment id.
 async function retryCloudflarePagesBuild(input) {
   const projectName = String(input.project_name || '').trim();
   if (!projectName) throw new Error('project_name is required.');
@@ -300,7 +333,32 @@ async function retryCloudflarePagesBuild(input) {
       note: `Retry the latest Cloudflare Pages deployment for "${project.name}" (currently ${dep.latest_stage?.status || 'NONE'}).`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned project name + deployment id
+  // /confirm-action verified against the live preview above — never
+  // re-resolve project_name or "latest deployment" from this call's own
+  // input, which is untrusted at this point (a new push landing between
+  // preview and confirm must not silently retry a DIFFERENT deployment).
+  const accountId = process.env.CF_ACCOUNT_ID;
+  if (!accountId) throw new Error('CF_ACCOUNT_ID is not set — required for Pages project lookups.');
+  const pinnedProject = input._verified_cloudflare_project_name;
+  const pinnedDeploymentId = input._verified_cloudflare_deployment_id;
+  if (!pinnedProject || !pinnedDeploymentId) {
+    return {
+      error: 'Missing the verified deployment identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  const json = await cfRequest(
+    `/accounts/${accountId}/pages/projects/${encodeURIComponent(pinnedProject)}/deployments/${encodeURIComponent(pinnedDeploymentId)}/retry`,
+    { method: 'POST', forWrite: true },
+  );
+  return {
+    success: true,
+    tool: 'retry_cloudflare_pages_build',
+    project: pinnedProject,
+    retried_deployment_id: pinnedDeploymentId,
+    new_deployment_id: json?.result?.id || null,
+  };
 }
 
 async function executeCloudflareOpsTool(toolName, input = {}) {
@@ -329,7 +387,7 @@ async function executeCloudflareOpsTool(toolName, input = {}) {
     } else {
       logger.error(`[intelligence-bar:cloudflare-ops] Tool ${toolName} failed:`, err);
     }
-    return { error: err.message };
+    return { error: err.message, ...(err.writeAccessRequired ? { code: 'write_access_required' } : {}) };
   }
 }
 

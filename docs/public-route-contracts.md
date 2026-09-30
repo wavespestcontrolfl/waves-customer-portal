@@ -800,6 +800,32 @@ A zone/no-tech confirm (no technician bound) has no single route to re-check
 and keeps only the overlap gate, unchanged. Either gate off skips this
 whole-route capacity re-check.
 
+Tech-aware confirm conflict checks for a second field technician
+(`GATE_MULTI_TECH_CONFIRM`, owner-approved 2026-09-29, ships DARK; needs
+`GATE_SCHEDULING_CAPACITY` live too). The offer side (`buildBookingAvailability`'s
+occupancy mirror) already keeps an occupied row only when it is unassigned or on
+the offered slot's own technician; the confirm side used to be tech-blind (built
+for one active technician), so a slot offered on technician B's day could be
+refused at confirm because technician A had an overlapping or nearby stop. With
+both gates on, `createSelfBooking` (`/api/booking/confirm`, the re-service commit
+and the consultation-page commit) scopes its whole conflict check to the booked
+technician: the zone/city/hold fast-path legs are AND-ed with "technician_id is
+NULL or equals the booked technician", and the global backstop
+(`findConflictingVisits`, which takes an opt-in `technicianId`) counts only the
+same technician's rows plus unassigned ones. Unassigned rows still block every
+technician, so the offer/commit predicates stay identical. The public reschedule
+commit (`SmartRebooker.reschedule` with `capacityPlacement: true`, the same
+offer builder) opts into the same scope for its kept technician. Either gate
+off, or a booking with no technician, is byte-for-byte the tech-blind check
+above. Every other caller — admin schedule/leads, rebooker series and
+rain-out/SMS moves, the phone agent, the zone-engine confirm, estimate slot
+reserve (which already verifies per technician in capacity mode), auto-dispatch
+and follow-up seeders — never passes `technicianId` and is unchanged. The
+date-wide occupancy advisory lock (rung 1) that every one of these writers takes
+still serializes concurrent confirms per calendar day regardless of technician,
+so two technicians' bookings and an unassigned insert cannot race past each
+other's probe.
+
 Public-confirm location freshness applies with either capacity gate on or
 off. After the scheduling and customer-communications fences, the customer
 row is held `FOR SHARE` through the insert. A complete live pin in another
@@ -2115,6 +2141,48 @@ Operational `meta.providerStatus` (credential configuration and attempted-provid
 health) is staff-only; `publicLookupMeta` removes it from every public response.
 The public `errors` array includes only the known outside-service-area verdict;
 `publicLookupErrors` removes provider failures and internal diagnostic messages.
+The response's `satellite.closeUrl` / `microCloseUrl` / `wideUrl` are ABSOLUTE
+short-lived signed proxy URLs (`https://<portal>/api/public/map-image/<token>`),
+never Google Static Maps URLs: the lookup builds keyed URLs internally (the
+server Maps key, which also serves Geocoding/Routes and so cannot be
+referrer-restricted), `publicSatellitePayload` re-signs only their
+center/zoom/size, and the whole success body also runs the shared Maps-key
+scrub (`scrubMapsKeysDeep`) as a last line. The marketing site's quote form
+renders `closeUrl` as a plain `<img src>`, which is why the URL is absolute.
+`/api/public/map-image/:token` (GET/HEAD, read-only signed satellite image
+proxy; the ONLY way the public lookup, the customer service report
+(`treatmentMap.satellite.live.url`, `stationMap.image.url`) and the customer
+portal `/api/property/station-map` get a map image — none of those payloads
+carries a maps.googleapis.com URL or a key any more; staff-only surfaces such
+as admin dispatch keep direct URLs). The token is
+`v1.<base64url(lat|lng|zoom|WxH|scale|maptype|exp)>.<base64url(HMAC-SHA256)>`,
+keyed on `REPORT_PIN_SECRET` (falls back to `JWT_SECRET`) through a
+purpose-derived key, 2 h expiry for report/portal links (24 h for the lead-form lookup, whose marketing-site form cannot re-request; never more than 24 h), constant-time compare,
+fail-closed when no secret is configured (the map is omitted, never sent
+keyed). The route reads NOTHING but the path token — no query param — and
+rebuilds a keyless Static Maps URL only from the signed, range-checked values
+(lat +-90, lng +-180, zoom 1-22, size <=640x640, scale 1|2, maptype
+satellite|hybrid), appends the key inside the fetch (8 s timeout, image/*
+content-type, 4 MB cap; a dedicated `GOOGLE_STATIC_MAPS_API_KEY` is preferred,
+matching the basemap provider), and streams the bytes, so it cannot become an
+open proxy or SSRF vector. Every refusal (malformed/forged/expired token, no
+key, upstream failure) is ONE generic 404 body — including the empty token,
+`//x`, extra path segments and every non-GET/HEAD method, which a terminal
+catch-all in the router answers with the same 404 (the header stamp and the
+route limiter run router-wide, ahead of the route, so no request under the
+mount falls through to the global limiter or the app notFound; the mount is
+case-insensitive and ignores a trailing slash; a last error handler in the router answers any error raised under the mount, such as a malformed percent-encoding like `/%E0%A4%A`, with the same 404 instead of the global 500); every response including the
+404 and the 429 carries `Cache-Control: no-store` (success: `private,
+max-age=900`), `Referrer-Policy: no-referrer`, `X-Content-Type-Options:
+nosniff`, `X-Robots-Tag: noindex` and `Cross-Origin-Resource-Policy:
+cross-origin` (helmet defaults to same-origin, which would block the <img> on
+the marketing site or a separate API origin). No server-side image cache
+(provider terms are display-only); a 60 req/min per-IP limiter (IPv6 /64
+collapsed) fronts the whole mount, which sits in `server/index.js` ABOVE the global `cors()` (it would otherwise answer an OPTIONS preflight with a bare 204 ahead of the router), the global `/api/` limiter and the body parsers.
+Regression guard: `server/tests/customer-map-no-key.test.js` fails if any
+server module outside an explicit server-only/staff-only allowlist references
+the Static Maps endpoint, and asserts the touched customer payloads carry no
+key).
 `/api/public/estimator/lead-prefill` (POST exchange, read-only semantics;
 swaps the voicemail text-back link's `lead_id` + HMAC token for that ONE
 lead's own contact fields — first/last name, email, phone, address, city,

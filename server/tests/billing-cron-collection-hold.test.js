@@ -15,6 +15,9 @@ let mockCustomers = [];
 let mockPaymentsInserts = [];
 let mockHealthAlertInserts = [];
 let mockExistingHoldRow = null;
+let mockPaymentsInsertFailures = 0;
+let mockPaymentsReadFails = false;
+let mockBillingDayMatches = true;
 
 jest.mock('../models/db', () => {
   function thenableFor(resultFn) {
@@ -39,8 +42,15 @@ jest.mock('../models/db', () => {
       let isHoldDedupe = false;
       const passThrough = b.whereRaw;
       b.whereRaw = (sql, ...rest) => { if (/deferred_reason/.test(String(sql))) isHoldDedupe = true; return passThrough(sql, ...rest); };
-      b.first = () => Promise.resolve(isHoldDedupe ? mockExistingHoldRow : null);
-      b.insert = jest.fn((row) => { mockPaymentsInserts.push(row); return Promise.resolve([1]); });
+      b.first = () => {
+        if (isHoldDedupe && mockPaymentsReadFails) return Promise.reject(new Error('db unavailable'));
+        return Promise.resolve(isHoldDedupe ? mockExistingHoldRow : null);
+      };
+      b.insert = jest.fn((row) => {
+        if (mockPaymentsInsertFailures > 0) { mockPaymentsInsertFailures -= 1; return Promise.reject(new Error('db unavailable')); }
+        mockPaymentsInserts.push(row);
+        return Promise.resolve([1]);
+      });
       return b;
     }
     if (table === 'customer_health_alerts') {
@@ -65,7 +75,7 @@ jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn(() => Promise.resolve('Hi there')) }));
 jest.mock('../services/payment-lifecycle-email', () => ({ sendChargeSuccess: jest.fn(), sendChargeFailed: jest.fn(), sendPaymentRetryNotice: jest.fn() }));
 jest.mock('../services/account-membership-email', () => ({}));
-jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => true) }));
+jest.mock('../services/billing-helpers', () => ({ isBillingDayMatch: jest.fn(() => mockBillingDayMatches) }));
 jest.mock('../services/stripe', () => ({
   charge: jest.fn(), chargeOneTime: jest.fn(), chargeMonthly: jest.fn(),
 }));
@@ -92,6 +102,9 @@ beforeEach(() => {
   mockPaymentsInserts = [];
   mockHealthAlertInserts = [];
   mockExistingHoldRow = null;
+  mockPaymentsInsertFailures = 0;
+  mockPaymentsReadFails = false;
+  mockBillingDayMatches = true;
   jest.clearAllMocks();
 });
 
@@ -144,3 +157,70 @@ test('with no hold the month is charged exactly as before (regression: the skip 
   expect(mockPaymentsInserts).toHaveLength(0);
   expect(logAutopay).not.toHaveBeenCalledWith('cust-held', 'skipped_collection_hold', expect.anything());
 }, 15000);
+
+describe('a hold deferral that cannot persist is never reported complete (billing_day only recurs monthly)', () => {
+  const holdErr = () => Object.assign(new Error('hold'), { code: 'COLLECTION_HOLD_CHECK_FAILED' });
+
+  test('a transient write failure is retried in-tick and the row still lands', async () => {
+    mockPaymentsInsertFailures = 1;
+    StripeService.chargeMonthly.mockRejectedValueOnce(holdErr());
+    const result = await BillingCron.processMonthlyBilling();
+    expect(mockPaymentsInserts).toHaveLength(1);
+    expect(result.skipped).toBe(1);
+    expect(result.failed || 0).toBe(0);
+    expect(mockHealthAlertInserts).toHaveLength(0);
+    expect(logAutopay).toHaveBeenCalledWith('cust-held', 'skipped_collection_hold', expect.objectContaining({ details: expect.objectContaining({ persisted: true }) }));
+  }, 15000);
+
+  test('when the durable row cannot be written: counted failed (not skipped), office bell filed, and the NEXT daily run (not the billing day) picks the customer up again', async () => {
+    mockPaymentsInsertFailures = 99;
+    StripeService.chargeMonthly.mockRejectedValueOnce(holdErr());
+    const first = await BillingCron.processMonthlyBilling();
+
+    expect(mockPaymentsInserts).toHaveLength(0);
+    expect(first.failed).toBe(1);
+    expect(first.skipped).toBe(0);
+    expect(mockHealthAlertInserts).toEqual([expect.objectContaining({
+      customer_id: 'cust-held', alert_type: 'billing_collection_deferred', severity: 'high',
+      title: expect.stringMatching(/NOT durably deferred/),
+    })]);
+    expect(logAutopay).toHaveBeenCalledWith('cust-held', 'skipped_collection_hold', expect.objectContaining({ details: expect.objectContaining({ persisted: false }) }));
+
+    // Next daily run: today is NOT the customer's billing day, the DB is back.
+    mockBillingDayMatches = false;
+    mockPaymentsInsertFailures = 0;
+    StripeService.chargeMonthly.mockRejectedValueOnce(holdErr());
+    const second = await BillingCron.processMonthlyBilling();
+    expect(StripeService.chargeMonthly).toHaveBeenCalledTimes(2); // marker made the customer due again
+    expect(mockPaymentsInserts).toHaveLength(1);
+    expect(JSON.parse(mockPaymentsInserts[0].metadata)).toMatchObject({ deferred_reason: 'collection_hold' });
+    expect(second.skipped).toBe(1);
+
+    // Persisted: the marker is cleared, so a third off-day run charges nobody.
+    StripeService.chargeMonthly.mockClear();
+    await BillingCron.processMonthlyBilling();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+  }, 30000);
+
+  test('a failed dedupe READ counts as not persisted (never assumes the row exists)', async () => {
+    mockPaymentsReadFails = true;
+    StripeService.chargeMonthly.mockRejectedValueOnce(holdErr());
+    const result = await BillingCron.processMonthlyBilling();
+    expect(result.failed).toBe(1);
+    expect(mockPaymentsInserts).toHaveLength(0);
+    expect(mockHealthAlertInserts).toHaveLength(1);
+  }, 15000);
+
+  test('a marked customer that got charged on the catch-up run has the marker cleared', async () => {
+    mockPaymentsInsertFailures = 99;
+    StripeService.chargeMonthly.mockRejectedValueOnce(holdErr());
+    await BillingCron.processMonthlyBilling();
+    mockBillingDayMatches = false;
+    StripeService.chargeMonthly.mockResolvedValueOnce({ id: 'pay-2', status: 'paid', amount: 89 });
+    const second = await BillingCron.processMonthlyBilling();
+    expect(second.charged).toBe(1);
+    StripeService.chargeMonthly.mockClear();
+    await BillingCron.processMonthlyBilling();
+    expect(StripeService.chargeMonthly).not.toHaveBeenCalled();
+  }, 30000);
+});

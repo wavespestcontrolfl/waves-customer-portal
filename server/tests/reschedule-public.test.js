@@ -1023,3 +1023,48 @@ describe('withSelfServeNotice (self-serve notice window, owner ruling 2026-09-23
     expect(withSelfServeNotice(elig, svc, now)).toBe(elig);
   });
 });
+
+describe('pageEligibility — the ONE verdict the GET page, find-slots and the texting AI share', () => {
+  const NOW = new Date('2026-07-01T12:00:00Z'); // 08:00 ET
+  const { pageEligibility } = reschedulePublicRouter._internals;
+  const ok = { status: 'confirmed', scheduled_date: '2026-07-10', window_start: '09:00:00', visit_id: null, customer_active: true };
+  function wireCount(n) {
+    mockDb.mockImplementation((table) => {
+      const api = {
+        where: () => api, whereNotIn: () => api, count: () => api,
+        first: async () => (table === 'scheduled_services' ? { n: String(n) } : null),
+      };
+      return api;
+    });
+  }
+
+  test('account not explicitly active → account_inactive (before any appointment logic or query)', async () => {
+    mockDb.mockClear();
+    expect(await pageEligibility({ ...ok, customer_active: false }, NOW)).toEqual({ ok: false, reason: 'account_inactive' });
+    expect(await pageEligibility({ ...ok, customer_active: null }, NOW)).toEqual({ ok: false, reason: 'account_inactive' });
+    expect(mockDb).not.toHaveBeenCalled();
+  });
+
+  test('grouped visit → grouped', async () => {
+    wireCount(2);
+    expect(await pageEligibility({ ...ok, visit_id: 'v1' }, NOW)).toEqual({ ok: false, reason: 'grouped' });
+  });
+
+  test('a MISSED visit stays rebookable and skips the notice rule', async () => {
+    expect(await pageEligibility({ ...ok, scheduled_date: '2026-06-20' }, NOW)).toEqual({ ok: true, missed: true });
+  });
+
+  test('a visit starting inside the self-serve move notice window → self_serve_notice', async () => {
+    expect(await pageEligibility({ ...ok, scheduled_date: '2026-07-01', window_start: '18:00:00' }, NOW)).toEqual({ ok: false, reason: 'self_serve_notice' });
+  });
+
+  test('an ordinary future visit → ok', async () => {
+    expect(await pageEligibility(ok, NOW)).toEqual({ ok: true });
+  });
+
+  test('the router\'s inline verdicts are gone: GET and find-slots call pageEligibility', () => {
+    const src = require('fs').readFileSync(require.resolve('../routes/reschedule-public'), 'utf8');
+    expect(src.match(/await pageEligibility\(svc\)/g)).toHaveLength(2);
+    expect(src.match(/withSelfServeNotice\(accountInactive/g)).toHaveLength(1); // only pageEligibility itself
+  });
+});

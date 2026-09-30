@@ -93,11 +93,56 @@ describe('models registry — cross-provider routing', () => {
     expect(M.TEXT_POLICIES.photoIdVision.fallback).toEqual({ provider: 'openai', model: M.OPENAI_FRONTIER });
   });
 
+  test('lawnVisitAssessment runs Gemini first and GPT-6 Sol second on its own selector (owner 2026-09-29, was Astra)', () => {
+    const M = require('../config/models');
+    expect(M.TEXT_POLICIES.lawnVisitAssessment.primary).toEqual({ provider: 'gemini', model: M.GEMINI_VISION_BEST });
+    expect(M.TEXT_POLICIES.lawnVisitAssessment.fallback).toEqual({ provider: 'openai', model: M.OPENAI_LAWN_ASSESSMENT });
+    expect(M.OPENAI_LAWN_ASSESSMENT).toBe(process.env.MODEL_OPENAI_LAWN_ASSESSMENT || 'gpt-6-sol');
+    // The pest identifier's Astra second look is untouched.
+    expect(M.TEXT_POLICIES.photoIdVision.fallback).toEqual({ provider: 'openai', model: M.OPENAI_FRONTIER });
+  });
+
+  test('MODEL_OPENAI_LAWN_ASSESSMENT overrides only the lawn backup leg', () => {
+    const saved = process.env.MODEL_OPENAI_LAWN_ASSESSMENT;
+    jest.resetModules();
+    process.env.MODEL_OPENAI_LAWN_ASSESSMENT = 'gpt-lawn-canary';
+    try {
+      const M = require('../config/models');
+      expect(M.TEXT_POLICIES.lawnVisitAssessment.fallback.model).toBe('gpt-lawn-canary');
+      expect(M.TEXT_POLICIES.photoIdVision.fallback.model).toBe(M.OPENAI_FRONTIER);
+      expect(M.TEXT_POLICIES.plantIdVision.fallback.model).toBe(M.OPENAI_PLANT_ID);
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_OPENAI_LAWN_ASSESSMENT; else process.env.MODEL_OPENAI_LAWN_ASSESSMENT = saved;
+      jest.resetModules();
+    }
+  });
+
   test('plantIdReferee is a single-leg Anthropic route on Claude Fable at effort high (owner 2026-09-28), outside the two-provider TEXT_POLICIES map', () => {
     const M = require('../config/models');
     expect(M.ROUTES.plantIdReferee).toEqual({ provider: 'anthropic', model: M.PLANT_ID_REFEREE, effort: 'high' });
     expect(M.PLANT_ID_REFEREE).toBe(process.env.MODEL_PLANT_ID_REFEREE || 'claude-fable-5-1');
     expect(M.MODEL_CATALOG[M.PLANT_ID_REFEREE].requires).toBe('deep');
+  });
+
+  test('lawnAssessmentReferee is a single-leg Anthropic route on Claude Fable at effort high (owner 2026-09-29), outside TEXT_POLICIES', () => {
+    const M = require('../config/models');
+    expect(M.ROUTES.lawnAssessmentReferee).toEqual({ provider: 'anthropic', model: M.LAWN_ASSESSMENT_REFEREE, effort: 'high' });
+    expect(M.LAWN_ASSESSMENT_REFEREE).toBe(process.env.MODEL_LAWN_ASSESSMENT_REFEREE || 'claude-fable-5-1');
+    expect(M.MODEL_CATALOG[M.LAWN_ASSESSMENT_REFEREE].requires).toBe('deep');
+  });
+
+  test('MODEL_LAWN_ASSESSMENT_REFEREE overrides only the lawn referee route', () => {
+    const saved = process.env.MODEL_LAWN_ASSESSMENT_REFEREE;
+    jest.resetModules();
+    process.env.MODEL_LAWN_ASSESSMENT_REFEREE = 'claude-fable-canary';
+    try {
+      const M = require('../config/models');
+      expect(M.ROUTES.lawnAssessmentReferee.model).toBe('claude-fable-canary');
+      expect(M.ROUTES.plantIdReferee.model).toBe(M.PLANT_ID_REFEREE);
+    } finally {
+      if (saved === undefined) delete process.env.MODEL_LAWN_ASSESSMENT_REFEREE; else process.env.MODEL_LAWN_ASSESSMENT_REFEREE = saved;
+      jest.resetModules();
+    }
   });
 
   test('MODEL_OPENAI_PLANT_ID and MODEL_PLANT_ID_REFEREE env overrides flow into the registry', () => {

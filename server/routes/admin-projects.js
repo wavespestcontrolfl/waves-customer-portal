@@ -958,7 +958,7 @@ function buildProjectReportPrompt({ typeCfg, findings, rawRecommendations, custo
 
 ## CONTEXT
 
-This generates customer-facing narrative copy for a Waves Pest Control & Lawn Care inspection / documentation report. The report is a branded PDF + web page delivered to the customer after a field visit.
+This generates customer-facing narrative copy for a Waves Pest Control inspection / documentation report. The report is a branded PDF + web page delivered to the customer after a field visit.
 
 Project types this prompt handles:
 - WDO inspection (wood-destroying organism, often pre-home-purchase)

@@ -310,6 +310,15 @@ async function deferMonthlyCollection(customer, monthKey, now) {
   });
 }
 
+const HOLD_DEFER_PERSIST_ATTEMPTS = 3;
+const HOLD_DEFER_PERSIST_DELAY_MS = 250;
+// customerId -> billed month whose hold deferral could NOT be written. The
+// monthly job only bills on billing_day, so the daily run treats a marked
+// customer as due again (same month only) until the deferral persists or the
+// month is collected. In-memory: covers a DB blip; a process restart drops it
+// (the office bell above names the manual recovery).
+const pendingHoldDeferrals = new Map();
+
 // Collections DISPUTE hold (collection-hold.js, B10): the customer disputed a
 // bill on a collections call and was told all billing follow-up is on hold,
 // so monthly dues are NOT charged — and NOT failed: no payment-failed SMS, no
@@ -321,32 +330,61 @@ async function deferMonthlyCollection(customer, monthKey, now) {
 // row for this obligation is not duplicated on a re-run.
 async function deferMonthlyForCollectionHold(customer, monthKey, now, err) {
   logger.warn(`[billing-cron] Monthly charge for customer ${customer.id} deferred — collections hold (${err.code}); collecting after release`);
-  try {
-    const existing = await db('payments')
-      .where({ customer_id: customer.id, status: 'failed' })
-      .whereNull('superseded_by_payment_id')
-      .whereRaw("metadata->>'billed_month' = ?", [monthKey])
-      .whereRaw("metadata->>'deferred_reason' = 'collection_hold'")
-      .first('id');
-    if (!existing) {
-      await db('payments').insert({
-        customer_id: customer.id,
-        status: 'failed',
-        payment_date: etDateString(now),
-        amount: customer.monthly_rate,
-        description: `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name} — DEFERRED (collections hold)`,
-        failure_reason: 'Not charged: the customer has an active collections dispute hold. Collected automatically after the office releases the hold.',
-        retry_count: 0,
-        next_retry_at: new Date(),
-        metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: monthKey, tier: customer.waveguard_tier || '', deferred_reason: 'collection_hold' }),
-      });
+  // The deferral is "complete" ONLY when the durable retry row exists (already
+  // present, or written now). A hold-lookup failure is often a DB outage, in
+  // which case this read/insert fails too; billing_day recurs only once a
+  // month, so a swallowed failure here would lose the month's dues. Bounded
+  // in-tick retry, then surface + leave a marker the next daily run picks up.
+  let persisted = false;
+  let lastError = null;
+  for (let attempt = 1; attempt <= HOLD_DEFER_PERSIST_ATTEMPTS && !persisted; attempt++) {
+    try {
+      const existing = await db('payments')
+        .where({ customer_id: customer.id, status: 'failed' })
+        .whereNull('superseded_by_payment_id')
+        .whereRaw("metadata->>'billed_month' = ?", [monthKey])
+        .whereRaw("metadata->>'deferred_reason' = 'collection_hold'")
+        .first('id');
+      if (!existing) {
+        await db('payments').insert({
+          customer_id: customer.id,
+          status: 'failed',
+          payment_date: etDateString(now),
+          amount: customer.monthly_rate,
+          description: `${customer.waveguard_tier || 'WaveGuard'} WaveGuard Monthly — ${customer.first_name} ${customer.last_name} — DEFERRED (collections hold)`,
+          failure_reason: 'Not charged: the customer has an active collections dispute hold. Collected automatically after the office releases the hold.',
+          retry_count: 0,
+          next_retry_at: new Date(),
+          metadata: JSON.stringify({ type: 'monthly_autopay', billed_month: monthKey, tier: customer.waveguard_tier || '', deferred_reason: 'collection_hold' }),
+        });
+      }
+      persisted = true;
+    } catch (persistErr) {
+      lastError = persistErr;
+      if (attempt < HOLD_DEFER_PERSIST_ATTEMPTS) await new Promise((r) => setTimeout(r, HOLD_DEFER_PERSIST_DELAY_MS));
     }
-  } catch (insertErr) {
-    logger.error(`[billing-cron] Could not persist collection-hold retry row for customer ${customer.id}: ${insertErr.message} — falling back to the log event only`);
   }
-  await logAutopay(customer.id, 'skipped_collection_hold', {
-    details: { source: 'autopay', billed_month: monthKey, code: err.code },
-  });
+  if (!persisted) {
+    logger.error(`[billing-cron] Could not persist collection-hold retry row for customer ${customer.id} (${monthKey}): ${lastError?.message} — dues NOT durably deferred; marking for catch-up on the next daily run`);
+    pendingHoldDeferrals.set(String(customer.id), monthKey);
+    await insertHealthAlert(customer.id, {
+      alert_type: 'billing_collection_deferred',
+      severity: 'high',
+      title: 'Monthly dues NOT collected and NOT durably deferred — collections hold check failed',
+      description: `The daily dues cron could not charge ${monthKey} (a collections hold is active or could not be verified) and could not write the retry row (${lastError?.message}). The next daily run retries this customer automatically while the app stays up; if it restarts first, collect ${monthKey} from Customer 360 "Charge now" once the hold is cleared.`,
+      trigger_data: JSON.stringify({ billed_month: monthKey, source: 'billing_monthly_cron_hold_defer_unpersisted', code: err.code }),
+    }, 'Hold-defer-unpersisted');
+  } else {
+    pendingHoldDeferrals.delete(String(customer.id));
+  }
+  try {
+    await logAutopay(customer.id, 'skipped_collection_hold', {
+      details: { source: 'autopay', billed_month: monthKey, code: err.code, persisted },
+    });
+  } catch (logErr) {
+    logger.warn(`[billing-cron] skipped_collection_hold log failed for customer ${customer.id}: ${logErr.message}`);
+  }
+  return persisted;
 }
 
 // Codex round-2 P0 + pre-push fallback audit P1: a sibling attempt for this
@@ -479,7 +517,10 @@ const BillingCron = {
         // shapes "charge today vs. skip" for every customer regardless
         // of their billing_day. See isBillingDayMatch for the NULL-default
         // contract.
-        if (!isBillingDayMatch(customer.billing_day, todayDay)) {
+        const catchUpMonth = pendingHoldDeferrals.get(String(customer.id));
+        const holdCatchUp = catchUpMonth === `${year}-${String(month).padStart(2, '0')}`;
+        if (catchUpMonth && !holdCatchUp) pendingHoldDeferrals.delete(String(customer.id));
+        if (!holdCatchUp && !isBillingDayMatch(customer.billing_day, todayDay)) {
           continue;
         }
 
@@ -571,6 +612,8 @@ const BillingCron = {
         );
         const lockOutcome = attempt.ok ? attempt.value : { claimHeldElsewhere: true };
 
+        if (!lockOutcome.holdSkipped) pendingHoldDeferrals.delete(String(customer.id));
+
         if (lockOutcome.unresolvedOutcome) {
           await alertUnresolvedMonthlyOutcome(customer, monthKey, lockOutcome.unresolvedOutcome);
           skipped++;
@@ -578,8 +621,8 @@ const BillingCron = {
         }
 
         if (lockOutcome.holdSkipped) {
-          await deferMonthlyForCollectionHold(customer, monthKey, now, lockOutcome.holdSkipped);
-          skipped++;
+          const deferred = await deferMonthlyForCollectionHold(customer, monthKey, now, lockOutcome.holdSkipped);
+          if (deferred) skipped++; else failed++;
           continue;
         }
 

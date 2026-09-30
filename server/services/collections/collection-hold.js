@@ -134,33 +134,37 @@ async function collectionHoldInvoiceIds(invoiceIds, { database = db } = {}) {
 // `database` is the transaction the primitive already holds. Best-effort - a
 // failed lookup or write only logs, it never blocks or fails the charge.
 async function recordHoldOverride({ customerId, actorId = null, ip = null, userAgent = null, route = null, invoiceId = null, database = db }) {
+  const args = { customerId, actorId, ip, userAgent, route, invoiceId };
   try {
-    // On a caller's transaction the lookup runs in a SAVEPOINT: a failed query
-    // would otherwise leave that transaction aborted (25P02) and turn this
-    // best-effort trail into a blocked charge on the next statement.
-    const held = database?.isTransaction && typeof database.transaction === 'function'
-      ? await database.transaction((sp) => customerHasActiveCollectionHold(customerId, sp))
-      : await customerHasActiveCollectionHold(customerId, database);
-    if (!held) return false;
-    const { recordAuditEvent } = require('../audit-log');
-    const { logAutopay } = require('../autopay-log');
-    await recordAuditEvent({
-      actor_type: 'technician',
-      actor_id: actorId,
-      action: 'customer.collection_hold_overridden',
-      resource_type: 'customer',
-      resource_id: customerId,
-      metadata: { route, invoice_id: invoiceId },
-      ip_address: ip,
-      user_agent: userAgent,
-      critical: false,
-    });
-    await logAutopay(customerId, 'collection_hold_overridden', { details: { route, invoice_id: invoiceId, admin_id: actorId } });
-    return true;
+    // Inside the charge transaction a failed read would abort the whole trx
+    // (25P02) and block the charge this trail only annotates, so the lookup
+    // runs under a savepoint that rolls back on error.
+    return database.isTransaction
+      ? await database.transaction((sp) => recordHoldOverrideOn(sp, args))
+      : await recordHoldOverrideOn(database, args);
   } catch (err) {
     require('../logger').warn(`[collection-hold] override trail failed for customer ${customerId}: ${err.message}`);
     return false;
   }
+}
+
+async function recordHoldOverrideOn(database, { customerId, actorId, ip, userAgent, route, invoiceId }) {
+  if (!(await customerHasActiveCollectionHold(customerId, database))) return false;
+  const { recordAuditEvent } = require('../audit-log');
+  const { logAutopay } = require('../autopay-log');
+  await recordAuditEvent({
+    actor_type: 'technician',
+    actor_id: actorId,
+    action: 'customer.collection_hold_overridden',
+    resource_type: 'customer',
+    resource_id: customerId,
+    metadata: { route, invoice_id: invoiceId },
+    ip_address: ip,
+    user_agent: userAgent,
+    critical: false,
+  });
+  await logAutopay(customerId, 'collection_hold_overridden', { details: { route, invoice_id: invoiceId, admin_id: actorId } });
+  return true;
 }
 
 // ---------------------------------------------------------------------------
