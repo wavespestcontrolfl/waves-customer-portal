@@ -54,8 +54,31 @@ describe('source picking', () => {
     expect(m).toMatchObject({ zip: '34221', city: null, state: null });
   });
   test('external id: customer id, else lead-scoped', () => {
-    expect(F.externalIdFor({ customerId: 'c1', leadId: 'l1' })).toBe('c1');
+    expect(F.externalIdFor({ customerId: 'c1', leadId: 'l1' })).toBe('lead:l1');
+    expect(F.externalIdFor({ customerId: 'c1' })).toBe('c1');
     expect(F.externalIdFor({ leadId: 'l1' })).toBe('lead:l1');
     expect(F.externalIdFor({})).toBeNull();
+  });
+
+  describe('identityForContact', () => {
+    const lead = { email: 'Spouse@Example.com', phone: '(941) 555-0101', firstName: 'Pat', lastName: 'Lee', zip: '34202' };
+    const cust = { email: 'owner@example.com', phone: '941-555-0199', firstName: 'Sam', lastName: 'Rivera', city: 'Bradenton', state: 'FL', zip: '34211' };
+
+    it('never pairs a different caller\'s contact with the account holder\'s name', () => {
+      const id = F.identityForContact({ email: lead.email, phone: lead.phone }, cust, lead);
+      expect(id).toMatchObject({ firstName: 'Pat', lastName: 'Lee', zip: '34202', state: null });
+    });
+
+    it('merges both sources when they share a contact', () => {
+      const same = { ...lead, email: 'OWNER@example.com', firstName: null, lastName: null, zip: null };
+      const id = F.identityForContact({ email: same.email, phone: same.phone }, cust, same);
+      expect(id).toMatchObject({ firstName: 'Sam', lastName: 'Rivera', zip: '34211', state: 'FL' });
+    });
+
+    it('sends no name/address when the uploaded contact mixes two people', () => {
+      const leadEmailOnly = { ...lead, phone: null };
+      const id = F.identityForContact({ email: leadEmailOnly.email, phone: cust.phone }, cust, leadEmailOnly);
+      expect(id).toEqual({ firstName: null, lastName: null, city: null, state: null, zip: null });
+    });
   });
 });

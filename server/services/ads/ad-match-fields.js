@@ -135,6 +135,31 @@ function mergeIdentity(preferred, fallback) {
   return { firstName: name.first || null, lastName: name.last || null, city: addr.city, state: addr.state, zip: addr.zip };
 }
 
+// Name/address must describe the SAME person as the uploaded email/phone. A
+// lead can be linked to an account customer while keeping a different caller's
+// contact (spouse, tenant, buyer), so the two sources are merged only when
+// they share an email or phone. Otherwise the identity comes from the one
+// source that supplied every uploaded contact, and none when the upload mixes
+// both. Each source is { email, phone, firstName, lastName, city, state, zip }.
+function sameEmail(a, b) {
+  const x = String(a || '').trim().toLowerCase();
+  return !!x && x === String(b || '').trim().toLowerCase();
+}
+function samePhone(a, b) {
+  const x = String(a || '').replace(/\D/g, '').slice(-10);
+  return x.length === 10 && x === String(b || '').replace(/\D/g, '').slice(-10);
+}
+function identityForContact(uploaded, preferred, fallback) {
+  const a = preferred || {};
+  const b = fallback || {};
+  const { email, phone } = uploaded || {};
+  if (sameEmail(a.email, b.email) || samePhone(a.phone, b.phone)) return mergeIdentity(a, b);
+  const supplies = (src) => (!email || sameEmail(src.email, email)) && (!phone || samePhone(src.phone, phone));
+  if (supplies(a)) return mergeIdentity(a, {});
+  if (supplies(b)) return mergeIdentity(b, {});
+  return { firstName: null, lastName: null, city: null, state: null, zip: null };
+}
+
 // Google AddressInfo needs ALL of givenName, familyName, regionCode and
 // postalCode; names are SHA-256 hashed (by the caller's `hash`), regionCode and
 // postalCode are sent as-is. null unless both names and a 5-digit ZIP exist.
@@ -155,12 +180,13 @@ function nullIdentityFields() {
   return out;
 }
 
-// Our stable per-person id: the customer id when known (one person stays the
-// same across a Lead and every later Purchase/audience row), else a
-// lead-scoped id.
+// Our stable per-funnel id: lead:<id> whenever a lead exists, so the Lead
+// event and the later Purchase carry the same value even when the lead is
+// linked to a customer after its Lead event was sent (events are never
+// rewritten). The customer id only for jobs with no lead.
 function externalIdFor({ customerId, leadId }) {
-  if (customerId) return String(customerId);
   if (leadId) return `lead:${leadId}`;
+  if (customerId) return String(customerId);
   return null;
 }
 
@@ -174,6 +200,7 @@ module.exports = {
   normalizeIdentity,
   googleAddressParts,
   mergeIdentity,
+  identityForContact,
   externalIdFor,
   IDENTITY_FIELDS,
   nullIdentityFields,

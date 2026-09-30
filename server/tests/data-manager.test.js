@@ -606,25 +606,46 @@ describe('extra match keys on conversions (name / ZIP / external id)', () => {
     const c = mapLeadCandidate({ id: 'l1', first_name: 'Jo', last_name: 'Lee', zip: '34221', eventTimestamp: 1, created_at: '2026-07-01T00:00:00Z' });
     expect(skipReason(c)).toBe('missing_match_keys');
   });
-  test('lead candidate: own name/ZIP first, linked customer fills state; external id is the customer id', () => {
+  test('lead candidate: own name/ZIP first, same-person linked customer fills state; external id is lead-scoped', () => {
     const c = mapLeadCandidate({
       id: 'lead-1', customer_id: 'cust-1', created_at: '2026-07-01T00:00:00Z', status: 'qualified',
+      email: 'jo@example.com', customer_email: 'JO@example.com',
       first_name: 'Jo', last_name: 'Lee', zip: '34221',
       customer_first_name: 'Joanne', customer_last_name: 'Lee', customer_city: 'Palmetto', customer_state: 'FL', customer_zip: '34221',
     });
-    expect(c).toMatchObject({ firstName: 'Jo', lastName: 'Lee', city: 'Palmetto', state: 'FL', zip: '34221', externalId: 'cust-1' });
+    expect(c).toMatchObject({ firstName: 'Jo', lastName: 'Lee', city: 'Palmetto', state: 'FL', zip: '34221', externalId: 'lead:lead-1' });
+  });
+  test('lead from a different caller linked to an account customer: no borrowed customer name/address', () => {
+    const c = mapLeadCandidate({
+      id: 'lead-2', customer_id: 'cust-1', created_at: '2026-07-01T00:00:00Z', status: 'qualified',
+      email: 'spouse@example.com', phone: '9415550101', customer_email: 'owner@example.com', customer_phone: '9415550199',
+      first_name: null, last_name: null, zip: null,
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_city: 'Bradenton', customer_state: 'FL', customer_zip: '34211',
+    });
+    expect(c).toMatchObject({ firstName: null, lastName: null, city: null, state: null, zip: null, email: 'spouse@example.com' });
   });
   test('unlinked lead gets a lead-scoped external id', () => {
     expect(mapLeadCandidate({ id: 'lead-7', created_at: '2026-07-01T00:00:00Z' }).externalId).toBe('lead:lead-7');
   });
-  test('completed job: the customer record is canonical, the lead is the fallback; ids agree with the Lead event', () => {
+  test('completed job: the same-person customer record is canonical, the lead is the fallback; ids agree with the Lead event', () => {
     const c = mapCompletedJobCandidate({
       id: 'ea1', customer_id: 'cust-1', lead_id: 'lead-1', service_date: '2026-07-01', invoice_total: 100,
+      lead_phone: '(941) 555-0100', customer_phone: '941-555-0100',
       customer_first_name: 'Joanne', customer_last_name: 'Lee', customer_zip: '34221',
       lead_first_name: 'Jo', lead_last_name: 'Lee', lead_zip: '34202',
     });
-    expect(c).toMatchObject({ firstName: 'Joanne', zip: '34221', externalId: 'cust-1' });
+    expect(c).toMatchObject({ firstName: 'Joanne', zip: '34221', externalId: 'lead:lead-1' });
     expect(mapCompletedJobCandidate({ id: 'ea2', lead_id: 'lead-1', service_date: '2026-07-01' }).externalId).toBe('lead:lead-1');
+    expect(mapCompletedJobCandidate({ id: 'ea3', customer_id: 'cust-9', service_date: '2026-07-01' }).externalId).toBe('cust-9');
+  });
+  test('completed job booked by a different caller: name/address follow the uploaded lead contact, not the account holder', () => {
+    const c = mapCompletedJobCandidate({
+      id: 'ea4', customer_id: 'cust-1', lead_id: 'lead-2', service_date: '2026-07-01', invoice_total: 100,
+      lead_email: 'tenant@example.com', lead_phone: '9415550101', customer_email: 'owner@example.com', customer_phone: '9415550199',
+      customer_first_name: 'Sam', customer_last_name: 'Rivera', customer_zip: '34211',
+      lead_first_name: 'Pat', lead_last_name: 'Lee', lead_zip: '34202',
+    });
+    expect(c).toMatchObject({ email: 'tenant@example.com', firstName: 'Pat', lastName: 'Lee', zip: '34202' });
   });
   test('consent: an opted-out contact loses name, address and external id along with email/phone', async () => {
     mockLoadSuppression.mockResolvedValue({

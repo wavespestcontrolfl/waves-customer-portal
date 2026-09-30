@@ -380,12 +380,14 @@ function dedupeCandidatesByTransaction(candidates = []) {
 }
 
 // Name/address for a conversion: the row's own person first, the linked
-// customer as fallback (see ad-match-fields.mergeIdentity). Lead rows have no
-// state column, so state only ever comes from the linked customer.
+// customer as fallback only when it is the same person as the uploaded
+// contact (see ad-match-fields.identityForContact). Lead rows have no state
+// column, so state only ever comes from the linked customer.
 function leadIdentity(row) {
-  return matchFields.mergeIdentity(
-    { firstName: row.first_name, lastName: row.last_name, city: row.city, zip: row.zip },
-    { firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
+  return matchFields.identityForContact(
+    { email: row.email, phone: row.phone },
+    { email: row.email, phone: row.phone, firstName: row.first_name, lastName: row.last_name, city: row.city, zip: row.zip },
+    { email: row.customer_email, phone: row.customer_phone, firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
   );
 }
 
@@ -393,8 +395,7 @@ function mapLeadCandidate(row) {
   const eventTimestamp = toRfc3339(row.converted_at || row.first_contact_at || row.created_at);
   return {
     ...leadIdentity(row),
-    // Meta external_id: the linked customer id when there is one (so the Lead
-    // and the later Purchase are the same person), else lead:<id>.
+    // Meta external_id: lead:<id>, the same value the later Purchase carries.
     externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId: row.id }),
     conversionType: 'qualified_lead',
     sourceTable: 'leads',
@@ -446,10 +447,13 @@ function mapCompletedJobCandidate(row) {
   const customerPhone = row.customer_phone || null;
   const leadId = row.lead_id || estimateLeadId(row.estimate_data);
   return {
-    // The customer record is canonical for a completed job; the lead is the fallback.
-    ...matchFields.mergeIdentity(
-      { firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
-      { firstName: row.lead_first_name, lastName: row.lead_last_name, city: row.lead_city, zip: row.lead_zip },
+    // The customer record is canonical for a completed job and the lead the
+    // fallback, but only a source that is the same person as the uploaded
+    // email/phone below may supply the name/address.
+    ...matchFields.identityForContact(
+      { email: leadEmail || customerEmail, phone: leadPhone || customerPhone },
+      { email: customerEmail, phone: customerPhone, firstName: row.customer_first_name, lastName: row.customer_last_name, city: row.customer_city, state: row.customer_state, zip: row.customer_zip },
+      { email: leadEmail, phone: leadPhone, firstName: row.lead_first_name, lastName: row.lead_last_name, city: row.lead_city, zip: row.lead_zip },
     ),
     externalId: matchFields.externalIdFor({ customerId: row.customer_id, leadId }),
     conversionType: 'completed_job_revenue',
