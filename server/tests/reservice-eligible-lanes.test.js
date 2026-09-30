@@ -510,6 +510,27 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['Wasps are back', true, 'pest', false],
     ['Hornets are back', true, 'pest', false],
     ['Yellow jackets are back', true, 'pest', false],
+    // Codex round-41 P2: "haven't stopped coming" / "didn't stop showing up" PERSIST (not a negated sighting)
+    ["The ants haven't stopped coming", true, 'pest', false],
+    ["The ants didn't stop showing up", true, 'pest', false],
+    ['Ants will not stop coming', true, 'pest', false],
+    ["I can't stop seeing roaches", true, 'pest', false],
+    ['The ants stopped coming', false, null, false],
+    ["The ants aren't coming anymore", false, null, false],
+    // Codex round-41 P2: plain possession with the covered pests' qualified names (bounded modifiers)
+    ['I have carpenter ants', true, 'pest', false],
+    ["We've got ghost ants", true, 'pest', false],
+    ['I have large roaches', true, 'pest', false],
+    ['I have black widow spiders', true, 'pest', false],
+    ['I have a few fire ants', true, 'pest', false],
+    ['I have a question about ants', false, 'pest', false],
+    ['we have ants under contract', false, 'pest', false],
+    // Codex round-41 P2: palm issues are the plant specialty (palm_treatment), not the generic pest lane; palmetto bugs are roaches
+    ['The palm bugs are back', true, null, true],
+    ['my palms are dying', false, null, true],
+    ['I need palm treatment, the palm bugs are back', true, null, true],
+    ['the palmetto bugs are back', true, 'pest', false],
+    ['the ants are back in the palm tree', true, 'pest', false],
     // several reported lanes: active, but the single-lane view is null (see reportedReserviceLanes below)
     ['Ants and chinch bugs are back', true, null, false],
   ];

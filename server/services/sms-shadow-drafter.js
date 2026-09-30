@@ -1362,12 +1362,12 @@ function reserviceExcludedSpecialtyInPromise(text) {
 // further down are read only at call time.
 // The lane of an ACTIVE report, pest or lawn, when the facts list it as eligible (a pronoun-only return is pest).
 // Codex round-39 P2: the SET of reported lanes — "Ants and chinch bugs are back" reports BOTH pest and lawn. owed = reported ∩ eligible.
-function reportedLaneSet(text, context) {
+function reportedLaneSet(text, context, coveredLanes) {
   const { reportedReserviceLanes } = require('./reservice-scheduler');
   const t = String(text || '');
   const named = reportedReserviceLanes(t);
   if (named.length) return named;
-  const pronoun = pronounOnlyReportLane(t, context);
+  const pronoun = pronounOnlyReportLane(t, context, coveredLanes);
   return pronoun ? [pronoun] : [];
 }
 function reportedReportLanes({ inboundMessage, context, lanes }) {
@@ -1378,24 +1378,27 @@ function reportedReportLanes({ inboundMessage, context, lanes }) {
     const named = reportedReserviceLanes(text).filter((lane) => eligible.includes(lane));
     if (named.length) return named;
   }
-  if (pronounOnlyReportLane(text, context) && eligible.includes('pest')) return ['pest'];
+  if (pronounOnlyReportLane(text, context, eligible) && eligible.includes('pest')) return ['pest'];
   return [];
 }
 function reportedPestLane({ inboundMessage, context, lanes }) {
   const { reportedReserviceLane } = require('./reservice-scheduler');
   const text = String(inboundMessage || '');
   if (PEST_REPORT_TEXT_RE.test(text) && reportedReserviceLane(text) === 'pest' && lanes.includes('pest')) return 'pest';
-  if (pronounOnlyReportLane(text, context) && lanes.includes('pest')) return 'pest';
+  if (pronounOnlyReportLane(text, context, lanes) && lanes.includes('pest')) return 'pest';
   return null;
 }
 // The ONE history-based lane inference (Codex round-27 P1, PR #5336): ONLY a genuine pronoun-only return
 // ("they're back") from a customer with a pest relationship reads as a pest report. A report that names its
 // own pest noun, lawn word or excluded specialty (termites, rodents, mosquitoes, bed bugs, tree & shrub) has
 // a lane of its own — resolved or deliberately null — and never falls back to "pest" from history.
-function pronounOnlyReportLane(text, context) {
+// Codex round-41 P2: the pest relationship is the context's display-window history OR the already-loaded LIVE pest-lane state
+// (`coveredLanes`: eligible / link-down / booked lanes from the facts) — an eligible customer whose last pest visit fell out of the
+// 3-row completed-visit window still has a pest relationship.
+function pronounOnlyReportLane(text, context, coveredLanes) {
   const { reportedReserviceLanes, reportedReserviceExcludedSpecialty } = require('./reservice-scheduler');
   const t = String(text || '');
-  if (!context || !PRONOUN_RETURN_TEXT_RE.test(t) || !customerHasPestRelationship(context)) return null;
+  if (!PRONOUN_RETURN_TEXT_RE.test(t) || !hasPestRelationship(context, coveredLanes)) return null;
   if (reportedReserviceExcludedSpecialty(t) || reportedReserviceLanes(t).length) return null;
   return 'pest';
 }
@@ -1448,12 +1451,15 @@ const RESERVICE_REFUSAL_RE = new RegExp(
 function reserviceRefusalAffirmed(text) {
   return require('./reservice-scheduler').mentionsAffirmed(String(text || ''), RESERVICE_REFUSAL_RE);
 }
-function reserviceOfferOwed({ inboundMessage, lanes, context }) {
+// A true hand-off the customer's OWN words establish, or an explicit refusal, suppresses the owed offer (and the state replies below).
+function reserviceOfferSuppressed(inboundMessage) {
   const handoffRe = gateEnvValue('GATE_SMS_AGENT_COMPLAINTS') ? RESERVICE_HANDOFF_TEXT_RE : RESERVICE_HANDOFF_WITH_ANGER_RE;
   // Codex round-24 P2: only an AFFIRMED hand-off clause suppresses the offer — "I don't need a refund" or
   // "I don't want to cancel" mentions the term to negate it (the scheduler's clause-level negation rule).
-  if (require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe)) return false;
-  if (reserviceRefusalAffirmed(inboundMessage)) return false;
+  return require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe) || reserviceRefusalAffirmed(inboundMessage);
+}
+function reserviceOfferOwed({ inboundMessage, lanes, context }) {
+  if (reserviceOfferSuppressed(inboundMessage)) return false;
   // Codex round-36 P2: the owed lane is the RESOLVED reported lane — pest OR lawn (turf insects: "Chinch bugs are back") — when it is
   // eligible, so the customer gets the link instead of neither the link nor times (OPEN TIMES are skipped for a deciding lane).
   return reportedReportLanes({ inboundMessage, context, lanes }).length > 0;
@@ -1503,11 +1509,11 @@ function reserviceHasSeparateRequest(text) {
 // (bookable or already booked) the guards ALWAYS apply — no offered_times, no book_appointment, no OPEN TIMES in the
 // facts — whatever else the inbound asks. This detector only decides whether to ADD a prompt hint telling the model
 // to hand the OTHER request to the office; it may be imperfect and never loosens anything.
-function reserviceMixedRequest({ inboundMessage, context }) {
+function reserviceMixedRequest({ inboundMessage, context, coveredLanes }) {
   const text = String(inboundMessage || '');
   // Codex round-37 P2: "another service" is judged against the RESOLVED reported lane (a lawn report's own lawn words are not another service)
   const { reportedReserviceExcludedSpecialty, namesOtherService } = require('./reservice-scheduler');
-  const reported = reportedLaneSet(text, context);
+  const reported = reportedLaneSet(text, context, coveredLanes);
   // several reported lanes: the only "other service" is an excluded specialty (each lane's own words are the report itself)
   const other = reported.length > 1 ? reportedReserviceExcludedSpecialty(text) : namesOtherService(text, reported[0] || 'pest');
   return SAVE_SALE_NON_PEST_TEXT_RE.test(text) || reserviceHasSeparateRequest(text) || other;
@@ -1516,8 +1522,10 @@ function reserviceMixedRequest({ inboundMessage, context }) {
 // rule; the other request goes to a person.
 const RESERVICE_MIXED_REQUEST_HINT = 'MIXED REQUEST: this text reports pests AND asks for something else (another visit, a schedule change, a cancellation or another service). Answer the pest report per the PEST REPORTS rule (offer the free re-service link when FREE RE-SERVICE says eligible, or refer to the appointment already on the schedule when it says booked). Do NOT quote, offer or book any times for the other request — add {"type":"escalate","note":"<the other request in a few words>"} to intended_actions and say when they\'ll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW.';
 function reserviceLaneDecidesReply({ reserviceState, inboundMessage, context }) {
-  if (!reserviceState || !gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context)) return false;
-  return reportedLaneSet(inboundMessage, context).some((lane) => reserviceState.lanes.includes(lane) || (reserviceState.linkDownLanes || []).includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
+  if (!reserviceState) return false;
+  const covered = reserviceStateCoveredLanes(reserviceState);
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !pestReportSignal(inboundMessage, context, covered)) return false;
+  return reportedLaneSet(inboundMessage, context, covered).some((lane) => reserviceState.lanes.includes(lane) || (reserviceState.linkDownLanes || []).includes(lane) || Object.prototype.hasOwnProperty.call(reserviceState.booked || {}, lane));
 }
 // Lanes the facts mark COVERED-BUT-LINK-UNAVAILABLE ("covered for pest, but the free re-service booking link is unavailable …").
 function linkDownReserviceLanes(factsBlock) {
@@ -1536,9 +1544,10 @@ function bookedReserviceLanes(factsBlock) {
 // ("The ants are back, cancel my plan and book my lawn visit": the cancellation may suppress the OWED offer, never this).
 function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTimes, actions }) {
   if (!([].concat(offeredTimes || []).length || actions.some((a) => a && a.type === 'book_appointment'))) return null;
-  if (!pestReportSignal(inboundMessage, context)) return null; // pronoun-aware ("they're back" + a pest relationship)
+  const covered = factsCoveredReserviceLanes(factsBlock);
+  if (!pestReportSignal(inboundMessage, context, covered)) return null; // pronoun-aware ("they're back" + a pest relationship)
   // Codex round-39 P2: EVERY reported lane is guarded ("Ants and chinch bugs are back" reports pest AND lawn); an excluded specialty never falls back to pest
-  for (const lane of reportedLaneSet(inboundMessage, context)) {
+  for (const lane of reportedLaneSet(inboundMessage, context, covered)) {
     if (bookedReserviceLanes(factsBlock).includes(lane)) {
       return `FREE RE-SERVICE in the facts says the reported ${lane} line is ALREADY BOOKED — never offer OPEN TIMES, book a slot or offer a paid visit for it; acknowledge and refer to the appointment already on the schedule`;
     }
@@ -1548,6 +1557,34 @@ function reserviceLaneSlotGuard({ factsBlock, inboundMessage, context, offeredTi
     if (eligibleReserviceLanes(factsBlock).includes(lane)) {
       return `the customer reported a ${lane} issue and FREE RE-SERVICE in the facts says they are eligible — the re-service link shows its own availability, so never declare offered_times or add book_appointment; hand any OTHER request to the office with {"type":"escalate","note":"<the other request>"} and the FOLLOW-UP SLA wording`;
     }
+  }
+  return null;
+}
+// Codex round-41 P2: a pest report whose reported lane is ALREADY BOOKED or COVERED-BUT-LINK-UNAVAILABLE owes no offer, but a generic
+// non-promise ("Sorry about that") must not converge either. Booked: the reply references the existing appointment (an
+// existing-appointment marker, or its stored day / date). Link unavailable: the reply hands it off — an escalate action plus the
+// CURRENT FOLLOW-UP SLA wording. (An eligible reported lane is the owed-offer path; hand-offs / refusals are not judged here.)
+function reserviceStateReplyFault({ reply, factsBlock, inboundMessage, context, actions }) {
+  const covered = factsCoveredReserviceLanes(factsBlock);
+  if (!pestReportSignal(inboundMessage, context, covered) || reserviceOfferSuppressed(inboundMessage)) return null;
+  const reported = reportedLaneSet(inboundMessage, context, covered);
+  const eligible = eligibleReserviceLanes(factsBlock);
+  if (!reported.length || reported.some((lane) => eligible.includes(lane))) return null;
+  const text = String(reply || '');
+  const booked = reported.filter((lane) => bookedReserviceLanes(factsBlock).includes(lane));
+  if (booked.length) {
+    const factsLine = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
+    const dayNames = booked.flatMap((lane) => {
+      const m = new RegExp(`\\b${lane} already booked \\((\\d{4}-\\d{2}-\\d{2})`).exec(factsLine);
+      return m ? reserviceBookedDayNames({ date: m[1], windowStart: null }) : [];
+    });
+    const refersToIt = RESERVICE_EXISTING_APPT_RE.test(text)
+      || dayNames.some((name) => new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w])`, 'i').test(text));
+    if (!refersToIt) return `the customer reported a ${booked.join(' and ')} issue and their free re-service for it is ALREADY BOOKED — the reply must refer to the appointment already on the schedule (say it is already scheduled, or name its day), not a generic acknowledgement`;
+  }
+  const down = reported.filter((lane) => linkDownReserviceLanes(factsBlock).includes(lane));
+  if (down.length && !(actions.some((a) => a && a.type === 'escalate') && followupSla.slaPhraseStatus(text) === 'current')) {
+    return `the customer reported a ${down.join(' and ')} issue and is COVERED, but the free re-service booking link is unavailable — the reply must hand it to the office: add {"type":"escalate","note":"<what they need>"} and say when they'll hear back using the EXACT wording from FOLLOW-UP SLA RIGHT NOW`;
   }
   return null;
 }
@@ -1575,6 +1612,8 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
     if (owed && !(reserviceCarriesLinkAction(actions) && reserviceReplyHasOfferWording(text))) {
       return { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] };
     }
+    const stateFault = owed ? null : reserviceStateReplyFault({ reply: text, factsBlock, inboundMessage, context, actions });
+    if (stateFault) return { ok: false, violations: [stateFault] };
     if (!reserviceCarriesLinkAction(actions)) return { ok: true, violations: [] };
   }
   // reservice-scheduler is the SAME classifier the no-named-lane path uses (NOT sms-service-intent.js's
@@ -3430,6 +3469,17 @@ const PRONOUN_RETURN_TEXT_RE = /\b(?:they|it)(?:['’]re|['’]ve|['’]s|\s+(?:
 // permissive rather than trying to perfectly classify "pest family" from a
 // free-text service label with no DB round trip.
 // (Round-30: the recurring-tier shortcut is gone — see the body.)
+// History-based relationship OR live pest-lane coverage (eligible / link-down / booked) already loaded for this draft.
+function hasPestRelationship(context, coveredLanes) {
+  return customerHasPestRelationship(context) || [].concat(coveredLanes || []).includes('pest');
+}
+// Every lane the facts / fact state shows the customer COVERED for, whatever its booking state.
+function factsCoveredReserviceLanes(factsBlock) {
+  return [...new Set([...eligibleReserviceLanes(factsBlock), ...linkDownReserviceLanes(factsBlock), ...bookedReserviceLanes(factsBlock)])];
+}
+function reserviceStateCoveredLanes(state) {
+  return [...new Set([...(state?.lanes || []), ...(state?.linkDownLanes || []), ...Object.keys(state?.booked || {})])];
+}
 function customerHasPestRelationship(context) {
   // Codex round-30 P2: PEST-BACKED evidence only — a pest service in history, or an upcoming pest visit (an active pest
   // plan). A bare waveguard_tier proves nothing: it can be 'none', 'One-Time', 'Commercial', or stamped from a
@@ -3452,9 +3502,9 @@ function customerHasPestRelationship(context) {
 
 // The text-only half of the pest-report classifier (no facts): shared by needsOpenTimes and reportedPestLane's
 // callers so the two never drift. A pronoun-only return counts only with a pest relationship on file.
-function pestReportSignal(inboundMessage, context) {
+function pestReportSignal(inboundMessage, context, coveredLanes) {
   const text = String(inboundMessage || '');
-  return PEST_REPORT_TEXT_RE.test(text) || (PRONOUN_RETURN_TEXT_RE.test(text) && customerHasPestRelationship(context));
+  return PEST_REPORT_TEXT_RE.test(text) || (PRONOUN_RETURN_TEXT_RE.test(text) && hasPestRelationship(context, coveredLanes));
 }
 
 function draftRouteFor({ intentName, inboundMessage } = {}) {
@@ -3672,7 +3722,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
     ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
-  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage, context }) ? RESERVICE_MIXED_REQUEST_HINT : '');
+  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, reserviceLaneDecides && reserviceMixedRequest({ inboundMessage, context, coveredLanes: reserviceStateCoveredLanes(reserviceState) }) ? RESERVICE_MIXED_REQUEST_HINT : '');
 
   // Route once for the whole loop (revisions included) — routing looks at the
   // intent label AND the raw message so complaints mislabeled as scheduling
@@ -4355,4 +4405,5 @@ module.exports = {
   reserviceMixedRequest,
   RESERVICE_MIXED_REQUEST_HINT,
   reportedPestLane,
+  reportedLaneSet,
 };

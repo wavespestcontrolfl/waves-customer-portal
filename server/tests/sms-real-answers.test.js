@@ -3073,13 +3073,19 @@ describe('free re-service is an entitlement resolved through the existing mechan
         const out = validateReserviceOffer({ ...args, context: withHistory });
         expect(out.ok).toBe(false);
         expect(out.violations[0]).toMatch(/offer the covered free re-service/);
-        expect(validateReserviceOffer({ ...args, context: noHistory }).ok).toBe(true);
-        expect(validateReserviceOffer({ ...args }).ok).toBe(true); // no context at all
+        // Codex round-41 P2: the LIVE pest lane in the facts is itself a pest relationship (the context's 3-row visit window can miss
+        // an eligible customer's last pest visit) — so history is no longer required when the facts list the pest lane
+        expect(validateReserviceOffer({ ...args, context: noHistory }).ok).toBe(false);
+        expect(validateReserviceOffer({ ...args }).ok).toBe(false); // no context at all
+        expect(validateReserviceOffer({ ...args, context: noHistory, factsBlock: facts([]) }).ok).toBe(true); // neither history nor coverage
+        expect(validateReserviceOffer({ ...args, factsBlock: facts(['lawn']) }).ok).toBe(true);
         expect(validateReserviceOffer({ ...args, context: withHistory, factsBlock: facts(['lawn']) }).ok).toBe(true);
         expect(validateReserviceOffer({ ...args, context: withHistory, factsBlock: facts([]) }).ok).toBe(true);
         expect(validateReserviceOffer({ ...args, context: withHistory, inboundMessage: 'call me back' }).ok).toBe(true);
         expect(pestReportSignal("they're back", withHistory)).toBe(true);
         expect(pestReportSignal("they're back", noHistory)).toBe(false);
+        expect(pestReportSignal("they're back", noHistory, ['pest'])).toBe(true);
+        expect(pestReportSignal("they're back", noHistory, ['lawn'])).toBe(false);
       });
 
       test('the pronoun report\'s generic offer resolves the pest lane, so it converges', () => {
@@ -3095,9 +3101,58 @@ describe('free re-service is an entitlement resolved through the existing mechan
         expect(out.promisedLanes).toEqual(['pest']);
       });
 
+      // Codex round-41 P2: state-specific validation for the two non-offer states.
+      test('booked lane: the reply must refer to the existing appointment; link-unavailable lane: it must hand off with the current SLA wording', () => {
+        const { validateReserviceOffer, reserviceFactLine, followupSlaPhrase } = require('../services/sms-shadow-drafter');
+        const inboundMessage = 'The ants are back';
+        const bookedFacts = `X\n${reserviceFactLine([], { pest: { date: '2026-10-08', windowStart: '09:00' } })}\nBILLING:`;
+        const run = (reply, factsBlock, intendedActions = []) => validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMessage });
+        // booked
+        const generic = run('So sorry to hear that, we will get this sorted.', bookedFacts);
+        expect(generic.ok).toBe(false);
+        expect(generic.violations[0]).toMatch(/ALREADY BOOKED/);
+        expect(run('Sorry about that. Your free re-service is already scheduled for this week.', bookedFacts).ok).toBe(true);
+        expect(run('Sorry about that. Your re-service is on the schedule.', bookedFacts).ok).toBe(true);
+        expect(run('Sorry about that. We have a tech coming Thursday.', bookedFacts).ok).toBe(true);
+        expect(run('Sorry about that. We have a tech coming Friday.', bookedFacts).ok).toBe(false); // the wrong day is not a reference to it
+        // a refusal / hand-off in the customer's words is not judged here
+        expect(validateReserviceOffer({ reply: 'Understood.', factsBlock: bookedFacts, intendedActions: [], inboundMessage: "Ants are back, please don't send anyone" }).ok).toBe(true);
+        // link unavailable
+        const downFacts = `X\n${reserviceFactLine([], {}, 'unknown', ['pest'])}\nBILLING:`;
+        const sla = followupSlaPhrase();
+        const escalate = [{ type: 'escalate', note: 'followup_promised' }];
+        const noHandoff = run('So sorry to hear that.', downFacts);
+        expect(noHandoff.ok).toBe(false);
+        expect(noHandoff.violations[0]).toMatch(/link is unavailable/);
+        expect(run(`So sorry. Someone from the office will reach out ${sla}.`, downFacts).ok).toBe(false); // SLA wording but no escalate action
+        expect(run('So sorry. The office will reach out soon.', downFacts, escalate).ok).toBe(false); // escalate but no SLA wording
+        expect(run(`So sorry. Someone from the office will reach out ${sla}.`, downFacts, escalate).ok).toBe(true);
+        // not a pest report / no covered state: untouched
+        expect(validateReserviceOffer({ reply: 'Thanks!', factsBlock: downFacts, intendedActions: [], inboundMessage: 'thank you' }).ok).toBe(true);
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, intendedActions: [], inboundMessage }).ok).toBe(true);
+      });
+
+      // Codex round-41 P2: an eligible customer whose last pest visit fell out of the context's completed-visit window still has a pest
+      // relationship — the live pest lane in the facts / fact state counts.
+      test('pronoun-only report: live pest coverage (eligible / link-down / booked) counts as the pest relationship, history window empty', () => {
+        const { reportedLaneSet, reserviceLaneDecidesReply } = require('../services/sms-shadow-drafter');
+        const empty = { customer: { id: 'cust-1' }, serviceHistory: [], upcomingServices: [] };
+        expect(reportedLaneSet("they're back", empty)).toEqual([]);
+        expect(reportedLaneSet("they're back", empty, ['pest'])).toEqual(['pest']);
+        expect(reportedLaneSet("they're back", empty, ['lawn'])).toEqual([]);
+        const decides = (state) => reserviceLaneDecidesReply({ reserviceState: state, inboundMessage: "they're back", context: empty });
+        expect(decides({ lanes: ['pest'], booked: {}, linkDownLanes: [] })).toBe(true);
+        expect(decides({ lanes: [], booked: {}, linkDownLanes: ['pest'] })).toBe(true);
+        expect(decides({ lanes: [], booked: { pest: { date: '2026-10-08' } }, linkDownLanes: [] })).toBe(true);
+        expect(decides({ lanes: [], booked: {}, linkDownLanes: [] })).toBe(false);
+      });
+
       test('NOT forced when the lane is already booked, not eligible, an escalation hand-off, or not a pest report', () => {
         const { validateReserviceOffer } = require('../services/sms-shadow-drafter');
-        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts([], { pest: { date: '2026-10-05' } }), intendedActions: [], inboundMessage: report }).ok).toBe(true);
+        // Codex round-41 P2: booked → no OFFER is owed, but the reply must refer to the existing appointment (a generic "Sorry." no longer converges)
+        expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts([], { pest: { date: '2026-10-05' } }), intendedActions: [], inboundMessage: report }).ok).toBe(false);
+        expect(validateReserviceOffer({ reply: 'Sorry about that. Your free pest re-service is already scheduled, so a tech will be out.', factsBlock: facts([], { pest: { date: '2026-10-05' } }), intendedActions: [], inboundMessage: report }).ok).toBe(true);
+        expect(validateReserviceOffer({ reply: 'Sorry about that — we have you down for Monday.', factsBlock: facts([], { pest: { date: '2026-10-05' } }), intendedActions: [], inboundMessage: report }).ok).toBe(true);
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts([]), intendedActions: [], inboundMessage: report }).ok).toBe(true);
         // Codex round-20 P2: a MODEL-emitted escalate is not a hand-off — only an independent complaint/intent is.
         expect(validateReserviceOffer({ reply: 'Sorry.', factsBlock: facts(['pest']), intendedActions: [], inboundMessage: 'the ants are back again, I want a refund' }).ok).toBe(true);
@@ -3542,8 +3597,10 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(out.ok).toBe(false);
       expect(out.violations[0]).toMatch(/ALREADY BOOKED/);
       expect(validateReserviceOffer({ ...args, intendedActions: [{ type: 'book_appointment' }], offeredTimes: [], context: withHistory }).ok).toBe(false);
-      // no pest relationship on file → not a pest report → untouched
-      expect(validateReserviceOffer({ ...args, context: { customer: { id: 'cust-1' }, serviceHistory: [] } }).ok).toBe(true);
+      // Codex round-41 P2: the booked pest lane itself is live pest coverage, so even an empty history window still guards
+      expect(validateReserviceOffer({ ...args, context: { customer: { id: 'cust-1' }, serviceHistory: [] } }).ok).toBe(false);
+      // no pest relationship anywhere (no coverage in the facts either) → not a pest report → untouched
+      expect(validateReserviceOffer({ ...args, factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, context: { customer: { id: 'cust-1' }, serviceHistory: [] } }).ok).toBe(true);
     });
 
     // Codex round-27 P1: history never turns an excluded-specialty report into a pest report.

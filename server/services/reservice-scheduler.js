@@ -429,7 +429,13 @@ const TREE_SHRUB_SPECIALTY_ISSUE_RE = new RegExp(
   + '|\\b(?:my\\s+|our\\s+|the\\s+)?(?:trees?|shrubs?)\\s+(?:are|is|looks?)\\s+(?:sick|dying|diseased)\\b'
   // Disease/fungus/scale on the trees or shrubs, in either order.
   + '|\\b(?:trees?|shrubs?)\\b[^.?!\\n]{0,20}\\b(?:disease|fungus|scale)\\b'
-  + '|\\b(?:disease|fungus|scale)\\b[^.?!\\n]{0,20}\\b(?:trees?|shrubs?)\\b',
+  + '|\\b(?:disease|fungus|scale)\\b[^.?!\\n]{0,20}\\b(?:trees?|shrubs?)\\b'
+  // Codex round-41 P2: PALM issues are the same specialty (palm_treatment; covered-pests specialtyLedLabel already reads "palm"):
+  // "palm bugs / mites / weevils", "palm treatment", "service for my palms", "my palms are sick". "palmetto bugs" (a roach) has no
+  // space after "palm", and "ants in the palm tree" stays an incidental location.
+  + '|\\bpalms?\\s+(?:bugs?|mites?|weevils?|aphids?|scale|fungus|disease|issues?|problems?|treatments?|service|care|program|spray(?:ing)?|fertili[sz]\\w*|nutrition|fronds?)\\b'
+  + '|\\b(?:service|treatment|care|program|spray(?:ing)?)\\s+(?:for|on|of|to)\\s+(?:(?:my|our|the|your)\\s+)?palms?\\b'
+  + '|\\b(?:my\\s+|our\\s+|the\\s+)?palms?\\s+(?:are|is|look|looks)\\s+(?:sick|dying|diseased|dead|yellow|brown|yellowing|browning)\\b',
   'i',
 );
 // Codex round-21 P2 (PR #5336): the lawn SERVICE words are the SAME list the outgoing promise classifier
@@ -544,6 +550,9 @@ const RESERVICE_LOCATION_PHRASE_RE = new RegExp(
 const RESERVICE_NOUN_NOT_SERVICE = '(?!\\s+(?:control|service|services|treatment|treatments|plan|plans|program|visit|visits|schedule|contract|guarantee|coverage|company|inspection|inspections|spray|application|appointment)\\b)';
 // Codex round-37 P2: ongoing-presence predicates ("the ants remain", "they persist", "keep showing up") are active-report predicates too
 const RESERVICE_ACTIVITY_AFTER = "(?:back|again|everywhere|remain(?:s|ed|ing)?\\b|persist(?:s|ed|ing)?\\b|(?:never|haven'?t|hasn'?t|hadn'?t|didn'?t|won'?t|wouldn'?t|can'?t|not)\\s+(?:(?:yet|even|really|fully|completely|entirely)\\s+)?(?:went\\s+away|gone(?:\\s+away)?|go(?:ne|ing)?\\s+away|stopp\\w+|stop|left|leave|leaving)\\b|returned?|returning|(?:show(?:ed|ing|s)?|popp(?:ed|ing)|crawl(?:ed|ing)|swarm(?:ed|ing)|came|come|coming|comes)\\b|infest\\w*|invad\\w*|multipl\\w*|appear\\w*|still\\s+(?:there|here|around|coming|showing|alive|crawling|active|appearing|seeing|see)\\b|all\\s+over|in\\s+(?:my|the|our)\\s+(?:house|home|kitchen|bathroom|garage|bedroom|room|pantry|attic|shed|lanai|patio|porch|walls?)\\b)";
+// Codex round-41 P2: the covered pests' own qualified names ("carpenter ants", "ghost ants", "large roaches", "black widow spiders") — a
+// BOUNDED modifier vocabulary (at most 2), so plain possession "I have carpenter ants" reads, while "I have a question about ants" does not.
+const RESERVICE_PEST_MODIFIER = "(?:carpenter|ghost|big-?headed|fire|acrobat|crazy|argentine|white-?footed|pharaoh|odorous|sugar|house|large|big|huge|giant|little|small|tiny|flying|black|red|brown|american|australian|smoky-?brown|palmetto|wolf|jumping|widow|recluse|banded|cellar|camel|brown-?banded|oriental|field|cave|house)";
 const RESERVICE_ACTIVITY_BOUND_RES = [
   // noun … activity ("the ants are back", "roaches keep coming", "ants are everywhere")
   new RegExp(`\\b${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}(?:\\W+[\\w'’-]+){0,6}?\\W+${RESERVICE_ACTIVITY_AFTER}`, 'i'),
@@ -555,7 +564,7 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
   new RegExp(`\\b(?:${PEST_PERSISTENCE_PHRASES_SOURCE})\\b(?:\\W+(?!about\\b|regarding\\b|for\\b|with\\b)[\\w'’-]+){0,3}?\\W+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
   // plain possession by the speaker ("I have ants", "we've got roaches") — never a service-context phrase
   // ("we have ants under contract / covered / in our plan / on the schedule")
-  new RegExp(`\\b(?:i|we)(?:['’]ve|\\s+have|\\s+had|\\s+got|['’]ve\\s+got|\\s+have\\s+got|\\s+now\\s+have)\\s+(?:(?:a|an|some|the|these|those|many|several|few|a\\s+few)\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}(?!\\W+(?:under|covered|included|in\\s+(?:our|my|the)\\s+(?:plan|contract|program|package|coverage)|on\\s+(?:our|my|the)\\s+(?:plan|contract|schedule|list)|with\\s+(?:our|my|the)\\s+(?:plan|contract|program|service)|for\\s+(?:our|my|the)\\s+(?:plan|contract|program|service)))`, 'i'),
+  new RegExp(`\\b(?:i|we)(?:['’]ve|\\s+have|\\s+had|\\s+got|['’]ve\\s+got|\\s+have\\s+got|\\s+now\\s+have)\\s+(?:(?:a|an|some|the|these|those|many|several|few|a\\s+few)\\s+)?(?:${RESERVICE_PEST_MODIFIER}[\\s-]+){0,2}${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}(?!\\W+(?:under|covered|included|in\\s+(?:our|my|the)\\s+(?:plan|contract|program|package|coverage)|on\\s+(?:our|my|the)\\s+(?:plan|contract|schedule|list)|with\\s+(?:our|my|the)\\s+(?:plan|contract|program|service)|for\\s+(?:our|my|the)\\s+(?:plan|contract|program|service)))`, 'i'),
   // presence: "there are (still) roaches", "still roaches left" (LEFT as remaining — Codex round-28 P2)
   new RegExp(`\\bthere\\s+(?:are|is|were|was)\\s+(?:(?:still|now|more|so\\s+many|many|some|a\\s+few)\\s+)*(?:[\\w'’-]+\\s+){0,2}?${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
   new RegExp(`\\bstill\\b(?:\\W+[\\w'’-]+){0,4}?\\W+${RESERVICE_ANY_PEST_NOUN}\\b(?:\\W+[\\w'’-]+){0,2}?\\W+left\\b`, 'i'),
@@ -563,8 +572,14 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
   new RegExp(`\\b(?:have|having|got|getting)\\s+(?:more|new|another|so\\s+many|a\\s+lot\\s+of|lots\\s+of|tons\\s+of|a\\s+bunch\\s+of)\\s+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
 ];
 
+// Codex round-41 P2: "haven't stopped coming", "didn't stop showing up", "won't stop", "can't stop seeing" say the pests PERSIST — a
+// negator + stop + activity verb is a persistence construction, not a negated sighting ("haven't ... coming" once dropped it).
+const RESERVICE_NOT_STOP_PERSIST_RE = new RegExp(`\\b${RESERVICE_NEG}\\b(?:\\W+(?:yet|even|really|fully|completely|entirely|quite|ever|just))*\\W+stop(?:ped|ping|s)?\\s+(?:to\\s+)?(?:coming|come|showing|show|appearing|appear|returning|return|crawling|swarming|multiplying|seeing|finding|getting|popping|invading|infesting)\\b`, 'gi');
 function reserviceClauseDropped(clause) {
-  return RESERVICE_CLAUSE_NEGATED_RE.test(clause.replace(RESERVICE_AFFIRMING_EPISTEMIC_RE, (m) => ' '.repeat(m.length))) || reserviceClauseResolved(clause);
+  const blanked = clause
+    .replace(RESERVICE_AFFIRMING_EPISTEMIC_RE, (m) => ' '.repeat(m.length))
+    .replace(RESERVICE_NOT_STOP_PERSIST_RE, (m) => ' '.repeat(m.length));
+  return RESERVICE_CLAUSE_NEGATED_RE.test(blanked) || reserviceClauseResolved(clause);
 }
 // Codex round-28 P2: a QUESTION or HYPOTHETICAL is not a report ("Are the ants back?", "Can you tell me if ants are
 // back?", "If ants are back, what should I do?"): the clause ends in "?", opens with an auxiliary inversion, or is
