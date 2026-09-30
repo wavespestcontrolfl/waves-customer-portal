@@ -885,6 +885,15 @@ async function coverageRowsForTerm(term, conn = db, {
     // so a visit moved earlier must compete for a slot at its new position.
     const overriddenIds = new Set(extraCandidateRows.map((row) => String(row?.id)));
     const dbById = new Map(rows.map((row) => [String(row.id), row]));
+    // window_start as Postgres orders a TIME: posted values arrive as
+    // "9:00", "09:00" or "09:00:00" (and DB rows as "HH:MM:SS"), so compare
+    // a zero-padded HH:MM:SS key, never the raw string (Codex pre-push P1).
+    const timeKey = (value) => {
+      if (value == null || value === '') return null;
+      const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(String(value).trim());
+      if (!m) return String(value);
+      return `${m[1].padStart(2, '0')}:${m[2]}:${m[3] || '00'}`;
+    };
     // Postgres ORDER BY ASC: NULLS LAST, plain byte order (never locale).
     const cmp = (a, b) => {
       if (a == null || b == null) return (a == null) - (b == null);
@@ -895,7 +904,7 @@ async function coverageRowsForTerm(term, conn = db, {
       ...rows.filter((row) => !overriddenIds.has(String(row.id))),
       ...overrides.map((row) => ({ ...(dbById.get(String(row.id)) || {}), ...row })),
     ].sort((a, b) => cmp(dateOnly(a.scheduled_date), dateOnly(b.scheduled_date))
-      || cmp(a.window_start, b.window_start)
+      || cmp(timeKey(a.window_start), timeKey(b.window_start))
       || cmp(a.id, b.id));
   }
 

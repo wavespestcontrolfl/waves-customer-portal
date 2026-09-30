@@ -113,4 +113,11 @@ describe('coverageRowsForTerm extraCandidateRows', () => {
     const selected = await run([visit('v-a', '2026-06-10'), early], [bare]);
     expect(selected.map((r) => r.id)).toEqual(['v-b']);
   });
+
+  test('start times are compared as times, not raw strings ("9:00" sorts before "10:00:00")', async () => {
+    const a = { ...visit('v-a', '2026-06-10'), window_start: '10:00:00' };
+    const b = { ...visit('v-b', '2026-06-10'), window_start: '09:30:00' };
+    const selected = await run([b, a], [{ ...a, window_start: '9:00' }]);
+    expect(selected.map((r) => r.id)).toEqual(['v-a']);
+  });
 });
