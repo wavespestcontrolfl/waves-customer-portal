@@ -20,12 +20,20 @@
  *                                          whole, case-insensitively
  */
 
-// services.service_key → /book funnel key.
+// services.service_key → /book funnel key. Audited key by key against the
+// catalog seeds/renames (see sms-book-funnel-map.test.js for the withheld
+// list): only a row whose job IS the funnel's job is mapped.
 const FUNNEL_KEY_BY_CATALOG_KEY = Object.freeze({
   // pest_control: the general pest visit, any cadence
   pest_control: 'pest_control',
   pest_recurring: 'pest_control',
   pest_onetime: 'pest_control',
+  // The one-time pest identity: prod carries the admin-created
+  // one_time_pest_control row, migration-built databases its documented twin
+  // pest_initial_cleanout (20260825000011 CONDITIONAL_SEEDS; both quote as
+  // the engine's oneTimePest line — public-services-menu.js).
+  one_time_pest_control: 'pest_control',
+  pest_initial_cleanout: 'pest_control',
   pest_general_monthly: 'pest_control',
   pest_general_bimonthly: 'pest_control',
   pest_general_quarterly: 'pest_control',

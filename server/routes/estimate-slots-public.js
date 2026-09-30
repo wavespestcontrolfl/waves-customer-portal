@@ -1041,13 +1041,116 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
 // bookable quoted slot — so the recheck asks for every slot the page's
 // filters allow, straight from the calendar. The draft keeps the default cut.
 const FRESH_MAX_SLOTS = 10000;
+
+// Bundle combo axes (the page's serviceCadences memo): each non-pest axis'
+// section default, skipping an axis with no rendered section exactly as the
+// page does. null = the page sends none (not a bundle, or the bundle fell back
+// to one synthetic section); false = cannot be reconstructed reliably (only
+// some axes rendered, or no combo priced for the default selection).
+function defaultComboCadences(pricing, sections, selectedFrequency, sectionDefault) {
+  const combos = Array.isArray(pricing.serviceCadenceCombos) ? pricing.serviceCadenceCombos : [];
+  if (!combos.length) return null;
+  const axisKeys = Object.keys(combos[0]?.selection || {}).filter((k) => k !== 'pest_control');
+  if (!axisKeys.length) return null;
+  const cadences = {};
+  for (const axis of axisKeys) {
+    const section = sections.find((s) => s.key === axis);
+    const key = section ? sectionDefault(section) : null;
+    if (key) cadences[axis] = String(key);
+  }
+  const found = Object.keys(cadences).length;
+  if (!found) return null;
+  if (found !== axisKeys.length) return false;
+  const priced = combos.some((combo) => {
+    const sel = combo?.selection || {};
+    const nonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+    if (nonPest.length !== axisKeys.length || !axisKeys.every((k) => sel[k] === cadences[k])) return false;
+    return sel.pest_control ? sel.pest_control === selectedFrequency : true;
+  });
+  return priced ? cadences : false;
+}
+
+// The selection the estimate page opens with — what SlotPicker.jsx sends as
+// ?selectedFrequency= / ?serviceCadences= on its first fetch, before the
+// customer touches anything. The page derives it from the /data `pricing`
+// payload (EstimateViewPage.jsx pricingServices / defaultSelectedForServices /
+// selectedPricingFrequencyKey / the serviceCadences memo); the server has no
+// helper for it, so this mirrors that derivation over the SAME bundle /data
+// serves (buildPricingBundle), keeping every axis the page sends:
+//   selectedFrequency — the pest (else first recurring, else first) section's
+//     default key (its `selected` / `recommended` frequency, else the first),
+//     kept only when pricing.frequencies offers it, else frequencies[0];
+//   serviceCadences   — bundles only: each non-pest combo axis' section
+//     default key.
+// Returns { selectedFrequency, serviceCadences } (either may be null, exactly
+// as the page omits them), or null when the default cannot be reconstructed
+// reliably (a combo axis with no section or default, or no combo priced for
+// the default selection — accept would refuse it too): the caller withholds.
+function pageDefaultSlotSelection(pricing) {
+  if (!pricing || typeof pricing !== 'object') return null;
+  const frequencies = Array.isArray(pricing.frequencies) ? pricing.frequencies : [];
+  let sections = Array.isArray(pricing.services) ? pricing.services.filter(Boolean) : [];
+  if (!sections.length && frequencies.length) {
+    sections = [{ key: 'pest_control', isRecurring: true, frequencies, defaultFrequencyKey: frequencies[0]?.key || null }];
+  }
+  const sectionDefault = (section) => {
+    const own = Array.isArray(section?.frequencies) ? section.frequencies : [];
+    return section?.defaultFrequencyKey || own[0]?.key || null;
+  };
+  const primary = sections.find((s) => s.key === 'pest_control')
+    || sections.find((s) => s.isRecurring)
+    || sections[0];
+  const primaryKey = primary ? sectionDefault(primary) : null;
+  const selectedFrequency = frequencies.length
+    ? (frequencies.some((f) => f?.key === primaryKey) ? primaryKey : (frequencies[0]?.key || null))
+    : primaryKey;
+
+  const cadences = defaultComboCadences(pricing, sections, selectedFrequency, sectionDefault);
+  if (cadences === false) return null;
+  const serviceCadences = cadences;
+  return {
+    selectedFrequency: selectedFrequency ? String(selectedFrequency) : null,
+    serviceCadences,
+  };
+}
+
+// A customer selection already saved on the estimate (accept writes it) is
+// what resolveEstimateSlotProfile falls back to when no selectedFrequency is
+// passed — that path stays exactly as it was.
+function hasSavedCustomerSelection(estimate) {
+  const selection = parseEstimateData(estimate).customerSelection;
+  return !!(selection && (selection.serviceTierKey || selection.frequencyKey || selection.frequency));
+}
+
 async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
   const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id');
   if (!estimate || !customerId || String(estimate.customer_id) !== String(customerId)) return null;
   if (await slotBrowseRefusal(estimate)) return null;
+  const serviceMode = resolveSlotServiceMode(estimate, '');
+  // The page's own first fetch (SlotPicker.jsx) always carries the default
+  // selectedFrequency / serviceCadences of a recurring estimate — without them
+  // the picker sizes the visit from frequencies[0] and unmodified companion
+  // rows, a different duration / service mix than the customer's default.
+  let selection = {};
+  if (serviceMode !== 'one_time' && !hasSavedCustomerSelection(estimate)) {
+    let derived = null;
+    try {
+      const full = await db('estimates').where({ id: estimate.id }).first();
+      derived = full ? pageDefaultSlotSelection(await buildPricingBundle(full)) : null;
+    } catch (err) {
+      logger.warn(`[estimate-slots-public:offerable] default selection lookup failed (${err.message}); estimate times withheld`);
+      return null;
+    }
+    if (!derived) return null;
+    selection = {
+      ...(derived.selectedFrequency ? { selectedFrequency: derived.selectedFrequency } : {}),
+      ...(derived.serviceCadences ? { serviceCadences: derived.serviceCadences } : {}),
+    };
+  }
   try {
     return await getAvailableSlots(estimate.id, {
-      serviceMode: resolveSlotServiceMode(estimate, ''),
+      serviceMode,
+      ...selection,
       ...(fresh ? { bypassCache: true, maxResults: FRESH_MAX_SLOTS, expanderMaxResults: 0 } : {}),
     });
   } catch (err) {
@@ -1057,4 +1160,4 @@ async function offerableEstimateSlots(estimateId, customerId, { fresh = false } 
 }
 
 module.exports = router;
-module.exports._internals = { offerableEstimateSlots };
+module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection };

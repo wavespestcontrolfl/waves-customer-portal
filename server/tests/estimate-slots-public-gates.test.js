@@ -55,6 +55,9 @@ jest.mock('../routes/estimate-public', () => ({
     return true;
   },
   isEstimateAcceptActive: jest.fn(() => true),
+  // The /data pricing bundle (offerableEstimateSlots derives the page's default
+  // selection from it); no priced frequencies unless a case sets one.
+  buildPricingBundle: jest.fn(async () => ({})),
   isStructuralOneTimeOnlyEstimate: jest.fn(() => false),
   isRodentGuaranteeOnlyEstimate: jest.fn(() => false),
   estimateTrenchingReviewRequired: jest.fn(() => false),
@@ -77,6 +80,7 @@ let server;
 let base;
 let currentEstimate;
 let lastFirstArgs;
+let firstArgsHistory = [];
 
 beforeAll((done) => {
   db.mockImplementation((table) => {
@@ -85,6 +89,7 @@ beforeAll((done) => {
       where: jest.fn().mockReturnThis(),
       first: jest.fn((...cols) => {
         lastFirstArgs = cols;
+        firstArgsHistory.push(cols);
         return Promise.resolve(currentEstimate);
       }),
     };
@@ -104,9 +109,12 @@ afterAll((done) => {
 
 beforeEach(() => {
   getAvailableSlots.mockReset();
+  require('../routes/estimate-public').buildPricingBundle.mockReset();
+  require('../routes/estimate-public').buildPricingBundle.mockResolvedValue({});
   findEstimateSlots.mockReset();
   slotReservation.reserveSlot.mockReset();
   lastFirstArgs = null;
+  firstArgsHistory = [];
 });
 
 const NON_VIEWABLE = [
@@ -351,7 +359,7 @@ describe('offerableEstimateSlots — the page picker, for the texting AI', () =>
     await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBe(SLOTS);
     expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({ serviceMode: expect.any(String) }));
     expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('windowDays');
-    expect(lastFirstArgs).toContain('customer_id');
+    expect(firstArgsHistory[0]).toContain('customer_id');
   });
 
   test('the send-time recheck (fresh): the SAME picker read uncached and uncapped; the draft read passes none of that', async () => {
@@ -401,5 +409,121 @@ describe('offerableEstimateSlots — the page picker, for the texting AI', () =>
     await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
     getAvailableSlots.mockRejectedValueOnce(new Error('db down'));
     await expect(offerableEstimateSlots('est-1', 'cust-1')).rejects.toThrow('db down');
+  });
+});
+
+// The picker must be asked with the SAME default selection the estimate page
+// sends on its first fetch (SlotPicker.jsx: selectedFrequency + serviceCadences),
+// or an SMS offer can be sized for a different duration / service mix.
+describe('offerableEstimateSlots — the page\'s default selection axes', () => {
+  const { offerableEstimateSlots } = require('../routes/estimate-slots-public')._internals;
+  const { buildPricingBundle, isStructuralOneTimeOnlyEstimate } = require('../routes/estimate-public');
+  const OWN = { id: 'est-1', customer_id: 'cust-1', status: 'sent', expires_at: null, archived_at: null };
+  const SLOTS = { primary: [{ date: '2027-05-20', windowStart: '09:00' }], expander: [] };
+  const freq = (key, extra = {}) => ({ key, ...extra });
+
+  beforeEach(() => { currentEstimate = OWN; getAvailableSlots.mockResolvedValue(SLOTS); });
+
+  test('recommended frequency is not frequencies[0] → the picker gets THAT frequency, on the draft AND the fresh recheck', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly', { recommended: true }), freq('bi_monthly')],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('monthly'), freq('quarterly'), freq('bi_monthly')] }],
+    });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'recurring', selectedFrequency: 'quarterly' });
+    getAvailableSlots.mockClear();
+    await offerableEstimateSlots('est-1', 'cust-1', { fresh: true });
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual(expect.objectContaining({
+      serviceMode: 'recurring', selectedFrequency: 'quarterly', bypassCache: true, expanderMaxResults: 0,
+    }));
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('serviceCadences');
+  });
+
+  test('a section default the combined list does not offer falls back to frequencies[0], exactly as the page does', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('monthly'), freq('quarterly')],
+      services: [{ key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'bi_monthly', frequencies: [freq('bi_monthly')] }],
+    });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1].selectedFrequency).toBe('monthly');
+  });
+
+  test('a bundle with per-service default cadences → selectedFrequency AND serviceCadences, on both calls', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('quarterly')],
+      services: [
+        { key: 'pest_control', isRecurring: true, defaultFrequencyKey: 'quarterly', frequencies: [freq('quarterly')] },
+        { key: 'lawn_care', isRecurring: true, defaultFrequencyKey: 'enhanced', frequencies: [freq('standard'), freq('enhanced')] },
+        { key: 'mosquito', isRecurring: true, frequencies: [freq('seasonal9'), freq('monthly12')] },
+      ],
+      serviceCadenceCombos: [
+        { selection: { pest_control: 'quarterly', lawn_care: 'standard', mosquito: 'seasonal9' } },
+        { selection: { pest_control: 'quarterly', lawn_care: 'enhanced', mosquito: 'seasonal9' } },
+      ],
+    });
+    // mosquito carries no defaultFrequencyKey → its first frequency, like the page
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBe(SLOTS);
+    const want = { serviceMode: 'recurring', selectedFrequency: 'quarterly', serviceCadences: { lawn_care: 'enhanced', mosquito: 'seasonal9' } };
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual(want);
+    getAvailableSlots.mockClear();
+    await offerableEstimateSlots('est-1', 'cust-1', { fresh: true });
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual(expect.objectContaining(want));
+  });
+
+  test.each([
+    ['only some combo axes have a section on the page', {
+      frequencies: [freq('quarterly')],
+      services: [
+        { key: 'pest_control', isRecurring: true, frequencies: [freq('quarterly')] },
+        { key: 'lawn_care', isRecurring: true, frequencies: [freq('standard')] },
+      ],
+      serviceCadenceCombos: [{ selection: { pest_control: 'quarterly', lawn_care: 'standard', tree_shrub: 'standard' } }],
+    }],
+    ['no combo is priced for the default selection', {
+      frequencies: [freq('quarterly')],
+      services: [
+        { key: 'pest_control', isRecurring: true, frequencies: [freq('quarterly')] },
+        { key: 'lawn_care', isRecurring: true, defaultFrequencyKey: 'enhanced', frequencies: [freq('standard'), freq('enhanced')] },
+      ],
+      serviceCadenceCombos: [{ selection: { pest_control: 'quarterly', lawn_care: 'standard' } }],
+    }],
+    ['the bundle cannot be read (not an object)', null],
+  ])('unreconstructable (%s) → estimate times withheld, the picker is never asked', async (_label, pricing) => {
+    buildPricingBundle.mockResolvedValue(pricing);
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('no combo axis rendered (bundle fell back to one section) → no serviceCadences, exactly as the page sends none', async () => {
+    buildPricingBundle.mockResolvedValue({
+      frequencies: [freq('quarterly')],
+      services: [{ key: 'bundle', isRecurring: true, frequencies: [freq('quarterly')] }],
+      serviceCadenceCombos: [{ selection: { pest_control: 'quarterly', lawn_care: 'standard' } }],
+    });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'recurring', selectedFrequency: 'quarterly' });
+  });
+
+  test('the pricing bundle throwing withholds too (never guesses, never blocks drafting)', async () => {
+    buildPricingBundle.mockRejectedValue(new Error('pricing down'));
+    await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  test('a saved customerSelection is left exactly as before: no derived axes, the pricing bundle is not even read', async () => {
+    currentEstimate = { ...OWN, estimate_data: JSON.stringify({ customerSelection: { frequency: 'monthly' } }) };
+    buildPricingBundle.mockResolvedValue({ frequencies: [freq('quarterly')] });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'recurring' });
+    expect(buildPricingBundle).not.toHaveBeenCalled();
+  });
+
+  test('a one-time-only estimate sends neither axis (the page sends none in one-time mode)', async () => {
+    isStructuralOneTimeOnlyEstimate.mockReturnValueOnce(true);
+    buildPricingBundle.mockResolvedValue({ frequencies: [freq('quarterly')] });
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).toEqual({ serviceMode: 'one_time' });
+    expect(buildPricingBundle).not.toHaveBeenCalled();
   });
 });
