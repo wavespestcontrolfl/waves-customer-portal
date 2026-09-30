@@ -361,6 +361,9 @@ async function applyFactPlan(trx, fact, row, plan, { now, today, hasAuditLog, ha
       return;
     }
     case 'hold':
+      // A person's deactivation also leaves the hybrid index now, not at
+      // the next nightly rebuild (the shared readers honor `active`).
+      if (plan.reason === 'deactivated_by_person' && row) await dropIndexChunks(trx, hasEmbeddings, row.slug);
       await auditHold(trx, hasAuditLog, row || { slug: fact.slug }, plan);
       result.held.push({ slug: row?.slug || fact.slug, reason: plan.reason });
       return;
@@ -704,7 +707,12 @@ const PATCH_TRIGGER = new RegExp(
   '\\b(?:summer(?:s|time)?|june|july|august|september|rainy\\s+season|hot(?:ter|test)?|heat(?:waves?)?|warm(?:er|est)\\s+months?|dog\\s+days)\\b'
   + `|\\b${UPWARD_COMPARATOR}[-\\s]+(?:the\\s+)?(?:${HOT_FIGURE})${NOT_A_TEMPERATURE}`
   + '|\\bthe\\s+(?:(?:upper|high|mid|low|mid-to-upper)[-\\s]+)?(?:(?:8|9)0\'?s|eighties|nineties|100\'?s|hundreds|triple[-\\s]+digits)\\b'
-  + `|\\b(?:at|around|about|near|approximately|roughly|in|during|on)\\s+(?:the\\s+)?(?:${HOT_FIGURE})\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)`,
+  + `|\\b(?:at|around|about|near|approximately|roughly|in|during|on)\\s+(?:the\\s+)?(?:${HOT_FIGURE})\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)`
+  // (v) the copular form — "temperatures are 85°F", "temperatures are 80°F
+  // or higher", "it's 90 degrees" — names the same threshold with no
+  // preposition (codex #5187 follow-up). "80°F or lower" / "or below" is the
+  // cool side of the line and never a trigger.
+  + `|\\b(?:is|are|was|were|be|being|been|'s|'re)\\s+(?:(?:about|around|near|nearly|approximately|roughly|just|only|almost)\\s+)?(?:${HOT_FIGURE})(?:\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)(?!\\s*[FC]?\\s*(?:or|and|to)\\s+(?:lower|below|less|under|cooler|colder|down))|\\s+(?:or|and)\\s+(?:higher|hotter|warmer|above|more|greater|up|over)\\b)`,
   'i',
 );
 // A clause that says large patch RECEDES in the heat is the fact, not the

@@ -45,7 +45,7 @@ const FIRST_TUESDAY = new Date('2026-06-02T11:05:00Z');
 
 function chain(overrides = {}) {
   const q = {};
-  ['where', 'whereNull', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
+  ['where', 'whereNull', 'whereRaw', 'select', 'orderBy'].forEach((m) => { q[m] = jest.fn(() => q); });
   q.first = jest.fn(async () => overrides.first);
   return q;
 }
@@ -345,6 +345,63 @@ describe('pest-insider proof catch-up', () => {
 
     expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
     expect(result.skipped).toBe(false);
+  });
+
+  describe('after the 10th of the month', () => {
+    const LATE = new Date('2026-06-11T18:15:00Z');
+    // wireDb answers audit_log with ONE row for both the last-attempt read and
+    // the "was a proof ever sent" read; the latter only checks it exists.
+    const SENT_PROOF = { id: 'audit-sent', created_at: new Date('2026-06-04T11:05:00Z'), metadata: { sent: true, reason: null, notified: false } };
+
+    test('a corrected draft whose proof was released by a failed approval is re-proofed (codex #5187 follow-up)', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { id: 'send-pi-1', updated_at: new Date('2026-06-11T14:00:00Z') }, lastAttempt: SENT_PROOF });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(mockValidate).toHaveBeenCalled();
+      expect(mockSendProof).toHaveBeenCalledWith('send-pi-1');
+      expect(result).toEqual({ skipped: false, sendId: 'send-pi-1', proofSent: true, reason: null });
+    });
+
+    test('…but not while it still fails validation (no repeat notices for an uncorrected draft)', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({ draft: { id: 'send-pi-1', updated_at: new Date('2026-06-11T14:00:00Z') }, lastAttempt: SENT_PROOF });
+      mockValidate.mockImplementation(() => ({ errors: ['still blocked'], warnings: [] }));
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('…and a draft no proof was ever sent for stays cut off, however clean it is', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      const { audit } = wireDb({ draft: { id: 'send-pi-1' } });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result.skipped).toBe(true);
+      expect(audit.whereRaw).toHaveBeenCalledWith("metadata->>'sent' = 'true'");
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('a failure reading the proof history keeps the cutoff', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      const { audit } = wireDb({ draft: { id: 'send-pi-1' }, lastAttempt: SENT_PROOF });
+      audit.first.mockRejectedValue(new Error('audit_log down'));
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('no draft at all is still a quiet skip', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      wireDb({});
+      expect((await retryPestInsiderProof({ now: LATE })).skipped).toBe(true);
+    });
   });
 
   test('after the 10th of the month a stale draft is not proofed', async () => {

@@ -606,6 +606,32 @@ describe('findUnverifiedClaims', () => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
     });
 
+    // Copular forms of the threshold (codex #5187 follow-up): no preposition
+    // before the figure, so the old degree branch missed them.
+    test.each([
+      'Large patch thrives when temperatures are 85°F.',
+      'Large patch thrives when temperatures are 80°F or higher.',
+      'Large patch is worst when temperatures are 90 degrees.',
+      'Large patch takes off when it is 95 degrees out.',
+      "Large patch flares up when it's 90°F.",
+      'Large patch spreads when temperatures are 85 or higher.',
+      'Large patch thrives when the temperature is about 88°F.',
+      'Large patch thrives when temperatures are ninety degrees.',
+    ])('a copular hot-temperature claim is still the claim: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
+    });
+
+    test.each([
+      'Large patch is active when temperatures are 75°F.',
+      'Large patch is active when temperatures are 80°F or lower.',
+      'Large patch is active when temperatures are 80°F or below.',
+      'Large patch is most likely when temperatures are 60 to 75 degrees.',
+      'Large patch is active when the soil is 65°F.',
+      'Large patch can cover an area that is 80 square feet.',
+    ])('a copular cool-side temperature passes: %s', (sentence) => {
+      expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
+    });
+
     test.each([
       'Large patch thrives in summer as the grass slows down.',
       "Large patch doesn't slow down in summer.",

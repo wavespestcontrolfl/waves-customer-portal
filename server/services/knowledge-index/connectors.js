@@ -44,6 +44,9 @@ async function loadWiki() {
 async function loadKb() {
   const rows = await db('knowledge_base')
     .where({ status: 'active' })
+    // A row an admin switched off (active=false, status still 'active') is
+    // not shared knowledge; the nightly rebuild prunes its chunks.
+    .whereRaw('active IS NOT FALSE')
     .whereNot({ source: 'wiki-sync' })
     .select('slug', 'title', 'category', 'summary', 'content', 'confidence', 'updated_at');
   return rows.map((r) => ({

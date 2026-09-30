@@ -212,9 +212,14 @@ async function runPestInsiderAutopilot({ now = new Date() } = {}) {
  */
 async function retryPestInsiderProof({ now = new Date() } = {}) {
   if (!proofGateOn()) return { skipped: true, reason: 'proof gate off' };
-  if (etParts(now).day > PROOF_RETRY_LAST_DAY) {
-    return { skipped: true, reason: `past day ${PROOF_RETRY_LAST_DAY} of the month (ET)` };
-  }
+  // The day-10 cutoff keeps a stale, never-proofed draft from being proofed
+  // late in the month. It does not apply to a CORRECTED draft: one whose
+  // proof was sent and then released by a failed approval (proof_sent_at
+  // cleared) and that passes validation now — without this it could never be
+  // re-proofed after day 10 (codex #5187 follow-up). That draft is checked
+  // below, once it is loaded.
+  const pastCutoff = etParts(now).day > PROOF_RETRY_LAST_DAY;
+  const pastCutoffSkip = { skipped: true, reason: `past day ${PROOF_RETRY_LAST_DAY} of the month (ET)` };
 
   const { start, end } = etMonthBounds(now);
   const draft = await db('newsletter_sends')
@@ -224,7 +229,10 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
     .where('created_at', '>=', start)
     .where('created_at', '<', end)
     .first();
-  if (!draft) return { skipped: true, reason: 'no unproofed draft this month' };
+  if (!draft) return pastCutoff ? pastCutoffSkip : { skipped: true, reason: 'no unproofed draft this month' };
+  if (pastCutoff && !(await proofWasSent(draft.id) && !(await draftFailsValidation(draft)))) {
+    return pastCutoffSkip;
+  }
 
   // Deterministic failure: the validator blocks this draft, nobody has
   // edited it since the last proof attempt, and that attempt ended in
@@ -253,6 +261,22 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
 
   const proof = await sendProofFor(draft.id);
   return { skipped: false, sendId: draft.id, proofSent: proof.sent, reason: proof.reason };
+}
+
+// True when this module recorded a proof actually SENT for the draft. With
+// proof_sent_at now empty, that means an approval-time check released it.
+// Fails closed (false): past the cutoff, doubt means no proof.
+async function proofWasSent(sendId) {
+  try {
+    const sent = await db('audit_log')
+      .where({ action: PROOF_ATTEMPT_ACTION, resource_type: 'newsletter_sends', resource_id: sendId })
+      .whereRaw("metadata->>'sent' = 'true'")
+      .first('id');
+    return Boolean(sent);
+  } catch (e) {
+    logger.warn(`[pest-insider-autopilot] could not read the proof history: ${e.message}`);
+    return false;
+  }
 }
 
 function editedSince(draft, at) {

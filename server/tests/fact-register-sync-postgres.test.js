@@ -434,6 +434,36 @@ postgres('email-division fact register sync against migrated PostgreSQL', () => 
     expect((await rowOf(f.slug)).active).toBe(false);
   });
 
+  test('a row a person DEACTIVATED (status stays active) leaves shared search, the knowledge index load and the hybrid-index chunks', async () => {
+    const KnowledgeBaseService = require('../services/knowledge-base');
+    const { CONNECTORS } = require('../services/knowledge-index/connectors');
+    const loadKb = CONNECTORS.find((c) => c.source === 'kb').load;
+    const marker = `zzq${uid}wordmark`;
+    const f = fact(1, { content: `The ${marker} appears only in this synthetic fact.` });
+    await sync([f]);
+    await trx('knowledge_embeddings').insert({
+      source: 'kb', source_id: f.slug, chunk_index: 0, title: f.title, content: f.content,
+      content_hash: 'synthetic-hash', metadata: JSON.stringify({ category: 'facts' }),
+    });
+    expect((await KnowledgeBaseService.search(marker)).map((r) => r.slug)).toContain(f.slug);
+    expect((await loadKb()).map((d) => d.sourceId)).toContain(f.slug);
+
+    await trx('knowledge_base').where({ slug: f.slug }).update({ active: false });
+    expect((await rowOf(f.slug)).status).toBe('active'); // the case: only the flag changed
+    expect((await KnowledgeBaseService.search(marker)).map((r) => r.slug)).not.toContain(f.slug);
+    expect((await loadKb()).map((d) => d.sourceId)).not.toContain(f.slug);
+
+    // the register's own run also clears the chunks and keeps the person's off switch
+    const r = await sync([f]);
+    expect(r.held).toEqual([{ slug: f.slug, reason: 'deactivated_by_person' }]);
+    expect(await trx('knowledge_embeddings').where({ source: 'kb', source_id: f.slug })).toHaveLength(0);
+    expect((await rowOf(f.slug)).active).toBe(false);
+
+    // a row whose flag is NULL (an old row) still counts as on
+    await trx('knowledge_base').where({ slug: f.slug }).update({ active: null });
+    expect((await KnowledgeBaseService.search(marker)).map((r2) => r2.slug)).toContain(f.slug);
+  });
+
   test('an edit that landed on exactly the register\'s new wording converges: restamped as a metadata-only update, not held forever', async () => {
     const f = fact(1);
     await sync([f]);
