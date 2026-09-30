@@ -62,6 +62,8 @@ const {
   resolveAcceptOneTimeTotal,
   resolveEstimateInvoiceMode,
   resolveEstimateQuoteRequirement,
+  resolveEstimateAcceptance,
+  estimateRendersMonthlyBilling,
   verifyEstimateAskToken,
 } = require('./estimate-public');
 
@@ -224,6 +226,59 @@ function isCommercialAutoEstimate(estimate = {}) {
   return recurringRows.some(isCommercialSvc);
 }
 
+// The estimate columns the page's slot gate reads (slotBrowseRefusal).
+const SLOT_ESTIMATE_COLUMNS = ['id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest'];
+
+// Everything GET /:token/available-slots can answer with INSTEAD of slots —
+// the estimate is refused, terminal, or not self-schedulable (commercial,
+// invoice-only renewal, trenching review). null = the page browses slots.
+// Also the texting AI's gate (offerableEstimateSlots): it offers an estimate
+// time only when this page would.
+async function slotBrowseRefusal(estimate) {
+  let refusal = null;
+  const sink = { status(status) { return { json(body) { refusal = { status, body }; return refusal; } }; } };
+  // Fail closed: a helper that refuses without the status().json() chain the
+  // sink captures still refuses (generic 404, never a browsable estimate).
+  if (await rejectCallSideBlockedEstimate(sink, estimate) || rejectIneligibleEstimate(sink, estimate)) {
+    return refusal || { status: 404, body: { error: 'Not found' } };
+  }
+  if (isCommercialAutoEstimate(estimate)) {
+    return {
+      status: 200,
+      body: {
+        primary: [], expander: [], availableSlots: [], summary: null,
+        commercialManualScheduling: true,
+        message: 'A Waves team member will reach out to schedule your commercial service.',
+      },
+    };
+  }
+  // A guarantee-only renewal accepts through the payment-only invoice path —
+  // there is NO visit to book, so the slot picker never renders. Return the
+  // empty no-booking shape (mirroring the accept-time gate) so a crafted or
+  // stale client can't browse slots for an estimate whose accept takes none.
+  if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
+    return {
+      status: 200,
+      body: {
+        primary: [], expander: [], availableSlots: [], summary: null,
+        invoiceOnlyAcceptance: true,
+        message: 'No appointment is needed — this renewal is accepted with an invoice.',
+      },
+    };
+  }
+  if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
+    return {
+      status: 200,
+      body: {
+        primary: [], expander: [], availableSlots: [], summary: null,
+        reviewBeforeBooking: true,
+        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
+      },
+    };
+  }
+  return null;
+}
+
 router.get('/:token/available-slots', async (req, res) => {
   const token = req.params.token;
   if (!token || !TOKEN_RE.test(token)) {
@@ -233,39 +288,12 @@ router.get('/:token/available-slots', async (req, res) => {
   try {
     const estimate = await db('estimates')
       .where({ token })
-      .first('id', 'status', 'expires_at', 'archived_at', 'estimate_data', 'monthly_total', 'annual_total', 'onetime_total', 'service_interest');
+      .first(...SLOT_ESTIMATE_COLUMNS);
     if (!estimate) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const callBlocked = await rejectCallSideBlockedEstimate(res, estimate);
-    if (callBlocked) return callBlocked;
-    const ineligible = rejectIneligibleEstimate(res, estimate);
-    if (ineligible) return ineligible;
-    if (isCommercialAutoEstimate(estimate)) {
-      return res.json({
-        primary: [], expander: [], availableSlots: [], summary: null,
-        commercialManualScheduling: true,
-        message: 'A Waves team member will reach out to schedule your commercial service.',
-      });
-    }
-    // A guarantee-only renewal accepts through the payment-only invoice path —
-    // there is NO visit to book, so the slot picker never renders. Return the
-    // empty no-booking shape (mirroring the accept-time gate) so a crafted or
-    // stale client can't browse slots for an estimate whose accept takes none.
-    if (isRodentGuaranteeOnlyEstimate(estimate, parseEstimateData(estimate))) {
-      return res.json({
-        primary: [], expander: [], availableSlots: [], summary: null,
-        invoiceOnlyAcceptance: true,
-        message: 'No appointment is needed — this renewal is accepted with an invoice.',
-      });
-    }
-    if (estimateTrenchingReviewRequired(parseEstimateData(estimate))) {
-      return res.json({
-        primary: [], expander: [], availableSlots: [], summary: null,
-        reviewBeforeBooking: true,
-        message: 'A Waves specialist will confirm your termite trenching treatment path and schedule your visit.',
-      });
-    }
+    const refusal = await slotBrowseRefusal(estimate);
+    if (refusal) return res.status(refusal.status).json(refusal.body);
 
     const windowDays = Number.parseInt(req.query.windowDays, 10);
     const opts = {};
@@ -1006,4 +1034,170 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
   }
 });
 
+// The slots the estimate page would show for one estimate, for the texting
+// AI's OPEN TIMES (sms-shadow-drafter): the SAME gate (slotBrowseRefusal) and
+// the same getAvailableSlots the page's GET runs (default window, the page's
+// default service mode), so an offered time is one /reserve would take. null
+// when the estimate is not this customer's, or the page would show none.
+//
+// `fresh` (the send-time recheck only): the same picker read UNCACHED and
+// UNCAPPED. The page's default read serves a 5-minute cache other estimates'
+// bookings never invalidate, and returns a curated cut (day rotation, scarce
+// day pin, route order) in which one unrelated hold change can drop a still-
+// bookable quoted slot — so the recheck asks for every slot the page's
+// filters allow, straight from the calendar. The draft keeps the default cut.
+const FRESH_MAX_SLOTS = 10000;
+
+// Bundle combo axes (the page's serviceCadences memo): each non-pest axis'
+// section default, skipping an axis with no rendered section exactly as the
+// page does. null = the page sends none (not a bundle, or the bundle fell back
+// to one synthetic section); false = cannot be reconstructed reliably (only
+// some axes rendered, or no combo priced for the default selection).
+function defaultComboCadences(pricing, sections, selectedFrequency, sectionDefault) {
+  const combos = Array.isArray(pricing.serviceCadenceCombos) ? pricing.serviceCadenceCombos : [];
+  if (!combos.length) return null;
+  const axisKeys = Object.keys(combos[0]?.selection || {}).filter((k) => k !== 'pest_control');
+  if (!axisKeys.length) return null;
+  const cadences = {};
+  for (const axis of axisKeys) {
+    const section = sections.find((s) => s.key === axis);
+    const key = section ? sectionDefault(section) : null;
+    if (key) cadences[axis] = String(key);
+  }
+  const found = Object.keys(cadences).length;
+  if (!found) return null;
+  if (found !== axisKeys.length) return false;
+  const priced = combos.some((combo) => {
+    const sel = combo?.selection || {};
+    const nonPest = Object.keys(sel).filter((k) => k !== 'pest_control');
+    if (nonPest.length !== axisKeys.length || !axisKeys.every((k) => sel[k] === cadences[k])) return false;
+    return sel.pest_control ? sel.pest_control === selectedFrequency : true;
+  });
+  return priced ? cadences : false;
+}
+
+// The selection the estimate page opens with — what SlotPicker.jsx sends as
+// ?selectedFrequency= / ?serviceCadences= on its first fetch, before the
+// customer touches anything. The page derives it from the /data `pricing`
+// payload (EstimateViewPage.jsx pricingServices / defaultSelectedForServices /
+// selectedPricingFrequencyKey / the serviceCadences memo); the server has no
+// helper for it, so this mirrors that derivation over the SAME bundle /data
+// serves (buildPricingBundle), keeping every axis the page sends:
+//   selectedFrequency — the pest (else first recurring, else first) section's
+//     default key (its `selected` / `recommended` frequency, else the first),
+//     kept only when pricing.frequencies offers it, else frequencies[0];
+//   serviceCadences   — bundles only: each non-pest combo axis' section
+//     default key.
+// Returns { selectedFrequency, serviceCadences } (either may be null, exactly
+// as the page omits them), or null when the default cannot be reconstructed
+// reliably (a combo axis with no section or default, or no combo priced for
+// the default selection — accept would refuse it too): the caller withholds.
+function pageDefaultSlotSelection(pricing) {
+  if (!pricing || typeof pricing !== 'object') return null;
+  const frequencies = Array.isArray(pricing.frequencies) ? pricing.frequencies : [];
+  let sections = Array.isArray(pricing.services) ? pricing.services.filter(Boolean) : [];
+  if (!sections.length && frequencies.length) {
+    sections = [{ key: 'pest_control', isRecurring: true, frequencies, defaultFrequencyKey: frequencies[0]?.key || null }];
+  }
+  const sectionDefault = (section) => {
+    const own = Array.isArray(section?.frequencies) ? section.frequencies : [];
+    return section?.defaultFrequencyKey || own[0]?.key || null;
+  };
+  const primary = sections.find((s) => s.key === 'pest_control')
+    || sections.find((s) => s.isRecurring)
+    || sections[0];
+  const primaryKey = primary ? sectionDefault(primary) : null;
+  const selectedFrequency = frequencies.length
+    ? (frequencies.some((f) => f?.key === primaryKey) ? primaryKey : (frequencies[0]?.key || null))
+    : primaryKey;
+
+  const cadences = defaultComboCadences(pricing, sections, selectedFrequency, sectionDefault);
+  if (cadences === false) return null;
+  const serviceCadences = cadences;
+  return {
+    selectedFrequency: selectedFrequency ? String(selectedFrequency) : null,
+    serviceCadences,
+  };
+}
+
+// A customer selection already saved on the estimate (accept writes it) is
+// what resolveEstimateSlotProfile falls back to when no selectedFrequency is
+// passed — that path stays exactly as it was.
+function hasSavedCustomerSelection(estimate) {
+  const selection = parseEstimateData(estimate).customerSelection;
+  return !!(selection && (selection.serviceTierKey || selection.frequencyKey || selection.frequency));
+}
+
+// The texting AI's estimate for this customer, by the resolver's own two
+// rules (estimate-conversion-agent resolveEstimateContext): the estimate is on
+// the customer's record, or its customer_phone is the customer's own number —
+// the phone fallback the resolver uses for an estimate with no (or another)
+// customer_id. Both live drafters run only for a webhook-matched customer, so
+// the customer's phone on file stands in for the texting number; a customer
+// texting from some other number is offered nothing (fail closed).
+function last10Digits(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+async function estimateBelongsToCustomer(estimate, customerId) {
+  if (!customerId) return false;
+  if (estimate.customer_id && String(estimate.customer_id) === String(customerId)) return true;
+  const estimatePhone = last10Digits(estimate.customer_phone);
+  if (!estimatePhone) return false;
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
+  return last10Digits(customer?.phone) === estimatePhone;
+}
+
+async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
+  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id', 'customer_phone');
+  if (!estimate || !(await estimateBelongsToCustomer(estimate, customerId))) return null;
+  if (await slotBrowseRefusal(estimate)) return null;
+  // The page's /data resolution for this estimate: its acceptance contract
+  // decides whether the slot picker renders at all (quote-required, linked
+  // existing appointment, invoice-only, commercial site-confirmation → no
+  // picker, so no time the customer could pick), and its pricing bundle is
+  // what the picker's first fetch derives the default selection from.
+  // /data reconciles a stale frozen membership snapshot (in memory, never
+  // persisted) before building either, so this does too: a lapsed plan can
+  // reprice the default selection or make the estimate quote-required.
+  let pricing;
+  let full;
+  try {
+    full = await db('estimates').where({ id: estimate.id }).first();
+    if (!full) return null;
+    await reconcileFrozenMembershipSnapshot(full);
+    pricing = await buildPricingBundle(full, { monthlyBilled: await estimateRendersMonthlyBilling(full) });
+    const { acceptance } = await resolveEstimateAcceptance(full, parseEstimateData(full), pricing);
+    if (acceptance?.mode !== 'standard_slot_pick') return null;
+  } catch (err) {
+    logger.warn(`[estimate-slots-public:offerable] page contract lookup failed (${err.message}); estimate times withheld`);
+    return null;
+  }
+  const serviceMode = resolveSlotServiceMode(full, '');
+  // The page's own first fetch (SlotPicker.jsx) always carries the default
+  // selectedFrequency / serviceCadences of a recurring estimate — without them
+  // the picker sizes the visit from frequencies[0] and unmodified companion
+  // rows, a different duration / service mix than the customer's default.
+  let selection = {};
+  if (serviceMode !== 'one_time' && !hasSavedCustomerSelection(full)) {
+    const derived = pageDefaultSlotSelection(pricing);
+    if (!derived) return null;
+    selection = {
+      ...(derived.selectedFrequency ? { selectedFrequency: derived.selectedFrequency } : {}),
+      ...(derived.serviceCadences ? { serviceCadences: derived.serviceCadences } : {}),
+    };
+  }
+  try {
+    return await getAvailableSlots(estimate.id, {
+      serviceMode,
+      ...selection,
+      ...(fresh ? { bypassCache: true, maxResults: FRESH_MAX_SLOTS, expanderMaxResults: 0 } : {}),
+    });
+  } catch (err) {
+    if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) return null;
+    throw err;
+  }
+}
+
 module.exports = router;
+module.exports._internals = { offerableEstimateSlots, pageDefaultSlotSelection };
