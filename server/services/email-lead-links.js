@@ -8,8 +8,7 @@
  *   estimate_id  the estimate the mail was about: the caller's explicit
  *                estimateId / estimateIds / linkEstimateId, else the payload's
  *                own estimate_id (the automation executor's estimate events).
- *   lead_id      the lead the mail went to: the caller's explicit leadId, else
- *                recipient_id when the send is lead-typed AND that id is a
+ *   lead_id      the lead the mail went to: recipient_id when the send is lead-typed AND that id is a
  *                real leads row (the executor's estimate events name the
  *                CUSTOMER id in a lead-typed row, which is not a lead), else
  *                the lead that owns the estimate (leads.estimate_id).
@@ -47,7 +46,6 @@ function firstUuid(...candidates) {
 async function resolveEmailLinks({
   recipientType = null,
   recipientId = null,
-  leadId = null,
   estimateId = null,
   estimateIds = null,
   linkEstimateId = null,
@@ -69,7 +67,7 @@ async function resolveEmailLinks({
   if (type === 'customer') return out;
 
   try {
-    const candidate = firstUuid(leadId, type === 'lead' ? recipientId : null);
+    const candidate = firstUuid(type === 'lead' ? recipientId : null);
     if (candidate) {
       const lead = await dbh('leads').where({ id: candidate }).first('id');
       if (lead) out.lead_id = lead.id;

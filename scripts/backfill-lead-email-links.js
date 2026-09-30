@@ -40,7 +40,12 @@ require('dotenv').config();
 
 const UUID_G = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const ESTIMATE_LINK_G = /\/estimate\/([A-Za-z0-9_-]{6,})/g;
+const UUID_EXACT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BATCH = 500;
+
+// Only a whole UUID may reach a uuid-column comparison: Postgres aborts the
+// transaction on "invalid input syntax for type uuid" for anything else.
+const asUuid = (v) => (UUID_EXACT.test(String(v || '').trim()) ? String(v).trim().toLowerCase() : null);
 
 function uuidsIn(text) {
   return [...new Set((String(text || '').match(UUID_G) || []).map((s) => s.toLowerCase()))];
@@ -66,7 +71,8 @@ function planRow(row, ref) {
   // The same key is often written to both fields (estimate follow-ups), so de-duplicate before counting matches.
   const ids = [...new Set([...uuidsIn(row.trigger_event_id), ...uuidsIn(row.idempotency_key)])];
 
-  const viaRun = row.automation_run_id ? ref.runEstimate.get(String(row.automation_run_id)) : null;
+  const runId = asUuid(row.automation_run_id);
+  const viaRun = runId ? ref.runEstimate.get(runId) : null;
   if (viaRun) {
     out.estimate_id = viaRun; out.estimateVia = 'automation_run';
   } else {
@@ -79,7 +85,7 @@ function planRow(row, ref) {
     }
   }
 
-  const rid = String(row.recipient_id || '').toLowerCase();
+  const rid = asUuid(row.recipient_id);
   if (rid && ref.leadsById.has(rid)) {
     out.lead_id = rid; out.leadVia = 'recipient';
   } else if (out.estimate_id && ref.leadByEstimate.has(out.estimate_id)) {
@@ -97,10 +103,11 @@ async function loadRefs(dbh, rows) {
   const runIds = new Set();
   for (const r of rows) {
     for (const id of [...uuidsIn(r.trigger_event_id), ...uuidsIn(r.idempotency_key)]) ids.add(id);
-    const rid = String(r.recipient_id || '').toLowerCase();
-    if (/^[0-9a-f-]{36}$/.test(rid)) ids.add(rid);
+    const rid = asUuid(r.recipient_id);
+    if (rid) ids.add(rid);
     for (const t of estimateTokensIn(r.html_snapshot)) tokens.add(t);
-    if (r.automation_run_id && uuidsIn(r.automation_run_id).length) runIds.add(String(r.automation_run_id).toLowerCase());
+    const runId = asUuid(r.automation_run_id);
+    if (runId) runIds.add(runId);
   }
   const idList = [...ids];
   const estimatesById = new Set();
@@ -114,7 +121,10 @@ async function loadRefs(dbh, rows) {
   if (runIds.size) {
     const runs = await dbh('email_template_automation_runs').whereIn('id', [...runIds])
       .where({ entity_type: 'estimate' }).select('id', 'entity_id');
-    for (const r of runs) if (uuidsIn(r.entity_id).length) runEstimate.set(r.id, r.entity_id.toLowerCase());
+    for (const r of runs) {
+      const est = asUuid(r.entity_id);
+      if (est) runEstimate.set(r.id, est);
+    }
   }
   if (tokens.size) {
     const ests = await dbh('estimates').whereIn('token', [...tokens]).select('id', 'token');
@@ -249,7 +259,7 @@ function parseArgs(argv) {
   return { execute: argv.includes('--execute'), limit: num('--limit') || null, samples: num('--samples') || 5 };
 }
 
-module.exports = { planRow, uuidsIn, estimateTokensIn, run, parseArgs };
+module.exports = { asUuid, planRow, uuidsIn, estimateTokensIn, run, parseArgs };
 
 if (require.main === module) {
   const db = require('../server/models/db');

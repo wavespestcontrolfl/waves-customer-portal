@@ -106,9 +106,21 @@ pg('backfill-lead-email-links on Postgres', () => {
     expect(await linkOf(ids.already)).toMatchObject({ estimate_id: ids.estB });
   });
 
+  test('non-UUID text in any evidence field never reaches a uuid column and never aborts the run', async () => {
+    const good = randomUUID(); const junk = randomUUID(); const junk2 = randomUUID();
+    await insertMail({ id: good, template_key: 'estimate.delivery', trigger_event_id: `estimate_delivery:${ids.estA}` });
+    // 36 chars of hex and dashes that are not a UUID, a prefixed run id, and free-text keys
+    await insertMail({ id: junk, template_key: 'estimate.delivery', recipient_id: 'abcdef--abcdef--abcdef--abcdef--abcd', automation_run_id: `run-${ids.run}`, trigger_event_id: 'not a uuid', idempotency_key: 'estimate_followup_final:12345' });
+    await insertMail({ id: junk2, template_key: 'estimate.delivery', recipient_id: 'lead-123', trigger_event_id: `ZZZ${ids.estA}ZZZ-not-uuid` });
+    const out = await backfill.run({ execute: true, dbh: db, log });
+    expect(out.totals.written).toBeGreaterThanOrEqual(1);
+    expect(await linkOf(good)).toMatchObject({ estimate_id: ids.estA });
+    expect(await linkOf(junk)).toMatchObject({ lead_id: null, estimate_id: null });
+  });
+
   test('re-running --execute is a no-op', async () => {
     const out = await backfill.run({ execute: true, dbh: db, log });
-    expect(out.totals).toMatchObject({ candidates: 2, linked: 0, unresolved: 2, written: 0 });
+    expect(out.totals).toMatchObject({ linked: 0, written: 0 });
   });
 });
 
@@ -137,6 +149,11 @@ describe('backfill planning helpers', () => {
     const other = '33333333-3333-4333-8333-333333333333';
     ref.estimatesById.add(other);
     expect(planRow({ trigger_event_id: key, idempotency_key: `x:${other}`, recipient_id: null }, ref).estimate_id).toBeNull();
+  });
+  test('asUuid accepts only a whole uuid', () => {
+    const id = '11111111-1111-4111-8111-111111111111';
+    expect(backfill.asUuid(` ${id.toUpperCase()} `)).toBe(id);
+    for (const bad of ['abcdef--abcdef--abcdef--abcdef--abcd', `run-${id}`, 'lead-123', '', null, undefined]) expect(backfill.asUuid(bad)).toBeNull();
   });
   test('planRow with empty references links nothing', () => {
     const ref = { estimatesById: new Set(), estimateByToken: new Map(), runEstimate: new Map(), leadsById: new Set(), leadByEstimate: new Map() };

@@ -1452,10 +1452,10 @@ async function sendTemplate({
   // prepareTemplateSend).
   marketingRequiresLedger = false,
   // Provenance only (email_messages.lead_id / estimate_id, recorded by
-  // resolveEmailLinks; never affects delivery, guards or dedupe): the lead the
-  // mail is for, and the estimate it concerns when the caller has no
-  // `estimateId` to hand the annual-offer guard (a deposit receipt).
-  leadId = null,
+  // resolveEmailLinks; never affects delivery, guards or dedupe): the estimate
+  // the mail concerns when the caller has no `estimateId` to hand the
+  // annual-offer guard (a deposit receipt). The lead is derived from
+  // recipient_id or the estimate's owner; no caller passes one directly.
   linkEstimateId = null,
 } = {}) {
   if (!to) throw new Error('recipient email required');
@@ -1520,7 +1520,7 @@ async function sendTemplate({
   const sendAttemptToken = crypto.randomUUID();
   // The single chokepoint for tying prospect mail to its lead / estimate.
   const links = await resolveEmailLinks({
-    recipientType, recipientId, leadId, estimateId, estimateIds, linkEstimateId, payload, test,
+    recipientType, recipientId, estimateId, estimateIds, linkEstimateId, payload, test,
   });
   const messageSnapshot = {
     provider: 'sendgrid',
