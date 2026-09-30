@@ -13553,7 +13553,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
         // own — so every column coverageRowsForTerm's matching needs rides
         // along here too, each column-guarded like the ones above.
         for (const col of ['customer_id', 'scheduled_date', 'service_type', 'service_id', 'service_key_snapshot',
-          'status', 'is_recurring', 'recurring_pattern', 'recurring_parent_id', 'property_id', 'is_callback', 'prepaid_method']) {
+          'status', 'is_recurring', 'recurring_pattern', 'recurring_parent_id', 'property_id', 'is_callback', 'prepaid_method', 'window_start']) {
           if (priceGuardCols[col] && !priceGuardSelect.includes(col)) priceGuardSelect.push(col);
         }
         const priceGuardRow = await trx('scheduled_services').where({ id: req.params.id }).forUpdate().first(...priceGuardSelect);
@@ -13567,6 +13567,12 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // coverage as it will actually stand once this save commits.
           if (priceGuardRow && updates.scheduled_date !== undefined) {
             priceGuardRow._effectiveScheduledDate = updates.scheduled_date;
+          }
+          // Same for the start time: coverage slots are ordered scheduled_date,
+          // window_start, id, so a same-day start-time change moves the visit
+          // ahead of (or behind) another one competing for a sold slot.
+          if (priceGuardRow && updates.window_start !== undefined) {
+            priceGuardRow._effectiveWindowStart = updates.window_start;
           }
           const covered = await findBillingCoveredVisits(trx, [priceGuardRow || { id: req.params.id }], { liveInvoice: true });
           const estimateReason = covered.size > 0 ? null
@@ -13619,7 +13625,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
           // findBillingCoveredVisits.
           for (const col of ['customer_id', 'service_type', 'service_id', 'service_key_snapshot', 'status',
             'is_recurring', 'recurring_pattern', 'recurring_parent_id', 'property_id', 'is_callback',
-            'prepaid_method', 'source_estimate_id']) {
+            'prepaid_method', 'source_estimate_id', 'window_start']) {
             if (sibGuardCols[col] && !sibSelect.includes(col)) sibSelect.push(col);
           }
           const convSiblings = await trx('scheduled_services')
@@ -17809,6 +17815,7 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
     // successor, scope) test a fresh DB read of the written date would.
     const effectiveDate = v._effectiveScheduledDate !== undefined ? v._effectiveScheduledDate : v.scheduled_date;
     const candidateRow = { ...v, scheduled_date: effectiveDate };
+    if (v._effectiveWindowStart !== undefined) candidateRow.window_start = v._effectiveWindowStart;
     for (const term of terms) {
       const covered = await coverageRowsForTerm(term, conn, { extraCandidateRows: [candidateRow] });
       if (covered.some((row) => String(row.id) === String(v.id))) {

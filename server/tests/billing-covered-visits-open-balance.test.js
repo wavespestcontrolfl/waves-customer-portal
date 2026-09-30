@@ -526,6 +526,37 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     expect(covered.get('v1')).toMatch(/card-confirmation page/);
   });
 
+  test('a same-day start time moved EARLIER in the same save takes the sold slot (the proposed, not the stored, start)', async () => {
+    // One sold slot, two same-day visits: v2 (09:00) stored ahead of v1
+    // (10:00). The save moves v1 to 08:00 — _effectiveWindowStart threads
+    // updates.window_start through, so v1 competes at its final position.
+    const v1 = visit({ id: 'v1', scheduled_date: '2026-03-15', window_start: '10:00:00' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-03-15', window_start: '09:00:00' });
+    const conn = fixture({ visits: [v2, v1] });
+    const storedOnly = await findBillingCoveredVisits(conn, [v1], { liveInvoice: true });
+    expect(storedOnly.has('v1')).toBe(false);
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _effectiveWindowStart: '08:00:00' }],
+      { liveInvoice: true },
+    );
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
+  test('a visit moved INTO the window keeps its start time when competing for a same-day slot', async () => {
+    // v1 stored outside the window (so no DB row to recover window_start
+    // from); moved onto v2's day at 08:00, ahead of v2's 09:00.
+    const v1 = visit({ id: 'v1', scheduled_date: '2027-01-10', window_start: '08:00:00' });
+    const v2 = visit({ id: 'v2', scheduled_date: '2026-03-15', window_start: '09:00:00' });
+    const conn = fixture({ visits: [v2] });
+    const covered = await findBillingCoveredVisits(
+      conn,
+      [{ ...v1, _effectiveScheduledDate: '2026-03-15' }],
+      { liveInvoice: true },
+    );
+    expect(covered.get('v1')).toMatch(/card-confirmation page/);
+  });
+
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {
     const v1 = visit();
     const conn = fixture({ visits: [v1], securePrepayLockAcquired: false });
