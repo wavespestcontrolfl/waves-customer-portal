@@ -11,6 +11,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
 
 const VALID_SOURCES = Object.freeze([
   'manual', 'adjustment', 'invoice_application', 'invoice_prepaid', 'referral',
@@ -283,6 +284,12 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
         .forUpdate()
         .first('status');
       if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
+        return { applied: 0, skipped: 'dunning_stopped' };
+      }
+      // Active collections collection_hold (dispute raised on a collections
+      // call, B10) stops credit consumption too. A lookup failure throws
+      // (fail closed — nothing consumed).
+      if (await customerHasActiveCollectionHold(invoice.customer_id, t)) {
         return { applied: 0, skipped: 'dunning_stopped' };
       }
     }

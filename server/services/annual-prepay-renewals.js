@@ -199,6 +199,7 @@ function whereCallbackRow(cols) {
   };
 }
 const { INVOICE_CANCELLED_STATUSES } = require('./annual-prepay-invoice-statuses');
+const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
 const COVERAGE_EXCLUDED_STATUSES = new Set(['cancelled', 'canceled', 'no_show', 'skipped', 'rescheduled']);
 const PREPAID_UPDATE_EXCLUDED_STATUSES = new Set([...COVERAGE_EXCLUDED_STATUSES, 'completed']);
 
@@ -6058,6 +6059,9 @@ async function computeCardExpiryExemptions(horizon = etDateString(), conn = db) 
         else if (reused) {
           const seq = await conn('invoice_followup_sequences').where({ invoice_id: reused.id }).first('status');
           if (seq && String(seq.status || '').toLowerCase() === 'stopped') autopayLaneCharges = false;
+          // Active collections collection_hold (dispute on a collections
+          // call, B10) — same refusal the charge boundary asserts.
+          else if (await customerHasActiveCollectionHold(reused.customer_id || v.customer_id, conn)) autopayLaneCharges = false;
           else if (await conn('payment_plans').where({ invoice_id: reused.id, status: 'active' }).first('id')) autopayLaneCharges = false;
         }
       }

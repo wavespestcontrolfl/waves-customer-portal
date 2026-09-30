@@ -41,7 +41,9 @@
  * minted ahead of its visit (estimate accept, setup fee) is collected by that
  * visit's own completion charge or stays on its pay link and dunning.
  *
- * Invoices whose follow-up sequence an admin explicitly STOPPED are skipped:
+ * Invoices whose follow-up sequence an admin explicitly STOPPED, and every
+ * invoice of a customer with an active collections collection_hold (dispute
+ * raised on a collections call), are skipped:
  * "stop dunning" (customer mailing a check, disputed bill) must also mean
  * "don't silently collect it off-session" — same signal previsit-balance
  * honors. The preflight here is only a cheap skip; the binding check runs
@@ -75,16 +77,24 @@ const { etDateString, etCalendarDayOf } = require('../utils/datetime-et');
 const { invoiceHasPositiveSetupFeeLine } = require('./estimate-first-application-invoice');
 const { acceptedEstimateIdFromNotes } = require('./setup-fee-alert-reconcile');
 
+const { collectionHoldInvoiceIds } = require('./collections/collection-hold');
+
 const SWEEP_SOURCE = 'completion_balance_sweep';
 
-// Invoices an admin told the dunning engines to leave alone.
+// Invoices the dunning engines were told to leave alone: an admin-STOPPED
+// follow-up sequence, OR an active collections_flags collection_hold on the
+// invoice's customer (a dispute raised on a collections call — B10). Both
+// mean "don't silently collect it off-session". A lookup failure THROWS
+// (callers refuse rather than charge on an unproven state).
 async function dunningStoppedInvoiceIds(invoiceIds, { database = db } = {}) {
   if (!invoiceIds.length) return new Set();
   const rows = await database('invoice_followup_sequences')
     .whereIn('invoice_id', invoiceIds)
     .where({ status: 'stopped' })
     .select('invoice_id');
-  return new Set(rows.map((r) => String(r.invoice_id)));
+  const stopped = new Set(rows.map((r) => String(r.invoice_id)));
+  for (const id of await collectionHoldInvoiceIds(invoiceIds, { database })) stopped.add(id);
+  return stopped;
 }
 
 // Owner ruling 2026-09-26: never charge a client before the visit. The

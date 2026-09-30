@@ -3,6 +3,7 @@ const config = require('../config');
 const stripeConfig = require('../config/stripe-config');
 const db = require('../models/db');
 const logger = require('./logger');
+const { customerHasActiveCollectionHold } = require('./collections/collection-hold');
 const PaymentLifecycleEmail = require('./payment-lifecycle-email');
 const { v4: uuidv4 } = require('uuid');
 const { etDateString } = require('../utils/datetime-et');
@@ -2218,6 +2219,16 @@ const StripeService = {
             .first('status');
           if (seq && String(seq.status || '').toLowerCase() === 'stopped') {
             throw Object.assign(new Error('Collection is stopped for this invoice. Review before charging.'), {
+              code: 'INVOICE_COLLECTION_STOPPED',
+            });
+          }
+          // A dispute raised on a collections call (collections_flags
+          // collection_hold, customer-level) is the same instruction: the
+          // customer was told all billing follow-up is on hold (B10). Read
+          // inside this transaction; a lookup failure throws and rolls the
+          // charge back (fail closed).
+          if (await customerHasActiveCollectionHold(lockedInvoice.customer_id, trx)) {
+            throw Object.assign(new Error('Collection is on hold for this customer (billing dispute). Review before charging.'), {
               code: 'INVOICE_COLLECTION_STOPPED',
             });
           }
