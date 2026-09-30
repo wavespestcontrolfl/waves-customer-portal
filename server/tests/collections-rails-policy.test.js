@@ -1539,24 +1539,25 @@ describe('invoice-followups rail', () => {
     expectHeldRetime(heldRetime);
   });
 
-  test('Fable P2: SMS durably blocked at the sender while Email is only spacing-denied is classified by the SMS outcome — not held, not paused', async () => {
+  test('Codex r2 P1: a terminal SMS refusal never discards the Email leg\'s transient denial — held so Email retries after its window', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    // Email denied by a spacing window (its default result reason stays
-    // 'collections_policy_denied'); SMS is permitted but the sender refuses it
-    // for good. Nothing a retry can change: no hold (and no pause, as before).
+    // Email denied by a spacing window; SMS is permitted but the sender
+    // refuses it for good (non-mobile). The email leg is still owed a retry,
+    // so the touch is held rather than left due for the stale skip.
     ContactPolicy.evaluate.mockImplementation(async (_id, { channel }) => (channel === 'email' ? TRANSIENT_DENIED : ALLOWED));
     sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
+    const heldRetime = chain({ result: 1 });
     const claimClear = chain({ result: 1 });
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: Array.from({ length: 4 }, () => chain({ first: FU_INVOICE })),
       notification_prefs: [chain({ first: { email_enabled: true } })],
-      invoice_followup_sequences: [chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), claimClear],
+      invoice_followup_sequences: [chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), heldRetime, claimClear],
     });
     await InvoiceFollowUps.runPending();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
-    expect(claimClear.update).toHaveBeenCalledTimes(1);
+    expectHeldRetime(heldRetime);
     expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
   });
 

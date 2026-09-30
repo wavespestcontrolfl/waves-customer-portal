@@ -44,6 +44,7 @@ const { publicPortalUrl } = require('../utils/portal-url');
 const EmailTemplateLibrary = require('./email-template-library');
 const { currency } = require('./email-template');
 const { formatDateOnly } = require('../utils/date-only');
+const { etDateString } = require('../utils/datetime-et');
 const { explicitBillingChannels } = require('./billing-delivery-channels');
 const { dispatchUnderBillingEmailAuthority } = require('./billing-channel-email-authority');
 const {
@@ -1200,11 +1201,6 @@ function heldTouchFloor(now = new Date()) {
   return anchorTo10amNY(now, 1, 0);
 }
 
-// YYYY-MM-DD of an instant in New York, for day-level comparisons.
-function nyCalendarDay(d) {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
-}
-
 // How long the FINAL step may keep being held past its own scheduled day.
 const FINAL_STEP_HOLD_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -1252,10 +1248,10 @@ async function holdTouchUntilNextDay(row, claimStamp, why, { operatorInitiated =
     // Compare the day the cron can ACTUALLY retry (first send-window day on or
     // after the floor), not the raw floor: a Friday hold retries Tuesday, which
     // may already be the next step's day (Codex #5404 r1 P1).
-    const retryDay = nyCalendarDay(firstEligibleFireAt(floor));
+    const retryDay = etDateString(firstEligibleFireAt(floor));
     withinWindow = nextStepAt
-      ? retryDay < nyCalendarDay(firstEligibleFireAt(nextStepAt))
-      : !!ownStepAt && retryDay <= nyCalendarDay(new Date(ownStepAt.getTime() + FINAL_STEP_HOLD_MAX_MS));
+      ? retryDay < etDateString(firstEligibleFireAt(nextStepAt))
+      : !!ownStepAt && retryDay <= etDateString(new Date(ownStepAt.getTime() + FINAL_STEP_HOLD_MAX_MS));
   } catch (err) {
     logger.warn(`[invoice-followups] hold bound could not be computed for sequence ${row.id} (${why}): ${err.message} — not held`);
     return false;
@@ -1995,16 +1991,13 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
       // Classified by what ACTUALLY happened on each leg: the email result's
       // default reason reads 'collections_policy_denied' even when Email was
       // never selected, so it only counts while a leg really has a transient
-      // denial or outage — and never once the SMS/App leg ended on a terminal
-      // sender outcome (blocked, non-mobile, ...), which a retry cannot change.
-      const smsTerminal = smsSkipReason != null && ![
-        'collections_policy_denied', 'ledger_unavailable', 'no_non_email_selected',
-        'no_customer_phone', 'missing_template',
-      ].includes(smsSkipReason);
+      // denial or outage. A terminal outcome on one leg (SMS non-mobile,
+      // blocked) never discards another leg's transient denial: the email
+      // leg must still be retried once its window passes (Codex #5404 r2 P1).
       const transientLeg = policyChannels.some((_channel, index) => !verdictAllows(policyResults[index])
         && !verdictDurablyDenied(policyResults[index]))
         || smsSkipReason === 'ledger_unavailable' || emailResult.reason === 'ledger_unavailable';
-      if (transientLeg && !smsTerminal) {
+      if (transientLeg) {
         await holdTouchUntilNextDay(row, claimStamp, smsSkipReason || emailResult.reason, { operatorInitiated });
       }
       logger.info(`[invoice-followups] touch for sequence ${row.id} handled by collections policy/ledger — retrying on a later run`);
