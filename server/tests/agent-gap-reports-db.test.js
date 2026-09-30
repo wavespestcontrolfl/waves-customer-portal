@@ -5,6 +5,11 @@ const SKIP = !process.env.DATABASE_URL;
 const postgres = SKIP ? describe.skip : describe;
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// The bell writer is stubbed: this suite shares CI's database with the other
+// DB-gated suites, so it must not leave `agents` notification rows behind.
+// notifyAdmin receives the gap row's savepoint as opts.trx.
+const mockNotifyAdmin = jest.fn(async () => ({ id: 1 }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...args) => mockNotifyAdmin(...args) }));
 
 postgres('agent-gap-reports against PostgreSQL', () => {
   let db;
@@ -199,5 +204,22 @@ postgres('agent-gap-reports against PostgreSQL', () => {
     const withClosed = await listGapReports({ days: 1, include_closed: true });
     const opsGroupClosed = withClosed.groups.find((g) => g.domain === 'ops');
     expect(opsGroupClosed.gaps.some((g) => g.gap_id === closed.id)).toBe(true);
+  });
+
+  test('a bell that fails inside its savepoint (aborted statement, null result) leaves the sighting saved and belled_at NULL', async () => {
+    mockNotifyAdmin.mockImplementationOnce(async (_c, _t, _b, opts) => {
+      // Same shape as notification-service's create(): a failed statement on
+      // the caller's connection, caught, returned as null.
+      try { await opts.trx.raw('SELECT 1/0'); } catch { return null; }
+      return { id: 1 };
+    });
+    const gap = await record({ summary: 'Synthetic failed bell gap' });
+    expect(gap.rang).toBe(false);
+    const row = await db('agent_gap_reports').where('id', gap.id).first('belled_at', 'occurrences');
+    expect(row).toMatchObject({ belled_at: null, occurrences: 1 });
+    expect(Number((await db('agent_gap_report_sightings').where('gap_id', gap.id).count('* as n'))[0].n)).toBe(1);
+    const next = await record({ summary: 'Synthetic failed bell gap' });
+    expect(next.rang).toBe(true);
+    expect((await db('agent_gap_reports').where('id', gap.id).first('belled_at')).belled_at).not.toBeNull();
   });
 });

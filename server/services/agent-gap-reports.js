@@ -174,40 +174,35 @@ function gapBellText({ id, source, domain, reopened = false }) {
   return { title, body };
 }
 
-// Rings the admin bell for a newly recorded (or reopened) gap. Runs AFTER the
-// row's transaction committed, never awaited by the caller, and never
-// throws: a bell failure must not fail or slow the reply that surfaced the
-// gap. The dedupe key is unique per ring event (first sighting, or the
-// reopening sighting), so a reopen rings again but a replay of the same
-// event does not double-ring.
-//
-// belled_at is stamped inside the row's transaction (a claim, so two
-// concurrent sightings ring once). If the bell is not written — notifyAdmin
-// throws, or returns null on its dedupe path — the claim is released
-// (belled_at back to NULL, only if it is still this event's stamp) so the
-// gap's next sighting rings instead of losing its bell for good.
-async function ringGapBell(event) {
-  let delivered = false;
+// Writes the admin bell for a newly recorded (or reopened) gap INSIDE the
+// gap row's transaction, in a savepoint: the bell row and the belled_at stamp
+// commit together with the sighting, so a process exit (a deploy) can never
+// leave a gap marked as rung with no bell. A bell that is not written
+// (notifyAdmin throws inside the savepoint) rolls back only the savepoint —
+// the sighting still commits, belled_at stays NULL, and the next sighting
+// rings. Never throws. The dedupe key is unique per ring event (first
+// sighting, or the reopening sighting), so a reopen rings again but a replay
+// of the same event does not double-ring. Returns true when the bell landed.
+async function ringGapBell(trx, event) {
+  if (!gapReportsEnabled()) return false;
   try {
-    if (!gapReportsEnabled()) return;
-    const { title, body } = gapBellText(event);
-    const NotificationService = require('./notification-service');
-    const result = await NotificationService.notifyAdmin('agents', title, body, {
-      link: BELL_LINK,
-      bell: true,
-      dedupeKey: `agent-gap:${event.id}:${event.at.toISOString()}`,
-      metadata: { gapId: event.id, source: event.source, reopened: Boolean(event.reopened) },
+    await trx.transaction(async (sp) => {
+      const { title, body } = gapBellText(event);
+      const NotificationService = require('./notification-service');
+      const result = await NotificationService.notifyAdmin('agents', title, body, {
+        link: BELL_LINK,
+        bell: true,
+        trx: sp,
+        dedupeKey: `agent-gap:${event.id}:${event.at.toISOString()}`,
+        metadata: { gapId: event.id, source: event.source, reopened: Boolean(event.reopened) },
+      });
+      if (!result) throw Object.assign(new Error('bell not written'), { code: 'NOT_WRITTEN' });
+      await sp('agent_gap_reports').where('id', event.id).update({ belled_at: event.at });
     });
-    delivered = Boolean(result);
-    if (!delivered) logger.warn('[agent-gap-reports] bell failed (not written)');
+    return true;
   } catch (err) {
     logger.warn(`[agent-gap-reports] bell failed (${err.code || err.name || 'error'})`);
-  }
-  if (delivered) return;
-  try {
-    await db('agent_gap_reports').where({ id: event.id, belled_at: event.at }).update({ belled_at: null });
-  } catch (err) {
-    logger.warn(`[agent-gap-reports] bell claim release failed (${err.code || err.name || 'error'})`);
+    return false;
   }
 }
 
@@ -225,17 +220,18 @@ async function ringGapBell(event) {
 // concurrent triage or recurrence cannot flip them between the read and the
 // merge), and Postgres' `xmax = 0` on the returned row says the statement
 // inserted instead of merging (which also settles two simultaneous first
-// sightings: only the inserter rings). A ring stamps belled_at in the same
-// transaction. The bell itself fires after the commit, fire-and-forget.
+// sightings: only the inserter rings). The bell row and the belled_at stamp
+// are written in a savepoint of the same transaction (ringGapBell), so they
+// commit with the sighting or not at all.
 async function upsertGapRow(row) {
   const now = new Date();
-  const saved = await db.transaction(async (trx) => {
+  return db.transaction(async (trx) => {
     const prior = await trx('agent_gap_reports')
       .where({ fingerprint: row.fingerprint })
       .forUpdate()
       .first('status', 'belled_at');
     const rows = await trx('agent_gap_reports')
-      .insert({ ...row, occurrences: 1, status: 'new', first_seen_at: now, last_seen_at: now, belled_at: now })
+      .insert({ ...row, occurrences: 1, status: 'new', first_seen_at: now, last_seen_at: now })
       .onConflict('fingerprint')
       .merge({
         occurrences: trx.raw('agent_gap_reports.occurrences + 1'),
@@ -254,23 +250,20 @@ async function upsertGapRow(row) {
     const neverRang = !inserted && !reopened && !prior?.belled_at
       && (prior?.status === 'new' || prior?.status === 'building');
     const rang = inserted || reopened || neverRang;
-    // An insert already carries belled_at; a merge that rings stamps it here.
-    if (rang && !inserted) await trx('agent_gap_reports').where('id', result.id).update({ belled_at: now });
+    const id = Number(result.id);
+    const belled = rang
+      ? await ringGapBell(trx, { id, source: row.source, domain: result.domain || null, reopened, at: now })
+      : false;
     // bigint ids come back from pg as strings; "gap #<id>" wants a number.
     return {
-      id: Number(result.id),
+      id,
       occurrences: Number(result.occurrences),
       status: result.status,
       domain: result.domain || null,
-      rang,
+      rang: belled,
       reopened,
     };
   });
-  if (saved?.rang) {
-    // Deliberately not awaited: the caller's reply never waits on the bell.
-    ringGapBell({ id: saved.id, source: row.source, domain: saved.domain, reopened: saved.reopened, at: now });
-  }
-  return saved;
 }
 
 /**

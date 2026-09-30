@@ -9,7 +9,7 @@ describe('agent-gap-reports', () => {
   let sightings;
   let priorRow;
   let belledUpdates;
-  let belledReleases;
+  let savepointMock;
   let notifyMock;
 
   beforeEach(() => {
@@ -20,7 +20,6 @@ describe('agent-gap-reports', () => {
     returningRows = [{ id: '7', occurrences: 1, status: 'new', domain: null, xmax: '0' }];
     priorRow = undefined;
     belledUpdates = [];
-    belledReleases = [];
     notifyMock = jest.fn().mockResolvedValue({ id: 'n1' });
     loggerMock = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
@@ -39,10 +38,9 @@ describe('agent-gap-reports', () => {
               })),
             };
           }),
-          where: jest.fn((whereArgs) => ({
+          where: jest.fn(() => ({
             forUpdate: jest.fn(() => ({ first: jest.fn(async () => priorRow) })),
             update: jest.fn((fields) => {
-              if (fields && fields.belled_at === null) { belledReleases.push(whereArgs); return Promise.resolve(1); }
               if (fields && fields.belled_at) { belledUpdates.push(fields); return Promise.resolve(1); }
               return { returning: jest.fn().mockResolvedValue([{ id: '7', kind: 'missing_capability', occurrences: 1, ...fields }]) };
             }),
@@ -56,7 +54,12 @@ describe('agent-gap-reports', () => {
     });
     table.raw = jest.fn((sql) => ({ __raw: sql }));
     dbMock = table;
-    dbMock.transaction = jest.fn(async (work) => work(table));
+    // The row transaction, with its own savepoint (the bell is written in one).
+    const trx = jest.fn((name) => table(name));
+    trx.raw = table.raw;
+    savepointMock = jest.fn(async (work) => work(trx));
+    trx.transaction = savepointMock;
+    dbMock.transaction = jest.fn(async (work) => work(trx));
 
     jest.doMock('../models/db', () => dbMock);
     jest.doMock('../services/logger', () => loggerMock);
@@ -257,15 +260,17 @@ describe('agent-gap-reports', () => {
       expect(belledUpdates).toHaveLength(0);
     });
 
-    test('an insert stamps belled_at itself, and a reopen stamps it too', async () => {
+    test('a bell stamps belled_at in a savepoint of the row transaction, on insert and on reopen', async () => {
       const { writeGapRows } = load();
       await writeGapRows([signal()]);
-      expect(insertedRows[0].belled_at).toEqual(expect.any(Date));
-      expect(belledUpdates).toHaveLength(0);
+      expect(insertedRows[0].belled_at).toBeUndefined();
+      expect(savepointMock).toHaveBeenCalledTimes(1);
+      expect(notifyMock.mock.calls[0][3].trx).toBeDefined();
+      expect(belledUpdates).toHaveLength(1);
       priorRow = { status: 'fixed', belled_at: new Date() };
       returningRows = [{ id: '7', occurrences: 2, status: 'new', domain: null, xmax: '9' }];
       await writeGapRows([signal()]);
-      expect(belledUpdates).toHaveLength(1);
+      expect(belledUpdates).toHaveLength(2);
     });
 
     test('a reopen and the first sighting have different dedupe keys', async () => {
@@ -284,7 +289,7 @@ describe('agent-gap-reports', () => {
       process.env.AGENT_GAP_REPORTS = 'off';
       const { writeGapRows, _private: { ringGapBell } } = load();
       await writeGapRows([signal()]);
-      await ringGapBell({ id: 7, source: 'texting-ai', domain: null, at: new Date() });
+      expect(await ringGapBell(null, { id: 7, source: 'texting-ai', domain: null, at: new Date() })).toBe(false);
       await flush();
       expect(notifyMock).not.toHaveBeenCalled();
     });
@@ -298,38 +303,30 @@ describe('agent-gap-reports', () => {
       expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] bell failed (ECONNRESET)');
     });
 
-    test('a failed bell releases the belled_at claim so the next sighting rings', async () => {
+    test('a failed bell leaves belled_at unset (next sighting rings) and still saves the sighting', async () => {
       const { writeGapRows } = load();
       notifyMock.mockRejectedValue(Object.assign(new Error('down'), { code: 'ECONNRESET' }));
-      await writeGapRows([signal()]);
-      await flush();
-      expect(belledReleases).toHaveLength(1);
-      expect(belledReleases[0].id).toBe(7);
-      expect(belledReleases[0].belled_at).toBeInstanceOf(Date);
+      const saved = await writeGapRows([signal()]);
+      expect(saved).toHaveLength(1);
+      expect(saved[0].rang).toBe(false);
+      expect(sightings).toHaveLength(1);
+      expect(belledUpdates).toHaveLength(0);
     });
 
-    test('a bell notifyAdmin did not write (null) also releases the claim', async () => {
+    test('a bell notifyAdmin did not write (null) also leaves belled_at unset', async () => {
       const { writeGapRows } = load();
       notifyMock.mockResolvedValue(null);
       await writeGapRows([signal()]);
-      await flush();
-      expect(belledReleases).toHaveLength(1);
-      expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] bell failed (not written)');
+      expect(belledUpdates).toHaveLength(0);
+      expect(loggerMock.warn).toHaveBeenCalledWith('[agent-gap-reports] bell failed (NOT_WRITTEN)');
     });
 
-    test('a delivered bell keeps the claim', async () => {
+    test('a delivered bell stamps belled_at', async () => {
       const { writeGapRows } = load();
-      await writeGapRows([signal()]);
-      await flush();
-      expect(notifyMock).toHaveBeenCalledTimes(1);
-      expect(belledReleases).toHaveLength(0);
-    });
-
-    test('the caller does not wait on a slow bell', async () => {
-      const { writeGapRows } = load();
-      notifyMock.mockReturnValue(new Promise(() => {}));
       const saved = await writeGapRows([signal()]);
-      expect(saved).toHaveLength(1);
+      expect(notifyMock).toHaveBeenCalledTimes(1);
+      expect(saved[0].rang).toBe(true);
+      expect(belledUpdates).toHaveLength(1);
     });
 
     test('title and body stay short for every source, and the title never carries the summary', () => {
