@@ -1031,8 +1031,11 @@ const RESERVICE_DENIAL_SCAN_RE = new RegExp(RESERVICE_DENIAL_RE.source, 'gi');
 // detectors run. Kept COVERED: a generic technician "free pest inspection / free inspection of your lawn /
 // complimentary assessment visit" stays an offer (Codex round-10 P2 — a free return visit in disguise), as do
 // "free re-service / retreat / follow-up visit / callback".
+// Codex round-40 P2: "free consultation" is the customer-facing name of the same Waves Assessment product (ScheduleFlowPage.jsx: "Your free
+// consultation is already scheduled") — blanked with its optional free / complimentary lead and visit / appointment tail.
 const RESERVICE_OTHER_PRODUCT_RE = new RegExp(
-  '\\bwaves\\s+assessments?(?:\\s+(?:visit|appointment|inspection))?\\b'
+  '\\b(?:(?:free|complimentary|no[- ]charge)\\s+(?:(?!then\\b)[\\w-]+\\s+){0,2})?(?:waves\\s+)?consultations?(?:\\s+(?:visit|appointment|call))?\\b'
+  + '|\\bwaves\\s+assessments?(?:\\s+(?:visit|appointment|inspection))?\\b'
   + '|\\b(?:your|our)\\s+(?:(?:free|complimentary)\\s+)?(?:[\\w-]+\\s+)?(?:inspections?|assessments?)(?:\\s+(?:visit|appointment|call))?\\b(?=\\s+(?:is|are|was|will\\s+be)\\s+(?:scheduled|booked|set|confirmed|tomorrow|today|tonight|at\\s+\\d|(?:on\\s+)?(?:mon|tues|wednes|thurs|fri|satur|sun)day))'
   // Codex round-28 P2: a TERMINAL callback reference — completed / canceled / missed / expired — is factual history,
   // not a new offer. Only the reference itself is blanked, so a separate new offer in the same reply still counts.

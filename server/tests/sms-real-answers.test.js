@@ -3807,6 +3807,33 @@ describe('free re-service is an entitlement resolved through the existing mechan
       }
     });
 
+    // Codex round-40 P2: "free consultation" is the Waves Assessment product — never a booked re-service claim nor a re-service offer.
+    test('"free consultation" (the Waves Assessment) is blanked: not a booked-callback claim, not an offer', async () => {
+      const dt = require('../utils/datetime-et');
+      const realEt = dt.etDateString;
+      try {
+        dt.etDateString = jest.fn(() => '2026-10-05');
+        const booked = { pest: { date: '2026-10-08', windowStart: '09:00' } };
+        jest.resetModules();
+        const actual = jest.requireActual('../services/reservice-scheduler');
+        jest.doMock('../services/reservice-scheduler', () => ({ ...actual, reserviceSelfServeEnabled: () => true, loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], open: booked, bookable: [], verified: true }) }));
+        require('../utils/datetime-et').etDateString = dt.etDateString;
+        const drafter = require('../services/sms-shadow-drafter');
+        const send = (body) => drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers2', draftId: null, intendedActions: [], bookedCallbacks: booked } });
+        for (const ok of ['Your free consultation appointment is scheduled for Thursday at 1 PM.', 'Your free consultation is already scheduled for Friday.', 'Your complimentary consultation visit is tomorrow at 2 PM.']) {
+          await expect(send(ok)).resolves.toBeNull();
+        }
+        // the booked pest re-service itself is still rechecked
+        await expect(send('Your pest re-service is scheduled for Thursday at 1 PM.')).resolves.toMatch(/reservice_booking_changed/);
+        for (const offer of ['We will send you a free consultation appointment.', 'We will send you a free pest consultation visit.', 'Your free consultation visit is on us.']) {
+          expect(drafter.isReserviceOfferPromise(offer)).toBe(false);
+        }
+        expect(drafter.isReserviceOfferPromise('We will send you a free re-service visit.')).toBe(true);
+      } finally {
+        dt.etDateString = realEt;
+      }
+    });
+
     // Codex round-39 P2: a MERIDIEM-FREE range is an asserted window — compared modulo 12h on BOTH endpoints.
     test('meridiem-free ranges in a callback claim are asserted times (live Thursday 9:00 - 11:00): a wrong or one-sided range is blocked', async () => {
       const dt = require('../utils/datetime-et');

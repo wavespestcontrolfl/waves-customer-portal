@@ -575,7 +575,19 @@ function reserviceClauseDropped(clause) {
 const RESERVICE_QUESTION_OPEN_RE = new RegExp(`^\\W*(?:(?:and|but|so|also|please|then)\\W+)*(?:are|is|was|were|am|do|does|did|can|could|will|would|should|shall|may|might|have|has|had)\\s+(?:you|i|we|they|he|she|it|there|someone|somebody|anyone|anybody|everyone|the|my|our|your|these|those|this|that|any|some|no|a|an|${RESERVICE_ANY_PEST_NOUN})\\b`, 'i');
 const RESERVICE_WHY_QUESTION_RE = /^\W*(?:(?:and|but|so)\W+)*(?:why|how\s+come)\b/i;
 const RESERVICE_HYPOTHETICAL_RE = /\b(?:if|whether|unless|in\s+case|suppose|supposing)\b/i;
+// Codex round-40 P2: an UNPUNCTUATED trailing request / question ("Ants are back can you help?", "Roaches are everywhere please help",
+// "Ants are back what should I do?") makes the clause end in "?" without making the PEST ASSERTION a question. The trailing segment is
+// split off before judging: the prefix is judged on its own (a genuine question — "Are the ants back?" — opens as one and stays
+// non-assertive; so does a hypothetical prefix).
+const RESERVICE_TRAILING_REQUEST_RE = /\b(?:(?:can|could|will|would)\s+(?:you|u|someone|somebody|anyone|anybody)\b|(?:please|pls)\s+(?:help|send|come|call|advise|fix|let)\b|(?:what|how)\s+(?:should|can|do|would|could)\s+(?:i|we|you)\b|what\s+now\b|any\s+(?:ideas|advice|suggestions|thoughts)\b|(?:do|did)\s+you\s+(?:have|know)\b)/i;
 function reserviceClauseIsQuestion(clause, delimiter) {
+  const trailing = RESERVICE_TRAILING_REQUEST_RE.exec(clause);
+  if (trailing && trailing.index > 0 && clause.slice(0, trailing.index).trim() && !RESERVICE_QUESTION_OPEN_RE.test(clause) && !RESERVICE_WHY_QUESTION_RE.test(clause)) {
+    return reserviceClauseIsQuestionCore(clause.slice(0, trailing.index), '');
+  }
+  return reserviceClauseIsQuestionCore(clause, delimiter);
+}
+function reserviceClauseIsQuestionCore(clause, delimiter) {
   // if / whether / unless make the clause hypothetical only when they GOVERN the pest activity — i.e. a pest noun
   // FOLLOWS the marker ("If ants are back…", "tell me if ants are back"). "Ants are back if you can believe it"
   // asserts the recurrence (Codex round-29 P2).

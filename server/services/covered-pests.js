@@ -32,6 +32,10 @@ const COVERED_PEST_NOUN_SOURCES = Object.freeze([
   'scorpions?',
   'wasps?',
   'hornets?',
+  // Codex round-40 P2: the company facts cover "wasps, mud daubers and hornet nests on the house" on regular visits; yellow jackets are
+  // wasps (estimate-one-time-copy classifies them with wasps). Synonyms of the covered "wasps" row, like hornets.
+  'mud\\s*daubers?',
+  'yellow\\s*jackets?',
   'stink\\s*bugs?',
   'boxelder\\s*bugs?',
 ]);

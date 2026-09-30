@@ -495,6 +495,21 @@ describe('clause-level pest-report classifier (isActivePestReport / reportedRese
     ['the ants stopped', false, null, false],
     ['they stopped coming', false, null, false],
     ['saw ants yesterday, now they are gone', false, null, false],
+    // Codex round-40 P2: an unpunctuated trailing request / question does not make the pest assertion a question
+    ['Ants are back can you help?', true, 'pest', false],
+    ['Ants are back please help', true, 'pest', false],
+    ['Ants are back what should I do?', true, 'pest', false],
+    ['Roaches everywhere could someone come out?', true, 'pest', false],
+    ['Are the ants back?', false, 'pest', false],
+    ['Ants are back?', false, 'pest', false],
+    ['Is it normal that ants are back?', false, 'pest', false],
+    ['Tell me if ants are back can you?', false, 'pest', false],
+    // Codex round-40 P2: every pest the company facts cover ("wasps, mud daubers and hornet nests") is a covered noun
+    ['Mud daubers are back', true, 'pest', false],
+    ['Mud dauber nests are back on the porch', true, 'pest', false],
+    ['Wasps are back', true, 'pest', false],
+    ['Hornets are back', true, 'pest', false],
+    ['Yellow jackets are back', true, 'pest', false],
     // several reported lanes: active, but the single-lane view is null (see reportedReserviceLanes below)
     ['Ants and chinch bugs are back', true, null, false],
   ];
