@@ -32,7 +32,7 @@ const { extractSmsOperations, VERSION: EXTRACTOR_VERSION } = require('./sms-oper
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, PAYMENT_WITNESS_KINDS } = require('./sms-commitment-fulfillment');
 const { ringOverdueBell, keptLate, resolveDueDeadline } = require('./sms-operational-actions');
 const { resolveEmailCustomerLink, personSentFilter } = require('./email/email-customer-link');
-const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText, ownSubjectInThread } = require('./email/email-strip');
 const NotificationService = require('./notification-service');
 
 const VERSION = `${EXTRACTOR_VERSION}:email`;
@@ -76,6 +76,13 @@ function overdueBody(kind, whenAt) {
 // because none happens — a Gmail message is immutable once sent, and a
 // resync never rewrites a stored subject or body (email-sync.js upsertEmail).
 const subjectOf = (email) => String(email?.subject || '').trim();
+// Only a subject that is new text counts as the email's words: every reply
+// repeats the thread subject behind "Re:", which would otherwise re-extract
+// the original ask, or pin it on a staff send (same rule as email_reply;
+// only earlier messages in the thread count — ownSubjectInThread).
+async function withOwnSubject(conn, email) {
+  return { ...email, subject: await ownSubjectInThread(conn, email) };
+}
 const sourceHash = (email) => hashExtractionSource(JSON.stringify([subjectOf(email), emailPlainText(email)]));
 
 function eligibleAskEmail(email) {
@@ -134,8 +141,9 @@ async function recordEmailOperations(conn, email, extracted, { direction = 'inbo
     // classification; a staff send's re-resolved recipient link).
     if (!enabled()) return { skipped: 'gate_off' };
     const source = await trx('emails').where({ id: email.id }).forUpdate()
-      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'body_html', 'gmail_thread_id', 'to_address', 'cc_address', 'bcc_address', 'subject');
-    if (!source || source.operational_analysis || emailPlainText(source) !== emailPlainText(email) || subjectOf(source) !== subjectOf(email)) return { skipped: 'source_changed' };
+      .first('id', 'operational_analysis', 'customer_id', 'classification', 'body_text', 'body_html', 'gmail_thread_id', 'to_address', 'cc_address', 'bcc_address', 'subject', 'received_at');
+    if (!source || source.operational_analysis || emailPlainText(source) !== emailPlainText(email)
+      || subjectOf(await withOwnSubject(trx, source)) !== subjectOf(email)) return { skipped: 'source_changed' };
     const stillOwned = direction === 'outbound'
       ? String(await resolveEmailCustomerLink(trx, source)) === String(customer.id)
       : eligibleAskEmail(source) && String(source.customer_id) === String(customer.id);
@@ -247,7 +255,7 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       })
       .whereNotExists(noTerminalReceipt('emails'))
       .orderBy('received_at').orderBy('id').limit(PAGE_INTAKE)
-      .select('id', 'customer_id', 'body_text', 'body_html', 'subject', 'received_at', 'classification');
+      .select('id', 'customer_id', 'gmail_thread_id', 'body_text', 'body_html', 'subject', 'received_at', 'classification');
 
     const promiseCandidates = await conn('emails as er')
       .whereRaw(personSentFilter('er')).whereNull('er.operational_analysis')
@@ -260,8 +268,9 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
       .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.body_text', 'er.body_html', 'er.subject', 'er.received_at');
 
     let processed = 0; let failed = 0; let skipped = 0;
-    for (const email of askCandidates) {
+    for (const raw of askCandidates) {
       if (!enabled()) break;
+      const email = await withOwnSubject(conn, raw);
       const source = { source_type: RECEIPT_SOURCE_TYPE, source_id: email.id, extractor_version: VERSION,
         source_hash: sourceHash(email) };
       if (!eligibleAskEmail(email)) {
@@ -283,8 +292,9 @@ async function runEmailOperationalActions({ now = new Date(), conn = db } = {}) 
           .catch((err) => logger.warn(`[email-operations] could not record the failed attempt for email ${email.id}: ${err.message}`));
       }
     }
-    for (const email of promiseCandidates) {
+    for (const raw of promiseCandidates) {
       if (!enabled()) break;
+      const email = await withOwnSubject(conn, raw);
       const source = { source_type: RECEIPT_SOURCE_TYPE, source_id: email.id, extractor_version: VERSION,
         source_hash: sourceHash(email) };
       let resolvedCustomerId = null;

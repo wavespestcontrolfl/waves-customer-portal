@@ -739,6 +739,23 @@ postgres('Email commitments on PostgreSQL', () => {
     expect(prompt.slice(0, prompt.indexOf('Return only JSON'))).not.toContain('Please reschedule Friday');
   });
 
+  test('subject-only ask: a later reply repeating the subject behind Re: neither blanks the first email\'s subject nor re-asks', async () => {
+    const at = Date.now() - 30 * 60000;
+    const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Please reschedule Friday', received_at: new Date(at) });
+    const echo = await insertEmail({ gmail_thread_id: email.gmail_thread_id, customer_id: customerId, classification: 'customer_request',
+      body_text: '', subject: 'Re: Please reschedule Friday', received_at: new Date(at + 5 * 60000) });
+    dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',
+      description: 'reschedule Friday', quote: 'Please reschedule Friday', basis: 'request', property_id: null,
+      due_text: null, due_at: null, due_date: null, promise_firm: false, answered_by_payment: false }], facts: [], additional_properties: [] } });
+    await runEmailOperationalActions({ conn: mockPg, now: new Date() });
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+    expect(dispatchWithFallback.mock.calls[0][1].text).toContain('"subject":"Please reschedule Friday"');
+    const rows = await mockPg('call_commitments').select('email_id');
+    expect(rows.map((r) => r.email_id)).toEqual([email.id]);
+    expect(rows.some((r) => r.email_id === echo.id)).toBe(false);
+  });
+
   test('subject-only ask: a quote grounded in neither the subject nor the body is still dropped', async () => {
     await insertEmail({ customer_id: customerId, classification: 'customer_request', body_text: '', subject: 'Please reschedule Friday' });
     dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { obligations: [{ party: 'waves', kind: 'other',

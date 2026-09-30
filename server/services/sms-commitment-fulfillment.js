@@ -14,7 +14,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callContactSelects } = require('./staff-contact');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
-const { stripQuotedAndSignature, emailPlainText, ownReplySubject } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText, ownSubjectInThread } = require('./email/email-strip');
 const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
 
 const LIMIT = 50;
@@ -362,9 +362,7 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
         const { body_html: _html, ...rest } = row;
         let text = stripQuotedAndSignature(emailPlainText(row));
         if (!text && row.subject) {
-          const threadSubjects = row.gmail_thread_id ? await conn('emails').where({ gmail_thread_id: row.gmail_thread_id })
-            .whereNot('id', row.id).whereNotNull('subject').limit(LIMIT).pluck('subject') : [];
-          const own = ownReplySubject(row.subject, threadSubjects);
+          const own = await ownSubjectInThread(conn, row, LIMIT);
           if (own) text = `Subject: ${own}`;
         }
         if (text) rows.push({ ...rest, body_text: text });

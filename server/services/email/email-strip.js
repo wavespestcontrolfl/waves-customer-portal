@@ -118,5 +118,22 @@ function ownReplySubject(subject, threadSubjects = []) {
   const seen = new Set(threadSubjects.map((s) => withoutReplyPrefixes(s).toLowerCase()));
   return seen.has(own.toLowerCase()) ? '' : own;
 }
+// The same rule against the stored thread. Only messages sent BEFORE this
+// one count: a later reply repeats this subject behind "Re:", and would
+// otherwise blank the subject of the very email that first wrote it.
+async function ownSubjectInThread(conn, row, limit = 50) {
+  if (!String(row?.subject || '').trim()) return '';
+  if (!row.gmail_thread_id || !row.received_at) return ownReplySubject(row.subject, []);
+  const at = new Date(row.received_at);
+  const earlier = await conn('emails').where({ gmail_thread_id: row.gmail_thread_id }).whereNot('id', row.id)
+    .whereNotNull('subject')
+    .where(function sentBefore() {
+      this.where('received_at', '<', at).orWhere(function sameInstant() {
+        this.where('received_at', at).where('id', '<', row.id);
+      });
+    })
+    .orderBy('received_at', 'desc').limit(limit).pluck('subject');
+  return ownReplySubject(row.subject, earlier);
+}
 
-module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject };
+module.exports = { stripQuotedAndSignature, decodeEntities, emailPlainText, ownReplySubject, ownSubjectInThread };
