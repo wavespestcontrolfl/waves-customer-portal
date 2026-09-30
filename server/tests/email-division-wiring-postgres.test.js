@@ -489,6 +489,85 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(await db('marketing_email_ledger').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
     });
 
+    // Recovery before ANY mutable check: a crash after an ACCEPTED delivery, then the
+    // world changes (email, archive, paused automation): the reclaimed run is
+    // finalized sent from the ledger / delivery authority — never skipped.
+    test('crash after an accepted delivery, then the estimate\'s email changes, it is archived and the automation is paused: the reclaimed run is finalized SENT, not skipped (real seeded nurture.expired_1)', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike());
+      const first = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email })).results[0].run;
+      expect(first.status).toBe('sent');
+      const message = await db('email_messages').where({ idempotency_key: first.idempotency_key }).first();
+      // The crash: the ledger never settled; the accepted message is the delivery authority.
+      await db('marketing_email_ledger').where({ idempotency_key: first.idempotency_key }).update({ status: 'reserved', sent_at: null, email_message_id: null, reason: null });
+      await db('email_template_automation_runs').where({ id: first.id }).update({
+        status: 'queued', attempts: 0, run_after: new Date(Date.now() - 1000), completed_at: null, email_message_id: null, last_error: null,
+      });
+      // ...and everything a build would have refused since.
+      await db('estimates').where({ id: estimateId }).update({ customer_email: 'new.email@example.invalid', archived_at: new Date() });
+      await db('email_template_automations').where({ automation_key: automation.automation_key }).update({ status: 'paused' });
+
+      const recovered = await Executor.executeRun(first.id);
+
+      expect(recovered.status).toBe('sent');
+      expect(recovered.email_message_id).toBe(message.id);
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    // The boundary re-runs the builder's OWN eligibility (one predicate), so an
+    // archive or a zero-comms stamp landing after the build is not sent.
+    test.each([
+      ['archived', { archived_at: new Date() }],
+      ['stamped noEngagementAutomation', { estimate_data: JSON.stringify({ noEngagementAutomation: true }) }],
+    ])('the estimate is %s AFTER the build, before the provider handoff: refused at the boundary, nothing sent', async (_label, change) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const estimateId = await makeEstimate(customer.id, customer.email);
+      const automation = await nurtureAutomation();
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => db('estimates').where({ id: estimateId }).update(change) }));
+
+      const run = (await fire(automation, { estimateId, customerId: customer.id, email: customer.email })).results[0].run;
+
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('archived or opted out');
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger[0]).toEqual(expect.objectContaining({ status: 'skipped', reason: 'ESTIMATE_FOLLOWUP_BLOCKED' }));
+    });
+
+    test('B1: the service record is suppressed from the customer report AFTER the build: refused at the boundary (the builder\'s own visit gate), nothing sent', async () => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'] });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike({
+        beforeHandoff: () => db('service_records').where({ id: recordId }).update({ structured_notes: JSON.stringify({ typedReportDelivery: 'manual' }) }),
+      }));
+
+      const run = (await Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      })).results[0].run;
+
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('no longer eligible');
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+    });
+
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
@@ -619,6 +698,32 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(retried.exit_reason).toContain('already has a sent');
       expect(sendTemplate).toHaveBeenCalledTimes(1);
       expect(await db('marketing_email_ledger').where({ customer_id: customer.id, email_key: 'lc.why_91_days', status: 'sent' })).toHaveLength(1);
+    });
+
+    test('B5: a crash after an accepted delivery, then the record is renumbered: the reclaimed run is finalized sent (recovery precedes the builder)', async () => {
+      const { customer, visit2, report } = await whyScenario();
+      sendTemplate.mockImplementation(libraryLike());
+      const first = await report(visit2);
+      expect(first.status).toBe('sent');
+      await db('marketing_email_ledger').where({ idempotency_key: first.idempotency_key }).update({ status: 'reserved', sent_at: null, email_message_id: null, reason: null });
+      await db('service_records').where({ id: visit2 }).update({ visit_number: 3 }); // the builder would now skip it
+      await reclaim(first);
+      const recovered = await Executor.executeRun(first.id);
+      expect(recovered.status).toBe('sent');
+      expect(sendTemplate).toHaveBeenCalledTimes(1);
+      // The ledger row was settled from the delivery authority (reconciled), not re-sent.
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id, status: 'sent' });
+      expect(ledger).toHaveLength(1);
+      expect(ledger[0].reason).toBe('reconciled_from_email_messages');
+    });
+
+    test('B5: the record is renumbered AFTER the build, before the provider handoff: refused at the boundary, nothing sent', async () => {
+      const { visit2, report } = await whyScenario();
+      sendTemplate.mockImplementation(libraryLike({ beforeHandoff: () => db('service_records').where({ id: visit2 }).update({ visit_number: 3 }) }));
+      const run = await report(visit2);
+      expect(run.status).toBe('skipped');
+      expect(run.exit_reason).toContain('no longer eligible');
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
     });
 
     test('a queued first-visit report that will never qualify does not block the second-visit send', async () => {

@@ -29,6 +29,7 @@
  */
 
 const db = require('../../models/db');
+const { estimateFollowupBlockedReason } = require('../estimate-comms-eligibility');
 const { etDateString } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
 
@@ -143,10 +144,11 @@ async function loadCustomer(conn, customerId) {
 // names — the same predicate the activity averages and the first-visit
 // default are judged on, so an inspection-only / declined / incomplete /
 // report-suppressed closeout never drives one of these emails.
-async function loadPerformedVisit(conn, deps, recordId) {
+async function loadPerformedVisit(conn, deps, recordId, { lock = false } = {}) {
   if (!recordId) return null;
   const query = conn('service_records').where('service_records.id', recordId);
   deps.applyPerformedVisitHistoryFilter(query, {});
+  if (lock) query.forShare();
   return query.first('service_records.*');
 }
 
@@ -277,9 +279,11 @@ async function nextPestVisit({
 
 // Every condition that makes this THE customer's first performed pest visit
 // for this recipient: returns a skip, or { record, customer }.
-async function firstVisitGate({ run, conn, deps }) {
+async function firstVisitGate({
+  run, conn, deps, lock = false,
+}) {
   const customerId = run.recipient_id;
-  const record = await loadPerformedVisit(conn, deps, run.entity_id);
+  const record = await loadPerformedVisit(conn, deps, run.entity_id, { lock });
   if (!record) return skip('visit is not a completed, customer-visible, performed service record', 'visit_not_eligible');
   if (!customerId || clean(record.customer_id) !== clean(customerId)) {
     return skip('the visit does not belong to the recipient customer', 'recipient_not_visit_customer');
@@ -445,6 +449,9 @@ async function priorSends({
 const ESTIMATE_RECIPIENT_CHANGED = 'ESTIMATE_RECIPIENT_CHANGED';
 const ESTIMATE_NOT_EXPIRED = 'ESTIMATE_NOT_EXPIRED';
 const ESTIMATE_EXPIRY_SUPERSEDED = 'ESTIMATE_EXPIRY_SUPERSEDED';
+const ESTIMATE_FOLLOWUP_BLOCKED = 'ESTIMATE_FOLLOWUP_BLOCKED';
+const VISIT_NOT_ELIGIBLE = 'VISIT_NOT_ELIGIBLE';
+const ESTIMATE_VERDICT_REASONS = new Set([ESTIMATE_RECIPIENT_CHANGED, ESTIMATE_NOT_EXPIRED, ESTIMATE_EXPIRY_SUPERSEDED, ESTIMATE_FOLLOWUP_BLOCKED]);
 
 // The expiry date (ET, YYYY-MM-DD) the run was created for: the emitter's
 // expires_on, carried on the run's stored payload (and context).
@@ -468,8 +475,9 @@ function runExpiresOn(run) {
 //                   between the check and the request.
 function ledgerGuardsFor(run) {
   const scope = { 'lc.why_91_days': 'customer', 'nurture.expired_1': 'estimate' }[run.template_key];
-  if (!scope) return { guard: null, boundaryGuard: null };
-  const once = async (trx) => {
+  const visitGate = { 'lc.first_visit_pest': firstVisitGate, 'lc.why_91_days': whyPlanGate }[run.template_key];
+  if (!scope && !visitGate) return { guard: null, boundaryGuard: null };
+  const once = scope && (async (trx) => {
     const state = await priorSends({
       conn: trx,
       run,
@@ -478,19 +486,35 @@ function ledgerGuardsFor(run) {
     });
     if (state === 'sent') return { reason: ONCE_ALREADY_DELIVERED };
     return state ? { reason: ONCE_IN_FLIGHT } : null;
-  };
-  if (scope !== 'estimate') return { guard: once, boundaryGuard: null };
+  });
+  if (scope === 'estimate') {
+    return {
+      guard: async (trx) => (await estimateAddressingVerdict(trx, run)) || once(trx),
+      boundaryGuard: (trx) => estimateAddressingVerdict(trx, run, { lock: true }),
+    };
+  }
+  // B1 / B5: the builder's own visit gate (the same function), re-run on the
+  // boundary transaction with the service record share-locked to its end: a
+  // record that was reassigned, suppressed from the customer report, or
+  // renumbered after the build is not sent on stale evidence.
   return {
-    guard: async (trx) => (await estimateAddressingVerdict(trx, run)) || once(trx),
-    boundaryGuard: (trx) => estimateAddressingVerdict(trx, run, { lock: true }),
+    guard: once || null,
+    boundaryGuard: async (trx) => {
+      const gate = await visitGate({
+        run, conn: trx, deps: defaultDeps(), lock: true,
+      });
+      return gate.skip ? { reason: VISIT_NOT_ELIGIBLE, detail: gate.reason } : null;
+    },
   };
 }
 
 // The visit, customer and plan this email may be sent for: a skip, or
 // { record, customer, planName }.
-async function whyPlanGate({ run, conn, deps }) {
+async function whyPlanGate({
+  run, conn, deps, lock = false,
+}) {
   const customerId = run.recipient_id;
-  const record = await loadPerformedVisit(conn, deps, run.entity_id);
+  const record = await loadPerformedVisit(conn, deps, run.entity_id, { lock });
   if (!record) return skip('visit is not a completed, customer-visible, performed service record', 'visit_not_eligible');
   if (!customerId || clean(record.customer_id) !== clean(customerId)) {
     return skip('the visit does not belong to the recipient customer', 'recipient_not_visit_customer');
@@ -694,17 +718,23 @@ async function estimateCity(conn, deps, estimate) {
 // provider boundary (where the row is share-locked for the rest of the handoff
 // transaction): a reassignment or an email change, or an extension, between
 // the build and the send must never deliver this estimate's bearer link.
-async function estimateAddressingVerdict(conn, run, { lock = false, expiresOn = runExpiresOn(run) } = {}) {
-  const query = conn('estimates').where({ id: run.entity_id });
-  if (lock) query.forShare();
-  const estimate = await query.first('id', 'status', 'customer_id', 'customer_email', 'expires_at');
+// THE eligibility predicate for sending nurture.expired_1 about an estimate row:
+// used by the builder (on the row it loaded) AND by the ledger's reservation and
+// provider-boundary guards (on a row re-read under a share lock) — one function,
+// so what the builder checked is exactly what the boundary re-checks. It covers
+// everything the send depends on that can change after the build: the row's
+// existence, the shared follow-up rule (archived, noEngagementAutomation), that it
+// is still an expired estimate, that it is still the expiry that triggered this
+// run (an estimate extended and expired again has a newer run), and that it is
+// still addressed to this run's recipient (owner and normalized email).
+const ESTIMATE_VERDICT_COLUMNS = ['id', 'status', 'customer_id', 'customer_email', 'expires_at', 'archived_at', 'estimate_data'];
+function estimateSendVerdict(estimate, run, expiresOn = runExpiresOn(run)) {
   if (!estimate) return { reason: ESTIMATE_RECIPIENT_CHANGED };
-  if (estimate.status !== 'expired') return { reason: ESTIMATE_NOT_EXPIRED };
-  // A delayed run belongs to the EXPIRY that triggered it: an estimate extended
-  // during the delay and expired again has a newer expiry (and a newer run), so
-  // this one is superseded — it must neither send nor use up the estimate's
-  // once-only allowance. Compared only when both sides are recorded (an aged-out
-  // estimate with no expires_at has no expiry date to compare).
+  const blocked = estimateFollowupBlockedReason(estimate);
+  if (blocked) return { reason: ESTIMATE_FOLLOWUP_BLOCKED, detail: blocked };
+  if (estimate.status !== 'expired') return { reason: ESTIMATE_NOT_EXPIRED, detail: `status is ${estimate.status}` };
+  // Compared only when both sides are recorded (an aged-out estimate with no
+  // expires_at has no expiry date to compare).
   if (expiresOn && estimate.expires_at && etDateString(new Date(estimate.expires_at)) !== expiresOn) {
     return { reason: ESTIMATE_EXPIRY_SUPERSEDED };
   }
@@ -715,23 +745,38 @@ async function estimateAddressingVerdict(conn, run, { lock = false, expiresOn = 
   return null;
 }
 
+// The same predicate on the row as it stands NOW; `lock` share-locks it to the
+// end of the caller's transaction (the provider-boundary transaction).
+async function estimateAddressingVerdict(conn, run, { lock = false, expiresOn = runExpiresOn(run) } = {}) {
+  const query = conn('estimates').where({ id: run.entity_id });
+  if (lock) query.forShare();
+  return estimateSendVerdict(await query.first(...ESTIMATE_VERDICT_COLUMNS), run, expiresOn);
+}
+
 async function buildExpiredNurture({
   run, payload: basePayload = {}, conn = db, deps = defaultDeps(), mode = 'live',
 }) {
   const templateKey = 'nurture.expired_1';
   const estimate = await conn('estimates').where({ id: run.entity_id }).first();
   if (!estimate) return skip('linked estimate no longer exists', 'estimate_missing');
-  if (estimate.status !== 'expired') return skip(`linked estimate is no longer expired (status is ${estimate.status})`, 'estimate_not_expired');
-  // The run was addressed when the trigger fired; the estimate's CURRENT owner
-  // and email must still be that recipient, or the old recipient would receive
-  // the current estimate's bearer link. Same normalization as the ledger's
-  // recipient check (trim + lowercase); skips the whole send, never retargets.
-  const addressing = await estimateAddressingVerdict(conn, run, { expiresOn: clean(basePayload.expires_on) || runExpiresOn(run) });
-  if (addressing?.reason === ESTIMATE_RECIPIENT_CHANGED) {
-    return skip('the estimate\'s customer or email changed since this run was created; not sent to the old recipient', 'estimate_recipient_changed');
-  }
-  if (addressing?.reason === ESTIMATE_EXPIRY_SUPERSEDED) {
-    return skip('the estimate was extended and expired again since this run was created; a newer run owns the touch', 'estimate_expiry_superseded');
+  // The run was addressed when the trigger fired: the estimate must still be an
+  // expired, follow-up-eligible estimate, at the expiry that triggered this run,
+  // addressed to this recipient — or the old recipient would receive the current
+  // estimate's bearer link. The SAME predicate the ledger re-runs at the
+  // reservation and at the provider boundary. Skips the whole send, never retargets.
+  const verdict = estimateSendVerdict(estimate, run, clean(basePayload.expires_on) || runExpiresOn(run));
+  if (verdict) {
+    return skip({
+      [ESTIMATE_RECIPIENT_CHANGED]: 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient',
+      [ESTIMATE_EXPIRY_SUPERSEDED]: 'the estimate was extended and expired again since this run was created; a newer run owns the touch',
+      [ESTIMATE_NOT_EXPIRED]: `linked estimate is no longer expired (${verdict.detail})`,
+      [ESTIMATE_FOLLOWUP_BLOCKED]: `the estimate may not receive automated follow-up: ${verdict.detail}`,
+    }[verdict.reason], {
+      [ESTIMATE_RECIPIENT_CHANGED]: 'estimate_recipient_changed',
+      [ESTIMATE_EXPIRY_SUPERSEDED]: 'estimate_expiry_superseded',
+      [ESTIMATE_NOT_EXPIRED]: 'estimate_not_expired',
+      [ESTIMATE_FOLLOWUP_BLOCKED]: 'estimate_followup_blocked',
+    }[verdict.reason]);
   }
   if ((await priorSends({ conn, run, estimateId: estimate.id })) === 'sent') {
     return skip('this estimate already has a sent expired-estimate touch', 'already_delivered');
@@ -813,6 +858,9 @@ module.exports = {
   ESTIMATE_RECIPIENT_CHANGED,
   ESTIMATE_NOT_EXPIRED,
   ESTIMATE_EXPIRY_SUPERSEDED,
+  ESTIMATE_FOLLOWUP_BLOCKED,
+  VISIT_NOT_ELIGIBLE,
+  ESTIMATE_VERDICT_REASONS,
   buildFirstVisitPest,
   buildWhy91Days,
   buildExpiredNurture,

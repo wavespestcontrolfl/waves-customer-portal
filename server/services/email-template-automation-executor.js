@@ -13,7 +13,7 @@ const { emailTemplateAutomationsMode } = require('../config/feature-gates');
 const { RESERVATION_LIFETIME_MS } = require('./email-division/reservation-lifetime');
 const {
   hasPayloadBuilder, buildEmailDivisionPayload, ledgerGuardsFor, ONCE_ALREADY_DELIVERED, ONCE_IN_FLIGHT,
-  ESTIMATE_RECIPIENT_CHANGED, ESTIMATE_NOT_EXPIRED, ESTIMATE_EXPIRY_SUPERSEDED,
+  ESTIMATE_VERDICT_REASONS, VISIT_NOT_ELIGIBLE,
 } = require('./email-division/payload-builders');
 
 // Mirrors ASSIGNMENT_TERMINAL_STATUSES in routes/admin-schedule.js — an
@@ -1778,13 +1778,13 @@ function recipientChangedSkip() {
 // longer expired between the build and the provider boundary: terminal, never
 // retargeted — its bearer link must not reach the old recipient.
 function estimateChangedSkip(reason) {
-  return {
-    skipReason: {
-      [ESTIMATE_NOT_EXPIRED]: 'the estimate is no longer expired; not sent',
-      [ESTIMATE_EXPIRY_SUPERSEDED]: 'the estimate was extended and expired again since this run was created; a newer run owns the touch',
-    }[reason] || 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient',
-    skipGuard: 'estimate_recipient_changed',
-  };
+  const skipReason = {
+    ESTIMATE_NOT_EXPIRED: 'the estimate is no longer expired; not sent',
+    ESTIMATE_EXPIRY_SUPERSEDED: 'the estimate was extended and expired again since this run was created; a newer run owns the touch',
+    ESTIMATE_FOLLOWUP_BLOCKED: 'the estimate was archived or opted out of automated follow-up since this run was created; not sent',
+    VISIT_NOT_ELIGIBLE: 'the visit this run is about is no longer eligible (reassigned, suppressed, or renumbered since the run was created); not sent',
+  }[reason] || 'the estimate\'s customer or email changed since this run was created; not sent to the old recipient';
+  return { skipReason, skipGuard: reason === VISIT_NOT_ELIGIBLE ? 'visit_not_eligible' : 'estimate_recipient_changed' };
 }
 
 // Ledger-routed dispatch (the wiring PR). Everything the library's
@@ -1861,7 +1861,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
       throw Object.assign(new Error('email division eligibility lookup failed'), { code: 'LEDGER_LOOKUP_FAILED' });
     }
     if (out.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-    if (out.reason === ESTIMATE_RECIPIENT_CHANGED || out.reason === ESTIMATE_NOT_EXPIRED || out.reason === ESTIMATE_EXPIRY_SUPERSEDED) return estimateChangedSkip(out.reason);
+    if (ESTIMATE_VERDICT_REASONS.has(out.reason) || out.reason === VISIT_NOT_ELIGIBLE) return estimateChangedSkip(out.reason);
     if (out.reason === ONCE_ALREADY_DELIVERED) {
       return { skipReason: 'this customer (or estimate) already has a sent email of this kind; not sent again', skipGuard: 'already_delivered' };
     }
@@ -1886,7 +1886,7 @@ async function dispatchThroughLedger(run, automation, executionPayload, stream, 
   // dispatch takes.
   if (settled?.status === 'sent') throw out.error || deliveryUncertainError();
   if (settled?.status === 'skipped' && settled.reason === REASONS.RECIPIENT_CHANGED) return recipientChangedSkip();
-  if (settled?.status === 'skipped' && (settled.reason === ESTIMATE_RECIPIENT_CHANGED || settled.reason === ESTIMATE_NOT_EXPIRED || settled.reason === ESTIMATE_EXPIRY_SUPERSEDED)) {
+  if (settled?.status === 'skipped' && (ESTIMATE_VERDICT_REASONS.has(settled.reason) || settled.reason === VISIT_NOT_ELIGIBLE)) {
     return estimateChangedSkip(settled.reason);
   }
   if (settled?.status === 'skipped') {
@@ -2085,9 +2085,28 @@ async function applyPayloadBuilder(run, automation, payload, shadowRun, attemptN
 
 const GATE_OFF_REASON = 'email template automations gate is off';
 
+// Only a run that is runnable (or stale-running: a crashed worker's) is reclaimed;
+// a live worker's own run finalizes itself.
+async function recoverConfirmedDelivery(run, now) {
+  if (!ledgerStreamFor(run.template_key)) return null;
+  const reclaimable = RUNNABLE_STATUSES.includes(run.status)
+    || (run.status === 'running' && new Date(run.updated_at) <= staleRunningCutoff(now));
+  if (!reclaimable) return null;
+  const delivered = await confirmedLedgerDelivery(run);
+  if (!delivered) return null;
+  return (await finalizeSentRun(run, delivered.result)).updated;
+}
+
 async function executeRun(runOrId, { automation, now = new Date() } = {}) {
   const { run, resolvedAutomation } = await loadRunAndAutomation(runOrId, automation);
   if (FINAL_STATUSES.has(run.status)) return run;
+  // A confirmed delivery under this run's own key is settled FIRST, ahead of every
+  // check that reads mutable state (the automation's status, the gate, the live
+  // entity, exit conditions, the payload builder, the recipient checks): the email
+  // went out, so a reclaimed run is finalized sent — never skipped because the
+  // world changed after the send.
+  const recovered = await recoverConfirmedDelivery(run, now);
+  if (recovered) return recovered;
   const automationStatus = normalizeStatus(resolvedAutomation.status || 'active');
   if (automationStatus !== 'active') {
     return markRunSkipped(run, `automation status is ${automationStatus}`, { guard: 'automation_status' });
