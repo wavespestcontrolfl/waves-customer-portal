@@ -1120,7 +1120,7 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // arrived", "arrived at your home", "the tech is here / outside / at your
 // door", "pulled up" state the tech IS on site — a different fact from "on
 // the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|(?:tech(?:nician)?|he|she|they|driver|crew|team)\s+(?:just\s+|already\s+|finally\s+)?arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|pulled\s+up)\b/i;
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|(?:tech(?:nician)?|he|she|they|driver|crew|team)\s+(?:just\s+|already\s+|finally\s+)?arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
@@ -1186,7 +1186,9 @@ const VISIT_STATUS_RE = new RegExp(
   // at your door / almost there) count ONLY with a technician-type subject
   // (round-21 P2): "We are here to help" / "we're here" are not a claim.
   + `|${VISIT_STATUS_SUBJECT}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
-  + '|left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up|show(?:ed|ing)?\\s+up)\\b', 'gi');
+  // Movement forms (left for / pulled up / showed up) also need a technician-type
+  // subject (round-26 P2): "I pulled up your invoice" is not an arrival.
+  + `|${VISIT_STATUS_SUBJECT}\\s+(?:has\\s+|have\\s+|just\\s+|already\\s+)*(?:left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up(?!\\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\\b)|show(?:ed|ing)?\\s+up))\\b`, 'gi');
 function bodyMentionsVisitStatus(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(VISIT_STATUS_RE.source, VISIT_STATUS_RE.flags))) {
