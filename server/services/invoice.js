@@ -3503,6 +3503,37 @@ async function directSendHoldRefusal(row, holdExempt) {
   return held.held ? collectionHold.holdDeferOutcome(held) : null;
 }
 
+// The ONE order every unclaimed sender entry uses (Codex #5424 r12 P1): resolve Bill-To FIRST, then
+// judge the homeowner's dispute hold only for an invoice that is STILL self-pay. A renewal or
+// combined-visit invoice whose payer_id is not stamped yet may belong to a payer that resolves live
+// under claimBillToFencedSend's held rows, and the homeowner's unrelated dispute must not defer it.
+// `fenced` is claimBillToFencedSend's result: null (no fence applies - nothing claimed), a payer
+// withdrawal (the caller returns payer_billed), or a claim. The hold guard runs for the null and
+// claim cases; a claim it refuses is handed straight back (restored to its prior status, queued-send
+// rows returned, nothing credited or sent), so the refusal leaves the invoice exactly as it was found
+// - the same state the no-fence refusal leaves. Returns the refusal outcome or null.
+async function holdRefusalAfterBillToResolution(invoiceId, row, fenced, holdExempt) {
+  const holdRefusal = await directSendHoldRefusal(row, holdExempt);
+  if (!holdRefusal) return null;
+  if (fenced?.claim?.claimed) {
+    const { previousStatus, consumedQueuedSendRows = [], invoice } = fenced.claim;
+    await restoreSendClaim(invoiceId, previousStatus, fenced.claim.claimed, consumedQueuedSendRows, db, invoice.send_claim_token);
+  }
+  return holdRefusal;
+}
+
+// A renewal's own clearance (termite-annual-renewal-charge withRenewalSendClearance) parks a self-pay
+// renewal behind the customer's dispute hold by throwing renewal_send_withheld with
+// collectionHoldDeferral. For an UNCLAIMED, non-exempt sender entry that is the hold refusal, not a
+// failure: it returns the coded retryable outcome. A pre-claimed send and an operator / customer
+// send (exempt from the hold) keep the throw as before.
+function renewalClearanceHoldDeferral(err, allowClaimed, holdExempt) {
+  return Boolean(err?.collectionHoldDeferral) && !allowClaimed && !HOLD_EXEMPT_CALLERS.has(holdExempt);
+}
+function collectionHoldRefusalFromClearance() {
+  return require("./collections/collection-hold").holdDeferOutcome({ reason: "hold" });
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
@@ -3819,6 +3850,9 @@ async function claimRenewalInvoiceUnderFence(invoiceId, customerId, { allowClaim
 // (renewal gate + customer/payer rows FOR SHARE) and the SAME withdrawal claimRenewalInvoiceUnderFence
 // does - a draft stamped payer_billed:<payer>, never retried to the homeowner - and returns
 // { payerBilled: true, payerId }. Null = no renewal link or no payer: the hold defers it as usual.
+// Same order as the unclaimed sender entries (holdRefusalAfterBillToResolution): Bill-To first, the hold
+// only for an invoice still self-pay. The worker already owns a queue claim here, so it consults the hold
+// first and runs this fence only for a held invoice - the same outcome without a fence per due invoice.
 async function withdrawHeldRenewalInvoiceToPayer(claimed) {
   if (!claimed || claimed.payer_id || claimed.visit_completion_packet_id || !claimed.annual_prepay_term_id) return null;
   const renewal = await termiteRenewalTermForInvoice(claimed.id, claimed.annual_prepay_term_id);
@@ -5898,21 +5932,24 @@ const InvoiceService = {
     try {
       if (!allowClaimed) {
         pre = await db("invoices").where({ id: invoiceId }).first("visit_completion_packet_id", "payer_id", "annual_prepay_term_id", "customer_id");
-        // Default-on dispute-hold backstop (see directSendHoldRefusal): before any claim or credit.
-        if (!_zeroDueRetried) {
-          const holdRefusal = await directSendHoldRefusal(pre, holdExempt);
-          if (holdRefusal) return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
-        }
-        // A termite renewal invoice takes the same fence (claimBillToFencedSend).
+        // A termite renewal invoice takes the same fence (claimBillToFencedSend). Bill-To is
+        // resolved BEFORE the default-on dispute-hold backstop (see
+        // holdRefusalAfterBillToResolution): the hold applies only to a still-self-pay invoice.
         const packetClaim = await claimBillToFencedSend(invoiceId, pre, { firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
         if (packetClaim?.payerBilled) {
           return { sent: false, reason: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed" };
         }
+        const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, pre, packetClaim, holdExempt);
+        if (holdRefusal) return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
         claim = packetClaim ? packetClaim.claim : await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, firstDeliveryOnly, overridesReviewHold, adoptsQueuedInvoiceSend });
       } else {
         claim = await claimInvoiceForSend(invoiceId, { allowClaimed, claimToken, adoptsQueuedInvoiceSend, firstDeliveryOnly, overridesReviewHold });
       }
     } catch (claimErr) {
+      if (renewalClearanceHoldDeferral(claimErr, allowClaimed, holdExempt)) {
+        const holdRefusal = collectionHoldRefusalFromClearance();
+        return { sent: false, blocked: true, ...holdRefusal, error: holdRefusal.reason };
+      }
       // Codex round-5 #4131: a claim path detecting zero-due never settles
       // itself (see zeroDueDetectedError) — direct callers of sendViaSMS
       // (collections-conversation.js, the AI-assistant send tool, batch
@@ -6707,14 +6744,6 @@ const InvoiceService = {
     // individually. Refuse BEFORE claiming/applying credit so we don't flip its
     // status to 'sending'. (sendInvoiceEmail also fails closed; this is the early gate.)
     const accrualPre = await db("invoices").where({ id: invoiceId }).first("payer_statement_id", "visit_completion_packet_id", "payer_id", "annual_prepay_term_id", "customer_id");
-    // Default-on dispute-hold backstop (see directSendHoldRefusal): before any claim, credit or provider contact.
-    if (!allowClaimed && !_zeroDueRetried && !_underRenewalGate) {
-      const holdRefusal = await directSendHoldRefusal(accrualPre, holdExempt);
-      if (holdRefusal) {
-        return { ok: false, ...holdRefusal, error: holdRefusal.reason,
-          sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
-      }
-    }
     // Codex #4971 r24 P1: a termite RENEWAL invoice's send holds the renewal
     // gate through its ENTIRE provider handoff — not only while the claim is
     // checked (claimRenewalInvoiceForSend's clearance) — for EVERY caller,
@@ -6753,6 +6782,13 @@ const InvoiceService = {
     } catch (err) {
       const zeroDueResult = await zeroDueWrapperOutcomeIfDetected(invoiceId, err, allowClaimed, _zeroDueRetried ? null : retryOnce);
       if (zeroDueResult) return zeroDueResult;
+      // A self-pay renewal the clearance parked behind the customer's dispute hold: the same coded,
+      // retryable refusal every unclaimed sender entry returns (nothing claimed, nothing sent).
+      if (renewalClearanceHoldDeferral(err, allowClaimed, holdExempt)) {
+        const holdRefusal = collectionHoldRefusalFromClearance();
+        return { ok: false, ...holdRefusal, error: holdRefusal.reason,
+          sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
+      }
       // The scheduled-send worker already fenced and claimed this send; a
       // transient failure of the re-judge here left no provider request
       // behind, so the invoice goes back to its queue slot instead of
@@ -6766,6 +6802,17 @@ const InvoiceService = {
     if (packetClaim?.payerBilled) {
       return { ok: false, error: "Suppressed — the visit is now billed to a third-party payer", code: "payer_billed",
         sms: { ok: false, code: "payer_billed" }, email: { ok: false, code: "payer_billed" } };
+    }
+    // Default-on dispute-hold backstop (see directSendHoldRefusal), AFTER Bill-To resolution (see
+    // holdRefusalAfterBillToResolution): only a still-self-pay invoice waits behind the homeowner's
+    // dispute. Before any credit draw or provider contact; a fence claim it refuses is handed back.
+    // A pre-claimed send (allowClaimed) was already judged by its owner, the worker.
+    if (!allowClaimed) {
+      const holdRefusal = await holdRefusalAfterBillToResolution(invoiceId, accrualPre, packetClaim, holdExempt);
+      if (holdRefusal) {
+        return { ok: false, ...holdRefusal, error: holdRefusal.reason,
+          sms: { ok: false, code: holdRefusal.code }, email: { ok: false, code: holdRefusal.code } };
+      }
     }
     // Claim FIRST, then apply credit. Applying before the claim strands credit when
     // two sends race: the loser draws down the balance, but the winner already owns

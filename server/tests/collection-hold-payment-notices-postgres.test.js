@@ -510,6 +510,65 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       expect(await db('email_messages').where({ id: rec.recovery_message_id }).first()).toMatchObject({ status: 'sent', provider_message_id: 'sg-synthetic-1' });
     });
 
+    test('a sweep claim abandoned mid-flow (worker died after held_dispute -> pending) is reclaimed once stale, never before, and re-runs the flow (round 12 P2)', async () => {
+      const sendgrid = require('../services/sendgrid-mail');
+      const Recovery = require('../services/email-bounce-recovery');
+      const local = randomUUID();
+      const typo = `${local}@gmial.com`;
+      const c = await newCustomer();
+      await db('customers').where({ id: c }).update({ email: typo });
+      const bounced = await bouncedPair(c, typo);
+      const holdId = await placeHold(c);
+      await Recovery.attemptRecovery(bounced, {});
+      let rec = await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first();
+      expect(rec.status).toBe(Recovery.HELD_RECOVERY_STATUS);
+      await release(holdId);
+      // The sweep claimed the row (held_dispute -> pending, hold_claimed_at stamped) and the worker died before the flow ran.
+      const claimedAt = (ms) => new Date(Date.now() - ms).toISOString();
+      const strand = (ms) => db('email_bounce_recoveries').where({ id: rec.id })
+        .update({ status: 'pending', metadata: db.raw("metadata || ?::jsonb", [JSON.stringify({ hold_claimed_at: claimedAt(ms) })]) });
+      await strand(60 * 1000);
+      // A fresh claim is a live worker's: left alone.
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      expect((await db('email_bounce_recoveries').where({ id: rec.id }).first()).status).toBe('pending');
+      // A pending row with NO hold_claimed_at marker (an ordinary in-flight recovery) is never reclaimed either.
+      await db('email_bounce_recoveries').where({ id: rec.id }).update({ metadata: db.raw("metadata - 'hold_claimed_at'") });
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0 });
+      // A stale claim (older than 10 minutes) is reclaimed and the whole flow re-runs to a resend.
+      await strand(11 * 60 * 1000);
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 1 });
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+      expect(sendgrid.sendOne.mock.calls[0][0].to).toBe(`${local}@gmail.com`);
+      rec = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+      expect(rec.status).toBe('resent');
+      // Settled: the marker never reopens it.
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 0 });
+      expect(sendgrid.sendOne).toHaveBeenCalledTimes(1);
+    });
+
+    test('a stale claim whose flow parks again under a still-standing hold goes back to held_dispute one interval out (no resend)', async () => {
+      const sendgrid = require('../services/sendgrid-mail');
+      const Recovery = require('../services/email-bounce-recovery');
+      const local = randomUUID();
+      const typo = `${local}@gmial.com`;
+      const c = await newCustomer();
+      await db('customers').where({ id: c }).update({ email: typo });
+      const bounced = await bouncedPair(c, typo);
+      const holdId = await placeHold(c);
+      await Recovery.attemptRecovery(bounced, {});
+      const rec = await db('email_bounce_recoveries').where({ original_message_id: bounced.id }).first();
+      await db('email_bounce_recoveries').where({ id: rec.id }).update({
+        status: 'pending', metadata: db.raw("metadata || ?::jsonb", [JSON.stringify({ hold_claimed_at: new Date(Date.now() - 30 * 60 * 1000).toISOString() })]),
+      });
+      expect(await Recovery.retryHeldRecoveries()).toMatchObject({ claimed: 1 });
+      expect(sendgrid.sendOne).not.toHaveBeenCalled();
+      const after = await db('email_bounce_recoveries').where({ id: rec.id }).first();
+      expect(after.status).toBe(Recovery.HELD_RECOVERY_STATUS);
+      expect(new Date(after.metadata.hold_retry_at).getTime()).toBeGreaterThan(Date.now());
+      await release(holdId);
+    });
+
     test('the FINAL sendOne boundary check parks the recovery too (a hold committed after the up-front read)', async () => {
       const sendgrid = require('../services/sendgrid-mail');
       const Recovery = require('../services/email-bounce-recovery');

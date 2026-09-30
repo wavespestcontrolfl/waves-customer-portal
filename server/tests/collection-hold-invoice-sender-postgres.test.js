@@ -56,6 +56,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
   let Hold;
   let Invoices;
   let sendSpy;
+  let realSend;
   const customers = [];
   const packetFixtures = { packets: [], visits: [], services: [], payers: [] };
 
@@ -88,14 +89,21 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
     db = require('../models/db');
     Hold = require('../services/collections/collection-hold');
     Invoices = require('../services/invoice');
+    realSend = Invoices.sendViaSMSAndEmail;
     // The provider handoff is out of scope: finalize the way a real delivery would.
-    sendSpy = jest.spyOn(Invoices, 'sendViaSMSAndEmail').mockImplementation(async (invoiceId, opts = {}) => {
-      await db('invoices').where({ id: invoiceId }).update({
-        status: 'sent', sent_at: db.fn.now(), scheduled_send_at: null, send_claim_token: null, updated_at: db.fn.now(),
-      });
-      return { ok: true, opts };
-    });
+    sendSpy = jest.spyOn(Invoices, 'sendViaSMSAndEmail').mockImplementation(fakeDelivery);
   });
+  async function fakeDelivery(invoiceId, opts = {}) {
+    await db('invoices').where({ id: invoiceId }).update({
+      status: 'sent', sent_at: db.fn.now(), scheduled_send_at: null, send_claim_token: null, updated_at: db.fn.now(),
+    });
+    return { ok: true, opts };
+  }
+  // Run the REAL sender entry (its own Bill-To fence + hold guard) with a provider that must never be reached.
+  async function withRealSender(fn) {
+    sendSpy.mockImplementation((...args) => realSend.apply(Invoices, args));
+    try { return await fn(); } finally { sendSpy.mockImplementation(fakeDelivery); }
+  }
   beforeEach(() => { jest.clearAllMocks(); db.__failTables.clear(); });
   afterAll(async () => {
     sendSpy.mockRestore();
@@ -114,6 +122,44 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
     }
     await db.destroy();
   });
+
+  async function packetInvoiceFor(customerId, { payer = false } = {}) {
+    const [visit] = await db('service_visits').insert({
+      customer_id: customerId, scheduled_date: '2040-03-04', stop_base_key: `pkt-${randomUUID().slice(0, 8)}`, created_by: 'fixture',
+    }).returning('id');
+    const [svc] = await db('scheduled_services').insert({
+      customer_id: customerId, status: 'confirmed', scheduled_date: '2040-03-04', service_type: 'Pest Control',
+    }).returning('id');
+    const [packet] = await db('visit_completion_packets').insert({
+      visit_id: visit.id, idempotency_key: `pkt-${randomUUID()}`, request_hash: 'fixture', status: 'processing',
+      payload: JSON.stringify({ billingSnapshot: { billedServiceIds: [svc.id] } }),
+    }).returning('id');
+    packetFixtures.visits.push(visit.id); packetFixtures.services.push(svc.id); packetFixtures.packets.push(packet.id);
+    let payerId = null;
+    if (payer) {
+      // The Bill-To is assigned AFTER the invoice was queued: invoices.payer_id stays NULL until
+      // the claim-time fence resolves it.
+      const [p] = await db('payers').insert({ display_name: 'Synthetic Bill-To', ap_email: 'ap@example.invalid' }).returning('id');
+      packetFixtures.payers.push(p.id);
+      payerId = p.id;
+      await db('scheduled_services').where({ id: svc.id }).update({ payer_id: p.id });
+    }
+    const inv = await newInvoice(customerId, { visit_completion_packet_id: packet.id });
+    return { inv, payerId };
+  }
+
+  async function renewalInvoice(customerId) {
+    const inv = await newInvoice(customerId);
+    const [parent] = await db('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: '2039-01-01', term_end: '2039-12-31', status: 'renewed', renewal_decision: 'renew',
+    }).returning('id');
+    const [successor] = await db('annual_prepay_terms').insert({
+      customer_id: customerId, term_start: '2040-01-01', term_end: '2040-12-31', status: 'payment_pending',
+      renewed_from_term_id: parent.id, annual_plan_version: 'v3', prepay_invoice_id: inv,
+    }).returning('id');
+    await db('invoices').where({ id: inv }).update({ annual_prepay_term_id: successor.id });
+    return { inv, parent: parent.id, successor: successor.id };
+  }
 
   describe('queueHeldInvoiceForSender', () => {
     test('queues a plain self-pay draft (draft -> scheduled, due now); leaves everything else alone', async () => {
@@ -171,35 +217,11 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
   });
 
   describe('combined-visit (packet) invoices reach the live Bill-To fence before the hold exclusion (#5424 round 10)', () => {
-    async function packetInvoice(customerId, { payer = false } = {}) {
-      const [visit] = await db('service_visits').insert({
-        customer_id: customerId, scheduled_date: '2040-03-04', stop_base_key: `pkt-${randomUUID().slice(0, 8)}`, created_by: 'fixture',
-      }).returning('id');
-      const [svc] = await db('scheduled_services').insert({
-        customer_id: customerId, status: 'confirmed', scheduled_date: '2040-03-04', service_type: 'Pest Control',
-      }).returning('id');
-      const [packet] = await db('visit_completion_packets').insert({
-        visit_id: visit.id, idempotency_key: `pkt-${randomUUID()}`, request_hash: 'fixture', status: 'processing',
-        payload: JSON.stringify({ billingSnapshot: { billedServiceIds: [svc.id] } }),
-      }).returning('id');
-      packetFixtures.visits.push(visit.id); packetFixtures.services.push(svc.id); packetFixtures.packets.push(packet.id);
-      let payerId = null;
-      if (payer) {
-        // The Bill-To is assigned AFTER the invoice was queued: invoices.payer_id stays NULL until
-        // the claim-time fence resolves it.
-        const [p] = await db('payers').insert({ display_name: 'Synthetic Bill-To', ap_email: 'ap@example.invalid' }).returning('id');
-        packetFixtures.payers.push(p.id);
-        payerId = p.id;
-        await db('scheduled_services').where({ id: svc.id }).update({ payer_id: p.id });
-      }
-      const inv = await newInvoice(customerId, { visit_completion_packet_id: packet.id });
-      return { inv, payerId };
-    }
 
     test('a packet invoice for a held homeowner who now has a payer is routed to the payer (withdrawn), never held behind the homeowner\'s dispute, never texted', async () => {
       const c = await newCustomer();
       await placeHold(c);
-      const { inv, payerId } = await packetInvoice(c, { payer: true });
+      const { inv, payerId } = await packetInvoiceFor(c, { payer: true });
       await queueDue(inv);
       await Invoices.processScheduledSends();
       expect(sentIds()).not.toContain(inv);
@@ -210,7 +232,7 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
     test('a truly self-pay packet invoice for a held homeowner still waits: claimed by the fence, released at the delivery-boundary hold check, no attempt spent, then sends after the release', async () => {
       const c = await newCustomer();
       await placeHold(c);
-      const { inv } = await packetInvoice(c);
+      const { inv } = await packetInvoiceFor(c);
       await queueDue(inv);
       const before = Date.now();
       const out = await Invoices.processScheduledSends();
@@ -228,18 +250,6 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
   });
 
   describe('termite renewal invoices reach the live Bill-To fence before the sender\'s hold check (#5424 round 11)', () => {
-    async function renewalInvoice(customerId) {
-      const inv = await newInvoice(customerId);
-      const [parent] = await db('annual_prepay_terms').insert({
-        customer_id: customerId, term_start: '2039-01-01', term_end: '2039-12-31', status: 'renewed',
-      }).returning('id');
-      const [successor] = await db('annual_prepay_terms').insert({
-        customer_id: customerId, term_start: '2040-01-01', term_end: '2040-12-31', status: 'payment_pending',
-        renewed_from_term_id: parent.id, annual_plan_version: 'v3', prepay_invoice_id: inv,
-      }).returning('id');
-      await db('invoices').where({ id: inv }).update({ annual_prepay_term_id: successor.id });
-      return { inv, parent: parent.id, successor: successor.id };
-    }
     afterEach(async () => {
       await db('annual_prepay_terms').whereIn('customer_id', customers).update({ prepay_invoice_id: null, renewed_from_term_id: null });
       await db('annual_prepay_terms').whereIn('customer_id', customers).del();
@@ -276,6 +286,85 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       await makeDueNow(inv);
       await Invoices.processScheduledSends();
       expect(sentIds()).toContain(inv);
+    });
+
+    describe('the sender entry itself resolves Bill-To before the hold guard (#5424 round 12)', () => {
+      async function heldHomeownerWithDefaultPayer() {
+        const c = await newCustomer();
+        await placeHold(c);
+        const [payer] = await db('payers').insert({ display_name: 'Synthetic Bill-To', ap_email: 'ap@example.invalid' }).returning('id');
+        packetFixtures.payers.push(payer.id);
+        await db('customers').where({ id: c }).update({ payer_id: payer.id });
+        return { c, payerId: payer.id };
+      }
+
+      test('a DIRECT renewal send (sendViaSMSAndEmail, no worker) for a held homeowner with a default payer is routed to the payer: payer_billed, never the hold deferral, never sent', async () => {
+        const { c, payerId } = await heldHomeownerWithDefaultPayer();
+        const { inv } = await renewalInvoice(c);
+        const out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {}));
+        expect(out).toMatchObject({ ok: false, code: 'payer_billed' });
+        expect(out.code).not.toBe('COLLECTION_HOLD_DEFER');
+        // An unclaimed direct send has no claim to withdraw: the invoice is left exactly as found, unclaimed.
+        expect(await invoice(inv)).toMatchObject({ status: 'draft', scheduled_send_at: null, send_claim_token: null, sms_sent_at: null });
+        expect(payerId).toBeTruthy();
+      });
+
+      test('the direct sendViaSMS entry takes the same order: a held homeowner\'s renewal with a default payer is payer_billed', async () => {
+        const { c, payerId } = await heldHomeownerWithDefaultPayer();
+        const { inv } = await renewalInvoice(c);
+        const out = await Invoices.sendViaSMS(inv, {});
+        expect(out).toMatchObject({ sent: false, code: 'payer_billed' });
+        expect(await invoice(inv)).toMatchObject({ status: 'draft', send_claim_token: null });
+        expect(payerId).toBeTruthy();
+      });
+
+      test('the renewal pay-link clearance (deliverRenewalInvoice) reads Bill-To before the hold too: a payer-owned renewal routes to the payer (payer_billed), a self-pay one still waits (delivery_refused, deferred)', async () => {
+        const Renewal = require('../services/termite-annual-renewal-charge');
+        const { c } = await heldHomeownerWithDefaultPayer();
+        const { successor } = await renewalInvoice(c);
+        const term = await db('annual_prepay_terms').where({ id: successor }).first();
+        const routed = await withRealSender(() => Renewal._private.deliverRenewalInvoice(term));
+        expect(routed).toMatchObject({ ok: false, code: 'payer_billed' });
+
+        const own = await newCustomer();
+        await placeHold(own);
+        const selfPay = await renewalInvoice(own);
+        const row = await db('annual_prepay_terms').where({ id: selfPay.successor }).first();
+        const waited = await withRealSender(() => Renewal._private.deliverRenewalInvoice(row));
+        expect(waited).toMatchObject({ ok: false, code: 'delivery_refused', outcome: 'deferred' });
+        expect(await invoice(selfPay.inv)).toMatchObject({ status: 'draft', send_claim_token: null, sms_sent_at: null });
+      });
+
+      test('a direct packet invoice send for a held homeowner whose visit now has a payer is payer_billed on both sender entries', async () => {
+        const c = await newCustomer();
+        await placeHold(c);
+        const { inv, payerId } = await packetInvoiceFor(c, { payer: true });
+        const out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {}));
+        expect(out).toMatchObject({ ok: false, code: 'payer_billed' });
+        expect(await invoice(inv)).toMatchObject({ status: 'draft', send_claim_token: null });
+        expect(payerId).toBeTruthy();
+        const { inv: inv2 } = await packetInvoiceFor(c, { payer: true });
+        expect(await Invoices.sendViaSMS(inv2, {})).toMatchObject({ sent: false, code: 'payer_billed' });
+      });
+
+      test('a truly self-pay renewal / packet invoice for a held homeowner is still refused with the retryable hold deferral, the fence claim handed straight back (untouched, unclaimed, nothing sent)', async () => {
+        const c = await newCustomer();
+        await placeHold(c);
+        const { inv } = await renewalInvoice(c);
+        const out = await withRealSender(() => Invoices.sendViaSMSAndEmail(inv, {}));
+        expect(out).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER' });
+        expect(await invoice(inv)).toMatchObject({ status: 'draft', send_claim_token: null, scheduled_send_error: null });
+        const sms = await Invoices.sendViaSMS(inv, {});
+        expect(sms).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
+        expect(await invoice(inv)).toMatchObject({ status: 'draft', send_claim_token: null });
+
+        const { inv: pkt } = await packetInvoiceFor(c);
+        const pktOut = await withRealSender(() => Invoices.sendViaSMSAndEmail(pkt, {}));
+        expect(pktOut).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER' });
+        expect(await invoice(pkt)).toMatchObject({ status: 'draft', send_claim_token: null });
+        expect(await Invoices.sendViaSMS(pkt, {})).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
+        expect(await invoice(pkt)).toMatchObject({ status: 'draft', send_claim_token: null });
+      });
     });
   });
 

@@ -121,6 +121,11 @@ function uniqueCategories(values = []) {
 // its next look). The unique original_message_id keeps the webhook from opening a second recovery, so
 // the held row itself is what the sweep resumes.
 const HELD_RECOVERY_STATUS = 'held_dispute';
+// A sweep claim (held_dispute -> pending) stamps metadata.hold_claimed_at. A worker that dies between
+// the claim and the flow's settle leaves a 'pending' row nothing else can reopen (the webhook cannot:
+// original_message_id is unique), so the sweep reclaims a hold-originated pending row whose claim is
+// older than this - the invoice sender's 10-minute stale-claim window (a live flow settles in seconds).
+const HELD_RECOVERY_CLAIM_STALE_MS = 10 * 60 * 1000;
 
 function jsonbMerge(extra) {
   return db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify(extra)]);
@@ -877,17 +882,27 @@ async function runRecoveryFlow(bouncedMessage, bouncedEmail, recoveryId, { resum
  */
 async function retryHeldRecoveries({ limit = 25 } = {}) {
   if (!recoveryEnabled()) return { claimed: 0 };
+  const staleCutoff = new Date(Date.now() - HELD_RECOVERY_CLAIM_STALE_MS).toISOString();
+  const staleClaimSql = "(metadata->>'hold_claimed_at') IS NOT NULL AND (metadata->>'hold_claimed_at')::timestamptz <= ?";
+  // The ONE eligibility predicate the read and the claim share: a held row whose retry time is due,
+  // or a hold-originated 'pending' row whose sweep claim was abandoned (worker died / redeploy).
+  const eligible = (q) => q
+    .where((held) => held.where({ status: HELD_RECOVERY_STATUS })
+      .whereRaw("COALESCE((metadata->>'hold_retry_at')::timestamptz, now()) <= now()"))
+    .orWhere((stale) => stale.where({ status: 'pending' }).whereRaw(staleClaimSql, [staleCutoff]));
   const due = await db('email_bounce_recoveries')
-    .where({ status: HELD_RECOVERY_STATUS })
-    .whereRaw("COALESCE((metadata->>'hold_retry_at')::timestamptz, now()) <= now()")
+    .where(eligible)
     .orderBy('updated_at', 'asc')
     .limit(limit)
     .select('id', 'original_message_id', 'bounced_email');
   let claimed = 0;
   for (const row of due) {
+    // Compare-and-swap on that same eligibility: a held row moves to pending, a stale pending row is
+    // re-stamped, and either way a second worker's identical claim then finds it fresh and skips it.
     const won = await db('email_bounce_recoveries')
-      .where({ id: row.id, status: HELD_RECOVERY_STATUS })
-      .update({ status: 'pending', updated_at: new Date() });
+      .where({ id: row.id })
+      .where(eligible)
+      .update({ status: 'pending', updated_at: new Date(), metadata: jsonbMerge({ hold_claimed_at: new Date().toISOString() }) });
     if (!Number(won)) continue;
     claimed += 1;
     let bouncedMessage = null;

@@ -2857,7 +2857,16 @@ async function payLinkVerdict(successor, conn, { ignoreCollectionHold = false } 
   // annual-prepay edit that won the gate first (a moved successor
   // term_start, say) is visible only in the fresh row, and the stale one
   // would still read as aligned with the parent.
-  const refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold });
+  let refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold });
+  // Codex #5424 r12 P1: a collections dispute hold waits only the HOMEOWNER's pay link. A renewal a
+  // third-party payer owns (its own Bill-To, or the customer default payer) is not that link, so the
+  // homeowner's unrelated dispute must not park it: judge the rest of the clearance as if no hold
+  // stood, and the caller's own payer routing / Bill-To fence then sends it to the payer. A payer
+  // lookup that cannot be answered keeps the deferral (fail closed toward waiting).
+  if (refusal && refusal.reason === HOLD_DEFER_REASON && !ignoreCollectionHold
+    && await renewalPayerRouting(stillPending, conn) === 'payer_billed') {
+    refusal = await successorRecoveryRefusal(stillPending, conn, { ignoreCollectionHold: true });
+  }
   return refusal ? { kind: 'refused', durable: Boolean(refusal.retire), reason: refusal.reason, refusal, fresh: stillPending } : null;
 }
 
@@ -2949,6 +2958,9 @@ async function withRenewalSendClearance(successorId, { claim, release }) {
 function renewalSendWithheldError(successor, verdict, outcome) {
   return Object.assign(new Error(`Renewal invoice for term ${successor.id} withheld — ${verdict.reason} (${outcome})`), {
     code: 'renewal_send_withheld', deliveryNeverAttempted: true, withheldOutcome: outcome,
+    // A hold-only deferral (a self-pay renewal waiting behind the customer's dispute): invoice.js's
+    // unclaimed sender entries return their coded, retryable COLLECTION_HOLD_DEFER for it instead.
+    collectionHoldDeferral: verdict.reason === HOLD_DEFER_REASON,
   });
 }
 
