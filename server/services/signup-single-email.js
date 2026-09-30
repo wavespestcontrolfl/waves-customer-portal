@@ -397,6 +397,8 @@ module.exports = {
   sectionValues,
   messageCarriesAll,
   carrierState,
+  carrierRowState,
+  CARRIER_STATUSES,
   recordOwedMembership,
   recordExpected,
   resolveOwedEmail,

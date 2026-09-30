@@ -60,7 +60,8 @@ postgres('one signup email against migrated PostgreSQL', () => {
       recipient_type: 'customer',
       recipient_id: customerId,
       recipient_email_snapshot: EMAIL,
-      status: 'sent',
+      status: 'delivered',
+      delivered_at: new Date(),
       idempotency_key: `synthetic:${id}`,
       categories: JSON.stringify(['estimate_accepted_onboarding', 'signup_full']),
       payload_snapshot: JSON.stringify({ property_address: '100 Test Lane, Test City, 00000' }),
@@ -145,6 +146,24 @@ postgres('one signup email against migrated PostgreSQL', () => {
         expect(await covers({ created_at: new Date() })).toBe(true);
       });
 
+      test('a carrier that is only `sent` (no delivery event) does not cover the welcome email', async () => {
+        await message({ status: 'sent', delivered_at: null });
+        expect(await covers()).toBe(false);
+      });
+
+      test('a carrier delivered and then bounced (bounced_at) does not cover the welcome email', async () => {
+        await message({ bounced_at: new Date() });
+        expect(await covers()).toBe(false);
+        await trx('email_messages').del();
+        await message({ status: 'bounced', bounced_at: new Date() });
+        expect(await covers()).toBe(false);
+      });
+
+      test('an open with status still `sent` (delivered event lost) covers it', async () => {
+        await message({ status: 'sent', delivered_at: null, opened_at: new Date() });
+        expect(await covers()).toBe(true);
+      });
+
       test('marker kept but the app link removed: not covered (the welcome email sends)', async () => {
         await message({ text_snapshot: 'You can get ready now: sign in with the mobile number on your account, and enter your texted code.' });
         expect(await covers()).toBe(false);
@@ -186,8 +205,8 @@ postgres('one signup email against migrated PostgreSQL', () => {
     const owedRows = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).orderBy('created_at');
     const dueNow = () => trx('sms_sequences').whereIn('sequence_type', Signup.OWED_TYPES).update({ next_send_at: new Date(Date.now() - 1000) });
     const membership = () => Signup.recordOwedMembership(trx, { customerId, estimateId, onboardingKey: KEY, membershipEmail: { ...MEMBERSHIP_ARGS, customerId } });
-    const delivered = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, status: 'delivered', delivered_at: new Date(), ...overrides });
-    const carrier = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, ...overrides });
+    const delivered = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, ...overrides });
+    const carrier = (text, overrides = {}) => message({ idempotency_key: KEY, text_snapshot: text, status: 'sent', delivered_at: null, ...overrides });
 
     beforeEach(() => {
       estimateId = randomUUID();

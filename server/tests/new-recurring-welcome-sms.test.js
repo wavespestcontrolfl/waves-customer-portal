@@ -609,7 +609,7 @@ describe('new recurring welcome SMS', () => {
     test('gate on and the combined signup email was delivered: the text still sends, the welcome EMAIL does not', async () => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT }; // the delivered combined signup email
+      mockEmailProviderRow = { id: 'email-1', status: 'delivered', text_snapshot: FULL_APP_SECTION_TEXT }; // the delivered combined signup email
       const results = await service.processDueWelcomes();
       expect(results.sent).toBe(1);
       expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
@@ -622,14 +622,14 @@ describe('new recurring welcome SMS', () => {
     test('the delivery-time lookup only counts a delivered full signup email that still carries the app steps', async () => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT };
+      mockEmailProviderRow = { id: 'email-1', status: 'delivered', text_snapshot: FULL_APP_SECTION_TEXT };
       const covered = await service._internals.combinedSignupEmailCoversWelcome(
         { id: 'customer-1', email: 'Ada@Example.com' }, { created_at: new Date('2026-09-29T14:00:00Z') });
       expect(covered).toBe(true);
       const emailQuery = mockDb.mock.results.map((r) => r.value).find((c) => c.whereRaw.mock.calls.length);
       expect(emailQuery.where).toHaveBeenCalledWith({ template_key: 'estimate.accepted_signup', recipient_type: 'customer' });
       expect(emailQuery.whereIn).toHaveBeenCalledWith('recipient_id', ['customer-1']);
-      expect(emailQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked']);
+      expect(emailQuery.whereIn).toHaveBeenCalledWith('status', ['sent', 'delivered', 'opened', 'clicked', 'spam_report', 'unsubscribed']);
       expect(emailQuery.whereRaw).toHaveBeenCalledWith('categories @> ?::jsonb', [JSON.stringify(['signup_full'])]);
       expect(emailQuery.whereRaw).toHaveBeenCalledWith('lower(recipient_email_snapshot) = ?', ['ada@example.com']);
       // The window opens an hour BEFORE the queued row (the row is queued moments before the email).
@@ -645,7 +645,7 @@ describe('new recurring welcome SMS', () => {
     ])('reworded or trimmed app section fails safe (%s): the welcome email sends', async (_label, trim) => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1', text_snapshot: `Welcome aboard.\n${trim(APP_SECTION_VALUES).join('\n')}` };
+      mockEmailProviderRow = { id: 'email-1', status: 'delivered', text_snapshot: `Welcome aboard.\n${trim(APP_SECTION_VALUES).join('\n')}` };
       await service.processDueWelcomes();
       expect(mockSendTemplate).toHaveBeenCalledTimes(1);
       expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
@@ -655,7 +655,29 @@ describe('new recurring welcome SMS', () => {
     test('the app section is also recognised in the html snapshot (links live in href attributes, & escaped)', async () => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1', text_snapshot: '', html_snapshot: APP_SECTION_VALUES.map((v) => v.replace(/&/g, '&amp;')).join('<br>') };
+      mockEmailProviderRow = { id: 'email-1', status: 'delivered', text_snapshot: '', html_snapshot: APP_SECTION_VALUES.map((v) => v.replace(/&/g, '&amp;')).join('<br>') };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ['only accepted (`sent`, no delivery event)', { status: 'sent' }],
+      ['delivered, then bounced', { status: 'bounced', delivered_at: new Date(), bounced_at: new Date() }],
+      ['delivered event followed by an async bounce timestamp', { status: 'delivered', delivered_at: new Date(), bounced_at: new Date() }],
+    ])('a carrier that is %s does not suppress: the welcome email sends', async (_label, fields) => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT, ...fields };
+      await service.processDueWelcomes();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+      expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
+      expect(mockSendCustomerMessage).toHaveBeenCalledTimes(1);
+    });
+
+    test('an open with the status still `sent` (delivered event lost) counts as delivered: the welcome email is skipped', async () => {
+      process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
+      dueWelcome();
+      mockEmailProviderRow = { id: 'email-1', status: 'sent', opened_at: new Date(), text_snapshot: FULL_APP_SECTION_TEXT };
       await service.processDueWelcomes();
       expect(mockSendTemplate).not.toHaveBeenCalled();
     });
@@ -673,7 +695,7 @@ describe('new recurring welcome SMS', () => {
 
     test('the gate turned OFF between signup and delivery: the welcome email sends even though a combined email exists', async () => {
       dueWelcome();
-      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT };
+      mockEmailProviderRow = { id: 'email-1', status: 'delivered', text_snapshot: FULL_APP_SECTION_TEXT };
       await service.processDueWelcomes();
       expect(mockSendTemplate).toHaveBeenCalledTimes(1);
       expect(mockSendTemplate.mock.calls[0][0].templateKey).toBe('welcome.new_recurring');
@@ -691,7 +713,7 @@ describe('new recurring welcome SMS', () => {
     test('a phoneless customer whose signup email was delivered: the sequence still completes, nothing is emailed or texted', async () => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome({ phone: '' });
-      mockEmailProviderRow = { id: 'email-1', text_snapshot: FULL_APP_SECTION_TEXT };
+      mockEmailProviderRow = { id: 'email-1', status: 'delivered', text_snapshot: FULL_APP_SECTION_TEXT };
       const results = await service.processDueWelcomes();
       expect(results.sent).toBe(1);
       expect(mockSendCustomerMessage).not.toHaveBeenCalled();
