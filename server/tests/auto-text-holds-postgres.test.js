@@ -127,6 +127,37 @@ jest.setTimeout(30000);
     });
   });
 
+  describe('said_no_texts', () => {
+    test('an earlier call where they said no to texts', async () => {
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) });
+      expect(await hold()).toBe('said_no_texts');
+    });
+
+    test('the call setting the text off, read by its id', async () => {
+      const id = randomUUID();
+      await database('call_log').insert({
+        id, direction: 'inbound', from_phone: '+19415559999', to_phone: '+19412975749', created_at: CALL_AT,
+        v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }),
+      });
+      expect(await hold({ originCallId: id })).toBe('said_no_texts');
+    });
+
+    test('a call from another line where they gave this number and said no to texts', async () => {
+      await priorCall({
+        from_phone: '+19415559999', v2_extraction_status: 'valid',
+        ai_extraction_enriched: JSON.stringify({ caller: { phone_e164: PHONE }, consent: { sms_declined: true } }),
+      });
+      expect(await hold()).toBe('said_no_texts');
+    });
+
+    test('never: no decline, a call from before the field existed, or a schema-failed extraction', async () => {
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: false } }) });
+      await priorCall({ v2_extraction_status: 'valid', ai_extraction_enriched: JSON.stringify({ consent: { sms_consent_given: false } }) });
+      await priorCall({ v2_extraction_status: 'invalid', ai_extraction_enriched: JSON.stringify({ consent: { sms_declined: true } }) });
+      expect(await hold()).toBeNull();
+    });
+  });
+
   describe('not_a_prospect', () => {
     test.each(['spam_solicitation', 'robocall', 'wrong_number', 'job_applicant'])(
       'a call with this number the V2 extraction called %s',
