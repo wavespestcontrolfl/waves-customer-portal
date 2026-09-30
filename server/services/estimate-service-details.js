@@ -519,7 +519,7 @@ const SERVICE_DETAILS_COPY = {
         bullets: [
           'Mow at normal height about a week before, then don’t mow, edge, or hand-pull for 7 days after. Why: Bermuda has to have leaf to absorb the product and time to move it into the runners and rhizomes.',
           'Don’t scalp. Low mowing removes the leaf we need and is what favors Bermuda in the first place.',
-          'No irrigation for 48 hours after, and we need a 3-hour dry window with no rain. We’ll reschedule rather than spray into weather.',
+          'Hold the sprinklers after the application for as long as your service report says, and we need a dry, rain-free window to apply. We’ll reschedule rather than spray into weather.',
           'Don’t use clippings from treated areas as mulch, and don’t plant anything but turf in a treated area for 12 months (label restrictions).',
           'Deal with the source. Bermuda coming across a property line or out of a bed will come back. Edge beds 6 inches deep and clean mowers that leave a contaminated lawn.',
         ],

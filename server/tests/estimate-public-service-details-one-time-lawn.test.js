@@ -214,6 +214,29 @@ describe('POST /:token/service-details/send', () => {
     expect(buildServiceDetailsContent).toHaveBeenCalledWith('lawn_care', expect.objectContaining({ token: TOKEN }), { lawnScope: 'one_time' });
   });
 
+  test('the one-time hint only keys the lawn guide: another guide keeps one idempotency key (Codex r3 P2)', async () => {
+    const data = {
+      result: {
+        recurring: { services: [{ service: 'lawn_care', mo: 60 }, { service: 'pest_control', mo: 60 }] },
+        oneTime: { items: [LAWN_ROW('one_time_lawn', 'One-Time Lawn Treatment')] },
+      },
+    };
+    const { sendTemplate } = require('../services/email-template-library');
+    const keys = [];
+    for (const body of [{ service: 'pest_control', channel: 'email' }, { service: 'pest_control', channel: 'email', scope: 'one_time' }, { service: 'lawn_care', channel: 'email', scope: 'one_time' }]) {
+      require('../models/db').__holder.row = estimateRow(data);
+      sendTemplate.mockResolvedValueOnce({ sent: true, blocked: false });
+      const res = await fetch(`${base}/api/estimates/${TOKEN}/service-details/send`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(200);
+      keys.push(sendTemplate.mock.calls[sendTemplate.mock.calls.length - 1][0].idempotencyKey);
+    }
+    expect(keys[0]).toMatch(/:pest_control:\d{4}-\d{2}-\d{2}$/);
+    expect(keys[1]).toMatch(/:pest_control:\d{4}-\d{2}-\d{2}$/); // no one-time suffix on a non-lawn guide
+    expect(keys[2]).toMatch(/:lawn_care:one_time:\d{4}-\d{2}-\d{2}$/);
+  });
+
   test('404s (no send) for a guide the estimate does not carry', async () => {
     require('../models/db').__holder.row = estimateRow(oneTime([LAWN_ROW('plugging', 'Lawn plugging')]));
     const { sendTemplate } = require('../services/email-template-library');

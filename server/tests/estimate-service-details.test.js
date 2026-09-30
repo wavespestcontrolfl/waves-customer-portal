@@ -197,6 +197,11 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     const lawn = await withBermudaGate('true', () => buildServiceDetailsContent('lawn_care', BERMUDA_ESTIMATE));
     const headings = lawn.sections.map((sec) => sec.heading);
     for (const h of bermudaHeadings) expect(headings).toContain(h);
+    // No fixed post-application irrigation/dry windows (AGENTS.md compliance,
+    // Codex r3 P1): the report states the timing.
+    const bermudaText = JSON.stringify(lawn.sections);
+    expect(bermudaText).not.toMatch(/48 hours|3-hour/);
+    expect(bermudaText).toMatch(/for as long as your service report says/);
     // Markers never reach the renderers.
     for (const sec of lawn.sections) {
       expect(sec).not.toHaveProperty('requires');
