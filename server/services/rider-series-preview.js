@@ -538,7 +538,11 @@ async function evaluatePairGates(conn, ctx) {
     // Savepoint: a failed read here must not abort the caller's
     // transaction (25P02) for every read after it.
     const seriesSkips = await conn.transaction((sp) => topupAllSeriesSkipReasons(sp, overlaidRiderParent, riderParentId, cols));
-    reasons.push(...seriesSkips);
+    // Owner ruling 2026-09-29: an annual-prepay pest series rides the lawn
+    // rhythm too. Its prepaid visits stay pinned ('prepaid'), and only the
+    // visits after them join lawn dates, so the prepay refusal the top-up
+    // applies doesn't apply to a rider.
+    reasons.push(...seriesSkips.filter((r) => r !== 'annual_prepay_series'));
   } catch {
     reasons.push('series_check_error');
   }
@@ -706,6 +710,7 @@ async function classifyRiderRows(conn, riderParentId, riderParent, todayStr) {
  *   planFloor: ?string, horizon: ?string, plan: string[], keep: Array,
  *   move: Array, insert: string[], cancel: Array,
  *   retained: Array<{id: string, date: string}>,
+ *   beyondSchedule: Array<{id: string, date: string}>,
  *   pinned: Array<{id: string, date: ?string, why: string}>}>}
  */
 async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
@@ -721,6 +726,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
     insert: [],
     cancel: [],
     retained: [],
+    beyondSchedule: [],
     pinned: [],
   });
 
@@ -795,7 +801,14 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       blackoutDates,
     });
 
-    const diff = diffPlan(plan, movableRows);
+    // Movable visits after the horizon (the last scheduled lawn date, or the
+    // rider's own bounded horizon) aren't surplus: they'd join lawn dates
+    // once lawn is extended. Report them as beyond the lawn schedule, never
+    // as cancellations.
+    const beyondSchedule = movableRows
+      .filter((r) => dateOnly(r.scheduled_date) > horizonDate)
+      .map((r) => ({ id: r.id, date: dateOnly(r.scheduled_date) }));
+    const diff = diffPlan(plan, movableRows.filter((r) => dateOnly(r.scheduled_date) <= horizonDate));
     const pinned = pinnedRows();
 
     return {
@@ -810,6 +823,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       insert: diff.insert,
       cancel: diff.cancel,
       retained,
+      beyondSchedule,
       pinned,
     };
   } catch (err) {
@@ -825,6 +839,7 @@ async function previewRiderPair(conn, { riderParentId, hostParentId } = {}) {
       insert: [],
       cancel: [],
       retained: [],
+      beyondSchedule: [],
       pinned: [],
       error: err.message,
     };

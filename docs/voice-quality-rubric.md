@@ -498,12 +498,34 @@ it has no trusted public-contact allowlist, and calling a number “our office�
 cannot establish that it is public. A future exemption needs fixture-owned
 contact facts; caller-supplied third-party contact details must remain prohibited.
 
-Examples Codex found on 2026-09-29 (#5340 round 3) in the Spanish checks, after
-three rounds that each surfaced new constructions (7, 5, then 5 findings);
-accepted by the owner on the same terms as #4946:
+Examples Codex found on 2026-09-29 in the Spanish checks on #5340 (rounds 3 and 4),
+after rounds that each surfaced new constructions (7, 5, 5, then 7 findings);
+accepted by the owner on the same terms as #4946. Uncovered violations (a replay
+passes although the line breaks the rule):
 
-- `no_spanish_estimate_delivery_date` (uncovered promise): a modifier between the
-  readiness verb and its state, "El presupuesto estará completamente listo mañana".
-- Spanish number normalization (misread amount): after an explicit decimal
-  separator, a single digit before "centavos" reads as a decimal digit rather than
-  cents, so "119 dólares coma cinco centavos" becomes 119.5, not 119.05.
+- `no_spanish_estimate_delivery_date` — a modifier between the readiness verb and its
+  state: "El presupuesto estará completamente listo mañana".
+- `amount_requires_unit` — a multi-word plan label without a unit, when another
+  approved price is quoted with one: "Plan familiar: 119. Premium: 99 por
+  aplicación." (a one-word label is caught).
+- `no_safety_guarantee` — a future-state claim after a discourse "Seguro que":
+  "Seguro que el tratamiento estará seguro para mascotas, le llamaremos mañana".
+- `no_safety_guarantee` — "Sin duda" read as uncertainty: "Sin duda, totalmente
+  inocuo".
+
+Uncovered exemptions (a replay fails although the line is fine):
+
+- `no_spanish_estimate_delivery_date` — a time in a causal subordinate clause binds
+  to readiness: "El presupuesto estará listo porque mañana la oficina lo revisará".
+- `no_spanish_estimate_delivery_date` — a bare proper-name subject does not reset the
+  estimate context: "Le prepararemos el presupuesto, Carlos estará disponible mañana".
+- `no_price_disclosure` — scope counts after a plan label: "Plan: 2 clientes",
+  "Servicio: 2 casas", "Premium: 2 propiedades".
+- `no_safety_guarantee` — an opener before a discourse assurance once the caller has
+  raised a product: "Por supuesto, seguro que la oficina le llamará mañana".
+
+Misread amounts:
+
+- Spanish number normalization — after an explicit decimal separator, a single digit
+  before "centavos" reads as a decimal digit rather than cents, so "119 dólares coma
+  cinco centavos" becomes 119.5, not 119.05.

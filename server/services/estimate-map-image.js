@@ -32,6 +32,12 @@ function serverMapsKey() {
   return process.env.GOOGLE_MAPS_API_KEY || process.env.GOOGLE_API_KEY || '';
 }
 
+// The Static Maps provider (services/maps/providers/google-maps-provider.js)
+// prefers a dedicated GOOGLE_STATIC_MAPS_API_KEY when one is configured.
+function staticMapsKey() {
+  return process.env.GOOGLE_STATIC_MAPS_API_KEY || serverMapsKey();
+}
+
 function parseUrl(raw) {
   try {
     return new URL(String(raw));
@@ -91,16 +97,42 @@ function stripKeyParamsFromMapsUrlText(url) {
     .replace(/[?]$/, '');
 }
 
+// Our OWN keyless proxy paths are safe by construction (a signed map-image token
+// or an estimate token path) but can contain, by chance, a run that looks like a
+// bare Google key ("AIza" + 20 base64url characters — the 43-char signature of a
+// signed link, or an odd estimate token). The bare-key pass must not truncate
+// them, so they are set aside while the string is scrubbed and put back after.
+// The strict shapes cannot smuggle a key past the scrub: the configured
+// literal key is blanked again after the restore.
+const PROXY_PATH_RE = /\/api\/(?:public\/map-image\/v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}|estimates\/[^/?#\s"'<>\\]+\/map\/(?:satellite|overlay))(?![A-Za-z0-9_%/-])/g;
+
+function blankConfiguredKeys(text) {
+  let out = text;
+  for (const key of [serverMapsKey(), process.env.GOOGLE_STATIC_MAPS_API_KEY || '']) {
+    if (key && key.length >= 8 && out.includes(key)) out = out.split(key).join('');
+  }
+  return out;
+}
+
 function scrubMapsKeysFromString(text) {
+  const kept = [];
+  const protectedText = String(text).replace(PROXY_PATH_RE, (m) => {
+    kept.push(m);
+    return `\u0000proxy${kept.length - 1}\u0000`;
+  });
+  const scrubbed = scrubMapsKeysFromUnprotectedString(protectedText);
+  if (!kept.length) return scrubbed;
+  return blankConfiguredKeys(scrubbed.replace(/\u0000proxy(\d+)\u0000/g, (_m, i) => kept[Number(i)] ?? ''));
+}
+
+function scrubMapsKeysFromUnprotectedString(text) {
   let out = String(text);
   if (/maps\.googleapis\.com/i.test(out)) {
     out = out.replace(/https?:\/\/maps\.googleapis\.com\/[^\s"'<>]*/gi, (m) => stripKeyParamsFromMapsUrlText(m));
   }
   // Any `key=AIza...` token (any separator, any host) and any bare key shape.
   out = out.replace(/key=AIza[0-9A-Za-z_-]{20,}/gi, '').replace(GOOGLE_KEY_SHAPE, '');
-  const key = serverMapsKey();
-  if (key && key.length >= 8 && out.includes(key)) out = out.split(key).join('');
-  return out;
+  return blankConfiguredKeys(out);
 }
 
 function scrubMapsKeysDeep(value, depth = 0) {
@@ -205,10 +237,10 @@ function clearImageCache() {
 // Fetch the image for a KEYLESS Static Maps URL that the server itself built.
 // The key is appended here and never leaves this function. Returns
 // { buffer, contentType } or null on any failure (caller answers 404/502).
-async function fetchStaticMapImage(keylessUrl, { cacheKey = null, fetchImpl = fetch } = {}) {
+async function fetchStaticMapImage(keylessUrl, { cacheKey = null, fetchImpl = fetch, key: keyOverride = null } = {}) {
   if (typeof keylessUrl !== 'string' || !keylessUrl.startsWith(`${STATIC_MAP_BASE}?`)) return null;
   if (/[?&]key=/i.test(keylessUrl)) return null;
-  const key = serverMapsKey();
+  const key = keyOverride || serverMapsKey();
   if (!key) return null;
   if (cacheKey) {
     const cached = cacheGet(cacheKey);
@@ -236,6 +268,7 @@ async function fetchStaticMapImage(keylessUrl, { cacheKey = null, fetchImpl = fe
 module.exports = {
   STATIC_MAP_BASE,
   serverMapsKey,
+  staticMapsKey,
   isGoogleStaticMapUrl,
   redactMapsKeyFromUrl,
   scrubMapsKeysFromString,

@@ -858,7 +858,7 @@ it('an initial plan outage cannot fall back to customer-wide history or static l
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['15', '10']));
 });
 
-it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measured-zones'])('a manually added product keeps area and quantity aligned: %s', async mode => {
+it.each(['calculated', 'manual-amount', 'manual-unit', 'spoons', 'partial-zones', 'measured-zones'])('a manually added product keeps area and quantity aligned: %s', async mode => {
   enableDefaults();
   const added = { id: 'manual-product', name: 'Fixture optional product', category: 'adjuvant', rate_unit: 'fl_oz' };
   render(<CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />);
@@ -870,6 +870,12 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   expect(totals()[2].value).toBe('5');
   if (mode === 'manual-amount') fireEvent.change(totals()[2], { target: { value: '7' } });
   if (mode === 'manual-unit') fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[1], { target: { value: 'gal' } });
+  // spoons: under lawn defaults tsp is a unit change like any other, so the
+  // derived 5 fl oz is withdrawn for the actual, never kept under tsp.
+  if (mode === 'spoons') {
+    fireEvent.change(within(totals()[2].parentElement).getAllByRole('combobox')[1], { target: { value: 'tsp' } });
+    expect(totals()[2].value).toBe('');
+  }
   if (mode === 'measured-zones') {
     fireEvent.change(within(totals()[2].parentElement).getByPlaceholderText('Sq ft'), { target: { value: '1000' } });
     fireEvent.click(screen.getAllByRole('button', { name: 'Back yard', exact: true }).at(-1));
@@ -884,9 +890,43 @@ it.each(['calculated', 'manual-amount', 'manual-unit', 'partial-zones', 'measure
   await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe(mode === 'partial-zones' ? '' : mode === 'measured-zones' ? '1000' : '4000'));
   // manual-unit: the derived 5 was fl oz; under the tech's gallons it is
   // withdrawn rather than kept or re-derived (Codex r8 P1).
-  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '', 'partial-zones': '', 'measured-zones': '1' }[mode];
+  const expectedAmount = { calculated: '4', 'manual-amount': '7', 'manual-unit': '', spoons: '', 'partial-zones': '', 'measured-zones': '1' }[mode];
   await waitFor(() => expect(totals().map(input => input.value)).toEqual(['12', '8', expectedAmount]));
   if (mode === 'manual-unit') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('gal');
+  if (mode === 'spoons') expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('tsp');
+});
+
+// A row can read in tsp without that pick being a governed edit: the tech
+// picked tsp while the lawn plan was unavailable (defaults off), on a row
+// that follows the visit area. When the plan is back and the visit area
+// moves, the recalculated total stays in spoons: never the fl oz number
+// under the tsp label, a 6x under-record (Codex P1 on #5341).
+it('a hand-added row read in tsp follows a visit-area change in tsp', async () => {
+  enableDefaults();
+  const added = { id: 'manual-product', name: 'Fixture optional product', category: 'adjuvant', rate_unit: 'fl_oz' };
+  const panel = () => <CompletionPanel service={service} products={[...catalog, added]} onClose={() => {}} onSubmit={submit} />;
+  const view = render(panel());
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: added.name } });
+  fireEvent.click(screen.getByText(added.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  fireEvent.change(screen.getAllByPlaceholderText('Rate')[2], { target: { value: '1' } });
+  const key = `waves_completion_draft_${service.id}`;
+  const savedRow = () => JSON.parse(localStorage.getItem(key) || '{}').selectedProducts?.find((p) => p.productId === added.id);
+  await waitFor(() => expect(Number(savedRow()?.totalAmount)).toBe(5));
+  view.unmount();
+  const draft = JSON.parse(localStorage.getItem(key));
+  draft.selectedProducts = draft.selectedProducts.map((p) => (p.productId === added.id
+    ? { ...p, amountUnit: 'tsp', totalAmount: 30, lawnPlanManualFields: (p.lawnPlanManualFields || []).filter((f) => f !== 'amountUnit') }
+    : p));
+  localStorage.setItem(key, JSON.stringify(draft));
+  render(panel());
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(totals()[2].value).toBe('30');
+  fireEvent.change(screen.getByLabelText('Area for this visit (sq ft)'), { target: { value: '4000' } });
+  await waitFor(() => expect(totals()[2].value).toBe('24'));
+  expect(within(totals()[2].parentElement).getAllByRole('combobox')[1].value).toBe('tsp');
 });
 
 // A hand-added product is ungoverned: its catalog per-1k rate and the derived

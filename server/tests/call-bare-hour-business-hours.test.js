@@ -137,9 +137,9 @@ describe('routing accepts the extraction the contract produces for the bare-hour
 });
 
 describe('version stamps', () => {
-  test('prompt v18 and decision v2-1.50.0 are new, listed and current', () => {
-    expect(PROMPT_VERSION).toBe('v18');
-    expect(PROMPT_HASH).toMatch(/^v18-[a-f0-9]{12}$/);
+  test('prompt v19 and decision v2-1.50.0 are new, listed and current', () => {
+    expect(PROMPT_VERSION).toBe('v19');
+    expect(PROMPT_HASH).toMatch(/^v19-[a-f0-9]{12}$/);
     expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
     expect(V2_DECISION_VERSIONS).toContain('v2-1.50.0');
     expect(V2_DECISION_VERSIONS.indexOf('v2-1.50.0')).toBeGreaterThan(V2_DECISION_VERSIONS.indexOf('v2-1.49.0'));

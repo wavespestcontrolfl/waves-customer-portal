@@ -150,7 +150,7 @@ describe('intelligence bar Sentry ops tools', () => {
 // intelligence-bar-full-access-tool-offering.test.js), not here — these
 // tests cover the module contract: missing-token refusal, a human-readable
 // preview naming the issue by TITLE, and the commit path's refusal.
-describe('intelligence bar Sentry write tools (preview only)', () => {
+describe('intelligence bar Sentry write tools (preview)', () => {
   test('unconfigured state is benign for every write tool, no network call', async () => {
     for (const name of ['resolve_sentry_issue', 'ignore_sentry_issue', 'assign_sentry_issue']) {
       const result = await executeSentryOpsTool(name, { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam' });
@@ -391,15 +391,110 @@ describe('intelligence bar Sentry write tools (preview only)', () => {
     const result = await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: 'WAVES-PORTAL-9Z' });
     expect(result.error).toMatch(/No Sentry issue found/);
   });
+});
+
+describe('intelligence bar Sentry write tools (confirmed commit)', () => {
+  const { outsideWritePins } = require('../services/intelligence-bar/outside-write-pins');
+
+  // Preview first (as /confirm-action's live re-run does), then derive the
+  // pins from it and confirm — the same chain the route runs.
+  async function previewThenConfirm(name, input, previewResponses, confirmResponse) {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    previewResponses.forEach((r) => global.fetch.mockResolvedValueOnce(r));
+    const preview = await executeSentryOpsTool(name, input);
+    expect(preview.preview).toBe(true);
+    global.fetch.mockClear();
+    if (confirmResponse) global.fetch.mockResolvedValueOnce(confirmResponse);
+    const pins = outsideWritePins(name, preview);
+    return executeSentryOpsTool(name, { ...input, ...pins, confirmed: true });
+  }
+
+  test.each([
+    ['resolve_sentry_issue', 'resolved'],
+    ['ignore_sentry_issue', 'ignored'],
+  ])('%s: confirm PUTs the status to the PINNED internal issue id only', async (name, status) => {
+    const result = await previewThenConfirm(name, { issue_short_id: 'WAVES-PORTAL-1A' },
+      [jsonResponse([issueFixture])], jsonResponse({ status }));
+    expect(result).toEqual({ success: true, tool: name, issue_id: '111', status });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/organizations\/[^/]+\/issues\/111\/$/);
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body)).toEqual({ status });
+  });
+
+  test('assign_sentry_issue: confirm PUTs assignedTo the PINNED member id, never the raw assignee string', async () => {
+    const result = await previewThenConfirm('assign_sentry_issue',
+      { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam@wavespestcontrol.com' },
+      [jsonResponse([issueFixture]), jsonResponse([memberFixture])], jsonResponse({}));
+    expect(result).toEqual({ success: true, tool: 'assign_sentry_issue', issue_id: '111', assignee_id: 'user-1' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const [url, init] = global.fetch.mock.calls[0];
+    expect(String(url)).toMatch(/\/issues\/111\/$/);
+    expect(JSON.parse(init.body)).toEqual({ assignedTo: 'user:user-1' });
+    // The account email never rides into the write result either.
+    expect(JSON.stringify(result)).not.toContain('adam@wavespestcontrol.com');
+  });
+
+  test('confirmed with a swapped short id acts only on the pinned issue id (the raw input is never re-resolved)', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({}));
+    const result = await executeSentryOpsTool('resolve_sentry_issue', {
+      issue_short_id: 'OTHER-PROJECT-9', _verified_sentry_issue_id: '111', confirmed: true,
+    });
+    expect(result.success).toBe(true);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(String(global.fetch.mock.calls[0][0])).toMatch(/\/issues\/111\/$/);
+  });
 
   test.each(['resolve_sentry_issue', 'ignore_sentry_issue', 'assign_sentry_issue'])(
-    '%s: confirmed:true refuses — the commit path is not built in this PR',
+    '%s: confirmed without a verified pin refuses and never calls Sentry (target-changed refusal is the route fingerprint check)',
     async (name) => {
       process.env.SENTRY_API_TOKEN = 'sentry-token';
       const result = await executeSentryOpsTool(name, { issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam', confirmed: true });
-      expect(result.error).toMatch(/not enabled yet/);
-      expect(result.code).toBe('not_yet_implemented');
+      expect(result.code).toBe('missing_verified_pin');
       expect(global.fetch).not.toHaveBeenCalled();
     },
   );
+
+  test('assign_sentry_issue: confirmed with an issue pin but no assignee pin refuses', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    const result = await executeSentryOpsTool('assign_sentry_issue', {
+      issue_short_id: 'WAVES-PORTAL-1A', assignee: 'adam', _verified_sentry_issue_id: '111', confirmed: true,
+    });
+    expect(result.code).toBe('missing_verified_pin');
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  test.each([401, 403])('a read-only token (HTTP %i) returns a clear write-access result, one call, nothing changed', async (status) => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ detail: 'You do not have permission' }, status));
+    const result = await executeSentryOpsTool('resolve_sentry_issue', {
+      issue_short_id: 'WAVES-PORTAL-1A', _verified_sentry_issue_id: '111', confirmed: true,
+    });
+    expect(result.code).toBe('write_access_required');
+    expect(result.error).toMatch(/read-only.*write scope/i);
+    expect(result.success).toBeUndefined();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a non-permission Sentry failure surfaces as a plain error, not a write-access claim', async () => {
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({ detail: 'Issue not found' }, 404));
+    const result = await executeSentryOpsTool('ignore_sentry_issue', {
+      issue_short_id: 'WAVES-PORTAL-1A', _verified_sentry_issue_id: '111', confirmed: true,
+    });
+    expect(result.error).toMatch(/HTTP 404/);
+    expect(result.code).toBeUndefined();
+  });
+
+  test('the write failure log carries status only — no issue title or token', async () => {
+    const logger = require('../services/logger');
+    process.env.SENTRY_API_TOKEN = 'sentry-token';
+    global.fetch.mockResolvedValueOnce(jsonResponse({}, 403));
+    await executeSentryOpsTool('resolve_sentry_issue', { issue_short_id: 'X', _verified_sentry_issue_id: '111', confirmed: true });
+    const logged = JSON.stringify(logger.error.mock.calls);
+    expect(logged).toContain('status=403');
+    expect(logged).not.toContain('sentry-token');
+  });
 });

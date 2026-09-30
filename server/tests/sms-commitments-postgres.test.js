@@ -768,6 +768,50 @@ postgres('SMS commitments on PostgreSQL', () => {
       .toMatchObject({ verdict: 'uncertain', reason: 'incomplete_sources', failures: ['email_delivery_truncated'] });
   });
 
+  test.each(['same', 'other'])('an estimate-delivery email cited for a plain quote ask grounds on its estimate (%s property)', async (which) => {
+    const after = new Date(message.created_at.getTime() + 1000);
+    const now = new Date(after.getTime() + 1000);
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], kind: 'send_estimate', quote: 'Can I get a quote please',
+      description: 'get a quote', due_at: after.toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    const propertyId = which === 'same' ? context.properties[0].id
+      : (await mockPg('customer_properties').insert({ customer_id: message.customer_id, address_line1: '400 Other Lane',
+        city: 'Sarasota', zip: '34236', active: true }).returning('id'))[0].id;
+    const [estimate] = await mockPg('estimates').insert({ customer_id: message.customer_id, property_id: propertyId,
+      status: 'sent', service_interest: 'Pest Control', estimate_data: { deliveryState: { lastDeliveredAt: after.toISOString() } } }).returning('id');
+    const [email] = await mockPg('email_messages').insert({ recipient_type: 'customer', recipient_id: message.customer_id,
+      recipient_email_snapshot: 'synthetic@example.invalid', trigger_event_id: `estimate_delivery:${estimate.id}`,
+      status: 'delivered', sent_at: after, delivered_at: after, text_snapshot: 'Your customized Waves estimate is ready for review' }).returning('id');
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'fulfilled', record_ref: `email_delivery:${email.id}`, quote: 'estimate is ready for review' } });
+    const evidence = await loadSmsFulfillmentEvidence(mockPg, commitment, message, now);
+    const verdict = await verifySmsFulfillment(commitment, evidence, { now });
+    if (which === 'other') {
+      expect(verdict).toMatchObject({ verdict: 'uncertain', reason: 'invalid_witness' });
+      return;
+    }
+    expect(verdict).toMatchObject({ verdict: 'fulfilled', record_type: 'estimate', record_id: estimate.id });
+    await mockPg.transaction(async (trx) => {
+      await trx('customers').where({ id: message.customer_id }).forUpdate().first();
+      expect(await revalidateSmsFulfillment(trx, commitment, message, verdict, now)).toBe(true);
+    });
+  });
+
+  test('owner ruling 2026-09-28: the check is told a late record still keeps a promise (keptLate rings first)', async () => {
+    result.facts = [];
+    result.obligations[0] = { ...result.obligations[0], basis: 'promise', kind: 'other', party: 'waves',
+      quote: result.obligations[0].quote, due_at: new Date(message.created_at.getTime() + 1000).toISOString() };
+    await recordMessageOperations(mockPg, message, result, context);
+    const commitment = await mockPg('call_commitments').first();
+    const now = new Date(message.created_at.getTime() + 5000);
+    dispatchWithFallback.mockResolvedValue({ ok: true, json: { verdict: 'open', record_ref: null, quote: null } });
+    await verifySmsFulfillment(commitment, { records: [{ ref: 'sms:x', type: 'sms', id: 'x', text: 'hi', created_at: now }], failures: [] }, { now });
+    const prompt = dispatchWithFallback.mock.calls.at(-1)?.[1]?.text || '';
+    expect(prompt).toContain('a record after the promised day still fulfills it');
+    expect(prompt).not.toContain('on the promised day when sms_context.due_date names one');
+  });
+
   test('revalidation of an estimate-delivery witness also holds the linked estimate without waiting', async () => {
     const after = new Date(message.created_at.getTime() + 1000);
     const now = new Date(after.getTime() + 1000);

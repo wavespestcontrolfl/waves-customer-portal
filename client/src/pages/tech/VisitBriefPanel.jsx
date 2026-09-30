@@ -28,6 +28,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
+import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
 import { formatETDateTime } from '../../lib/timezone';
 import {
   fmtMoney,
@@ -609,13 +610,22 @@ function WdoBriefSection({ brief }) {
 }
 
 // One protocol-window / history product line — label facts only, exactly
-// as the brief stored them.
+// as the brief stored them, but never in mL (rateText).
 function productLine(p) {
   const bits = [p?.name];
-  if (p?.ratePer1000 != null && p?.rateUnit) bits.push(`${p.ratePer1000} ${p.rateUnit}/1000 sq ft`);
-  else if (p?.rate != null && p?.rateUnit) bits.push(`${p.rate} ${p.rateUnit}`);
+  if (p?.ratePer1000 != null && p?.rateUnit) bits.push(`${rateText(p.ratePer1000, p.rateUnit)}/1000 sq ft`);
+  else if (p?.rate != null && p?.rateUnit) bits.push(rateText(p.rate, p.rateUnit));
   if (p?.role) bits.push(p.role);
   return bits.filter(Boolean).join(' · ');
+}
+
+// A stored rate in its stored unit, except a rate in mL, which reads in fl oz
+// on its own basis ("5 ml/gal" is "0.169 fl oz/gal"): nothing a tech sees is
+// in mL (owner ruling 2026-09-29).
+function rateText(value, unit) {
+  if (!isMlUnit(unit)) return `${value} ${unit}`;
+  const basis = String(unit).split('/').slice(1).join('/').trim();
+  return `${mlToFlOz(value)} fl oz${basis ? `/${basis}` : ''}`;
 }
 
 // The served generic visit brief's guidance the tech actually preps from:

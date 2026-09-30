@@ -1,4 +1,5 @@
 import lawnLibrary from '../../../shared/lawn-condition-findings.json';
+import { isMlUnit } from './measure-units';
 import { isTankCalculation } from './product-rate-prefill';
 
 // Existing plan and assessment records remain authoritative; these helpers only
@@ -39,16 +40,22 @@ export function lawnPlanSelections(items, buildProduct, catalog, { areas = LAWN_
   }).map((item) => {
     const row = buildProduct(catalog.find((product) => String(product.id) === String(item.product.id)));
     const mix = item.mix || {};
+    // A plan quantity in mL is never a default: nothing a tech sees or enters
+    // on a completion is in mL (owner ruling 2026-09-29). The row starts blank
+    // with its amount in fl oz, and an mL rate unit gives way to the catalog
+    // row's own (the shared resolver never leaves that in mL). Set here, so
+    // the plan snapshot below and every later reconcile hold the clean values.
+    const mlQuantity = isMlUnit(mix.rateUnit) || isMlUnit(mix.amountUnit);
     // Only the generated per-visit mix supplies defaults; static optional
     // protocol rows and inferred label rates never become actual quantities.
     const selection = {
       ...row,
-      rate: mix.ratePer1000 ?? '',
-      rateUnit: mix.rateUnit || row.rateUnit,
-      amountUnit: mix.amountUnit || row.amountUnit,
+      rate: mlQuantity ? '' : (mix.ratePer1000 ?? ''),
+      rateUnit: isMlUnit(mix.rateUnit) ? row.rateUnit : (mix.rateUnit || row.rateUnit),
+      amountUnit: mlQuantity ? 'fl_oz' : (mix.amountUnit || row.amountUnit),
       areaValue: mix.treatedSqft ?? row.areaValue,
       areaUnit: mix.treatedSqft != null ? 'sqft' : row.areaUnit,
-      totalAmount: mix.amount ?? '',
+      totalAmount: mlQuantity ? '' : (mix.amount ?? ''),
       totalAmountManual: false,
       applicationArea: areas.join(', '),
       applicationAreaDefault: true,

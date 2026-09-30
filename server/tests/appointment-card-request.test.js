@@ -6,6 +6,17 @@
 
 let mockTableHandlers = {};
 let mockDbTouches = [];
+// Standalone trx.raw(...) calls (the scheduled-invoice mint advisory lock,
+// pg_advisory_xact_lock) never touch a table and so never appear in
+// mockDbTouches — tracked separately so lock-order tests can assert the
+// exact key finishVerifiedSecureCapture takes.
+let mockRawCalls = [];
+// Open db.transaction depth right now — sampled by the Stripe mock so a test
+// can prove no network call ever runs inside a transaction (the mint lock is
+// transaction-scoped, so a Stripe call inside one would hold it across the
+// network).
+let mockTrxDepth = 0;
+let mockStripeCallTrxDepths = [];
 jest.mock('../models/db', () => {
   const makeChain = (handlers, touch) => {
     const chain = { calls: [] };
@@ -46,13 +57,22 @@ jest.mock('../models/db', () => {
     mockDbTouches.push(touch);
     return makeChain(mockTableHandlers[table] || {}, touch);
   });
-  // Raw SQL fragments (the monotonic disclosure stamp) — returned as an
-  // inspectable token so tests can pin the SQL contract and its bindings.
-  db.raw = (sql, bindings = []) => ({ __raw: sql, bindings });
+  // Raw SQL fragments (the monotonic disclosure stamp, and standalone
+  // pg_advisory_xact_lock calls) — returned as an inspectable token so
+  // tests can pin the SQL contract and its bindings; also recorded in
+  // mockRawCalls for the standalone (non-update-patch) call shape, since
+  // those calls are awaited directly and never land in mockDbTouches.
+  db.raw = (sql, bindings = []) => {
+    mockRawCalls.push({ sql, bindings });
+    return { __raw: sql, bindings };
+  };
   // The auto-secure path runs live-check + enrollment + satisfied row in one
   // transaction (Codex #3361 r26 P1) — the mock trx is the db itself, so
   // every table touch stays visible to the touches() helper.
-  db.transaction = async (cb) => cb(db);
+  db.transaction = async (cb) => {
+    mockTrxDepth += 1;
+    try { return await cb(db); } finally { mockTrxDepth -= 1; }
+  };
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -81,7 +101,10 @@ const mockSavePaymentMethod = jest.fn(async () => ({ id: 'pm-row-9', method_type
 const mockRetireSetupIntent = jest.fn(async () => ({}));
 const mockRetrievePaymentMethod = jest.fn(async () => ({ id: 'pm_stripe_9', type: 'card' }));
 jest.mock('../services/stripe', () => ({
-  retrieveSetupIntent: (...a) => mockRetrieveSetupIntent(...a),
+  retrieveSetupIntent: (...a) => {
+    mockStripeCallTrxDepths.push(mockTrxDepth);
+    return mockRetrieveSetupIntent(...a);
+  },
   createAppointmentCardSetupIntent: (...a) => mockCreateAppointmentCardSetupIntent(...a),
   savePaymentMethod: (...a) => mockSavePaymentMethod(...a),
   retireSetupIntent: (...a) => mockRetireSetupIntent(...a),
@@ -176,7 +199,20 @@ beforeEach(() => {
   process.env.APPOINTMENT_CARD_REQUEST = 'true';
   mockTableHandlers = baseHandlers();
   mockDbTouches = [];
+  mockRawCalls = [];
+  mockTrxDepth = 0;
+  mockStripeCallTrxDepths = [];
 });
+
+// The exact advisory-lock key every scheduled-service invoice writer shares
+// (scheduled-invoice-mint.js's SCHEDULED_SERVICE_INVOICE_MINT_LOCK) — pinned
+// here too so a drift in either file's literal breaks a test instead of
+// silently stopping the two sides from contending.
+function mintLockCalls(scheduledServiceId) {
+  return mockRawCalls.filter((c) => /pg_advisory_xact_lock/.test(c.sql)
+    && c.bindings[0] === 'schedule.invoice.mint'
+    && c.bindings[1] === String(scheduledServiceId));
+}
 afterAll(() => { delete process.env.APPOINTMENT_CARD_REQUEST; });
 
 describe('requestCardForAppointment — gate and visit eligibility', () => {
@@ -1194,6 +1230,64 @@ describe('completeSecureCardCapture — save → consent → enroll → complete
       stripe_payment_method_id: 'pm_stripe_9',
       payment_method_id: 'pm-row-9',
     });
+  });
+
+  // Reprice/card-completion serialization (Codex #5253 follow-up): the
+  // pending→completing claim and the completing→completed write each take
+  // this visit's scheduled-invoice mint lock — the SAME lock
+  // admin-schedule.js acquires before it ever reads this row or checks for
+  // a 'completing' request — so the two sides serialize on one point
+  // instead of racing a plain read against a plain UPDATE.
+  test('the pending → completing claim takes this visit\'s scheduled-invoice mint lock', async () => {
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    expect(mintLockCalls('svc-1').length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('the completing → completed write re-acquires the same mint lock, in its own transaction (never spanning the Stripe re-read)', async () => {
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: true });
+    // Two lock acquisitions total: the claim, then the final write.
+    expect(mintLockCalls('svc-1').length).toBe(2);
+    // Every Stripe SetupIntent read this function makes runs OUTSIDE any
+    // transaction, so the transaction-scoped mint lock is never held across
+    // a network call.
+    expect(mockStripeCallTrxDepths.length).toBeGreaterThanOrEqual(1);
+    expect(mockStripeCallTrxDepths.every((d) => d === 0)).toBe(true);
+    expect(mockTrxDepth).toBe(0);
+  });
+
+  test('eligibility is re-read UNDER the claim lock — a re-price that zeroed the visit after the pre-claim read refuses the capture and never claims', async () => {
+    // Outside a transaction the visit still looks priced (the stale
+    // pre-claim read); under the lock it shows the price a re-price save
+    // committed in the gap.
+    mockTableHandlers.scheduled_services.first = () => ({ ...VISIT, estimated_price: mockTrxDepth > 0 ? '0.00' : VISIT.estimated_price });
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'no_longer_needed' });
+    expect(mintLockCalls('svc-1').length).toBe(1);
+    const claimed = mockDbTouches.some((t) => t.table === 'appointment_card_requests'
+      && (t.chain?.calls || []).some((c) => c[0] === 'update' && c[1]?.status === 'completing'));
+    expect(claimed).toBe(false);
+  });
+
+  test('a claim that never wins the lock race (a concurrent re-price holds it, then refuses) still stays retryable — no lock leak', async () => {
+    // The claim's own UPDATE misses (as if a re-price's guard had already
+    // put the row somewhere this claim's WHERE no longer matches) —
+    // confirms the lock is acquired and released around the claim attempt
+    // itself, not held open on a miss.
+    mockTableHandlers.appointment_card_requests.update = (chain, patch) => (patch.status === 'completing' ? 0 : 1);
+    const res = await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    expect(res).toEqual({ ok: false, code: 'completion_in_progress' });
+    expect(mintLockCalls('svc-1').length).toBe(1);
+  });
+
+  test('the lock is keyed on scheduled_service_id, not the request id — matches the reprice guard\'s own key', async () => {
+    await completeSecureCardCapture({ token: REQUEST.token, setupIntentId: 'seti_1' });
+    const keys = mockRawCalls
+      .filter((c) => /pg_advisory_xact_lock/.test(c.sql))
+      .map((c) => c.bindings[1]);
+    expect(keys.every((k) => k === REQUEST.scheduled_service_id)).toBe(true);
+    expect(keys).not.toContain(REQUEST.id);
   });
 
   test('completion records consent against the DISCLOSED (row-stamped) terms — never re-reads live config (Codex #3153 r1)', async () => {
