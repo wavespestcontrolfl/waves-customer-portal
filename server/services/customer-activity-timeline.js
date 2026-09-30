@@ -60,6 +60,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { leadEmailLinksLive } = require('../config/feature-gates');
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -322,6 +323,20 @@ const SOURCES = [
         w.orWhere((k) => k.whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')")
           .where((o) => o.where('em.recipient_id', String(ctx.customerId))
             .orWhereIn('em.recipient_id', dbh('leads').where('customer_id', ctx.customerId).select(dbh.raw('id::text')))));
+        // GATE_LEAD_EMAIL_LINKS: mail sent to this customer's lead, or about
+        // one of their estimates, before they were a customer
+        // (email_messages.lead_id / estimate_id, recorded at send time; see
+        // email-lead-links.js). Ownership is by id, so it survives a changed
+        // address. Only lead-typed / untyped rows ride the link (a
+        // customer-typed row is owned by its recipient_id), and a row whose
+        // recipient_id names some OTHER customer never does.
+        if (ctx.leadEmailLinks) {
+          w.orWhere((k) => k.whereRaw("COALESCE(em.recipient_type, '') IN ('', 'lead')")
+            .where((o) => o.whereIn('em.lead_id', dbh('leads').where('customer_id', ctx.customerId).select('id'))
+              .orWhereIn('em.estimate_id', dbh('estimates').where('customer_id', ctx.customerId).select('id')))
+            .where((o) => o.whereRaw("COALESCE(em.recipient_id, '') IN ('', ?)", [String(ctx.customerId)])
+              .orWhereIn('em.recipient_id', dbh('leads').where('customer_id', ctx.customerId).select(dbh.raw('id::text')))));
+        }
         // Address match only for mail nobody claimed: recipient_type NULL/''/
         // 'lead' AND no recipient_id at all. A lead-typed row that names some
         // other lead/customer id (another prospect sharing this inbox) never
@@ -637,7 +652,11 @@ async function getCustomerActivity(customerId, { before = null, limit = DEFAULT_
   const customer = await dbh('customers').where({ id: customerId }).whereNull('deleted_at').first('id', 'email');
   if (!customer) return null;
   const emails = [...new Set([String(customer.email || '').trim().toLowerCase()].filter(Boolean))];
-  const ctx = { dbh, customerId: customer.id, emails, limit: cap, beforeIso: beforeIso || FAR_FUTURE };
+  const ctx = {
+    dbh, customerId: customer.id, emails, limit: cap, beforeIso: beforeIso || FAR_FUTURE,
+    // Read at call time so a flip needs no redeploy.
+    leadEmailLinks: leadEmailLinksLive(),
+  };
 
   const unavailableSources = [];
   const settled = await Promise.all(SOURCES.map(async (src) => {
