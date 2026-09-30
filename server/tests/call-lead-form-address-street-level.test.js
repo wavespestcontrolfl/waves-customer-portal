@@ -47,7 +47,7 @@ const { parseRawAddress } = require('../utils/address-normalizer');
 // A lead row as the web form leaves it: the form endpoint's normalized address snapshot in extracted_data.
 const formRow = (address, zip) => {
   const p = parseRawAddress(address);
-  return { first_contact_channel: 'form', address, zip, extracted_data: { stage: 'lead_webhook_received', address: { line1: p.line1, city: p.city, zip: p.zip || zip || '' } } };
+  return { first_contact_channel: 'form', address, zip, extracted_data: { stage: 'lead_webhook_received', address: { line1: p.line1, city: p.city, state: p.state || '', zip: p.zip || zip || '' } } };
 };
 
 let saved;
@@ -268,8 +268,12 @@ describe('street type is part of the street (codex pre-push P1)', () => {
     ]) {
       expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(false);
     }
-    for (const typed of ['1234 Sample Palm Dr', '1234 Sample Palm Drive, Parrish', '1234 Sample Palm Dr, Parrish, FL 34219']) {
+    for (const typed of ['1234 Sample Palm Dr, Parrish, FL 34219', '1234 Sample Palm Drive, Parrish, FL']) {
       expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(true);
+    }
+    // No locality / no state on the snapshot (owner-directed r13): the street alone never qualifies.
+    for (const typed of ['1234 Sample Palm Dr', '1234 Sample Palm Drive, Parrish']) {
+      expect(await onFileAddressIsFromWebForm(known, conn(typed))).toBe(false);
     }
   });
 });
@@ -725,5 +729,23 @@ describe('r8 fixes: hold survives reprocess, no follow-up child, bell format, fo
     expect(proc).toContain("bridgeNeedsConfirmation\n        .filter((r) => r !== 'street_level_address_review' || streetLevelStillHeld).length;");
     // Every other reason still opens review as before.
     expect(proc).not.toContain('...(bridgeNeedsConfirmation.length || schedulingChangeHeld ||');
+  });
+
+  test('r13: the form snapshot must carry AND match a locality (city or ZIP) plus state; a street-line-only snapshot does not qualify', async () => {
+    const known = lead();
+    const conn = (address) => () => ({ where() { return this; }, whereNull() { return this; }, orderBy() { return this; }, select() { return this; }, limit: async () => [{ extracted_data: { stage: 'lead_webhook_received', address } }] });
+    const full = { line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL', zip: '34219' };
+    expect(await onFileAddressIsFromWebForm(known, conn(full))).toBe(true);
+    // Street line only: any town could own it.
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', state: 'FL' }))).toBe(false);
+    // Locality without a state does not qualify either; a city OR a ZIP alone (with state) does.
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', city: 'Parrish', zip: '34219' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', city: 'Parrish', state: 'FL' }))).toBe(true);
+    expect(await onFileAddressIsFromWebForm(known, conn({ line1: '1234 Sample Newbuild Trl', zip: '34219', state: 'FL' }))).toBe(true);
+    // A present but different locality or state still fails.
+    expect(await onFileAddressIsFromWebForm(known, conn({ ...full, city: 'Sarasota' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ ...full, zip: '34203' }))).toBe(false);
+    expect(await onFileAddressIsFromWebForm(known, conn({ ...full, state: 'GA' }))).toBe(false);
   });
 });

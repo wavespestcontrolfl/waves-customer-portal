@@ -1592,7 +1592,7 @@ function formTypedAddressOf(row) {
   // street-level match cannot verify a unit, and a form for Apt 4 must never
   // vouch for an on-file edit to Apt 5.
   if (String(addr.line2 || '').trim()) return null;
-  return { line1: String(addr.line1).trim(), city: addr.city, zip: addr.zip };
+  return { line1: String(addr.line1).trim(), city: addr.city, zip: addr.zip, state: addr.state };
 }
 // True when the customer's on-file street is what their own web form typed:
 // a live lead linked to the customer whose form-typed address is the same
@@ -1614,6 +1614,7 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
       .limit(25);
     const zip = zip5Of(knownCaller.addressZip);
     const city = alnum(knownCaller.addressCity);
+    const onFileState = normalizeState(String(knownCaller.addressState || '').trim()) || SERVICE_STATE;
     return rows.some((row) => {
       const typed = formTypedAddressOf(row);
       if (!typed || houseNumberOf(typed.line1) !== house) return false;
@@ -1623,8 +1624,13 @@ async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
       // an extra street word can never hide as a city: the parsed city must be
       // the one on file, and a ZIP, when given, the same ZIP.
       if (streetNameKey(typed.line1) !== name) return false;
+      // The snapshot must CARRY and match a locality discriminator (city or ZIP)
+      // and the state: a street-line-only snapshot ("123 Main St") could belong to
+      // any town, so it never vouches for this address.
+      if (!typed.city && !typed.zip) return false;
       if (typed.city && alnum(typed.city) !== city) return false;
       if (typed.zip && zip5Of(typed.zip) !== zip) return false;
+      if (!typed.state || normalizeState(String(typed.state).trim()) !== onFileState) return false;
       return true;
     });
   } catch (err) {

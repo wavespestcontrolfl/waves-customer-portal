@@ -66,4 +66,31 @@ async function findStreetLevelHoldCard(conn, { callLogId, visitId }) {
   return { ...card, payload: parsePayload(card.payload) || {} };
 }
 
-module.exports = { heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard };
+// A cancelled / skipped street-level hold visit no longer needs the office's
+// address confirmation: resolve its open review card and recompute the call's
+// review_status, under the shared per-call lock. Gated on the card signal (only
+// a voice_agent-source visit with a street-level card is touched), idempotent,
+// best-effort — never throws.
+async function closeHoldCardForEndedVisit(visitId, toStatus, conn = db) {
+  try {
+    const visit = await conn('scheduled_services').where({ id: visitId, source_action: 'voice_agent' }).first('id', 'source_call_log_id');
+    if (!visit?.source_call_log_id) return false;
+    const card = await findStreetLevelHoldCard(conn, { callLogId: visit.source_call_log_id, visitId });
+    if (!card || !['open', 'in_progress'].includes(card.status)) return false;
+    const { lockTriageCall, syncCallReviewStatus } = require('../utils/triage-locks');
+    return await conn.transaction(async (trx) => {
+      await lockTriageCall(trx, visit.source_call_log_id);
+      const resolved = await trx('triage_items')
+        .where({ id: card.id })
+        .whereIn('status', ['open', 'in_progress'])
+        .update({ status: 'resolved', resolved_at: new Date(), updated_at: new Date(), resolution_note: `Visit ${toStatus} — the address hold no longer applies.` });
+      await syncCallReviewStatus(trx, visit.source_call_log_id);
+      return resolved > 0;
+    });
+  } catch (err) {
+    logger.warn(`[street-level-hold] closing the hold card for ${visitId} failed: ${err.message}`);
+    return false;
+  }
+}
+
+module.exports = { heldVisitSubquery, isStreetLevelHoldVisit, findStreetLevelHoldCard, closeHoldCardForEndedVisit };

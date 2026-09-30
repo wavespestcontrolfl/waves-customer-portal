@@ -1763,6 +1763,9 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
       // rejected) AI request releases its slot instead of holding the day full.
       .whereNotIn('status', ['cancelled', 'rescheduled', 'skipped'])
       .whereBetween('scheduled_date', [rangeFrom, rangeTo])
+      // Owner ruling 2026-09-30: an unconfirmed street-level address hold takes no
+      // daily-cap capacity (same exclusion the commit-time counter uses).
+      .whereNotExists(function () { require('../services/street-level-hold').heldVisitSubquery(this, 'scheduled_services'); })
       .select('scheduled_date')
       .count('* as count')
       .groupBy('scheduled_date');

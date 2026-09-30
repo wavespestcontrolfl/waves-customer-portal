@@ -941,6 +941,14 @@ async function transitionJobStatus({
     // require: the module's dependency chain reaches back into job-status.
     const { handleFollowupChildCancellation, handleFollowupChildRevival } = require('./typed-followup-obligation');
     if (['cancelled', 'skipped', 'no_show'].includes(String(toStatus || ''))) {
+      // A street-level address hold's review card closes with its visit
+      // (cancelled / skipped): the office no longer has an address to confirm.
+      // Gated on the card signal inside the helper; a no-op for every other visit.
+      if (['cancelled', 'skipped'].includes(String(toStatus))) {
+        void require('./street-level-hold').closeHoldCardForEndedVisit(jobId, toStatus).catch((e) => {
+          logger.warn(`[job-status] street-level hold close failed for ${jobId}: ${e.message}`);
+        });
+      }
       void handleFollowupChildCancellation({ jobId, toStatus }).catch((e) => {
         logger.warn(`[job-status] follow-up re-park hook failed for ${jobId}: ${e.message}`);
       });
