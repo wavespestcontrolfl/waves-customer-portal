@@ -1030,3 +1030,26 @@ test('the autopay decline notice persists every shared replay hold, including a 
   expect(source).toMatch(/!failResult\.sent && require\('\.\/messaging\/billing-channel-routing'\)\.REPLAY_HOLD_CODES\.includes\(failResult\.code\) && failResult\.deferred && failResult\.nextAllowedAt/);
   expect(require('../services/messaging/billing-channel-routing').REPLAY_HOLD_CODES).toContain('BILLING_PREFERENCES_CHANGED');
 });
+
+describe('retired cockroach work_completed chips from a stale form are dropped, not rejected (2026-09-29)', () => {
+  const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+  const ActivityIndicators = require('../services/service-report/activity-indicators');
+
+  test('the strip runs before validateTypedFindings on the primary typed path', () => {
+    const stripAt = source.indexOf("if (typedFindingsType === 'cockroach' && structuredFindings?.values");
+    const deleteAt = source.indexOf('delete structuredFindings.values.work_completed;');
+    const validateAt = source.indexOf('const findingsValidation = ActivityIndicators.validateTypedFindings({');
+    expect(stripAt).toBeGreaterThan(-1);
+    expect(deleteAt).toBeGreaterThan(stripAt);
+    expect(validateAt).toBeGreaterThan(deleteAt);
+  });
+
+  test('without the strip the validator would reject the retired key (the strip is load-bearing)', () => {
+    const result = ActivityIndicators.validateTypedFindings({
+      type: 'cockroach',
+      values: { species: 'German', activity_level: 'Low', work_completed: 'Bait placement' },
+      expectedType: 'cockroach',
+    });
+    expect(result.errors).toContain('Unknown findings field: work_completed');
+  });
+});

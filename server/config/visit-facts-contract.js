@@ -763,8 +763,16 @@ const TYPED_REPORT_BUILDERS = Object.freeze({
   cockroach: Object.freeze({
     typedForm: 'cockroach',
     file: COCKROACH_REPORT_V2,
-    // The builder's own exported list (the typed tiles skip these keys).
-    keys: Object.freeze([...COCKROACH_V2_DASHBOARD_FIELD_KEYS]),
+    // The builder's own exported list (the typed tiles skip these keys),
+    // minus the retired key below, which the form no longer defines.
+    keys: Object.freeze([...COCKROACH_V2_DASHBOARD_FIELD_KEYS].filter((key) => key !== 'work_completed')),
+    // Keys the builder still reads off STORED snapshots although the form no
+    // longer defines them (retired fields). `work_completed` chips were
+    // retired from the cockroach form 2026-09-26; every record completed
+    // before then keeps them in its frozen snapshot and the "What we did"
+    // section renders them (chips win over the product-derived work). The
+    // contract test requires the builder's reads to equal keys + retiredKeys.
+    retiredKeys: Object.freeze(['work_completed']),
     defaultSection: 'Cockroach report dashboard',
     sections: Object.freeze({
       species: 'Status + status summary; species label; How you can help',
@@ -772,7 +780,6 @@ const TYPED_REPORT_BUILDERS = Object.freeze({
       activity_locations: '"Areas with activity" metric + status summary',
       evidence_observed: 'Status reconciliation (resolveCockroachStatus) + status summary + evidence list',
       conducive_conditions: 'Conducive conditions list (dashboard conditions)',
-      work_completed: '"What we did" (buildWork)',
       customer_prep: 'How you can help (buildHelp)',
     }),
   }),
@@ -1390,7 +1397,6 @@ const VISIT_FACTS_CONTRACT = {
       ...typedFormFacts('cockroach', {
         notes: {
           evidence_observed: 'Evidence can reconcile the status away from the activity select ("Signs found").',
-          work_completed: 'buildWork reads ONLY these chips — see gap cockroach_work_from_products.',
         },
       }),
       ...typedSharedCompletionFacts(),
@@ -1404,10 +1410,15 @@ const VISIT_FACTS_CONTRACT = {
         capture: ['voice', 'tap'],
         storage: 'service_products.product_name',
         writers: [COMPLETE_SERVICE],
-        readers: [],
+        readers: [
+          {
+            file: COCKROACH_REPORT_V2,
+            section: '"What we did" + "Treatments applied" metric + the bait / IGR-aware next-visit and prep copy (workChipsFromApplications, from the report payload\'s applications[])',
+            readerSymbol: 'workChipsFromApplications',
+          },
+        ],
         whenMissing: 'hidden',
-        status: 'gap',
-        notes: 'cockroach-report-v2.js buildWork(chips(values.work_completed)) never falls back to the visit\'s service_products rows: a visit completed without work_completed chips shows no work even though products were recorded.',
+        notes: 'Owner ruling 2026-09-26: the "Work completed today" chips were retired from the cockroach form (project-types.js) and "What we did" derives from the product rows instead. Classified by the row\'s catalog category / recorded method / active ingredient, with name fallbacks for Advion gel (bait), Gentrol / Tekko (IGR) and Alpine (crack & crevice); an exterior application area adds the perimeter line. An unrecognised product yields no line. Records completed before the retirement keep their stored work_completed chips, which win over the products. A chip-less record\'s PDF cache key carries a product-row signature (cockroachWorkSourceSignature).',
       },
     ],
   },

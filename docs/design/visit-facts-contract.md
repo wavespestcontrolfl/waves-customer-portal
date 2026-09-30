@@ -258,7 +258,9 @@ requires. Internal optional fields are office-only data, not report facts.
   findings list (`activity-indicators.js` `buildTypedReportSnapshot`). Named
   readers come from the builders' own key lists: `report-data.js`
   `TYPED_AREA_FIELD_KEYS` (areas treated), `cockroach-report-v2.js`
-  `COCKROACH_V2_DASHBOARD_FIELD_KEYS`, and the `values.<key>` reads in
+  `COCKROACH_V2_DASHBOARD_FIELD_KEYS` (its retired `work_completed` key is
+  registered as a `retiredKeys` entry: still read off stored snapshots, no
+  longer a form field), and the `values.<key>` reads in
   `termite-report-v2.js` (`TYPED_REPORT_BUILDERS` in the registry). A few
   per-key readers (Today's Result stories, the rodent narrative) are
   registered by hand, and the test checks that the key appears in
@@ -502,7 +504,10 @@ only the *other* facts each line adds by hand are named here.
   `german_roach`, `german_roach_initial`. Has a gauge
   (`typed_activity_score`, `roach_activity`, derived from `activity_level`).
   Adds the typed photo summary,
-  product facts, photos and the `cockroach_work_from_products` **gap**.
+  product facts, photos and `cockroach_work_from_products`: the report's
+  "What we did" derives from the visit's product rows (the `work_completed`
+  chips were retired from the form 2026-09-26; stored snapshots keep theirs,
+  and chips win over products).
 - **Termite bait** (`termite_bait`, form `termite_bait_station`,
   `20260612000001`): `termite_bait`, `termite_active_annual`,
   `termite_active_bait_quarterly`, `termite_monitoring`,
@@ -620,10 +625,6 @@ listed here, and every bullet here is still a gap fact on that line.
   line, but nothing records it today. The observations vocabulary is
   species-neutral and was unused on 0 of 69 visits, and product targets are
   the label list, not finds. Voice fill has to add the storage.
-- `cockroach.cockroach_work_from_products`: **the cockroach "What we did"
-  section has no product fallback.** `buildWork` in `cockroach-report-v2.js`
-  reads only the `work_completed` chips. A visit that recorded products but
-  no chips shows no work.
 - `reservice_pest.fast_complete_customer_text`: **Fast Complete sends no
   customer text.** `FastCompleteSheet.jsx` `completionBody` sends no
   `customerRecap` and sets `sendCompletionSms: false`, so the fact has no
@@ -698,7 +699,6 @@ means the field is legal on a primary OR a companion submission.
 | `evidence_observed` | Evidence observed | chips | both | hidden | Status reconciliation (resolveCockroachStatus) + status summary + evidence list (cockroach-report-v2.js) |
 | `conducive_conditions` | Conducive conditions | chips | both | hidden | Conducive conditions list (dashboard conditions) (cockroach-report-v2.js) |
 | `areas_treated` | Areas treated | chips | both | hidden | Areas treated (TYPED_AREA_FIELD_KEYS) (report-data.js) |
-| `work_completed` | Work completed today | chips | both | hidden | "What we did" (buildWork) (cockroach-report-v2.js) |
 | `customer_prep` | How the customer can help | chips | both | hidden | How you can help (buildHelp) (cockroach-report-v2.js) |
 
 ### `termite_bait` — typed `termite_bait_station` form

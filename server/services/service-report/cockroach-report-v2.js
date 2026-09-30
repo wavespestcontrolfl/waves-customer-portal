@@ -28,7 +28,14 @@
  *    even a tech who picked no customer-prep chips ships the defaults.
  */
 
+const crypto = require('crypto');
+
 const COCKROACH_TYPED_TYPE = 'cockroach';
+
+// The fixed "what we did" sentence activity-indicators' buildTodaysResult
+// falls back to when a typed snapshot has nothing to compose from. A test
+// pins it to the real generator output so the two cannot drift.
+const GENERIC_WHAT_WE_DID = 'We completed the scheduled service.';
 
 // Package sizes the catalog itself defines. cockroach_control is the
 // two-treatment package (TWO_TREATMENT_PACKAGE_KEYS, typed-followup-
@@ -92,6 +99,99 @@ const PREP_COPY = [
 // joins only when bait was actually recorded today (local codex P1 —
 // never instruct the customer about placements that were not made).
 const GERMAN_DEFAULT_PREP_KEYS = ['no_sprays', 'food_debris'];
+
+// ── Work derived from the visit's recorded product rows ────────────────────
+// Owner ruling 2026-09-26 (report-completion-sync plan Step 2): the
+// "Work completed today" chips were retired from the cockroach Complete
+// Service form — the products the tech recorded ARE the work record. Chips
+// still WIN whenever a stored snapshot carries them (every record completed
+// before the retirement keeps rendering exactly as it always did); rows are
+// consulted only when the snapshot has no work_completed at all.
+//
+// The classifier emits the SAME chip labels the retired form offered, so
+// WORK_COPY, recordedWork() (bait / IGR flags behind the "keep bait" prep,
+// nextVisitPlan and betweenVisitsCopy) and the metrics run unchanged.
+// Every line traces to a recorded row fact; an unrecognised product yields
+// NO line — never a claim without a recorded fact.
+//
+//   bait            row method bait_placement, a bait/gel catalog category, or
+//                   the Advion gel-bait name  → "Bait placement"
+//   IGR             an IGR catalog category, a growth-regulator active
+//                   (hydroprene, pyriproxyfen, methoprene, novaluron), or the
+//                   Gentrol / Tekko name      → "Insect growth regulator"
+//   dust            "dust" in the product name / category → "Dust application"
+//   Alpine          the Alpine name / dinotefuran active → "Crack & crevice"
+//                   (+ "Exterior perimeter" when the row's application AREA is
+//                   an exterior chip; a row whose area is exterior and whose
+//                   method is not a spot/crack method reads perimeter only)
+//   other pesticide with an exterior application area → "Exterior perimeter"
+//
+// Exterior evidence is the row's application AREA (a controlled chip the tech
+// picks), never the stored method: complete-scheduled-service stores
+// 'perimeter_spray' as the DEFAULT method for any methodless pest product, so
+// the method alone is a guess, not a recorded fact.
+const DERIVED_WORK_CHIPS = {
+  bait: 'Bait placement',
+  igr: 'Insect growth regulator',
+  crack: 'Crack & crevice treatment',
+  dust: 'Dust application',
+  exterior: 'Exterior perimeter treatment',
+};
+const DERIVED_WORK_ORDER = ['bait', 'igr', 'crack', 'dust', 'exterior'];
+
+// Rows that are not a roach treatment at all: adjuvants, nutrients, other
+// pest classes' devices (rodent / termite / mole stations, glue and traps).
+const NOT_ROACH_TREATMENT_RE = /adjuvant|surfactant|wetting|fertiliz|herbicide|fungicide|biostim|nutrient|rodent|mole\b|termite|station|cartridge|monitor|glue|trap/i;
+const BAIT_ROW_RE = /\bbait\b|\bgel\b/i;
+const BAIT_NAME_RE = /gel bait|(?:cockroach|roach) gel/i;
+const IGR_ROW_RE = /\bigr\b|growth regulator/i;
+const IGR_ACTIVE_RE = /hydroprene|pyriproxyfen|methoprene|novaluron|kinoprene/i;
+const IGR_NAME_RE = /\bgentrol\b|\btekko\b/i;
+const DUST_ROW_RE = /\bdust\b/i;
+const ALPINE_ROW_RE = /\balpine\b|dinotefuran/i;
+const SPOT_METHOD_RE = /^(?:spot_treatment|crack_crevice|crack_and_crevice|void_injection)$/;
+
+function exteriorApplicationArea(area) {
+  try {
+    // Lazy: pest-report-expectations pulls in the premium-experience module.
+    return require('./pest-report-expectations').isExteriorApplicationArea(area);
+  } catch { return false; }
+}
+
+// One application row (report-data `applications[]` shape) → derived work keys.
+function workKeysForApplication(app = {}) {
+  const product = app.product && typeof app.product === 'object' ? app.product : {};
+  const name = String(product.name || '').trim();
+  const category = String(product.category || '').trim();
+  const productType = String(product.product_type || '').trim();
+  const activeIngredient = String(product.active_ingredient || '').trim();
+  if (!name && !category) return [];
+  const method = String(app.method || '').toLowerCase().replace(/[^a-z0-9]+/g, '_');
+  const identity = `${name} ${category} ${productType}`;
+  if (NOT_ROACH_TREATMENT_RE.test(identity)) return [];
+  const exterior = exteriorApplicationArea(app.applicationArea);
+  if (method === 'bait_placement' || BAIT_ROW_RE.test(`${category} ${productType}`) || BAIT_NAME_RE.test(name)) return ['bait'];
+  if (IGR_ROW_RE.test(`${category} ${productType}`) || IGR_ACTIVE_RE.test(activeIngredient) || IGR_NAME_RE.test(name)) return ['igr'];
+  if (DUST_ROW_RE.test(identity)) return ['dust'];
+  if (ALPINE_ROW_RE.test(`${name} ${activeIngredient}`)) {
+    if (!exterior) return ['crack'];
+    return SPOT_METHOD_RE.test(method) ? ['crack', 'exterior'] : ['exterior'];
+  }
+  // Any other pesticide row speaks only through a recorded exterior area.
+  const pesticideClass = /pestic|insectic|[a-z]*cide\b/i.test(`${category} ${productType}`);
+  return exterior && pesticideClass ? ['exterior'] : [];
+}
+
+/**
+ * Work chips (retired-form labels, canonical order, de-duplicated) derived
+ * from a visit's application rows. Empty for a null / empty / all-unknown set.
+ */
+function workChipsFromApplications(applications) {
+  if (!Array.isArray(applications) || !applications.length) return [];
+  const keys = new Set();
+  for (const app of applications) for (const key of workKeysForApplication(app)) keys.add(key);
+  return DERIVED_WORK_ORDER.filter((key) => keys.has(key)).map((key) => DERIVED_WORK_CHIPS[key]);
+}
 
 function chips(value) {
   if (Array.isArray(value)) return value.map((v) => String(v || '').trim()).filter(Boolean);
@@ -402,6 +502,10 @@ function buildCockroachReportV2({
   upcomingRoachVisits = null,
   laterCompleted = 0,
   positionReason = null,
+  // The visit's recorded application rows (report-data `applications[]`).
+  // "What we did" derives from them ONLY when the frozen snapshot carries no
+  // work_completed chips (records completed after the chips were retired).
+  applications = null,
 } = {}) {
   if (typedReportType !== COCKROACH_TYPED_TYPE) return null;
   const values = typedSnapshotValues && typeof typedSnapshotValues === 'object' ? typedSnapshotValues : {};
@@ -410,7 +514,10 @@ function buildCockroachReportV2({
   const locations = chips(values.activity_locations);
   const evidence = chips(values.evidence_observed);
   const conditions = chips(values.conducive_conditions);
-  const work = buildWork(chips(values.work_completed));
+  // Stored chips win (old records render exactly as before); products fill in
+  // only when the snapshot recorded none.
+  const storedWorkChips = chips(values.work_completed);
+  const work = buildWork(storedWorkChips.length ? storedWorkChips : workChipsFromApplications(applications));
   const help = buildHelp({ prepChips: chips(values.customer_prep), species, baitRecorded: recordedWork(work).bait });
   if (!species && !activityLevel && !locations.length && !work.length) return null;
 
@@ -434,7 +541,19 @@ function buildCockroachReportV2({
     // when the status was reconciled away from it, that trend describes a
     // reading the report no longer shows — the client withholds it.
     statusReconciled,
-    statusSummary: buildStatusSummary({ status, species, locations, evidence, work, todaysResultBody: statusReconciled ? null : todaysResultBody }),
+    statusSummary: buildStatusSummary({
+      status,
+      species,
+      locations,
+      evidence,
+      work,
+      // The frozen Today's Result of a chip-less record reads the generic
+      // "We completed the scheduled service." (nothing to compose from); when
+      // products supplied the work, the built summary names it instead.
+      todaysResultBody: statusReconciled || (!storedWorkChips.length && work.length && todaysResultBody === GENERIC_WHAT_WE_DID)
+        ? null
+        : todaysResultBody,
+    }),
     aiSummary: technicianReport ? { headline: null, body: technicianReport } : null,
     metrics,
     species,
@@ -560,6 +679,7 @@ function attachCockroachReportV2(data, service = {}) {
           : null,
       }),
       serviceKey: frozenCockroachServiceKey(service),
+      applications: Array.isArray(data.applications) ? data.applications : null,
       nextVisit,
       scheduleResolved,
       upcomingRoachVisits,
@@ -807,11 +927,46 @@ function cockroachProgramSignature(program) {
   return `-roachv2a-p${state}`;
 }
 
+// Work-source key component. A record whose frozen snapshot carries
+// work_completed chips renders the same page whatever its product rows do, so
+// it adds NOTHING (every pre-retirement PDF keeps its key). A chip-less record
+// derives "What we did" from its product rows, so the rows key the PDF: a
+// changed / added / removed row re-renders the cached copy. `rows` is the raw
+// service_products set (null = the load FAILED → keyed 'f', like the program
+// state). Raw columns only — the lookup (below) and report-data's render
+// stamp read the SAME fields, so the two sides can never disagree.
+function snapshotHasStoredWork(service = {}) {
+  const snapshot = cockroachSnapshotOf(service);
+  return Boolean(snapshot && chips(snapshot.values && snapshot.values.work_completed).length);
+}
+
+function cockroachWorkSourceSignature(service = {}, rows = null) {
+  if (!cockroachSnapshotOf(service) || snapshotHasStoredWork(service)) return '';
+  if (rows == null) return '-wf';
+  if (!Array.isArray(rows) || !rows.length) return '';
+  const tuples = rows
+    .map((r) => [r.product_id || '', lower(r.product_name), lower(r.application_method), lower(r.application_area)].join('|'))
+    .sort()
+    .join('\n');
+  return `-w${crypto.createHash('sha1').update(tuples).digest('hex').slice(0, 8)}`;
+}
+
+async function cockroachWorkSourceLookup(service = {}, knex = null) {
+  if (!knex || !service.id || !cockroachSnapshotOf(service) || snapshotHasStoredWork(service)) return '';
+  let rows = null;
+  try {
+    rows = await knex('service_products')
+      .where({ service_record_id: service.id })
+      .select('product_id', 'product_name', 'application_method', 'application_area');
+  } catch { rows = null; }
+  return cockroachWorkSourceSignature(service, Array.isArray(rows) ? rows : null);
+}
+
 async function cockroachReportV2PdfSignature(service = {}, knex = null) {
   if (process.env.COCKROACH_REPORT_V2 !== 'true') return '';
   if (!cockroachSnapshotOf(service)) return '';
   const program = knex ? await resolveCockroachProgram(service, knex) : null;
-  return cockroachProgramSignature(program);
+  return cockroachProgramSignature(program) + await cockroachWorkSourceLookup(service, knex);
 }
 
 /**
@@ -830,7 +985,12 @@ function cockroachReportV2RenderedSignature(data, service = {}) {
     : cockroachProgramSignature(null);
 }
 
-/** Typed field keys the dashboard renders itself — the typed tiles drop them. */
+/**
+ * Typed field keys the dashboard renders itself — the typed tiles drop them.
+ * `work_completed` stays even though the form no longer offers it: stored
+ * snapshots still carry the chips, and the dashboard's "What we did" renders
+ * them (or the product-derived work) instead of a duplicate typed tile.
+ */
 const COCKROACH_V2_DASHBOARD_FIELD_KEYS = new Set([
   'species',
   'activity_level',
@@ -850,6 +1010,9 @@ module.exports = {
   cockroachReportV2PdfSignature,
   cockroachReportV2RenderedSignature,
   cockroachProgramSignature,
+  cockroachWorkSourceSignature,
+  workChipsFromApplications,
+  GENERIC_WHAT_WE_DID,
   resolveCockroachProgram,
   cockroachProgramLineage,
   cockroachSnapshotOf,

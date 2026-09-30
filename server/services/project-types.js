@@ -223,11 +223,13 @@ const PROJECT_TYPES = {
         'Wall voids', 'Garage', 'Attic', 'Exterior perimeter', 'Landscape beds',
         'Lanai / pool cage', 'Other',
       ] },
-      { key: 'work_completed', label: 'Work completed today', type: 'chips', section: 'Work completed', options: [
-        'Bait placement', 'Insect growth regulator', 'Crack & crevice treatment',
-        'Dust application', 'Flush-out treatment', 'Exterior perimeter treatment',
-        'Glue boards placed', 'Monitoring stations placed', 'Sanitation review completed',
-      ] },
+      // `work_completed` ("Work completed today" chips) was retired from THIS
+      // type only (owner ruling 2026-09-26): the visit's recorded product rows
+      // are the work record — the cockroach report's "What we did" derives from
+      // them (cockroach-report-v2.js workChipsFromApplications). Stored
+      // snapshots keep their chips and render unchanged; a new submission
+      // carrying the key is rejected as unknown like every other retired
+      // field. german_roach_knockdown / palmetto / one_time_pest keep theirs.
       { key: 'customer_prep', detail: true, label: 'How the customer can help', type: 'chips', section: 'Customer prep', options: [
         'Remove food debris', 'No over-the-counter sprays', 'Keep counters clean',
         'Reduce clutter', 'Empty trash nightly', 'Fix plumbing leaks',

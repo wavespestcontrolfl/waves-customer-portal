@@ -3316,6 +3316,14 @@ async function completeScheduledService(completionInput, packetContext = null) {
           && typeof structuredFindings.values === 'object') {
           delete structuredFindings.values.treatments_completed;
         }
+        // Cockroach work_completed retired 2026-09-29 (the report derives
+        // "What we did" from the product rows). A form loaded before that
+        // deploy still posts the chips; drop them rather than 400 a live
+        // completion the tech can't fix from a stale screen.
+        if (typedFindingsType === 'cockroach' && structuredFindings?.values
+          && typeof structuredFindings.values === 'object') {
+          delete structuredFindings.values.work_completed;
+        }
         const findingsValidation = ActivityIndicators.validateTypedFindings({
           type: structuredFindings?.type,
           values: structuredFindings?.values,

@@ -7,7 +7,7 @@ const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
-const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
+const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature, cockroachWorkSourceSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -5453,7 +5453,11 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
       // The signature of the program state THIS payload carries — the PDF
       // store key reads it from the render, never from a second lookup.
-      cockroachRenderedSignature = cockroachProgramSignature(program);
+      // …plus the work-source component (chip-less records derive "What we
+      // did" from the product rows; the raw rows are read here exactly as the
+      // lookup reads them). A failed product load keys 'f'.
+      cockroachRenderedSignature = cockroachProgramSignature(program)
+        + cockroachWorkSourceSignature(service, productsLoadFailed ? null : rawProducts);
     }
 
     // Placed last in this try so a failure here can never disturb the

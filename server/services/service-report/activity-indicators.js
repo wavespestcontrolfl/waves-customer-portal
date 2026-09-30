@@ -873,11 +873,6 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
       'Lawn treatment', 'Pet resting area treatment', 'Limited treatment'],
     noWork: ['Inspection only'],
   } },
-  cockroach: { work_completed: {
-    applied: ['Bait placement', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
-      'Flush-out treatment', 'Exterior perimeter treatment'],
-    nonSpray: ['Bait placement'],
-  } },
   german_roach_knockdown: { treatment_completed: {
     applied: ['Gel bait', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
       'Appliance-area treatment', 'Cabinet hinge treatment', 'Plumbing penetration treatment'],
@@ -942,6 +937,23 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
   },
 });
 
+// Fields RETIRED from a typed form whose STORED snapshots still carry them:
+// the schema no longer offers the option (so the every-label-exists test does
+// not apply), but read-time evidence must keep classifying every record
+// completed before the retirement exactly as it always did. Cockroach
+// `work_completed` retired 2026-09-26 (owner ruling: the visit's product rows
+// are the work record — see cockroach-report-v2.js workChipsFromApplications).
+// A NEW cockroach completion carries no chips, so its treatment evidence comes
+// from its product rows through the same product-row paths every other lane
+// uses (spray-class method, product identity, isProductApplicationRow).
+const RETIRED_TYPED_TREATMENT_OPTIONS = Object.freeze({
+  cockroach: { work_completed: {
+    applied: ['Bait placement', 'Insect growth regulator', 'Crack & crevice treatment', 'Dust application',
+      'Flush-out treatment', 'Exterior perimeter treatment'],
+    nonSpray: ['Bait placement'],
+  } },
+});
+
 // `noWork` = the closeout explicitly recorded inspection-only / deferred /
 // device-only work and nothing else that treats — the typed counterpart of an exclusive
 // no-treatment protocol action, so read-time normalization can clear the
@@ -951,7 +963,7 @@ const TYPED_TREATMENT_OPTIONS = Object.freeze({
 // evidence, distinct from the application verdict (codex P1 r14). `declared`
 // = any classified option was selected at all.
 function typedTreatmentEvidence(type, values) {
-  const fields = TYPED_TREATMENT_OPTIONS[type];
+  const fields = TYPED_TREATMENT_OPTIONS[type] || RETIRED_TYPED_TREATMENT_OPTIONS[type];
   const result = { applied: false, performed: false, noWork: false, dryDown: false, declared: false, reentryWait: false };
   if (!fields || !values || typeof values !== 'object') return result;
   let noWorkSelected = false;
@@ -4256,6 +4268,7 @@ function findBannedCustomerCopy(text) {
 
 module.exports = {
   TYPED_TREATMENT_OPTIONS,
+  RETIRED_TYPED_TREATMENT_OPTIONS,
   typedTreatmentEvidence,
   typedTreatmentEvidenceForRecord,
   projectPoisonControl,
