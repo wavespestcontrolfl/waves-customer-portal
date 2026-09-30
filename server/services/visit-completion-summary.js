@@ -447,6 +447,11 @@ async function summaryLinkTextStarted(database, invoiceId, kind) {
   const row = await database('visit_completion_packets').where({ id: packetId }).first('visit_id', 'payload');
   const recorded = row && require('./visit-completion-packets').packetPayload(row).summaryBillingLink;
   if (recorded?.kind !== kind || recorded.invoiceId !== invoiceId) return false;
+  // Judged on what the summary actually carried, not on the plan: the request's record (written
+  // before the provider request, cleared for a plain summary) must name this link. A summary that
+  // went plain (the link went stale at the handoff) gave the customer no link.
+  const attempt = require('./visit-completion-packets').packetPayload(row).summaryLinkTextAttempt;
+  if (attempt?.kind !== kind || attempt.invoiceId !== invoiceId) return false;
   const effect = await database('visit_effects').where({ visit_id: row.visit_id, effect_type: 'completion_sms' }).first('status', 'last_error');
   return effect?.status === 'sent' || (effect?.status === 'unknown_delivery' && !VisitGroups.isHandoffPending(effect.last_error));
 }

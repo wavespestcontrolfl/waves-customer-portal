@@ -5737,6 +5737,50 @@ postgres('visit summary recipient recovery', () => {
         expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
       });
 
+      // The link goes stale at the locked handoff (a billing hold lands after the decision), so the
+      // summary goes out PLAIN and is accepted: the customer never got the link.
+      const summaryGoesPlain = () => {
+        let calls = 0;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          calls += 1;
+          if (calls === 1) await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+          return handoffSender()(input);
+        });
+      };
+
+      test('a summary that went plain does not fence an operator first send of the invoice', async () => {
+        const invoiceId = await stop();
+        summaryGoesPlain();
+        await coordinate();
+        await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+        expect(sendCustomerMessage.mock.calls.map(([input]) => input.body)).toContain(plainBody());
+        expect(await summaryEffect()).toMatchObject({ status: 'sent' });
+        expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+        const outcome = await operatorFirstSend(invoiceId);
+        expect(refused(outcome)).not.toBe('already_delivered');
+        expect(strayTexts).toEqual(['payment_link']);
+      });
+
+      test('a summary that went plain does not fence an operator first send of the receipt', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        summaryGoesPlain();
+        await coordinate();
+        await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: false });
+        expect(await summaryEffect()).toMatchObject({ status: 'sent' });
+        const claimed = await Queue.claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true });
+        expect(claimed.alreadySent).toBeUndefined();
+        expect(claimed.id).toBeTruthy();
+        await Queue.releaseOperatorReceiptClaim(claimed, {});
+      });
+
+      test('a summary that carried the receipt link still fences an operator first send of the receipt', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        const restore = await failStamp('receipt');
+        try { await coordinate(); } finally { await restore(); }
+        expect(await Queue.claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: true })).toEqual({ alreadySent: true });
+      });
+
       test('a plain summary (its link went stale) never stamps the invoice, on replay either', async () => {
         const invoiceId = await stop();
         let calls = 0;
