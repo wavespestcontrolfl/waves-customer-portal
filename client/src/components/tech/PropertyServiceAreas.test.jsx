@@ -76,6 +76,24 @@ describe('property area review', () => {
     expect(screen.getByLabelText('Ornamental beds square feet')).toHaveValue(300);
     expect(screen.getAllByRole('checkbox')[0]).not.toBeChecked();
   });
+  it.each([
+    ['the same row at a new address', { addressKey: 'new-address' }, true],
+    ['an unchanged property', {}, false],
+  ])('a reload describing %s clears today\'s coverage only when the property changed', async (_label, change, cleared) => {
+    const first = { ...measurements(), addressKey: 'old-address' };
+    adminFetch.mockResolvedValueOnce(first);
+    const onVisitAreaChange = vi.fn();
+    render(<PropertyServiceAreas {...props} visitArea="600" onVisitAreaChange={onVisitAreaChange} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Review areas' }));
+    fireEvent.change(screen.getByLabelText('Ornamental beds square feet'), { target: { value: '850' } });
+    fireEvent.click(screen.getAllByRole('checkbox')[0]);
+    adminFetch.mockRejectedValueOnce(Object.assign(new Error('Property areas changed. Reload before saving your correction.'), { status: 409 }));
+    fireEvent.click(screen.getByRole('button', { name: 'Save reviewed areas' }));
+    adminFetch.mockResolvedValueOnce({ ...first, version: 'c'.repeat(64), ...change });
+    fireEvent.click(await screen.findByRole('button', { name: 'Load latest saved areas' }));
+    await waitFor(() => expect(adminFetch).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(onVisitAreaChange.mock.calls.some(([area]) => area === null)).toBe(cleared));
+  });
   it('treats zero as a reviewed area, and today’s coverage never issues a property write', async () => {
     const data = measurements(); data.areas.beds = { sqft: 0, source: 'field', reviewedAt: '2026-09-27' };
     adminFetch.mockResolvedValue(data);

@@ -30,8 +30,19 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
   const [stale, setStale] = useState(false);
   const [reloadCount, setReloadCount] = useState(0);
   const epoch = useRef(0);
-  const current = useRef({ endpoint, onMeasurements, onUnavailable });
-  current.current = { endpoint, onMeasurements, onUnavailable };
+  const current = useRef({ endpoint, onMeasurements, onUnavailable, onVisitAreaChange });
+  current.current = { endpoint, onMeasurements, onUnavailable, onVisitAreaChange };
+  // The property (customer, row, address) the loaded areas describe. Visit
+  // coverage typed for one property never carries to another — including the
+  // same row after an address change, which the parent's property-id check
+  // cannot see.
+  const loadedIdentity = useRef(null);
+  function accept(result) {
+    const identity = identityOf(result);
+    if (loadedIdentity.current !== null && loadedIdentity.current !== identity) current.current.onVisitAreaChange?.(null);
+    loadedIdentity.current = identity;
+    setData(result); current.current.onMeasurements?.(result);
+  }
 
   useEffect(() => {
     const generation = ++epoch.current;
@@ -42,7 +53,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     adminFetch(endpoint).then(result => {
       if (!alive || generation !== epoch.current) return;
       if (!result?.enabled) { current.current.onUnavailable?.({ failed: false }); return; }
-      setData(result); current.current.onMeasurements?.(result);
+      accept(result);
     }).catch(err => {
       if (!alive || generation !== epoch.current) return;
       // A 404 is the feature being off; anything else is a failed load the
@@ -68,7 +79,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     try {
       const result = await adminFetch(`${endpoint}/lookup`, { method: 'POST', body: '{}' });
       if (current.current.endpoint !== startedFor || generation !== epoch.current) return;
-      setData(result); current.current.onMeasurements?.(result);
+      accept(result);
       setMessage('Property estimates updated. Reviewed measurements were kept.');
     } catch (err) {
       if (current.current.endpoint === startedFor && generation === epoch.current) setError(err.message || 'The property lookup could not finish. Retry or enter a measured area.');
@@ -93,7 +104,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     try {
       const result = await adminFetch(endpoint, { method: 'PUT', body: JSON.stringify({ areas, version: data.version }) });
       if (current.current.endpoint !== startedFor || generation !== epoch.current) return;
-      setData(result); current.current.onMeasurements?.(result); setOpen(false);
+      accept(result); setOpen(false);
       setMessage('Reviewed property areas saved for future visits.');
     } catch (err) {
       if (current.current.endpoint === startedFor && generation === epoch.current) {
@@ -110,7 +121,7 @@ export default function PropertyServiceAreas({ serviceId, serviceLine, customerI
     try {
       const result = await adminFetch(endpoint);
       if (current.current.endpoint !== startedFor || generation !== epoch.current) return;
-      setData(result); current.current.onMeasurements?.(result);
+      accept(result);
       let notice = '';
       if (identityOf(result) !== identityOf(data)) {
         // The visit now points at a different property (or address): the

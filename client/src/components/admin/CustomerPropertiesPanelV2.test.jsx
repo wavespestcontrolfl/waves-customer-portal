@@ -424,4 +424,17 @@ describe('CustomerPropertiesPanelV2 — review-round behaviours', () => {
     await screen.findByText(/10 Palm Ave/);
     await waitFor(() => expect(onChanged).toHaveBeenCalledTimes(1));
   });
+
+  it.each([false, true])('mounts per-row area editors only when the list says the feature is on (%s)', async enabled => {
+    const fetchMock = vi.fn((url) => url.endsWith('/areas')
+      ? jsonResponse({ enabled: true, propertyId: 'p1', version: 'a'.repeat(64), areas: { beds: null, lawn: null, mosquito: null } })
+      : jsonResponse({ properties: [PRIMARY, ELIGIBLE], canChangePrimary: true, propertyServiceAreas: enabled }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<CustomerPropertiesPanelV2 customerId="c1" canEdit onChanged={vi.fn()} />);
+    await screen.findByRole('button', { name: 'Make primary' });
+    if (enabled) await waitFor(() => expect(screen.getAllByRole('button', { name: 'Review areas' })).toHaveLength(2));
+    // Dark: one list request, no per-row probes.
+    const areaCalls = fetchMock.mock.calls.filter(([url]) => url.endsWith('/areas'));
+    expect(areaCalls).toHaveLength(enabled ? 2 : 0);
+  });
 });

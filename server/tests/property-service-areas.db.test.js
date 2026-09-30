@@ -5,7 +5,9 @@ const migration = require('../models/migrations/20260927010000_property_service_
 jest.mock('../routes/property-lookup-v2', () => ({ performPropertyLookup: jest.fn(async () => null) }));
 const lookup = require('../routes/property-lookup-v2').performPropertyLookup;
 const areas = require('../services/property-service-areas');
-const describeDb = process.env.DATABASE_URL ? describe : describe.skip;
+// CI's DB-gated runner discovers suites by this exact SKIP line.
+const SKIP = !process.env.DATABASE_URL;
+const describeDb = SKIP ? describe.skip : describe;
 jest.setTimeout(30000);
 
 // Synthetic rows in an owned schema. No customer rows or public sequences are

@@ -60,6 +60,8 @@ export default function CustomerPropertiesPanelV2({
 }) {
   const density = useUiDensity();
   const [properties, setProperties] = useState([]);
+  // Resolved once from the list response: a dark feature mounts no row editors.
+  const [serviceAreasEnabled, setServiceAreasEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadErr, setLoadErr] = useState("");
   const [adding, setAdding] = useState(false);
@@ -97,6 +99,7 @@ export default function CustomerPropertiesPanelV2({
     setLoading(true);
     setLoadErr("");
     setCanChangePrimary(false);
+    setServiceAreasEnabled(false);
     setPrimaryPreview(null);
     // A refreshed preview is obsolete; an in-flight write still owns its lock.
     setPreviewBusy(false);
@@ -105,6 +108,7 @@ export default function CustomerPropertiesPanelV2({
         if (!cancelled) {
           setProperties(Array.isArray(d.properties) ? d.properties : []);
           setCanChangePrimary(d.canChangePrimary === true);
+          setServiceAreasEnabled(d.propertyServiceAreas === true);
         }
       })
       .catch((e) => {
@@ -364,7 +368,7 @@ export default function CustomerPropertiesPanelV2({
                   </div>
                 )}
                 </div>
-                {canEdit && <PropertyServiceAreas customerId={customerId} propertyId={p.id} refreshToken={refreshToken} disabled={writeBusy} />}
+                {canEdit && serviceAreasEnabled && <PropertyServiceAreas customerId={customerId} propertyId={p.id} refreshToken={refreshToken} disabled={writeBusy} />}
               </div>
             ))}
             {properties.length === 0 && (
