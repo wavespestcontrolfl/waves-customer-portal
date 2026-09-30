@@ -111,6 +111,8 @@ describe('scoring', () => {
     expect(evalLib.costUsd('gemini-3.8-flash', { input_tokens: 1_000_000, output_tokens: 500_000, reasoning_tokens: 500_000 })).toBe(0.75 + 3.75);
     expect(evalLib.costUsd('gpt-6-astra', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(1.5); // reasoning not billed twice
     expect(evalLib.costUsd('mystery', { input_tokens: 1 })).toBeNull();
+    expect(evalLib.costUsd('gpt-6-sol', { input_tokens: 100_000, output_tokens: 10_000, reasoning_tokens: 8_000 })).toBe(0.3);
+    expect(evalLib.costUsd('claude-fable-5-1', { input_tokens: 100_000, output_tokens: 10_000 })).toBe(1.5);
     expect(evalLib.costUsd('gpt-6-astra', null)).toBeNull();
     // A usage object with null counts (provider omitted its metadata) is an unknown charge, never $0.
     expect(evalLib.costUsd('gpt-6-astra', { input_tokens: null, output_tokens: null, reasoning_tokens: null })).toBeNull();

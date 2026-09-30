@@ -40,6 +40,11 @@ const { CAUSE_PATTERNS } = require('./lawn-diagnostic-naming-gate');
 const PRICES_PER_M = Object.freeze({
   'gemini-3.8-flash': { input: 0.75, output: 3.75, reasoningSeparate: true },
   'gpt-6-astra': { input: 10, output: 50, reasoningSeparate: false },
+  // Backup leg + second opinion since 2026-09-29 (OpenAI pricing page, short context).
+  'gpt-6-sol': { input: 2, output: 10, reasoningSeparate: false },
+  // Referee (claude-api skill price table, cached 2026-09-25). Anthropic's
+  // output_tokens already include thinking, so nothing is added separately.
+  'claude-fable-5-1': { input: 10, output: 50, reasoningSeparate: false },
 });
 
 // A pg DATE arrives as a Date (local midnight) or 'YYYY-MM-DD'; either way the
