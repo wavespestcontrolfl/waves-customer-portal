@@ -2173,7 +2173,8 @@ function validateAnaphoricClaim(claim, text, env) {
 // The invoice is identified by the number named in the clause or the customer's message, then by an amount
 // (the invoice total or amount due); with nothing to go on it must be the ONLY recent invoice. Unknown
 // invoice state, no match, or several candidates all fail closed.
-const INVOICE_COLLECTIBLE_STATUSES = new Set(['open', 'sent', 'viewed', 'overdue', 'partially_paid']);
+// the SAME status list as the aggregator's collectible-own-invoice predicate (invoice-helpers)
+const INVOICE_COLLECTIBLE_STATUSES = new Set(require('./invoice-helpers').OWN_COLLECTIBLE_INVOICE_STATUSES);
 const INVOICE_STATUS_FAMILY = { paid: 'paid', prepaid: 'paid', processing: 'pending', refunded: 'refunded' };
 function validateInvoiceStatusClaim(claim, text, amounts, env) {
   const list = env.context?.billing?.invoiceStatuses;

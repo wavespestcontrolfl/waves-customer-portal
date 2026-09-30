@@ -1,7 +1,10 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue } = require('./invoice-helpers');
+const {
+  INVOICE_UNCOLLECTIBLE_STATUSES, invoiceAmountDue, invoiceWithdrawnFromCustomer, isCollectibleOwnInvoice, hasCollectibleAmountDue,
+  OWN_COLLECTIBLE_INVOICE_STATUSES,
+} = require('./invoice-helpers');
 const { customerOnAutopay, isPaused } = require('./autopay-eligibility');
 const { technicianReportCustomerCopy } = require('./service-report/technician-report-copy');
 const { etDateString } = require('../utils/datetime-et');
@@ -587,7 +590,7 @@ class ContextAggregator {
         // ceiling, far above any real account.
         .orderBy('created_at', 'desc')
         .limit(300)
-        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'created_at')
+        .select('id', 'invoice_number', 'title', 'status', 'total', 'credit_applied', 'due_date', 'payer_id', 'scheduled_send_error', 'created_at')
         // FAIL CLOSED (Codex r11): a lone invoice-query failure must not
         // read as "no invoices" — null marks billing UNAVAILABLE and the
         // facts render a visible unknown instead of "Balance: Current".
@@ -639,7 +642,7 @@ class ContextAggregator {
     // balance and the recent-payments facts.
     const billingUnavailable = allInvoices === null;
     const invoiceRows = allInvoices || [];
-    const VISIBLE_INVOICE_STATUSES = new Set(['sent', 'viewed', 'overdue']);
+    const VISIBLE_INVOICE_STATUSES = new Set(OWN_COLLECTIBLE_INVOICE_STATUSES);
     const payerInvoiceIds = new Set(invoiceRows.filter((r) => r.payer_id).map((r) => String(r.id)));
     const draftOwnInvoiceIds = new Set(invoiceRows.filter((r) => !r.payer_id && String(r.status) === 'draft').map((r) => String(r.id)));
     const paymentInvoiceId = (p) => {
@@ -659,7 +662,11 @@ class ContextAggregator {
     // attempt is NOT "Current". Invoice-linked failed attempts are excluded
     // (the invoice itself already counts — double-count guard). Superseded
     // failed attempts were collected by their retry's own row.
-    const ownInvoices = invoiceRows.filter((inv) => !inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
+    // ONE shared predicate (invoice-helpers.isCollectibleOwnInvoice): sent / viewed / overdue / partially_paid,
+    // not payer-billed, and not WITHDRAWN to a payer (stamp only — billing-v2 /balance excludes those too), so
+    // the balance, open invoice, Zelle-target list and settlement checks all mean the same invoices
+    // (Codex round-23 P1).
+    const ownInvoices = invoiceRows.filter(isCollectibleOwnInvoice);
     const ownInvoiceIds = new Set(ownInvoices.map((inv) => String(inv.id)));
     const invoiceBalance = ownInvoices.reduce((sum, inv) => sum + invoiceAmountDue(inv), 0);
     const failedStandalone = ownPayments
@@ -676,22 +683,25 @@ class ContextAggregator {
     // Newest own invoice with a POSITIVE due (Codex r8): a fully-credited
     // newest row must not present "$0.00 due" while an older invoice carries
     // the balance.
-    const openInvoice = ownInvoices.find((inv) => invoiceAmountDue(inv) > 0) || null;
+    const openInvoice = ownInvoices.find(hasCollectibleAmountDue) || null;
     // EVERY own invoice with a positive due (newest first, capped) — `openInvoice` above is only the newest.
     // Lets a caller tell WHICH open invoice a customer's message is about (Codex round-19 P1).
-    const openInvoices = ownInvoices.filter((inv) => invoiceAmountDue(inv) > 0).slice(0, 10).map((inv) => ({
+    const openInvoices = ownInvoices.filter(hasCollectibleAmountDue).slice(0, 10).map((inv) => ({
       id: inv.id, invoiceNumber: inv.invoice_number || null, status: inv.status, amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
     }));
     // The status of the customer's recent own invoices (drafts excluded — never shown to the customer), for
     // "your invoice is paid / processing" statements (Codex round-20 P1). null = billing unavailable (unknown).
     const invoiceStatuses = billingUnavailable ? null : invoiceRows
-      .filter((inv) => !inv.payer_id && String(inv.status) !== 'draft')
+      // a packet invoice WITHDRAWN to a third-party payer keeps payer_id NULL and a collectible status — only its
+      // stamp says it is the payer's debt, never the homeowner's (Codex round-23 P1)
+      .filter((inv) => !inv.payer_id && String(inv.status) !== 'draft' && !invoiceWithdrawnFromCustomer(inv))
       .slice(0, 8)
       .map((inv) => ({
         id: inv.id, invoiceNumber: inv.invoice_number || null, status: String(inv.status || ''),
         total: Number(inv.total), amountDue: invoiceAmountDue(inv), dueDate: inv.due_date || null,
       }));
-    const hasPayerBilledOpen = invoiceRows.some((inv) => inv.payer_id && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
+    // a WITHDRAWN packet invoice is payer-billed in effect (stamp only), so it flags the same fact
+    const hasPayerBilledOpen = invoiceRows.some((inv) => (inv.payer_id || invoiceWithdrawnFromCustomer(inv)) && VISIBLE_INVOICE_STATUSES.has(String(inv.status)));
     // The BILLING LANE, resolved once and carried as an explicit FACT. The
     // per-application copy rule lets a monthly amount be spoken only when the
     // account says the lane is monthly membership — but nothing produced that

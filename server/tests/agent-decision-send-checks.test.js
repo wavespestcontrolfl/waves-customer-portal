@@ -7,6 +7,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/sms-shadow-drafter', () => ({
   planOpenTimesRecheck: jest.fn(),
   openTimesStillOffered: jest.fn(),
+  // the amount pattern sms-amount-recheck reads off the drafter (bodyAmountCents); without it the pattern is
+  // undefined and every body looks like it carries an amount
+  AMOUNT_MASK_RE: /\$\s?\d[\d,]*(?:\.\d{1,2})?/g,
 }));
 // slaDraftedAt is kept REAL (only followupPromiseBlockReason is mocked) so
 // this suite proves the actual facts_generated_at → created_at fallback the
@@ -22,6 +25,11 @@ jest.mock('../services/sms-followup-sla', () => ({
 jest.mock('../services/sms-amount-recheck', () => ({
   ...jest.requireActual('../services/sms-amount-recheck'),
   outgoingAmountsStale: jest.fn(async () => ({ stale: false })),
+}));
+// bodyNeedsPaymentRecheck (the scheduler's gate, now this seam's too) asks the real sms-suggest-mode for price grammar;
+// that module cannot load under this file's stubbed drafter (it fails closed => "needs recheck"), so give it a stand-in.
+jest.mock('../services/sms-suggest-mode', () => ({
+  hasPriceQuote: jest.fn((text) => /\$\s*\d|\b\d[\d,]*(?:\.\d+)?\s*dollars?\b/i.test(String(text || ''))),
 }));
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
@@ -134,10 +142,32 @@ test('a gone slot, a stale/edited follow-up promise, or a stale amount each refu
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' })).resolves.toBe('amount no longer authorized (amount_no_longer_authorized)');
 });
 
-test('no snapshot → no availability call; an older-prompt decision skips the amount recheck', async () => {
-  await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
+test('no snapshot → no availability call; an older-prompt decision skips the recheck for a body that needs none', async () => {
+  await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'See you Tuesday, thanks!' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
+});
+
+// Codex round-23 P2: the immediate Agent Review seam gates the recheck EXACTLY like the scheduler's fire-time seam
+// (bodyNeedsPaymentRecheck: an amount, an affirmative Zelle offer, a payment-status claim, price grammar, or a
+// NEGATIVE Zelle availability claim) — so an edited pre-v12 body carrying a Zelle DENIAL is rechecked too.
+describe('the recheck gate matches the scheduler (round 23)', () => {
+  const v11 = (over = {}) => decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11', ...over });
+  test.each(["Zelle isn't available right now.", "We don't take Zelle.", 'Zelle is not available for this account right now, so use your pay link.'])(
+    'a pre-v12 edited Zelle DENIAL runs the recheck: %s', async (body) => {
+      outgoingAmountsStale.mockResolvedValue({ stale: true, reason: 'zelle_now_available' });
+      await expect(agentDecisionSendBlockReason({ decision: v11(), outgoingBody: body })).resolves.toBe('amount no longer authorized (zelle_now_available)');
+      expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'c1', body, promptVersion: 'house_voice_v11', trustOwedAmounts: true }));
+    },
+  );
+  test('a still-true denial goes out; a denial on a decision with no customer cannot be verified and is not silently blocked as an offer', async () => {
+    await expect(agentDecisionSendBlockReason({ decision: v11(), outgoingBody: "Zelle isn't available right now." })).resolves.toBeNull();
+    await expect(agentDecisionSendBlockReason({ decision: v11({ customer_id: null }), outgoingBody: "Zelle isn't available right now." })).resolves.toBeNull();
+  });
+  test.each(['You owe $5.', 'Your payment was received.', 'You can Zelle us.'])('a pre-v12 body that names a figure / payment status / Zelle offer is rechecked like the scheduler does: %s', async (body) => {
+    await agentDecisionSendBlockReason({ decision: v11(), outgoingBody: body });
+    expect(outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ body, trustOwedAmounts: true }));
+  });
 });
 
 // Independent-review P1 (round 6, PR #5331): the Zelle recipient-plus-

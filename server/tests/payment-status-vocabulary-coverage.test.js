@@ -891,8 +891,8 @@ describe('round-22: "Invoice #0123 is still unpaid" binds THAT invoice, not the 
   const inv = (num, status, amountDue, total = 100) => ({ id: `i-${num}`, invoiceNumber: `WPC-2026-${num}`, status, total, amountDue });
   const CLAIM = 'Invoice #0123 is still unpaid.';
 
-  test('collectible (open / sent / viewed / overdue / partially paid) with an amount due => true', () => {
-    for (const status of ['open', 'sent', 'viewed', 'overdue', 'partially_paid']) {
+  test('collectible (sent / viewed / overdue / partially paid) with an amount due => true', () => {
+    for (const status of ['sent', 'viewed', 'overdue', 'partially_paid']) {
       expect({ status, r: rq(CLAIM, [inv('0123', status, 60)]) }).toEqual({ status, r: false });
     }
     expect(rq(CLAIM, [inv('0123', 'sent', 0)])).toBe(true); // nothing due

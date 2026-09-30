@@ -91,9 +91,13 @@ function followupBlock({ decision, outgoingBody }) {
 // fail CLOSED (refuse) rather than let an unverifiable Zelle offer out.
 async function amountsBlock({ decision, outgoingBody }) {
   const realAnswers = typeof decision.prompt_version === 'string' && decision.prompt_version.startsWith('house_voice_v12');
-  const { outgoingAmountsStale, hasAffirmativeZelleMention } = require('./sms-amount-recheck');
+  const { outgoingAmountsStale, hasAffirmativeZelleMention, bodyNeedsPaymentRecheck } = require('./sms-amount-recheck');
   const hasZelleOffer = hasAffirmativeZelleMention(outgoingBody);
-  if (!realAnswers && !hasZelleOffer) return null;
+  // Codex round-23 P2: the SAME gate the scheduler's fire-time seam uses (bodyNeedsPaymentRecheck: an amount, an
+  // affirmative Zelle offer, a payment-status claim, price grammar — AND a negative Zelle availability claim),
+  // so an edited pre-v12 body carrying a Zelle DENIAL is rechecked too. v12 decisions always run the recheck.
+  const needsRecheck = realAnswers || bodyNeedsPaymentRecheck(outgoingBody);
+  if (!needsRecheck) return null;
   if (!decision.customer_id) {
     return hasZelleOffer ? 'amount no longer authorized (amount_recheck_no_customer)' : null;
   }

@@ -173,6 +173,22 @@ function invoiceWithdrawnFromCustomer(invoice) {
     && PACKET_WITHDRAWN_SEND_ERROR.test(String(invoice.scheduled_send_error || ''));
 }
 
+// Codex round-23 P1: ONE definition of "a collectible invoice the HOMEOWNER owes" shared by the SMS context
+// (outstanding balance, open invoice, Zelle-target list, invoice-status facts), the settlement / obligation
+// checks and the drafter's invoice-status map. Status must be one a customer can still be asked to pay
+// (sent / viewed / overdue / partially_paid), the invoice must not be payer-billed (payer_id) or WITHDRAWN to a
+// payer (stamp only), and `hasCollectibleAmountDue` adds a positive amount due (total minus applied credit).
+const OWN_COLLECTIBLE_INVOICE_STATUSES = Object.freeze(['sent', 'viewed', 'overdue', 'partially_paid']);
+function isCollectibleOwnInvoice(invoice) {
+  return !!invoice
+    && !invoice.payer_id
+    && OWN_COLLECTIBLE_INVOICE_STATUSES.includes(invoiceStatusKey(invoice.status))
+    && !invoiceWithdrawnFromCustomer(invoice);
+}
+function hasCollectibleAmountDue(invoice) {
+  return isCollectibleOwnInvoice(invoice) && invoiceAmountDue(invoice) > 0;
+}
+
 // Takes the invoice ROW — the only shape that can see the withdrawal stamp.
 // There is deliberately no status-string overload (Codex #4311 r27 P2,
 // AGENTS.md: no compatibility shims for callers this repo controls): a second
@@ -307,6 +323,9 @@ module.exports = {
   assertInvoiceVoidable,
   isInvoiceCollectibleStatus,
   invoiceWithdrawnFromCustomer,
+  OWN_COLLECTIBLE_INVOICE_STATUSES,
+  isCollectibleOwnInvoice,
+  hasCollectibleAmountDue,
   invoiceAmountDue,
   formatCardLine,
   COLLECTION_PENDING_FENCE_CODES,
