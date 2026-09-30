@@ -195,25 +195,38 @@ async function executeAwayMode({ customerId, caseRow, params }) {
   ] };
 }
 
+// Only holds THIS execution created are ever compensated by it: a hold a
+// same-case retry picked up (holds.js resumeSameCaseHold) may belong to a
+// concurrent run that is finishing it — undoing it here could restore
+// billing under visits that run already skipped. An unfinished picked-up
+// hold is left to the daily recovery.
+const ownHoldIds = (results) => results.filter((r) => !r.picked).map((r) => r.holdId);
+
+async function undoOwnHolds(holdIds) {
+  const { cancelHold } = require('./holds');
+  for (const holdId of holdIds || []) {
+    try { await cancelHold(holdId, { compensateVisits: true }); } catch (undoErr) {
+      logger.error(`[cancel-actions] hold compensation failed for ${holdId}: ${undoErr.message}`);
+    }
+  }
+}
+
 // The accept stands only once its holds are marked (holds.js
-// markHoldsAccepted): a marking failure undoes the holds and fails the
-// accept, as any other write failure does, before a skip can run.
-async function markAcceptedOrUndo(holdIds) {
-  const { markHoldsAccepted, cancelHold } = require('./holds');
+// markHoldsAccepted): a marking failure undoes this execution's own holds
+// and fails the accept, as any other write failure does, before a skip
+// can run.
+async function markAcceptedOrUndo(holdIds, ownIds) {
+  const { markHoldsAccepted } = require('./holds');
   try {
     await markHoldsAccepted(holdIds);
   } catch (err) {
-    for (const holdId of holdIds || []) {
-      try { await cancelHold(holdId, { compensateVisits: true }); } catch (undoErr) {
-        logger.error(`[cancel-actions] hold compensation failed for ${holdId}: ${undoErr.message}`);
-      }
-    }
+    await undoOwnHolds(ownIds);
     throw err;
   }
 }
 
 async function executeHold({ customerId, caseRow, action, params, families, deferTechNotices = false, allowNoHold = false }) {
-  const { startHold, cancelHold, applyHoldSkips, sendDueRestartTexts, emitHoldTechNotices } = require('./holds');
+  const { startHold, applyHoldSkips, sendDueRestartTexts, emitHoldTechNotices } = require('./holds');
   const holdable = families.filter((f) => ['lawn_care', 'mosquito', 'tree_shrub'].includes(f));
   if (!holdable.length) throw codedError('hold_family_required', 'Nothing on this plan can be held');
   // Multi-family holds commit ALL or NOTHING (codex P0): a later family's
@@ -229,11 +242,7 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
       if (result.notNeeded) notNeeded.push(result); else results.push(result);
     }
   } catch (err) {
-    for (const done of [...results].reverse()) {
-      try { await cancelHold(done.holdId, { compensateVisits: true }); } catch (undoErr) {
-        logger.error(`[cancel-actions] hold compensation failed for ${done.holdId}: ${undoErr.message}`);
-      }
-    }
+    await undoOwnHolds(ownHoldIds(results).reverse());
     throw err;
   }
   // Rule 2 (owner 2026-09-29): no visit inside the away dates means there
@@ -243,14 +252,14 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
     : `No ${labelOf(n.familyKey)} visits are booked before you are back, so nothing changes for it.`));
   // An away pairing still sets Away Mode on pest when no family needs a hold.
   if (!results.length && !allowNoHold) throw codedError('hold_not_needed', notNeededEffects.join(' '));
-  if (!results.length) return { holds: [], effects: notNeededEffects, ...(deferTechNotices ? { techNotices: [], holdResults: [] } : {}) };
+  if (!results.length) return { holds: [], effects: notNeededEffects, ...(deferTechNotices ? { techNotices: [], holdResults: [], ownHolds: [] } : {}) };
   // The techs hear about the moves, and the visits inside the pause are
   // skipped, only now — every family stands and no compensation can revert
   // them (a skip is one-way). An away pairing defers both further, until
   // its Away Mode write also stands.
   const techNotices = results.flatMap((r) => r.techNotices || []);
   if (!deferTechNotices) {
-    await markAcceptedOrUndo(results.map((r) => r.holdId));
+    await markAcceptedOrUndo(results.map((r) => r.holdId), ownHoldIds(results));
     emitHoldTechNotices(techNotices);
     await applyHoldSkips(results);
     await sendDueRestartTexts(results.map((r) => r.holdId));
@@ -264,13 +273,13 @@ async function executeHold({ customerId, caseRow, action, params, families, defe
     ...(results.some((r) => r.moved) ? ['Visits you already paid for are not lost: we moved them to after you are back.'] : []),
     ...notNeededEffects,
     'Your WaveGuard level and prices stay locked. We text you a week before your first visit back so you can move the date or cancel.',
-  ], ...(deferTechNotices ? { techNotices, holdResults: results } : {}) };
+  ], ...(deferTechNotices ? { techNotices, holdResults: results, ownHolds: ownHoldIds(results) } : {}) };
 }
 
 async function executeAwayPairing(ctx) {
   // Holds first (they can fail and fully compensate); Away Mode is a
   // single idempotent preference write, so nothing partial can linger.
-  const { techNotices, holdResults, ...hold } = await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });
+  const { techNotices, holdResults, ownHolds, ...hold } = await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });
   let away;
   try {
     // Durable first: recovery can undo the Away Mode write if this accept
@@ -281,19 +290,14 @@ async function executeAwayPairing(ctx) {
   } catch (err) {
     // Nothing partial survives (codex r2 P1): undo every hold this accept
     // created before reporting the failure.
-    const { cancelHold } = require('./holds');
-    for (const holdId of hold.holds || []) {
-      try { await cancelHold(holdId, { compensateVisits: true }); } catch (undoErr) {
-        logger.error(`[cancel-actions] hold compensation failed for ${holdId}: ${undoErr.message}`);
-      }
-    }
+    await undoOwnHolds(ownHolds);
     throw err;
   }
   // Holds and Away Mode both stand: the moved visits' techs hear now, and
   // the visits inside the pause are skipped.
   const holds = require('./holds');
   try {
-    await markAcceptedOrUndo(hold.holds);
+    await markAcceptedOrUndo(hold.holds, ownHolds);
   } catch (err) {
     // The holds are undone; Away Mode goes back too, so a failed accept
     // really changed nothing.

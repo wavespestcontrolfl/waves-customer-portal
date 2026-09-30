@@ -365,6 +365,9 @@ async function resumeSameCaseHold({ customerId, caseId, familyKey }) {
     moved: (record.moved || []).length,
     pendingSkips: (record.toSkip || []).filter((v) => !done.has(String(v.id))),
     techNotices: [],
+    // Not this execution's to undo: another run of the same accept may be
+    // finishing it; if none does, the daily recovery undoes it.
+    picked: true,
   };
 }
 

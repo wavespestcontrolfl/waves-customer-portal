@@ -194,3 +194,22 @@ test('away pairing records the Away Mode change on its holds before writing it',
   expect(mockRecordAway).toHaveBeenCalledWith(['h-lawn_care'], { customerId: 'c1', until: '2026-11-01' });
   expect(mockRecordAway.mock.invocationCallOrder[0]).toBeLessThan(mockStartAwayMode.mock.invocationCallOrder[0]);
 });
+
+test('a same-case retry never undoes a hold it picked up from another run: only its own holds are compensated', async () => {
+  mockStartHold
+    .mockResolvedValueOnce({ ...hold('lawn_care', []), picked: true })
+    .mockRejectedValueOnce(Object.assign(new Error('unmovable'), { code: 'hold_visits_unmovable' }));
+  await expect(executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'hold' }, params: {}, families: ['lawn_care', 'mosquito'],
+  })).rejects.toMatchObject({ code: 'hold_visits_unmovable' });
+  expect(mockCancelHold).not.toHaveBeenCalled();
+
+  jest.clearAllMocks();
+  mockStartHold.mockResolvedValueOnce({ ...hold('lawn_care', []), picked: true }).mockResolvedValueOnce(hold('mosquito', []));
+  mockMarkAccepted.mockRejectedValueOnce(new Error('no longer active'));
+  await expect(executeAcceptedAction({
+    customerId: 'c1', caseRow, action: { type: 'hold' }, params: {}, families: ['lawn_care', 'mosquito'],
+  })).rejects.toThrow('no longer active');
+  expect(mockCancelHold.mock.calls.map(([id]) => id)).toEqual(['h-mosquito']);
+  expect(mockSkips).not.toHaveBeenCalled();
+});
