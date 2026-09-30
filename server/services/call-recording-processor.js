@@ -113,6 +113,7 @@ function callExtractionV2PrimaryEnabled() {
 }
 const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
+const { SERVICE_AREA_COUNTY_ZIPS } = require('../config/county-zips');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
 // The address_recovered card's pass marker, reconciled to THIS pass. The two
@@ -1519,13 +1520,125 @@ function judgedAddressMatches(judged, knownCaller) {
   const now = onFileAddressJudged(knownCaller, normalizeState(String(knownCaller.addressState || '').trim()) || SERVICE_STATE);
   return ['line1', 'line2', 'city', 'state', 'zip'].every((k) => String(judged[k] || '') === now[k]);
 }
+// ── Web-form lead, street-level on-file address ───────────────────────────
+// (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL, owner ruling 2026-09-30.)
+// A new-build street in Parrish or Lakewood Ranch is often one Google has not
+// indexed by house: Address Validation resolves the ROUTE but not the premise
+// (status missing_component, granularity ROUTE), so the lead's typed form
+// address never earned on-file trust and an agreed time went unbooked. When
+// the address on file was typed into the lead's own web form and the call
+// does not repeat or replace it, that form address is booked anyway — and the
+// office gets an address read-back card (reason code address_readback).
+// Narrow on every side: form-sourced only, a house number on file, the same
+// street Google resolved, an in-area ZIP, and a verdict that is street-level
+// (never "the street does not exist", never out of area).
+const STREET_LEVEL_FORM_STATUS = 'street_level_form_accept';
+// leads.first_contact_channel values the web forms write (lead-webhook 'form',
+// public-quote 'website_quote'); a call-created lead is 'call'.
+const FORM_LEAD_CHANNELS = ['form', 'website_quote'];
+const SERVICE_AREA_ZIP5 = new Set(Object.values(SERVICE_AREA_COUNTY_ZIPS).flat());
+function streetLevelFormAddressGateOn() {
+  const reader = require('../config/feature-gates').callLeadFormAddressStreetLevelLive;
+  return typeof reader === 'function' && reader() === true;
+}
+// The street NAME of a line (house number and suffix dropped): "1234 Sample
+// Palm Dr" and Google's route "Sample Palm Drive" reduce to the same key. An
+// empty result means no comparable street.
+function streetNameKey(line) {
+  const bare = String(line || '').trim().replace(/^\d+[a-z]?\s+(?=\S)/i, '');
+  const key = streetCompareKey(`1 ${bare}`);
+  return key.startsWith('1 ') ? key.slice(2).trim() : '';
+}
+const zip5Of = (zip) => (String(zip || '').match(/^\d{5}/) || [''])[0];
+// True when the customer's on-file street is what their own web form typed:
+// a live form lead linked to the customer whose address is the same house
+// and street. A call-created lead, or an address only a call ever wrote, has
+// no such row. Any lookup failure fails closed.
+async function onFileAddressIsFromWebForm(knownCaller, conn = db) {
+  try {
+    if (!knownCaller?.id) return false;
+    const line1 = String(knownCaller.addressLine1 || '').trim();
+    const house = (line1.match(/^\d+/) || [''])[0];
+    const name = streetNameKey(line1);
+    if (!house || !name) return false;
+    const rows = await conn('leads')
+      .where({ customer_id: knownCaller.id })
+      .whereIn('first_contact_channel', FORM_LEAD_CHANNELS)
+      .whereNull('deleted_at')
+      .select('address', 'zip')
+      .limit(25);
+    const zip = zip5Of(knownCaller.addressZip);
+    return rows.some((row) => {
+      const typed = String(row.address || '').trim();
+      if (!typed || (typed.match(/^\d+/) || [''])[0] !== house) return false;
+      if (row.zip && zip5Of(row.zip) !== zip) return false;
+      const rest = streetCompareKey(typed).replace(/^\d+\s*/, '');
+      return ` ${rest} `.startsWith(` ${name} `);
+    });
+  } catch (err) {
+    logger.warn(`[call-proc] form-address lookup skipped for new lead ${knownCaller?.id}: ${err.message}`);
+    return false;
+  }
+}
+// Pure: does Google's answer for the on-file address qualify as street-level
+// on the SAME street, in area? Returns the evidence to persist, else null.
+function streetLevelMatch(knownCaller, verdict) {
+  if (!verdict || verdict.status !== 'missing_component' || verdict.granularity !== 'ROUTE') return null;
+  if (verdict.inServiceArea === false) return null;
+  const line1 = String(knownCaller.addressLine1 || '').trim();
+  if (!/^\d+/.test(line1)) return null;             // no house number: nothing to read back
+  const zip = zip5Of(knownCaller.addressZip);
+  if (!SERVICE_AREA_ZIP5.has(zip)) return null;      // in-area ZIP is the area proof when Google has no county
+  const n = verdict.normalized || {};
+  const formName = streetNameKey(line1);
+  if (!formName || formName !== streetNameKey(n.street_line_1)) return null;
+  if (n.postal_code && zip5Of(n.postal_code) !== zip) return null;
+  if (n.state && normalizeState(n.state) !== SERVICE_STATE) return null;
+  return { granularity: 'ROUTE', route: String(n.street_line_1 || '').trim() || null, zip };
+}
+function applyStreetLevelFormVerdict(knownCaller, verdict) {
+  // Re-checked here so an offline replay of a persisted verdict honors the
+  // gate and the same bounds the live pass applied.
+  if (!streetLevelFormAddressGateOn()) return knownCaller;
+  if (verdict?.inServiceArea !== true || verdict?.streetLevel?.granularity !== 'ROUTE') return knownCaller;
+  if (!/^\d+/.test(String(knownCaller.addressLine1 || '').trim())) return knownCaller;
+  if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
+  knownCaller.addressTrusted = true;
+  knownCaller.addressOnly = true;
+  knownCaller.onFileStreetLevel = { ...verdict.streetLevel };
+  knownCaller.addressState = String(verdict.address.state || SERVICE_STATE).toUpperCase();
+  return knownCaller;
+}
+// The advisory read-back card for a street-level web-form booking: null unless
+// the booking really dispatches to that on-file address. Existing reason code
+// address_readback (address_review lane) — no new card type.
+function buildStreetLevelReadbackItem({ knownCaller, routingResult, callLogId, extraction, onFileAddress = null } = {}) {
+  if (routingResult?.usesOnFileAddress !== true || !knownCaller?.onFileStreetLevel) return null;
+  return buildTriageItem({
+    callLogId, flag: 'address_readback', extraction, severity: 'advisory', onFileAddress,
+    extraPayload: {
+      address_source: 'web_form_on_file',
+      address_on_file: [knownCaller.addressLine1, knownCaller.addressLine2, knownCaller.addressCity, knownCaller.addressState, knownCaller.addressZip]
+        .map((v) => String(v || '').trim()).filter(Boolean).join(', '),
+      google_granularity: knownCaller.onFileStreetLevel.granularity,
+      google_street: knownCaller.onFileStreetLevel.route,
+      confirmation_question: 'Google confirmed the street but not the house number (new-build street?). Read the address on file back to the caller before the visit.',
+    },
+  });
+}
 function applyOnFileAddressVerdict(knownCaller, verdict) {
   if (!knownCaller) return knownCaller;
   const status = verdict?.status || null;
   knownCaller.onFileAddressVerdict = status
-    ? { status, inServiceArea: verdict?.inServiceArea ?? null, ...(verdict?.address ? { address: verdict.address } : {}) }
+    ? {
+      status, inServiceArea: verdict?.inServiceArea ?? null, ...(verdict?.address ? { address: verdict.address } : {}),
+      // Only the street-level verdict carries the evidence behind it, so
+      // every other persisted verdict keeps its exact prior shape.
+      ...(status === STREET_LEVEL_FORM_STATUS && verdict?.streetLevel ? { streetLevel: verdict.streetLevel } : {}),
+    }
     : null;
   if (knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
+  if (status === STREET_LEVEL_FORM_STATUS) return applyStreetLevelFormVerdict(knownCaller, verdict);
   if (!(status === 'validated_accept' && verdict?.inServiceArea === true)) return knownCaller;
   // A verdict carries the address it judged; the record must still match it.
   if (!judgedAddressMatches(verdict.address, knownCaller)) return knownCaller;
@@ -1544,7 +1657,7 @@ function applyOnFileAddressVerdict(knownCaller, verdict) {
 // stored — a non-Florida state fails closed rather than being rewritten to
 // FL, or Google would accept a synthesized Florida address the proof
 // snapshot never carried (codex #4685 r2 P1).
-async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null, failOpen = true } = {}) {
+async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAddress, extraction = null, failOpen = true, isFormAddress = onFileAddressIsFromWebForm } = {}) {
   if (!knownCaller || knownCaller.addressTrusted || knownCaller.pipelineStage !== 'new_lead') return knownCaller;
   if (knownCaller.onFileAddressVerdict !== undefined) return knownCaller;   // already judged this pass
   const line1 = String(knownCaller.addressLine1 || '').trim();
@@ -1573,6 +1686,17 @@ async function trustValidatedNewLeadAddress(knownCaller, { validate = validateAd
   } catch (err) {
     logger.warn(`[call-proc] on-file address validation skipped for new lead ${knownCaller.id}: ${err.message}`);
     return applyOnFileAddressVerdict(knownCaller, { status: 'validator_error', inServiceArea: null, address });
+  }
+  // GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL: a confirmed booking on a web-form
+  // lead's own typed address that Google resolved only to the street. Every
+  // other verdict — and gate off — takes the exact path below.
+  if (extraction?.scheduling?.status === 'confirmed' && streetLevelFormAddressGateOn()) {
+    const evidence = streetLevelMatch(knownCaller, verdict);
+    if (evidence && await isFormAddress(knownCaller)) {
+      return applyOnFileAddressVerdict(knownCaller, {
+        status: STREET_LEVEL_FORM_STATUS, inServiceArea: true, address, streetLevel: evidence,
+      });
+    }
   }
   return applyOnFileAddressVerdict(knownCaller, { status: verdict?.status || null, inServiceArea: verdict?.inServiceArea ?? null, address });
 }
@@ -10253,6 +10377,24 @@ const CallRecordingProcessor = {
           } else {
             // Approved — dispatch proceeds on the AV-normalized address
             // adopted above (both branches adopt it now).
+            // Street-level web-form address (GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL):
+            // the visit books to the address the lead typed into their form,
+            // which Google confirmed only to the street — the office reads
+            // the house number back before the visit. Existing reason code
+            // address_readback (advisory, address_review lane). Only when the
+            // booking really dispatches to that on-file address.
+            const streetLevelReadback = buildStreetLevelReadbackItem({
+              knownCaller, routingResult, callLogId: call.id, extraction: v2Extraction, onFileAddress,
+            });
+            if (streetLevelReadback) {
+              try {
+                await db('triage_items')
+                  .insert(streetLevelReadback)
+                  .onConflict(db.raw('(call_log_id, reason_code) WHERE status IN (\'open\', \'in_progress\')')).ignore();
+              } catch (fe) {
+                logger.warn(`[call-proc-v2] street-level address read-back insert failed for ${maskSid(callSid)}: ${fe.message}`);
+              }
+            }
             // Fail-open recovery: this appointment was allowed only because
             // recoverable flags were dropped from the blocking set. Surface
             // them as ADVISORY review items so the office confirms the field
@@ -20851,6 +20993,9 @@ CallRecordingProcessor._test = {
   failOpenKnownCustomer,
   trustValidatedNewLeadAddress,
   applyOnFileAddressVerdict,
+  onFileAddressIsFromWebForm,
+  streetLevelMatch,
+  buildStreetLevelReadbackItem,
   summarizePriorCall,
   providerTimeoutSignal,
   PROVIDER_FETCH_TIMEOUTS_MS,

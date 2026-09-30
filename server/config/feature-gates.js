@@ -1567,6 +1567,16 @@ const gates = {
   // blocks (out_of_service_area, do_not_contact, caller_not_authorized, spam)
   // stay. Creates real appointments — owner-flip only.
   callFailOpenBooking: process.env.GATE_CALL_FAIL_OPEN_BOOKING === 'true',
+  // Web-form lead, street-level address (owner ruling 2026-09-30): a new lead
+  // whose address on file came from their own web form and who does not
+  // repeat it on the call books to that form address even when Google
+  // confirms only the STREET (route), not the house — new-build streets in
+  // Parrish and Lakewood Ranch that Google has not indexed yet. The office
+  // gets an address read-back card. Needs callFailOpenBooking. Creates real
+  // appointments — owner-flip only. This entry is for logGateStatus only:
+  // call-recording-processor.js reads GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL
+  // at call time via callLeadFormAddressStreetLevelLive().
+  callLeadFormAddressStreetLevel: process.env.GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL === 'true',
   // Agent-commitment booking authorization: when OUR agent explicitly
   // committed to the confirmed slot on the call ("we'll confirm it for noon
   // on Sunday" — evidence-pinned to an AGENT-spoken quote), a third-party
@@ -3778,6 +3788,16 @@ function plantIdRefereeLive() {
   return process.env.GATE_PLANT_ID_REFEREE === 'true';
 }
 
+// GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL read at CALL time — strict
+// `=== 'true'`, ships DARK (owner ruling 2026-09-30). The one canonical reader
+// for call-recording-processor.js's on-file verdict path: on, a web-form lead's
+// on-file address Google confirms only to the street may still satisfy the
+// on-file address rule (with an address read-back card). Off, byte-identical
+// to before — the verdict path never looks at street-level matches.
+function callLeadFormAddressStreetLevelLive() {
+  return process.env.GATE_CALL_LEAD_FORM_ADDRESS_STREET_LEVEL === 'true';
+}
+
 // GATE_IB_CANCEL_APPOINTMENT read at CALL time — strict `=== 'true'`, same
 // convention as discountStackingLive(). The one canonical reader for both
 // entry points that need to know whether the Intelligence Bar may
@@ -3951,4 +3971,5 @@ module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimesta
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
+module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 // gates 1775330914
