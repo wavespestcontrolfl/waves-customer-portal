@@ -7989,11 +7989,11 @@ const InvoiceService = {
       .update({ receipt_sent_at: at || database.fn.now(), updated_at: new Date() });
   },
 
-  // A receipt cover written for a text the provider definitively refused: only
-  // the exact stamp this attempt wrote is taken back.
+  // A receipt cover written for a text that never went out: only the exact stamp
+  // this attempt wrote is taken back, and the receipt queue restores the Text leg
+  // its job may have skipped under the cover (receipt-delivery-queue.js).
   async takeBackReceiptSummaryCover(invoiceId, at) {
-    return db("invoices").where({ id: invoiceId, receipt_sent_at: at })
-      .update({ receipt_sent_at: null, updated_at: new Date() });
+    return require("./receipt-delivery-queue").restoreReceiptTextAfterCoverTakeback(invoiceId, at);
   },
 
   /**

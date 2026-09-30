@@ -5192,5 +5192,62 @@ postgres('visit summary recipient recovery', () => {
         expect(await invoiceRow(invoiceId)).toMatchObject({ scheduled_send_error: null, sms_sent_at: null });
       });
     });
+
+    describe('a receipt cover that is taken back restores the receipt text', () => {
+      const setup = async (label) => {
+        const invoiceId = await stop({ status: 'paid', invoice: { paid_at: new Date(), stripe_payment_intent_id: `pi_fixture_${label}` } });
+        const Queue = require('../services/receipt-delivery-queue');
+        await Queue.enqueueReceiptDelivery({ invoiceId, source: 'card_on_file', stripePaymentIntentId: `pi_fixture_${label}` });
+        const receiptEmail = jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail').mockResolvedValue({ ok: true });
+        const receiptTexts = [];
+        return { invoiceId, Queue, receiptEmail, receiptTexts };
+      };
+      const route = (receiptTexts, summarySender) => sendCustomerMessage.mockImplementation(async (input) => {
+        if (input.purpose === 'payment_receipt') { receiptTexts.push(input.body); return { sent: true }; }
+        return summarySender(input);
+      });
+
+      test('the drain completes its job under the cover, the summary is definitively rejected: exactly one receipt text follows, and no second receipt email', async () => {
+        const { invoiceId, Queue, receiptEmail, receiptTexts } = await setup('restore');
+        route(receiptTexts, handoffSender(async () => {
+          // The receipt worker runs while the cover is held: it skips its text and completes.
+          await Queue.processDueReceiptDeliveryJobs();
+          expect(await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first()).toMatchObject({ status: 'completed' });
+          return { sent: false, terminal: true };
+        }));
+        await deliver();
+        expect(await summaryEffect()).toMatchObject({ status: 'suppressed' });
+        expect((await invoiceRow(invoiceId)).receipt_sent_at).toBeNull();
+        expect(receiptTexts).toHaveLength(0);
+        await Queue.processDueReceiptDeliveryJobs();
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(receiptTexts).toHaveLength(1);
+        expect(receiptEmail).toHaveBeenCalledTimes(1);
+        expect(await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first()).toMatchObject({ status: 'completed' });
+        expect((await invoiceRow(invoiceId)).receipt_sent_at).not.toBeNull();
+      });
+
+      test('a worker that is mid-pass when the cover is taken back does not complete the job past the owed text', async () => {
+        const { invoiceId, Queue, receiptEmail, receiptTexts } = await setup('running');
+        route(receiptTexts, handoffSender());
+        const Invoice = require('../services/invoice');
+        const cover = new Date();
+        await mockPg('invoices').where({ id: invoiceId }).update({ receipt_sent_at: cover });
+        const sendReceipt = Invoice.sendReceipt;
+        jest.spyOn(Invoice, 'sendReceipt').mockImplementation(async (...args) => {
+          const result = await sendReceipt.apply(Invoice, args); // skips as already-sent
+          await Invoice.takeBackReceiptSummaryCover(invoiceId, cover); // the takeback lands before the worker completes
+          return result;
+        });
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).first()).toMatchObject({ status: 'queued' });
+        jest.restoreAllMocks();
+        jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail').mockImplementation(receiptEmail);
+        route(receiptTexts, handoffSender());
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(receiptTexts).toHaveLength(1);
+        expect(receiptEmail).toHaveBeenCalledTimes(1);
+      });
+    });
   });
 });

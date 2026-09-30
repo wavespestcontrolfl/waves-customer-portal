@@ -201,19 +201,53 @@ function receiptDeliveryFailureError({ smsResult = null, emailResult = null } = 
   return new Error(`receipt channel failed: sms=${smsReason} email=${emailReason}`);
 }
 
+// Completing the job re-reads the receipt stamp under the job row lock, the lock a
+// summary-cover takeback takes too (restoreReceiptTextAfterCoverTakeback): a text
+// this pass skipped as 'already-sent' only because the combined-visit summary's
+// provisional cover was in place, and which the takeback has since cleared, is
+// still owed, so the job goes back on the queue with its email leg kept done.
 async function markJobCompleted(job, { smsResult, emailResult }) {
-  await db('receipt_delivery_jobs')
+  const done = (conn, owedText) => conn('receipt_delivery_jobs')
     .where({ id: job.id })
     .update({
-      status: 'completed',
+      status: owedText ? 'queued' : 'completed',
       sms_result: smsResult || null,
       email_result: emailResult || null,
-      completed_at: db.fn.now(),
+      completed_at: owedText ? null : db.fn.now(),
+      ...(owedText ? { next_attempt_at: db.fn.now() } : {}),
       locked_at: null,
       locked_by: null,
       last_error: null,
       updated_at: db.fn.now(),
     });
+  // Only a pass that skipped its text as already sent can be caught out.
+  if (smsResult?.reason !== 'already-sent') return done(db, false);
+  return db.transaction(async (trx) => {
+    await trx('receipt_delivery_jobs').where({ id: job.id }).forUpdate().first('id');
+    const stamped = (await trx('invoices').where({ id: job.invoice_id }).first('receipt_sent_at'))?.receipt_sent_at;
+    return done(trx, !stamped);
+  });
+}
+
+// The combined-visit summary text's receipt cover is taken back because that text
+// was definitively not sent (visit-completion-summary.js). The receipt Text is owed
+// again: clear exactly that stamp under the job row lock (job before invoice, the
+// worker's order). A job that completed while the cover was in place, skipping its
+// text as 'already-sent', is re-opened with its email leg kept done (the pass above
+// skips a delivered email leg), so exactly the text follows. A job that is still
+// queued needs nothing more, and one running is settled by markJobCompleted's re-read.
+async function restoreReceiptTextAfterCoverTakeback(invoiceId, stampedAt) {
+  return db.transaction(async (trx) => {
+    const job = await trx('receipt_delivery_jobs').where({ invoice_id: invoiceId }).forUpdate().first('id', 'status', 'sms_result');
+    const cleared = await trx('invoices').where({ id: invoiceId, receipt_sent_at: stampedAt })
+      .update({ receipt_sent_at: null, updated_at: trx.fn.now() });
+    if (cleared && job?.status === 'completed' && job.sms_result?.reason === 'already-sent') {
+      await trx('receipt_delivery_jobs').where({ id: job.id }).update({
+        status: 'queued', next_attempt_at: trx.fn.now(), completed_at: null, last_error: null, updated_at: trx.fn.now(),
+      });
+    }
+    return cleared;
+  });
 }
 
 async function markJobRetry(job, err, { smsResult = null, emailResult = null } = {}) {
@@ -334,7 +368,10 @@ async function processReceiptDeliveryJob(job) {
     // invoice. The dropdown governs the SMS leg (via the consent gate); the
     // emailed PDF receipt is the durable payment record and always sends
     // unless the payment_receipt kill switch is off.
-    emailResult = prefsLookupFailed
+    emailResult = job.email_result?.ok === true
+      // A pass that delivered the email already (a text-only re-run after a cover takeback).
+      ? job.email_result
+      : prefsLookupFailed
       ? { ok: false, error: 'receipt prefs lookup failed' }
       : receiptKillSwitch
         ? { ok: false, error: 'receipt_opted_out' }
@@ -556,6 +593,7 @@ module.exports = {
   claimReceiptJobForOperatorSend,
   recordOperatorReceiptDelivered,
   releaseOperatorReceiptClaim,
+  restoreReceiptTextAfterCoverTakeback,
   _internals: {
     recoverStaleLocks,
     actionableSmsFailure,
