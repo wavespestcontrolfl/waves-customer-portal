@@ -439,6 +439,9 @@ test('send_pay_link: rail-guard consulted first, RECORD-THEN-SEND ordering, once
   expect(order).toEqual(['guard', 'ledger', 'send']);
   expect(InvoiceService.sendViaSMS).toHaveBeenCalledWith('inv-1', { operatorInitiated: true, holdExempt: 'customer' });
   expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ channel: 'sms', invoiceId: 'inv-1' }));
+  // The customer asked for this link on the call: the rail-guard consult (and the send below) carry
+  // the trusted customer exemption, so a dispute-hold wait does not refuse a link they requested.
+  expect(collectionsChannelPermitted).toHaveBeenCalledWith(expect.objectContaining({ holdExempt: 'customer' }));
 
   // Second attempt on the same call is refused without another send.
   mockScriptedMessages.push(toolUse('send_pay_link', { customer_agreement_verbatim: 'yes, text it to me' }), endTurn('It is already on its way.'));

@@ -55,11 +55,13 @@ function warnShadowWithoutPolicy() {
  * transaction).
  */
 async function disputeHoldHolds(customerId, database, holdExempt = null) {
-  // Only a deliberate operator send (owner ruling 2026-09-30) skips the dispute-hold wait;
-  // every automated rail still waits. The policy gate's own verdict is unaffected.
-  if (holdExempt === 'operator') return false;
+  // Only a deliberate operator send, or a send the customer asked for themselves (the voice
+  // "text me the link" tool), skips the dispute-hold wait (owner ruling 2026-09-30); every
+  // automated rail still waits. The policy gate's own verdict is unaffected.
+  const collectionHold = require('./collection-hold');
+  if (collectionHold.holdExemptionApplies(holdExempt)) return false;
   if (!customerId) return false;
-  const { held } = await require('./collection-hold').dueInvoiceHeldByDisputeHold(customerId, database || undefined);
+  const { held } = await collectionHold.dueInvoiceHeldByDisputeHold(customerId, database || undefined);
   return held;
 }
 

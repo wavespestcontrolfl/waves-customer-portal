@@ -23,6 +23,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
   claimAttempt: jest.fn(async () => ({ allowed: true })),
+  releaseHeldReservation: jest.fn(async () => true),
 }));
 jest.mock('../services/customer-credit', () => ({
   autoApplyAccountCreditIfEnabled: jest.fn(async () => ({ applied: 0 })),
@@ -494,6 +495,103 @@ describe('invoice follow-up email sidecar', () => {
     expect(require('../services/collections/contact-ledger').markSendFailed).toHaveBeenCalledWith(
       expect.anything(), expect.objectContaining({ reason: expected.reason }),
     );
+  });
+
+  // Dispute hold (owner ruling 2026-09-30) placed AFTER fireTouch's rail-guard consult, during the
+  // credit / short-link / ledger / render awaits: the send boundary refuses the leg. A WAIT, never a
+  // failure - the reservation is released (no failed row), the sequence stays active and the touch is
+  // retimed to the next day, so it goes out after the release.
+  test('a dispute hold that lands before the Email handoff releases the reservation and keeps the touch due', async () => {
+    const ContactLedger = require('../services/collections/contact-ledger');
+    const sequence = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer() })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: { invoice_channels: ['email'] } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    BillingEmailAuthority.dispatchUnderBillingEmailAuthority.mockImplementationOnce(async ({ state }) => {
+      state.boundaryBlock = { code: 'COLLECTION_HOLD_DEFER', blocked: true, retryable: true, deliveryOutcome: 'not_sent',
+        reason: 'Customer has an active collections dispute hold; billing email deferred until it is released' };
+      return { ok: false };
+    });
+    EmailTemplates.sendTemplate.mockImplementationOnce(async ({ withProviderHandoff }) => {
+      const verdict = await withProviderHandoff(jest.fn());
+      return verdict.ok ? { sent: true } : { sent: false, aborted: true, reason: 'aborted_before_dispatch' };
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+    expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
+    const [update] = sequenceUpdate.update.mock.calls[0];
+    expect(update).not.toHaveProperty('status'); // never paused, never completed
+    expect(update).not.toHaveProperty('paused_reason');
+    expect(update).not.toHaveProperty('step_index'); // the step did not advance: it fires after the release
+    expect(update.next_touch_at).toEqual(new Date('2026-05-27T04:00:00.000Z'));
+  });
+
+  test('a dispute hold that lands before the Text handoff releases the reservation and keeps the touch due (no pause, no queued pay-link row)', async () => {
+    const ContactLedger = require('../services/collections/contact-ledger');
+    const sequence = followupRow();
+    const sequenceUpdate = chain();
+    const smsLogInsert = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer() })],
+      invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: {} })],
+      customer_interactions: [chain(), chain()],
+      sms_log: [smsLogInsert],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    // The Email leg cannot deliver (its context read fails), so the Text leg is the only one in play.
+    BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+      reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed',
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'invoice_followup_sequence' });
+    expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('holdExempt'); // an automated touch waits
+    // the SMS reservation is released; only the never-sent email attempt's own stamp remains
+    expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'COLLECTION_HOLD_SUPPRESSED' }));
+    expect(smsLogInsert.insert).not.toHaveBeenCalled(); // no scheduled-SMS row carrying the pay link
+    const [update] = sequenceUpdate.update.mock.calls[0];
+    expect(update).not.toHaveProperty('status');
+    expect(update).not.toHaveProperty('paused_reason');
+    expect(update).not.toHaveProperty('step_index');
+    expect(update.next_touch_at).toEqual(InvoiceFollowUps.heldTouchFloor());
+  });
+
+  test('a dispute hold that lands before an explicitly selected Text handoff releases the reservation and holds the touch', async () => {
+    const ContactLedger = require('../services/collections/contact-ledger');
+    const sequence = followupRow();
+    const sequenceUpdate = chain();
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [sequence], first: sequence })],
+      customers: [chain({ first: customer() })],
+      invoices: Array.from({ length: 6 }, () => chain({ first: invoice() })),
+      notification_prefs: [chain({ first: { invoice_channels: ['sms'] } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    const [update] = sequenceUpdate.update.mock.calls[0];
+    expect(update).not.toHaveProperty('status');
+    expect(update).not.toHaveProperty('step_index');
+    expect(update.next_touch_at).toEqual(InvoiceFollowUps.heldTouchFloor());
   });
 
   test('skips a touch whose sequence was postponed between the batch select and the claim', async () => {

@@ -2,8 +2,9 @@
  * Sweep guard (owner ruling 2026-09-30, PR #5424 round 8): while a customer has an ACTIVE
  * collections dispute hold no AUTOMATED billing follow-up carrying a pay or update-card link
  * reaches them. The customer-message boundary (send-customer-message.js step 1.5) gates the
- * purposes below, so every sender that uses one must be classified here on purpose. A new
- * sender fails this test until it is classified, instead of slipping past the hold.
+ * purposes and dunning entry points below, and the billing email authority gates the dunning email
+ * templates, so every sender that uses one must be classified here on purpose. A new sender fails
+ * this test until it is classified, instead of slipping past the hold.
  *
  * Source scans only: no database, nothing sends.
  */
@@ -39,10 +40,13 @@ describe('customer-message purposes gated by the dispute hold at the send bounda
     ]);
   });
 
-  test('the boundary gates exactly the machine-initiated payment_failure and autopay purposes', () => {
+  test('the boundary gates the machine-initiated payment_failure / autopay purposes and the dunning entry points, with the operator and customer exemptions', () => {
     const src = read('services/messaging/send-customer-message.js');
     expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES = Object\.freeze\(\['payment_failure', 'autopay'\]\)/);
-    expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES\.includes\(input\.purpose\) && input\.customerId\s*&& input\.customerInitiated !== true/);
+    expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES\.includes\(input\.purpose\)\) return true/);
+    expect(src).toMatch(/HOLD_GATED_DUNNING_ENTRY_POINTS\.has\(String\(input\.entryPoint/);
+    expect(src).toMatch(/isHoldGatedBillingMessage\(input\) && input\.customerInitiated !== true && !holdExempt/);
+    expect(src).toMatch(/holdExemptionApplies\(input\.holdExempt\)/);
   });
 
   test('only the Stripe webhook (from the PaymentIntent\'s own markers) and the payment-failed email assert customerInitiated on these notices', () => {
@@ -64,7 +68,9 @@ describe('customer-message purposes gated by the dispute hold at the send bounda
 describe('lifecycle (payment.*) emails that carry a pay / update-card link', () => {
   test('one shared template set feeds the fresh-send guard and the stored-copy paths', () => {
     const Hold = require('../services/collections/collection-hold');
-    expect([...Hold.HOLD_GATED_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+    expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+    // the guard's set is the lifecycle set plus the machine-initiated dunning templates (below)
+    for (const templateKey of Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES) expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.has(templateKey)).toBe(true);
     expect(read('services/payment-lifecycle-email.js')).toMatch(/HOLD_GATED_TEMPLATES = require\('\.\/collections\/collection-hold'\)\.HOLD_GATED_EMAIL_TEMPLATES/);
   });
 
@@ -92,5 +98,144 @@ describe('lifecycle (payment.*) emails that carry a pay / update-card link', () 
     expect(src).toMatch(/deferPaymentFailedForHold/);
     expect(src).toMatch(/whereNot\('e\.template_key', 'payment_failed'\)/);
     expect(src).toMatch(/disputeHoldExistsSql\(this, 'e\.customer_id'\)/);
+  });
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// The MACHINE-INITIATED DUNNING senders (PR #5424 round 9). Their preflight consults the hold, then
+// they await credit application, link shortening, ledger writes and rendering, so the hold is also
+// enforced at the provider-side chokepoints: the customer-message boundary (Text / App, keyed on the
+// entry point because 'payment_link' / 'billing' are shared purposes) and the billing email
+// authority (Email, keyed on the dunning template). Each is a WAIT for its caller.
+// ---------------------------------------------------------------------------------------------
+describe('machine-initiated dunning senders are gated at the send boundaries', () => {
+  const Hold = require('../services/collections/collection-hold');
+
+  // Shared purposes: every sendCustomerMessage caller of 'payment_link' / 'billing' is either a
+  // dunning sender (gated by its entry point) or classified exempt here with its reason.
+  const SHARED_PURPOSE = /(?<![_a-zA-Z])purpose:\s*['"](payment_link|billing)['"]/;
+  test('every sender using the shared payment_link / billing purposes is classified', () => {
+    expect(filesMatching(SHARED_PURPOSE)).toEqual([
+      // --- machine-initiated dunning: gated at the boundary by HOLD_GATED_DUNNING_ENTRY_POINTS ---
+      'routes/admin-projects.js', // EXEMPT: an operator's own click (operatorInitiated), not automated follow-up
+      'services/annual-prepay-renewals.js', // EXEMPT: the termite renewal NOTICE (dates, fee, cancel terms), no pay link
+      'services/invoice-followups.js', // GATED: Day 3-90 ladder (invoice_followup_sequence); send-now passes holdExempt 'operator'
+      'services/invoice.js', // EXEMPT: the invoice sender itself (invoice_send_via_sms): its own default-on hold check
+      'services/late-payment-checker.js', // GATED: late_payment_checker / late_payment_checker_microdeposit
+      'services/previsit-balance-reminder.js', // GATED: previsit_balance_reminder
+      'services/price-change-notices.js', // EXEMPT: an operator-confirmed price-change notice, no pay link
+      'services/workflows/balance-reminder.js', // GATED: balance_reminder_workflow / balance_reminder_late_payment_check
+    ]);
+  });
+
+  test('every entry point the dunning senders use is gated or classified as a non-pay-link notice', () => {
+    const gated = [...Hold.HOLD_GATED_DUNNING_ENTRY_POINTS].sort();
+    expect(gated).toEqual([
+      'balance_reminder_late_payment_check', 'balance_reminder_workflow', 'invoice_followup_sequence',
+      'late_payment_checker', 'late_payment_checker_microdeposit', 'previsit_balance_reminder',
+    ]);
+    // thank-you / receipt texts carry no pay link (a payment was just received)
+    const NON_PAY_LINK_ENTRY_POINTS = ['invoice_followup_thank_you', 'balance_reminder_payment_received'];
+    for (const file of ['services/invoice-followups.js', 'services/late-payment-checker.js',
+      'services/previsit-balance-reminder.js', 'services/workflows/balance-reminder.js']) {
+      const literals = [...read(file).matchAll(/entryPoint:\s*['"]([a-z_]+)['"]/g)].map((m) => m[1]);
+      expect(literals.length).toBeGreaterThan(0);
+      for (const literal of literals) {
+        expect([file, [...gated, ...NON_PAY_LINK_ENTRY_POINTS].includes(literal)]).toEqual([file, true]);
+      }
+    }
+    // late-payment-checker passes its entry point through a variable: every value it is given is gated
+    const checkerValues = [...read('services/late-payment-checker.js').matchAll(/entryPoint:\s*'([a-z_]+)'/g)].map((m) => m[1]);
+    expect(checkerValues.sort()).toEqual(['late_payment_checker', 'late_payment_checker_microdeposit']);
+  });
+
+  test('every file that consults the rail guard for a billing reminder is classified', () => {
+    expect(filesMatching(/require\(['"](\.\/|\.\.\/)(collections\/)?rail-guard['"]\)/)).toEqual([
+      'services/billing-reminder-delivery.js', // gated via its senders' boundaries; a suppressed leg is RELEASED (no failed row), episode stays open
+      'services/collections/outbound-voice/collections-conversation.js', // EXEMPT: customer-requested pay link (holdExempt 'customer')
+      'services/invoice-followups.js', // GATED (early consult + both boundaries); send-now = holdExempt 'operator'
+      'services/late-payment-checker.js', // GATED
+      'services/messaging/billing-email-replay-eligibility.js', // replay eligibility: waits with holdDefer
+      'services/messaging/deferred-replay-registry.js', // queued replays: disputeHoldRecheck waits (retryAt), sends after release
+      'services/previsit-balance-reminder.js', // GATED
+      'services/workflows/balance-reminder.js', // GATED
+    ]);
+  });
+
+  test('every consumer of the shared reminder-delivery helper is a classified dunning sender', () => {
+    expect(filesMatching(/require\(['"](\.\/|\.\.\/)billing-reminder-delivery['"]\)/)).toEqual([
+      'services/invoice-followups.js', // verdict helpers only
+      'services/late-payment-checker.js', // verdict helpers only
+      'services/previsit-balance-reminder.js', // sendReminderChannels: a suppressed leg is released, episode stays open
+      'services/workflows/balance-reminder.js', // sendReminderChannels: same
+    ]);
+  });
+
+  test('the dunning email templates are one list shared with the sender-rendered set, and cover every template the senders name', () => {
+    const InvoiceFollowUps = require('../services/invoice-followups');
+    const dunning = Hold.HOLD_GATED_DUNNING_EMAIL_TEMPLATES;
+    expect(dunning).toBe(require('../services/billing-email-no-replay').SENDER_RENDERED_TEMPLATES);
+    for (const templateKey of Object.values(InvoiceFollowUps.FOLLOWUP_EMAIL_TEMPLATE_BY_STEP_ID)) expect(dunning.has(templateKey)).toBe(true);
+    const balanceKeys = [...read('services/workflows/balance-reminder.js').matchAll(/templateKey:\s*"(billing_late_payment_\d+_day)"/g)].map((m) => m[1]);
+    expect(balanceKeys).toHaveLength(5);
+    for (const templateKey of balanceKeys) expect(dunning.has(templateKey)).toBe(true);
+    expect(read('services/microdeposit-verification-email.js')).toMatch(/TEMPLATE_KEY = 'payment\.microdeposit_verification'/);
+    expect(dunning.has('payment.microdeposit_verification')).toBe(true);
+    expect(read('services/previsit-balance-reminder.js')).toMatch(/EMAIL_TEMPLATE_KEY = 'billing\.previsit_balance'/);
+    expect(dunning.has('billing.previsit_balance')).toBe(true);
+    // ... and the lifecycle set is unchanged, both feeding the one HOLD_GATED_EMAIL_TEMPLATES
+    expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+    for (const templateKey of [...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES, ...dunning]) expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.has(templateKey)).toBe(true);
+    expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.size).toBe(Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES.size + dunning.size);
+  });
+
+  test('a dunning email template literal anywhere in the runtime must be in the gated set (a new template cannot slip past)', () => {
+    const literal = /['"](invoice\.followup_[a-z0-9_]+|billing_late_payment_[a-z0-9_]+|payment\.microdeposit_verification|billing\.previsit_balance)['"]/g;
+    const seen = new Set();
+    for (const file of RUNTIME) for (const m of read(file).matchAll(literal)) seen.add(m[1]);
+    // routes/admin-email-templates.js lists the protected keys; that list must equal what is gated
+    for (const key of seen) expect([key, Hold.HOLD_GATED_DUNNING_EMAIL_TEMPLATES.has(key)]).toEqual([key, true]);
+  });
+
+  test('the billing email authority reads the hold for those templates at the provider boundary, twice, honouring the exemptions', () => {
+    const src = read('services/billing-channel-email-authority.js');
+    expect(src).toMatch(/HOLD_GATED_EMAIL_TEMPLATES\.has\(templateKey\)/);
+    expect(src).toMatch(/holdExemptionApplies\(holdExempt\) \|\| invoice\?\.payer_id/);
+    // before dispatch AND at the final provider-boundary check
+    expect(src.match(/dunningHoldBlock\(/g)).toHaveLength(3); // definition + two call sites
+    expect(src).toMatch(/code, held\.reason|HOLD_DEFER_CODE/);
+  });
+
+  test('every sender that goes through the billing email authority is classified', () => {
+    expect(filesMatching(/dispatchUnderBillingEmailAuthority\(/)).toEqual([
+      'services/account-membership-email.js', // GATED by template (billing.previsit_balance)
+      'services/automation-runner.js', // payment-failed automation: its own up-front + locked hold check (COLLECTION_HOLD_DEFER)
+      'services/billing-channel-email-authority.js', // the authority itself (the definition, not a sender)
+      'services/billing-channel-email.js', // the routed billing.notice leg: gated a step earlier at the customer-message boundary
+      'services/billing-email-provider-replay.js', // stored-copy replay: its own hold check
+      'services/invoice-email.js', // the invoice email itself: its own provider-boundary hold check
+      'services/invoice-followups.js', // GATED by template
+      'services/microdeposit-verification-email.js', // GATED by template
+      'services/workflows/balance-reminder.js', // GATED by template
+    ]);
+  });
+
+  test('every hold-suppression the callers meet is treated as a WAIT: released reservation, no failed stamp, touch stays due', () => {
+    // one classification per caller: the reservation is released (never stamped failed) on a suppression
+    const RELEASES = {
+      'services/billing-reminder-delivery.js': /isHoldSuppression\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(entry\)/,
+      'services/invoice-followups.js': /heldByDisputeHold\(sendResult\)[\s\S]{0,400}releaseHeldReservation\(smsLedger\)/,
+      'services/late-payment-checker.js': /isHoldSuppression\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(ledger\)/,
+      'services/previsit-balance-reminder.js': /isHoldSuppression\(result\)\) await ContactLedger\.releaseHeldReservation\(smsLedger\)/,
+      'services/workflows/balance-reminder.js': /isHoldSuppression\(sendResult\)\) \{[\s\S]{0,400}releaseHeldReservation\(ledgerEntry\)/,
+    };
+    for (const [file, pattern] of Object.entries(RELEASES)) expect([file, pattern.test(read(file))]).toEqual([file, true]);
+    expect(read('services/invoice-followups.js')).toMatch(/if \(heldByDisputeHold\(result\)\) \{\s*await ContactLedger\.releaseHeldReservation\(ledger\);\s*return true;/);
+    // the operator "send now" text carries the trusted exemption; automated ladder touches carry none
+    expect(read('services/invoice-followups.js')).toMatch(/\.\.\.\(operatorInitiated \? \{ holdExempt: 'operator' \} : \{\}\)/);
+    // the voice "text me the link" tool: rail-guard consult and send both carry the customer exemption
+    expect(read('services/collections/outbound-voice/collections-conversation.js')).toMatch(/holdExempt: 'customer',\s*\}\);/);
+    expect(read('services/collections/outbound-voice/collections-conversation.js')).toMatch(/sendViaSMS\(invoiceId, \{ operatorInitiated: true, holdExempt: 'customer' \}\)/);
   });
 });

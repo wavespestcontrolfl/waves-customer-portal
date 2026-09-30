@@ -104,7 +104,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       expect(out).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
     } finally { lookup.mockRestore(); }
     const src = fs.readFileSync(path.join(__dirname, '../services/messaging/send-customer-message.js'), 'utf8');
-    expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES\.includes\(input\.purpose\) && input\.customerId\s*&& input\.customerInitiated !== true/);
+    expect(src).toMatch(/isHoldGatedBillingMessage\(input\) && input\.customerInitiated !== true && !holdExempt/);
     expect(src).toMatch(/HOLD_GATED_MESSAGE_PURPOSES = Object\.freeze\(\['payment_failure', 'autopay'\]\)/);
   });
 
@@ -284,7 +284,12 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
 
     test('a template outside the gated set is untouched by the hold (source contract on the shared set)', () => {
       const Hold = require('../services/collections/collection-hold');
-      expect([...Hold.HOLD_GATED_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+      expect([...Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES].sort()).toEqual(['payment.failed', 'payment.method_expiring', 'payment.retry_notice']);
+      // the guard's set adds only the machine-initiated dunning templates; receipts and confirmations stay out
+      for (const key of ['invoice.receipt', 'billing.receipt_notice', 'payment.confirmation', 'invoice.sent']) {
+        expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.has(key)).toBe(false);
+      }
+      for (const key of Hold.HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES) expect(Hold.HOLD_GATED_EMAIL_TEMPLATES.has(key)).toBe(true);
     });
   });
 

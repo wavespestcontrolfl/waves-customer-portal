@@ -160,7 +160,19 @@ function followupEmailOutcomeUncertain(result, explicit) {
     || (result?.deduped && !result?.blocked));
 }
 
+// A dispute hold that landed after the preflight consult refused this leg at the provider boundary
+// (COLLECTION_HOLD_SUPPRESSED / COLLECTION_HOLD_DEFER). That is a WAIT: nothing reached the customer
+// and nothing failed, so the reservation is released (no failed row, no spent attempt) and the touch
+// stays due (see the held-touch retime in fireTouch); it goes out after the release.
+function heldByDisputeHold(result) {
+  return require('./collections/collection-hold').isHoldSuppression(result);
+}
+
 async function settleFollowupEmailLedger(ContactLedger, ledger, result, explicit, originalDeliveryTimes) {
+  if (heldByDisputeHold(result)) {
+    await ContactLedger.releaseHeldReservation(ledger);
+    return true;
+  }
   if (result?.ok === true) {
     const originalContact = originalBillingContactArgs(result);
     originalDeliveryTimes.push(...originalContact.map((stamp) => stamp.occurredAt));
@@ -296,7 +308,10 @@ async function sendFollowupEmail({ row, customer, step, ctx, enforceBillingPrefe
       recipientId: customer.id,
       triggerEventId: `invoice_followup:${row.invoice_id}:${step.id}`,
       idempotencyKey: `invoice_followup_email:${row.invoice_id}:${step.id}`,
-      categories: ['invoice_followup', step.id],
+      // An operator's "send now" email (no billing-preference enforcement) keeps the dispute-hold
+      // exemption if the provider-retry rail later re-sends its stored copy.
+      categories: ['invoice_followup', step.id,
+        ...(enforceBillingPreference ? [] : [require('./collections/collection-hold').OPERATOR_INITIATED_EMAIL_CATEGORY])],
       suppressionGroupKey: 'transactional_required',
       withProviderHandoff: enforceBillingPreference
         ? (dispatch) => dispatchUnderBillingEmailAuthority({
@@ -1682,6 +1697,8 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
   // durable one (flag, suppression) waives it so the step cannot be pinned
   // forever. The global-hold gate above still stops an all-denied touch.
   let emailHold = selectedChannels !== null && emailSelected && !emailPermitted && !emailDurablyDenied;
+  // A dispute hold refused a leg at the send boundary after the preflight (a wait, not a failure).
+  let holdSuppressedAtBoundary = false;
   if (emailPermitted) {
     let emailLedger = null;
     try {
@@ -1727,6 +1744,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
           ContactLedger, emailLedger, emailResult, selectedChannels !== null, originalDeliveryTimes,
         );
         emailHold = emailHold || attemptHeld;
+        if (heldByDisputeHold(emailResult)) holdSuppressedAtBoundary = true;
       }
     } else if (selectedChannels !== null) emailHold = true;
   }
@@ -1817,6 +1835,12 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
         if (channel === 'push') appSent ||= delivery === 'delivered'; else actualSmsSent ||= delivery === 'delivered';
         if (typeof ContactLedger.markDelivered === 'function'
           && !await ContactLedger.markDelivered(ledger, ...(occurredAt ? [{ occurredAt }] : []))) holdStep();
+      } else if (heldByDisputeHold(result)) {
+        // Dispute hold landed after the preflight: a WAIT, never a failed send.
+        await ContactLedger.releaseHeldReservation(ledger);
+        holdStep(result);
+        smsSkipReason = 'collection_hold';
+        holdSuppressedAtBoundary = true;
       } else if (result?.deliveryOutcome === 'not_sent'
         || (result?.deliveryOutcome == null && result?.blocked === true)) {
         if (!await ContactLedger.markSendFailed(ledger, { code: result.code || 'not_sent' })) holdStep();
@@ -1873,6 +1897,10 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
         // it (an operator clicked THIS touch at this moment); the 10:16 ET
         // cron path stays fenced.
         ...(operatorInitiated ? { operatorInitiated: true } : {}),
+        // The office "send now" click is a deliberate operator send: it keeps its pay link during a
+        // dispute hold (owner ruling 2026-09-30), so the customer-message boundary lets it through.
+        // Automated ladder touches carry no exemption and wait.
+        ...(operatorInitiated ? { holdExempt: 'operator' } : {}),
         metadata: {
           original_message_type: messageType,
           notificationEventKey: `invoice-followup:${row.id}:${step.id}`,
@@ -1889,7 +1917,17 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
         // fences on. Fail-closed, with no lock held across provider I/O.
         preDispatchCheck: invoiceHelpers.selfPayAtDispatch(row.invoice_id, db),
       }) : null;
-      if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
+      if (sendResult && heldByDisputeHold(sendResult)) {
+        // Dispute hold landed after the preflight: nothing was sent and nothing failed. Release the
+        // reservation and keep the touch due (retimed a day, like the preflight hold) - never
+        // paused, never queued onto the scheduled-SMS rail (the queued row would carry the pay link).
+        await ContactLedger.releaseHeldReservation(smsLedger);
+        smsSkipReason = 'collection_hold';
+        smsDeferUntil = heldTouchFloor();
+        smsHoldUnowned = true;
+        holdSuppressedAtBoundary = true;
+        logger.info(`[invoice-followups] SMS leg of sequence ${row.id} held by a collections dispute hold at the send boundary — touch stays due`);
+      } else if (sendResult && (sendResult.blocked || sendResult.sent === false)) {
         smsOutcomeMayHaveDelivered = ['accepted', 'uncertain'].includes(sendResult.deliveryOutcome);
         await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || 'sms_blocked' });
         smsSkipReason = sendResult.code || 'sms_blocked';
@@ -1972,6 +2010,9 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
       smsDeferUntil = heldTouchFloor();
     }
     if (smsDeferUntil) {
+      if (holdSuppressedAtBoundary) {
+        logger.info(`[invoice-followups] touch for sequence ${row.id} held by a collections dispute hold at the send boundary — kept due until ${smsDeferUntil.toISOString()}`);
+      }
       // Nothing failed — the touch fired outside the 8AM-8PM ET send
       // window and no email leg covered it. Keep the sequence active and
       // move ONLY this touch to the window open; the same step re-fires at

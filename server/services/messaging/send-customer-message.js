@@ -264,6 +264,17 @@ function classifyDeliveryCertainty(outcome) {
 // charge announcement) and so wait out an active collections dispute hold.
 const HOLD_GATED_MESSAGE_PURPOSES = Object.freeze(['payment_failure', 'autopay']);
 
+// The machine-initiated dunning senders (Day 3-90 invoice follow-up ladder, late-payment checker,
+// balance reminder workflow, previsit balance reminder) send under the shared purposes
+// 'payment_link' / 'billing', which the invoice sender, an operator's project payment link and
+// the price-change notice also use - so they are recognised by their entry point
+// (collection-hold HOLD_GATED_DUNNING_ENTRY_POINTS), not by purpose alone.
+function isHoldGatedBillingMessage(input = {}) {
+  if (input.audience !== 'customer' || !input.customerId) return false;
+  if (HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose)) return true;
+  return require('../collections/collection-hold').HOLD_GATED_DUNNING_ENTRY_POINTS.has(String(input.entryPoint || ''));
+}
+
 function isAutopayCustomerSms(input = {}) {
   if (input.channel !== 'sms') return false;
   if (!['customer', 'lead'].includes(input.audience)) return false;
@@ -357,11 +368,20 @@ async function sendCustomerMessageCore(input) {
   // (autopay-notifications, workflows/payment-expiry) text an update-card portal link and the
   // pre-charge reminder announces a charge the hold has stopped. Every purpose-'autopay'
   // sender is a cron sweep; a customer-driven autopay notice would carry customerInitiated.
-  if (input.audience === 'customer' && HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose) && input.customerId
-    && input.customerInitiated !== true) {
+  // The machine-initiated DUNNING senders (isHoldGatedBillingMessage: the follow-up ladder, the
+  // late-payment and balance reminders, the previsit balance reminder) are the same follow-up:
+  // their preflight consulted the hold minutes earlier, but they await credit application, link
+  // shortening, ledger writes and rendering before reaching here, so a hold placed in between
+  // stops the send at this boundary. The suppression is a WAIT: every caller keeps the touch due
+  // (no failed row, nothing paused) and it goes out after the release. Exempt: a customer's own
+  // action (customerInitiated / holdExempt 'customer') and a deliberate operator send
+  // (holdExempt 'operator', e.g. the office "send now" button); payer-billed invoices never reach
+  // these senders (they pause or skip before sending).
+  const holdExempt = require('../collections/collection-hold').holdExemptionApplies(input.holdExempt);
+  if (isHoldGatedBillingMessage(input) && input.customerInitiated !== true && !holdExempt) {
     const held = await require('../collections/collection-hold').dueInvoiceHeldByDisputeHold(input.customerId);
     if (held.held) {
-      logger.info(`[send_customer_message] billing notice (${input.purpose}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
+      logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
       return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
         reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed' };
     }

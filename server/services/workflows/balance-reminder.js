@@ -559,6 +559,14 @@ class BalanceReminder {
         ? require("../invoice-helpers").selfPayAtDispatch(balance.oldestInvoiceId, db)
         : undefined,
     });
+    if (require("../collections/collection-hold").isHoldSuppression(sendResult)) {
+      // A dispute hold landed after the policy consult: a WAIT, not a failed send. Release the
+      // reservation (no failed row) and skip quietly like a policy hold; the next run after the
+      // release sends the reminder.
+      await ContactLedger.releaseHeldReservation(ledgerEntry);
+      logger.info(`[balance-reminder] reminder for customer ${service.cust_id} held by a collections dispute hold at the send boundary`);
+      return false;
+    }
     if (sendResult.blocked || sendResult.sent === false) {
       await ContactLedger.markSendFailed(ledgerEntry, { code: sendResult.code || "blocked" });
       throw new Error(
@@ -965,7 +973,10 @@ class BalanceReminder {
           return null;
         });
         if (emailResult?.ok === true) await markReminderDelivery(emailLedger, emailResult);
-        else if (emailResult?.deliveryOutcome !== 'uncertain') {
+        else if (require("../collections/collection-hold").isHoldSuppression(emailResult)) {
+          // Dispute hold after the preflight: a WAIT - release the reservation, no failed row.
+          await ContactLedger.releaseHeldReservation(emailLedger);
+        } else if (emailResult?.deliveryOutcome !== 'uncertain') {
           // A retryable refusal before the provider never reached the
           // customer. This row is unkeyed, so it is stamped never_contacted
           // (the pre-send doctrine, outbound-voice/origination.js), retried
@@ -1015,7 +1026,10 @@ class BalanceReminder {
         preDispatchCheck: require("../invoice-helpers").selfPayAtDispatch(oldestInvoice.id, db),
       }) : { sent: false, blocked: true, code: customer.phone ? 'COLLECTIONS_POLICY' : 'NO_PHONE' };
       if (sendResult.blocked || sendResult.sent === false) {
-        if (smsLedger) await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || "blocked" });
+        if (smsLedger && require("../collections/collection-hold").isHoldSuppression(sendResult)) {
+          // Dispute hold after the preflight: a WAIT - release the reservation, no failed row.
+          await ContactLedger.releaseHeldReservation(smsLedger);
+        } else if (smsLedger) await ContactLedger.markSendFailed(smsLedger, { code: sendResult.code || "blocked" });
         logger.warn(
           `[balance-reminder] late-payment SMS blocked for customer ${customer.id}: ${sendResult.code || "unknown"} ${sendResult.reason || ""}`,
         );

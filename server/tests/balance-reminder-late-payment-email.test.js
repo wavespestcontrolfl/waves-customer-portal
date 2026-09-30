@@ -46,6 +46,7 @@ jest.mock('../services/collections/contact-ledger', () => ({
   claimAttempt: jest.fn(async () => ({ allowed: true })),
   markSendFailed: jest.fn(async () => true),
   markDelivered: jest.fn(async () => true),
+  releaseHeldReservation: jest.fn(async () => true),
 }));
 // Consulted by the real rail-guard only when GATE_COLLECTIONS_POLICY==='true'.
 jest.mock('../services/collections/contact-policy', () => ({
@@ -967,6 +968,56 @@ describe('collections policy + ledger on latePaymentCheck', () => {
       expect.objectContaining({ code: 'quiet_hours' }),
     );
     expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  // Dispute hold (owner ruling 2026-09-30) landing after the rail-guard consult: the send boundary
+  // refuses the text. A WAIT - the reservation is released, not stamped failed, the email sidecar is
+  // not sent alone and the reminder goes out on the first run after the release.
+  test('a dispute hold at the send boundary releases the legacy late-payment SMS reservation instead of stamping it failed', async () => {
+    armHappyPath();
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+    });
+    await BalanceReminder.latePaymentCheck();
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'balance_reminder_late_payment_check' });
+    expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledWith(expect.objectContaining({ id: 'led-1' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
+  test('a dispute hold at the email boundary releases the legacy late-payment email reservation instead of stamping it failed', async () => {
+    armHappyPath();
+    const emailSpy = jest.spyOn(BalanceReminder, 'sendLatePaymentEmail').mockResolvedValueOnce({
+      ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'COLLECTION_HOLD_DEFER',
+    });
+    ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-led`, metadata: {} }));
+    let emailCalls;
+    try {
+      await BalanceReminder.latePaymentCheck();
+      emailCalls = emailSpy.mock.calls.length;
+    } finally { emailSpy.mockRestore(); }
+    expect(emailCalls).toBe(1);
+    expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledWith(expect.objectContaining({ id: 'email-led' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+  });
+
+  test('a dispute hold at the send boundary releases the legacy previsit-balance SMS reservation and skips quietly (no throw)', async () => {
+    const service = customer({ id: 'visit-1', cust_id: 'cust-1', scheduled_date: '2026-05-25', service_type: 'Pest Control' });
+    const balance = { oldestInvoiceId: 'inv-1', oldestInvoiceUrl: 'https://portal/pay/token-1', totalBalance: 129, daysOverdue: 8 };
+    setDbQueues({
+      notification_prefs: [chain({ first: {} })],
+      collections_contact_ledger: [chain({ result: [] })],
+      customer_interactions: [chain()],
+    });
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    sendCustomerMessage.mockResolvedValueOnce({
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+    });
+    await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(false);
+    expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'balance_reminder_workflow' });
+    expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalled();
+    expect(ContactLedger.markDelivered).not.toHaveBeenCalled();
   });
 
   test('an unavailable ledger SKIPS the send — no unledgered customer contact, ever (gate state irrelevant)', async () => {

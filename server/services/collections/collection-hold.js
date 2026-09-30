@@ -238,7 +238,51 @@ const HOLD_DEFER_MS = 4 * 60 * 1000;
 // Category stamped on a payment.failed row that answers the customer's own payment attempt: the
 // retry rail keeps the customerInitiated exemption from it.
 const CUSTOMER_INITIATED_EMAIL_CATEGORY = 'customer_initiated';
-const HOLD_GATED_EMAIL_TEMPLATES = new Set(['payment.failed', 'payment.retry_notice', 'payment.method_expiring']);
+// Category stamped on a dunning email an OPERATOR sent on purpose (the office "send now" button):
+// a stored copy of it re-sent by the provider-retry rail keeps the operator exemption.
+const OPERATOR_INITIATED_EMAIL_CATEGORY = 'operator_initiated';
+const HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES = new Set(['payment.failed', 'payment.retry_notice', 'payment.method_expiring']);
+// Machine-initiated dunning emails that carry a pay / update-card / billing link: the Day 3-90
+// invoice follow-up ladder, the customer-level combined steps, the late-payment reminders
+// (balance-reminder + late-payment-checker), the bank-verification re-nudge and the legacy previsit
+// balance email. They are exactly the sender-rendered billing emails (billing-email-no-replay.js,
+// one list, so a new dunning template cannot join one and miss the other). They go through the
+// billing email authority (billing-channel-email-authority.js), which re-reads the hold at the
+// provider boundary for these keys. (The routed billing.notice email leg is gated one step
+// earlier, at the customer-message boundary, by HOLD_GATED_DUNNING_ENTRY_POINTS.)
+const HOLD_GATED_DUNNING_EMAIL_TEMPLATES = require('../billing-email-no-replay').SENDER_RENDERED_TEMPLATES;
+const HOLD_GATED_EMAIL_TEMPLATES = new Set([
+  ...HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES, ...HOLD_GATED_DUNNING_EMAIL_TEMPLATES,
+]);
+
+// Customer-message entry points (sendCustomerMessage `entryPoint`) of the machine-initiated dunning
+// senders. Their `purpose` is the shared 'payment_link' / 'billing', which non-dunning senders use
+// too (the invoice sender, an operator's project payment link, price-change notices), so the
+// boundary keys on the entry point for these. A new dunning sender must be added here (the sweep
+// test fails until it is classified).
+const HOLD_GATED_DUNNING_ENTRY_POINTS = new Set([
+  'invoice_followup_sequence',
+  'late_payment_checker',
+  'late_payment_checker_microdeposit',
+  'balance_reminder_workflow',
+  'balance_reminder_late_payment_check',
+  'previsit_balance_reminder',
+]);
+
+// The two trusted exemptions a caller can assert: a deliberate operator send, and a send the
+// customer asked for themselves. Everything else waits out the hold.
+function holdExemptionApplies(holdExempt) {
+  return holdExempt === 'operator' || holdExempt === 'customer';
+}
+
+// A send result the hold refused BEFORE the provider (the customer-message boundary's
+// COLLECTION_HOLD_SUPPRESSED, the email authority's COLLECTION_HOLD_DEFER, the sender's
+// hold-deferral). It is a WAIT: the owed touch stays due and goes out after the release; the
+// caller must not stamp a failure, spend an attempt or pause anything for it.
+function isHoldSuppression(result) {
+  const code = result?.code || result?.reason;
+  return code === 'COLLECTION_HOLD_SUPPRESSED' || code === HOLD_DEFER_CODE || result?.holdDefer === true;
+}
 
 // { held: true, reason: 'hold' | 'lookup_failed', error? } | { held: false }.
 // Fail closed: a lookup that cannot be answered holds the send (retried next tick).
@@ -329,7 +373,8 @@ async function storedLifecycleEmailHeld(message, database = db) {
   if (typeof categories === 'string') {
     try { categories = JSON.parse(categories); } catch { categories = []; }
   }
-  if (Array.isArray(categories) && categories.includes(CUSTOMER_INITIATED_EMAIL_CATEGORY)) return { held: false };
+  if (Array.isArray(categories) && (categories.includes(CUSTOMER_INITIATED_EMAIL_CATEGORY)
+    || categories.includes(OPERATOR_INITIATED_EMAIL_CATEGORY))) return { held: false };
   return dueInvoiceHeldByDisputeHold(message.recipient_id, database);
 }
 
@@ -410,7 +455,13 @@ const excludeHoldDeferralPlaceholders = excludeNeverAttemptedHoldDeferrals;
 module.exports = {
   storedLifecycleEmailHeld,
   HOLD_GATED_EMAIL_TEMPLATES,
+  HOLD_GATED_LIFECYCLE_EMAIL_TEMPLATES,
+  HOLD_GATED_DUNNING_EMAIL_TEMPLATES,
+  HOLD_GATED_DUNNING_ENTRY_POINTS,
   CUSTOMER_INITIATED_EMAIL_CATEGORY,
+  OPERATOR_INITIATED_EMAIL_CATEGORY,
+  holdExemptionApplies,
+  isHoldSuppression,
   dueInvoiceHeldByDisputeHold,
   holdDeferOutcome,
   HOLD_DEFER_CODE,

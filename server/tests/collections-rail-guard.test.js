@@ -225,8 +225,21 @@ describe('collections dispute hold (owner ruling 2026-09-30)', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(false);
   });
 
-  test('only "operator" exempts (any other value still waits)', async () => {
+  test('"operator" and "customer" exempt; any other value still waits', async () => {
     held();
+    // A send the customer asked for themselves (the voice "text me the link" tool) is not automated
+    // follow-up, so the hold does not stop it; the policy verdict is still consulted.
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'customer' })).resolves.toBe(true);
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
+    for (const value of ['system', 'admin', true, '', 'Customer']) {
+      await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: value })).resolves.toBe(false);
+    }
+  });
+
+  test('the customer exemption does not lift a policy denial', async () => {
+    held();
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, eligibleInvoiceIds: [], denialReasons: ['flag_do_not_collect'] });
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'customer' })).resolves.toBe(false);
   });
 });
@@ -239,6 +252,6 @@ describe('invoice-followups passes the operator exemption for "send now" only', 
     expect(src).toMatch(/\.\.\.\(holdExempt \? \{ holdExempt \} : \{\}\)/);
     // the operator flag is set by sendNextTouchNow's caller and threads fireStep -> fireTouch
     expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated \}\)/);
-    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated \}\)/);
+    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated(, claimStamp)? \}\)/);
   });
 });
