@@ -1127,8 +1127,9 @@ async function planUpdateDetailsRecurrenceDates(conn, {
       // guard's secure-prepay coverage overlay (Codex r2 P1 on #5387): the
       // guards run BEFORE the rewrite re-dates these rows, so a repriced
       // sibling must be judged at the date the rewrite will give it. A
-      // mismatch with the in-trx rewrite already aborts the save
-      // (guardRecurrenceDestination), so this peek is authoritative.
+      // mismatch with the in-trx rewrite aborts the save (the per-visit
+      // drift check after its planCadenceRewriteTargets call), so this peek
+      // is authoritative.
       for (const [visitId, d] of [...childTargets, ...boosterTargets]) dates.cadenceTargetById.set(String(visitId), d);
     }
   }
@@ -14860,6 +14861,25 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               seenDates,
               blackoutDates: rewriteBlackoutDates,
             });
+            // Per-visit drift check (Codex pre-push P1 on #5387): the re-price
+            // guards judged each sibling at the date the UNLOCKED peek
+            // predicted (plannedRecurrenceDates.cadenceTargetById), and
+            // guardRecurrenceDestination below only checks that a date is
+            // in the locked SET. A visit landing anywhere else — or a target
+            // the peek never planned — means the guards judged the wrong
+            // series; refuse with the same retry the lock-set drift uses.
+            {
+              const planned = plannedRecurrenceDates.cadenceTargetById || new Map();
+              const actual = new Map([...childTargets, ...boosterTargets].map(([id, d]) => [String(id), d]));
+              const drifted = actual.size !== planned.size
+                || [...actual].some(([id, d]) => planned.get(id) !== d);
+              if (drifted) {
+                throw Object.assign(
+                  new Error('This plan changed while saving — reload and save again.'),
+                  { statusCode: 409, isOperational: true, code: 'SERIES_CHANGED_RETRY' },
+                );
+              }
+            }
             // All-or-nothing: blackout exhaustion can leave the generator
             // mapping only a prefix of the pending children. Committing the
             // parent's new cadence while later children keep their old dates
