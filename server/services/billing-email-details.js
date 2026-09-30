@@ -6,8 +6,7 @@
  * customer looks for: invoice.sent and the receipts often went out with a blank
  * service, service date or payment method; payment.failed with no card label,
  * attempt date or retry date; invoices, receipts and estimate follow-ups with no
- * Property row; and invoice.sent (plus a handful of receipts) with no
- * idempotency key at all.
+ * Property row. (The unkeyed sends are a separate follow-up.)
  *
  * This module is the ONE place the sending code asks "what do we know about
  * this invoice / payment" and gets a plain string back ('' when the data does
@@ -17,12 +16,12 @@
  * keys are exactly what they were.
  */
 
-const crypto = require('node:crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { propertyStreetAddress } = require('../utils/property-display');
 const { invoiceCustomerAddress } = require('./invoice-address');
 const { formatDateOnly } = require('../utils/date-only');
+const { parseRawAddress } = require('../utils/address-normalizer');
 const featureGates = require('../config/feature-gates');
 
 // The one reader every sender in the lane goes through. Read at CALL time; a
@@ -271,32 +270,21 @@ async function paidPaymentForInvoice(invoice) {
   }
 }
 
-// ── Idempotency keys ────────────────────────────────────────────────────
+// ── Street-shaped address text ──────────────────────────────────────────
 
-function shortHash(value) {
-  return crypto.createHash('sha256').update(clean(value).toLowerCase()).digest('hex').slice(0, 12);
-}
-
-// invoice.sent: one email per send CLAIM. Every delivery attempt of an invoice
-// runs under a fresh send_claim_token, so a provider retry, a re-run worker or
-// a double-fired request of the SAME claim collapses to one email while an
-// operator's deliberate resend (a new claim) still goes out. The unclaimed
-// payer-completion send has no claim, so it keys on the invoice and the
-// recipient.
-function invoiceSentKey({ invoiceId, claimToken = null, recipientEmail = '' }) {
-  return claimToken
-    ? `invoice_sent:${invoiceId}:${claimToken}`
-    : `invoice_sent:${invoiceId}:unclaimed:${shortHash(recipientEmail)}`;
-}
-
-// invoice.receipt when the caller passed no key of its own. Only a deliberate
-// operator / record-payment send with its own per-attempt identity (the
-// receipt-delivery claim token) gets a derived key; automatic sends already
-// carry theirs, and every other caller stays key-less as on main. The key moves
-// with each attempt, so a blocked first attempt (a suppressed address the office
-// then fixes) can never dedupe a later deliberate resend.
-function receiptAttemptKey({ invoiceId, attemptToken }) {
-  return `invoice_receipt:${invoiceId}:attempt:${shortHash(attemptToken)}`;
+// True only for free text that reads as a street address: the shared address
+// parser's street line starts with a house number followed by a street name
+// ("123 Main St", "5A Palm Ave"). A nickname such as "Rental 2", "Property #2"
+// or "Unit 4" is not one, even though it carries a digit.
+function isStreetShapedAddress(value) {
+  const text = clean(value);
+  if (!text) return false;
+  try {
+    const { line1 } = parseRawAddress(text);
+    return /^\d+[A-Za-z]?(?:-\d+)?\s+[A-Za-z]/.test(clean(line1));
+  } catch {
+    return false;
+  }
 }
 
 module.exports = {
@@ -310,7 +298,6 @@ module.exports = {
   customerPropertyAddress,
   invoiceServiceDetails,
   paidPaymentForInvoice,
-  invoiceSentKey,
-  receiptAttemptKey,
+  isStreetShapedAddress,
   _private: { stampedVisitAddress, scheduledServiceIdFor, savedMethodRow, MANUAL_TENDERS },
 };

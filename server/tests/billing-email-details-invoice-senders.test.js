@@ -10,9 +10,8 @@
  *     method reach the template even when the invoice row itself is blank; the
  *     nickname "Primary" never stands in for the address; a payer's or a
  *     one-off recipient's email never names the homeowner's card
- *   - gate ON: invoice.sent carries one key per send claim, a receipt with no
- *     caller key carries one per receipt generation, and a caller's own key
- *     always wins
+ *   - keys are NOT changed by the gate: invoice.sent still sends no idempotency
+ *     key and a receipt sends exactly the key its caller passed (or null)
  */
 
 jest.mock('../models/db', () => jest.fn());
@@ -185,25 +184,11 @@ describe('invoice.sent', () => {
     expect(args.payload.property_full_address).toBe('');
   });
 
-  test('gate on: the idempotency key is per send claim, so a retry dedupes and a resend under a new claim does not', async () => {
+  test('gate on: invoice.sent sends exactly main\'s keys - none', async () => {
     process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
-    const first = await sent(invoiceRow());
-    expect(first.args.idempotencyKey).toBe('invoice_sent:inv-1:claim-1');
-    EmailTemplates.sendTemplate.mockClear();
-    mockTables(baseTables(invoiceRow({ send_claim_token: 'claim-2' })));
-    await sendInvoiceEmail('inv-1', { claimToken: 'claim-2' });
-    expect(EmailTemplates.sendTemplate.mock.calls[0][0].idempotencyKey).toBe('invoice_sent:inv-1:claim-2');
-  });
-
-  test('gate on: a deduped send (the retry of a delivered claim) reports ok without a second provider call', async () => {
-    process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
-    EmailTemplates.sendTemplate.mockResolvedValue({
-      sent: true, deduped: true, message: { provider_message_id: 'sg-original', sent_at: '2026-09-29T12:00:00.000Z', status: 'sent' },
-    });
-    const { result } = await sent(invoiceRow());
-    expect(result.ok).toBe(true);
-    expect(result.deduped).toBe(true);
-    expect(EmailTemplates.sendTemplate).toHaveBeenCalledTimes(1);
+    const { args } = await sent(invoiceRow());
+    expect(args).not.toHaveProperty('idempotencyKey');
+    expect(args.triggerEventId).toBe('invoice_sent:inv-1');
   });
 
   test('gate on: an operator\'s one-off recipient never sees the homeowner\'s card, but still gets the rest', async () => {
@@ -214,7 +199,7 @@ describe('invoice.sent', () => {
     expect(args.to).toBe('bookkeeper@example.com');
     expect(args.payload.payment_method).toBe('');
     expect(args.payload.service_label).toBe('Quarterly Pest Control');
-    expect(args.idempotencyKey).toBe('invoice_sent:inv-1:claim-1');
+    expect(args).not.toHaveProperty('idempotencyKey');
   });
 
   test('gate on: a payer-billed invoice never names the homeowner\'s card', async () => {
@@ -273,21 +258,10 @@ describe('invoice.receipt', () => {
     expect(args.payload.payment_method).toBe('VISA ···· 4242');
   });
 
-  test('gate on: a receipt with no caller key and no attempt identity stays key-less, as on main', async () => {
+  test('gate on: a receipt with no caller key stays key-less, exactly as on main', async () => {
     process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
     const { args } = await receipt(paid(), {}, { payments: { id: 'pay-1', amount: '150.00' } });
     expect(args.idempotencyKey).toBeNull();
-  });
-
-  test('gate on: an operator send is keyed on its own claim token; a new claim is a new key (blocked first attempt -> fixed address -> resend sends)', async () => {
-    process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
-    const first = await receipt(paid(), { attemptToken: 'operator:w1:claim-a' });
-    EmailTemplates.sendTemplate.mockClear();
-    const again = await receipt(paid(), { attemptToken: 'operator:w1:claim-a' });
-    const resend = await receipt(paid(), { attemptToken: 'operator:w1:claim-b' });
-    expect(first.args.idempotencyKey).toMatch(/^invoice_receipt:inv-1:attempt:/);
-    expect(again.args.idempotencyKey).toBe(first.args.idempotencyKey);
-    expect(resend.args.idempotencyKey).not.toBe(first.args.idempotencyKey);
   });
 
   test('gate on: a key the caller passes always wins (the queue, the webhook, the prepaid receipt)', async () => {

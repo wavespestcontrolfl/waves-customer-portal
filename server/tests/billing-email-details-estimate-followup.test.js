@@ -157,6 +157,28 @@ test('gate on: with no usable estimate address the customer\'s street address is
   expect(sentPayload().property_full_address).toBe('1 Main Street, Bradenton, FL 34205');
 });
 
+test.each(['Rental 2', 'Property #2', 'Unit 4', 'Additional property'])(
+  'gate on: the nickname %p in estimates.address is not a street address; the linked property\'s structured address is used',
+  async (nickname) => {
+    process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
+    db.mockImplementation((table) => {
+      if (table === 'customer_properties') {
+        return rowsFor({ address_line1: '77 Saved Street', city: 'Parrish', state: 'FL', zip: '34219' });
+      }
+      throw new Error(`Unexpected db table ${table}`);
+    });
+    await _private.sendDualChannel(est({ address: nickname, customer_id: 'cust-1', property_id: 'prop-1' }), { email: emailLeg({ property_address: nickname }) });
+    expect(sentPayload().property_full_address).toBe('77 Saved Street, Parrish, FL 34219');
+  },
+);
+
+test('gate on: a street-shaped estimate address with a digit-led house number is used as is', async () => {
+  process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
+  await _private.sendDualChannel(est({ address: '5A Palm Ave, Parrish, FL 34219' }), { email: emailLeg() });
+  expect(sentPayload().property_full_address).toBe('5A Palm Ave, Parrish, FL 34219');
+  expect(db).not.toHaveBeenCalled();
+});
+
 test('gate on: nothing known is no row at all (the variable is absent, so the template drops the block)', async () => {
   process.env.GATE_BILLING_EMAIL_DETAILS = 'true';
   await _private.sendDualChannel(est({ address: 'Primary' }), { email: emailLeg({ property_address: 'Primary' }) });

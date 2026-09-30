@@ -467,7 +467,7 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
   };
 
   // GATE_BILLING_EMAIL_DETAILS (dark): the service, service date, full street
-  // address and payment method on file, plus a per-claim idempotency key. The
+  // address and payment method on file. The
   // template rows are variable-driven, so gate off nothing below is filled and
   // the email is exactly what it was.
   const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
@@ -510,11 +510,6 @@ async function sendInvoiceEmail(invoiceId, options = {}) {
         recipientType: 'customer',
         recipientId: invoice.customer_id || null,
         triggerEventId: `invoice_sent:${invoice.id}`,
-        ...(detailsLive ? {
-          idempotencyKey: BillingEmailDetails.invoiceSentKey({
-            invoiceId: invoice.id, claimToken, recipientEmail: recipient.email,
-          }),
-        } : {}),
         categories: ['invoice_sent'],
         attachments: [pdfAttachment(`invoice-${invoice.invoice_number}.pdf`, pdfBuffer)],
         // Ownership AGAIN at the provider boundary (Codex #4311 r46 P1): the
@@ -725,7 +720,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
   // retried delivery doesn't email the customer twice; manual operator
   // resends from /admin/invoices intentionally omit it so the operator
   // can always force a fresh send.
-  let idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+  const idempotencyKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
     ? options.idempotencyKey.trim()
     : null;
   const invoice = await db('invoices').where({ id: invoiceId }).first();
@@ -784,8 +779,7 @@ async function sendReceiptEmail(invoiceId, options = {}) {
 
   // GATE_BILLING_EMAIL_DETAILS (dark): the service, service date, full street
   // address and the tender behind the payment (cash, check, ACH... not just a
-  // card), and a deterministic key for the deliveries that passed none (the
-  // record-payment path and the operator resends). Gate off, nothing is filled.
+  // card). Gate off, nothing is filled.
   const detailsLive = BillingEmailDetails.billingEmailDetailsLive();
   let detailPayload = {};
   if (detailsLive) {
@@ -796,9 +790,6 @@ async function sendReceiptEmail(invoiceId, options = {}) {
       property_full_address: await BillingEmailDetails.invoicePropertyAddress(invoice, customer),
       payment_method: BillingEmailDetails.receiptTenderLabel({ payment, invoice }),
     };
-    if (!idempotencyKey && options.attemptToken) {
-      idempotencyKey = BillingEmailDetails.receiptAttemptKey({ invoiceId: invoice.id, attemptToken: options.attemptToken });
-    }
   }
 
   const first = recipient.name || customer.first_name || 'there';

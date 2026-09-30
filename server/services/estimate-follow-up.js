@@ -26,7 +26,7 @@ const { leadIdForEstimate } = require("./estimate-lead-linkage");
 const { sendCustomerMessage } = require("./messaging/send-customer-message");
 const { inferEstimateServiceInterest } = require("./estimate-service-lines");
 const { isEnabled } = require("../config/feature-gates");
-const { billingEmailDetailsLive, customerPropertyAddress } = require("./billing-email-details");
+const { billingEmailDetailsLive, customerPropertyAddress, isStreetShapedAddress } = require("./billing-email-details");
 const { estimateDeliverableUnderGate } = require("./pricing-authority-gate");
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require("../constants/business");
 const {
@@ -401,13 +401,13 @@ async function mintStageLinks(est, purpose, { query = null, emailOnly = false } 
 // templates now render the NEW `property_full_address` variable, filled only
 // here and only under the gate, so gate off the emails are byte-identical. The
 // estimate's own address text wins (it is the property the quote is FOR, which
-// can differ from the customer's primary); a value with no street number is a
-// nickname, not an address, so it falls through to the structured property /
-// customer address through the shared street-address helper.
+// can differ from the customer's primary); a value that does not read as a
+// street address ("Primary", "Rental 2", "Property #2") is a nickname, so it
+// falls through to the structured property / customer address.
 async function withFollowupPropertyRow(est, payload) {
   if (!billingEmailDetailsLive()) return payload;
   const own = String(est.address || "").trim();
-  let address = /\d/.test(own) ? own : "";
+  let address = isStreetShapedAddress(own) ? own : "";
   if (!address) {
     address = await customerPropertyAddress(est.customer_id, est.property_id);
   }

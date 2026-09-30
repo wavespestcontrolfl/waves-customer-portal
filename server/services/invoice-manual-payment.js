@@ -513,7 +513,7 @@ async function recordManualPayment(id, {
     if (canSend) {
       try {
         if (emailLeg) {
-          emailResult = await sendReceiptEmail(id, { attemptToken: claim.token }).catch((err) => ({ ok: false, error: err.message }));
+          emailResult = await sendReceiptEmail(id).catch((err) => ({ ok: false, error: err.message }));
           if (emailResult?.ok) await recordOperatorReceiptDelivered(claim, 'email');
         }
         const r = smsLeg

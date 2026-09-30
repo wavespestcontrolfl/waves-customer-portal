@@ -394,8 +394,7 @@ describe('recordManualPayment — settlement', () => {
     const out = await recordManualPayment('inv-1', { method: 'zelle', reference: 'Pat Doe', recordedBy: 'zelle-notice-reconciler' });
     expect(out.invoice).toBeTruthy();
     expect(out.receipt).toEqual({ email: { ok: true }, sms: { ok: true } });
-    // The operator claim token rides along as the attempt identity (used only under GATE_BILLING_EMAIL_DETAILS).
-    expect(sendReceiptEmail).toHaveBeenCalledWith('inv-1', { attemptToken: 'claim-1' });
+    expect(sendReceiptEmail).toHaveBeenCalledWith('inv-1');
     expect(InvoiceService.sendReceipt).toHaveBeenCalledWith('inv-1', expect.objectContaining({ force: true, hasEmailLeg: true, operatorInitiated: true }));
     const descriptions = activity.insert.mock.calls.map(([r]) => r.description);
     expect(descriptions[0]).toMatch(/Manual payment recorded for WPC-2026-0400 \(\$117\.00 via zelle · ref Pat Doe\) — zelle-notice-reconciler/);

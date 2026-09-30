@@ -287,30 +287,29 @@ describe('service and service date', () => {
   });
 });
 
-describe('idempotency keys', () => {
-  test('invoice.sent: one key per send claim, so a retry of the same claim dedupes and a fresh claim (an operator resend) sends', () => {
-    const a = Details.invoiceSentKey({ invoiceId: 'inv-1', claimToken: 'claim-a', recipientEmail: 'x@example.com' });
-    expect(a).toBe('invoice_sent:inv-1:claim-a');
-    expect(Details.invoiceSentKey({ invoiceId: 'inv-1', claimToken: 'claim-a', recipientEmail: 'other@example.com' })).toBe(a);
-    expect(Details.invoiceSentKey({ invoiceId: 'inv-1', claimToken: 'claim-b' })).not.toBe(a);
-    expect(Details.invoiceSentKey({ invoiceId: 'inv-2', claimToken: 'claim-a' })).not.toBe(a);
+describe('street-shaped address text', () => {
+  test.each([
+    ['123 Main St', true],
+    ['123 Example Street, Bradenton, FL 34205', true],
+    ['5A Palm Ave', true],
+    ['12345 Gulf Drive Bradenton', true],
+    ['Rental 2', false],
+    ['Property #2', false],
+    ['Unit 4', false],
+    ['Primary', false],
+    ['Additional property', false],
+    ['2', false],
+    ['', false],
+    [null, false],
+  ])('isStreetShapedAddress(%p) -> %p', (value, expected) => {
+    expect(Details.isStreetShapedAddress(value)).toBe(expected);
   });
+});
 
-  test('invoice.sent with no claim keys on the invoice and a hash of the recipient (case-insensitive, no address in the key)', () => {
-    const key = Details.invoiceSentKey({ invoiceId: 'inv-1', recipientEmail: 'AP@Example.com' });
-    expect(key).toMatch(/^invoice_sent:inv-1:unclaimed:[0-9a-f]{12}$/);
-    expect(key).toBe(Details.invoiceSentKey({ invoiceId: 'inv-1', recipientEmail: 'ap@example.com' }));
-    expect(key).not.toBe(Details.invoiceSentKey({ invoiceId: 'inv-1', recipientEmail: 'someone@example.com' }));
-    expect(key).not.toContain('example.com');
-  });
-
-  test('receipt: the key follows the attempt identity, so a fresh operator attempt never dedupes against a blocked earlier one', () => {
-    const a = Details.receiptAttemptKey({ invoiceId: 'inv-1', attemptToken: 'operator:w1:aaa' });
-    expect(a).toMatch(/^invoice_receipt:inv-1:attempt:[0-9a-f]{12}$/);
-    expect(Details.receiptAttemptKey({ invoiceId: 'inv-1', attemptToken: 'operator:w1:aaa' })).toBe(a);
-    expect(Details.receiptAttemptKey({ invoiceId: 'inv-1', attemptToken: 'operator:w1:bbb' })).not.toBe(a);
-    expect(Details.receiptAttemptKey({ invoiceId: 'inv-2', attemptToken: 'operator:w1:aaa' })).not.toBe(a);
-    expect(a.length).toBeLessThan(260);
-    expect(Details.invoiceSentKey({ invoiceId: 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11', claimToken: 'b0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' }).length).toBeLessThan(260);
+describe('no idempotency-key helpers ship in this lane', () => {
+  test('keys stay exactly as on main (the follow-up owns them)', () => {
+    expect(Details).not.toHaveProperty('invoiceSentKey');
+    expect(Details).not.toHaveProperty('receiptAttemptKey');
+    expect(Details).not.toHaveProperty('receiptKey');
   });
 });

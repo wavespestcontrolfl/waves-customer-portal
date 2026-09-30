@@ -3470,8 +3470,7 @@ const gates = {
   // Billing email details (owner-approved 2026-09-29 audit of email_messages):
   // the invoice / receipt / payment-failed / estimate follow-up emails carry
   // the service, service date, payment method, full street address, card
-  // label, attempt date and the retry date the ladder armed, plus a
-  // deterministic idempotency key on invoice.sent and receipts. Ships DARK:
+  // label, attempt date and the retry date the ladder armed. Ships DARK:
   // off unless exactly 'true'. This entry is for logGateStatus only: every
   // sender reads GATE_BILLING_EMAIL_DETAILS at call time via
   // billingEmailDetailsLive().
@@ -3824,7 +3823,7 @@ function lawnAssessmentRefereeLive() {
 // billing-email-details lane: the extra detail rows on invoice.sent /
 // invoice.receipt / billing.notice / billing.receipt_notice, the card label,
 // attempt date and armed retry date on payment.failed, the Property row on the
-// estimate follow-ups, and the deterministic idempotency keys. The template
+// estimate follow-ups. The template
 // blocks are variable-driven, so with the gate off no sender fills the new
 // variables and every email renders exactly as before.
 function billingEmailDetailsLive() {
