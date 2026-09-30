@@ -763,16 +763,8 @@ const TYPED_REPORT_BUILDERS = Object.freeze({
   cockroach: Object.freeze({
     typedForm: 'cockroach',
     file: COCKROACH_REPORT_V2,
-    // The builder's own exported list (the typed tiles skip these keys),
-    // minus the retired key below, which the form no longer defines.
-    keys: Object.freeze([...COCKROACH_V2_DASHBOARD_FIELD_KEYS].filter((key) => key !== 'work_completed')),
-    // Keys the builder still reads off STORED snapshots although the form no
-    // longer defines them (retired fields). `work_completed` chips were
-    // retired from the cockroach form 2026-09-26; every record completed
-    // before then keeps them in its frozen snapshot and the "What we did"
-    // section renders them (chips win over the product-derived work). The
-    // contract test requires the builder's reads to equal keys + retiredKeys.
-    retiredKeys: Object.freeze(['work_completed']),
+    // The builder's own exported list (the typed tiles skip these keys).
+    keys: Object.freeze([...COCKROACH_V2_DASHBOARD_FIELD_KEYS]),
     defaultSection: 'Cockroach report dashboard',
     sections: Object.freeze({
       species: 'Status + status summary; species label; How you can help',
@@ -780,6 +772,7 @@ const TYPED_REPORT_BUILDERS = Object.freeze({
       activity_locations: '"Areas with activity" metric + status summary',
       evidence_observed: 'Status reconciliation (resolveCockroachStatus) + status summary + evidence list',
       conducive_conditions: 'Conducive conditions list (dashboard conditions)',
+      work_completed: '"What we did" (buildWork)',
       customer_prep: 'How you can help (buildHelp)',
     }),
   }),
@@ -1397,6 +1390,7 @@ const VISIT_FACTS_CONTRACT = {
       ...typedFormFacts('cockroach', {
         notes: {
           evidence_observed: 'Evidence can reconcile the status away from the activity select ("Signs found").',
+          work_completed: 'autoFilled: hidden from the tech form and DERIVED at completion from the submitted product rows (cockroach-work-from-products.js, called by complete-scheduled-service.js before the snapshot freezes) — see cockroach_work_from_products. Records completed before the change keep the chips the tech picked.',
         },
       }),
       ...typedSharedCompletionFacts(),
@@ -1406,19 +1400,19 @@ const VISIT_FACTS_CONTRACT = {
       ...photoFacts(),
       {
         key: 'cockroach_work_from_products',
-        label: 'Products applied, as a source for the cockroach "What we did" section',
-        capture: ['voice', 'tap'],
+        label: 'Products applied, as the source of the cockroach work_completed chips',
+        capture: ['derived'],
         storage: 'service_products.product_name',
         writers: [COMPLETE_SERVICE],
         readers: [
           {
-            file: COCKROACH_REPORT_V2,
-            section: '"What we did" + "Treatments applied" metric + the bait / IGR-aware next-visit and prep copy (workChipsFromApplications, from the report payload\'s applications[])',
-            readerSymbol: 'workChipsFromApplications',
+            file: 'server/services/service-report/cockroach-work-from-products.js',
+            section: 'Derives the autoFilled work_completed chips (deriveCockroachWorkChips) from each submitted product row\'s catalog category / recorded method / active ingredient / application area',
+            readerSymbol: 'deriveCockroachWorkChips',
           },
         ],
         whenMissing: 'hidden',
-        notes: 'Owner ruling 2026-09-26: the "Work completed today" chips were retired from the cockroach form (project-types.js) and "What we did" derives from the product rows instead. Classified by the row\'s catalog category / recorded method / active ingredient, with name fallbacks for Advion gel (bait), Gentrol / Tekko (IGR) and Alpine (crack & crevice); an exterior application area adds the perimeter line. An unrecognised product yields no line. Records completed before the retirement keep their stored work_completed chips, which win over the products. A chip-less record\'s PDF cache key carries a signature of the derived work chips (cockroachWorkSourceSignature).',
+        notes: 'Owner ruling 2026-09-26: the cockroach form no longer asks for work chips; the products the tech recorded ARE the work. Bait (Advion gel / bait method), IGR (Gentrol / IGR category or active) and Alpine (crack & crevice) map to the same chip labels the tech used to tap; an exterior application area adds Exterior perimeter treatment. An unrecognised product derives no chip. The derived chips freeze into the typed snapshot, so the report, Today\'s Result, treatment evidence and trace eligibility read them exactly as before. A stale posted value is stripped and replaced by the derivation. A companion cockroach section (residual pre-retirement combined visits) is not derived: the shared products list cannot be attributed per line.',
       },
     ],
   },

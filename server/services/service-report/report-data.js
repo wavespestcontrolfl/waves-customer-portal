@@ -7,7 +7,7 @@ const { pairBeforeAfterPhotos } = require('../lawn-visit-input');
 const { METHOD_LABELS, renderTreatmentMap } = require('./treatment-map');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isRodentAdjacentServiceType, isSprayApplicationMethod, isNonBaitPesticideProduct, isProductApplicationRow, isTermiteNoReentryServiceType } = require('./service-line-configs');
 const { isTermiteBaitServiceName, termiteBaitSnapshotOf, recordStage, isMonitoringServiceKey, TERMITE_BAIT_TYPED_TYPE } = require('./termite-report-v2');
-const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature, cockroachWorkSourceSignature, workChipsFromApplications } = require('./cockroach-report-v2');
+const { cockroachSnapshotOf, resolveCockroachProgram, cockroachProgramSignature } = require('./cockroach-report-v2');
 const { customerVisiblePressureIndex } = require('../pest-pressure/display');
 const { loadActiveConfig, loadScoreForServiceRecord, loadHistoryForCustomer } = require('../pest-pressure/store');
 const { buildPestPressureCustomerView } = require('../pest-pressure/customer-view');
@@ -338,47 +338,6 @@ async function attachApprovedReportProductFacts(knex, products = [], { frozenFac
       approved_report_product_facts: facts,
     };
   });
-}
-
-// The fields of an application row the cockroach work classifier reads
-// (cockroach-report-v2.js workKeysForApplication), built from an ENRICHED
-// service_products row exactly as buildReportV1Data's `applications` map
-// builds them. Shared so the PDF cache-key lookup below cannot drift from the
-// render.
-function cockroachClassifierApplication(product, serviceLine) {
-  return {
-    product: {
-      name: product.product_name,
-      category: product.product_category || '',
-      product_type: product.approved_report_product_facts?.productType || null,
-      active_ingredient: product.active_ingredient || '',
-    },
-    method: methodFromProduct(product, serviceLine),
-    applicationArea: product.application_area || product.area || null,
-  };
-}
-
-// PDF cache-key lookup side of the cockroach work-source signature: load the
-// visit's product rows, enrich them exactly as buildReportV1Data does (same
-// frozen reportIdentitySnapshot facts, same live catalog fallback), and return
-// the derived work chips. null = the load or the catalog enrichment FAILED
-// (the render marks the same condition productsLoadFailed).
-async function deriveCockroachWorkChipsForRecord(service = {}, knex = db) {
-  if (!service || !service.id) return null;
-  const overlaid = applyReportIdentitySnapshot(service);
-  const frozenIdentity = overlaid.report_identity_snapshot || null;
-  const serviceLine = overlaid.service_line || detectServiceLine(overlaid.service_type);
-  let rawProducts;
-  try {
-    rawProducts = await knex('service_products').where({ service_record_id: service.id }).orderBy('created_at');
-  } catch { return null; }
-  if (!Array.isArray(rawProducts)) return null;
-  const products = await attachApprovedReportProductFacts(knex, rawProducts, {
-    frozenFacts: frozenIdentity?.productFacts || null,
-  });
-  if (products.catalogEnrichmentFailed
-    && rawProducts.some((p) => p.product_id && !String(p.product_category || '').trim())) return null;
-  return workChipsFromApplications(products.map((p) => cockroachClassifierApplication(p, serviceLine)));
 }
 
 function formatPhoneDisplay(raw) {
@@ -4164,9 +4123,6 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
     : null;
 
   const applications = products.map((product, index) => {
-    // name / category / product_type / active_ingredient / method /
-    // applicationArea below are ALSO built by cockroachClassifierApplication
-    // (the cockroach PDF cache-key lookup) — keep the two in step.
     const method = methodFromProduct(product, serviceLine);
     return {
       id: product.id || `product-${index + 1}`,
@@ -5497,12 +5453,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       }
       // The signature of the program state THIS payload carries — the PDF
       // store key reads it from the render, never from a second lookup.
-      // …plus the work-source component (chip-less records derive "What we
-      // did" from the product rows; keyed on the DERIVED chips of the very
-      // `applications` this payload carries). A failed product / catalog
-      // load keys 'f'.
-      cockroachRenderedSignature = cockroachProgramSignature(program)
-        + cockroachWorkSourceSignature(service, productsLoadFailed ? null : workChipsFromApplications(applications));
+      cockroachRenderedSignature = cockroachProgramSignature(program);
     }
 
     // Placed last in this try so a failure here can never disturb the
@@ -6672,8 +6623,6 @@ module.exports = {
   inferCatalogProductType,
   approvedReportProductFacts,
   attachApprovedReportProductFacts,
-  deriveCockroachWorkChipsForRecord,
-  cockroachClassifierApplication,
   completedProtocolActionLabels,
   completedProtocolActionEntries,
   loadLawnProgramOverviewContext,

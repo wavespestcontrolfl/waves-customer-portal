@@ -564,17 +564,10 @@ describe('visit facts contract registry', () => {
     for (const [name, builder] of Object.entries(TYPED_REPORT_BUILDERS)) {
       const src = readRepoFile(builder.file) || '';
       const reads = [...extractValuesKeys(src)].sort();
-      // retiredKeys: stored snapshots still carry a field the form no longer
-      // defines (cockroach work_completed, retired 2026-09-26), so the builder
-      // keeps reading it. They must be read, must NOT be defined by the form
-      // any more (a live field belongs in `keys`), and carry no fact edge.
-      const retired = [...(builder.retiredKeys || [])];
-      expect({ builder: name, reads }).toEqual({ builder: name, reads: [...builder.keys, ...retired].sort() });
+      expect({ builder: name, reads }).toEqual({ builder: name, reads: [...builder.keys].sort() });
       const fieldKeys = new Set((PROJECT_TYPES[builder.typedForm]?.findingsFields || []).map((f) => f.key));
       for (const key of reads) {
-        if (retired.includes(key)) {
-          if (fieldKeys.has(key)) problems.push(`${builder.file}: ${key} is listed retired but ${builder.typedForm} still defines it`);
-        } else if (!fieldKeys.has(key)) problems.push(`${builder.file} reads values.${key}, which ${builder.typedForm} does not define`);
+        if (!fieldKeys.has(key)) problems.push(`${builder.file} reads values.${key}, which ${builder.typedForm} does not define`);
       }
       for (const key of Object.keys(builder.sections)) {
         if (!builder.keys.includes(key)) problems.push(`${name}: section label for ${key}, which the builder does not read`);
