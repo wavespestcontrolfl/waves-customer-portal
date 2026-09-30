@@ -1885,6 +1885,76 @@ describe('r26 (round 26): relative dates in historical thread rows resolve again
   });
 });
 
+describe('r27 (round 26 review): seeded re-entry wordings parse; compound relative dates; dew and other moisture', () => {
+  const parse = labelFactsLib.parseReentryText;
+  test('every plain seeded catalog wording (reentry_summary / reentry_text) that states people AND pets, or is unscoped, parses', () => {
+    const untilDry = [
+      'Keep people and pets off treated areas until dry.', 'until dry', 'until sprays have dried', 'until the spray has dried',
+      'Do not allow people or pets to enter the treated area until sprays have dried.', 'do not allow people or pets on treated surfaces until dry',
+      'People and pets are kept off treated surfaces until the spray has dried.', 'People and pets are kept off the treated lawn until it has dried.',
+      'People and pets are kept off treated areas until the sprays have dried.', 'People and pets stay off treated areas until sprays have dried.',
+      'People and pets stay off treated turf until the sprays have dried.', 'People and pets stay off treated turf until sprays have dried.',
+      'People and pets stay off treated surfaces until they have dried.', 'No re-entry to treated turf until the sprays have dried.', 'No entry into treated turf until sprays have dried.',
+      'Stay off treated areas until they are dry.',
+    ];
+    for (const t of untilDry) expect([t, parse(t)]).toEqual([t, { kind: 'until_dry' }]);
+    expect(parse('People and pets stay off for 4 hours.')).toEqual({ kind: 'hours', hours: 4 });
+  });
+  test('wordings with one subject or an extra condition stay unknown', () => {
+    for (const t of [
+      'Children and pets are kept off treated surfaces until the spray has dried.', // children only (not people): one subject
+      'People are kept off treated areas until the spray solution has dried.', 'People stay off treated turf until the spray has dried.', 'Do not allow pets to enter until sprays have dried.', // one subject
+      'No re-entry to treated turf until the spray has dried and the turf or soil is dry.', 'No entry into treated turf without protective clothing until the sprays have dried.',
+      'People and pets stay off treated surfaces until dry. Toxic to fish, so it is kept away from water.', 'People and pets stay off until the dust has settled and the turf is dry.',
+      'A granular product; people and pets stay off until it is watered in and the lawn is dry.', 'Treated areas are not occupied until the solution has absorbed into the wood.',
+      'Keep people and pets off until dry or 4 hours', 'Do not allow people or pets to enter the treated area until sprays have dried and watered in.',
+    ]) expect([t, parse(t)]).toEqual([t, null]);
+  });
+  test('a product carrying the seeded "Do not allow people or pets to enter..." summary (rei_hours 0 or null) gets its re-entry line', () => {
+    const seeded = 'Do not allow people or pets to enter the treated area until sprays have dried.';
+    for (const reiHours of [0, null]) {
+      const text = labelFactsLib.renderLabelFactsSection({ serviceDate: '2026-06-05', products: [product({ reiHours, reentrySummary: seeded })], unverifiedCount: 0 }, { formatDate: (d) => d });
+      expect([reiHours, /keep people and pets off treated areas until dry/.test(text)]).toEqual([reiHours, true]);
+    }
+  });
+
+  const differs = (t, today = '2026-09-30', visit = '2026-09-29') => labelFactsLib.inboundRefersToOtherVisit(t, visit, today);
+  test('compound relatives resolve before the bare "yesterday": "the day before yesterday" is today - 2', () => {
+    expect(differs("the day before yesterday's treatment")).toBe(true); // Sep 28, not the Sep 29 visit
+    expect(differs('the day before yesterday', '2026-10-01')).toBe(false); // Sep 29
+    expect(differs('the day before yesterday', '2026-09-30', '2026-09-28')).toBe(false);
+    expect(differs('two days ago', '2026-10-01')).toBe(false);
+    expect(differs('yesterday')).toBe(false);
+    expect(differs('the day before yesterday', null)).toBe(true); // unknown own date: unresolvable
+  });
+  test('the other day, a couple / few days ago, a day or two ago, night before last are not one day: another visit', () => {
+    for (const t of ['the other day', 'a couple days ago', 'a couple of days ago', 'a few days ago', 'several days ago', 'a day or two ago', 'night before last', 'the night before last', 'before yesterday']) expect([t, differs(t)]).toEqual([t, true]);
+    expect(differs('how long should they stay off for a few days?')).toBe(false); // not a past reference
+  });
+  test('compound relatives in a historical row resolve against that row\'s date', () => {
+    const FACTS = { serviceDate: '2026-09-29', products: [], unverifiedCount: 0 };
+    const rows = (date) => [{ text: 'You sprayed the day before yesterday', date }];
+    expect(labelFactsLib.labelFactsForInbound(FACTS, ['Can the dogs go out now?'], '2026-09-30', rows('2026-10-01T15:00:00Z'))).toBe(FACTS);
+    expect(labelFactsLib.labelFactsForInbound(FACTS, ['Can the dogs go out now?'], '2026-09-30', rows('2026-09-15T15:00:00Z'))).toBeNull();
+    expect(labelFactsLib.labelFactsForInbound(FACTS, ['Can the dogs go out now?'], '2026-09-30', rows(null))).toBeNull();
+  });
+
+  test('inbound: dew / dewy / condensation / moisture / fog / mist / humidity with a question shape or treatment context ask the rain kind', () => {
+    for (const t of ['Will the morning dew affect the treatment?', 'is the fog a problem for the spray?', 'does condensation matter?', 'it is misty out, will the product still work?', 'the dewy grass is okay?', 'Will moisture hurt the application?', 'Humidity is high, does that affect the spray?']) {
+      expect([t, labelFactsLib.askedLabelKinds(t).includes('rain')]).toEqual([t, true]);
+    }
+    expect(labelFactsLib.askedLabelKinds('We have a humidifier, see you Tuesday')).toEqual([]);
+  });
+  test('outgoing: dew / moisture / fog / humidity assurances are rain claims (held without the rainfast copy)', () => {
+    const asked = labelFactsLib.askedLabelKinds('Will the morning dew affect the treatment?');
+    for (const reply of ["Morning dew won't affect the treatment.", 'Dew will not hurt it.', "Moisture doesn't matter.", "Fog won't wash it away.", "Humidity shouldn't affect it.", "Don't worry about the dew.", 'The dew is fine.']) {
+      expect([reply, labelFactsLib.hasUngroundedLabelClaim(labelFactsLib.stripLabelSentences(reply, ''))]).toEqual([reply, true]);
+      expect([reply, labelFactsLib.replyClaimsUngroundedLabelTiming(reply, '', asked)]).toEqual([reply, true]);
+    }
+    expect(labelFactsLib.replyClaimsUngroundedLabelTiming('Thanks for asking! Your technician will confirm the timing.', '', asked)).toBe(false);
+  });
+});
+
 describe('r26: the follow-up deadline the real-answers prompt requires may trail a hand-off (the exact SLA_PHRASES of sms-followup-sla)', () => {
   const { SLA_PHRASES } = require('../services/sms-followup-sla');
   const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');

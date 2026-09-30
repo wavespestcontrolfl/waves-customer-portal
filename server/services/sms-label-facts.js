@@ -344,10 +344,15 @@ function rainfastDuration(minutes) {
 // re-entry is unknown. The whole text is read (no truncation).
 // Only a subject that covers BOTH people and pets is accepted; a text naming only people or only pets (or "everyone")
 // is not the whole-visit statement the sentence makes, so it is unknown. An unscoped lead ("keep off treated areas") is accepted.
-const REENTRY_SUBJECT_SRC = 'people\\s+and\\s+pets|pets\\s+and\\s+people|people,\\s*pets|humans\\s+and\\s+(?:animals|pets)|people\\s+and\\s+animals|everyone\\s+including\\s+pets';
-const REENTRY_AREA_SRC = '(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawn|grass|yard|surfaces?)';
-const REENTRY_LEAD_SRC = `(?:(?:keep|stay)\\s+(?:(?:${REENTRY_SUBJECT_SRC})\\s+)?(?:off|out\\s+of)(?:\\s+${REENTRY_AREA_SRC})?|(?:do\\s+not|don't)\\s+(?:re-?enter|enter)(?:\\s+${REENTRY_AREA_SRC})?|(?:safe|ok|okay)\\s+for\\s+(?:${REENTRY_SUBJECT_SRC})|re-?entry(?:\\s+(?:is\\s+)?(?:allowed|permitted))?|wait)`;
-const REENTRY_UNTIL_DRY_SRC = "(?:until|once|when)\\s+(?:(?:it(?:\\s+is|'s|\\s+has)?|the\\s+(?:spray|treatment|application|product|areas?|surfaces?)\\s+(?:is|are|has|have))\\s+)?(?:(?:completely|fully|thoroughly)\\s+)?(?:dry|dried)";
+const REENTRY_SUBJECT_SRC = 'people\\s+and\\s+pets|pets\\s+and\\s+people|people\\s+or\\s+pets|pets\\s+or\\s+people|people,\\s*pets|humans\\s+and\\s+(?:animals|pets)|people\\s+and\\s+animals|everyone\\s+including\\s+pets';
+const REENTRY_AREA_SRC = '(?:the\\s+)?(?:treated\\s+)?(?:areas?|lawn|grass|yard|surfaces?|turf)';
+const REENTRY_OFF_SRC = '(?:off|out\\s+of|away\\s+from)';
+// Seeded wordings (the catalog's reentry_summary / reentry_text): "Keep people and pets off treated areas until dry.", "Do not allow people or pets
+// to enter the treated area until sprays have dried.", "People and pets stay off treated turf until sprays have dried.", "No re-entry to treated turf
+// until the sprays have dried." - a plain lead over an until-dry or ONE duration and nothing else.
+const REENTRY_LEAD_SRC = `(?:(?:keep|stay)\\s+(?:(?:${REENTRY_SUBJECT_SRC})\\s+)?${REENTRY_OFF_SRC}(?:\\s+${REENTRY_AREA_SRC})?|(?:${REENTRY_SUBJECT_SRC})\\s+(?:(?:are\\s+)?kept|stay|remain|(?:must|should)\\s+stay|are\\s+to\\s+stay)\\s+${REENTRY_OFF_SRC}(?:\\s+${REENTRY_AREA_SRC})?|(?:do\\s+not|don't)\\s+(?:allow\\s+(?:${REENTRY_SUBJECT_SRC})\\s+(?:to\\s+)?)?(?:re-?enter|enter|on|onto|walk\\s+on)(?:\\s+${REENTRY_AREA_SRC})?|no\\s+(?:re-?entry|entry)\\s+(?:to|into|onto)\\s+${REENTRY_AREA_SRC}|(?:safe|ok|okay)\\s+for\\s+(?:${REENTRY_SUBJECT_SRC})|re-?entry(?:\\s+(?:is\\s+)?(?:allowed|permitted))?|wait)`;
+const REENTRY_DRY_SUBJECT_SRC = '(?:the\\s+)?(?:(?:sprays?|treatments?|applications?|products?)(?:\\s+solution)?|treated\\s+(?:areas?|surfaces?|lawn|turf)|areas?|surfaces?|lawn|turf)';
+const REENTRY_UNTIL_DRY_SRC = `(?:until|once|when)\\s+(?:(?:it(?:\\s+is|'s|\\s+has)?|they(?:\\s+are|\\s+have)|${REENTRY_DRY_SUBJECT_SRC}\\s+(?:is|are|has|have))\\s+)?(?:(?:completely|fully|thoroughly)\\s+)?(?:dry|dried)`;
 const REENTRY_DURATION_SRC = '(?:for\\s+)?(\\d+(?:\\.\\d+)?)\\s*(hours?|hrs?|minutes?|mins?|days?)(?:\\s+after\\s+(?:the\\s+)?(?:application|spraying|treatment))?';
 const REENTRY_SHAPE_RE = new RegExp(`^(?:${REENTRY_LEAD_SRC})?\\s*(?:(${REENTRY_UNTIL_DRY_SRC})|${REENTRY_DURATION_SRC})?\\s*\\.?$`, 'i');
 const HOURS_PER_UNIT = { m: 1 / 60, h: 1, d: 24 };
@@ -610,6 +615,9 @@ const hasClockTime = (clause) => CLOCK_TIME_RE.test(clause);
 // confirming timing) and the COMPANY FACTS rain line are not claims; the
 // drafter rewrites the former before calling this and the latter carries none
 // of the above.
+// Moisture that is not rain but is asked about / reassured about the same way ("will the morning dew affect the treatment?", "dew won't hurt it").
+const MOISTURE_WORD_SRC = 'dew|dewy|condensation|moisture|fog|foggy|mist|misty|humidity|humid\\w*';
+const MOISTURE_WORD_RE = new RegExp(`\\b(?:${MOISTURE_WORD_SRC})\\b`);
 const RAIN_WORD_RE = /\b(?:rain(?:s|ed|ing|fall|y|fast)?|rain-fast|showers?|storms?|thunderstorms?|downpours?|sprinklers?|irrigation|drizzle)\b/;
 const RAINFAST_RE = /\brain[-\s]?(?:fast|proof|resistant)\b|\bweather[-\s]?(?:proof|resistant)\b|\bwater[-\s]?(?:proof|resistant)\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this\s+|that\s+|them\s+|the\s+\w+\s+)?(?:off|away|out)\b|\bwashed\s+off\b/;
 const UNTIL_DRY_HOLD_RE = /\b(?:until|till|til|unless|before)\b[^.]{0,40}\bdr(?:y|ies|ied|ying)\b/;
@@ -724,8 +732,8 @@ function clauseFacts({ clause, staffCarry, sentence, question, replyContext, rep
     staffLed: (staffSubjectIn(clause) || staffCarry) && !being,
     duration,
     clock: hasClockTime(clause),
-    rain: RAIN_WORD_RE.test(clause),
-    rainSentence: RAIN_WORD_RE.test(sentence),
+    rain: RAIN_WORD_RE.test(clause) || MOISTURE_WORD_RE.test(clause),
+    rainSentence: RAIN_WORD_RE.test(sentence) || MOISTURE_WORD_RE.test(sentence),
     preVisit: isPreVisitAccess(sentence),
     sched: (clock) => isSchedulingClause(clause, { staffCarry, clock, sentence }),
   };
@@ -1071,7 +1079,7 @@ const asksReentryStructurally = (text) => asksIndoorReentry(text) || (ASKER_RE.t
   || (OUTDOOR_PLACE_RE.test(text) && (ASKED_QUESTION_RE.test(text) || /\b(?:safe|ok|okay|fine|ready|usable|clear)\b/.test(text)));
 // Weather-only wording ("will this weather affect the treatment?", "the wet grass ok?", "humid today, will it still work?")
 // asks the rain kind when it has a question shape or a treatment / spray / application / work / effect context.
-const WEATHER_WORD_RE = /\b(?:weather|wet|storm\w*|forecast\w*|humid\w*|humidity|drizzl\w*|pour(?:s|ed|ing)?|downpour\w*|sprinkl\w*|damp|soaked|soaking|showers?|rain\w*)\b/;
+const WEATHER_WORD_RE = /\b(?:weather|wet|dew|dewy|condensation|moisture|fog|foggy|mist|misty|storm\w*|forecast\w*|humid\w*|humidity|drizzl\w*|pour(?:s|ed|ing)?|downpour\w*|sprinkl\w*|damp|soaked|soaking|showers?|rain\w*)\b/;
 const TREATMENT_CONTEXT_RE = /\b(?:treatment|treated|spray|sprayed|spraying|application|applied|product|granules?|fertilizer|work|works|working|effect|affect|affected)\b/;
 const ASKED_RAIN_RE = new RegExp([RAIN_WORD_RE.source, RAINFAST_RE.source, /\bwater(?:ing)?\s+in\b/.source].join('|'));
 const asksWeather = (text) => WEATHER_WORD_RE.test(text) && (ASKED_QUESTION_RE.test(text) || TREATMENT_CONTEXT_RE.test(text));
@@ -1096,7 +1104,7 @@ function isEllipticalInbound(text) {
 // so the approved COMPANY FACTS watering answer is what answers it.
 const WATERING_RE = /\b(?:water(?:ing)?(?=\s+(?:the|my|our|it|them|in|down|early|daily|twice|every|once|more|less|again|now|today|tonight|tomorrow|yet|lawn|grass|yard|plants?|garden|sod)\b|\s*[?!.]|\s*$)|to\s+water\b|sprinklers?|irrigat\w+|hose|turn(?:ing)?\s+(?:the\s+)?(?:water|sprinklers?|irrigation)\s+(?:back\s+)?on|run(?:ning)?\s+the\s+(?:sprinklers?|irrigation|water))\b/;
 const WATERING_CONTEXT_RE = /\b(?:now|yet|ok|okay|safe|fine|when|can\s+(?:i|we)|may\s+(?:i|we)|allowed|how\s+long|after|before|until|till|today|tonight|tomorrow|already|still|treatment|treated|spray|sprayed|spraying|application|applied|fertilizer|fertilized|granules?|product|wait|hold\s+off|again|back\s+on)\b/;
-const WATERING_WEATHER_RE = /\b(?:rain\w*|showers?|storms?|stormy|forecast\w*|drizzl\w*|downpour\w*|weather|humid\w*|wet|soaked)\b|\bwash(?:es|ed)?\s+(?:it\s+)?(?:off|away)\b/;
+const WATERING_WEATHER_RE = /\b(?:dew|dewy|fog|foggy|mist|misty|moisture|condensation|rain\w*|showers?|storms?|stormy|forecast\w*|drizzl\w*|downpour\w*|weather|humid\w*|wet|soaked)\b|\bwash(?:es|ed)?\s+(?:it\s+)?(?:off|away)\b/;
 const OTHER_REENTRY_TOPIC_RE = new RegExp(BEING_RE.source + '|\\b(?:walk|walking|play|playing|mow|mowing|swim|swimming|sit|sitting|enter|inside|indoors)\\b');
 function wateringKinds(text) {
   if (!WATERING_RE.test(text)) return null;
@@ -1408,6 +1416,10 @@ function isoAddDays(iso, days) {
 const YESTERDAY_RE = /\byesterday\b/g;
 // Same-day references ("today", "this morning", "earlier today", "just now", "a few hours ago") mean the ET date `today`.
 const SAME_DAY_RE = /\btoday(?:'s)?\b|\bthis\s+(?:morning|afternoon|evening)\b|\bjust\s+now\b|\b(?:an?|one|two|three|four|five|six|\d{1,2}|a\s+few|a\s+couple(?:\s+of)?|several|some)\s+(?:hours?|hrs?|minutes?|mins?)\s+ago\b/g;
+// Compound relatives come BEFORE the bare "yesterday": "the day before yesterday" is two days ago; "the other day", "a couple / few days ago",
+// "a day or two ago" and "night before last" are not one resolvable day, so they always name another visit.
+const DAY_BEFORE_YESTERDAY_RE = /\b(?:the\s+)?day\s+before\s+(?:yesterday|last)\b/g;
+const NIGHT_BEFORE_LAST_RE = /\b(?:the\s+)?night\s+before\s+(?:last|yesterday)\b|(?<!\bday\s+)\bbefore\s+yesterday\b|\bthe\s+other\s+(?:day|night)\b|\b(?:a\s+)?(?:couple|few|several|some|many)(?:\s+of)?\s+(?:days?|nights?)\s+(?:ago|back)\b|\b(?:a\s+)?(?:day|night)\s+or\s+(?:two|so)\s+(?:ago|back)\b/g;
 const DAYS_AGO_RE = /\b(\d{1,3}|a|one|two|three|four|five|six|seven)\s+days?\s+ago\b/g;
 const DAYS_AGO_WORDS = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
 const MONTH_SRC = MONTH_NAMES.map((n) => n.slice(0, 3)).join('|');
@@ -1451,7 +1463,7 @@ const otherYmd = (v, month, day, year) => month !== v.month || day !== v.day || 
 const tailYear = (a, b) => a || b;
 
 // The patterns whose meaning depends on the day the message was sent.
-const RELATIVE_REFERENCES = [YESTERDAY_RE, SAME_DAY_RE, DAYS_AGO_RE, QUALIFIED_WEEKDAY_RE, WEEKDAY_ABBR_RE];
+const RELATIVE_REFERENCES = [YESTERDAY_RE, DAY_BEFORE_YESTERDAY_RE, NIGHT_BEFORE_LAST_RE, SAME_DAY_RE, DAYS_AGO_RE, QUALIFIED_WEEKDAY_RE, WEEKDAY_ABBR_RE];
 
 // Every way a message can point at a visit: a pattern, and a resolver that says
 // whether ONE match names a visit other than the facts' own. The message refers
@@ -1460,7 +1472,10 @@ const RELATIVE_REFERENCES = [YESTERDAY_RE, SAME_DAY_RE, DAYS_AGO_RE, QUALIFIED_W
 const VISIT_REFERENCES = [
   { re: FUTURE_OR_OLDER_RE, differs: () => true },
   // "yesterday" / "N days ago" resolve against today and must land on the visit date
-  { re: YESTERDAY_RE, differs: (m, v) => isoAddDays(v.today, -1) !== v.date },
+  { re: DAY_BEFORE_YESTERDAY_RE, differs: (m, v) => isoAddDays(v.today, -2) !== v.date },
+  { re: NIGHT_BEFORE_LAST_RE, differs: () => true },
+  // (the "yesterday" of "the day before yesterday" is the compound's, read above)
+  { re: YESTERDAY_RE, differs: (m, v) => !/\b(?:day|night)\s+before\s+$|\bbefore\s+$/.test(m.input.slice(0, m.index)) && isoAddDays(v.today, -1) !== v.date },
   { re: SAME_DAY_RE, differs: (m, v) => v.today !== v.date },
   { re: DAYS_AGO_RE, differs: (m, v) => isoAddDays(v.today, -(DAYS_AGO_WORDS[m[1]] ?? Number(m[1]))) !== v.date },
   // a QUALIFIED weekday ("next Friday", "this Friday", "this coming Friday", "the following Friday", "Friday after next",
@@ -1577,4 +1592,5 @@ module.exports = {
   isEnglishInbound,
   nonEnglishTimingWords,
   labelFactsForInbound,
+  parseReentryText,
 };
