@@ -251,12 +251,17 @@ function propertyIdentity(row, deps) {
   if (!row) return { id: '', address: '' };
   return {
     id: row.property_id ? String(row.property_id) : '',
-    address: deps.addressKey({
-      address_line1: row.service_address_line1,
-      address_line2: row.service_address_line2,
-      city: row.service_address_city,
-      zip: row.service_address_zip,
-    }),
+    // The address identity needs a STREET: addressKey is nonempty for a city or ZIP
+    // alone, and "Parrish" is not a property. Without line 1 the identity is unknown
+    // (never a match; the ambiguity guards apply).
+    address: clean(row.service_address_line1)
+      ? deps.addressKey({
+        address_line1: row.service_address_line1,
+        address_line2: row.service_address_line2,
+        city: row.service_address_city,
+        zip: row.service_address_zip,
+      })
+      : '',
   };
 }
 function hasPropertyIdentity(row, deps) {
@@ -269,6 +274,11 @@ function sameProperty(a, b, deps) {
   if (x.id && y.id) return x.id === y.id;
   if (x.address && y.address) return x.address === y.address;
   return false;
+}
+// Every row provably at ONE property (a single row is trivially one; unknown
+// identities never agree with a second row).
+function allSameProperty(rows, deps) {
+  return rows.length <= 1 || rows.every((row) => sameProperty(rows[0], row, deps));
 }
 // Compatible = provably the same property, or an identity is missing on a side
 // (not recorded is not "a different property").
@@ -304,7 +314,7 @@ async function nextPestVisit({
     const next = pest.find((row) => sameProperty(linked, row, deps));
     return { ymd: next ? dateOnlyString(next.scheduled_date) : '' };
   }
-  if (pest.some((row) => !sameProperty(pest[0], row, deps))) return { ambiguous: true };
+  if (!allSameProperty(pest, deps)) return { ambiguous: true };
   return { ymd: pest[0] ? dateOnlyString(pest[0].scheduled_date) : '' };
 }
 
@@ -357,7 +367,7 @@ async function activeRecurringPestPlan({ conn, deps, record }) {
     const rootId = String(linked.recurring_parent_id || linked.id);
     return active.some((parent) => String(parent.id) === rootId);
   }
-  return active.length > 0 && active.every((parent) => sameProperty(active[0], parent, deps));
+  return active.length > 0 && allSameProperty(active, deps);
 }
 
 // Every condition that makes this THE customer's first performed pest visit

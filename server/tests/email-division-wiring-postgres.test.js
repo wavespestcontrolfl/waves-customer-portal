@@ -178,7 +178,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
   async function makeNextVisit(customerId, pattern = 'quarterly', date = '2099-12-24', extra = {}) {
     const [row] = await db('scheduled_services').insert({
       customer_id: customerId, scheduled_date: date, service_type: 'Quarterly Pest Control Service',
-      status: 'confirmed', recurring_pattern: pattern, service_address_city: 'Parrish',
+      status: 'confirmed', recurring_pattern: pattern, service_address_line1: '123 Example St', service_address_city: 'Parrish', service_address_zip: '34219',
       // A live recurring series root (the canonical active-series source reads these flags).
       is_recurring: Boolean(pattern) && pattern !== 'one_time', recurring_ongoing: Boolean(pattern) && pattern !== 'one_time',
       ...extra,
@@ -190,7 +190,7 @@ describeOrSkip('email division wiring (Postgres)', () => {
   async function makeDoneRecurring(customerId, extra = {}) {
     const [row] = await db('scheduled_services').insert({
       customer_id: customerId, scheduled_date: '2026-09-20', service_type: 'Quarterly Pest Control Service',
-      status: 'completed', recurring_pattern: 'quarterly', service_address_city: 'Parrish',
+      status: 'completed', recurring_pattern: 'quarterly', service_address_line1: '123 Example St', service_address_city: 'Parrish', service_address_zip: '34219',
       is_recurring: true, recurring_ongoing: true, ...extra,
     }).returning('id');
     return row.id;
@@ -1261,6 +1261,33 @@ describeOrSkip('email division wiring (Postgres)', () => {
         const recordOther = await makeVisit({ customerId: other.id, technicianId: techId, scheduledServiceId: doneOther });
         const same = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordOther, other), mode: 'live', deps: baseDeps() });
         expect(same.payload.next_visit_date).toBe('December 24, 2099');
+      });
+
+      test('a city (or ZIP) alone is not a property: appointments carrying only the same city never match — ambiguity skips, never a wrong date', async () => {
+        const techId = await makeTech();
+        const cityOnly = { service_address_line1: null, service_address_zip: null, service_address_city: 'Parrish' };
+        // Linked visit with only a city; two upcoming pest appointments, also city-only (could be two properties).
+        const customer = await makeCustomer();
+        const root = await makeDoneRecurring(customer.id, cityOnly);
+        await makeNextVisit(customer.id, 'quarterly', '2098-01-05', cityOnly);
+        await makeNextVisit(customer.id, 'quarterly', '2099-12-24', cityOnly);
+        const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, scheduledServiceId: root });
+        const ambiguous = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', recordId, customer), mode: 'live', deps: baseDeps() });
+        expect(ambiguous).toEqual(expect.objectContaining({ skip: true, code: 'next_visit_property_ambiguous' }));
+        // One city-only upcoming appointment is unambiguous (nothing to confuse it with).
+        const single = await makeCustomer();
+        const singleRoot = await makeDoneRecurring(single.id, cityOnly);
+        await makeNextVisit(single.id, 'quarterly', '2099-12-24', cityOnly);
+        const singleRecord = await makeVisit({ customerId: single.id, technicianId: techId, scheduledServiceId: singleRoot });
+        const ok = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', singleRecord, single), mode: 'live', deps: baseDeps() });
+        expect(ok.payload.next_visit_date).toBe('December 24, 2099');
+        // An UNLINKED record cannot join two city-only active series: they may be two properties.
+        const unlinked = await makeCustomer();
+        await makeNextVisit(unlinked.id, 'quarterly', '2099-01-05', cityOnly);
+        await makeNextVisit(unlinked.id, 'quarterly', '2099-12-24', cityOnly);
+        const unlinkedRecord = await makeVisit({ customerId: unlinked.id, technicianId: techId });
+        const refused = await Builders.buildEmailDivisionPayload({ run: runFor('lc.first_visit_pest', unlinkedRecord, unlinked), mode: 'live', deps: baseDeps() });
+        expect(refused).toEqual(expect.objectContaining({ skip: true, code: 'not_recurring_plan' }));
       });
 
       test('a cancelled (or lapsed) series is not an ACTIVE plan: a cancelled recurring root plus a separately booked future pest visit is no B1', async () => {
