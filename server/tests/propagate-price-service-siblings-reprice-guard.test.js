@@ -61,7 +61,7 @@ function makeConn({
   const conn = (table) => {
     if (table === 'scheduled_services') {
       const c = {};
-      for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNot', 'orderBy']) c[m] = jest.fn(() => c);
+      for (const m of ['where', 'whereIn', 'whereNotIn', 'whereNot', 'orderBy', 'select']) c[m] = jest.fn(() => c);
       c.modify = jest.fn((cb) => { cb(c); return c; });
       c.forUpdate = jest.fn((...a) => { rowForUpdateSpy(...a); return c; });
       c.noWait = jest.fn(() => c);

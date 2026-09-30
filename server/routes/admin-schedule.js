@@ -17672,7 +17672,13 @@ async function memberBillingInvoiceRows(conn, ids) {
   };
   const readItemized = async () => {
     const containment = memberIds.map(() => 'itemized.line_items @> ?::jsonb').join(' OR ');
+    // Scoped to the members' own customers (Codex r1 P2 on #5374): a combined
+    // first-application invoice is minted for the anchor's customer, and its
+    // members are that same customer's visits (estimate-first-application-
+    // invoice.js), so the indexed invoices.customer_id bounds the jsonb
+    // containment scan to one customer's invoices instead of the table.
     const rows = await conn('invoices as itemized')
+      .whereIn('itemized.customer_id', conn('scheduled_services').whereIn('id', memberIds).select('customer_id'))
       .whereNotIn('itemized.status', CANCELLED_SERVICE_RESOLVED_STATUSES)
       .whereRaw(`(${containment})`, memberIds.map((id) => JSON.stringify([{ client_id: `scheduled_${id}_primary` }])))
       .select('itemized.id', 'itemized.scheduled_service_id', 'itemized.line_items');
