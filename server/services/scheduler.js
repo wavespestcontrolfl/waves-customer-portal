@@ -7728,8 +7728,8 @@ function initScheduledJobs() {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();
-      if (!result.skipped && (result.misses > 0 || result.alerted > 0)) {
-        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted}`);
+      if (!result.skipped && (result.misses > 0 || result.alerted > 0 || result.repeated > 0)) {
+        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted} repeated=${result.repeated || 0}`);
       }
     } catch (err) {
       logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);
