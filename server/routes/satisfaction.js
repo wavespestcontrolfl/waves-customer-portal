@@ -30,13 +30,11 @@ const { visitAnchor, reviewLinkClickedSince } = require('../services/review-clic
 //   - the customer has already left a Google review (has_left_google_review);
 //   - they already clicked through a tracked review link since that visit
 //     (review_requests.redirected_at) — that is how the card stops showing;
-//   - a one-off ask is queued / mid-send, whatever the cap / cooldown / cadence
-//     state (its own text would still go out after a review);
-//   - a cadence owns the customer and there is no live token to reuse (a bare
-//     URL would stop nothing and the cadence would keep chasing).
-// The link comes from services/portal-review-card.js: the customer's live
-// tokenized /api/rate/<token>/go link (the click is stamped and the cadence
-// stops), else the office's official g.page/r/<id>/review URL.
+//   - the customer opted out of review requests (notification_prefs);
+//   - the customer has no live delivered review link: the card offers ONLY the
+//     tracked /api/rate/<token>/go link (services/portal-review-card.js), never
+//     a bare office Google URL, so every portal tap stamps the click and the
+//     send-time guard suppresses any ask enrolled afterwards.
 router.get('/review-card', async (req, res, next) => {
   try {
     const customer = req.customer;
@@ -87,7 +85,7 @@ router.get('/review-card', async (req, res, next) => {
       storedLocationId: customer.nearest_location_id || null,
     });
 
-    const reviewLink = await reviewCardLinkFor(customer.id, office);
+    const reviewLink = await reviewCardLinkFor(customer.id);
     if (!reviewLink) return res.json({ card: null, propertyScope });
 
     res.json({

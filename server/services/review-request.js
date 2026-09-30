@@ -848,7 +848,7 @@ async function reserveSendableReviewSms({ request, to, body }) {
 // handoff — it is sendable or retryable and must never be superseded or
 // treated as stoppable. Used as the callback of whereExists / whereNotExists
 // (`this` is the subquery builder); shared by supersedeQueuedAsks,
-// _reservedPendingAsk and so futureAskState / stopFutureAsks.
+// _reservedPendingAsk and so stopFutureAsks.
 function activeSendReservation() {
   this.select(1).from("sms_log")
     .whereRaw("sms_log.metadata->>'review_request_id' = review_requests.id::text")
@@ -2036,7 +2036,7 @@ const ReviewService = {
     if (await ClickGuard.askSuppressedByClick(request)) {
       await db("review_requests").where({ id: requestId }).update({ status: "suppressed" });
       logger.info(`[review] Suppressed request (customerId=${request.customer_id} requestId=${requestId} reason=review_link_clicked)`);
-      return;
+      return { refused: "review_link_clicked" };
     }
     // A pending automatic ask whose combined-visit summary is parked as
     // uncertain is removed, exactly as the parking operation does; the
@@ -4200,7 +4200,7 @@ const ReviewService = {
             return;
           }
           // Send-time guard: a tracked click since the visit ends the follow-up.
-          if (await ClickGuard.askSuppressedByClick(request, { followup: true })) {
+          if (await ClickGuard.askSuppressedByClick(request)) {
             await db("review_requests").where({ id: request.id }).update({ followup_sent: true, followup_sent_at: new Date() });
             logger.info(`[review] Follow-up suppressed (requestId=${request.id} reason=review_link_clicked)`);
             suppressed++;
@@ -4425,11 +4425,15 @@ const ReviewService = {
     // cannot race the click's own stop; terminal, so the cadence stops.
     // A cadence with no visit ids (admin-started) falls back to its own start.
     let fallbackAnchor = null;
-    if (sequenceId && !serviceRecordId && !scheduledServiceId) {
+    if (sequenceId) {
+      // Any cadence: its own start is the fallback whenever its visit row is
+      // gone (a deleted record), not only when it never had one.
       const seq = await db("review_sequences").where({ id: sequenceId }).first("created_at", "started_at");
       fallbackAnchor = seq?.created_at || seq?.started_at || null;
     }
-    if (await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId, fallbackAnchor })) {
+    // No visit AND no cadence (an operator one-off: Quick Links, admin,
+    // tech-trigger, Intelligence Bar): the customer's newest completed visit.
+    if (await ClickGuard.touchSuppressedByClick(customer.id, { serviceRecordId, scheduledServiceId, fallbackAnchor, newestVisitFallback: !sequenceId })) {
       logger.info(`[review] Touch suppressed (customerId=${customer.id} reason=review_link_clicked)`);
       return { ok: false, reason: "review_link_clicked", terminal: true };
     }
@@ -5461,13 +5465,11 @@ const ReviewService = {
    * 'deferred' where the queued-row check cannot see them). Only counted while
    * GATE_REVIEW_SEQUENCES is ON — with the gate off the cadence cron is frozen
    * and a stranded 'active' row must not lock the customer out forever.
-   * Fail-closed: no .catch, a DB error throws. Shared by
-   * checkUnscheduledAskGates and futureAskState (which passes ignoreGate: a
-   * gate flip must not resurrect a stranded cadence the card ignored).
+   * Fail-closed: no .catch, a DB error throws.
    */
-  async _activeCadenceFor(customerId, { ignoreGate = false } = {}) {
+  async _activeCadenceFor(customerId) {
     const { isEnabled } = require("../config/feature-gates");
-    if (!ignoreGate && !isEnabled("reviewSequences")) return false;
+    if (!isEnabled("reviewSequences")) return false;
     const activeSeq = await db("review_sequences")
       .where({ customer_id: customerId, status: "active" }).first();
     return Boolean(activeSeq);
@@ -5477,7 +5479,7 @@ const ReviewService = {
    * A one-off ask about to text: a composer send mid-flight, or a queued
    * ('pending', scheduled) ASK row. Independent of cap / cooldown / cadence.
    * Returns {outcome: 'in_flight'} | {outcome: 'already_queued', nextAllowedAt,
-   * queuedId} | null. Shared by checkUnscheduledAskGates and futureAskState.
+   * queuedId} | null.
    */
   async _pendingOneOffAsk(customerId) {
     const inFlight = await this._unsentSendingAsk(customerId, { since: new Date(Date.now() - INLINE_CLAIM_STALE_MS) });
@@ -5496,16 +5498,14 @@ const ReviewService = {
    * so neither the queued arm nor the delivered stats see it — yet the ask is
    * about to text. Block every canonical one-off path for the claim's lifetime
    * (`since` = the fresh-claim window; a claim older than the stale window is
-   * reconciled by claimInlineForSend, not blocking). Without `since` this is
-   * ANY unsent 'sending' row: reconcileStrandedSends may still release it back
-   * to the scheduler, so it can text later (futureAskState).
+   * reconciled by claimInlineForSend, not blocking).
    */
-  async _unsentSendingAsk(customerId, { since = null } = {}) {
-    const q = db("review_requests")
+  async _unsentSendingAsk(customerId, { since }) {
+    return db("review_requests")
       .where({ customer_id: customerId, status: "sending" })
-      .whereNull("sms_sent_at");
-    if (since) q.where("claimed_at", ">=", since);
-    return q.first("id");
+      .whereNull("sms_sent_at")
+      .where("claimed_at", ">=", since)
+      .first("id");
   },
 
   /** A queued ('pending', scheduled) ASK row processScheduled will text. */
@@ -5520,77 +5520,8 @@ const ReviewService = {
   },
 
   /**
-   * THE chokepoint for "can another review ask still reach this customer
-   * later?" — read independently of the ask-eligibility outcome (cap /
-   * cooldown / cadence gates return early and never prove nothing is pending).
-   * Every automatic or resumable sender is listed here, each built from the
-   * predicate its sender uses:
-   *   cadence_active        review_sequences 'active'        -> processReviewSequences
-   *   cadence_deferred_final 'deferred' series final          -> _sweepDeferredEnrollments
-   *   cadence_redeeming     'redeeming' (sweep lease mid-flight; cannot be stopped)
-   *   cadence_parked        stopped + visit_summary_bounced   -> resumeVisitReviewOutreach
-   *   summary_may_enroll    a parked/uncertain visit summary whose outreach was
-   *                         REMOVED (no sequence for the record): the recovery
-   *                         enrolls a fresh ask (enrollVisitCompletionReview)
-   *   queued_one_off        pending scheduled ASK            -> processScheduled
-   *   reserved_send         pending ask with an active sms_log send reservation:
-   *                         a dispatcher holds (or crashed holding) the provider
-   *                         handoff, so it is sendable/retryable and NOT stoppable
-   *   unsent_sending        'sending' with no sms_sent_at    -> reconcileStrandedSends
-   *                         may release it back to the scheduler
-   *   followup_due          delivered ask with followup_sent=false -> processFollowups
-   * Not listed on purpose: the owed inline email leg (findInlineAwaitingEmail)
-   * is operator-driven (composer) and already excludes redirected_at.
-   *
-   * `stoppable` says whether stopFutureAsks (run by /go on a tracked click)
-   * really stops that path; `stoppableToken` is the customer's live delivered
-   * review token, whose /go click runs it, and is null when any listed path is
-   * NOT stoppable. Fails closed: a DB error throws.
-   * @returns {{possible: boolean, reasons: {key: string, stoppable: boolean}[], stoppable: boolean, stoppableToken: string|null}}
-   */
-  async futureAskState(customerId) {
-    const reasons = [];
-    const add = (key, stoppable) => reasons.push({ key, stoppable });
-    const Summary = require("./visit-completion-summary");
-
-    const seqs = await db("review_sequences")
-      .where({ customer_id: customerId })
-      .whereIn("status", ["active", "deferred", "redeeming"])
-      .select("status");
-    for (const seq of seqs) {
-      if (seq.status === "active") add("cadence_active", true);
-      else if (seq.status === "deferred") add("cadence_deferred_final", true);
-      else add("cadence_redeeming", false);
-    }
-    const parked = await db("review_sequences")
-      .where({ customer_id: customerId, status: "stopped", stop_reason: Summary.PARKED_REVIEW_REASON }).first("id");
-    if (parked) add("cadence_parked", true);
-
-    // A summary parked as uncertain removes the legacy pending ask and, with
-    // no sequence for the record, the recovery enrolls a fresh one.
-    const recent = await db("service_records")
-      .where({ customer_id: customerId, status: "completed" })
-      .where("service_date", ">=", new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10))
-      .orderBy("service_date", "desc").limit(10).pluck("id");
-    for (const recordId of recent) {
-      if ((await Summary.visitSummaryUncertainForRecord(recordId)) === false) continue;
-      if (!(await this._priorSequenceForRecord(recordId))) { add("summary_may_enroll", false); break; }
-    }
-
-    if (await this._queuedOneOffAsk(customerId)) add("queued_one_off", true);
-    if (await this._reservedPendingAsk(customerId)) add("reserved_send", false);
-    if (await this._unsentSendingAsk(customerId)) add("unsent_sending", false);
-    if (await this._followupPendingBase(db("review_requests").where({ customer_id: customerId })).first("id")) add("followup_due", true);
-
-    const possible = reasons.length > 0;
-    const stoppable = reasons.every((r) => r.stoppable);
-    const token = stoppable ? await this._liveReviewToken(customerId).catch(() => null) : null;
-    return { possible, reasons, stoppable, stoppableToken: token };
-  },
-
-  /**
-   * What a tracked /go click does about every path futureAskState lists as
-   * stoppable (one click, all of them): stops the clicked request's sequence
+   * What a tracked /go click does about the later-ask paths it can reach
+   * (one click, all of them): stops the clicked request's sequence
    * and every active / deferred cadence of the customer, relabels a cadence
    * parked for summary recovery so the recovery can no longer resume it (the
    * one-cadence-per-record rule then refuses a fresh enrollment too),
@@ -5619,9 +5550,7 @@ const ReviewService = {
    * a pending ask whose send reservation is still active (supersedeQueuedAsks
    * skips it). After the lock is won nothing is mid-send, so what remains is a
    * stranded reservation the reconciliation owns; the caller fails closed until
-   * it settles. (A claimed-but-unsent 'sending' row hides the portal card via
-   * futureAskState but does not block a click: one permanently stranded row
-   * must not lock a customer out of Google.)
+   * it settles.
    */
   async _stopFutureAsksLocked(customerId, { sequenceId, reason }) {
     if (sequenceId) await this.stopReviewSequence(sequenceId, reason);
@@ -5651,8 +5580,7 @@ const ReviewService = {
   /**
    * Delivered asks whose text follow-up (processFollowups) could still go out:
    * the base predicate, WITHOUT its timing clauses (a row not yet old enough
-   * will become eligible). Shared by processFollowups, futureAskState and
-   * stopFutureAsks.
+   * will become eligible). Shared by processFollowups and stopFutureAsks.
    */
   _followupPendingBase(q) {
     return q
@@ -5676,7 +5604,7 @@ const ReviewService = {
   /**
    * One cadence per SERVICE RECORD, ever: any sequence for the record (not a
    * start_failed retry, not a parked/redeeming deferred enrollment) makes a
-   * fresh enrollment refuse. Shared by enrollment and futureAskState.
+   * fresh enrollment refuse.
    */
   async _priorSequenceForRecord(serviceRecordId) {
     return db("review_sequences")

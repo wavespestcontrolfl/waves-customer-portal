@@ -37,7 +37,9 @@ const directLinkLimiter = rateLimit({
   // (codex #3285 r5).
   handler: (req, res) => {
     const { publicPortalUrl } = require('../utils/portal-url');
-    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(req.params?.token || ''))}`);
+    // ?retry=1: this is a failure fallback, and the rate page's only control
+    // is /go — the page says "try again in a minute" instead of looping silently.
+    return res.redirect(302, `${publicPortalUrl()}/rate/${encodeURIComponent(String(req.params?.token || ''))}?retry=1`);
   },
 });
 const { isBotUserAgent } = require('../utils/bot-ua');
@@ -88,6 +90,10 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
   // audit). publicPortalUrl() is the canonical public origin serving the SPA.
   const { publicPortalUrl } = require('../utils/portal-url');
   const ratePageFallback = `${publicPortalUrl()}/rate/${encodeURIComponent(token)}`;
+  // Failure fallbacks (a DB error on the stamp / claim) carry ?retry=1 so the
+  // page tells the customer to try again; finality and already-reviewed
+  // fallbacks do not — there is nothing to retry.
+  const retryFallback = `${ratePageFallback}?retry=1`;
   try {
     // The tracked flow runs whatever GATE_REVIEW_DIRECT_LINK says (that gate
     // only decides whether ask texts/emails link HERE or to the /rate thank-you
@@ -180,7 +186,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       await db('review_requests').where({ id: request.id }).update(updates);
     } catch (err) {
       logger.warn(`[review-gate] direct-link click stamp failed — rate-page fallback: ${err.message}`);
-      return res.redirect(302, ratePageFallback);
+      return res.redirect(302, retryFallback);
     }
 
     // Atomic first-click claim: only the request that flips redirected_at
@@ -197,7 +203,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
       firstClick = claimed > 0;
     } catch (err) {
       logger.warn(`[review-gate] first-click claim failed — rate-page fallback: ${err.message}`);
-      return res.redirect(302, ratePageFallback);
+      return res.redirect(302, retryFallback);
     }
 
     // They acted on the ask — stop what we can find that would ask them again
@@ -259,7 +265,10 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     if (firstClick && request.customer_id) {
       try {
         const { sendReferralInviteEmail } = require('../services/referral-invite-email');
-        void sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'google_review_click' });
+        // The helper never rejects today, but a detached promise must never be
+        // able to go unhandled.
+        Promise.resolve(sendReferralInviteEmail({ customerId: request.customer_id, trigger: 'google_review_click' }))
+          .catch((err) => logger.warn(`[review-gate] referral invite failed: ${err.message}`));
       } catch (err) {
         logger.warn(`[review-gate] referral invite failed: ${err.message}`);
       }
@@ -282,7 +291,7 @@ router.get('/:token/go', directLinkLimiter, async (req, res) => {
     return res.redirect(302, loc.googleReviewUrl);
   } catch (err) {
     logger.error(`[review-gate] direct-link redirect failed: ${err.message}`);
-    return res.redirect(302, ratePageFallback);
+    return res.redirect(302, retryFallback);
   }
 });
 

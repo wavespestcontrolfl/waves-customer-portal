@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const ClickGuard = require('../services/review-click-guard');
 const TwilioService = require('../services/twilio');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 const { findKnownCallerCustomer } = require('../utils/known-caller-phone');
@@ -863,7 +864,6 @@ router.post('/sms', async (req, res, next) => {
     if (reviewRequestId) {
       try {
         const ReviewService = require('../services/review-request');
-        const ClickGuard = require('../services/review-click-guard');
         const rr = await db('review_requests')
           .where({ id: String(reviewRequestId) })
           .first('id', 'customer_id', 'status', 'sms_sent_at', 'triggered_by', 'token', 'service_record_id', 'scheduled_service_id', 'created_at');
@@ -1000,7 +1000,7 @@ router.post('/sms', async (req, res, next) => {
           return abortUnsent(422, 'This customer can no longer receive a review request by text (preferences, already-reviewed flag, or the record was removed) — remove the review link before sending.');
         }
         if (seam.clicked) {
-          return abortUnsent(409, 'This customer already tapped a review link since this one was added — remove the review link before sending.');
+          return abortUnsent(409, `${ClickGuard.REVIEW_LINK_CLICKED_REASON} Remove the review link before sending.`);
         }
         if (seam.gate) {
           const { REVIEW_GATE_REASONS } = require('../services/composer-customer-links');
@@ -2818,6 +2818,7 @@ const EMAIL_LEG_REASONS = {
   // Post-dispatch throw: the provider MAY hold it — never "try again".
   email_uncertain: "The review email may or may not have gone out — check the customer's email log before sending it again",
   already_reviewed: 'This customer is already marked as having left a review',
+  review_link_clicked: ClickGuard.REVIEW_LINK_CLICKED_REASON,
   no_customer: 'That customer could not be found',
   // The email WENT but the row could not be stamped (twice): the ask is
   // invisible to the cooldown, so the operator must not click again.

@@ -918,7 +918,7 @@ router.post('/send-request', requireAdmin, async (req, res, next) => {
         });
       case 'blocked':
         return res.status(result.httpStatus || 409).json({
-          error: result.reason || `Review request was not sent (${result.code || 'blocked'}). Check the customer's messaging consent / suppression.`,
+          error: (result.reason === 'review_link_clicked' && require('../services/review-click-guard').REVIEW_LINK_CLICKED_REASON) || result.reason || `Review request was not sent (${result.code || 'blocked'}). Check the customer's messaging consent / suppression.`,
         });
       case 'error':
         // NON-durable failure (lock never ran, or no scheduled_for was

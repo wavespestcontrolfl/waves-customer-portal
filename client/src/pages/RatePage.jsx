@@ -1,7 +1,7 @@
 import { COLORS, FONTS } from '../theme-brand';
 import { CUSTOMER_SURFACE } from '../theme-customer';
 import { useState, useEffect } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useSearchParams } from 'react-router-dom';
 import PublicLoadError from '../components/PublicLoadError';
 import { CustomerColumn } from '../components/brand';
 import { useGlassSurface } from '../glass/glass-engine';
@@ -36,6 +36,9 @@ const primaryActionStyle = {
 
 export default function RatePage() {
   const { token } = useParams();
+  // ?retry=1: /go fell back here on a failure — say so instead of looping silently.
+  const [searchParams] = useSearchParams();
+  const showRetry = searchParams.get('retry') === '1';
   useGlassSurface(true);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -113,6 +116,11 @@ export default function RatePage() {
         <div style={{ fontFamily: FONTS.serif, fontSize: 30, fontWeight: 500, color: TEXT, marginBottom: 8 }}>Thank you!</div>
         {data?.reviewUrl ? (
           <>
+            {showRetry && (
+              <div role="alert" style={{ fontSize: 14, lineHeight: 1.45, color: BODY, fontWeight: 700, marginBottom: 10 }}>
+                Couldn't open Google just now — please try again in a minute.
+              </div>
+            )}
             <div style={{ fontSize: 14, lineHeight: 1.45, color: MUTED }}>
               Public Google reviews help local neighbors choose a provider.
             </div>

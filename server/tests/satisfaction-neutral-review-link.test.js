@@ -1,8 +1,9 @@
 /**
  * Portal Google review card (owner ruling 2026-09-29: the 1-10 rating is
  * retired; one tap to Google). GET /api/satisfaction/review-card offers the
- * card under the old prompt's eligibility, links to the customer's live
- * tracked token or the office's Google review URL, and sends NOTHING. The
+ * card under the old prompt's eligibility, links ONLY to the customer's live
+ * tracked /go token (never a bare office URL: an untracked tap would let an ask
+ * enrolled a moment later still text them), and sends NOTHING. The
  * rating POST and the pending-prompt GET no longer exist.
  */
 jest.mock('../models/db', () => {
@@ -25,7 +26,8 @@ jest.mock('../models/db', () => {
 jest.mock('../services/twilio', () => ({ sendSMS: jest.fn(async () => ({})) }));
 jest.mock('../services/review-request', () => ({
   sendGatedAsk: jest.fn(),
-  futureAskState: jest.fn(),
+  reviewSmsAllowedNow: jest.fn(),
+  _liveReviewToken: jest.fn(),
 }));
 jest.mock('../services/account-properties', () => {
   const actual = jest.requireActual('../services/account-properties');
@@ -48,7 +50,6 @@ const { resolveReviewLocation } = require('../config/locations');
 const office = resolveReviewLocation({ nearest_location_id: 'bradenton' }, { storedLocationId: 'bradenton' });
 const { publicPortalUrl } = require('../utils/portal-url');
 const TOKEN_URL = `${publicPortalUrl()}/api/rate/${'t'.repeat(40)}/go`;
-const NONE = { possible: false, reasons: [], stoppable: true, stoppableToken: null };
 const VISIT = { id: 'rec-1', service_type: 'Pest Control', service_date: '2026-09-28', technician_name: 'Alex' };
 
 let server; let base;
@@ -65,7 +66,8 @@ beforeEach(() => {
   global.__LEFT__ = false;
   db.state.visits = [VISIT];
   db.state.clicked = null;
-  ReviewService.futureAskState.mockResolvedValue(NONE);
+  ReviewService.reviewSmsAllowedNow.mockResolvedValue({ allowed: true });
+  ReviewService._liveReviewToken.mockResolvedValue('t'.repeat(40));
 });
 
 const card = async () => (await fetch(`${base}/satisfaction/review-card`)).json();
@@ -74,9 +76,8 @@ const expectNothingSent = () => {
   expect(ReviewService.sendGatedAsk).not.toHaveBeenCalled();
 };
 
-describe('GET /review-card — a link, never a send', () => {
-  test('a live tracked token: the card carries its /go link (nothing else pending or stoppable-only)', async () => {
-    ReviewService.futureAskState.mockResolvedValue({ ...NONE, stoppableToken: 't'.repeat(40) });
+describe('GET /review-card — tracked links only, never a send', () => {
+  test('a live tracked token: the card carries its /go link', async () => {
     expect(await card()).toEqual({
       card: { serviceRecordId: 'rec-1', serviceType: 'Pest Control', technicianName: 'Alex', reviewLink: TOKEN_URL, officeName: office.name },
       propertyScope: expect.anything(),
@@ -84,18 +85,30 @@ describe('GET /review-card — a link, never a send', () => {
     expectNothingSent();
   });
 
-  test('no live token and nothing possible: the office Google review URL', async () => {
+  test('no live token: NO card — the bare office URL is never offered', async () => {
+    ReviewService._liveReviewToken.mockResolvedValue(null);
     const body = await card();
-    expect(body.card.reviewLink).toBe(office.googleReviewUrl);
-    expect(body.card.officeName).toBe(office.name);
+    expect(body.card).toBeNull();
+    expect(JSON.stringify(body)).not.toContain(office.googleReviewUrl);
     expectNothingSent();
+  });
+
+  test.each(['review_off', 'customer_deleted', 'already_reviewed', 'prefs_unavailable'])('review opt-out / ineligible (%s): no card, no token read', async (reason) => {
+    ReviewService.reviewSmsAllowedNow.mockResolvedValue({ allowed: false, reason });
+    expect((await card()).card).toBeNull();
+    expect(ReviewService._liveReviewToken).not.toHaveBeenCalled();
+  });
+
+  test.each(['sms_off', 'email_only'])('%s does not hide the card (it is a button, not a text)', async (reason) => {
+    ReviewService.reviewSmsAllowedNow.mockResolvedValue({ allowed: false, reason });
+    expect((await card()).card.reviewLink).toBe(TOKEN_URL);
   });
 
   test('already_reviewed (has_left_google_review): no card and no lookups at all', async () => {
     global.__LEFT__ = true;
     expect(await card()).toEqual({ card: null });
     expect(db).not.toHaveBeenCalled();
-    expect(ReviewService.futureAskState).not.toHaveBeenCalled();
+    expect(ReviewService._liveReviewToken).not.toHaveBeenCalled();
     expectNothingSent();
   });
 
@@ -109,21 +122,18 @@ describe('GET /review-card — a link, never a send', () => {
     expect((await card()).card).toBeNull();
   });
 
-  test('something possible with a stoppable token: only that /go link; without one: hidden — never the office URL', async () => {
-    const possible = { possible: true, reasons: [{ key: 'cadence_active', stoppable: true }], stoppable: true };
-    ReviewService.futureAskState.mockResolvedValue({ ...possible, stoppableToken: 't'.repeat(40) });
-    expect((await card()).card.reviewLink).toBe(TOKEN_URL);
-    ReviewService.futureAskState.mockResolvedValue({ ...possible, stoppableToken: null });
-    expect((await card()).card).toBeNull();
-    ReviewService.futureAskState.mockResolvedValue({ possible: true, reasons: [{ key: 'unsent_sending', stoppable: false }], stoppable: false, stoppableToken: null });
-    expect((await card()).card).toBeNull();
-    expectNothingSent();
-  });
-
-  test('the state read fails closed: an error is a 500, never a card', async () => {
-    ReviewService.futureAskState.mockRejectedValue(new Error('db down'));
+  test('the consent / token read fails closed: an error is a 500, never a card', async () => {
+    ReviewService._liveReviewToken.mockRejectedValue(new Error('db down'));
     const res = await fetch(`${base}/satisfaction/review-card`);
     expect(res.status).toBe(500);
+  });
+
+  test('futureAskState is gone from the codebase (the card was its only caller)', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const f of ['../services/review-request.js', '../services/portal-review-card.js', '../routes/satisfaction.js']) {
+      expect(fs.readFileSync(path.join(__dirname, f), 'utf8')).not.toMatch(/futureAskState|summary_may_enroll|pendingAskState/);
+    }
   });
 });
 

@@ -3670,12 +3670,14 @@ contract as security-critical).
 marketing site — no auth, no token, location filter + limit; reads
 `google_reviews` only).
 `/api/review/:token` (GET + POST; token-gated customer review flow — GET
-returns the review-request context by token, POST submits the customer's
-review. No auth beyond the review-request token. Baseline guards
+returns the review-request context by token. POST is RETIRED (owner ruling
+2026-09-29, the 1-10 rating is gone): it answers 410 Gone with no DB access
+(it used to be an unauthenticated rating write that stamped the click fields and
+fired a referral invite). No auth beyond the review-request token. Baseline guards
 (`server/routes/review-public.js`): `REVIEW_TOKEN_RE` format gate (the
 shape `services/review-request.js` mints — 32-64 url-safe chars) via
 `router.param` before any DB read, one generic 404 body for malformed,
-unknown, and expired tokens on both verbs, a router-wide 30 req/min limiter
+unknown, and expired tokens on GET, a router-wide 30 req/min limiter
 on the shared IPv6-safe `rateLimitKey`, and the shared `noStore` privacy
 headers (`no-store`, `noindex`, `no-referrer`) on every response. The GET
 stamps open state and returns customer name data, so those guards are the

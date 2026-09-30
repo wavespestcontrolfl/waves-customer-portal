@@ -11,10 +11,12 @@
  * `review-send:<customerId>` lock, so it cannot race the click's own stop.
  *
  * Anchor: an ask belongs to a VISIT (its service record, else its scheduled
- * visit); a click at or after that visit's date is a response to it. A repeat
- * customer's click for an earlier visit predates the new visit's date and
- * suppresses nothing. An ask with no visit anchor (an operator one-off) is
- * anchored at its own creation, so only a click AFTER it was queued counts.
+ * visit) — for EVERY kind of ask, operator-initiated ones included; a click at
+ * or after that visit's date is a response to it. A repeat customer's click for
+ * an earlier visit predates the new visit's date and suppresses nothing. With no
+ * visit on the row: a cadence anchors at its own start, an operator one-off
+ * being minted (no row yet) at the customer's newest completed visit, and an
+ * existing row at its own creation.
  *
  * Call sites (all inside the review-send lock):
  *   - review-request.js sendOutreachTouch  — cadence steps + one-off outreach, SMS and email
@@ -27,8 +29,6 @@
  */
 const db = require('../models/db');
 const { dateOnlyString, parseETDateTime } = require('../utils/datetime-et');
-
-const AUTOMATIC_TRIGGERS = ['auto', 'auto_inline', 'sequence'];
 
 // A date-only visit column is that ET calendar day, so the anchor is ET
 // midnight. new Date('YYYY-MM-DD') would be UTC midnight on Railway (TZ=UTC),
@@ -65,24 +65,39 @@ async function reviewLinkClickedSince(customerId, since, database = db) {
   return Boolean(row);
 }
 
+// Operator-initiated asks with no visit and no cadence (Quick Links, admin,
+// tech-trigger, Intelligence Bar one-offs): the customer's newest completed
+// visit is the one the ask is about.
+async function newestCompletedVisitAnchor(customerId, database = db) {
+  if (!customerId) return null;
+  const row = await database('service_records')
+    .where({ customer_id: customerId, status: 'completed' })
+    .orderBy('service_date', 'desc')
+    .first('service_date');
+  return etMidnight(row?.service_date);
+}
+
 // The guard for an ask described by a review_requests row (sendSMS, follow-ups,
-// the inline email leg). `followup` asks always anchor on the visit.
-async function askSuppressedByClick(request, { followup = false } = {}, database = db) {
+// the inline email leg, the composer seam). The visit anchor always wins; the
+// row's own creation is only the fallback when it has no visit.
+async function askSuppressedByClick(request, database = db) {
   if (!request?.customer_id) return false;
-  const automatic = followup || AUTOMATIC_TRIGGERS.includes(request.triggered_by);
-  const anchor = (automatic ? await visitAnchor({
+  const anchor = (await visitAnchor({
     serviceRecordId: request.service_record_id, scheduledServiceId: request.scheduled_service_id,
-  }, database) : null) || (request.created_at ? new Date(request.created_at) : null);
+  }, database)) || (request.created_at ? new Date(request.created_at) : null);
   return reviewLinkClickedSince(request.customer_id, anchor, database);
 }
 
-// The guard for a cadence / outreach touch that has no request row yet.
-// A cadence with no visit (an admin-started one) anchors at its own start, so
-// only a click after it began counts.
-async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null, fallbackAnchor = null } = {}, database = db) {
+// The guard for a cadence / outreach touch that has no request row yet: the
+// visit, else `fallbackAnchor` (a cadence's own start), else — when
+// `newestVisitFallback` — the customer's newest completed visit.
+async function touchSuppressedByClick(customerId, { serviceRecordId = null, scheduledServiceId = null, fallbackAnchor = null, newestVisitFallback = false } = {}, database = db) {
   const anchor = (await visitAnchor({ serviceRecordId, scheduledServiceId }, database))
-    || (fallbackAnchor ? new Date(fallbackAnchor) : null);
+    || (fallbackAnchor ? new Date(fallbackAnchor) : null)
+    || (newestVisitFallback ? await newestCompletedVisitAnchor(customerId, database) : null);
   return reviewLinkClickedSince(customerId, anchor, database);
 }
 
-module.exports = { reviewLinkClickedSince, askSuppressedByClick, touchSuppressedByClick, visitAnchor };
+const REVIEW_LINK_CLICKED_REASON = 'This customer already tapped their Google review link, so no further review request is sent.';
+
+module.exports = { reviewLinkClickedSince, askSuppressedByClick, touchSuppressedByClick, visitAnchor, newestCompletedVisitAnchor, REVIEW_LINK_CLICKED_REASON };

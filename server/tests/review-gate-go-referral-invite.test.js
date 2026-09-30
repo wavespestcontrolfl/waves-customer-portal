@@ -6,6 +6,8 @@
  */
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'go-referral-secret';
 
+// The per-IP limiter has its own suite (review-gate-go-overlimit); this file makes many /go hits.
+jest.mock('express-rate-limit', () => () => (_req, _res, next) => next());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({ gates: {}, isEnabled: jest.fn() }));
 jest.mock('../services/review-request', () => ({
@@ -15,7 +17,7 @@ jest.mock('../services/review-request', () => ({
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => {}) }));
 jest.mock('../services/referral-invite-email', () => ({ sendReferralInviteEmail: jest.fn(async () => null) }));
 jest.mock('../models/db', () => {
-  const state = { request: null, customer: null, activeSeq: null };
+  const state = { failUpdate: false, request: null, customer: null, activeSeq: null };
   const fn = jest.fn((table) => {
     const q = { _nullCols: [] };
     for (const m of ['where', 'orderBy', 'limit', 'select']) q[m] = jest.fn(() => q);
@@ -28,6 +30,7 @@ jest.mock('../models/db', () => {
     });
     q.update = jest.fn(async (patch) => {
       if (table !== 'review_requests') return 1;
+      if (state.failUpdate) throw new Error('pg blip');
       // Atomic first-click claim: WHERE redirected_at IS NULL.
       if (q._nullCols.includes('redirected_at') && state.request.redirected_at) return 0;
       Object.assign(state.request, patch);
@@ -61,6 +64,7 @@ beforeAll((done) => {
 afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
+  db.state.failUpdate = false;
     db.state.customer = { id: 'cust-1', first_name: 'Pat', last_name: 'Lee', has_left_google_review: false };
   db.state.request = {
     id: 'rr-1', token: TOKEN, customer_id: 'cust-1', location_id: loc.id, status: 'sent',
@@ -136,6 +140,32 @@ describe.each([true, false])('GATE_REVIEW_DIRECT_LINK=%s (review sequences ON) â
       expect(sendReferralInviteEmail).toHaveBeenCalledTimes(1);
       expect(sendReferralInviteEmail).toHaveBeenCalledWith({ customerId: 'cust-1', trigger: 'google_review_click' });
     }
+  });
+
+  test('a REJECTED (async) invite is caught and logged: never an unhandled rejection, the 302 is untouched', async () => {
+    const unhandled = jest.fn();
+    process.on('unhandledRejection', unhandled);
+    sendReferralInviteEmail.mockImplementationOnce(() => Promise.reject(new Error('sendgrid down')));
+    const res = await go();
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(loc.googleReviewUrl);
+    await flush(); await flush();
+    process.off('unhandledRejection', unhandled);
+    expect(unhandled).not.toHaveBeenCalled();
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('referral invite failed'));
+  });
+
+  test('a DB error on the stamp or claim falls back to /rate?retry=1 (so the page says try again); finality does not', async () => {
+    db.state.failUpdate = true;
+    let res = await go();
+    expect(res.status).toBe(302);
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}?retry=1`);
+    await flush();
+    expect(sendReferralInviteEmail).not.toHaveBeenCalled();
+    db.state.failUpdate = false;
+    db.state.request.status = 'submitted';
+    res = await go();
+    expect(res.headers.get('location')).toBe(`${publicPortalUrl()}/rate/${TOKEN}`);
   });
 
   test('a link-scanner / bot fetch records nothing and sends no invite', async () => {

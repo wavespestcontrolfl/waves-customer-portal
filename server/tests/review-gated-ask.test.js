@@ -503,15 +503,15 @@ describe('livePortalReviewUrlFor', () => {
   });
 });
 
-// Portal Google review card link (owner ruling 2026-09-29). Real ReviewService
-// and real visit-completion-summary against overlapping states: the card asks
-// ONE chokepoint, futureAskState, whether ANY path could still send this
-// customer a review ask later, and shows a link only when one tracked /go click
-// (stopFutureAsks) really stops every such path.
-describe('portal review card — futureAskState / stopFutureAsks (real overlapping states)', () => {
+// Portal Google review card + the /go click's stop (owner ruling 2026-09-29).
+// Real ReviewService and real visit-completion-summary. The card offers ONLY a
+// live tracked /go link (never a bare URL: an untracked tap would let an ask
+// enrolled a moment later still text the customer); stopFutureAsks is what a
+// tracked click does about every later-ask path it can reach, and the send-time
+// click guard covers the rest.
+describe('portal review card link + stopFutureAsks (real states)', () => {
   const { reviewCardLinkFor } = require('../services/portal-review-card');
   const Summary = require('../services/visit-completion-summary');
-  const OFFICE = { googleReviewUrl: 'https://g.page/r/office/review' };
   const GO = (c) => `https://portal.test/api/rate/${c.repeat(64)}/go`;
   const live = (c, daysBack) => sentAsk({
     token: c.repeat(64), expires_at: new Date(Date.now() + 86400000), sms_sent_at: daysAgo(daysBack), followup_sent: true,
@@ -530,131 +530,102 @@ describe('portal review card — futureAskState / stopFutureAsks (real overlappi
   });
   const seqRow = (state, id = 'seq-1') => state.rows.review_sequences.find((r) => r.id === id);
 
-  test.each([
-    ['cooldown + queued', [live('a', 5), queuedOneOff()], 'cooldown'],
-    ['at_cap + queued', [live('a', 150), live('b', 120), live('c', 90), queuedOneOff()], 'at_cap'],
-  ])('%s: the gate returns early, the card is the live token\'s /go link (never the office URL), and ONE click leaves nothing queued', async (_n, rows, gate) => {
-    const state = installMock({ customers: [CUSTOMER], review_requests: rows });
-    expect((await ReviewService.checkUnscheduledAskGates('cust-1')).outcome).toBe(gate);
-    const before = await ReviewService.futureAskState('cust-1');
-    expect(before.reasons).toEqual([{ key: 'queued_one_off', stoppable: true }]);
-    const link = await reviewCardLinkFor('cust-1', OFFICE);
-    expect(link).toMatch(/^https:\/\/portal\.test\/api\/rate\/[a-c]{64}\/go$/);
-    expect(link).not.toBe(OFFICE.googleReviewUrl);
-    await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
-    expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
-    expect((await ReviewService.futureAskState('cust-1')).possible).toBe(false);
-  });
-
-  test('cooldown + queued with NO live token: hidden, never the bare URL', async () => {
-    installMock({ customers: [CUSTOMER], review_requests: [sentAsk({ sms_sent_at: daysAgo(5) }), queuedOneOff()] });
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
-  });
-
-  test('in_cadence + a queued one-off: tracked link only; one click stops the cadence AND the queued ask', async () => {
-    const state = installMock({
-      customers: [CUSTOMER], review_sequences: [seq()], review_requests: [live('a', 2), queuedOneOff()],
+  describe('the card link is tracked-only', () => {
+    test('a live delivered token: its /go link, whatever else is pending (cooldown / cap / cadence / queued)', async () => {
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5), queuedOneOff()], review_sequences: [seq()] });
+      expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
     });
-    expect((await ReviewService.checkUnscheduledAskGates('cust-1')).outcome).toBe('in_cadence');
-    expect((await ReviewService.futureAskState('cust-1')).reasons.map((r) => r.key).sort()).toEqual(['cadence_active', 'queued_one_off']);
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(GO('a'));
-    await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
-    expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked', next_run_at: null });
-    expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
-    expect((await ReviewService.futureAskState('cust-1')).possible).toBe(false);
-  });
 
-  test('a cadence with the gate OFF still counts (a flip must not resurrect it): tracked link only', async () => {
-    mockGates.reviewSequences = false;
-    installMock({ customers: [CUSTOMER], review_sequences: [seq()], review_requests: [live('a', 2)] });
-    expect((await ReviewService.futureAskState('cust-1')).reasons).toEqual([{ key: 'cadence_active', stoppable: true }]);
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(GO('a'));
-  });
+    test('no live token: NO link — the bare office URL is never offered, not even when nothing is pending (the completion race)', async () => {
+      installMock({ customers: [CUSTOMER], review_requests: [] });
+      expect(await reviewCardLinkFor('cust-1')).toBeNull();
+      installMock({ customers: [CUSTOMER], review_requests: [queuedOneOff()] });
+      expect(await reviewCardLinkFor('cust-1')).toBeNull();
+    });
 
-  test('a parked series final (deferred) is stoppable; a redeeming lease is NOT — the card hides', async () => {
-    const state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ status: 'deferred' })], review_requests: [live('a', 2)] });
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(GO('a'));
-    await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
-    expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+    test('review opt-out (notification_prefs.review_request = false) hides the card; SMS-off does not', async () => {
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)], notification_prefs: [{ customer_id: 'cust-1', review_request: false }] });
+      expect(await reviewCardLinkFor('cust-1')).toBeNull();
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)], notification_prefs: [{ customer_id: 'cust-1', review_request: true, sms_enabled: false }] });
+      expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
+    });
 
-    installMock({ customers: [CUSTOMER], review_sequences: [seq({ status: 'redeeming' })], review_requests: [live('a', 2)] });
-    expect((await ReviewService.futureAskState('cust-1'))).toMatchObject({ possible: true, stoppable: false, stoppableToken: null });
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
-  });
-
-  test('an unsent in-flight claim (fresh OR stale) cannot be stopped by a click: hidden even with a live token', async () => {
-    for (const claimedAgo of [1, 3 * 24 * 3600]) {
-      installMock({
-        customers: [CUSTOMER],
-        review_requests: [live('a', 5), sentAsk({ status: 'sending', sms_sent_at: null, claimed_at: new Date(Date.now() - claimedAgo * 1000) })],
+    test('a card tap through /go is recorded and suppresses an ask enrolled AFTER it (the late enrollment the bare URL let through)', async () => {
+      const state = installMock({
+        customers: [CUSTOMER], service_records: [{ id: 'rec-1', customer_id: 'cust-1', status: 'completed', service_date: daysAgo(1).toISOString().slice(0, 10) }],
+        review_requests: [live('a', 0)],
       });
-      expect((await ReviewService.futureAskState('cust-1')).reasons).toContainEqual({ key: 'unsent_sending', stoppable: false });
-      expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
-    }
-  });
-
-  test('a due Day-3 follow-up counts; one click marks it handled', async () => {
-    const state = installMock({
-      customers: [CUSTOMER],
-      review_requests: [sentAsk({ id: 'rr-legacy', status: 'sent', sms_sent_at: daysAgo(1), followup_sent: false, token: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000) })],
-    });
-    expect((await ReviewService.futureAskState('cust-1')).reasons).toEqual([{ key: 'followup_due', stoppable: true }]);
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(GO('a'));
-    await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
-    expect(state.rows.review_requests[0]).toMatchObject({ followup_sent: true });
-    expect((await ReviewService.futureAskState('cust-1')).possible).toBe(false);
-  });
-
-  describe('outreach PARKED for summary recovery (visit_summary_bounced)', () => {
-    const parkedWorld = (extra = {}) => ({
-      customers: [CUSTOMER], ...summaryRows(),
-      review_sequences: [seq({ status: 'active', service_record_id: 'rec-1', current_step: 1, next_run_at: new Date(Date.now() + 3600000) })],
-      review_requests: [live('a', 2)], ...extra,
+      const ClickGuard = require('../services/review-click-guard');
+      state.rows.review_requests[0].redirected_at = new Date(); // what /go stamps
+      state.rows.review_requests.push(queuedOneOff());
+      expect(await ClickGuard.askSuppressedByClick({ ...queuedOneOff(), service_record_id: 'rec-1', created_at: new Date() })).toBe(true);
     });
 
-    test('park -> card -> click -> resume: the card is the tracked link only, and after the click the recovery can neither resume nor re-enroll', async () => {
-      const state = installMock(parkedWorld());
-      expect((await Summary.parkVisitReviewOutreach('pkt-1', db)).parked).toBeGreaterThan(0);
-      expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'visit_summary_bounced' });
+    test('GATE_REVIEW_DIRECT_LINK off: livePortalReviewUrlFor is the /rate page, the card is still the /go URL', async () => {
+      mockGates.reviewDirectLink = false;
+      installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)] });
+      expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBe(`https://portal.test/rate/${'a'.repeat(64)}`);
+      expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
+    });
+  });
 
-      // The parked cadence WOULD resume — that is the ask the bare URL used to race.
-      expect((await ReviewService.futureAskState('cust-1')).reasons).toEqual([{ key: 'cadence_parked', stoppable: true }]);
-      const link = await reviewCardLinkFor('cust-1', OFFICE);
-      expect(link).toBe(GO('a'));
-      expect(link).not.toBe(OFFICE.googleReviewUrl);
+  describe('what a tracked click stops', () => {
+    test.each([
+      ['cooldown + queued', [live('a', 5), queuedOneOff()]],
+      ['at_cap + queued', [live('a', 150), live('b', 120), live('c', 90), queuedOneOff()]],
+    ])('%s: one click supersedes the queued ask', async (_n, rows) => {
+      const state = installMock({ customers: [CUSTOMER], review_requests: rows });
+      expect(await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' })).toEqual({ stopped: true, outstanding: [] });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
+    });
 
+    test('in_cadence + a queued one-off: one click stops the cadence AND the queued ask', async () => {
+      const state = installMock({ customers: [CUSTOMER], review_sequences: [seq()], review_requests: [live('a', 2), queuedOneOff()] });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked', next_run_at: null });
+      expect(state.rows.review_requests.find((r) => r.id === 'rr-queued').status).toBe('suppressed');
+    });
+
+    test('a parked series final (deferred) is stopped', async () => {
+      const state = installMock({ customers: [CUSTOMER], review_sequences: [seq({ status: 'deferred' })], review_requests: [live('a', 2)] });
       await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
       expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
-      expect(await Summary.resumeVisitReviewOutreach('pkt-1', db)).toBe(0);
-      expect(seqRow(state).status).toBe('stopped');
-      // ...and the fresh enrollment the recovery falls back to is refused (one cadence per record).
-      expect(await ReviewService._priorSequenceForRecord('rec-1')).toBeTruthy();
-      expect((await ReviewService.futureAskState('cust-1')).reasons.map((r) => r.key)).not.toContain('cadence_parked');
     });
 
-    test('control: without the click the parked cadence really does resume', async () => {
-      const state = installMock(parkedWorld());
-      await Summary.parkVisitReviewOutreach('pkt-1', db);
-      expect(await Summary.resumeVisitReviewOutreach('pkt-1', db)).toBe(1);
-      expect(seqRow(state).status).toBe('active');
+    test('a due Day-3 follow-up is marked handled', async () => {
+      const state = installMock({
+        customers: [CUSTOMER],
+        review_requests: [sentAsk({ id: 'rr-legacy', status: 'sent', sms_sent_at: daysAgo(1), followup_sent: false, token: 'a'.repeat(64), expires_at: new Date(Date.now() + 86400000) })],
+      });
+      await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+      expect(state.rows.review_requests[0]).toMatchObject({ followup_sent: true });
     });
 
-    test('parked with NO live token: hidden, never the bare URL', async () => {
-      installMock(parkedWorld({ review_requests: [] }));
-      await Summary.parkVisitReviewOutreach('pkt-1', db);
-      expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
-    });
+    describe('outreach PARKED for summary recovery (visit_summary_bounced)', () => {
+      const parkedWorld = (extra = {}) => ({
+        customers: [CUSTOMER], ...summaryRows(),
+        review_sequences: [seq({ status: 'active', service_record_id: 'rec-1', current_step: 1, next_run_at: new Date(Date.now() + 3600000) })],
+        review_requests: [live('a', 2)], ...extra,
+      });
 
-    test('summary parked but the outreach was REMOVED (no sequence for the record): the recovery would enroll a fresh ask, a click cannot stop that — hidden', async () => {
-      installMock({ customers: [CUSTOMER], ...summaryRows(), review_requests: [live('a', 2)] });
-      const state = await ReviewService.futureAskState('cust-1');
-      expect(state.reasons).toEqual([{ key: 'summary_may_enroll', stoppable: false }]);
-      expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
-    });
+      test('park -> card -> click -> resume: the card is the tracked link, and after the click the recovery can neither resume nor re-enroll', async () => {
+        const state = installMock(parkedWorld());
+        expect((await Summary.parkVisitReviewOutreach('pkt-1', db)).parked).toBeGreaterThan(0);
+        expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'visit_summary_bounced' });
+        expect(await reviewCardLinkFor('cust-1')).toBe(GO('a'));
 
-    test('a healthy summary (not uncertain) adds nothing', async () => {
-      installMock({ customers: [CUSTOMER], ...summaryRows(), visit_effects: [], review_requests: [live('a', 2)] });
-      expect((await ReviewService.futureAskState('cust-1')).possible).toBe(false);
+        await ReviewService.stopFutureAsks('cust-1', { reason: 'clicked' });
+        expect(seqRow(state)).toMatchObject({ status: 'stopped', stop_reason: 'clicked' });
+        expect(await Summary.resumeVisitReviewOutreach('pkt-1', db)).toBe(0);
+        expect(await ReviewService._priorSequenceForRecord('rec-1')).toBeTruthy(); // a fresh enrollment is refused
+      });
+
+      test('control: without the click the parked cadence really does resume', async () => {
+        const state = installMock(parkedWorld());
+        await Summary.parkVisitReviewOutreach('pkt-1', db);
+        expect(await Summary.resumeVisitReviewOutreach('pkt-1', db)).toBe(1);
+        expect(seqRow(state).status).toBe('active');
+      });
     });
   });
 
@@ -663,14 +634,6 @@ describe('portal review card — futureAskState / stopFutureAsks (real overlappi
       customers: [CUSTOMER],
       review_requests: [live('a', 5), { ...queuedOneOff(), scheduled_for: new Date(Date.now() - 60000) }],
       sms_log: [{ id: 'sms-1', status: 'sending', metadata: { review_ask_reservation: true, review_request_id: 'rr-queued' } }],
-    });
-
-    test('a reserved pending ask is a NON-stoppable reserved_send reason: the card is hidden even with a live token', async () => {
-      installMock(reservedWorld());
-      const state = await ReviewService.futureAskState('cust-1');
-      expect(state.reasons).toContainEqual({ key: 'reserved_send', stoppable: false });
-      expect(state).toMatchObject({ possible: true, stoppable: false, stoppableToken: null });
-      expect(await reviewCardLinkFor('cust-1', OFFICE)).toBeNull();
     });
 
     test('a click that finds the reservation still active stops everything else but reports NOT stopped', async () => {
@@ -682,9 +645,8 @@ describe('portal review card — futureAskState / stopFutureAsks (real overlappi
 
     test('a click DURING the send waits for the dispatcher lock, then (after the send commits) stops the follow-up and reports stopped', async () => {
       const state = installMock(reservedWorld());
-      lockState.held = true; // the dispatcher holds review-send:<customer> around the provider call
+      lockState.held = true;
       setTimeout(() => {
-        // The send lands: the ask is delivered, the reservation resolves, the lock frees.
         Object.assign(state.rows.review_requests.find((r) => r.id === 'rr-queued'), { status: 'sent', sms_sent_at: new Date(), followup_sent: false });
         state.rows.sms_log[0].status = 'sent';
         lockState.held = false;
@@ -703,22 +665,5 @@ describe('portal review card — futureAskState / stopFutureAsks (real overlappi
       expect(out).toEqual({ stopped: false, outstanding: ['lock_timeout'] });
       expect(seqRow(state).status).toBe('active');
     });
-  });
-
-  test('nothing possible: the live tracked link if any, else the office URL; the card path sends and mints nothing', async () => {
-    const state = installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)] });
-    expect(await ReviewService.futureAskState('cust-1')).toEqual({ possible: false, reasons: [], stoppable: true, stoppableToken: 'a'.repeat(64) });
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(GO('a'));
-    installMock({ customers: [CUSTOMER], review_requests: [] });
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(OFFICE.googleReviewUrl);
-    expect(state.rows.review_requests).toHaveLength(1);
-    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
-  });
-
-  test('GATE_REVIEW_DIRECT_LINK off: the token is still returned raw and the card is the /go URL', async () => {
-    mockGates.reviewDirectLink = false;
-    installMock({ customers: [CUSTOMER], review_requests: [live('a', 5)] });
-    expect(await ReviewService.livePortalReviewUrlFor('cust-1')).toBe(`https://portal.test/rate/${'a'.repeat(64)}`);
-    expect(await reviewCardLinkFor('cust-1', OFFICE)).toBe(GO('a'));
   });
 });

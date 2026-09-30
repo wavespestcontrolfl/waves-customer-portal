@@ -121,7 +121,10 @@ jest.mock('../services/sms-auto-send', () => ({
 // The inline review claim boundary: the route must verify + claim BEFORE the
 // provider call and abort on any validation miss (fail closed — the tokenized
 // review page carries customer data).
-jest.mock('../services/review-click-guard', () => ({ askSuppressedByClick: jest.fn(async () => false) }));
+jest.mock('../services/review-click-guard', () => ({
+  askSuppressedByClick: jest.fn(async () => false),
+  REVIEW_LINK_CLICKED_REASON: 'This customer already tapped their Google review link, so no further review request is sent.',
+}));
 jest.mock('../services/review-request', () => ({
   claimInlineForSend: jest.fn(async () => new Date('2026-08-31T03:00:00.000Z')),
   inlineClaimStillHeld: jest.fn(async () => true),
@@ -1421,7 +1424,7 @@ describe('admin communications SMS route', () => {
       });
 
       expect(res.status).toBe(409);
-      expect((await res.json()).error).toMatch(/already tapped a review link/);
+      expect((await res.json()).error).toMatch(/already tapped their Google review link/);
       expect(ClickGuard.askSuppressedByClick).toHaveBeenCalledWith(expect.objectContaining({ id: 'rr-1', triggered_by: 'auto_inline' }));
       expect(sendCustomerMessage).not.toHaveBeenCalled();
       expect(ReviewService.claimInlineForSend).not.toHaveBeenCalled();

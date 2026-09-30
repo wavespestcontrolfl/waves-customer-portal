@@ -696,7 +696,7 @@
     {
       "router": "server/routes/review-public.js",
       "mount": "/api/review",
-      "reason": "Tokenized review capture page from customer comms",
+      "reason": "Tokenized review capture page from customer comms (POST retired: 410 Gone, no DB access)",
       "routes": [
         "GET /api/review/:token",
         "POST /api/review/:token"

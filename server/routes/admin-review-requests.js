@@ -3,6 +3,7 @@ const router = express.Router();
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
 const ReviewService = require('../services/review-request');
 const db = require('../models/db');
+const { REVIEW_LINK_CLICKED_REASON } = require('../services/review-click-guard');
 
 router.use(adminAuthenticate, requireTechOrAdmin);
 // 2026-08-25 role lockdown: the review-request queue (reads return customer
@@ -90,6 +91,11 @@ router.post('/trigger', async (req, res, next) => {
       triggeredBy: triggeredBy || 'admin',
       ...serviceContext,
     });
+    // The customer already tapped their Google review link: nothing was sent,
+    // and the operator is told why rather than shown a generic suppression.
+    if (request.sendOutcome?.failed === 'review_link_clicked') {
+      return res.status(409).json({ error: REVIEW_LINK_CLICKED_REASON, code: 'review_link_clicked' });
+    }
     res.json(request);
   } catch (err) {
     // Gate refusals from ReviewService.create (at cap / cooldown / active
@@ -135,7 +141,9 @@ router.post('/tech-trigger', async (req, res, next) => {
     const unsentFields = !unsent ? {}
       : unsent.uncertain
         ? { uncertain: true, message: 'Delivery could not be confirmed — this review text may already be with the customer. Check the SMS delivery log before sending another.' }
-        : unsent.failed === 'send_failed_unqueued'
+        : unsent.failed === 'review_link_clicked'
+          ? { failed: unsent.failed, message: REVIEW_LINK_CLICKED_REASON }
+          : unsent.failed === 'send_failed_unqueued'
           ? { failed: unsent.failed, message: 'The review text could not be sent. Try again in a few minutes.' }
           : unsent.failed
             ? { failed: unsent.failed, message: 'The review text was not sent: this customer cannot receive review texts right now.' }

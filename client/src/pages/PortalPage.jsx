@@ -3277,7 +3277,8 @@ function DashboardTab({ customer, onSwitchTab, onOpenPlanService, properties = [
               href={reviewCard.reviewLink}
               target="_blank"
               rel="noopener noreferrer"
-              onClick={() => rememberReviewCardDone(reviewCard.serviceRecordId)}
+              // Hide the card in the same handler; the link itself still opens Google.
+              onClick={() => { rememberReviewCardDone(reviewCard.serviceRecordId); setReviewCardDismissed(true); }}
               style={{
                 ...PORTAL_BUTTON_BASE, textDecoration: 'none', background: B.glassNavy, color: '#fff', padding: '10px 18px',
                 boxShadow: 'none', borderRadius: 8,

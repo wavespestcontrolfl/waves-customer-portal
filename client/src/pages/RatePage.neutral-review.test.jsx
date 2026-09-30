@@ -17,9 +17,9 @@ function installFetch(data, status = 200) {
   globalThis.fetch = vi.fn(async () => ({ ok: status < 300, status, json: async () => data }));
 }
 
-function renderPage() {
+function renderPage(search = '') {
   return render(
-    <MemoryRouter initialEntries={['/rate/tok']}>
+    <MemoryRouter initialEntries={[`/rate/tok${search}`]}>
       <Routes><Route path="/rate/:token" element={<RatePage />} /></Routes>
     </MemoryRouter>,
   );
@@ -57,5 +57,19 @@ describe('RatePage thank-you + one Google button', () => {
     renderPage();
     expect(await screen.findByText('Thank you!')).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Open Google' })).not.toBeInTheDocument();
+  });
+
+  it('?retry=1 (a /go failure fallback) shows one short try-again line above the same button', async () => {
+    installFetch({ firstName: 'Pat', techName: 'Alex', techPhotoUrl: null, reviewUrl: TRACKED });
+    renderPage('?retry=1');
+    expect(await screen.findByText("Couldn't open Google just now — please try again in a minute.")).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open Google' })).toHaveAttribute('href', TRACKED);
+  });
+
+  it('without ?retry=1 there is no try-again line', async () => {
+    installFetch({ firstName: 'Pat', techName: 'Alex', techPhotoUrl: null, reviewUrl: TRACKED });
+    renderPage();
+    await screen.findByRole('link', { name: 'Open Google' });
+    expect(screen.queryByText(/try again in a minute/i)).not.toBeInTheDocument();
   });
 });

@@ -310,6 +310,18 @@ describe('Google review card (the 1-10 rating is retired)', () => {
     expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
   });
 
+  it('tapping Open Google hides the card IMMEDIATELY (same handler), while the link still points at Google', async () => {
+    api.getGoogleReviewCard.mockResolvedValue({ card });
+    render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);
+    const link = await screen.findByRole('link', { name: 'Open Google' });
+    expect(link).toHaveAttribute('href', card.reviewLink);
+    link.addEventListener('click', (e) => e.preventDefault()); // jsdom cannot navigate
+    fireEvent.click(link);
+    expect(screen.queryByText('Visit Feedback')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Open Google' })).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem('waves.googleReviewCardDone'))).toEqual(['svc-9']);
+  });
+
   it('dismissing the card hides it and remembers it', async () => {
     api.getGoogleReviewCard.mockResolvedValue({ card });
     render(<DashboardTab customer={customer} onSwitchTab={() => {}} onOpenPlanService={() => {}} />);

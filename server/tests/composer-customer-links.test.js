@@ -127,6 +127,11 @@ jest.mock('../services/review-request', () => ({
   createInline: jest.fn(),
   checkUnscheduledAskGates: jest.fn(async () => ({ allowed: true })),
 }));
+// The send-time click guard the builder consults (own real suite: review-sequences).
+jest.mock('../services/review-click-guard', () => ({
+  touchSuppressedByClick: jest.fn(async () => false),
+  REVIEW_LINK_CLICKED_REASON: 'This customer already tapped their Google review link, so no further review request is sent.',
+}));
 // The builder runs gate+mint under the review advisory lock — run the body
 // inline; the skipped path is exercised explicitly.
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn(async (_key, fn) => fn()) }));
@@ -401,6 +406,14 @@ describe('resolveConfirmationEstimate (call-booking confirmation accept line)', 
 });
 
 describe('buildReviewRequestLink', () => {
+  test('a customer who already tapped a tracked review link gets the reason, not a mint', async () => {
+    mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: false } }) };
+    require('../services/review-click-guard').touchSuppressedByClick.mockResolvedValueOnce(true);
+    const r = await buildReviewRequestLink('c1');
+    expect(r).toMatchObject({ url: null, reason: expect.stringMatching(/already tapped their Google review link/) });
+    expect(ReviewService.createInline).not.toHaveBeenCalled();
+  });
+
   test('already-reviewed customers short-circuit before any mint', async () => {
     mockBuilders = { customers: chainBuilder({ firstRow: { id: 'c1', has_left_google_review: true } }) };
     const r = await buildReviewRequestLink('c1');
