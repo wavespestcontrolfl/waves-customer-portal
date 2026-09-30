@@ -97,8 +97,6 @@ postgres('one signup email against migrated PostgreSQL', () => {
       ['sent', { status: 'sent', delivered_at: null }],
       ['delivered', { status: 'delivered' }],
       ['reported as spam after delivery', { status: 'spam_report' }],
-      ['blocked by the provider with a retry scheduled (the retry rail will deliver it)', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
-      ['claimed by the retry rail and in flight', { status: 'queued', delivered_at: null, provider_retry_count: 1 }],
     ])('an earlier full email that was accepted for sending (%s) makes this an added property', async (_label, overrides) => {
       await message(overrides);
       expect(await ask()).toBe(true);
@@ -108,6 +106,9 @@ postgres('one signup email against migrated PostgreSQL', () => {
       ['only a short email earlier', { template_key: 'estimate.accepted_additional_property', categories: JSON.stringify(['estimate_accepted_onboarding', 'signup_short']) }],
       ['a plain onboarding email (the old template)', { template_key: 'estimate.accepted_onboarding', categories: JSON.stringify(['estimate_accepted_onboarding']) }],
       ['an email that failed with no retry left', { status: 'failed' }],
+      // Still on the retry rail: it may yet exhaust (GH Codex r8 P1).
+      ['an email blocked with a provider retry scheduled', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
+      ['an email claimed by the retry rail and in flight', { status: 'queued', delivered_at: null, provider_retry_count: 1 }],
       ['an email whose provider-retry rail is exhausted', { status: 'failed', provider_retry_exhausted_at: new Date() }],
       ['an email that bounced', { status: 'bounced' }],
       ['an email that was dropped', { status: 'dropped' }],
@@ -157,8 +158,6 @@ postgres('one signup email against migrated PostgreSQL', () => {
       test.each([
         ['sent', { status: 'sent', delivered_at: null }],
         ['reported as spam / unsubscribed after delivery', { status: 'unsubscribed' }],
-        ['blocked with a provider retry scheduled', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
-        ['claimed by the retry rail and in flight', { status: 'queued', delivered_at: null, provider_retry_count: 2 }],
       ])('a full signup email accepted for sending (%s) covers the welcome email', async (_label, overrides) => {
         await message(overrides);
         expect(await covers()).toBe(true);
@@ -171,6 +170,9 @@ postgres('one signup email against migrated PostgreSQL', () => {
         ['failed with no retry', { status: 'failed', delivered_at: null }],
         ['failed and the retry rail exhausted', { status: 'failed', delivered_at: null, provider_retry_exhausted_at: new Date() }],
         ['queued for its first send (no retry yet)', { status: 'queued', delivered_at: null, provider_retry_count: 0 }],
+        // Still on the retry rail: it may yet exhaust (GH Codex r8 P1).
+        ['blocked with a provider retry scheduled', { status: 'failed', delivered_at: null, provider_retry_next_at: new Date(Date.now() + 600000) }],
+        ['claimed by the retry rail and in flight', { status: 'queued', delivered_at: null, provider_retry_count: 2 }],
       ])('a full signup email that is %s does not cover it: the welcome email sends', async (_label, overrides) => {
         await message(overrides);
         expect(await covers()).toBe(false);

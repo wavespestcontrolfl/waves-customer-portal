@@ -118,14 +118,15 @@ function membershipCoveredBy(result, planSection) {
   return !!result?.sent && !!planSection && messageCarriesAll(result, sectionValues(planSection.variables));
 }
 
-// An email_messages row the provider took, or that the retry rail is still
-// re-attempting (scheduled, or claimed and in flight, and not exhausted).
+// An email_messages row the provider took. A send still on the provider retry
+// rail (a block with a retry scheduled or in flight) does NOT count: the welcome
+// email and the added-property choice are decided once, and if those retries
+// later exhaust nothing would reopen them, so the customer would get neither the
+// combined email nor the app steps (GH Codex r8 P1). Not yet accepted → the
+// welcome email sends / the next acceptance gets the full email; the worst case
+// is the app steps twice, never none.
 function acceptedForSending(row) {
-  const status = String(row?.status || '').toLowerCase();
-  if (ACCEPTED_STATUSES.includes(status)) return true;
-  if (row?.provider_retry_exhausted_at) return false;
-  return (status === 'failed' && !!row?.provider_retry_next_at)
-    || (status === 'queued' && Number(row?.provider_retry_count) > 0);
+  return ACCEPTED_STATUSES.includes(String(row?.status || '').toLowerCase());
 }
 
 module.exports = {

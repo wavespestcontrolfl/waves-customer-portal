@@ -320,8 +320,6 @@ describe('the onboarding email itself', () => {
         ['sent', { status: 'sent' }],
         ['delivered', { status: 'delivered' }],
         ['delivered then an unsubscribe / spam report', { status: 'spam_report' }],
-        ['blocked by the provider with a retry scheduled', { status: 'failed', provider_retry_next_at: new Date(Date.now() + 600000) }],
-        ['a retry claimed and in flight', { status: 'queued', provider_retry_count: 1 }],
       ])('an earlier full email that was accepted for sending (%s) makes this an added property: the short email', async (_label, fields) => {
         mockDb({ earlier: [{ ...earlierFull(), ...fields }] });
         EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });
@@ -336,6 +334,9 @@ describe('the onboarding email itself', () => {
         ['failed with no retry', { status: 'failed' }],
         ['failed and the retry rail exhausted', { status: 'failed', provider_retry_next_at: null, provider_retry_exhausted_at: new Date() }],
         ['queued for the first time (no retry yet)', { status: 'queued', provider_retry_count: 0 }],
+        // A send still on the retry rail may yet exhaust (GH Codex r8 P1).
+        ['blocked by the provider with a retry scheduled', { status: 'failed', provider_retry_next_at: new Date(Date.now() + 600000) }],
+        ['a retry claimed and in flight', { status: 'queued', provider_retry_count: 1 }],
       ])('an earlier full email that was %s does not count: the full email', async (_label, fields) => {
         mockDb({ earlier: [{ ...earlierFull(), ...fields }] });
         EmailTemplates.sendTemplate.mockResolvedValue({ sent: true });

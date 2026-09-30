@@ -664,8 +664,6 @@ describe('new recurring welcome SMS', () => {
       ['sent', { status: 'sent' }],
       ['delivered', { status: 'delivered' }],
       ['delivered and then unsubscribed / reported as spam', { status: 'spam_report' }],
-      ['blocked by the provider with a retry scheduled', { status: 'failed', provider_retry_next_at: new Date(Date.now() + 600000) }],
-      ['a retry claimed and in flight', { status: 'queued', provider_retry_count: 1 }],
     ])('a signup email that was accepted for sending (%s) suppresses the welcome EMAIL; the text still sends', async (_label, fields) => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
@@ -682,6 +680,9 @@ describe('new recurring welcome SMS', () => {
       ['failed with no retry', { status: 'failed' }],
       ['failed and the retry rail exhausted', { status: 'failed', provider_retry_next_at: null, provider_retry_exhausted_at: new Date() }],
       ['queued for the first time (no retry yet)', { status: 'queued', provider_retry_count: 0 }],
+      // A send still on the retry rail may yet exhaust (GH Codex r8 P1).
+      ['blocked by the provider with a retry scheduled', { status: 'failed', provider_retry_next_at: new Date(Date.now() + 600000) }],
+      ['a retry claimed and in flight', { status: 'queued', provider_retry_count: 1 }],
     ])('a signup email that is %s does not suppress: the welcome email sends', async (_label, fields) => {
       process.env.GATE_SIGNUP_SINGLE_EMAIL = 'true';
       dueWelcome();
