@@ -114,6 +114,11 @@ function sanitizeBuiltNotification(built = {}, trigger = {}) {
   };
 }
 
+// A call alert opens the call it is about: the Calls tab reads
+// #tab=calls&call=<call_log id> (CallLogTabV2 pins a call outside its loaded
+// window). No id in the payload keeps the bare tab.
+const callLink = (p) => `/admin/communications#tab=calls${p.callLogId ? `&call=${encodeURIComponent(p.callLogId)}` : ''}`;
+
 // priority: 'urgent' (red, double vibrate), 'high' (amber), 'normal' (teal), 'low' (gray)
 const TRIGGER_REGISTRY = {
   // Fired by server/services/property-lookup-canary.js when a golden parcel
@@ -299,7 +304,16 @@ const TRIGGER_REGISTRY = {
       ...(String(p.message || '').length > 140 ? { detail: redactSensitiveText(p.message).slice(0, 1600) } : {}),
       // threadId is the customer id (see twilio-webhook). CommunicationsPageV2
       // reads ?thread=<customerId> and opens that customer's SMS conversation.
-      link: p.threadId ? `/admin/communications?thread=${p.threadId}` : '/admin/communications',
+      // The MessageSid (never the phone number, which this feed masks) names
+      // the message the alert is about, so the page scrolls to THAT message
+      // even when newer ones arrive before the tap. A known sender keeps the
+      // thread link and appends &message=<sid> (markInboundSmsReadAdmin and
+      // inbound-sms-read match the part before &message=); an unknown sender
+      // has no customer, so ?message= alone opens the conversation
+      // (inbound-sms-read recognises both unlinked shapes by this prefix).
+      link: p.threadId
+        ? `/admin/communications?thread=${p.threadId}${p.twilioSid ? `&message=${encodeURIComponent(p.twilioSid)}` : ''}`
+        : (p.twilioSid ? `/admin/communications?message=${encodeURIComponent(p.twilioSid)}` : '/admin/communications'),
     }),
   },
   // Sandy PR 2A: a live transfer went to the office WITHOUT its summary
@@ -318,7 +332,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: 'Sandy transfer without context',
       body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
-      link: '/admin/communications#tab=calls',
+      link: callLink(p),
     }),
   },
   // Direct watcher bells must also join the staff visibility allowlist.
@@ -379,9 +393,8 @@ const TRIGGER_REGISTRY = {
         title: `${p.reason === 'sandy_provider_failure' ? 'AI call callback' : 'Voicemail'} — ${who}`,
         body: bodyParts.join(' - '),
         // Voicemail recordings render under the Calls tab (hash-routed);
-        // ?thread= would open the SMS view instead. CallLogTabV2 has no
-        // per-call URL param today, so the tab is the deepest stable link.
-        link: '/admin/communications#tab=calls',
+        // ?thread= would open the SMS view instead.
+        link: callLink(p),
       };
     },
   },
@@ -413,7 +426,7 @@ const TRIGGER_REGISTRY = {
       body: `${p.phone || 'unknown number'} called and did not leave a voicemail.`,
       // Calls live under the hash-routed Calls tab; ?thread= would open the
       // SMS conversation instead (same destination as the voicemail bell).
-      link: '/admin/communications#tab=calls',
+      link: callLink(p),
     }),
   },
   // Staff alert for a repeat window, gated by GATE_REPEAT_CALLER_BELL.
@@ -426,7 +439,7 @@ const TRIGGER_REGISTRY = {
     build: (p) => ({
       title: `Repeat caller — ${p.name || 'unknown number'}`,
       body: `${p.phone || 'unknown number'} has called ${p.count} times in the last 3 hours (${p.unanswered} unanswered)${p.line ? ` on ${p.line}` : ''}.`,
-      link: '/admin/communications#tab=calls',
+      link: callLink(p),
     }),
   },
   // A lead calls back while a Waves promise from an earlier unbooked call
@@ -447,7 +460,7 @@ const TRIGGER_REGISTRY = {
       return {
         title: `Calling back — still owe them a ${p.what || 'follow-up'}`,
         body: `${who} called at ${p.calledAtLabel || 'earlier'}. We still owe them a ${p.what || 'follow-up'} promised ${p.when || 'earlier'}.`,
-        link: '/admin/communications#tab=calls',
+        link: callLink(p),
       };
     },
   },
