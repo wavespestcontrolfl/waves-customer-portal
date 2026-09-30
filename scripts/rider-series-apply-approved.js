@@ -56,10 +56,12 @@
  *     rows (this covers occurrence-only add-ons: the row is refused rather
  *     than guessed at)
  *   - seriesExtensionUnbillable says the visit would be unbillable
- *   - the resolved technician (or any technician-NULL row, or any row at all
- *     when the moved visit ends up unassigned) already has a booking over the
- *     moved window (host window start + the pest duration) on the target date;
- *     the host lawn row itself is exempt
+ *   - ANY booking (any customer, any technician, technician-NULL included)
+ *     overlaps the moved window (host window start + the pest duration) on the
+ *     target date, per the occupancy.js global probe; only the visit itself,
+ *     the host lawn row and this pair's own moves are exempt
+ *   - the rider occurrence's own property (property_id / stamped address)
+ *     differs from the pair's series property
  *   - any lock not free: customer comms, host or pest series maintenance lock
  *     (all try-locks), or the pest series rows (FOR UPDATE NOWAIT)
  *
@@ -72,8 +74,8 @@
  * the recorded values), status/ungrouped, the near-term floor on the target, the
  * durable pins (the preview's own classification: reminded/confirmed, invoice,
  * card hold/request, closeout packet, completion claim, prepaid, in progress),
- * the customer's pest occupancy on the target date, the technician's bookings
- * over the target window (with the technician-NULL mirror guard), add-on
+ * the customer's pest occupancy on the target date, every booking overlapping the
+ * target window (the global occupancy probe), the row's own property, add-on
  * equality against the row's CURRENT add-ons, and billability. Rollback also
  * refuses a row whose moved columns no longer hold the values the apply wrote.
  *
@@ -281,13 +283,13 @@ async function occupantOnDate(sp, { customerId, to, exceptIds, pestParentId }) {
 function addonKey(a) { return `${a.service_id || ''}|${a.service_name || ''}`; }
 
 // The visit will occupy [target window start, + the pest duration] on the target
-// date for the RESOLVED technician. Reuses the shared conflict reader
-// (scheduling/occupancy.js, same non-occupying statuses as the admin schedule
-// writers); that reader is tech-blind, so the technician scope is applied here
-// with the mirror guard AGENTS.md requires for booking conflict checks: a
-// technician-NULL row collides with any technician, and an unassigned visit
-// collides with every row in its window.
-async function assertNoTechnicianConflict(sp, { target, to, exemptIds, rowId }) {
+// date. Implements the occupancy.js ORDERING CONTRACT's second half exactly: the
+// shared GLOBAL probe (findConflictingVisits: every booking that date overlapping
+// the window, any customer, any technician, technician-NULL rows included; only
+// cancelled/completed/skipped/no_show rows and windowless placeholders are
+// inert) and abort on ANY hit. The only rows excluded are the visit itself, the
+// host lawn stop it is joining (same stop by design) and this pair's own moves.
+async function assertNoWindowConflict(sp, { target, to, exemptIds, rowId }) {
   const { findConflictingVisits } = require('../server/services/scheduling/occupancy');
   const { ADMIN_OCCUPANCY_EXCLUDE_STATUSES } = require('../server/services/scheduling/window-rules');
   const clashes = await findConflictingVisits({
@@ -298,9 +300,20 @@ async function assertNoTechnicianConflict(sp, { target, to, exemptIds, rowId }) 
     excludeServiceIds: exemptIds,
     excludeStatuses: ADMIN_OCCUPANCY_EXCLUDE_STATUSES,
   });
-  const clash = clashes.find((c) => !c.technician_id || !target.technicianId
-    || String(c.technician_id) === String(target.technicianId));
-  if (clash) throw new PairSkip('technician_booked_in_window', `${rowId}->${clash.id}`);
+  if (clashes.length) throw new PairSkip('window_occupied', `${rowId}->${clashes[0].id}`);
+}
+
+// The rider occurrence must sit at the pair's own property: an occurrence with
+// its own property_id / stamped address that differs from the series scope would
+// be moved onto a lawn stop somewhere else. A row with no scope of its own
+// inherits the series scope (same rule as the preview's host-date filter).
+function assertRowAtPairProperty(row, ctx) {
+  const {
+    seriesPropertyVerdict, _internals: { rowPropertyScope },
+  } = require('../server/services/rider-series-preview');
+  const rowScope = rowPropertyScope(row);
+  if (!rowScope.resolved) return;
+  if (seriesPropertyVerdict(rowScope, ctx.propertyScope) !== 'same') throw new PairSkip('row_property_differs', row.id);
 }
 
 // Ownership, status, date and near-term floor, then the durable pins.
@@ -365,12 +378,13 @@ async function planMove(sp, ctx, {
   const { cols } = ctx;
   const row = await sp('scheduled_services').where({ id: expect.rowId }).first();
   await assertRowMovable(sp, row, { expect, to, ctx });
+  assertRowAtPairProperty(row, ctx);
 
   const occupant = await occupantOnDate(sp, {
     customerId: expect.customerId, to, exceptIds: [row.id, ...exemptIds], pestParentId: expect.pestParentId,
   });
   if (occupant) throw new PairSkip('pest_visit_already_on_target_date', `${row.id}->${occupant.id}`);
-  await assertNoTechnicianConflict(sp, {
+  await assertNoWindowConflict(sp, {
     target, to, exemptIds: [row.id, ...exemptIds], rowId: row.id,
   });
   await assertAddonsAndBillable(sp, ctx, row, to);
@@ -420,6 +434,7 @@ async function buildMoveContext(sp, { pestParentId, customerId, dates, apply, to
   const { customerPrefersNoWeekends } = require('../server/services/recurring-appointment-seeder');
   const { getBlackoutLayers } = require('../server/services/scheduling/blackout-dates');
   const { loadStoredDiscountScope } = require('../server/routes/admin-schedule')._test;
+  const { resolveSeriesPropertyScope } = require('../server/services/rider-series-preview');
   const cols = await sp('scheduled_services').columnInfo();
   const pestParent = await sp('scheduled_services').where({ id: pestParentId }).first();
   if (!pestParent) throw new PairSkip('parent_missing');
@@ -428,13 +443,14 @@ async function buildMoveContext(sp, { pestParentId, customerId, dates, apply, to
   const skipParent = !!pestParent.skip_weekends || await customerPrefersNoWeekends(sp, pestParent.customer_id);
   const parentAddons = await sp('scheduled_service_addons').where({ scheduled_service_id: pestParentId });
   const storedDiscountScope = await loadStoredDiscountScope(sp, template, parentAddons);
+  const propertyScope = await resolveSeriesPropertyScope(sp, pestParent);
   const sorted = [...dates].sort();
   let blackoutDates = null;
   try {
     blackoutDates = await sp.transaction((s2) => getBlackoutLayers(sorted[0], sorted[sorted.length - 1], s2));
   } catch { throw new PairSkip('blackout_check_error'); }
   return {
-    cols, template, blackoutDates, skipParent, parentAddons, storedDiscountScope, todayStr, apply,
+    cols, template, blackoutDates, skipParent, parentAddons, storedDiscountScope, propertyScope, todayStr, apply,
   };
 }
 

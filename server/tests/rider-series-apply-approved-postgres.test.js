@@ -298,7 +298,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     }
   });
 
-  test('a technician already booked over the moved window (another customer) refuses the pair; a NULL-technician row does too', async () => {
+  test('any booking over the moved window (another customer, same, NULL or different technician) refuses the pair', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);
     const target = approved.results[0].move[0].to;
@@ -315,21 +315,26 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     });
     const before = await snapshot();
     let res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
-    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'technician_booked_in_window' });
+    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'window_occupied' });
     expect(await snapshot()).toBe(before);
 
     // Mirror guard: a technician-NULL row collides with any technician.
     await trx('scheduled_services').where({ id: booked.id }).update({ technician_id: null });
     res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
-    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'technician_booked_in_window' });
+    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'window_occupied' });
     expect(await snapshot()).toContain(booked.id);
 
-    // A different technician's booking in the same window does not block.
+    // The global probe: a DIFFERENT technician's booking in the window refuses too.
     const otherTech = randomUUID();
     await trx('technicians').insert({
       id: otherTech, name: 'Other synthetic tech', employment_status: 'active', field_dispatchable: true,
     });
     await trx('scheduled_services').where({ id: booked.id }).update({ technician_id: otherTech });
+    res = await applyApproved(trx, approved, { apply: false });
+    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'window_occupied' });
+
+    // Outside the window (or cancelled) it does not.
+    await trx('scheduled_services').where({ id: booked.id }).update({ window_start: '13:00', window_end: '13:30' });
     res = await applyApproved(trx, approved, { apply: false });
     expect(res.pairs[0]).toMatchObject({ status: 'would_apply' });
   });
@@ -415,6 +420,19 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
     expect(seen.filter((q) => (q.bindings || []).includes(host.id)).length).toBeGreaterThanOrEqual(1);
   });
 
+  test('a rider occurrence at a different property than the pair is refused', async () => {
+    const pair = await buildPair();
+    const approved = await approvedFor(pair);
+    const moving = approved.results[0].move[0].id;
+    await trx('scheduled_services').where({ id: moving }).update({
+      service_address_line1: '999 Elsewhere Road', service_address_city: 'Other City', service_address_state: 'FL', service_address_zip: '11111',
+    });
+    const before = await snapshot();
+    const res = await applyApproved(trx, approved, { apply: true, rollbackOut: rollbackPath() });
+    expect(res.pairs[0]).toMatchObject({ status: 'skipped', reason: 'row_property_differs' });
+    expect(await snapshot()).toBe(before);
+  });
+
   test('a compatible second pest root introduced after approval makes the pair ambiguous and skips it', async () => {
     const pair = await buildPair();
     const approved = await approvedFor(pair);
@@ -451,7 +469,7 @@ postgres('rider-series one-time apply against migrated PostgreSQL', () => {
         status: 'confirmed', window_start: '14:30', window_end: '15:30', technician_id: techId,
       });
       const res = await rollbackApplied(trx, doc, { apply: true });
-      expect(res.results.find((r) => r.id === entry.id)).toMatchObject({ status: 'skipped', reason: 'technician_booked_in_window' });
+      expect(res.results.find((r) => r.id === entry.id)).toMatchObject({ status: 'skipped', reason: 'window_occupied' });
       const stayed = await trx('scheduled_services').where({ id: entry.id }).first();
       expect(dateOnly(stayed.scheduled_date)).toBe(entry.after.scheduled_date);
     });
