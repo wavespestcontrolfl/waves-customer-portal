@@ -58,13 +58,61 @@ test('the readers see an env change at call time (a flip needs no redeploy)', ()
   expect(fg.dunningCustomerScheduleLive()).toBe(false);
 });
 
-test('the allowlist is a trimmed comma list; blanks and duplicates collapse', () => {
-  process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = ' 11111111-aaaa , ,22222222-bbbb,11111111-aaaa ';
+const U1 = '11111111-aaaa-4aaa-8aaa-111111111111';
+const U2 = '22222222-bbbb-4bbb-8bbb-222222222222';
+
+test('the allowlist is a trimmed comma list of uuids; blanks, case and duplicates collapse', () => {
+  process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = ` ${U1.toUpperCase()} , ,${U2},${U1} `;
   const fg = load();
-  expect([...fg.dunningCustomerScheduleAllowlist()]).toEqual(['11111111-aaaa', '22222222-bbbb']);
+  expect([...fg.dunningCustomerScheduleAllowlist()]).toEqual([U1, U2]);
   expect(fg.gates.dunningCustomerScheduleAllowlist).toBe(true);
-  process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = ' , ';
+});
+
+test('unset or whitespace-only = no allowlist (null = everyone)', () => {
+  const fg = load();
   expect(fg.dunningCustomerScheduleAllowlist()).toBeNull();
+  process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = '   ';
+  expect(fg.dunningCustomerScheduleAllowlist()).toBeNull();
+  expect(fg.dunningCustomerScheduleAllowlistStatus()).toEqual({ configured: false, valid: [], invalid: [] });
+});
+
+test.each([' , ', ',', 'not-a-uuid', '12345, abc'])('configured but no valid id (%p) = an EMPTY set (nobody), never everyone', (value) => {
+  process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = value;
+  const fg = load();
+  const set = fg.dunningCustomerScheduleAllowlist();
+  expect(set).toBeInstanceOf(Set);
+  expect(set.size).toBe(0);
+});
+
+test('a malformed id is dropped and reported; the valid ones still stand', () => {
+  process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = `${U1}, 11111111-aaaa ,zzz`;
+  const fg = load();
+  expect([...fg.dunningCustomerScheduleAllowlist()]).toEqual([U1]);
+  expect(fg.dunningCustomerScheduleAllowlistStatus()).toEqual({ configured: true, valid: [U1], invalid: ['11111111-aaaa', 'zzz'] });
+});
+
+describe('logGateStatus reports the allowlist state', () => {
+  let logSpy;
+  beforeEach(() => { logSpy = jest.spyOn(console, 'log').mockImplementation(() => {}); });
+  afterEach(() => logSpy.mockRestore());
+  const lines = () => logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+
+  test('configured but empty says nobody; malformed ids are named', () => {
+    process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = 'oops';
+    load().logGateStatus();
+    expect(lines()).toContain('configured but has no valid ids → nobody');
+    expect(lines()).toContain('ignored malformed id(s): oops');
+  });
+
+  test('a valid list is counted; unset prints nothing extra', () => {
+    process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST = `${U1},${U2}`;
+    load().logGateStatus();
+    expect(lines()).toContain('allowlist: 2 customer(s)');
+    logSpy.mockClear();
+    delete process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST;
+    load().logGateStatus();
+    expect(lines()).not.toContain('allowlist');
+  });
 });
 
 describe.each([

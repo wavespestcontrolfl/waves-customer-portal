@@ -3511,8 +3511,10 @@ const gates = {
   // mints, no reservations, no sends); the live gate additionally needs
   // GATE_DUNNING_LADDER_90 and the pay-page balance gate (payIncludeBalance)
   // on. dunningCustomerScheduleAllowlist reads ENABLED when
-  // DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST (comma list of customer ids; empty =
-  // everyone) is non-empty — the one-customer canary before a full flip.
+  // DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST (comma list of customer uuids) is
+  // CONFIGURED — unset = everyone, configured = only the valid ids, and a
+  // configured list with no valid id = nobody (logGateStatus says so). The
+  // one-customer canary before a full flip.
   dunningCustomerScheduleShadow: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE_SHADOW === 'true',
   dunningCustomerSchedule: process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true',
   dunningCustomerScheduleAllowlist: String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '').trim() !== '',
@@ -3963,6 +3965,13 @@ function logGateStatus() {
   for (const [name, enabled] of Object.entries(gates)) {
     console.log(`  ${enabled ? '✅' : '🔒'} ${name}: ${enabled ? 'ENABLED' : 'DISABLED'}`);
   }
+  const allow = dunningCustomerScheduleAllowlistStatus();
+  if (allow.configured) {
+    console.log(allow.valid.length
+      ? `  ↳ dunning customer-schedule allowlist: ${allow.valid.length} customer(s)`
+      : '  ↳ dunning customer-schedule allowlist configured but has no valid ids → nobody');
+    if (allow.invalid.length) console.log(`  ↳ dunning customer-schedule allowlist ignored malformed id(s): ${allow.invalid.join(', ')}`);
+  }
 }
 
 // GATE_OUTLINK_TRACKING read at CALL time — strict `=== 'true'`, same
@@ -3997,16 +4006,31 @@ function dunningCustomerScheduleLive() {
   return process.env.GATE_DUNNING_CUSTOMER_SCHEDULE === 'true' && dunningCustomerSchedulePrereqsLive();
 }
 
-// DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST — comma-separated customer ids, read at
-// CALL time. Returns null when unset/empty (= everyone), else a Set of the
-// trimmed non-empty ids. It only ever NARROWS the live gate (a canary); it
-// never turns anything on by itself.
+// DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST — comma-separated customer ids (uuids),
+// read at CALL time. It only ever NARROWS the live gate (a canary); it never
+// turns anything on by itself. Three states, deliberately distinct:
+//   unset / whitespace only        -> null      (no allowlist: everyone)
+//   configured, >= 1 valid uuid    -> Set       (only those customers)
+//   configured, NO valid uuid      -> empty Set (nobody — a typo'd canary must
+//                                    fail closed, never widen to everyone)
+// A malformed entry (not a uuid) is dropped, and reported by
+// dunningCustomerScheduleAllowlistStatus() / logGateStatus.
+const ALLOWLIST_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function dunningCustomerScheduleAllowlistStatus() {
+  const raw = String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '');
+  if (raw.trim() === '') return { configured: false, valid: [], invalid: [] };
+  const valid = [];
+  const invalid = [];
+  for (const id of raw.split(',').map((x) => x.trim()).filter(Boolean)) {
+    if (ALLOWLIST_UUID.test(id)) { if (!valid.includes(id.toLowerCase())) valid.push(id.toLowerCase()); } else if (!invalid.includes(id)) invalid.push(id);
+  }
+  return { configured: true, valid, invalid };
+}
+
 function dunningCustomerScheduleAllowlist() {
-  const ids = String(process.env.DUNNING_CUSTOMER_SCHEDULE_ALLOWLIST || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean);
-  return ids.length ? new Set(ids) : null;
+  const status = dunningCustomerScheduleAllowlistStatus();
+  return status.configured ? new Set(status.valid) : null;
 }
 
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
@@ -4019,5 +4043,6 @@ module.exports.dunningCustomerSchedulePrereqsLive = dunningCustomerSchedulePrere
 module.exports.dunningCustomerScheduleShadowLive = dunningCustomerScheduleShadowLive;
 module.exports.dunningCustomerScheduleLive = dunningCustomerScheduleLive;
 module.exports.dunningCustomerScheduleAllowlist = dunningCustomerScheduleAllowlist;
+module.exports.dunningCustomerScheduleAllowlistStatus = dunningCustomerScheduleAllowlistStatus;
 module.exports.lawnAssessmentRefereeLive = lawnAssessmentRefereeLive;
 // gates 1775330914

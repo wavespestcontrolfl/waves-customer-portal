@@ -261,6 +261,39 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     }
     const invoice = await t('invoices').where({ id: invoiceId }).forUpdate().first();
     if (!invoice) return { applied: 0, skipped: 'not_found' };
+    // Opt-in collection fence (customer-dunning credit draw), ATOMIC with the
+    // apply and placed straight after the invoice lock: refuse to consume
+    // credit while a submitted-but-unresolved saved-card attempt, an orphan
+    // charge or a received deposit awaiting settlement means Stripe may
+    // already have taken (or be taking) this invoice's money.
+    //  - The deposit check runs with its ledger lock ENABLED (default), so the
+    //    draw waits for an in-flight markDepositReceived (which holds only that
+    //    advisory lock in its own transaction, then commits its receipt) and
+    //    sees the received row; a check without the lock could read "nothing
+    //    pending" a moment before that receipt commits.
+    //  - Lock order is invoice row -> estimate-deposit advisory lock -> customer
+    //    row: the order returnAppliedCreditOnRefund / restoreDepositCredit /
+    //    reconcileReceivedDepositToInvoice use (invoice, then the ledger lock,
+    //    then any customer balance write). That is why this sits BEFORE the
+    //    customer FOR UPDATE below rather than next to the other pre-apply
+    //    guards. markDepositReceived takes the advisory lock with no invoice or
+    //    customer lock held, so it cannot form a cycle with this path.
+    //  - A recognised pending state returns a skip SENTINEL, never a throw, so
+    //    the fence's own promotion of a stale claim to 'ambiguous' commits with
+    //    this transaction (apply-credit-claim-fence-promotion-postgres.test.js).
+    //    Any other error proves nothing and propagates: the trx rolls back and
+    //    nothing is applied.
+    if (requireNoCollectionPending) {
+      try {
+        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(t, invoice);
+        await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, t);
+      } catch (fenceErr) {
+        if (require('./invoice-helpers').isCollectionPendingFenceError(fenceErr)) {
+          return { applied: 0, skipped: 'collection_pending', pendingCode: fenceErr.code || null };
+        }
+        throw fenceErr;
+      }
+    }
     // The customer's opt-in gates every AUTOMATIC apply (owner ruling
     // 2026-08-28). `customerRequested` marks the one non-automatic caller
     // — estimate acceptance, where the customer just accepted a price
@@ -400,26 +433,6 @@ async function applyAccountCreditToInvoice({ invoiceId, createdBy = 'system', fu
     // completion invoice has no PI; the admin apply-credit route, by contrast,
     // explicitly triages/cancels the PI — auto-apply simply declines.)
     if (invoice.stripe_payment_intent_id) return { applied: 0, skipped: 'has_payment_intent' };
-    // Opt-in collection fence, ATOMIC with the apply (customer-dunning credit
-    // draw): under this invoice lock, refuse to consume credit while a
-    // submitted-but-unresolved saved-card attempt, an orphan charge or a
-    // received deposit awaiting settlement means Stripe may already have taken
-    // (or be taking) this invoice's money. A recognised pending state returns a
-    // skip SENTINEL — never a throw — so the fence's own promotion of a stale
-    // claim to 'ambiguous' commits with this transaction (see
-    // apply-credit-claim-fence-promotion-postgres.test.js). Any other error
-    // proves nothing and propagates: the trx rolls back, nothing is applied.
-    if (requireNoCollectionPending) {
-      try {
-        await require('./estimate-deposits').assertInvoiceDepositSettlementReady(t, invoice, { lock: false });
-        await require('./stripe').assertNoInvoiceChargeReconciliationPending(invoiceId, t);
-      } catch (fenceErr) {
-        if (require('./invoice-helpers').isCollectionPendingFenceError(fenceErr)) {
-          return { applied: 0, skipped: 'collection_pending', pendingCode: fenceErr.code || null };
-        }
-        throw fenceErr;
-      }
-    }
     // An active payment plan snapshots total_balance at creation; auto-applying
     // credit now would reduce amount due while the plan keeps collecting the
     // original balance (over-collection + consumed credit). Skip — the operator

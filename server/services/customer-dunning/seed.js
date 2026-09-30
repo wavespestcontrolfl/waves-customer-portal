@@ -9,7 +9,8 @@
  *
  * Rules (each one exists because a review round found the alternative):
  *  - `oldest` = the ACTIVE member with the minimum sequenceAnchor. Quiet
- *    members (completed / no row) never drive the cadence.
+ *    members (completed / no row) never drive the cadence. Equal anchors:
+ *    most advanced step_index, then created_at, then id (compareDrivers).
  *  - step_index = the first index >= oldest.step_index whose date on oldest's
  *    anchor is not stale (isStaleTouch), capped at the final step — the final
  *    notice is never skipped while it is still sendable. Seeding from the MIN
@@ -34,14 +35,35 @@ const maxDate = (dates) => {
 
 const maxInt = (values) => values.reduce((m, v) => Math.max(m, Number(v) || 0), 0);
 
-/** The oldest active member by cadence anchor, or null when none is active. */
+const timeOf = (d) => (d ? new Date(d).getTime() : 0);
+
+/**
+ * Total order for "which active member drives the cadence": the oldest
+ * cadence anchor first. Rows sharing an anchor are ordered by an EXPLICIT
+ * policy, never by input order: the most ADVANCED step_index wins (seeding
+ * from the less advanced twin would resend a stage already delivered), then
+ * the earlier created_at, then the smaller id as the final tie-break.
+ */
+function compareDrivers(a, b) {
+  const byAnchor = timeOf(Followups.sequenceAnchor(a)) - timeOf(Followups.sequenceAnchor(b));
+  if (byAnchor !== 0) return byAnchor;
+  const byStep = (Number(b.step_index) || 0) - (Number(a.step_index) || 0);
+  if (byStep !== 0) return byStep;
+  const byCreated = timeOf(a.created_at) - timeOf(b.created_at);
+  if (byCreated !== 0) return byCreated;
+  const ia = String(a.id ?? '');
+  const ib = String(b.id ?? '');
+  if (ia === ib) return 0;
+  return ia < ib ? -1 : 1;
+}
+
+/** The oldest active member by cadence anchor (ties: see compareDrivers), or null when none is active. */
 function oldestActive(activeRows) {
   let best = null;
   for (const row of activeRows) {
-    const at = new Date(Followups.sequenceAnchor(row)).getTime();
-    if (!best || at < best.at) best = { row, at };
+    if (!best || compareDrivers(row, best) < 0) best = row;
   }
-  return best ? best.row : null;
+  return best;
 }
 
 /** First non-stale step at/after `fromIndex` on `anchor`; final step is never passed over. */

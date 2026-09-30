@@ -38,6 +38,12 @@ function fakeTrx() {
   return trx;
 }
 
+// invocationCallOrder of the first read of the customers table on the fake trx
+const customerReadOrder = (trx) => {
+  const idx = trx.calls.indexOf('customers');
+  return idx === -1 ? Infinity : trx.mock.invocationCallOrder[idx];
+};
+
 const pending = (code, extra = {}) => Object.assign(new Error(code), { code, ...extra });
 
 beforeEach(() => {
@@ -61,11 +67,19 @@ describe('requireNoCollectionPending (opt-in, atomic with the apply)', () => {
     expect(trx.calls).not.toContain('payment_plans');
   });
 
-  test('the fence runs on the apply\'s OWN trx, after the invoice lock, in the non-locking (lock:false) deposit mode', async () => {
+  test('the fence runs on the apply\'s OWN trx right after the invoice lock, with the deposit LEDGER LOCK enabled, and before the customer row lock (invoice -> ledger -> customer)', async () => {
     const trx = fakeTrx();
     await CustomerCredit.applyAccountCreditToInvoice({ invoiceId: 'inv-1', requireNoCollectionPending: true }, trx);
-    expect(mockDepositReady).toHaveBeenCalledWith(trx, expect.objectContaining({ id: 'inv-1' }), { lock: false });
+    // exactly (trx, invoice): no { lock: false } — the default takes the estimate-deposit advisory lock
+    expect(mockDepositReady).toHaveBeenCalledTimes(1);
+    expect(mockDepositReady.mock.calls[0]).toHaveLength(2);
+    expect(mockDepositReady.mock.calls[0][0]).toBe(trx);
+    expect(mockDepositReady.mock.calls[0][1]).toMatchObject({ id: 'inv-1' });
     expect(mockReconcile).toHaveBeenCalledWith('inv-1', trx);
+    // the fence is settled before the customer row is locked
+    const fenceOrder = Math.min(mockDepositReady.mock.invocationCallOrder[0], mockReconcile.mock.invocationCallOrder[0]);
+    const customerLockAt = customerReadOrder(trx);
+    expect(customerLockAt).toBeGreaterThan(fenceOrder);
     expect(trx.calls[0]).toBe('invoices'); // locked read first
   });
 

@@ -191,3 +191,44 @@ describe('promotionSeed', () => {
     expect(JSON.stringify(rows)).toBe(snapshot);
   });
 });
+
+describe('promotionSeed: equal anchors have an explicit, order-independent policy', () => {
+  const NOW = new Date('2026-09-30T14:16:00Z');
+  beforeEach(() => { process.env.GATE_DUNNING_LADDER_90 = 'true'; });
+  afterEach(() => { delete process.env.GATE_DUNNING_LADDER_90; });
+  const twin = (id, step_index, created, extra = {}) => ({
+    id, invoice_id: `inv-${id}`, anchor_at: new Date('2026-08-01T15:00:00Z'), step_index, touches_sent: step_index,
+    last_touch_at: null, created_at: new Date(created), ...extra,
+  });
+
+  test.each([
+    ['ascending', (a, b) => [a, b]],
+    ['descending', (a, b) => [b, a]],
+  ])('same anchor: the MORE advanced step wins even when it is newer (%s input order)', (_l, order) => {
+    const behind = twin('seq-a', 1, '2026-08-01T09:00:00Z');
+    const ahead = twin('seq-b', 4, '2026-08-02T09:00:00Z');
+    const seed = promotionSeed(order(behind, ahead), NOW);
+    expect(seed.oldest_seq_id).toBe('seq-b');
+    expect(oldestActive(order(behind, ahead)).id).toBe('seq-b');
+  });
+
+  test.each([
+    ['ascending', (a, b) => [a, b]],
+    ['descending', (a, b) => [b, a]],
+  ])('same anchor and step: earlier created_at, then smaller id (%s input order)', (_l, order) => {
+    const older = twin('seq-z', 2, '2026-08-01T09:00:00Z');
+    const newer = twin('seq-a', 2, '2026-08-02T09:00:00Z');
+    expect(oldestActive(order(older, newer)).id).toBe('seq-z');
+    const t1 = twin('seq-a', 2, '2026-08-01T09:00:00Z');
+    const t2 = twin('seq-b', 2, '2026-08-01T09:00:00Z');
+    expect(oldestActive(order(t1, t2)).id).toBe('seq-a');
+    expect(promotionSeed(order(t1, t2), NOW)).toEqual(promotionSeed(order(t2, t1), NOW));
+  });
+
+  test('an older anchor still outranks a more advanced step', () => {
+    const old = twin('seq-old', 0, '2026-08-05T09:00:00Z', { anchor_at: new Date('2026-07-20T15:00:00Z') });
+    const adv = twin('seq-adv', 5, '2026-08-01T09:00:00Z');
+    expect(oldestActive([adv, old]).id).toBe('seq-old');
+  });
+});
+

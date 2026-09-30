@@ -294,20 +294,30 @@ async function combinedEligibleSiblings(anchorInvoice, { database = db, reusePay
       const StripeService = require('./stripe');
       const cleared = [];
       for (const inv of eligible) {
+        // Read-only callers (the customer-dunning resolver, which asserts the
+        // set in a message) run the SAME per-member predicate as the anchor:
+        // a recognised pending state excludes the sibling; an unexpected
+        // failure proves nothing, so the selection is incomplete (the caller
+        // holds) rather than a set built on an unread fence.
+        if (readOnly) {
+          let verdict;
+          try {
+            verdict = await memberCollectionPending(inv, { database });
+          } catch (checkErr) {
+            logger.warn(`[pay-combined] sibling ${inv.invoice_number} collection check unreadable (${checkErr.code || checkErr.message}) — read-only selection incomplete`);
+            return degrade('incomplete');
+          }
+          if (verdict) {
+            logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${verdict.reason}`);
+          } else {
+            cleared.push(inv);
+          }
+          continue;
+        }
         try {
           await StripeService.assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly });
           cleared.push(inv);
         } catch (fenceErr) {
-          // Read-only callers (the customer-dunning resolver, which asserts the
-          // set in a message) must tell a recognised pending state — the
-          // sibling really is fenced, exclude it — from an unexpected failure
-          // (a DB error), which proves nothing about the sibling: hold rather
-          // than name a set built on an unread fence. Every other caller keeps
-          // the graceful exclude-on-any-error behaviour.
-          if (readOnly && !require('./invoice-helpers').isCollectionPendingFenceError(fenceErr)) {
-            logger.warn(`[pay-combined] sibling ${inv.invoice_number} fence unreadable (${fenceErr.code || fenceErr.message}) — read-only selection incomplete`);
-            return degrade('incomplete');
-          }
           logger.warn(`[pay-combined] sibling ${inv.invoice_number} excluded from combined selection: ${fenceErr.message}`);
         }
       }
@@ -390,6 +400,63 @@ function parseCombinedAllocation(piMetadata) {
 }
 
 const isCombinedPiMetadata = (piMetadata) => !!piMetadata?.combined_allocation;
+
+/**
+ * READ-ONLY per-member "may a reminder name this invoice?" predicate: the
+ * per-member money checks the pay page's locked verifier
+ * (verifyAllocationLocked, below) and the route preflight
+ * (routes/pay-v2.js rejectIfInvoiceCollectionPending) run before money moves,
+ * minus the ones that only make sense inside a live payment session (the
+ * allocation snapshot's cents, the PaymentIntent binding). One definition,
+ * used for the ANCHOR and for EVERY sibling by the customer-dunning resolver,
+ * so a reminder can never name a member the page would refuse.
+ *
+ * Returns null when the member is clear, else `{ reason }`:
+ *   not_collectible | payer_billed | withdrawn   (ownership / status)
+ *   deposit_settlement | charge_reconciliation   (money may already be moving)
+ * A recognised pending fence state is a REASON; anything unexpected (a DB
+ * error, a payer lookup failure) THROWS — callers hold on that, never treat it
+ * as clear. Nothing is written or locked: the deposit check runs lock:false
+ * and the reconciliation fence readOnly (it must not release or promote a
+ * claim from a read path). tests/customer-dunning-member-fence-parity.test.js
+ * pins this list against the verifier's own source.
+ */
+async function memberCollectionPending(inv, { database = db } = {}) {
+  const { isCollectionPendingFenceError } = require('./invoice-helpers');
+  if (!inv) return { reason: 'not_collectible' };
+  if (!isInvoiceCollectibleStatus(inv.status)) return { reason: 'not_collectible' };
+  if (inv.payer_id || inv.payer_statement_id) return { reason: 'payer_billed' };
+  if (invoiceWithdrawnFromCustomer(inv)) return { reason: 'withdrawn' };
+  // LIVE payer re-resolution, fail closed (a lookup failure throws).
+  {
+    let resolved;
+    try {
+      resolved = await require('./payer').resolveForInvoice({
+        customerId: String(inv.customer_id),
+        ...(inv.scheduled_service_id ? { scheduledServiceId: String(inv.scheduled_service_id) } : {}),
+        throwOnError: true,
+        database,
+      });
+    } catch (err) {
+      err.memberCheck = 'payer_resolve';
+      throw err;
+    }
+    if (resolved?.payerId) return { reason: 'payer_billed' };
+  }
+  try {
+    await require('./estimate-deposits').assertInvoiceDepositSettlementReady(database, inv, { lock: false });
+  } catch (err) {
+    if (isCollectionPendingFenceError(err)) return { reason: 'deposit_settlement', code: err.code || null };
+    throw err;
+  }
+  try {
+    await require('./stripe').assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly: true });
+  } catch (err) {
+    if (isCollectionPendingFenceError(err)) return { reason: 'charge_reconciliation', code: err.code || null };
+    throw err;
+  }
+  return null;
+}
 
 /**
  * Re-verify a combined allocation against LOCKED invoice rows inside the
@@ -1441,6 +1508,7 @@ module.exports = {
   parseCombinedAllocation,
   isCombinedPiMetadata,
   verifyAllocationLocked,
+  memberCollectionPending,
   paymentIntentOwnsInvoice,
   combinedContextForInvoice,
   clearPaymentIntentStamps,

@@ -218,11 +218,10 @@ describe('parity with pay-v2\'s preview set for the same anchor', () => {
     expect(mockReconcile.mock.calls.some((c) => c[0] === 'A' && c[2]?.readOnly === true)).toBe(true);
   });
 
-  test('a credit-covered anchor holds as credit_covers_anchor before the fence is asked', async () => {
+  test('a credit-covered anchor holds as credit_covers_anchor even when its fence is also pending (HOLD_PRECEDENCE)', async () => {
     state.customerCredit = { account_credits: 500, auto_apply_account_credit: true };
     mockReconcile.mockRejectedValue(new Error('pending'));
     expect((await resolve()).reason).toBe('credit_covers_anchor');
-    expect(mockReconcile.mock.calls.filter((c) => c[0] === 'A')).toHaveLength(0);
   });
 
   test('hold: an incomplete open read stops before anything else is asked', async () => {
@@ -452,6 +451,35 @@ describe('sibling reconciliation fence: pending excludes, an unreadable fence ho
     const set = await resolve();
     expect(set.kind).toBe('multi');
     expect(ids(set)).toEqual(['A', 'C']);
+  });
+
+  test('a sibling with a received-but-unapplied estimate deposit is excluded, exactly like the page\'s locked verifier would refuse it', async () => {
+    mockDepositReady.mockImplementation(async (_db, invoice) => {
+      if (invoice.id === 'B') throw pending('DEPOSIT_RECONCILIATION_REQUIRED');
+    });
+    const set = await resolve();
+    expect(set.kind).toBe('multi');
+    expect(ids(set)).toEqual(['A', 'C']);
+  });
+
+  test('every member, anchor and each sibling, is vetted by the ONE predicate: deposit (lock:false) + reconciliation (readOnly), on the caller\'s database', async () => {
+    await resolve();
+    for (const id of ['A', 'B', 'C']) {
+      const dep = mockDepositReady.mock.calls.filter((c) => c[1].id === id);
+      expect(dep.length).toBeGreaterThanOrEqual(1);
+      for (const c of dep) { expect(c[0]).toBe(database); expect(c[2]).toEqual({ lock: false }); }
+      expect(mockReconcile.mock.calls.filter((c) => c[0] === id).length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  test('an unexpected deposit-check failure on a sibling holds the set as incomplete', async () => {
+    mockDepositReady.mockImplementation(async (_db, invoice) => { if (invoice.id === 'C') throw new Error('connection terminated'); });
+    expect(await resolve()).toMatchObject({ kind: 'hold', reason: 'incomplete' });
+  });
+
+  test('an unexpected failure on the anchor holds as anchor_reconciliation, never a send', async () => {
+    mockDepositReady.mockImplementation(async (_db, invoice) => { if (invoice.id === 'A') throw new Error('connection terminated'); });
+    expect(await resolve()).toMatchObject({ kind: 'hold', reason: 'anchor_reconciliation' });
   });
 
   test('an unexpected fence failure (DB down) on a sibling holds the whole set as incomplete', async () => {

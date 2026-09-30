@@ -112,7 +112,7 @@ function activeSequenceRows(database, customerId) {
   return database('invoice_followup_sequences as s')
     .join('invoices as i', 'i.id', 's.invoice_id')
     .where({ 's.customer_id': customerId, 's.status': 'active' })
-    .orderBy('i.created_at', 'asc')
+    .orderBy([{ column: 'i.created_at', order: 'asc' }, { column: 'i.id', order: 'asc' }])
     .select(
       's.*',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at',

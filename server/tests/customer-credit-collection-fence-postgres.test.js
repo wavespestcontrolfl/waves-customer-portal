@@ -11,9 +11,10 @@
 const { randomUUID } = require('node:crypto');
 const knex = require('knex');
 
+const mockDepositReady = jest.fn(async () => undefined);
 jest.mock('../services/estimate-deposits', () => ({
   ...jest.requireActual('../services/estimate-deposits'),
-  assertInvoiceDepositSettlementReady: jest.fn(async () => undefined),
+  assertInvoiceDepositSettlementReady: (...a) => mockDepositReady(...a),
 }));
 
 const connection = process.env.APP_TEST_DATABASE_URL;
@@ -170,5 +171,26 @@ postgres('applyAccountCreditToInvoice requireNoCollectionPending (PostgreSQL)', 
     await attempt(f, { stale: false, submitted: true });
     const out = await apply(f, {});
     expect(out).toMatchObject({ applied: 40 });
+  });
+
+  test('the deposit check takes the estimate ledger lock: the draw WAITS for an in-flight receipt (markDepositReceived-shaped: advisory lock only) and then proceeds — no deadlock', async () => {
+    const { acquireEstimateDepositLedgerLock } = jest.requireActual('../services/estimate-deposits');
+    const estimateId = randomUUID();
+    mockDepositReady.mockImplementationOnce(async (trx) => { await acquireEstimateDepositLedgerLock(trx, estimateId); });
+    const f = await seed();
+    let release;
+    const held = new Promise((resolve) => { release = resolve; });
+    const receipt = app.transaction(async (trx) => {
+      await acquireEstimateDepositLedgerLock(trx, estimateId); // what markDepositReceived holds while it inserts
+      await held;
+    });
+    await new Promise((r) => setTimeout(r, 300)); // the receipt owns the lock
+    let settled = false;
+    const draw = apply(f, { requireNoCollectionPending: true }).then((out) => { settled = true; return out; });
+    await new Promise((r) => setTimeout(r, 600));
+    expect(settled).toBe(false); // blocked behind the receipt's ledger lock
+    release();
+    await receipt;
+    expect(await draw).toMatchObject({ applied: 40 });
   });
 });

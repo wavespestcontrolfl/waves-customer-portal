@@ -143,24 +143,43 @@ function memberOf(inv, seq) {
   };
 }
 
-// The pay-v2 preview's own predicates on the anchor, plus the ownership
-// checks combinedEligibleSiblings makes. Returns a hold reason or null.
+// The anchor's hold reason for a member-predicate verdict.
+const ANCHOR_HOLD_BY_REASON = Object.freeze({
+  not_collectible: 'balance_incomplete',
+  payer_billed: 'payer_anchor',
+  withdrawn: 'payer_anchor',
+  deposit_settlement: 'anchor_reconciliation',
+  charge_reconciliation: 'anchor_reconciliation',
+});
+
+// The pay-v2 preview's own predicates on the anchor. Every per-member money
+// check (status, payer, withdrawal, live payer, received-deposit settlement,
+// charge reconciliation) is PayCombined.memberCollectionPending — the ONE
+// predicate that also vets every sibling inside combinedEligibleSiblings, so
+// anchor and siblings can never be judged by different rules. Only the
+// credit-coverage probe is anchor-specific (the page's capture step). Returns a
+// hold reason or null. Anything unreadable holds — never a send: a payer
+// lookup failure is payer_unresolved, any other throw anchor_reconciliation.
 async function anchorProblem(anchorRow, database) {
-  if (!isInvoiceCollectibleStatus(anchorRow.status)) return 'balance_incomplete';
-  if (anchorRow.payer_id || anchorRow.payer_statement_id || invoiceWithdrawnFromCustomer(anchorRow)) return 'payer_anchor';
-  if (await PayCombined.invoiceCreditWouldFullyCover(anchorRow, { database })) return 'credit_covers_anchor';
-  // The page's rejectIfInvoiceCollectionPending (routes/pay-v2.js) refuses an
-  // anchor with a received-but-unapplied estimate deposit OR a pending charge
-  // reconciliation, so a reminder must not send the customer to a page that
-  // would refuse them. Both checks mirrored, both read-only (lock: false; the
-  // reconciliation fence never releases or promotes a stale claim). Any throw
-  // (a pending fence, or an unreadable state) holds — never a send.
+  let verdict = null;
+  let unreadable = null;
   try {
-    await require('../estimate-deposits').assertInvoiceDepositSettlementReady(database, anchorRow, { lock: false });
-    await require('../stripe').assertNoInvoiceChargeReconciliationPending(anchorRow.id, database, { readOnly: true });
+    verdict = await PayCombined.memberCollectionPending(anchorRow, { database });
   } catch (err) {
-    logger.info(`[customer-dunning] anchor ${anchorRow.id} fenced (${err.code || 'unreadable'}): ${err.message}`);
-    return 'anchor_reconciliation';
+    unreadable = err;
+    logger.info(`[customer-dunning] anchor ${anchorRow.id} check unreadable (${err.code || err.memberCheck || 'error'}): ${err.message}`);
+  }
+  const held = verdict ? ANCHOR_HOLD_BY_REASON[verdict.reason] : null;
+  // Ownership / status verdicts stop before the credit probe, as the page's
+  // preview does.
+  if (held === 'balance_incomplete' || held === 'payer_anchor') return held;
+  if (unreadable?.memberCheck === 'payer_resolve') return 'payer_unresolved';
+  // credit_covers_anchor outranks the reconciliation holds (HOLD_PRECEDENCE).
+  if (await PayCombined.invoiceCreditWouldFullyCover(anchorRow, { database })) return 'credit_covers_anchor';
+  if (unreadable) return 'anchor_reconciliation';
+  if (held) {
+    logger.info(`[customer-dunning] anchor ${anchorRow.id} fenced (${verdict.code || verdict.reason})`);
+    return held;
   }
   return null;
 }
