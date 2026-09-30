@@ -17,6 +17,18 @@ jest.mock('../services/sendgrid-mail', () => ({
   serviceGroupId: () => 202,
 }));
 
+// sendConfirmationEmail now runs its suppression / do-not-contact vetoes
+// (B13) before the provider call; this suite pins the from-identity, so the
+// db answers "no suppression, no profile" (vetoes have their own suite:
+// newsletter-confirm-suppression).
+jest.mock('../models/db', () => jest.fn(() => {
+  const q = {};
+  ['where', 'whereRaw', 'orWhere', 'orWhereRaw', 'orWhereNull', 'select'].forEach((m) => { q[m] = () => q; });
+  q.first = async () => null;
+  q.then = (res, rej) => Promise.resolve([]).then(res, rej);
+  return q;
+}));
+
 const sendgrid = require('../services/sendgrid-mail');
 
 describe('newsletter-confirm', () => {

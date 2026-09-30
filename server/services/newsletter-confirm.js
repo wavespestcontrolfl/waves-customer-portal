@@ -12,6 +12,7 @@
  */
 
 const sendgrid = require('./sendgrid-mail');
+const db = require('../models/db');
 const { wrapEmail } = require('./email-template');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
@@ -31,6 +32,87 @@ function confirmationUrl(token) {
   return `${publicPortalUrl()}/api/public/newsletter/confirm/${token}`;
 }
 
+// Suppression types that are a fact about the ADDRESS, not one mailing list
+// (mirrors GLOBAL_SUPPRESSION_TYPES in email-template-library.js and
+// newsletter-sender.js). A DOI must never reach one of these.
+const GLOBAL_SUPPRESSION_TYPES = ['bounce', 'spam_complaint', 'do_not_email'];
+
+class ConfirmationVetoedError extends Error {
+  constructor(reason) {
+    super(`confirmation email vetoed: ${reason}`);
+    this.name = 'ConfirmationVetoedError';
+    this.code = 'confirmation_vetoed';
+    this.reason = reason;
+  }
+}
+
+/**
+ * The one outbound veto for a newsletter confirmation email. The send below
+ * deliberately bypasses SendGrid's suppression group (asmGroupId: 0 — a
+ * prior newsletter unsubscribe must not stop a fresh, deliberate re-signup
+ * confirmation), so the app-level vetoes have to run here, before the
+ * provider call, for EVERY caller (public form, quote wizard, admin import,
+ * call pipeline, email fanout).
+ *
+ *  - email_suppressions: an active bounce / spam_complaint / do_not_email row
+ *    (any stream) or an ungrouped row, on this mailbox under ANY Gmail
+ *    spelling — the same rule newsletter-sender's excludeGloballySuppressed
+ *    applies. A group-scoped newsletter unsubscribe does NOT veto: the
+ *    subscriber is asking back in.
+ *  - do-not-contact: a call_log consent.do_not_contact_request on the linked
+ *    customer OR on any customer profile carrying this mailbox in any of its email columns.
+ *
+ * Fail closed: a lookup that throws means the address could not be cleared,
+ * so nothing is sent. Vetoes are not surfaced to anonymous callers — every
+ * caller already swallows a send error and answers uniformly.
+ */
+async function assertConfirmationAllowed(subscriber, dbh = db) {
+  const emailLc = String(subscriber.email || '').trim().toLowerCase();
+  try {
+    const { suppressionCoversEmail } = require('../utils/email-equivalence');
+    const suppression = await dbh('email_suppressions')
+      .where(suppressionCoversEmail(emailLc))
+      .where({ status: 'active' })
+      .where(function globalOrUngrouped() {
+        this.whereRaw('LOWER(suppression_type) IN (?, ?, ?)', GLOBAL_SUPPRESSION_TYPES)
+          .orWhereNull('group_key')
+          .orWhere('group_key', '');
+      })
+      .first('id');
+    if (suppression) throw new ConfirmationVetoedError('address_suppressed');
+
+    const { GOOGLE_MAILBOX_SQL, googleMailboxIdentity, CUSTOMER_EMAIL_COLUMNS } = require('../utils/customer-comms-lock');
+    const customerIds = new Set();
+    if (subscriber.customer_id) customerIds.add(subscriber.customer_id);
+    const mailbox = googleMailboxIdentity(emailLc);
+    const profiles = await dbh('customers')
+      .where(function sameMailbox() {
+        for (const col of CUSTOMER_EMAIL_COLUMNS) {
+          this.orWhereRaw(`LOWER(${col}) = ?`, [emailLc]);
+          if (mailbox) {
+            this.orWhereRaw(
+              `(${GOOGLE_MAILBOX_SQL.isGoogle(col)} AND ${GOOGLE_MAILBOX_SQL.mailbox(col)} = ?)`,
+              [mailbox.split('@')[0]],
+            );
+          }
+        }
+      })
+      .select('id');
+    for (const row of profiles || []) customerIds.add(row.id);
+    if (customerIds.size) {
+      const { customerCallDoNotContact } = require('./lead-first-touch-resume');
+      for (const id of customerIds) {
+        if (await customerCallDoNotContact(id, dbh)) throw new ConfirmationVetoedError('do_not_contact');
+      }
+    }
+  } catch (err) {
+    if (err instanceof ConfirmationVetoedError) throw err;
+    // ID-only, no address, per AGENTS.md.
+    logger.warn(`[newsletter-confirm] veto check failed for subscriber id=${subscriber.id}: ${err.code || err.name || 'error'} — not sending`);
+    throw new ConfirmationVetoedError('veto_unverifiable');
+  }
+}
+
 /**
  * Send (or re-send) a confirmation email. Idempotent at the SendGrid
  * level — re-firing it just lands a duplicate in the recipient's inbox,
@@ -38,7 +120,10 @@ function confirmationUrl(token) {
  * retries.
  *
  * Returns { messageId } on success; throws on SendGrid error so the
- * caller can decide whether to surface a 500 or swallow.
+ * caller can decide whether to surface a 500 or swallow. Throws a
+ * ConfirmationVetoedError (code 'confirmation_vetoed') — never sending — when
+ * the address is suppressed / do-not-contact / unverifiable (see
+ * assertConfirmationAllowed); callers treat it like any failed send.
  */
 async function sendConfirmationEmail(subscriber) {
   if (!subscriber || !subscriber.email || !subscriber.confirmation_token) {
@@ -47,6 +132,7 @@ async function sendConfirmationEmail(subscriber) {
   if (!sendgrid.isConfigured()) {
     throw new Error('SendGrid not configured (SENDGRID_API_KEY missing)');
   }
+  await assertConfirmationAllowed(subscriber);
 
   const url = confirmationUrl(subscriber.confirmation_token);
   const firstName = (subscriber.first_name || '').trim();
@@ -99,4 +185,4 @@ async function sendConfirmationEmail(subscriber) {
   return result;
 }
 
-module.exports = { sendConfirmationEmail, confirmationUrl };
+module.exports = { sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError };
