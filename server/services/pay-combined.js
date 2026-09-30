@@ -453,13 +453,13 @@ async function memberCollectionPending(inv, { database = db } = {}) {
   try {
     await require('./estimate-deposits').assertInvoiceDepositSettlementReady(database, inv, { lock: false });
   } catch (err) {
-    if (isCollectionPendingFenceError(err)) return { reason: 'deposit_settlement', code: err.code || null };
+    if (isCollectionPendingFenceError(err)) return { reason: 'deposit_settlement', code: err.code };
     throw err;
   }
   try {
     await require('./stripe').assertNoInvoiceChargeReconciliationPending(inv.id, database, { readOnly: true });
   } catch (err) {
-    if (isCollectionPendingFenceError(err)) return { reason: 'charge_reconciliation', code: err.code || null };
+    if (isCollectionPendingFenceError(err)) return { reason: 'charge_reconciliation', code: err.code };
     throw err;
   }
   return { row: inv };

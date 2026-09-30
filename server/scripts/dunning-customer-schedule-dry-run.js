@@ -16,23 +16,23 @@
 //   - the customers that would be HELD (paused / autopay-held members,
 //     payer or credit conditions, an incomplete read).
 // It applies no account credit, mints no short link, reserves nothing and
-// sends nothing (resolveDunnableSet is a pure read and the engine never applies credit;
-// a customer holding unused credit is reported as HELD for the office).
+// sends nothing (resolveDunnableSet is a pure read; the engine never applies
+// credit — a customer holding unused credit is reported as HELD for the office).
 //
 // Prints invoice / sequence / customer ids only — never a customer name.
 //
 // Usage (repo root). `railway run --service Postgres` carries neither the web
 // service's gates nor STRIPE_SECRET_KEY / NODE_ENV, and the resolver depends on
-// all of them: feature-gates.js reads autoApplyAccountCredit and
-// divertMicrodepositDunning as `isProd ? env === 'true' : true` (so off-prod
-// they read true whatever the env says), and without Stripe the microdeposit
+// all of them: feature-gates.js reads divertMicrodepositDunning as
+// `isProd ? env === 'true' : true` (so off-prod it reads true whatever the env
+// says), and without Stripe the microdeposit
 // check throws (every PaymentIntent-stamped customer holds) and PaymentIntent
 // retrieval returns null (PI-stamped siblings read as live, so the set
 // under-combines). Export NODE_ENV=production and STRIPE_SECRET_KEY (read both
 // from the WEB service's Railway variables) alongside the gates:
 //   NODE_ENV=production STRIPE_SECRET_KEY=<web service value> \
 //   GATE_DUNNING_LADDER_90=true GATE_PAY_INCLUDE_BALANCE=true \
-//   GATE_AUTO_APPLY_ACCOUNT_CREDIT=<web value> GATE_MICRODEPOSIT_DUNNING_DIVERSION=<web value> \
+//   GATE_MICRODEPOSIT_DUNNING_DIVERSION=<web value> \
 //   railway run --service Postgres -- node server/scripts/dunning-customer-schedule-dry-run.js
 // The script REFUSES to run (exit 1) when STRIPE_SECRET_KEY is missing or
 // NODE_ENV is not production. --allow-degraded overrides that for a rough
