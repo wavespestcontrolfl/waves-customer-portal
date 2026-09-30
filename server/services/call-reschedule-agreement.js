@@ -937,6 +937,20 @@ function proposalIsExact(turn, words) {
   return hourExactIn(turn.raw, { day: words.day, hour }, true, false);
 }
 
+// A caller's acceptance that restates the hour must state THIS slot: the hour
+// on the hour, no half of the day but the slot's ("two in the morning" never
+// accepts 2 PM), no alternative, and no day beyond the recorded day words.
+// The same reading commitsToSlot applies to staff's commitment quote.
+function acceptanceStatesSlot(quote, words, hour24, turns, relative) {
+  if (!holds(quote, words.hour) || !periodIsTheHours(quote, { ...words, period: null })) return false;
+  const around = sentencesHolding(turns, quote);
+  const otherDays = typeof words.day === 'string' ? padded(around).replace(padded(normalize(words.day)), ' ') : around;
+  const unstatedHour = typeof words.period !== 'string' && !/^(?:noon|midnight)$/.test(normalize(words.hour));
+  return !/ (?:or|either) /.test(padded(around)) && !namesAnyDay(otherDays)
+    && (!unstatedHour || saidExactly(quote, words, turns, relative))
+    && halvesSaid(around).every((half) => half === (hour24 >= 12 ? 'pm' : 'am'));
+}
+
 function groundNewBookingAgreement({ v2, transcript, callStartedAt } = {}) {
   const fail = (reason) => ({ ok: false, reason, mode: null });
   const scheduling = v2?.scheduling || {};
@@ -984,7 +998,7 @@ function groundNewBookingAgreement({ v2, transcript, callStartedAt } = {}) {
     const commitTurns = new Set(commitsSlot.flatMap((q) => turnsHolding(turns, q, 'agent')));
     const accepted = acceptQuotes.some((q) => {
       const holding = turnsHolding(turns, q, 'caller');
-      if (holds(q, words.hour)) return true;
+      if (holds(q, words.hour)) return acceptanceStatesSlot(q, words, slot.hour24, turns, relative);
       return isShortAcceptance(q) && holding.length > 0
         && holding.every((t) => commitTurns.has(turns[turns.indexOf(t) - 1]));
     });

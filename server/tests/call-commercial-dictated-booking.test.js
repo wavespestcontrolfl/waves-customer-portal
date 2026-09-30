@@ -296,6 +296,28 @@ describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
     expect(grounded(longer.ex, longer.transcript)).toEqual({ ok: false, reason: 'caller_acceptance_not_of_the_slot' });
   });
 
+  test('a caller acceptance that restates the hour must state THIS slot (codex #5377 r1 pre-push P1)', () => {
+    const restate = (acceptText, lines = [`Agent: ${COMMIT}`, `Caller: ${acceptText}`]) => {
+      const c = acceptShape(acceptText, lines);
+      return grounded(c.ex, c.transcript);
+    };
+    expect(restate('Yes, two in the afternoon works for us.').ok).toBe(true);
+    expect(restate('Yes, two in the morning works for us.').ok).toBe(false);
+    expect(restate('Yes, Thursday at two thirty works for us.').ok).toBe(false);
+    expect(restate('Yes, Friday at two works for us.').ok).toBe(false);
+    expect(restate('Yes, Thursday the 25th at two works for us.').ok).toBe(false);
+    expect(restate('Yes, two or three works for us.').ok).toBe(false);
+    // The day-omitted booking (the reproduction): earlier Thursday, final turns only give the hour.
+    const c = dayOmittedCase();
+    c.ex.scheduling.agreed_slot_words = { day: null, hour: 'two', period: 'in the afternoon' };
+    c.transcript = c.transcript.replace('We will see you at two.', 'We will see you at two in the afternoon.').replace(`Caller: ${SURE}`, 'Caller: Yes, two in the morning works for us.');
+    c.ex.evidence = c.ex.evidence.map((e) => (e.field_path === '/scheduling/caller_accepted_slot' ? { ...e, quote: 'Yes, two in the morning works for us' } : { ...e, quote: e.quote === 'We will see you at two' ? 'We will see you at two in the afternoon' : e.quote }));
+    expect(grounded(c.ex, c.transcript).ok).toBe(false);
+    c.transcript = c.transcript.replace('two in the morning', 'two in the afternoon');
+    c.ex.evidence = c.ex.evidence.map((e) => (e.field_path === '/scheduling/caller_accepted_slot' ? { ...e, quote: 'Yes, two in the afternoon works for us' } : e));
+    expect(grounded(c.ex, c.transcript)).toMatchObject({ ok: true });
+  });
+
   test('staff\'s "Sure, that works." directly after the caller\'s exact day-and-hour proposal is the commitment', () => {
     const { ex, transcript } = proposalCase();
     expect(grounded(ex, transcript)).toMatchObject({ ok: true, mode: 'caller_proposed' });
