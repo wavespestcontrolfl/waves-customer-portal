@@ -177,6 +177,18 @@ test('gate on: a failed catalog read fails retryable instead of screening weaker
   expect(mockProvider).not.toHaveBeenCalled();
 });
 
+test('gate on: a catalog product the note mentions is screened even though it was not applied', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ name: 'Termidor SC', active_ingredient: 'Fipronil' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('Ghost ants were trailing', 'You asked about Termidor. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Customer asked about Termidor. Treated the thresholds (catalog mention case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+});
+
 test('gate on: a name-only product still has its catalog actives screened', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
   mockCatalogRows = [{ active_ingredient: 'Bacillus thuringiensis israelensis (Bti)' }];

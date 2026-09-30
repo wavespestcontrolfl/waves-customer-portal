@@ -231,9 +231,10 @@ async function buildCompletionCommsContext({
       .select('created_at', 'direction', 'call_outcome', 'lead_synopsis', 'transcription', 'notes',
         ...(customerWordsOnly ? ['processing_status', 'ai_extraction', 'ai_extraction_enriched', 'v2_extraction_status'] : []))
       .orderBy('created_at', 'desc')
-      // Over-fetch under customerWordsOnly: extraction-classified misdials
-      // are dropped in JS below and must not shrink the pick.
-      .limit(customerWordsOnly ? 10 : 6)
+      // customerWordsOnly: read the whole bounded window (the floor above
+      // already bounds it); extraction-classified misdials are dropped in JS
+      // below, and only then are six kept, so they never use up the pick.
+      .limit(customerWordsOnly ? 50 : 6)
       .catch((err) => {
         logger.warn(`[comms-context] call context unavailable: ${err.message}`);
         return [];

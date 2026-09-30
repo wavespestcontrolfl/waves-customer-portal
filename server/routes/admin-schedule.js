@@ -24755,11 +24755,29 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
     // The builder propagates a catalog failure only when an id-only product
     // depends on it for its name — the guard cannot run complete, so fail
     // retryable like the other grounding outages (codex r49).
+    // Under the writer rules no product may be named, not only this
+    // visit's: a catalog product the prompt itself mentions (a note saying
+    // "the customer asked about <product>") joins the trade-name screen.
+    const mentionedCatalogNames = [];
+    if (writerRulesOn) {
+      try {
+        const catalogRows = await db('products_catalog').select('name');
+        mentionedCatalogNames.push(...(Array.isArray(catalogRows) ? catalogRows : [])
+          .map((row) => row?.name)
+          .filter((name) => name && CompletionRecap.containsProductName(fullUserMessage, [{ name }], { wholeWord: true })));
+      } catch (err) {
+        logger.warn(`[generate-report] catalog name screen build failed — failing retryable: ${err.message}`);
+        return res.status(503).json({
+          error: 'AI report generation is temporarily unavailable. Your existing service notes were not changed.',
+          retryable: true,
+        });
+      }
+    }
     let screenTradeNames;
     try {
       screenTradeNames = await CompletionRecap.buildReportTradeNameScreen({
         products: Array.isArray(products) ? products : [],
-        extraNames: [...typedProductNameGuards, ...fallbackProductNames],
+        extraNames: [...typedProductNameGuards, ...fallbackProductNames, ...mentionedCatalogNames],
         db,
       });
     } catch (err) {

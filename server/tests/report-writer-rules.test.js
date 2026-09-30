@@ -161,6 +161,13 @@ describe('writerRulesRejection', () => {
     ['There is nothing to worry about.', 'owner_phrase'],
     ['The treatment map shows where we sprayed.', 'owner_phrase'],
     ['Your termite bond stays active.', 'owner_phrase'],
+    ['We will be back October 7.', 'date'],
+    ['October 7 is your next visit.', 'date'],
+    ['The next check is free.', 'price'],
+    ['The follow-up is included.', 'price'],
+    ['Your retreatment is covered.', 'price'],
+    ['Activity fell by five percent.', 'percent'],
+    ['We treated two acres of the back lot.', 'footage'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -178,6 +185,10 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('The gutters were free of standing water.')).toBeNull();
     expect(writerRulesRejection('You texted us on Monday about the ants.')).toBeNull();
     expect(writerRulesRejection('We checked 4/5 stations.')).toBeNull();
+    expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
+    expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
+    expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
+    expect(writerRulesRejection('Web removal was included in today\'s visit.')).toBeNull();
   });
 
   test('a dry cabinet or a note about rain is not re-entry wording', () => {

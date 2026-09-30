@@ -36,7 +36,7 @@ function stubKnex(rowsByTable = {}, whereArgs = {}) {
       whereRaw(...args) { (whereArgs[`${table}:raw`] = whereArgs[`${table}:raw`] || []).push(args); return q; },
       modify(fn) { fn(q); return q; },
       orderBy() { return q; },
-      limit() { return q; },
+      limit(n) { whereArgs[`${table}:limit`] = n; return q; },
       select() { return q; },
       first: () => Promise.resolve(filtered[0] || null),
       catch: (fn) => Promise.resolve(filtered).catch(fn),
@@ -275,6 +275,9 @@ describe('buildCompletionCommsContext', () => {
     // The filters run in the queries, before each channel's cap, so Waves'
     // own texts and mail can never crowd the customer's words out.
     expect(whereArgs.sms_log).toContainEqual(['direction', 'inbound']);
+    // The whole bounded window is read before misdials are dropped, so they
+    // never use up the six calls kept.
+    expect(whereArgs['call_log:limit']).toBe(50);
     // The canonical call reader's exclusions: no sandbox call, no call
     // classified spam or wrong number.
     expect(whereArgs['call_log:raw'].map(([sql]) => sql).join(' ')).toContain("COALESCE(??, '') <> ?");

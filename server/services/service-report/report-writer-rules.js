@@ -200,8 +200,9 @@ function activeIngredientNames(values) {
 }
 
 const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gal|gallons?|lbs?|pounds?|grams?|kilograms?|kg)\b|\b\d+(?:[.,]\d+)?\s*cc\b/i;
-const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot|acres?)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b/i;
-const PERCENT_RE = /\b\d+(?:\.\d+)?\s*(?:%|percent\b)/i;
+const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\bacres?\b|\bacreage\b/i;
+// Any percentage, spelled or not ("50%", "five percent").
+const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
 const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
 const COMPANY_NAME_RE = /\bWaves\s+(?:Pest\s+Control\s*(?:&|&amp;|and)\s*Lawn\b|Lawn\b)/i;
 const SAFE_WORD_RE = /\b(?:safe|safer|safest|safely|unsafe|non-?toxic|harmless)\b/i;
@@ -217,12 +218,27 @@ const TIMEFRAME_RE = new RegExp(
   + `|\\bnext\\s+${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b`,
   'i',
 );
-// Money and entitlement (rule 9).
+// Money and entitlement (rule 9). ENTITLEMENT_RE catches the predicate
+// forms ("the next check is free", "the follow-up is included") but not a
+// physical state ("covered by mulch", "free of standing water").
+const ENTITLEMENT_RE = /\b(?:is|are|was|were|be|comes?)\s+(?:(?:completely|totally|also|fully)\s+)?(?:free|included|covered)\b(?!\s+(?:by|with|in|under|of|from|on)\b)/i;
 const PRICE_RE = /\$\s?\d|\b(?:free\s+(?:of\s+charge|re-?treatments?|re-?services?|service|visits?|follow-?ups?|call-?backs?|inspections?)|at\s+no\s+(?:extra\s+|additional\s+)?(?:cost|charge)|no\s+(?:extra\s+|additional\s+)?charge|warrant(?:y|ies|ied)|included\s+(?:in|with)\s+(?:your|the)\s+(?:plan|program|membership|service|agreement)|covered\s+(?:by|under)\s+(?:your|the)\s+(?:plan|program|membership|warranty|agreement|bond))\b/i;
 // Next-visit dates, days and times (rule 11): the report prints the
 // appointment itself. "October 7", "next Tuesday", "10 AM".
-// "May" only capitalized, so "activity may 2…" is not a date.
-const MONTH_DAY_RE = /\b(?:[Jj]an(?:uary)?|[Ff]eb(?:ruary)?|[Mm]ar(?:ch)?|[Aa]pr(?:il)?|May|[Jj]une?|[Jj]uly?|[Aa]ug(?:ust)?|[Ss]ept?(?:ember)?|[Oo]ct(?:ober)?|[Nn]ov(?:ember)?|[Dd]ec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/;
+// "May" only capitalized, so "activity may 2…" is not a date. A date is
+// refused only with a forward cue: "On September 15, we noted…" is history
+// the grounding supplies; "your next visit is October 7" is the appointment.
+const MONTH_DAY_RE = /\b(?:[Jj]an(?:uary)?|[Ff]eb(?:ruary)?|[Mm]ar(?:ch)?|[Aa]pr(?:il)?|May|[Jj]une?|[Jj]uly?|[Aa]ug(?:ust)?|[Ss]ept?(?:ember)?|[Oo]ct(?:ober)?|[Nn]ov(?:ember)?|[Dd]ec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/g;
+const FUTURE_CUE_BEFORE_RE = /\b(?:next|upcoming|scheduled|appointment|return(?:ing)?|back|see\s+you|will|until|by|coming)\b/i;
+const FUTURE_CUE_AFTER_RE = /^[^.!?]{0,30}\b(?:next|upcoming)\s+(?:visit|appointment|service|check)\b/i;
+function futureDateMention(copy) {
+  for (const match of copy.matchAll(MONTH_DAY_RE)) {
+    const before = copy.slice(Math.max(0, match.index - 40), match.index).split(/[.!?]/).pop();
+    const after = copy.slice(match.index + match[0].length);
+    if (FUTURE_CUE_BEFORE_RE.test(before) || FUTURE_CUE_AFTER_RE.test(after)) return true;
+  }
+  return false;
+}
 // Forward words only: "you texted us on Monday" is a past fact.
 const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
 const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])/i;
@@ -247,8 +263,8 @@ function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   if (OWNER_PHRASE_RE.test(copy)) return 'owner_phrase';
   if (REENTRY_RE.test(copy)) return 'reentry';
   if (TIMEFRAME_RE.test(copy)) return 'timeframe';
-  if (PRICE_RE.test(copy)) return 'price';
-  if (MONTH_DAY_RE.test(copy) || WEEKDAY_RE.test(copy)) return 'date';
+  if (PRICE_RE.test(copy) || ENTITLEMENT_RE.test(copy)) return 'price';
+  if (futureDateMention(copy) || WEEKDAY_RE.test(copy)) return 'date';
   if (CLOCK_RE.test(copy)) return 'time';
   const patterns = [...COMMON_ACTIVE_INGREDIENTS, ...activeIngredientNames(activeIngredients)]
     .map(activeIngredientPattern)
