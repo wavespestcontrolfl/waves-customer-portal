@@ -13,6 +13,7 @@ const SUBJECT_TYPES = ['customer', 'visit', 'invoice', 'estimate', 'lead', 'call
 const MAX_HEADLINE_CHARS = 60;
 const MAX_WHY_CHARS = 110;
 const RULE_CODE = 'ADMIN_ALERT_RULE';
+const DONE_WHEN = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 
 // Doc section 3: what never appears in a headline or a why. [slug, test(text)].
 const FORBIDDEN = [
@@ -41,7 +42,7 @@ function composeAdminAlert(spec = {}) {
   if (!SUBJECT_TYPES.includes(subject?.type)) v.push('subject_type_invalid');
   const id = subject?.id;
   if (!((typeof id === 'string' && id.trim()) || (typeof id === 'number' && Number.isFinite(id)))) v.push('subject_id_invalid');
-  if (!(typeof doneWhen === 'string' && /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(doneWhen))) v.push('done_when_invalid');
+  if (!(typeof doneWhen === 'string' && DONE_WHEN.test(doneWhen))) v.push('done_when_invalid');
   if (typeof action !== 'string' || !action.trim()) v.push('action_missing');
 
   const headline = `${area} — ${typeof action === 'string' ? action.trim() : ''}`;
@@ -62,6 +63,22 @@ function composeAdminAlert(spec = {}) {
   return { headline, why: whyText, link: link || null, metadata: { area, severity, subject: { type: subject.type, id }, doneWhen, who } };
 }
 
+// The structured parts of a spec that are individually valid. The fallback below keeps
+// them: a copy violation (a customer's own words carrying a date) must not cost the
+// alert its subject, done-when and who, which is what a Claude session acts on.
+function validStructuredFields(spec = {}) {
+  const { area, severity, subject, doneWhen, who } = spec;
+  const id = subject?.id;
+  const idOk = (typeof id === 'string' && id.trim()) || (typeof id === 'number' && Number.isFinite(id));
+  return {
+    ...(AREAS.includes(area) ? { area } : {}),
+    ...(SEVERITIES.includes(severity) ? { severity } : {}),
+    ...(SUBJECT_TYPES.includes(subject?.type) && idOk ? { subject: { type: subject.type, id } } : {}),
+    ...(typeof doneWhen === 'string' && DONE_WHEN.test(doneWhen) ? { doneWhen } : {}),
+    ...(WHO.includes(who) ? { who } : {}),
+  };
+}
+
 // needs-you rings through notifyAdmin under the emitter's own category; broken belongs to
 // deliverOpsDigest (the Activity feed reads ops_digest rows only); fyi writes nothing.
 // A violation in a live emitter never crashes its work and never drops a needs-you alert:
@@ -76,7 +93,7 @@ async function raiseAdminAlert(category, spec = {}, opts = {}) {
     logger.warn(`[admin-alert] ${category} broke the notification rule: ${err.violations.join(', ')}`);
     if (severity === 'fyi') return { id: null, suppressed: true, reason: 'fyi' };
     return require('./notification-service').notifyAdmin(category, truncateAtWord([spec.area, spec.action].filter(Boolean).join(' — '), MAX_HEADLINE_CHARS), spec.why, {
-      ...opts, ...(spec.link ? { link: spec.link } : {}), metadata: { ...opts.metadata, ruleViolations: err.violations },
+      ...opts, ...(spec.link ? { link: spec.link } : {}), metadata: { ...opts.metadata, ...validStructuredFields(spec), ruleViolations: err.violations },
     });
   }
   if (spec.severity === 'broken') {

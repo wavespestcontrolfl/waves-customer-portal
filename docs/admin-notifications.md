@@ -120,7 +120,8 @@ Then, by severity:
   `{ id: null, suppressed: true, reason: 'fyi' }`. An FYI fact belongs on its page.
 
 A rule violation never costs an alert. Outside tests, a `needs-you` spec that breaks the
-rule still rings, with its headline cut to 60 and `metadata.ruleViolations` naming the
+rule still rings, with its headline cut to 60, the structured fields that are valid
+(area, severity, subject, done-when, who) kept, and `metadata.ruleViolations` naming the
 rules it broke, and a warning is logged with the category and rule names only. Under
 `NODE_ENV=test` the same violation throws, so the emitter's own tests catch it.
 

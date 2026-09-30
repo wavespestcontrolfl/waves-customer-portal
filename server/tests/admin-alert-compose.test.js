@@ -145,4 +145,19 @@ describe('raiseAdminAlert', () => {
     expect(opts.metadata.ruleViolations).toEqual(expect.arrayContaining(['headline_too_long', 'why_forbidden_token:exclamation']));
     expect(JSON.stringify(logger.warn.mock.calls)).not.toMatch(/Zelda/);
   });
+
+  test('the fallback keeps the structured fields that are valid and drops the ones that are not', async () => {
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      await raiseAdminAlert('service', spec({ why: 'Please come on 2026-10-04.', who: 'nobody' }), { metadata: { requestId: 'r1' } });
+    } finally { process.env.NODE_ENV = env; }
+    const { metadata } = NotificationService.notifyAdmin.mock.calls[0][3];
+    const valid = spec();
+    expect(metadata).toMatchObject({
+      requestId: 'r1', area: valid.area, severity: 'needs-you', subject: valid.subject, doneWhen: valid.doneWhen,
+    });
+    expect(metadata).not.toHaveProperty('who');
+    expect(metadata.ruleViolations).toEqual(expect.arrayContaining(['who_invalid', 'why_forbidden_token:iso_date']));
+  });
 });
