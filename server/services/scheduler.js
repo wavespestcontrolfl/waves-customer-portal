@@ -2328,6 +2328,18 @@ function initScheduledJobs() {
     } catch (err) { logger.error(`Signup classifier failed: ${err.message}`); }
   }, { timezone: 'America/New_York' });
 
+  // WEEKLY MON 4:47AM — Directory-listing (citation) audit: read-only GET of each
+  // seo_citations.listing_url, classified against config/locations.js NAP
+  // (services/seo/citation-auditor.js). Kill = GATE_CITATION_AUDIT=false.
+  // :47 is unused in the 4am hour (4:20 already runs three daily jobs).
+  cron.schedule('47 4 * * 1', async () => {
+    if (!isEnabled('citationAudit')) return;
+    logger.info('Running: citation audit');
+    try {
+      await runExclusive('citation-audit', () => require('./seo/citation-auditor').audit());
+    } catch (err) { logger.error(`Citation audit failed: ${err.message}`); }
+  }, { timezone: 'America/New_York' });
+
   // DAILY 3:30AM — Citation submission runner: auto-submit allowlisted submit_free
   // listings (fail-closed on account/CAPTCHA/payment). No-op without an allowlist
   // (SIGNUP_RUNNER_ALLOWLIST) — supervised-first. Never pays (Phase 2).
@@ -7728,8 +7740,8 @@ function initScheduledJobs() {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();
-      if (!result.skipped && (result.misses > 0 || result.alerted > 0)) {
-        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted}`);
+      if (!result.skipped && (result.misses > 0 || result.alerted > 0 || result.repeated > 0)) {
+        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted} repeated=${result.repeated || 0}`);
       }
     } catch (err) {
       logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);
