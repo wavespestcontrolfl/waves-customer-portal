@@ -1490,6 +1490,73 @@ describe('a cleared balance closes the schedule before the autopay guard; autopa
     expect(statuses).toEqual(expect.arrayContaining(['active', 'held', 'autopay_hold']));
   });
 
+  describe('delivery evidence settles on an autopay_hold row without authorizing a send (R9)', () => {
+    const partialDay60 = () => mockLedger.push({
+      id: 'd60-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(30),
+      invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-d60',
+      metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`, delivered: true, selectedChannels: ['email', 'sms'] },
+    });
+    // Day 60 half-delivered, the schedule then parked on autopay, and now Day 90 has arrived
+    const held = () => { setup({ stepIndex: 4, sentDaysAgo: 95, stepStatus: 'autopay_hold' }); partialDay60(); };
+    const noSend = () => { expect(mockSendMessage).not.toHaveBeenCalled(); expect(mockSendTemplate).not.toHaveBeenCalled(); };
+
+    test('still on autopay: the partial Day 60 settles (advance), the schedule stays autopay_hold and is revisited; nothing is sent', async () => {
+      held();
+      mockOnAutopay.mockResolvedValue(true);
+      expect(await run()).toMatchObject({ outcome: 'advanced', recovered: true });
+      expect(Schedule.advance).toHaveBeenCalledTimes(1);
+      expect(Schedule.advance.mock.calls[0][1]).toMatchObject({ fromStatuses: ['active', 'held', 'autopay_hold'], landStatus: 'autopay_hold' });
+      noSend();
+    });
+
+    test('autopay state unreadable: it fails closed to autopay_hold', async () => {
+      held();
+      mockOnAutopay.mockRejectedValue(new Error('down'));
+      expect((await run()).outcome).toBe('advanced');
+      expect(Schedule.advance.mock.calls[0][1]).toMatchObject({ landStatus: 'autopay_hold' });
+      noSend();
+    });
+
+    test('autopay has been turned off: it settles and lands ACTIVE, still without sending; the next run sends the next step once', async () => {
+      held();
+      mockOnAutopay.mockResolvedValue(false);
+      expect(await run()).toMatchObject({ outcome: 'advanced', recovered: true });
+      expect(Schedule.advance.mock.calls[0][1]).toMatchObject({ fromStatuses: ['active', 'held', 'autopay_hold'], landStatus: 'active' });
+      noSend();
+      // the next run: the schedule is now at Day 90, active, and the ordinary path sends it (no resume needed)
+      mockLedger.length = 0;
+      setup({ stepIndex: 5, sentDaysAgo: 95, stepStatus: 'active' });
+      expect((await run()).outcome).toBe('completed');
+      expect(Schedule.resumeFromAutopay).not.toHaveBeenCalled();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a SEND from an autopay_hold row still needs resumeFromAutopay first (the widening is for settling evidence only)', async () => {
+      setup({ stepIndex: 4, sentDaysAgo: 60, stepStatus: 'autopay_hold' });
+      mockOnAutopay.mockResolvedValue(false);
+      expect((await run()).outcome).toBe('advanced');
+      expect(Schedule.resumeFromAutopay).toHaveBeenCalledTimes(1);
+      expect(Schedule.advance.mock.calls[0][1].fromStatuses).toBeUndefined(); // the send's advance is the ordinary guarded one
+    });
+
+    test('a completed final notice settles from autopay_hold too (completeFinal), naming what the reservation named', async () => {
+      setup({ stepIndex: 5, sentDaysAgo: 100, stepStatus: 'autopay_hold' });
+      prefs = { invoice_channels: ['email'] };
+      mockOnAutopay.mockResolvedValue(true);
+      mockLedger.push({
+        id: 'd90-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(2),
+        invoice_ids: ['inv-a', 'inv-b'], idempotency_key: 'k-d90',
+        metadata: { notificationEventKey: `customer-dunning:${SCHEDULE_ID}:1:d90_final_notice`, delivered: true, selectedChannels: ['email'] },
+      });
+      expect((await run()).outcome).toBe('completed');
+      expect(Schedule.completeFinal).toHaveBeenCalledTimes(1);
+      const args = Schedule.completeFinal.mock.calls[0][1];
+      expect(args.fromStatuses).toEqual(['active', 'held', 'autopay_hold']);
+      expect([...args.namedInvoiceIds].sort()).toEqual(['inv-a', 'inv-b']);
+      noSend();
+    });
+  });
+
   test('SHADOW mirrors it: an autopay_hold schedule with nothing owed is a would-close; one still owing on autopay is a would-hold', async () => {
     Schedule.promotionCandidates.mockResolvedValue([]);
     const open = [{ id: 's-ap', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'autopay_hold' }];

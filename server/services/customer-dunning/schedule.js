@@ -408,9 +408,11 @@ function nextTouchFor(schedule, activeRows, now) {
   return cadence && cadence.getTime() > floor.getTime() ? cadence : floor;
 }
 
-const guardedOpen = (trx, schedule, claimStamp) => trx(TABLE)
+// `statuses` widens what the guarded write may act on. Only the recovery-settle path (delivery evidence
+// already in the ledger, nothing sent) widens it to an autopay_hold row; a send never does.
+const guardedOpen = (trx, schedule, claimStamp, statuses = ['active', 'held']) => trx(TABLE)
   .where({ id: schedule.id, step_index: schedule.step_index, touch_claimed_at: claimStamp })
-  .whereIn('status', ['active', 'held']);
+  .whereIn('status', statuses);
 
 /**
  * ADVANCE (§5 step 11): one UPDATE guarded by id, status, step_index and OUR
@@ -418,13 +420,17 @@ const guardedOpen = (trx, schedule, claimStamp) => trx(TABLE)
  * (D4/§5.12), never earlier than heldTouchFloor(); step_index never decreases.
  * The final step goes through completeFinal instead.
  */
-async function advance(schedule, { claimStamp, deliveredAt, activeRows = [], now = new Date(), database = db }) {
-  const changed = await guardedOpen(database, schedule, claimStamp).update({
+async function advance(schedule, {
+  claimStamp, deliveredAt, activeRows = [], now = new Date(), database = db, fromStatuses, landStatus = 'active',
+}) {
+  // Settling delivered evidence on an autopay_hold row lands it where the customer's autopay state says:
+  // still held (revisited tomorrow) or active (the cadence date, sent by the ordinary path).
+  const changed = await guardedOpen(database, schedule, claimStamp, fromStatuses).update({
     touches_sent: Number(schedule.touches_sent) + 1,
     step_index: Number(schedule.step_index) + 1,
     last_touch_at: deliveredAt || now,
-    next_touch_at: nextTouchFor(schedule, activeRows, now),
-    status: 'active',
+    next_touch_at: landStatus === 'autopay_hold' ? Followups.heldTouchFloor(now) : nextTouchFor(schedule, activeRows, now),
+    status: landStatus,
     held_reason: null, held_since: null, hold_alerted_at: null,
     link_digest: null, link_url: null,
     updated_at: database.fn.now(),
@@ -438,10 +444,12 @@ async function advance(schedule, { claimStamp, deliveredAt, activeRows = [], now
  * survivors (a microdeposit-pending or paused-then-resumed invoice the notice
  * did not name) go back to their own ladder.
  */
-async function completeFinal(schedule, { claimStamp, deliveredAt, namedInvoiceIds = [], now = new Date(), database = db }) {
+async function completeFinal(schedule, {
+  claimStamp, deliveredAt, namedInvoiceIds = [], now = new Date(), database = db, fromStatuses,
+}) {
   const out = await database.transaction(async (trx) => {
     await takeLock(trx, schedule.customer_id);
-    const changed = await guardedOpen(trx, schedule, claimStamp).update({
+    const changed = await guardedOpen(trx, schedule, claimStamp, fromStatuses).update({
       status: 'completed', closed_reason: 'final_notice_delivered',
       final_notice_at: deliveredAt || now, closed_at: now, next_touch_at: null,
       touches_sent: Number(schedule.touches_sent) + 1, last_touch_at: deliveredAt || now,

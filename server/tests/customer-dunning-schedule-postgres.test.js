@@ -668,6 +668,65 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
         expect((await fresh(s.id)).status).toBe('completed');
       });
 
+      describe('delivery evidence settles on an autopay_hold row (no send), landing by the customer\'s autopay state', () => {
+        const progressOf = (s, stepId, delivered, complete, invoiceIds) => jest.requireMock('../services/billing-reminder-delivery').reminderProgress
+          .mockResolvedValueOnce([{
+            metadata: { notificationEventKey: `customer-dunning:${s.id}:${s.episode}:${stepId}` },
+            entries: [...delivered].map((channel) => ({ id: randomUUID(), channel, invoice_ids: invoiceIds, occurred_at: ago(3) })),
+            delivered: new Set(delivered), resolved: new Set(), waived: new Set(), deliveredAt: ago(3), complete,
+          }]);
+        // Day 60 half-delivered (email only; the text is owed), parked on autopay, and Day 90 has now arrived
+        async function parkedPartialDay60() {
+          const c = await customer();
+          const m = await member(c, { sentDaysAgo: 95, step: 4 });
+          const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
+          mockResolve.mockResolvedValue(setFor([m]));
+          progressOf(s, 'd60_reminder', ['email'], false, [m.invoiceId]); // the text leg is still owed (the customer has default channels)
+          return { c, m, s };
+        }
+
+        test('still on autopay: settles and advances to Day 90, stays autopay_hold re-armed for tomorrow, sends nothing', async () => {
+          const { s } = await parkedPartialDay60();
+          autopay().mockResolvedValue(true);
+          expect(await Runner.processSchedule(s.id, NOW)).toMatchObject({ outcome: 'advanced', recovered: true });
+          const row = await fresh(s.id);
+          expect(row).toMatchObject({ status: 'autopay_hold', step_index: 5, touches_sent: 5 });
+          expect(new Date(row.next_touch_at).getTime()).toBe(Followups.heldTouchFloor(NOW).getTime());
+          expect(row.touch_claimed_at).toBeNull();
+        });
+
+        test('autopay turned off: settles and lands ACTIVE at the cadence date; nothing sent', async () => {
+          const { s } = await parkedPartialDay60();
+          autopay().mockResolvedValue(false);
+          expect(await Runner.processSchedule(s.id, NOW)).toMatchObject({ outcome: 'advanced', recovered: true });
+          const row = await fresh(s.id);
+          expect(row).toMatchObject({ status: 'active', step_index: 5 });
+          expect(new Date(row.next_touch_at).getTime()).toBeGreaterThanOrEqual(Followups.heldTouchFloor(NOW).getTime());
+        });
+
+        test('a delivered final notice completes the schedule from autopay_hold (completeFinal under the run\'s claim)', async () => {
+          const c = await customer();
+          const m = await member(c, { sentDaysAgo: 100, step: 5 });
+          const s = await openSchedule(c, { status: 'autopay_hold', step_index: 5, next_touch_at: ago(0.05) });
+          mockResolve.mockResolvedValue(setFor([m]));
+          progressOf(s, 'd90_final_notice', ['email'], true, [m.invoiceId]);
+          autopay().mockResolvedValue(true);
+          expect(await Runner.processSchedule(s.id, NOW)).toMatchObject({ outcome: 'completed', recovered: true });
+          expect(await fresh(s.id)).toMatchObject({ status: 'completed', closed_reason: 'final_notice_delivered' });
+          expect((await seqRow(m.seq.id)).status).toBe('completed'); // exactly the invoice the notice named
+        });
+
+        test('the widening is for settling only: a plain active/held write on an autopay_hold row is still refused', async () => {
+          const c = await customer();
+          await member(c, { sentDaysAgo: 60, step: 4 });
+          const s = await openSchedule(c, { status: 'autopay_hold', next_touch_at: ago(0.05) });
+          const claim = await Schedule.claim(s.id, NOW, { database: app });
+          expect(await Schedule.advance(claim.schedule, { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(false);
+          expect(await Schedule.markHeld(claim.schedule, 'x', { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(false);
+          expect((await fresh(s.id)).status).toBe('autopay_hold');
+        });
+      });
+
       test('still owing and still on autopay: the hold is re-armed for tomorrow and the claim released; the due scan revisits it then', async () => {
         const c = await customer();
         const m = await member(c, { sentDaysAgo: 60, step: 4 });

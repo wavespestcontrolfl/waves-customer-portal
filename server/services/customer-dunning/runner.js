@@ -197,6 +197,14 @@ async function recordInteraction(run, delivered) {
 async function finishDelivered(run, facts) {
   const deliveredAt = facts.deliveredAt ? new Date(facts.deliveredAt) : run.now;
   const base = { claimStamp: run.claimStamp, deliveredAt, now: run.now };
+  // Settling evidence that is ALREADY delivered (nothing is sent) is allowed on an autopay_hold row, under
+  // the run's own claim; a new send from that row still needs resumeFromAutopay first.
+  if (!facts.deliveredNow?.length && run.schedule.status === 'autopay_hold') {
+    base.fromStatuses = ['active', 'held', 'autopay_hold'];
+    // Where it lands: still on autopay (or the state unreadable, fail closed) stays held and is revisited
+    // tomorrow; off autopay lands active at the cadence date.
+    base.landStatus = (await decideAutopay(run)) ? 'autopay_hold' : 'active';
+  }
   let ok;
   if (Schedule.isFinalIndex(run.schedule.step_index)) {
     const { ids, unreadable } = namedForFinal(run, facts);
