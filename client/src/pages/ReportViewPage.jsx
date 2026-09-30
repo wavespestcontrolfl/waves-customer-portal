@@ -9720,6 +9720,14 @@ export default function ReportViewPage() {
   const mapsLoadedAt = useRef(0);
   const mapsRefreshing = useRef(false);
   const mapErrorRefetched = useRef(false);
+  // Identity of the report on screen: an in-flight map refresh for a report the
+  // reader has since navigated away from must not touch the new one.
+  const reportKey = `${token}|${mode}`;
+  const currentReportKey = useRef(reportKey);
+  currentReportKey.current = reportKey;
+  useEffect(() => {
+    mapErrorRefetched.current = false; // one error-retry per report, not per SPA session
+  }, [reportKey]);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -9795,6 +9803,7 @@ export default function ReportViewPage() {
   const refreshReportMaps = useCallback(() => {
     if (mode !== 'live' || mapsRefreshing.current) return;
     mapsRefreshing.current = true;
+    const requestedFor = `${token}|${mode}`;
     let staffToken = null;
     try { staffToken = localStorage.getItem('waves_admin_token'); } catch { /* storage blocked */ }
     fetch(reportDataUrl(token, mode, pinnedAssessment), {
@@ -9803,7 +9812,7 @@ export default function ReportViewPage() {
     })
       .then((r) => (r.ok ? r.json() : null))
       .then((fresh) => {
-        if (!fresh || fresh.error) return;
+        if (!fresh || fresh.error || currentReportKey.current !== requestedFor) return;
         mapsLoadedAt.current = Date.now();
         setData((prev) => (prev && !prev.error ? {
           ...prev,
