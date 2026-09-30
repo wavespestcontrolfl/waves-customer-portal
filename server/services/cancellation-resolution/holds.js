@@ -86,9 +86,14 @@ async function familyUpcomingVisits(customerId, familyKey, dbh = db) {
   return rows.filter((row) => familyOfServiceRow(row) === familyKey);
 }
 
+// The date startAwayMode writes for a requested return date.
+function ymdOrDefaultAwayUntil(until) {
+  return ymd(until) || addDays(etDateString(), 180);
+}
+
 async function startAwayMode({ customerId, caseId, until = null }) {
   const today = etDateString();
-  const untilYmd = ymd(until) || addDays(today, 180);
+  const untilYmd = ymdOrDefaultAwayUntil(until);
   if (untilYmd <= today) throw codedError('away_date_invalid', 'The return date must be in the future');
   const existing = await db('property_preferences').where({ customer_id: customerId }).first('id', 'away_mode_until');
   if (existing) {
@@ -347,6 +352,27 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
 const readRecord = (raw) => {
   try { return typeof raw === 'string' ? JSON.parse(raw) : (raw || {}); } catch { return {}; }
 };
+
+/**
+ * A paired accept records the Away Mode change it is about to make on each
+ * of its holds BEFORE making it, so the recovery pass can put the
+ * preference back if the accept dies before it is marked.
+ */
+async function recordPendingAwayMode(holdIds, { customerId, until }) {
+  if (!holdIds?.length) return;
+  const prefs = await db('property_preferences').where({ customer_id: customerId }).first('away_mode_until');
+  const previousUntil = prefs?.away_mode_until ? dateOnlyString(prefs.away_mode_until) : null;
+  await db.transaction(async (trx) => {
+    for (const holdId of holdIds) {
+      const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits');
+      if (!row) continue;
+      await trx('plan_holds').where({ id: holdId }).update({
+        moved_visits: JSON.stringify({ ...readRecord(row.moved_visits), awayPairing: { previousUntil, until } }),
+        updated_at: new Date(),
+      });
+    }
+  });
+}
 
 /**
  * Mark every hold of an accept as standing — called once ALL of the
@@ -632,6 +658,12 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
         // (rate restored, prepaid moves reverted) rather than skip visits
         // for an accept the customer was never told succeeded.
         await cancelHold(hold.id, { compensateVisits: true });
+        // A paired accept's Away Mode goes back too — only while the
+        // preference still holds the date this accept wrote.
+        if (record.awayPairing?.until) {
+          await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: record.awayPairing.until })
+            .update({ away_mode_until: record.awayPairing.previousUntil || null, updated_at: new Date() });
+        }
         const { notifyAdmin } = require('../notification-service');
         await notifyAdmin('service', 'Plan hold undone: the accept did not finish', `Hold ${hold.id} (${hold.family_key}) was written by a cancel-flow accept that stopped before it finished — it has been undone. Check with the customer whether they still want the pause.`, {
           bell: true, dedupeKey: `plan_hold_accept_interrupted:${hold.id}`, metadata: { kind: 'plan_hold_accept_interrupted', holdId: hold.id, customerId: hold.customer_id },
@@ -727,4 +759,4 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
   return out;
 }
 
-module.exports = { startAwayMode, restoreAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };
+module.exports = { startAwayMode, ymdOrDefaultAwayUntil, restoreAwayMode, recordPendingAwayMode, startHold, markHoldsAccepted, applyHoldSkips, sendDueRestartTexts, cancelHold, emitHoldTechNotices, runPlanHoldLifecycle, HOLDABLE_FAMILIES };

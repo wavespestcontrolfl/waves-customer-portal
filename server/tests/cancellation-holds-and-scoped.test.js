@@ -384,6 +384,20 @@ describe('runPlanHoldLifecycle', () => {
     expect(bells('plan_hold_accept_interrupted')).toHaveLength(1);
   });
 
+  test('undoing an unfinished paired accept also puts Away Mode back — unless the preference changed since', async () => {
+    const seedPaired = (awayNow) => {
+      holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000),
+        moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [], skipsFinal: false, acceptCommitted: false, awayPairing: { previousUntil: null, until: daysOut(30) } }) });
+      mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: awayNow }];
+    };
+    seedPaired(daysOut(30));
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(null);
+    seedPaired(daysOut(60));
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
+  });
+
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {
     holdSeed({}, [lawnVisit('placeholder', daysOut(22), { status: 'rescheduled' }), lawnVisit('back', daysOut(25))]);
     expect((await runPlanHoldLifecycle({ today: daysOut(20) })).reminded).toBe(1);

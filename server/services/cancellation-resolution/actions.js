@@ -273,6 +273,10 @@ async function executeAwayPairing(ctx) {
   const { techNotices, holdResults, ...hold } = await executeHold({ ...ctx, deferTechNotices: true, allowNoHold: true });
   let away;
   try {
+    // Durable first: recovery can undo the Away Mode write if this accept
+    // dies before its holds are marked.
+    const { ymdOrDefaultAwayUntil } = require('./holds');
+    await require('./holds').recordPendingAwayMode(hold.holds, { customerId: ctx.customerId, until: ymdOrDefaultAwayUntil(ctx.params?.resumeDate) });
     away = await executeAwayMode(ctx);
   } catch (err) {
     // Nothing partial survives (codex r2 P1): undo every hold this accept
