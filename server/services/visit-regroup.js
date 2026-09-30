@@ -69,7 +69,7 @@ async function membersStillUntouched(database, rowIds, earliest) {
 
 const dateString = (value) => require('./visit-groups').dateOnly(value);
 
-async function findCandidateRows(database, { fromDate, toDate, limit }) {
+async function findCandidateRows(database, { fromDate, toDate, limit, after = null }) {
   const q = database('scheduled_services as ss')
     .join('services as svc', 'ss.service_id', 'svc.id')
     .whereNull('ss.visit_id')
@@ -99,6 +99,10 @@ async function findCandidateRows(database, { fromDate, toDate, limit }) {
     .limit(limit)
     .select('ss.id', 'ss.customer_id', 'ss.property_id', 'ss.scheduled_date');
   if (toDate) q.where('ss.scheduled_date', '<=', toDate);
+  // Keyset paging (date, id): rows judged ineligible stay ungrouped and match
+  // every night, so a fixed first page could fill with them and starve later
+  // eligible stops. The sweep walks every page instead.
+  if (after) q.whereRaw('(ss.scheduled_date, ss.id) > (?::date, ?::uuid)', [after.date, after.id]);
   return q;
 }
 
@@ -109,7 +113,7 @@ async function findCandidateRows(database, { fromDate, toDate, limit }) {
  * @param {boolean} [opts.dryRun=true]  Default is a dry run; pass false to write.
  * @param {object}  [opts.database]  knex handle (default: shared pool).
  * @param {Date}    [opts.now]       Clock, for tests.
- * @param {number}  [opts.limit]     Max candidate rows per run.
+ * @param {number}  [opts.limit]     Candidate rows per page (every page is walked).
  * @returns {Promise<{ skipped?: string, dryRun: boolean, fromDate: string,
  *   toDate: string|null, candidates: number, groups: Array, left: Array }>}
  *   groups: [{ customerId, propertyId, date, rowIds, visitId }] (visitId null
@@ -126,48 +130,54 @@ async function regroupUngroupedSameStopRows({
   if (!gates.visitGroups) return { ...base, skipped: 'gate_off' };
 
   const VisitGroups = require('./visit-groups');
-  const candidates = await findCandidateRows(database, { fromDate: effectiveFrom, toDate, limit });
-  base.candidates = candidates.length;
-
   const handled = new Set();
-  for (const cand of candidates) {
-    if (handled.has(String(cand.id))) continue;
-    // Read-only verdict from the real eligibility path.
-    const verdict = await VisitGroups.maybeGroupRow(cand.id, { database, preview: true, createdBy: 'regroup-sweep' });
-    if (!verdict || !verdict.rowIds) {
-      handled.add(String(cand.id));
-      base.left.push({ rowId: cand.id, reason: 'not_eligible' });
-      continue;
-    }
-    const rowIds = verdict.rowIds.map(String);
-    rowIds.forEach((id) => handled.add(id));
-    if (!(await membersStillUntouched(database, rowIds, effectiveFrom))) {
-      rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'already_started' }));
-      continue;
-    }
-    const states = await reminderStateKey(database, rowIds);
-    if (new Set(states).size > 1) {
-      rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'reminder_state_differs' }));
-      continue;
-    }
-    const group = {
-      customerId: cand.customer_id,
-      propertyId: cand.property_id,
-      date: dateString(cand.scheduled_date),
-      rowIds,
-      visitId: null,
-    };
-    if (!dryRun) {
-      const visit = await VisitGroups.maybeGroupRow(cand.id, { database, createdBy: 'regroup-sweep' });
-      if (!visit || !visit.id) {
-        // createOrJoinVisit refused under its locks (frozen, artifact,
-        // in-flight completion) or the row changed since the preview.
-        rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'refused' }));
+  let after = null;
+  for (;;) {
+    const candidates = await findCandidateRows(database, { fromDate: effectiveFrom, toDate, limit, after });
+    base.candidates += candidates.length;
+    if (!candidates.length) break;
+    const last = candidates[candidates.length - 1];
+    after = { date: dateString(last.scheduled_date), id: last.id };
+    for (const cand of candidates) {
+      if (handled.has(String(cand.id))) continue;
+      // Read-only verdict from the real eligibility path.
+      const verdict = await VisitGroups.maybeGroupRow(cand.id, { database, preview: true, createdBy: 'regroup-sweep' });
+      if (!verdict || !verdict.rowIds) {
+        handled.add(String(cand.id));
+        base.left.push({ rowId: cand.id, reason: 'not_eligible' });
         continue;
       }
-      group.visitId = visit.id;
+      const rowIds = verdict.rowIds.map(String);
+      rowIds.forEach((id) => handled.add(id));
+      if (!(await membersStillUntouched(database, rowIds, effectiveFrom))) {
+        rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'already_started' }));
+        continue;
+      }
+      const states = await reminderStateKey(database, rowIds);
+      if (new Set(states).size > 1) {
+        rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'reminder_state_differs' }));
+        continue;
+      }
+      const group = {
+        customerId: cand.customer_id,
+        propertyId: cand.property_id,
+        date: dateString(cand.scheduled_date),
+        rowIds,
+        visitId: null,
+      };
+      if (!dryRun) {
+        const visit = await VisitGroups.maybeGroupRow(cand.id, { database, createdBy: 'regroup-sweep' });
+        if (!visit || !visit.id) {
+          // createOrJoinVisit refused under its locks (frozen, artifact,
+          // in-flight completion) or the row changed since the preview.
+          rowIds.forEach((id) => base.left.push({ rowId: id, reason: 'refused' }));
+          continue;
+        }
+        group.visitId = visit.id;
+      }
+      base.groups.push(group);
     }
-    base.groups.push(group);
+    if (candidates.length < limit) break;
   }
   return base;
 }
@@ -176,8 +186,15 @@ async function regroupUngroupedSameStopRows({
 async function countRegroupCandidateRows({ fromDate, toDate = null, database = db, now = new Date() } = {}) {
   const earliest = earliestRegroupDate(now);
   const effectiveFrom = fromDate && String(fromDate) > earliest ? String(fromDate) : earliest;
-  const rows = await findCandidateRows(database, { fromDate: effectiveFrom, toDate, limit: 100000 });
-  return rows.length;
+  let total = 0;
+  let after = null;
+  for (;;) {
+    const rows = await findCandidateRows(database, { fromDate: effectiveFrom, toDate, limit: DEFAULT_LIMIT, after });
+    total += rows.length;
+    if (rows.length < DEFAULT_LIMIT) return total;
+    const last = rows[rows.length - 1];
+    after = { date: dateString(last.scheduled_date), id: last.id };
+  }
 }
 
 module.exports = { regroupUngroupedSameStopRows, countRegroupCandidateRows, earliestRegroupDate, DEFAULT_LIMIT };

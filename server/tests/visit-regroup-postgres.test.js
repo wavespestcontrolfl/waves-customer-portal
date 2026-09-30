@@ -181,6 +181,19 @@ postgres('same-stop regroup sweep', () => {
     expect(await visitCount(f.customerId)).toBe(1);
   });
 
+  test('ineligible rows filling a page never starve a later eligible stop', async () => {
+    // A gap pair stays ungrouped and matches every night; with a page of 2 it
+    // fills the first page on its own. The sweep must page past it.
+    const stuck = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['13:00', '14:00']] });
+    const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:30', '10:30']] });
+    const out = await regroupUngroupedSameStopRows({ fromDate: stuck.date, toDate: f.date, dryRun: false, limit: 2 });
+    expect(out.groups.map((g) => g.date)).toEqual([f.date]);
+    const vids = await visitIds(f.rows);
+    expect(vids[0]).toBeTruthy();
+    expect(vids[0]).toBe(vids[1]);
+    expect((await visitIds(stuck.rows)).every((v) => v === null)).toBe(true);
+  });
+
   test('gate off is a no-op', async () => {
     const f = await fixture({ date: nextDate(), windows: [['09:00', '10:00'], ['09:30', '10:30']] });
     gates.visitGroups = false;
