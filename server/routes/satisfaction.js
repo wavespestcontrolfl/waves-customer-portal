@@ -15,6 +15,7 @@ router.use(authenticate);
 // page in the same week. The GBP URLs now come from WAVES_LOCATIONS, so a
 // profile-link change lands everywhere at once.
 const { resolveReviewLocation } = require('../config/locations');
+const { visitAnchor, reviewLinkClickedSince } = require('../services/review-click-guard');
 
 // =========================================================================
 // GET /api/satisfaction/review-card — the portal's one-tap Google review card
@@ -74,13 +75,10 @@ router.get('/review-card', async (req, res, next) => {
     const [visit] = await visitQuery;
     if (!visit) return res.json({ card: null, propertyScope });
 
-    // Already clicked through a tracked review link since this visit.
-    const clicked = await db('review_requests')
-      .where({ customer_id: req.customerId })
-      .whereNotNull('redirected_at')
-      .where('redirected_at', '>=', visit.service_date)
-      .first('id');
-    if (clicked) return res.json({ card: null, propertyScope });
+    // Already clicked through a tracked review link since this visit: the same
+    // ET-midnight anchor and first-or-latest click check the send-time guard uses.
+    const anchor = await visitAnchor({ serviceRecordId: visit.id });
+    if (await reviewLinkClickedSince(req.customerId, anchor)) return res.json({ card: null, propertyScope });
 
     // Same last-resort stored id the ask path uses (ReviewService
     // resolveLocation) so the office shown here can never disagree with the

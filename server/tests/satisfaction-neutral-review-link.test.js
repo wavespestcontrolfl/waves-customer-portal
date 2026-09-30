@@ -10,7 +10,12 @@ jest.mock('../models/db', () => {
   const fn = jest.fn((table) => {
     const q = {};
     for (const m of ['where', 'whereNotNull', 'leftJoin', 'select', 'orderBy', 'limit']) q[m] = jest.fn(() => q);
-    q.first = jest.fn(async () => (table === 'review_requests' ? state.clicked : undefined));
+    q.first = jest.fn(async () => {
+      if (table === 'review_requests') return state.clicked;
+      // visitAnchor (review-click-guard) reads the visit's service_date.
+      if (table === 'service_records') return state.visits[0] ? { service_date: state.visits[0].service_date } : undefined;
+      return undefined;
+    });
     q.then = (ok, err) => Promise.resolve(table === 'service_records' ? state.visits : []).then(ok, err);
     return q;
   });
