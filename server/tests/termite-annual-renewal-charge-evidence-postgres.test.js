@@ -1918,6 +1918,36 @@ describeOrSkip('termite renewal charge — chokepoint A payment evidence, real P
       await bellHeldOverdueRenewals({ conn: db, counts: third });
       expect(third.graceHeldByCollectionsHold).toBe(0);
       expect(await db('notifications').count('* as n').first()).toEqual({ n: String(total) });
+      // Every alert used the dedicated overdue key, never the shared 'ineligible' one.
+      const keys = mockNotifyAdmin.mock.calls.map(([, , , opts]) => opts.dedupeKey);
+      expect(keys.every((k) => k.endsWith(':held_overdue'))).toBe(true);
+    });
+
+    test('a term that already got the pre-grace ineligible bell still gets the past-grace warning', async () => {
+      const { bellHeldOverdueRenewals } = Charge._private;
+      mockNotifyAdmin.mockImplementation(async (_cat, _title, _body, opts) => {
+        const exists = await db('notifications').where({ recipient_type: 'admin' }).whereRaw("metadata->>'dedupeKey' = ?", [opts.dedupeKey]).first('id');
+        if (exists) return { deduped: true };
+        await db('notifications').insert({ recipient_type: 'admin', metadata: JSON.stringify({ dedupeKey: opts.dedupeKey }) });
+        return { deduped: false };
+      });
+      const holdCustomer = randomUUID();
+      await db('collections_flags').insert({ customer_id: holdCustomer, flag: 'collection_hold', reason: 'dispute: says the visit never happened' });
+      const parent = await insertParent({ customer_id: holdCustomer });
+      const term = await insertSuccessor(parent, await insertInvoice({ status: 'draft' }), { customer_id: holdCustomer });
+      // deferRenewalForCollectionHold's pre-grace bell for this same term.
+      await db('notifications').insert({ recipient_type: 'admin', metadata: JSON.stringify({ dedupeKey: `termite-renewal-charge:${term.id}:ineligible` }) });
+
+      const first = {};
+      await bellHeldOverdueRenewals({ conn: db, counts: first });
+      expect(first.graceHeldByCollectionsHold).toBe(1);
+      expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+      expect(mockNotifyAdmin.mock.calls[0][3].dedupeKey).toBe(`termite-renewal-charge:${term.id}:held_overdue`);
+
+      // Told once: the next pass skips it.
+      const second = {};
+      await bellHeldOverdueRenewals({ conn: db, counts: second });
+      expect(second.graceHeldByCollectionsHold).toBe(0);
     });
   });
 });

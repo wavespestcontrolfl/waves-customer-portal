@@ -34,7 +34,7 @@ describe('runNoShowFeeStep', () => {
     const [category, title, body, opts] = mockNotifyAdmin.mock.calls[0];
     expect(category).toBe('billing');
     expect(title).toBe('Billing — decide on a no-show fee held by a dispute');
-    expect(body).toMatch(/nothing was charged/);
+    expect(body).toMatch(/No-show fee not charged yet — customer has a collections dispute hold; decide after the dispute is resolved/);
     expect(`${title} ${body}`).not.toMatch(/declin|parked|needs review|failed/i);
     expect(opts.link).toBe('/admin/customers?customerId=cust-1');
     // Raised through raiseAdminAlert (docs/admin-notifications.md): structured fields present.
@@ -118,10 +118,15 @@ describe('no-show email charge line for a held fee', () => {
     return EmailTemplates.sendTemplate.mock.calls[0][0].payload.charge_line;
   };
 
-  test('held reads like the no-fee notice, with no fee or receipt wording', async () => {
+  test('held omits the charge line: no claim about a charge either way, no fee or receipt wording', async () => {
     const held = await line('held');
-    expect(held).toBe(await line('none'));
-    expect(held).not.toMatch(/receipt|fee|charged/i);
+    expect(held).toBe('');
+    expect(held).not.toMatch(/no charge|receipt|fee|charged/i);
+    expect(held).not.toBe(await line('none'));
+  });
+
+  test('none still says there is no charge', async () => {
+    expect(await line('none')).toMatch(/no charge/);
   });
 
   test('review keeps the cautious receipt copy', async () => {

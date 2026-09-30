@@ -2693,6 +2693,14 @@ const RENEWAL_BELL_COPY = {
   // 'switch_plan') in the window since this lapse started. No void
   // happened; check the account by hand — this needs a human decision,
   // not another automatic retry.
+  // B10: past its grace deadline but held back by a collections DISPUTE hold.
+  // Its own kind/key (never 'ineligible'): deferRenewalForCollectionHold rings
+  // 'ineligible' for the same term BEFORE the deadline, and that earlier bell
+  // must not swallow this later, different warning.
+  held_overdue: (successor, reason) => ({
+    title: 'Termite annual renewal — past its grace window, held by a collections dispute',
+    body: `The termite annual renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) is past its grace window: ${reason}. Nothing was charged and the customer was not messaged.`,
+  }),
   lapse_parent_decided_elsewhere: (successor, reason) => ({
     title: 'Termite annual renewal — grace lapse deferred, parent already decided',
     body: `The termite annual renewal for customer ${successor.customer_id} (invoice for $${Number(successor.prepay_amount).toFixed(2)}) reached its grace deadline, but ${reason} — voiding it now could contradict a decision an operator already made. It was NOT voided; check the account and resolve it by hand.`,
@@ -3196,7 +3204,9 @@ async function bellHeldOverdueRenewals({ conn, counts }) {
         require('./collections/collection-hold').disputeHoldExistsSql(this, 'tt.customer_id');
       })
       .whereRaw(`${deadlineSql} < ?`, [etDateString()])
-      // Skip terms staff was already told about: ringRenewalBell dedupes on
+      // Skip terms staff was already told about THIS warning (only the
+      // ':held_overdue' key — the pre-grace ':ineligible' bell from
+      // deferRenewalForCollectionHold is a different alert): ringRenewalBell dedupes on
       // this exact key, so a term that already has its bell would only burn
       // a slot in the bounded page. Without this the same first 50 rows come
       // back every day and a backlog past 50 never gets its alerts; with it
@@ -3204,14 +3214,14 @@ async function bellHeldOverdueRenewals({ conn, counts }) {
       .whereNotExists(function alreadyBelled() {
         this.select(1).from('notifications as n')
           .where('n.recipient_type', 'admin')
-          .whereRaw("n.metadata->>'dedupeKey' = 'termite-renewal-charge:' || tt.id::text || ':ineligible'");
+          .whereRaw("n.metadata->>'dedupeKey' = 'termite-renewal-charge:' || tt.id::text || ':held_overdue'");
       })
       .orderByRaw(`${deadlineSql} asc, tt.id asc`) // most overdue first, stable
       .select('tt.*')
       .limit(HELD_RENEWAL_BELL_SCAN_LIMIT);
     counts.graceHeldByCollectionsHold = held.length;
     for (const term of held) {
-      await ringRenewalBell(term, 'ineligible', 'the renewal is past its grace window but the customer has an active collections dispute hold, so it will not be lapsed or withdrawn until the office releases the hold');
+      await ringRenewalBell(term, 'held_overdue', 'the renewal is past its grace window but the customer has an active collections dispute hold, so it will not be lapsed or withdrawn until the office releases the hold');
     }
   } catch (err) {
     logger.warn(`[termite-annual-renewal] held-overdue renewal bell scan failed: ${err.message}`);

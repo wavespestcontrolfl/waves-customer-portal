@@ -423,17 +423,20 @@ async function requeueHeldInvoice(invoiceId, { customerId = null } = {}) {
 // (retry_count bumped, next_retry_at cleared) - still not a failure and not history.
 // A row a real attempt touched (PI stamped), one the sweep disarmed WITHOUT a
 // replacement, and the orphan-charge marker (superseded by its OWN id: charged at
-// Stripe, ledger row missing) stay visible like any other failed row.
+// Stripe, ledger row missing) stay visible like any other failed row. A
+// placeholder the retry sweep resolved as absorbed by annual prepay coverage
+// (self-superseded, metadata.deferred_resolution) is not a failure either.
 const HOLD_DEFERRAL_REASON = 'collection_hold';
+const ABSORBED_RESOLUTION = 'absorbed_annual_prepay';
 
 function isNeverAttemptedHoldDeferral(p) {
   if (!p || p.stripe_payment_intent_id) return false;
   const armed = Number(p.retry_count || 0) === 0 && p.next_retry_at != null;
   const collected = p.superseded_by_payment_id != null && String(p.superseded_by_payment_id) !== String(p.id);
-  if (!armed && !collected) return false;
   try {
     const m = typeof p.metadata === 'string' ? JSON.parse(p.metadata) : p.metadata;
-    return !!(m && m.deferred_reason === HOLD_DEFERRAL_REASON);
+    if (!m || m.deferred_reason !== HOLD_DEFERRAL_REASON) return false;
+    return armed || collected || m.deferred_resolution === ABSORBED_RESOLUTION;
   } catch {
     return false;
   }
@@ -443,8 +446,8 @@ function isNeverAttemptedHoldDeferral(p) {
 // keeps the NOT() NULL-safe for rows with no metadata.
 function excludeNeverAttemptedHoldDeferrals(query, alias = 'payments') {
   return query.whereRaw(
-    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id)))`,
-    [HOLD_DEFERRAL_REASON],
+    `NOT (COALESCE(${alias}.metadata->>'deferred_reason', '') = ? AND ${alias}.stripe_payment_intent_id IS NULL AND ((COALESCE(${alias}.retry_count, 0) = 0 AND ${alias}.next_retry_at IS NOT NULL) OR (${alias}.superseded_by_payment_id IS NOT NULL AND ${alias}.superseded_by_payment_id <> ${alias}.id) OR COALESCE(${alias}.metadata->>'deferred_resolution', '') = ?))`,
+    [HOLD_DEFERRAL_REASON, ABSORBED_RESOLUTION],
   );
 }
 

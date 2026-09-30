@@ -1076,6 +1076,10 @@ const BillingCron = {
             failure_reason: db.raw(
               "COALESCE(failure_reason, '') || ' — resolved: absorbed by active annual prepay coverage'",
             ),
+            // Marks the resolution so a collections-hold placeholder resolved
+            // this way stays out of history and failure counts
+            // (collection-hold.js isNeverAttemptedHoldDeferral).
+            metadata: db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ deferred_resolution: 'absorbed_annual_prepay' })]),
           }).catch((updErr) => logger.error(`[billing-cron] retry absorb (annual prepay) failed for payment ${payment.id}: ${updErr.message}`));
         await logAutopay(payment.customer_id, 'skipped_annual_prepay', {
           paymentId: payment.id,

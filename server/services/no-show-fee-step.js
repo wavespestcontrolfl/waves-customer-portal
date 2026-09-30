@@ -42,7 +42,7 @@ const ALERTS = {
   },
   fee_held_collections_dispute: {
     action: 'decide on a no-show fee held by a dispute',
-    why: 'The customer has a collections dispute hold, so nothing was charged and nothing was attempted.',
+    why: 'No-show fee not charged yet — customer has a collections dispute hold; decide after the dispute is resolved.',
     doneWhen: 'no_show_fee_decided',
   },
 };
