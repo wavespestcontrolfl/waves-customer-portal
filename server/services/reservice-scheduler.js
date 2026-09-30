@@ -407,10 +407,14 @@ const RESERVICE_LANE_WORD_PATTERNS = [
 const RESERVICE_CLAUSE_DELIMITER_RE = /[.!?;:,\n–—]+|\s-\s|\b(?:and|but|however|though|although|yet|while|whereas|plus)\b/gi;
 const RESERVICE_NEG = "(?:not|no|never|none|nor|without|cannot|can'?t|don'?t|doesn'?t|didn'?t|won'?t|wasn'?t|isn'?t|aren'?t|weren'?t|haven'?t|hasn'?t|hadn'?t|couldn'?t|wouldn'?t)";
 const RESERVICE_ANY_PEST_NOUN = `(?:bed[- ]?bugs?|${RESERVICE_PEST_NOUNS_SOURCE}|exterminator|termites?|mosquito\\w*|rodents?|mice|mouse|rats?)`;
+// Codex round-27 P2: a negator that governs a verb of BELIEF / KNOWLEDGE ("I can't believe the ants are back",
+// "I don't know why ants are back") does not negate the sighting that follows — negation must govern the sighting
+// verb or the pest noun itself.
+const RESERVICE_EPISTEMIC_AHEAD = "(?!(?:\\W+[\\w'’-]+){0,2}?\\W+(?:believe|know|understand|sure|think|imagine|wonder|guess|why|how|whether|if|mind|care|blame|expect|get\\s+why)\\b)";
 const RESERVICE_CLAUSE_NEGATED_RE = new RegExp(
   // a negator shortly before a sighting / presence / return verb ("don't see", "aren't back", "not showing up");
   // "go away" is a report that PERSISTS ("didn't go away"), not a negated sighting
-  `\\b${RESERVICE_NEG}\\b(?:\\W+[\\w'’-]+){0,3}?\\W+(?:see|seen|seeing|saw|find|finding|found|notice[ds]?|noticing|show(?:ed|ing|s)?|return\\w*|come|coming|came|have|had|get|getting|be|is|are|was|were|been|go(?!\\s+away)|going(?!\\s+away)|back|there|here|around|anymore)\\b`
+  `\\b${RESERVICE_NEG}\\b${RESERVICE_EPISTEMIC_AHEAD}(?:\\W+[\\w'’-]+){0,3}?\\W+(?:see|seen|seeing|saw|find|finding|found|notice[ds]?|noticing|show(?:ed|ing|s)?|return\\w*|come|coming|came|have|had|get|getting|be|is|are|was|were|been|go(?!\\s+away)|going(?!\\s+away)|back|there|here|around|anymore)\\b`
   // a negator directly before the noun ("not termites", "no ants", "without any roaches")
   + `|\\b${RESERVICE_NEG}\\s+(?:(?:any|a|an|the|more|even|just|really|actually|about)\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b`,
   'i',
@@ -444,6 +448,9 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
   // possession / persistence ("I still have ants", "I'm still getting ants", "keep seeing roaches"): the SAME
   // persistence constructions SAVE_SALE_TEXT_RE reads (pest-persistence-phrases — one source)
   new RegExp(`\\b(?:${PEST_PERSISTENCE_PHRASES_SOURCE})\\b(?:\\W+(?!about\\b|regarding\\b|for\\b|with\\b)[\\w'’-]+){0,3}?\\W+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
+  // plain possession by the speaker ("I have ants", "we've got roaches") — never a service-context phrase
+  // ("we have ants under contract / covered / in our plan / on the schedule")
+  new RegExp(`\\b(?:i|we)(?:['’]ve|\\s+have|\\s+had|\\s+got|['’]ve\\s+got|\\s+have\\s+got|\\s+now\\s+have)\\s+(?:(?:a|an|some|the|these|those|many|several|few|a\\s+few)\\s+)?${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}(?!\\W+(?:under|covered|included|in\\s+(?:our|my|the)\\s+(?:plan|contract|program|package|coverage)|on\\s+(?:our|my|the)\\s+(?:plan|contract|schedule|list)|with\\s+(?:our|my|the)\\s+(?:plan|contract|program|service)|for\\s+(?:our|my|the)\\s+(?:plan|contract|program|service)))`, 'i'),
   // "have / got / getting" with a quantity right before the noun ("we have so many ants", "getting more roaches")
   new RegExp(`\\b(?:have|having|got|getting)\\s+(?:more|new|another|so\\s+many|a\\s+lot\\s+of|lots\\s+of|tons\\s+of|a\\s+bunch\\s+of)\\s+${RESERVICE_ANY_PEST_NOUN}\\b${RESERVICE_NOUN_NOT_SERVICE}`, 'i'),
 ];
@@ -451,24 +458,36 @@ const RESERVICE_ACTIVITY_BOUND_RES = [
 function reserviceClauseDropped(clause) {
   return RESERVICE_CLAUSE_NEGATED_RE.test(clause) || reserviceClauseResolved(clause);
 }
+// A clause that RESOLVES a sighting by pronoun ("…, but they are gone now", "…, but they disappeared") also resolves
+// the sighting just before it (Codex round-27 P2): "I saw ants yesterday, but they are gone now". A resolution
+// that names a pest of its own ("ants are gone but roaches are back" — the resolved clause names ants, the
+// next names roaches) does not reach back.
+const RESERVICE_PRONOUN_SUBJECT_RE = /^\W*(?:(?:but|and|yet|now|then|so|because)\W+)*(?:they|it|them|those|these|all\s+of\s+(?:them|it))\b/i;
 // { kept: clauses that still count, survivingText: the original text with dropped clauses blanked }
 function reservicePestReportFacts(text) {
   const s = String(text || '');
-  const kept = [];
-  const clauses = [];
-  let surviving = '';
+  const segs = [];
   let cursor = 0;
-  const flush = (end, delimiter) => {
-    const clause = s.slice(cursor, end);
-    if (clause.trim()) clauses.push(clause);
-    if (clause.trim() && !reserviceClauseDropped(clause)) { kept.push(clause); surviving += clause; } else surviving += ' '.repeat(clause.length);
-    surviving += delimiter;
-  };
+  const flush = (end, delimiter) => segs.push({ clause: s.slice(cursor, end), delimiter });
   for (const m of s.matchAll(RESERVICE_CLAUSE_DELIMITER_RE)) {
     flush(m.index, m[0]);
     cursor = m.index + m[0].length;
   }
   flush(s.length, '');
+  segs.forEach((seg) => { seg.blank = !seg.clause.trim(); seg.dropped = seg.blank || reserviceClauseDropped(seg.clause); });
+  segs.forEach((seg, i) => {
+    const prev = segs.slice(0, i).reverse().find((x) => !x.blank);
+    if (!prev || seg.blank || prev.dropped || !reserviceClauseResolved(seg.clause)) return;
+    if (RESERVICE_PRONOUN_SUBJECT_RE.test(seg.clause) && !RESERVICE_PEST_NOUN_UNBOUND_RE.test(seg.clause)) prev.dropped = true;
+  });
+  const kept = [];
+  const clauses = [];
+  let surviving = '';
+  for (const seg of segs) {
+    if (!seg.blank) clauses.push(seg.clause);
+    if (!seg.dropped) { kept.push(seg.clause); surviving += seg.clause; } else surviving += ' '.repeat(seg.clause.length);
+    surviving += seg.delimiter;
+  }
   return { kept, clauses, survivingText: surviving };
 }
 // A pronoun return ("they're back", "it is coming back") in a clause that still counts, with a pest noun

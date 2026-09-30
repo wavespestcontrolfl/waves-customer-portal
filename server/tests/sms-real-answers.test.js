@@ -3134,6 +3134,10 @@ describe('free re-service is an entitlement resolved through the existing mechan
   ["I'm free at 3 if you want to talk.", false, []],
   ["Free on Thursday after 5, we can send a tech.", false, []],
   ["The re-service is free Tuesday.", true, []],
+  ["Interior treatment is included with your re-service.", false, []],
+  ["The inside spray is included in a re-service.", false, []],
+  ["The interior spray is covered during the re-service.", false, []],
+  ["Your re-service is covered; we will text the link now.", true, []],
   ["The estimate link includes options you can revisit.", false, []],
   ["You can revisit your options any time.", false, []],
   ["Here are the options you'll revisit when you're ready.", false, []],
@@ -3340,6 +3344,20 @@ describe('free re-service is an entitlement resolved through the existing mechan
       expect(validateReserviceOffer({ reply: 'We can send your free bed bug re-service link.', factsBlock: facts, intendedActions: sendLink, inboundMessage: 'hello' }).ok).toBe(false);
       // a NEGATED mention is not the specialty
       expect(validateReserviceOffer({ reply: 'So sorry to hear that.', factsBlock: facts, intendedActions: [], inboundMessage: "it's not bed bugs, the ants are back" }).ok).toBe(false);
+    });
+
+    // Codex round-27 P2: the link ACTION alone is not the customer-facing offer.
+    test('an owed offer needs offer wording in the reply, not just the send_reservice_link action', () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const facts = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const check = (reply) => validateReserviceOffer({ reply, factsBlock: facts, intendedActions: sendLink, inboundMessage: 'the ants are back' });
+      expect(check('Sorry to hear that.').ok).toBe(false);
+      expect(check("Oh no, I'm so sorry. Thanks for letting us know.").ok).toBe(false);
+      // recognizable wording the detector itself may miss still passes (action-backed, round-16 shape)
+      expect(check('We will have someone stop by again for the ants, no cost to you.').ok).toBe(true);
+      expect(check("I'm sending your booking link now.").ok).toBe(true);
+      expect(check("Sorry about that! I'm sending your free pest re-service link now.")).toMatchObject({ ok: true, promisedLanes: ['pest'] });
     });
 
     test('the lazy offer-span copies are built from source parts: no greedy {0,60} gap survives (round-19 P1)', () => {

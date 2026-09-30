@@ -814,8 +814,11 @@ const FREE_RESERVICE_OFFER_RE_SOURCE = (gap) => `${FREE_OFFER_WORD_SOURCE}[^.?!\
 // included in your plan" billing line doesn't spuriously trip this. Any of
 // link/covered/no charge/no cost/free/complimentary/on us/on the
 // house/included, in either order.
+const RESERVICE_SCOPE_WITHIN_AHEAD = `(?!\\s+(?:with|in|during|within|on|as\\s+part\\s+of)\\s+(?:(?:your|a|an|the|this|every|each|any|our)\\s+)?(?:${RESERVICE_SPECIFIC_NOUN_SOURCE}))`;
 const RESERVICE_COVERAGE_RE_SOURCE = (gap) => `\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]${gap}\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b`
-  + `|\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b[^.?!\\n]${gap}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})(?:e?s)?\\b`;
+  // Round-27 P2: "included / covered" must describe the re-service ITSELF, not something inside it — "Interior
+  // treatment is included with your re-service" / "The inside spray is included in a re-service" explain scope.
+  + `|\\b(?:link|covered${RESERVICE_SCOPE_WITHIN_AHEAD}|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included${RESERVICE_SCOPE_WITHIN_AHEAD})\\b[^.?!\\n]${gap}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})(?:e?s)?\\b`;
 // PR #5336 pre-push audit P1: an eligibility DENIAL names the same words as
 // a promise ("You are not eligible for a free re-service", "We cannot offer a
 // free pest re-service") but promises nothing — it is the truthful answer to
@@ -1247,6 +1250,10 @@ function reserviceOfferOwed({ inboundMessage, lanes, context }) {
   if (require('./reservice-scheduler').mentionsAffirmed(String(inboundMessage || ''), handoffRe)) return false;
   return reportedPestLane({ inboundMessage, context, lanes }) === 'pest';
 }
+// Recognizable customer-facing offer / send-link wording (free, no cost, re-service, a link, come back / stop by).
+function reserviceReplyHasOfferWording(text) {
+  return reserviceBodyPrescreen(text) || /\blink\b/i.test(String(text || ''));
+}
 function bookedReserviceLanes(factsBlock) {
   const line = String(factsBlock || '').split('\n').find((l) => l.startsWith(RESERVICE_FACT_LABEL)) || '';
   return ['pest', 'lawn'].filter((lane) => new RegExp(`\\b${lane} already booked\\b`).test(line));
@@ -1278,10 +1285,15 @@ function validateReserviceOffer({ reply, factsBlock, intendedActions, inboundMes
   // schedule — the prompt forbids OPEN TIMES and a paid visit for it, so a reply that offers slots is rejected.
   const bookedLaneBlock = reserviceBookedLaneOffersTimes({ factsBlock, inboundMessage, context, offeredTimes, actions });
   if (bookedLaneBlock) return { ok: false, violations: [bookedLaneBlock] };
-  if (!promise && !reserviceCarriesLinkAction(actions)) {
-    return reserviceOfferOwed({ inboundMessage, lanes: eligibleReserviceLanes(factsBlock), context })
-      ? { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] }
-      : { ok: true, violations: [] };
+  if (!promise) {
+    // Codex round-27 P2: when the offer is OWED, the link ACTION alone is not the customer-facing offer — a
+    // generic "Sorry to hear that" plus send_reservice_link tells the customer nothing. The reply must carry
+    // recognizable offer / send-link wording (the detector may still miss its exact phrasing).
+    const owed = reserviceOfferOwed({ inboundMessage, lanes: eligibleReserviceLanes(factsBlock), context });
+    if (owed && !(reserviceCarriesLinkAction(actions) && reserviceReplyHasOfferWording(text))) {
+      return { ok: false, violations: ['the customer reported a pest issue and FREE RE-SERVICE in the facts says they are eligible — offer the covered free re-service (say you are sending their free re-service booking link and add {"type":"escalate","note":"send_reservice_link"} to intended_actions)'] };
+    }
+    if (!reserviceCarriesLinkAction(actions)) return { ok: true, violations: [] };
   }
   // reservice-scheduler is the SAME classifier the no-named-lane path uses (NOT sms-service-intent.js's
   // lead-intake regexClassify, which lumps termite/rodent/mosquito words into its 'pest' bucket — that
