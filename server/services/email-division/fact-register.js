@@ -712,7 +712,7 @@ const PATCH_TRIGGER = new RegExp(
   // or higher", "it's 90 degrees" — names the same threshold with no
   // preposition (codex #5187 follow-up). "80°F or lower" / "or below" is the
   // cool side of the line and never a trigger.
-  + `|\\b(?:is|are|was|were|be|being|been|'s|'re)\\s+(?:(?:about|around|near|nearly|approximately|roughly|just|only|almost)\\s+)?(?:${HOT_FIGURE})(?:\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)(?!\\s*[FC]?\\s*(?:or|and|to)\\s+(?:lower|below|less|under|cooler|colder|down))|\\s+(?:or|and)\\s+(?:higher|hotter|warmer|above|more|greater|up|over)\\b)`,
+  + `|\\b(?:is|are|was|were|be|being|been|'s|'re)\\s+(?:(?:about|around|near|nearly|approximately|roughly|just|only|almost)\\s+)?(?:${HOT_FIGURE})(?:\\s*(?:°|-?\\s*degrees?\\b|-degree\\b)(?!\\s*[FC]?\\s*(?:or|and|to)\\s+(?:lower|below|less|under|cooler|colder|down))|\\s+(?:or|and)\\s+(?:higher|hotter|warmer|above|more|greater|up|over)\\b${NOT_A_TEMPERATURE})`,
   'i',
 );
 // A clause that says large patch RECEDES in the heat is the fact, not the

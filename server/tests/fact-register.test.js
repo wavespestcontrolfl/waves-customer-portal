@@ -628,6 +628,8 @@ describe('findUnverifiedClaims', () => {
       'Large patch is most likely when temperatures are 60 to 75 degrees.',
       'Large patch is active when the soil is 65°F.',
       'Large patch can cover an area that is 80 square feet.',
+      'Large patch can cover patches that are 90 or more square feet across.',
+      'Large patch is more likely in yards that are 85 or more years old.',
     ])('a copular cool-side temperature passes: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
     });
