@@ -12236,8 +12236,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // channel, so every auto-send lawn completion freezes the watering
     // instruction (and banner) exactly once whether or not the customer gets
     // the completion text (email-only customers, SMS disabled, no phone,
-    // text already handled). Best-effort; never blocks completion.
-    if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
+    // text already handled). Best-effort; never blocks completion. Backfill
+    // closeouts skip it: the gate would freeze TODAY's sprinkler settings as
+    // though captured at the historical visit (render-time reconciliation
+    // still applies, as it did before the hoist).
+    if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send' && !isBackfillCompletion) {
       try {
         const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
         const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });

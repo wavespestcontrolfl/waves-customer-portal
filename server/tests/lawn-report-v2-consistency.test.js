@@ -754,6 +754,11 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
 // evidenceSource 'product_instruction' and rides the EXISTING verdict table
 // (no new verdict, no new flag); a mixed visit resolves to hold.
 describe('watering instruction drives the aftercare through the existing verdict table', () => {
+  // The fixtures complete 2026-09-30; pin the render clock inside their
+  // windows so the instructions stay live (an expired one is history).
+  let nowSpy;
+  beforeEach(() => { nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-30T19:00:00Z')); });
+  afterEach(() => { nowSpy.mockRestore(); });
   const { buildWateringInstruction, composeBannerLines } = require('../services/service-report/lawn-watering-instruction');
   const { findBannedCustomerCopy: banned } = require('../services/service-report/activity-indicators');
   const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
@@ -762,6 +767,9 @@ describe('watering instruction drives the aftercare through the existing verdict
   const CELSIUS = [{ product: { name: 'Celsius WG', category: 'herbicide', irrigation_required: false }, targets: ['weeds'] }];
   const HOLD_RULE = { mode: 'hold', hold_hours: 24, source: 'label' };
   const WATER_IN_RULE = { mode: 'water_in', water_in_inches: 0.25, water_in_by_hours: 24, source: 'default' };
+  // A window that ends after the 24 h hold: the deadline stays completion + 72 h
+  // (a hold that reaches the deadline is no claim).
+  const LATE_WATER_IN_RULE = { ...WATER_IN_RULE, water_in_by_hours: 72 };
   const RUN_PLAN = {
     title: 'This week: one full cycle per turf zone',
     detail: 'On your permitted watering day, about ½" of water per run.',
@@ -821,24 +829,45 @@ describe('watering instruction drives the aftercare through the existing verdict
   });
 
   test('exactly one watering line reaches the PDF recommendations list', () => {
-    for (const rules of [[HOLD_RULE], [HOLD_RULE, WATER_IN_RULE], [WATER_IN_RULE]]) {
+    for (const rules of [[HOLD_RULE], [HOLD_RULE, LATE_WATER_IN_RULE], [WATER_IN_RULE]]) {
       const { instruction, report } = build(rules);
       const applied = applyLawnReportReconciliation({ reportV2: report }, null);
       const list = pdfRecommendations(applied.reportV2);
       const sentences = list.flatMap((entry) => entry.split(/(?<=[.!?])\s+/)).filter((sentence) => /watering|water in/i.test(sentence));
-      // Entries may restate the banner's first line, never a different watering instruction.
-      expect([...new Set(sentences)]).toEqual([instruction.lines[0]]);
+      // Entries restate the banner's own lines (its first line always), never a different watering instruction.
+      const own = instruction.lines.flatMap((line) => line.split(/(?<=[.!?])\s+/));
+      expect(sentences).toContain(instruction.lines[0]);
+      for (const sentence of sentences) expect(own).toContain(sentence);
       expect(list.join(' ')).not.toMatch(/No special watering|Confirm the (product )?(watering )?directions/i);
     }
   });
 
+  test('past expiresAt the instruction is history: no hero task, no restriction, no credit; its wording stays as a record', () => {
+    for (const rules of [[HOLD_RULE], [WATER_IN_RULE], [HOLD_RULE, LATE_WATER_IN_RULE], [{ ...WATER_IN_RULE, water_in_inches: 0.5 }]]) {
+      const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED, runtime: { headTypes: ['rotor'] } });
+      const live = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction });
+      expect(live.snapshot.customerAction || '').toContain(instruction.lines[0]);
+      const later = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction, nowMs: Date.parse(instruction.expiresAt) + 1 });
+      expect(later.aftercare).toMatchObject({ wateringEnded: true, wateringHold: false, creditableWaterIn: false, evidenceSource: 'product_instruction' });
+      expect(later.aftercare).not.toHaveProperty('holdTask');
+      expect(later.aftercare).not.toHaveProperty('waterInTask');
+      expect(resolveLawnAftercare(later.aftercare, later.water.weekPlan)).toMatchObject({ verdict: 'none', customerTask: null, restricts: false, credited: false });
+      expect(later.snapshot.customerAction || '').not.toContain(instruction.lines[0]);
+      expect(later.aftercare.watering).toBe(`This visit’s watering note has ended. It read: ${instruction.lines.join(' ')}`);
+      expect(renderedWeekPlan(later.aftercare, later.water.weekPlan)).toBe(RUN_PLAN);
+      // At the instant itself it is still live.
+      const edge = buildLawnReportV2({ lawnAssessment: clean(), applications: CELSIUS, wateringInstruction: instruction, nowMs: Date.parse(instruction.expiresAt) });
+      expect(edge.aftercare.wateringEnded).toBeUndefined();
+    }
+  });
+
   test('mixed hold + water-in resolves to hold; the water-in is banner text only', () => {
-    const { instruction, report } = build([HOLD_RULE, WATER_IN_RULE]);
+    const { instruction, report } = build([HOLD_RULE, LATE_WATER_IN_RULE]);
     expect(instruction.state).toBe('hold_then_water_in');
     expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: true, creditableWaterIn: false });
     expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan).verdict).toBe('hold');
-    expect(report.aftercare.holdTask).toBe('Skip your turf watering until Thu 3 PM, then water in.');
-    expect(report.aftercare.watering).toContain('After that, run');
+    expect(report.aftercare.holdTask).toBe('Skip your turf watering until Thu 3 PM.');
+    expect(report.aftercare.watering).toContain('After that, water in today’s treatment by Sat 2 PM');
     expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(RUN_PLAN.afterHold);
   });
 
@@ -896,7 +925,7 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(instruction.lines).toHaveLength(3);
     expect(report.aftercare.watering).toBe(instruction.lines.join(' '));
     expect(report.aftercare.watering).toContain('Run it even if it is not your usual day.');
-    const mixed = build([HOLD_RULE, WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
+    const mixed = build([HOLD_RULE, LATE_WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
     expect(mixed.report.aftercare.watering).toBe(mixed.instruction.lines.join(' '));
     expect(mixed.report.aftercare.watering).toContain('Run it even if it is not your usual day.');
     // A hold has two treatment sentences.
@@ -959,8 +988,10 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(buildWateringBanner(hold)).toEqual({
       state: 'hold', lines: hold.lines, holdUntil: '2026-10-01T19:00:00.000Z', waterInBy: null, expiresAt: '2026-10-01T19:00:00.000Z', ruleSource: 'label',
     });
-    const mixed = buildWateringInstruction({ rules: [HOLD_RULE, WATER_IN_RULE], completedAt: COMPLETED });
-    expect(buildWateringBanner(mixed)).toMatchObject({ state: 'hold_then_water_in', expiresAt: '2026-10-02T19:00:00.000Z' });
+    const mixed = buildWateringInstruction({ rules: [HOLD_RULE, LATE_WATER_IN_RULE], completedAt: COMPLETED });
+    expect(buildWateringBanner(mixed)).toMatchObject({ state: 'hold_then_water_in', expiresAt: '2026-10-03T18:00:00.000Z' });
+    // A hold that reaches the water-in deadline is no claim, so no banner.
+    expect(buildWateringBanner(buildWateringInstruction({ rules: [HOLD_RULE, WATER_IN_RULE], completedAt: COMPLETED }))).toBeNull();
     expect(buildWateringBanner(buildWateringInstruction({ rules: [{ mode: 'none', source: 'label' }], completedAt: COMPLETED })))
       .toMatchObject({ state: 'none', expiresAt: null });
     expect(buildWateringBanner(buildWateringInstruction({ rules: [null], completedAt: COMPLETED }))).toBeNull();

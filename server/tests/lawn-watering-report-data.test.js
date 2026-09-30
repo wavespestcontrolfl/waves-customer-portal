@@ -126,6 +126,11 @@ const fixtures = (prefs = []) => ({
 });
 
 describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
+  // The fixtures complete 2026-09-30; pin the render clock inside their
+  // windows so the instructions stay live (an expired one is history).
+  let nowSpy;
+  beforeEach(() => { nowSpy = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-30T19:00:00Z')); });
+  afterEach(() => { nowSpy.mockRestore(); });
   const OLD = process.env.GATE_LAWN_WATERING_RULE;
   afterEach(() => {
     if (OLD === undefined) delete process.env.GATE_LAWN_WATERING_RULE; else process.env.GATE_LAWN_WATERING_RULE = OLD;
@@ -149,7 +154,7 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
 
   test('gate on, mixed hold + water-in: hold then water-in with the customer\'s own head type', async () => {
     process.env.GATE_LAWN_WATERING_RULE = 'true';
-    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: facts(HOLD), [PRODUCT_ID.replace('5555', '6666')]: { ...facts(WATER_IN), name: 'Arena 50 WDG' } } });
+    const snapshot = buildReportIdentitySnapshot({ visit: {}, productFacts: { [PRODUCT_ID]: facts(HOLD), [PRODUCT_ID.replace('5555', '6666')]: { ...facts({ ...WATER_IN, water_in_by_hours: 72 }), name: 'Arena 50 WDG' } } });
     const service = { ...serviceWith(HOLD), service_data: JSON.stringify({ reportIdentitySnapshot: snapshot }) };
     const knex = makeKnex({
       ...fixtures([{ customer_id: 'cust-lawn-w1', irrigation_system_type: ['rotor'], irrigation_system: true }]),
@@ -160,8 +165,9 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
     });
     const v2 = (await buildReportV1Data(service, 'token-w1', knex)).reportV2;
     expect(v2.banner.state).toBe('hold_then_water_in');
-    expect(v2.banner.lines[1]).toBe('After that, run each zone about 40 minutes within 24 hours.');
-    expect(v2.banner.expiresAt).toBe('2026-10-02T19:00:00.000Z');
+    // The water-in deadline stays completion + 72 h (never re-anchored to the hold end).
+    expect(v2.banner.lines[1]).toBe('After that, water in today’s treatment by Sat 2 PM: run each zone about 40 minutes.');
+    expect(v2.banner.expiresAt).toBe('2026-10-03T18:00:00.000Z');
   });
 
   test('gate on, product with no rule: no banner and the legacy aftercare', async () => {
@@ -307,9 +313,10 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(out.productsLoadFailed).toBe(true);
       expect(out.instruction).toBeNull();
       expect(broken.reportV2.banner).toBeUndefined();
-      // Catalog back: the live lookup resolves the legacy product and the render completes.
+      // Catalog back: the live lookup resolves the legacy product (a liquid
+      // fertilizer defaults to none) and the render completes.
       const okOut = {};
-      const ok = await buildReportV1Data(service, 'token-w1', makeKnex({ ...fixtures(), service_products: rows, products_catalog: [{ id: LEGACY_ID, name: 'Legacy Product', category: 'fertilizer' }] }), { wateringInstructionOut: okOut });
+      const ok = await buildReportV1Data(service, 'token-w1', makeKnex({ ...fixtures(), service_products: rows, products_catalog: [{ id: LEGACY_ID, name: 'Legacy Product', category: 'fertilizer', formulation: 'liquid' }] }), { wateringInstructionOut: okOut });
       expect(okOut.productsLoadFailed).toBe(false);
       expect(ok.reportV2.banner.state).toBe('hold');
     });
