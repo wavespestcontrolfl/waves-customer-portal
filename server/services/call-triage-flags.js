@@ -797,6 +797,74 @@ function isMissingUnitNumber(av) {
     && av.missingComponents[0] === 'subpremise');
 }
 
+// Whole-structure services (owner ruling 2026-09-30, call-booker gates review
+// item 7): a WDO inspection or a termite pre-treat / perimeter treatment works
+// on the BUILDING, so a caller who gives a duplex address with no unit number
+// must not be held because Google wants a subpremise. Deliberately a small
+// explicit list, never a keyword match — anything not named here (interior
+// pest, bed bugs, spot/foam termite work, bait, bonds, a condo unit
+// inspection) keeps today's hold. Keys are `services.service_key`; the coarse
+// labels are resolveSchedulableCallService's own vocabulary, consulted only
+// when the call resolved NO catalog row (a service that is not bookable by
+// phone still books under its coarse label).
+const WHOLE_STRUCTURE_SERVICE_KEYS = new Set([
+  'wdo_inspection',
+  'termite_pretreatment',
+  'termite_slab_pretreat',
+  'termite_trenching',
+  'termite_liquid',
+]);
+const WHOLE_STRUCTURE_COARSE_LABELS = new Set([
+  'WDO Inspection',
+  'Pre-Slab Termidor',
+  'Liquid Termite Perimeter',
+]);
+// Building types where a unit-less address still names ONE structure. condo /
+// unknown / commercial-ish types never qualify: a condo WDO is a unit-level
+// inspection, and an unknown type cannot prove it is not one.
+const WHOLE_STRUCTURE_PROPERTY_TYPES = new Set(['single_family', 'multi_family', 'townhouse', 'mobile_home']);
+const UNIT_LEVEL_WORDING_RE = /\b(?:condo(?:minium)?s?|apartments?|apts?)\b/i;
+
+function isWholeStructureService({ serviceKey = null, coarseLabel = null } = {}) {
+  if (serviceKey) return WHOLE_STRUCTURE_SERVICE_KEYS.has(String(serviceKey));
+  return !!coarseLabel && WHOLE_STRUCTURE_COARSE_LABELS.has(String(coarseLabel));
+}
+
+/**
+ * GATE_CALL_WHOLE_STRUCTURE_NO_UNIT: rewrite an Address Validation verdict whose
+ * ONLY problem is the missing unit into the accepted verdict it would have been
+ * for a building-level job. Returns the SAME object untouched unless every
+ * condition holds, so gate-off (and every non-qualifying call) is
+ * byte-identical:
+ *   - the gate is on and the call's resolved service is on the allowlist;
+ *   - the verdict is exactly "PREMISE resolved, only subpremise missing"
+ *     (isMissingUnitNumber) — no other missing component;
+ *   - every other address check that deriveStatus would have applied still
+ *     holds: in service area, nothing unconfirmed, nothing replaced (a
+ *     corrected street/ZIP on this shape was never adopted, so it is not
+ *     waived either);
+ *   - the property is not commercial/HOA and not typed or worded as a
+ *     condo/apartment (unit-level work).
+ * The waived copy keeps the original evidence under
+ * `wholeStructureUnitWaived` and clears missingComponents so nothing downstream
+ * re-raises the unit ask. Persisted ai_address_validation keeps the ORIGINAL.
+ */
+function applyWholeStructureUnitWaiver(av, opts = {}) {
+  if (!opts.enabled) return av;
+  if (!isWholeStructureService(opts)) return av;
+  if (!isMissingUnitNumber(av)) return av;
+  if (av.inServiceArea !== true || av.hasUnconfirmed || av.hasReplaced) return av;
+  if (opts.commercial === true) return av;
+  if (!WHOLE_STRUCTURE_PROPERTY_TYPES.has(String(opts.propertyType || ''))) return av;
+  if (UNIT_LEVEL_WORDING_RE.test(String(opts.text || ''))) return av;
+  return {
+    ...av,
+    status: 'validated_accept',
+    missingComponents: [],
+    wholeStructureUnitWaived: { missingComponents: [...av.missingComponents], originalStatus: av.status },
+  };
+}
+
 function suppressAddressFlagsForAV(flags, addressValidation) {
   const s = addressValidation?.status;
   if (s !== 'validated_accept' && s !== 'corrected') return flags || [];
@@ -2796,6 +2864,9 @@ module.exports = {
   mergeTriageFlags,
   suppressAddressFlagsForAV,
   isMissingUnitNumber,
+  applyWholeStructureUnitWaiver,
+  isWholeStructureService,
+  WHOLE_STRUCTURE_SERVICE_KEYS,
   unitAskCorroborated,
   recordCarriesUnit,
   deriveCallReviewBridge,

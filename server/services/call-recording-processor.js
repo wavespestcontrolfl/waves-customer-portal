@@ -111,7 +111,7 @@ function callExtractionV2PrimaryEnabled() {
     console.warn('[call-proc] WARNING: enforce mode without ADDRESS_VALIDATION_ENABLED — address_unverifiable is never suppressed, so virtually no call will auto-route.');
   }
 }
-const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
+const { computeDeterministicTriageFlags, mergeTriageFlags, suppressAddressFlagsForAV, suppressUnsupportedModelFlags, isAuthorizedWdoArrangerBooking, isAuthorizedFamilyMemberBooking, canAutoRoute, hasCanonicalWriteBlock, deriveCallReviewBridge, deriveEmailReview, applyEmailDisagreementHold, mergeNeedsConfirmation, detectRentalSignal, normalizeCounty, ADVISORY_TRIAGE_FLAGS, FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS, streetCompareKey, isMissingUnitNumber, applyWholeStructureUnitWaiver, SCHEDULING_CHANGE_REVIEW_FLAGS, statesNewAddress, onFileHouseNumberConflict, sameHouseNumberStreet, callbackNumberNeededBlocksSms } = require('./call-triage-flags');
 const { normalizeState } = require('../utils/address-normalizer');
 const { recoverStreetAddress, RECOVERABLE_STATUSES } = require('./address-validation/recovery');
 
@@ -5719,6 +5719,32 @@ function resolveSchedulableCallService(extracted = {}, opts = {}) {
   return { ok: true, reason: null, service };
 }
 
+// Whole-structure unit waiver for one call (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT;
+// caller checks the gate). Resolves the call's service the way the booking
+// resolves it — catalog row first, the coarse label only when no catalog row
+// matched — and hands the verdict to the pure waiver in call-triage-flags.js.
+// Returns the SAME verdict object unless the waiver applies.
+function wholeStructureUnitWaiverForCall({ addressValidation, extracted = {}, transcription = '', services = [], property = null } = {}) {
+  const coarse = resolveSchedulableCallService(extracted, { transcription });
+  const row = resolveCallBookingCatalogService({
+    extracted,
+    transcription,
+    services,
+    coarseServiceLabel: coarse.ok ? coarse.service : null,
+  });
+  const prop = property || {};
+  const waived = applyWholeStructureUnitWaiver(addressValidation, {
+    enabled: true,
+    serviceKey: row?.service_key || null,
+    coarseLabel: row ? null : (coarse.ok ? coarse.service : null),
+    propertyType: prop.property_type,
+    commercial: prop.property_type === 'commercial' || prop.hoa_common_area_service === true,
+    text: [transcription, extracted.call_summary, extracted.requested_service].filter(Boolean).join(' '),
+  });
+  if (waived !== addressValidation) waived.wholeStructureUnitWaived.service = row?.service_key || coarse.service;
+  return waived;
+}
+
 async function resolveDefaultCallBookingTechnician(conn = db) {
   const configuredId = String(process.env.CALL_BOOKING_DEFAULT_TECHNICIAN_ID || '').trim();
   if (configuredId) {
@@ -9782,6 +9808,32 @@ const CallRecordingProcessor = {
       extracted = held.extracted;
       dictationEmailPayload = held.dictationEmailPayload;
       logger.info(`[call-proc] V1/V2 email disagreement held for read-back on ${maskSid(callSid)}`);
+    }
+
+    // Whole-structure calls (GATE_CALL_WHOLE_STRUCTURE_NO_UNIT, owner ruling
+    // 2026-09-30): a WDO inspection or termite pre-treat/perimeter job is not
+    // held for a missing unit number. The verdict is rewritten HERE, once,
+    // after the shadow row persisted the ORIGINAL — so the enforce gate, the
+    // shadow bridge and the audit path all read the same waived verdict. The
+    // service is resolved the way the booking below resolves it (catalog row
+    // first, coarse label only when no catalog row matched). Gate off, or any
+    // non-qualifying call, returns the verdict object untouched.
+    if (v2AddressValidation && isEnabled('callWholeStructureNoUnit') && isMissingUnitNumber(v2AddressValidation)) {
+      try {
+        const wsAv = wholeStructureUnitWaiverForCall({
+          addressValidation: v2AddressValidation,
+          extracted,
+          transcription,
+          services: bookableCallServices,
+          property: v2Result?.extraction?.property,
+        });
+        if (wsAv !== v2AddressValidation) {
+          logger.info(`[call-proc] Unit-less whole-structure address waived for ${maskSid(callSid)} (service ${wsAv.wholeStructureUnitWaived.service})`);
+          v2AddressValidation = wsAv;
+        }
+      } catch (wsErr) {
+        logger.warn(`[call-proc] whole-structure unit waiver failed open (hold stands) for ${maskSid(callSid)}: ${wsErr.message}`);
+      }
     }
 
     // ── Garbled-street recovery (every mode; consumed by BOTH gates) ─────
@@ -20835,6 +20887,7 @@ CallRecordingProcessor._test = {
   isLiveLeadConversation,
   summarizeCustomerServiceContext,
   resolveSchedulableCallService,
+  wholeStructureUnitWaiverForCall,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
   slotOnlyLinkAllowed,
