@@ -34,3 +34,30 @@ test('an amount-free settlement claim is rechecked against current billing', asy
   await expect(run("You're paid up!", [], { outstandingBalance: 40 })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
   await expect(run("You're paid up!", [], {})).resolves.toEqual({ stale: false });
 });
+
+// Codex round-14 P1: an "unpaid" assertion binds to a CURRENT open obligation at send time
+// too — an invoice voided/canceled after the draft (no paid row, nothing open) blocks the send.
+describe('a queued "still unpaid" reply is rechecked against the invoice that is open NOW', () => {
+  const { amountFreeStatusClaimStale } = require('../services/sms-amount-recheck');
+  const check = (body, extra) => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], extra));
+    return amountFreeStatusClaimStale({ customerId: 'c1', body, strict: true, dbh });
+  };
+  test.each(['This invoice is still unpaid.', 'Your invoice is unpaid.', "Your payment hasn't been paid."])('%s', async (body) => {
+    await expect(check(body, { outstandingBalance: 95 })).resolves.toEqual({ stale: false }); // open at draft time
+    await expect(check(body, { outstandingBalance: 0, openInvoice: null })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' }); // voided after the draft
+  });
+  test('with a figure: the amount must still be owed AND something must be open (outgoingAmountsStale)', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 95 }));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your $95 invoice is unpaid.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([], { outstandingBalance: 0, openInvoice: null }));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your $95 invoice is unpaid.', promptVersion: 'house_voice_v12_real_answers_cf_pf', dbh })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+  });
+  test('a multi-family reply is rechecked against every family at send time', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ ...paid, status: 'refunded' }], {}));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your payment was refunded after it failed.', strict: true, dbh }))
+      .resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'Your payment was refunded.', strict: true, dbh }))
+      .resolves.toEqual({ stale: false });
+  });
+});

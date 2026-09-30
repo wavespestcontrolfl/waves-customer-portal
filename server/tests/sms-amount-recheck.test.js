@@ -220,6 +220,28 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: invoiceRow, dbh: expect.any(Function) });
   });
 
+  // Codex round-14 P2: the visibility check's SPECIFIC reason survives, so the scheduler's
+  // reviewer-facing mapping for it is reachable.
+  test.each([
+    ['payer_owned', 'payer_owned'],
+    ['payer_unverifiable', 'payer_unverifiable'],
+    ['credit_unverifiable', 'credit_unverifiable'],
+    ['eligibility_unverifiable', 'zelle_recheck_failed'],
+    ['not_eligible', 'zelle_invoice_ineligible'],
+    ['credit_pending', 'zelle_invoice_ineligible'],
+    ['invoice_not_found', 'zelle_invoice_ineligible'],
+    ['not_configured', 'zelle_invoice_ineligible'],
+    [undefined, 'zelle_invoice_ineligible'],
+  ])('visibility reason %s => recheck reason %s (and the scheduler note for it is specific)', async (visibilityReason, expected) => {
+    const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
+    payPageZelleVisibility.mockResolvedValue({ visible: false, reason: visibilityReason });
+    await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }) }))
+      .resolves.toEqual({ eligible: false, reason: expected });
+    const { amountsStaleNote } = require('../services/scheduler');
+    const generic = 'no longer accurate';
+    if (expected !== 'zelle_invoice_ineligible') expect(amountsStaleNote(expected)).not.toMatch(generic);
+  });
+
   test('the invoice resolves and is still eligible', async () => {
     const invoiceRow = { id: 'inv-1', customer_id: 'c1', status: 'open' };
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });

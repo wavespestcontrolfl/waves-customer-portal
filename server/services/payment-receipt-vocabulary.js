@@ -202,20 +202,34 @@ function insideQuestion(text, index) {
   const m = /[.!?;\u2014\u2013\n]/.exec(String(text || '').slice(index));
   return !!m && m[0] === '?';
 }
-function paymentStatusPhraseClaim(clause, namesPayment = false) {
+// Codex round-14 P1: EVERY status family a clause asserts, not just the first. "Your
+// payment was refunded after it failed" asserts BOTH refunded and failed; returning only
+// the first table match let it validate against the refunded row alone. [] = no status
+// claim; ['negated'] = any negated positive-family claim in the clause (fail closed —
+// the binder cannot judge it); otherwise the distinct families in table order.
+function paymentStatusPhraseFamilies(clause, namesPayment = false) {
   const text = String(clause || '');
-  if (!namesPayment && !PAYMENT_NOUN_RE.test(text)) return null;
+  if (!namesPayment && !PAYMENT_NOUN_RE.test(text)) return [];
+  const families = [];
+  let negated = false;
   for (const [family, re] of STATUS_PHRASE_RES) {
     const m = re.exec(text);
     if (!m || insideQuestion(text, m.index)) continue;
-    if (POSITIVE_FAMILIES.has(family) && NEGATOR_BEFORE_RE.test(text.slice(0, m.index))) return 'negated';
-    return family;
+    if (POSITIVE_FAMILIES.has(family) && NEGATOR_BEFORE_RE.test(text.slice(0, m.index))) { negated = true; continue; }
+    families.push(family);
   }
+  if (negated) return ['negated'];
+  if (families.length) return families;
   // "didn't fail", "wasn't declined", "not refunded" forms whose positive stem
   // is not itself a table phrase: still a negated status claim.
   const stem = NEGATED_STEM_RE.exec(text);
-  if (stem && !insideQuestion(text, stem.index)) return 'negated';
-  return null;
+  if (stem && !insideQuestion(text, stem.index)) return ['negated'];
+  return [];
+}
+// The FIRST asserted family (null | 'negated' | family) — the single-claim view kept for
+// callers that only need "does this clause assert a status at all".
+function paymentStatusPhraseClaim(clause, namesPayment = false) {
+  return paymentStatusPhraseFamilies(clause, namesPayment)[0] || null;
 }
 // Codex round-12 P1: ONE table of SETTLEMENT phrases ("nothing is owed" claims),
 // feeding the drafter's settlement classifier AND the prescreen so a phrase can
@@ -282,6 +296,7 @@ module.exports = {
   PAYMENT_STATUS_VOCABULARY,
   ANY_STATUS,
   inboundNamesPayment,
+  paymentStatusPhraseFamilies,
   paymentStatusPhraseClaim,
   paymentStatusPromptLine,
   mayAssertPaymentStatus,

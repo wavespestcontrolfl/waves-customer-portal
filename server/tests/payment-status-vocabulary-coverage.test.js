@@ -136,9 +136,81 @@ describe('round-13: literal paid / unpaid forms', () => {
     expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 120 }))).toBe(false);
     expect(rq('Your $120 invoice is unpaid.', ctx([paid], { outstandingBalance: 120 }))).toBe(true); // a paid $120 row contradicts
     expect(rq('Your $120 invoice is unpaid.', ctx([], { outstandingBalance: 50 }))).toBe(true); // $120 is not owed
-    expect(rq('This invoice is unpaid.', ctx([]))).toBe(false);
-    expect(rq('This invoice is unpaid.', ctx([paid]))).toBe(true);
+    expect(rq('This invoice is unpaid.', ctx([], { outstandingBalance: 120 }))).toBe(false);
+    expect(rq('This invoice is unpaid.', ctx([paid], { outstandingBalance: 120 }))).toBe(true);
     expect(rq('You have an unpaid balance of $50.', ctx([], { outstandingBalance: 50 }))).toBe(false); // owed language, untouched
+    expect(r).toBeTruthy();
+  });
+});
+
+// Codex round-14 P1: an unpaid/owed status assertion must bind to a CURRENT open obligation.
+describe('round-14: "unpaid" needs a current open invoice or balance', () => {
+  const base = { billing: { outstandingBalance: 0, recentPayments: [] } };
+  const withOpen = (over = {}) => ({ billing: { ...base.billing, ...over } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const CLAIMS = ['This invoice is still unpaid.', 'Your invoice is unpaid.', "Your payment hasn't been paid.", 'Your account shows as unpaid.'];
+
+  test('open invoice / positive balance grounds it; nothing open (voided or canceled after the draft) does not', () => {
+    for (const claim of CLAIMS) {
+      expect({ claim, open: rq(claim, withOpen({ outstandingBalance: 95 })) }).toEqual({ claim, open: false });
+      expect({ claim, invoice: rq(claim, withOpen({ openInvoice: { amountDue: 95 } })) }).toEqual({ claim, invoice: false });
+      // the void-after-draft case: the send-time recheck re-reads billing and finds nothing open
+      expect({ claim, voided: rq(claim, withOpen({ outstandingBalance: 0, openInvoice: null })) }).toEqual({ claim, voided: true });
+    }
+  });
+
+  test('money merely in flight is not an open obligation for an unpaid claim', () => {
+    expect(rq('This invoice is unpaid.', withOpen({ hasProcessingPayment: true }))).toBe(true);
+  });
+
+  test('billing unavailable is still unknowable', () => {
+    expect(rq('This invoice is unpaid.', { billing: { unavailable: true } })).toBe(true);
+    expect(rq('This invoice is unpaid.', {})).toBe(true);
+  });
+});
+
+// Codex round-14 P1: every status family a clause asserts must bind (or the clause is ungrounded).
+describe('round-14: a clause asserting several status families is validated against ALL of them', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const row = (status, extra = {}) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card', ...extra });
+  const { paymentStatusPhraseFamilies } = V;
+
+  test('the classifier reports every family, in table order', () => {
+    expect(paymentStatusPhraseFamilies('Your payment was refunded after it failed')).toEqual(['refunded', 'failed']);
+    expect(paymentStatusPhraseFamilies('Your payment was refunded')).toEqual(['refunded']);
+    expect(paymentStatusPhraseFamilies('Your payment is still processing')).toEqual(['pending']);
+    expect(paymentStatusPhraseFamilies('Your payment was not refunded after it failed')).toEqual(['negated']);
+    expect(paymentStatusPhraseFamilies('We are processing your invoice request')).toEqual([]);
+  });
+
+  test('"refunded after it failed" is ungrounded whatever rows exist (one payment cannot be both)', () => {
+    const r = 'Your payment was refunded after it failed.';
+    expect(rq(r, ctx([row('refunded')]))).toBe(true);
+    expect(rq(r, ctx([row('failed')]))).toBe(true);
+    expect(rq(r, ctx([row('refunded'), row('failed', { payment_date: '2026-08-01' })]))).toBe(true);
+    expect(rq(r, ctx([]))).toBe(true);
+    // the same with a figure and a date
+    const r2 = 'Your $120 payment from Sep 12 was refunded after it failed.';
+    expect(rq(r2, ctx([row('refunded')]))).toBe(true);
+    expect(rq(r2, ctx([row('refunded'), row('failed')]))).toBe(true);
+  });
+
+  test('other incompatible pairs are ungrounded too; a single family with its row still passes', () => {
+    expect(rq('Your payment was refunded after it was disputed.', ctx([row('refunded'), row('disputed')]))).toBe(true);
+    expect(rq('Your payment failed while it is still processing.', ctx([row('failed'), row('processing')]))).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 was refunded.', ctx([row('refunded')]))).toBe(false);
+    expect(rq('Your $120 payment from Sep 12 failed.', ctx([row('failed')]))).toBe(false);
+    expect(rq('Your $120 payment from Sep 12 is still processing.', ctx([row('processing')]))).toBe(false);
+  });
+
+  test('compatible pairs pass only when EACH family binds', () => {
+    // refunded + reversed describe the same reversed payment
+    const r = 'Your $120 payment from Sep 12 was refunded and reversed.';
+    const single = 'Your $120 payment from Sep 12 was refunded, so it was reversed.';
+    expect(rq(single, ctx([row('refunded')]))).toBe(false);
+    expect(rq(single, ctx([row('failed')]))).toBe(true);
+    expect(rq(single, ctx([]))).toBe(true);
     expect(r).toBeTruthy();
   });
 });

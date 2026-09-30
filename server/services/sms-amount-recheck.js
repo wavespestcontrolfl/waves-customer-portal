@@ -203,6 +203,19 @@ function outgoingZelleStale(body) {
   return ok ? { stale: false } : { stale: true, reason: 'zelle_recipient_stale' };
 }
 
+// Codex round-14 P2: keep the SPECIFIC reason the shared visibility check gave, so the
+// scheduler's reviewer-facing note (AMOUNT_BLOCK_NOTES) says what actually changed
+// (a third-party payer took the invoice / the payer or credit state could not be
+// verified) instead of one generic "no longer eligible". Reasons with no reviewer
+// mapping of their own stay the generic ineligible; a probe that could not complete
+// is the recheck-failed reason.
+const PASSTHROUGH_ZELLE_REASONS = new Set(['payer_owned', 'payer_unverifiable', 'credit_unverifiable']);
+function zelleRecheckReason(visibilityReason) {
+  if (PASSTHROUGH_ZELLE_REASONS.has(visibilityReason)) return visibilityReason;
+  if (visibilityReason === 'eligibility_unverifiable') return 'zelle_recheck_failed';
+  return 'zelle_invoice_ineligible';
+}
+
 /**
  * Pre-push audit P1 (finding 2): a Zelle contact that still matches the
  * CURRENT recipient (outgoingZelleStale above) is not enough on its own —
@@ -243,7 +256,7 @@ async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db 
     }
     const { payPageZelleVisibility } = require('../routes/pay-v2');
     const visibility = await payPageZelleVisibility({ invoice: invoiceRow, dbh });
-    return visibility.visible ? { eligible: true } : { eligible: false, reason: 'zelle_invoice_ineligible' };
+    return visibility.visible ? { eligible: true } : { eligible: false, reason: zelleRecheckReason(visibility.reason) };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] Zelle eligibility recheck failed for customer ${customerId}: ${err.message}; blocking send`);
     return { eligible: false, reason: 'zelle_recheck_failed' };

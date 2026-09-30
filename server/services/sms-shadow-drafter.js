@@ -1241,7 +1241,7 @@ const AMOUNT_MASK_RE = /(?:\$|\bUSD\s?)\s?\d[\d,]*(?:\.\d{1,2})?|\b\d[\d,]*(?:\.
 // through/got/came through/cleared/posted/arrived" + "thank(s|you) for …
 // payment", also used by sms-amount-recheck.js's classifyZelleClause) rather
 // than a second, independently-maintained copy of the same words.
-const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, ZERO_BALANCE_RE, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
+const { paymentAckPatternSource, paymentStatusPhraseClaim, paymentStatusPhraseFamilies, paymentStatusPromptLine, PAYMENT_STATUS_VOCABULARY, ANY_STATUS, inboundNamesPayment, SETTLEMENT_PHRASE_RE, ZERO_BALANCE_RE, PAYMENT_EVENT_SUBJECT, insideQuestion } = require('./payment-receipt-vocabulary');
 const PAYMENT_ACK_RE = new RegExp(paymentAckPatternSource(), 'i');
 // Pre-push audit P1: PAYMENT_ACK_RE matches the same received/paid/all-set
 // vocabulary whether or not it's negated, so a truthful denial ("we
@@ -1354,6 +1354,15 @@ function billingAmountCents(context, { settledOnly = false } = {}) {
 // money — an open invoice with an amount due, or a positive outstanding
 // balance. Deliberately excludes published monthly dues (see
 // authorizedDuesCents), which authorize QUOTING a price, not owing it.
+// Codex round-14 P1: an OPEN obligation right now — an invoice with an amount due or a
+// positive outstanding balance. Unlike billingHasOutstandingObligation this EXCLUDES money
+// merely in flight: "this invoice is still unpaid" asserts a live demand, and a voided/
+// canceled invoice (no open invoice, zero balance, no paid row either) must not keep
+// grounding it.
+function billingHasOpenObligation(context) {
+  const billing = context?.billing || {};
+  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0;
+}
 function billingHasOutstandingObligation(context) {
   const billing = context?.billing || {};
   // Codex round-11 P1: money still IN FLIGHT (a processing/pending payment row,
@@ -1630,6 +1639,7 @@ function buildGroundingEnv(reply, context, opts) {
     // "is anything owed" (settlement claims) = an open invoice or positive
     // balance — never the quotable-price set (round-6 audit P1).
     hasOutstandingObligation: billingHasOutstandingObligation(context),
+    hasOpenObligation: billingHasOpenObligation(context),
     // billing missing/unavailable is UNKNOWABLE, never an empty account
     // (round-6 P1 + missing-context sweep).
     billingUnavailable: !context?.billing || typeof context.billing !== 'object' || !!context.billing.unavailable,
@@ -1645,7 +1655,11 @@ function buildGroundingEnv(reply, context, opts) {
 // Classify ONE (already amount-masked) clause. Kinds: negated | status | absence
 // | ack | settlement | negated_ack | owed | trusted_owed | ambiguous | none.
 function classifyPaymentClause(masked, hasAmounts, env) {
-  const phrase = paymentStatusPhraseClaim(masked, hasAmounts || inboundNamesPayment(env.inboundText));
+  const families = paymentStatusPhraseFamilies(masked, hasAmounts || inboundNamesPayment(env.inboundText));
+  // Codex round-14 P1: a clause asserting SEVERAL different status families is validated
+  // against every one of them (one validator, KIND_VALIDATORS.multi), never just the first.
+  if (families.length > 1 && !families.includes('negated')) return { kind: 'multi', families };
+  const phrase = families[0] || null;
   if (phrase === 'negated') return { kind: 'negated' };
   if (phrase === 'not_found' || phrase === 'not_received') return { kind: 'absence', family: phrase };
   if (phrase === 'unpaid') return { kind: 'unpaid', family: phrase };
@@ -1733,15 +1747,43 @@ function validateAbsenceClaim(c, env) {
   return contradicted || (!vague && !!hist && hist.complete === false);
 }
 
+// "is unpaid" (Codex round-14 P1): contradicted by a PAID row like any absence claim; being
+// owed-shaped, any figure it states must itself be owed; and it asserts a LIVE demand, so it
+// must bind to a CURRENT open invoice or outstanding balance — a voided/canceled invoice
+// (no paid row, nothing open) never grounds it, at draft time or at the send-time recheck.
+function validateUnpaidClaim(c, env) {
+  if (!env.hasOpenObligation) return true;
+  return validateAbsenceClaim(c, env) || c.amounts.some((a) => !env.owedCents.has(a));
+}
+const PRESENCE_FAMILIES = new Set(['pending', 'failed', 'refunded', 'disputed', 'reversed']);
+function validateFamilyClaim(family, c, env) {
+  if (family === 'unpaid') return validateUnpaidClaim({ ...c, family }, env);
+  if (family === 'not_found' || family === 'not_received') return validateAbsenceClaim({ ...c, family }, env);
+  return validateStatusClaim({ ...c, family }, env);
+}
+// A clause that asserts two or more different families is grounded only if EVERY family
+// binds. Presence families ("refunded", "failed", "disputed", "pending") describe ONE
+// payment's status, so they must share at least one row status — "refunded after it failed"
+// can never be a single row and is ungrounded whatever rows exist (fail closed).
+function validateMultiFamilyClaim(c, env) {
+  const presence = c.families.filter((f) => PRESENCE_FAMILIES.has(f));
+  if (presence.length > 1) {
+    const sets = presence.map((f) => new Set(PAYMENT_STATUS_VOCABULARY[f].rowStatuses));
+    const shared = [...sets[0]].filter((st) => sets.every((set) => set.has(st)));
+    if (!shared.length) return true;
+  }
+  return c.families.some((f) => validateFamilyClaim(f, c, env));
+}
+
 // Each kind's ONE validator: true = ungrounded.
 const KIND_VALIDATORS = {
+  multi: validateMultiFamilyClaim,
   negated: () => true, // a negated presence claim is not judgeable (round-9)
   ambiguous: () => true, // reads as both or neither of owed/receipt (round-5/6)
   status: validateStatusClaim,
   absence: validateAbsenceClaim,
-  // "is unpaid": contradicted by a paid row like any absence claim, AND — being
-  // owed-shaped — any figure it states must itself be owed (round-13).
-  unpaid: (c, env) => validateAbsenceClaim(c, env) || c.amounts.some((a) => !env.owedCents.has(a)),
+  // "is unpaid": see validateUnpaidClaim (paid-row contradiction + owed figure + a CURRENT open obligation).
+  unpaid: validateUnpaidClaim,
   ack: validateAck,
   // a negated ack ("wasn't processed") with a figure is never a binding claim;
   // amount-free it is a truthful denial and untouched (round-10 P1 polarity).
