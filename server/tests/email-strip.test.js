@@ -85,6 +85,8 @@ describe('stripQuotedAndSignature', () => {
     test('a dated / addressed quote header still cuts', () => {
       expect(stripQuotedAndSignature('Sounds good. On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: see you then')).toBe('Sounds good.');
       expect(stripQuotedAndSignature('Sounds good. On 09/09/2026 8:29 AM, Jane wrote: see you then')).toBe('Sounds good.');
+      // Any case: some clients write the header lower-case (Codex #5422 r3).
+      expect(stripQuotedAndSignature('Sounds good. on Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: see you then')).toBe('Sounds good.');
     });
 
     test('the digit or address must sit inside the header, before the first "wrote:"', () => {
@@ -111,5 +113,10 @@ describe('ownReplySubject', () => {
     expect(ownReplySubject('FW: Please cancel service', [])).toBe('');
     expect(ownReplySubject('Re: Fwd: Please cancel service', [])).toBe('');
     expect(ownReplySubject('Forward this to Adam please', [])).toBe('Forward this to Adam please');
+    // Localized clients' forward prefixes (Codex #5422 r3).
+    for (const prefix of ['WG', 'RV', 'TR', 'ENC', 'Doorst', 'VB', 'VL', 'AW: WG']) {
+      expect(ownReplySubject(`${prefix}: Please cancel service`, [])).toBe('');
+    }
+    expect(ownReplySubject('AW: Please cancel service', ['Please cancel service'])).toBe('');
   });
 });

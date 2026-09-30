@@ -140,6 +140,19 @@ describe('sms-operational-extractor channel param', () => {
       expect(negated.obligations).toHaveLength(0);
     });
 
+    test('email: a reminder idiom opening the body stays affirmative under a subject', () => {
+      const result = groundExtraction(ask("Don't forget to send the estimate", 'send the estimate'),
+        { message: baseMessage("Don't forget to send the estimate", { subject: 'Service update' }), channel: 'email' });
+      expect(result.obligations).toHaveLength(1);
+    });
+
+    test('email: the subject counts toward the length ceiling', () => {
+      const result = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
+        { message: baseMessage('', { subject: `Please reschedule Friday ${'x'.repeat(6000)}` }), channel: 'email' });
+      expect(result.obligations).toHaveLength(0);
+      expect(result.dropped).toBeGreaterThanOrEqual(1);
+    });
+
     test('SMS: a subject key is never a grounding source', () => {
       const result = groundExtraction(ask('Please reschedule Friday', 'reschedule Friday'),
         { message: baseMessage('Thanks', { subject: 'Please reschedule Friday' }) });

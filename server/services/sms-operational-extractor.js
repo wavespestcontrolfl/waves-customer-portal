@@ -259,6 +259,11 @@ function promiseDueDate(dueText, value, sentAt) {
   return day <= etDateString(addETDays(sent, 14)) ? day : null;
 }
 
+// An email's subject is part of its source, so it counts toward the
+// channel's length ceiling too: an over-limit message yields no obligations.
+const sourceLength = (message, channel) => String(message.message_body || '').length
+  + (channel === 'email' ? String(message.subject || '').length : 0);
+
 function groundExtraction(parsed, { message, properties = [], captureCommitments = true, captureAdditionalProperties = false, channel = 'sms' }) {
   if (!validate(parsed)) throw new Error('sms_operations_invalid_schema');
   if (stringifySmsEvidence(parsed) !== JSON.stringify(parsed)) throw new Error('sms_operations_sensitive_output');
@@ -283,6 +288,8 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   // An opening reminder idiom is affirmative; keep every later qualifier
   // visible so "don't forget to NOT call" still requires human review.
   const instructionOf = (text) => text.replace(/^(?:please\s+)?(?:don['’]t|do not)\s+forget\s+to\b/i, '');
+  // Per field, so a subject line never hides the idiom opening the body.
+  const instruction = [subject, body].filter(Boolean).map(instructionOf).join('\n');
   const propertyIds = new Set(properties.map((p) => p.id));
   const grounded = (item) => (body.includes(normalize(item.quote)) || (!!subject && subject.includes(normalize(item.quote))))
     && (!item.property_id || propertyIds.has(item.property_id));
@@ -298,9 +305,8 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   // name it; anything else ("I'll send you photos" is a customer kind) is a
   // general promise, never a reason to drop it (Codex #5248 r2 P1).
   const promiseKind = (item) => (kindBelongsToParty('waves', item.kind) && kindEvident(item) ? item.kind : 'other');
-  const obligations = (captureCommitments && message.message_body.length <= obligationLimit ? parsed.obligations : []).filter((item) => {
+  const obligations = (captureCommitments && sourceLength(message, channel) <= obligationLimit ? parsed.obligations : []).filter((item) => {
     if (!grounded(item)) return false;
-    const instruction = instructionOf(source.text);
     if (!normalize(item.quote).includes(normalize(item.description))) return false;
     if (outbound) return item.party === 'waves' && item.basis === 'promise' && item.promise_firm === true;
     if (!kindBelongsToParty(item.party, item.kind)) return false;
@@ -373,7 +379,7 @@ function groundExtraction(parsed, { message, properties = [], captureCommitments
   const dropped = factDropped + obligationDropped + additional.length - additional_properties.length;
   // Address capture may inspect a longer source, but its other instructions
   // still need the existing operational-review exception even for empty arrays.
-  return { obligations, facts, additional_properties, dropped: message.message_body.length > obligationLimit ? Math.max(1, dropped) : dropped };
+  return { obligations, facts, additional_properties, dropped: sourceLength(message, channel) > obligationLimit ? Math.max(1, dropped) : dropped };
 }
 
 async function extractSmsOperations(context) {
@@ -381,7 +387,7 @@ async function extractSmsOperations(context) {
   const bodyLimit = context.captureAdditionalProperties ? 6000 : (BODY_LIMIT[channel] || BODY_LIMIT.sms);
   // Whole-source facts must fit the narrowest schema field. Longer SMS
   // go to the existing exception path, even if a provider would return [].
-  if (context.message.message_body.length > bodyLimit) return { obligations: [], facts: [], additional_properties: [], dropped: 1 };
+  if (sourceLength(context.message, channel) > bodyLimit) return { obligations: [], facts: [], additional_properties: [], dropped: 1 };
   let prompt;
   try { prompt = buildPrompt(context); } catch (err) {
     if (err.message === 'sms_operations_source_boundary_changed') return { obligations: [], facts: [], dropped: 1 };

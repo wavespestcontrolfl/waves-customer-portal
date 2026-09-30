@@ -32,7 +32,7 @@ const { extractSmsOperations, VERSION: EXTRACTOR_VERSION } = require('./sms-oper
 const { loadSmsFulfillmentEvidence, verifySmsFulfillment, revalidateSmsFulfillment, admissibleWitness, PAYMENT_WITNESS_KINDS } = require('./sms-commitment-fulfillment');
 const { ringOverdueBell, keptLate, resolveDueDeadline } = require('./sms-operational-actions');
 const { resolveEmailCustomerLink, personSentFilter } = require('./email/email-customer-link');
-const { stripQuotedAndSignature, emailPlainText, ownSubjectInThread } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
 const NotificationService = require('./notification-service');
 
 const VERSION = `${EXTRACTOR_VERSION}:email`;
@@ -79,9 +79,9 @@ const subjectOf = (email) => String(email?.subject || '').trim();
 // Only a subject that is new text counts as the email's words: every reply
 // repeats the thread subject behind "Re:", which would otherwise re-extract
 // the original ask, or pin it on a staff send (same rule as email_reply;
-// only earlier messages in the thread count — ownSubjectInThread).
+// only earlier messages in the thread count — ownSubjectsInThreads).
 async function withOwnSubject(conn, email) {
-  return { ...email, subject: await ownSubjectInThread(conn, email) };
+  return { ...email, subject: (await ownSubjectsInThreads(conn, [email])).get(email.id) };
 }
 const sourceHash = (email) => hashExtractionSource(JSON.stringify([subjectOf(email), emailPlainText(email)]));
 

@@ -14,7 +14,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 const { operatorReply, personCallBack, smsDelivered, smsContactSelects, callContactSelects } = require('./staff-contact');
 const { etDateString, dateOnlyString } = require('../utils/datetime-et');
 const { personSentFilter, resolveEmailCustomerLink } = require('./email/email-customer-link');
-const { stripQuotedAndSignature, emailPlainText, ownSubjectInThread } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText, ownSubjectsInThreads } = require('./email/email-strip');
 const { gateEnvValue, gateEnvTimestamp } = require('../config/feature-gates');
 
 const LIMIT = 50;
@@ -355,12 +355,13 @@ async function loadSmsFulfillmentEvidence(conn, commitment, message, now) {
       // signature) is no reply at all, so it never witnesses one.
       // A reply's subject is part of its words too ("Booked you for Monday
       // 9am" over a body of "Thanks") — but only a subject that is new text,
-      // never the thread's subject behind "Re:" (ownSubjectInThread).
+      // never the thread's subject behind "Re:" (ownSubjectsInThreads).
+      const linked = resolved.filter(({ linkedCustomerId }) => String(linkedCustomerId) === String(customerId)).map(({ row }) => row);
+      const ownSubjects = await ownSubjectsInThreads(conn, linked);
       const rows = [];
-      for (const { row, linkedCustomerId } of resolved) {
-        if (String(linkedCustomerId) !== String(customerId)) continue;
+      for (const row of linked) {
         const { body_html: _html, ...rest } = row;
-        const own = row.subject ? await ownSubjectInThread(conn, row, LIMIT) : '';
+        const own = ownSubjects.get(row.id);
         const text = [own && `Subject: ${own}`, stripQuotedAndSignature(emailPlainText(row))].filter(Boolean).join('\n');
         if (text) rows.push({ ...rest, body_text: text });
       }
