@@ -205,19 +205,44 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(await schedules(c)).toHaveLength(1);
     });
 
-    test('a unique-violation on the open index (a promotion that bypassed the lock) is tolerated and undoes nothing else', async () => {
+    test('a unique-violation on the open index (a promotion that slipped past the lock) is tolerated', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 30, step: 3 });
+      const b = await member(c, { sentDaysAgo: 20, step: 2 });
+      mockResolve.mockResolvedValue(setFor([a, b]));
+      const rival = { transaction: async () => { throw Object.assign(new Error('duplicate key'), { code: '23505' }); } };
+      expect(await Schedule.promoteCustomer(c, NOW, { database: rival })).toMatchObject({ promoted: false, reason: 'concurrent_promotion' });
+      // and the real index does refuse a second open episode
+      await app('customer_dunning_schedules').insert({ customer_id: c, episode: 1, status: 'active', step_index: 2 });
+      await expect(app('customer_dunning_schedules').insert({ customer_id: c, episode: 2, status: 'held', step_index: 2 })).rejects.toMatchObject({ code: '23505' });
+      expect((await seqRow(a.seq.id)).status).toBe('active'); // per-invoice rows untouched
+    });
+
+    test('the set resolve runs OUTSIDE the promotion transaction (no Stripe I/O under the advisory lock)', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 30, step: 3 });
+      const b = await member(c, { sentDaysAgo: 20, step: 2 });
+      let lockedDuringResolve = null;
+      mockResolve.mockImplementation(async () => {
+        const [{ n }] = (await app.raw("select count(*)::int as n from pg_locks where locktype = 'advisory' and granted")).rows;
+        lockedDuringResolve = n;
+        return setFor([a, b]);
+      });
+      const before = (await app.raw("select count(*)::int as n from pg_locks where locktype = 'advisory' and granted")).rows[0].n;
+      expect((await Schedule.promoteCustomer(c, NOW, { database: app })).promoted).toBe(true);
+      expect(lockedDuringResolve).toBe(before);
+    });
+
+    test('a member that stopped being active between the resolve and the lock is not promoted over', async () => {
       const c = await customer();
       const a = await member(c, { sentDaysAgo: 30, step: 3 });
       const b = await member(c, { sentDaysAgo: 20, step: 2 });
       mockResolve.mockImplementation(async () => {
-        // a rival commits an open episode AFTER our open-check, on its own connection, holding no advisory lock
-        await app('customer_dunning_schedules').insert({ customer_id: c, episode: 1, status: 'active', step_index: 2 });
-        return setFor([a, b]);
+        const set = setFor([a, b]);
+        await app('invoice_followup_sequences').where({ id: b.seq.id }).update({ status: 'stopped' }); // stopped after the set was read
+        return set;
       });
-      const out = await Schedule.promoteCustomer(c, NOW, { database: app });
-      expect(out).toMatchObject({ promoted: false, reason: 'concurrent_promotion' });
-      expect(await schedules(c)).toHaveLength(1);
-      expect((await seqRow(a.seq.id)).status).toBe('active'); // per-invoice rows untouched
+      expect(await Schedule.promoteCustomer(c, NOW, { database: app })).toMatchObject({ promoted: false, reason: 'fewer_than_two_active_members' });
     });
 
     test('a closed episode frees the customer: the next promotion is episode 2', async () => {

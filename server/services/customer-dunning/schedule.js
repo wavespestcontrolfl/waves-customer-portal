@@ -174,12 +174,18 @@ async function insertSchedule(trx, customerId, decision, now) {
   return row;
 }
 
-async function promoteInTransaction(trx, customerId, now) {
+// The set was resolved BEFORE this transaction (the resolve makes Stripe
+// calls; nothing slow may run under the advisory lock, row locks or a pooled
+// connection). What the lock protects is the decision: the member rows are
+// re-read FOR UPDATE here and promotionDecision narrows the pre-resolved set
+// to the rows that are STILL active, so a member that changed in between
+// cannot be promoted over. A stale set is harmless anyway — promotion never
+// sends, and every send re-resolves and re-checks at the boundary.
+async function promoteInTransaction(trx, customerId, set, now) {
   await takeLock(trx, customerId);
   if (await openScheduleFor(customerId, { database: trx })) return { promoted: false, reason: 'already_open' };
   const rows = await activeMemberRows(customerId, { database: trx, forUpdate: true });
   if (rows.some((r) => claimIsFresh(r, now))) return { promoted: false, reason: 'member_claim_fresh' };
-  const set = await resolveDunnableSet(customerId, { database: trx, now });
   const decision = promotionDecision(set, rows, now);
   if (!decision.promote) return { promoted: false, reason: decision.reason };
   const schedule = await insertSchedule(trx, customerId, decision, now);
@@ -187,14 +193,16 @@ async function promoteInTransaction(trx, customerId, now) {
 }
 
 /**
- * Promote ONE customer under the advisory lock. Never sends: `next_touch_at`
- * is always a future run's anchor (seed.js). A concurrent promotion loses on
- * the open unique index (23505), which is caught and reported — nothing else
- * was written in the losing transaction, so there is nothing to undo.
+ * Promote ONE customer. Never sends: `next_touch_at` is always a future run's
+ * anchor (seed.js). A concurrent promotion loses on the open unique index
+ * (23505), which is caught and reported — nothing else was written in the
+ * losing transaction, so there is nothing to undo.
  */
 async function promoteCustomer(customerId, now = new Date(), { database = db } = {}) {
+  const set = await resolveDunnableSet(customerId, { database, now });
+  if (set.kind !== 'multi') return { promoted: false, reason: set.kind === 'hold' ? set.reason : `set_${set.kind}` };
   try {
-    return await database.transaction((trx) => promoteInTransaction(trx, customerId, now));
+    return await database.transaction((trx) => promoteInTransaction(trx, customerId, set, now));
   } catch (err) {
     if (err.code === '23505') {
       logger.info(`[customer-dunning] promotion of customer ${customerId} lost the race to a concurrent promotion`);
