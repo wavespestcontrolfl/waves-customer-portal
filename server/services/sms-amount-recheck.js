@@ -78,7 +78,9 @@ const ZELLE_NEGATION_RE = new RegExp(
   `\\b${ZELLE_NEGATOR}\\s+(?:(?:be\\s+able\\s+to|able\\s+to|currently|right\\s+now|really|anymore)\\s+)*`
   + '(?:(?:take|taking|accept|accepting|offer|offering|support|supporting|use|using|do|have|allow|process|processing)\\s+)?'
   + '(?:(?:any|payments?|transfers?|us|our|the|a)\\s+)*(?:(?:via|by|through|with|using)\\s+)?zelle\\b'
-  + "|\\bzelle\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:isn'?t|is\\s+not|aren'?t|are\\s+not|is\\s+unavailable|is\\s+no\\s+longer|not\\s+available|unavailable|not\\s+currently|no\\s+longer|not\\s+right\\s+now|not\\s+accepted|not\\s+supported|won'?t\\s+work|doesn'?t\\s+work)\\b",
+  + "|\\bzelle\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:isn'?t|is\\s+not|aren'?t|are\\s+not|is\\s+unavailable|is\\s+no\\s+longer|not\\s+available|unavailable|not\\s+currently|no\\s+longer|not\\s+right\\s+now|not\\s+accepted|not\\s+supported|won'?t\\s+work|doesn'?t\\s+work)\\b"
+  // Codex round-30 P2: SUBJECT-FIRST modal denials — "Zelle cannot be used", "Zelle won't be available", "Zelle could not be offered"
+  + "|\\bzelle\\b\\s+(?:(?:payments?|transfers?)\\s+)?(?:can'?t|cannot|can\\s+not|couldn'?t|could\\s+not|won'?t|will\\s+not|wouldn'?t|would\\s+not|shouldn'?t|should\\s+not|may\\s+not|might\\s+not)\\s+(?:be\\s+)?(?:used|offered|accepted|available|supported|taken|processed|possible|an?\\s+option)\\b",
   'i',
 );
 // Same clause-boundary split as the drafter's own CLAUSE_SPLIT_RE (not
@@ -126,7 +128,7 @@ const ZELLE_OFFER_RE = /\b(?:can|could|may|feel free to|please)\b[^.\n]{0,30}\bz
 // "Thanks for processing my Zelle payment!" / "Thank you, the Zelle payment
 // cleared" read as a historical RECEIPT exactly like a bare verb does.
 const {
-  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment, zeroBalanceClaim, unrecognizedPaymentAssertion,
+  RECEIPT_VERB_RE, THANKS_FOR_PAYMENT_RE, mayAssertPaymentStatus, paymentStatusPhraseClaim, inboundNamesPayment, zeroBalanceClaim, unrecognizedPaymentAssertion, hasPronounSubjectClause,
 } = require('./payment-receipt-vocabulary');
 const ZELLE_INSTRUCTION_MARKER_RE = /\b(?:use|send|pay|can|please)\b/i;
 // null (no affirmative Zelle mention in this clause), else 'offer' | 'receipt'.
@@ -330,7 +332,9 @@ async function amountFreeStatusClaimStale({
   // Codex round-6 (PR #5331): a body naming no payment/paid/account word
   // cannot assert a payment status — skip the drafter + billing re-read
   // entirely (gratitude/scheduling copy on the auto-send lane).
-  if (!mayAssertPaymentStatus(text)) return { stale: false };
+  // A customer message ABOUT a payment makes a bare pronoun clause ("It settled.") payment-scoped, so the
+  // prescreen alone can't clear it (Codex round-30 P1) — the per-clause decision below is the precise one.
+  if (!mayAssertPaymentStatus(text) && !inboundNamesPayment(inboundMessage)) return { stale: false };
   // ONE decision with the draft validator (Codex round-18/24 P1): a clause needs the billing recheck exactly
   // when clauseUngrounded would judge it — the enumerator finds a claim, OR it is an UNRECOGNIZED payment
   // assertion (fail closed: "Your payment settled." is never fresh just because no phrase knows it).
@@ -382,6 +386,8 @@ function bodyNeedsPaymentRecheck(body) {
   if (bodyAmountCents(text).length) return true;
   if (hasAffirmativeZelleMention(text) || hasNegativeZelleAvailabilityClaim(text)) return true;
   if (mayAssertPaymentStatus(text)) return true;
+  // a bare pronoun clause ("It settled.") may be payment-scoped by the customer's message — let the caller read it
+  if (hasPronounSubjectClause(text)) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
@@ -391,7 +397,7 @@ function bodyNeedsPaymentRecheck(body) {
  * ('zelle_now_available') when it would be offered now. An unverifiable check fails CLOSED.
  */
 const ZELLE_DENIAL_UNVERIFIABLE = new Set(['zelle_recheck_failed', 'payer_unverifiable', 'credit_unverifiable']);
-async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null } = {}) {
+async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null, body = null } = {}) {
   const { manualPayOptionsFromEnv } = require('../routes/pay-v2-helpers');
   if (!manualPayOptionsFromEnv()?.zelle?.recipient) return { stale: false };
   if (!customerId) return { stale: true, reason: 'zelle_recheck_failed' };
@@ -401,7 +407,9 @@ async function zelleDenialStale({ customerId, dbh = db, inboundMessage = null } 
     if (!ctx) return { stale: true, reason: 'zelle_recheck_failed' };
     // several open invoices: the SAME resolver as the draft (Codex round-19 P1); an unresolvable reference
     // abstained at draft time, so the denial stands
-    const target = require('./zelle-target-invoice').resolveZelleTargetInvoice(ctx?.billing, inboundMessage);
+    // the denial's own invoice reference wins; the customer's message only when the body names none (round 30)
+    const { resolveZelleTargetInvoice: resolveTarget, explicitInvoiceReference: bodyNames } = require('./zelle-target-invoice');
+    const target = resolveTarget(ctx?.billing, body && bodyNames(body) ? body : inboundMessage);
     const invoiceId = target.invoiceId;
     if (!invoiceId) {
       // Codex round-25 P1: no open invoice at all => nothing to pay by Zelle, the denial stands. An UNRESOLVED
@@ -445,6 +453,9 @@ async function outgoingAmountsStale({
   // tender/date the customer actually named, not only what the outgoing
   // body happens to restate.
   inboundMessage = null,
+  // Codex round-30 P1: run the clause-aware status / receipt check regardless of prompt version (a scheduled send of
+  // ANY draft — a pre-v12 "Your payment failed" too). trustOwedAmounts still excuses only genuinely OWED figures.
+  strictStatusClaims = false,
 } = {}) {
   const text = String(body || '');
   // Independent-review P1 (finding 4): checked unconditionally, ahead of
@@ -484,8 +495,9 @@ async function outgoingAmountsStale({
         const customerRow = await dbh('customers').where({ id: customerId }).first();
         const ctx = (customerRow && await require('./context-aggregator').getContextForCustomer(customerRow)) || {};
         if (!effectiveZelleInvoiceId) {
-          // several open invoices: the one the customer's message names, else abstain => zelle_invoice_unresolved
-          effectiveZelleInvoiceId = resolveZelleTargetInvoice(ctx?.billing, inboundMessage).invoiceId;
+          // Codex round-30 P1: the OUTGOING body's explicit invoice reference wins (unresolvable => unresolved => blocked);
+          // the customer's message decides only when the body names none. Several open: else abstain.
+          effectiveZelleInvoiceId = resolveZelleTargetInvoice(ctx?.billing, editedNamesInvoice ? text : inboundMessage).invoiceId;
         } else {
           const edited = resolveZelleTargetInvoice(ctx?.billing, text).invoiceId;
           if (edited !== effectiveZelleInvoiceId) effectiveZelleInvoiceId = edited; // re-targeted (null => unresolved => blocked below)
@@ -498,7 +510,7 @@ async function outgoingAmountsStale({
     const eligibility = await zelleInvoiceStillEligible({ customerId, zelleInvoiceId: effectiveZelleInvoiceId, dbh });
     if (!eligibility.eligible) return { stale: true, reason: eligibility.reason };
   } else if (hasNegativeZelleAvailabilityClaim(text)) {
-    const denial = await zelleDenialStale({ customerId, dbh, inboundMessage });
+    const denial = await zelleDenialStale({ customerId, dbh, inboundMessage, body: text });
     if (denial.stale) return denial;
   }
   const strict = strictForVersion(promptVersion);
@@ -506,7 +518,7 @@ async function outgoingAmountsStale({
   // human-edited one (trustOwedAmounts): the human-review exemption excuses an
   // OWED amount only — a receipt/status claim asserts a fact that can go stale
   // whoever wrote the words (round-4 finding 3 / round-13 P1).
-  const binderStrict = strict || trustOwedAmounts;
+  const binderStrict = strict || trustOwedAmounts || strictStatusClaims;
   const amounts = bodyAmountCents(text);
   if (!amounts.length) {
     // Price grammar the numeric extractor cannot verify ("fifty dollars",

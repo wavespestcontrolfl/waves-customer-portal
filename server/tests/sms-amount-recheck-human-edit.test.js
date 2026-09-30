@@ -352,3 +352,79 @@ describe('an edited Zelle offer that names another invoice is rechecked against 
     await expect(run('You can Zelle us at pay@example.com.', 'inv-A')).resolves.toEqual({ stale: false });
   });
 });
+
+// Codex round-30 P1 (2): pre-v12 non-human scheduled bodies get the clause-aware status / receipt check when asked.
+describe('strictStatusClaims: the status / receipt check regardless of prompt version', () => {
+  const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+  const STALE = { stale: true, reason: 'amount_no_longer_authorized' };
+  test('"Your payment failed." on a pre-v12, non-human decision: skipped without the flag (the old hole), checked with it', async () => {
+    const failedRow = { ...paid, amount: 120, status: 'failed' };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([{ ...paid, amount: 120 }])); // the payment actually went through
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your payment failed.', promptVersion: 'house_voice_v11', dbh })).resolves.toEqual({ stale: false });
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your payment failed.', promptVersion: 'house_voice_v11', dbh, strictStatusClaims: true })).resolves.toEqual(STALE);
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([failedRow]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your payment failed.', promptVersion: 'house_voice_v11', dbh, strictStatusClaims: true })).resolves.toEqual({ stale: false });
+  });
+  test('a receipt with a figure is judged clause-aware too; trustOwedAmounts still excuses only an owed figure', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([]));
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'We received your $500 payment from Sep 12.', promptVersion: 'house_voice_v11', dbh, strictStatusClaims: true })).resolves.toEqual(STALE);
+    await expect(outgoingAmountsStale({ customerId: 'c1', body: 'Your balance is $9,999.00.', promptVersion: 'house_voice_v11', dbh, strictStatusClaims: true, trustOwedAmounts: true })).resolves.toEqual({ stale: false });
+  });
+});
+
+describe('send time: "It settled." after a payment question is not fresh', () => {
+  const { amountFreeStatusClaimStale } = require('../services/sms-amount-recheck');
+  test('blocked with the inbound environment; fresh without it', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx([paid]));
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'It settled.', strict: true, dbh, inboundMessage: 'Did my payment go through?' })).resolves.toEqual({ stale: true, reason: 'amount_no_longer_authorized' });
+    await expect(amountFreeStatusClaimStale({ customerId: 'c1', body: 'It settled.', strict: true, dbh, inboundMessage: null })).resolves.toEqual({ stale: false });
+  });
+});
+
+// Codex round-30 P1 (4): with no zelle_invoice_id the OUTGOING body's explicit invoice reference wins over the inbound's.
+describe('no snapshot: the body\'s explicit target beats the inbound\'s', () => {
+  const { outgoingAmountsStale, zelleDenialStale } = require('../services/sms-amount-recheck');
+  const pay = require('../routes/pay-v2');
+  const open = [
+    { id: 'inv-A', invoiceNumber: 'WPC-2026-0001', status: 'sent', amountDue: 95 },
+    { id: 'inv-B', invoiceNumber: 'WPC-2026-0002', status: 'sent', amountDue: 210 },
+  ];
+  let visibility;
+  const checkedIds = [];
+  const idDb = (table) => ({ where: (w) => ({ first: async () => { if (table === 'invoices') checkedIds.push(w.id); return table === 'invoices' ? { id: w.id, customer_id: 'c1', status: 'sent' } : { id: 'c1' }; } }) });
+  beforeEach(() => {
+    checkedIds.length = 0;
+    process.env.ZELLE_RECIPIENT = 'pay@example.com';
+    visibility = jest.spyOn(pay, 'payPageZelleVisibility').mockImplementation(async () => ({ visible: true, reason: null }));
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing: { outstandingBalance: 0, recentPayments: [], openInvoice: open[0], openInvoices: open } });
+  });
+  afterEach(() => { delete process.env.ZELLE_RECIPIENT; visibility.mockRestore(); });
+  const run = (body, inboundMessage) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: 'house_voice_v11', zelleInvoiceId: null, inboundMessage, trustOwedAmounts: true, dbh: idDb });
+
+  test('body names B, inbound names A => B is checked', async () => {
+    await run('You can Zelle invoice WPC-2026-0002 to pay@example.com.', 'Can I pay invoice WPC-2026-0001 by Zelle?');
+    expect(checkedIds).toEqual(['inv-B']);
+  });
+  test('body names none => the inbound\'s invoice decides (as before)', async () => {
+    await run('You can Zelle us at pay@example.com.', 'Can I pay invoice WPC-2026-0001 by Zelle?');
+    expect(checkedIds).toEqual(['inv-A']);
+  });
+  test('body names an unresolvable invoice => blocked even though the inbound resolves', async () => {
+    await expect(run('You can Zelle invoice WPC-2026-0999 to pay@example.com.', 'Can I pay invoice WPC-2026-0001 by Zelle?')).resolves.toEqual({ stale: true, reason: 'zelle_invoice_unresolved' });
+  });
+  test('a Zelle denial naming an invoice is judged for THAT invoice', async () => {
+    visibility.mockImplementation(async ({ invoice }) => ({ visible: invoice.id === 'inv-B', reason: 'not_eligible' }));
+    // denial about B (eligible now) => stale, even though the inbound named A (ineligible)
+    await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: 'Zelle is not available for invoice WPC-2026-0002.' })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
+    // no reference in the body => the inbound (A, ineligible) => the denial stands
+    await expect(zelleDenialStale({ customerId: 'c1', dbh: idDb, inboundMessage: 'Can I pay invoice WPC-2026-0001 by Zelle?', body: "Zelle isn't available right now." })).resolves.toEqual({ stale: false });
+  });
+});
+
+describe('the recheck gates pass a pronoun-subject clause on to the per-clause decision (round 30)', () => {
+  const { bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
+  test('"It settled." is selected for a read (the inbound decides); plain copy without a pronoun subject is not', () => {
+    expect(bodyNeedsPaymentRecheck('It settled.')).toBe(true);
+    expect(bodyNeedsPaymentRecheck('Sounds good, see you Tuesday!')).toBe(false);
+  });
+});

@@ -55,6 +55,9 @@ async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
       // A human edit trusts only the OWED-amount half, never a Zelle offer or
       // receipt claim (round-4 finding 3).
       trustOwedAmounts: claimMeta.human_authored === true,
+      // every body bodyNeedsPaymentRecheck selected gets the clause-aware status / receipt check, whatever prompt
+      // version drafted it (Codex round-30 P1): a pre-v12 "Your payment failed" must not skip it.
+      strictStatusClaims: true,
     });
     return { stale: !!verdict.stale, reason: verdict.stale ? (verdict.reason || 'amount_recheck_failed') : null };
   } catch (err) {

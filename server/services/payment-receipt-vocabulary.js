@@ -425,7 +425,10 @@ function paymentStatusHit(sub) {
 const SUBCLAUSE_SPLIT_RE = /(\s+(?:so(?:\s+that)?|because|since|though|although|while|whereas|however|then|which|and|but)\s+|[,;\u2014\u2013]\s*|\s-\s|(?<=[.!?])\s+)/i;
 const PURPOSE_CONNECTOR_RE = /^\s*so(?:\s+that)?\s*$/i;
 const INTERROGATIVE_START_RE = /^\s*(?:did|do|does|is|are|was|were|has|have|had|can|could|will|would|should|may|what|when|why|how|where|which|who)\b/i;
-function unrecognizedPaymentAssertion(text) {
+// A clause whose subject is a bare pronoun ("It settled.", "That cleared out.", "They're sorted.") — payment-scoped only
+// when the surrounding environment is about a payment (Codex round-30 P1).
+const PRONOUN_SUBJECT_CLAUSE_RE = /^\s*(?:and\s+|but\s+|so\s+|well,?\s+|yes,?\s+)?(?:it|that|they|this(?:\s+one)?|the\s+(?:payment|charge|transfer|deposit))(?:['\u2019](?:s|re|ll|d))?\s+\w+/i;
+function unrecognizedPaymentAssertion(text, { paymentContext = false } = {}) {
   const t = String(text || '');
   if (/\?\s*$/.test(t) && INTERROGATIVE_START_RE.test(t)) return false; // the whole clause is a question
   // pieces alternate: sub-clause, connector, sub-clause, ...
@@ -440,6 +443,7 @@ function unrecognizedPaymentAssertion(text) {
     // through") is part of the instruction, not a status assertion
     const exempt = isNonAssertivePaymentClause(sub) || (prevExempt && PURPOSE_CONNECTOR_RE.test(connector));
     if (paymentStatusHit(sub) && !exempt) return true;
+    if (paymentContext && !exempt && PRONOUN_SUBJECT_CLAUSE_RE.test(sub)) return true; // "It settled." about a payment
     prevExempt = exempt;
   }
   return false;
@@ -468,7 +472,12 @@ function invoiceSubjectAt(text, index) {
   return !!range && invoiceSubjectClause(range.text);
 }
 
+// Does any sub-clause open with a bare pronoun / "the payment" subject? (A cheap prescreen signal for the recheck gates:
+// such a clause is payment-scoped only when the surrounding environment is about a payment — Codex round-30 P1.)
+const hasPronounSubjectClause = (text) => String(text || '').split(SUBCLAUSE_SPLIT_RE).some((sub, i) => i % 2 === 0 && PRONOUN_SUBJECT_CLAUSE_RE.test(sub));
+
 module.exports = {
+  hasPronounSubjectClause,
   subclauseRanges,
   invoiceSubjectAt,
   unrecognizedPaymentAssertion,

@@ -984,3 +984,20 @@ describe('several open invoices: the send-time Zelle recheck resolves the same i
     await expect(zelleDenialStale({ customerId: 'c1', dbh, inboundMessage: 'Can I Zelle invoice WPC-2026-0101?' })).resolves.toEqual({ stale: true, reason: 'zelle_now_available' });
   });
 });
+
+// Codex round-30 P2: subject-first MODAL denials are negative availability claims, not offers.
+describe('subject-first modal Zelle denials (round 30)', () => {
+  const { hasNegativeZelleAvailabilityClaim, bodyNeedsPaymentRecheck } = require('../services/sms-amount-recheck');
+  const DENIALS = [
+    'Zelle cannot be used for this.', "Zelle can't be used right now.", "Zelle won't be available this week.", 'Zelle could not be offered.', 'Zelle will not be accepted.',
+    "Zelle wouldn't be an option.", 'Zelle payments cannot be taken.', 'Zelle may not be available.', "Zelle couldn't be processed.",
+  ];
+  test.each(DENIALS)('%s => negative availability claim, not an offer, sent to the recheck', (body) => {
+    expect({ body, neg: hasNegativeZelleAvailabilityClaim(body), aff: hasAffirmativeZelleMention(body), screen: bodyNeedsPaymentRecheck(body) }).toEqual({ body, neg: true, aff: false, screen: true });
+  });
+  test('genuine offers are unchanged', () => {
+    for (const body of ['You can use Zelle.', 'Zelle can be used for this.', 'Zelle works great for that.', 'We take Zelle.']) {
+      expect({ body, neg: hasNegativeZelleAvailabilityClaim(body) }).toEqual({ body, neg: false });
+    }
+  });
+});

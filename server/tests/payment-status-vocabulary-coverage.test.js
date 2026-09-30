@@ -1254,3 +1254,48 @@ describe('round-29: "Your card on file didn\'t work" is a failure assertion', ()
     }
   });
 });
+
+// Codex round-30 P1 (1): a receipt can't bind any row while billing is unavailable.
+describe('round-30: receipts fail closed when billing is unavailable', () => {
+  const rq = (r, billing) => replyQuotesUngroundedAmount(r, { billing }, { byMeaning: true });
+  const paid = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  test('unavailable billing (e.g. payer-linkage lookup failed): receipt, status and absence claims are all ungrounded', () => {
+    const unavailable = { unavailable: true, outstandingBalance: 0, recentPayments: [paid] };
+    expect(rq('We received your $120 payment from Sep 12.', unavailable)).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 is paid.', unavailable)).toBe(true);
+    expect(rq('Your $120 payment from Sep 12 is still processing.', { ...unavailable, recentPayments: [{ ...paid, status: 'processing' }] })).toBe(true);
+    expect(rq("We haven't received your $120 payment from Sep 12.", { ...unavailable, recentPayments: [] })).toBe(true);
+    // the same receipt is fine with available billing
+    expect(rq('We received your $120 payment from Sep 12.', { outstandingBalance: 0, recentPayments: [paid] })).toBe(false);
+  });
+});
+
+// Codex round-30 P1 (3): pronoun-subject clauses are payment-scoped when the environment is about a payment.
+describe('round-30: "It settled." after a payment question is an unrecognized payment assertion', () => {
+  const V7 = require('../services/payment-receipt-vocabulary');
+  const { paymentClauseNeedsValidation, enumeratePaymentClaims } = require('../services/sms-shadow-drafter');
+  const rq = (r, rows, inboundMessage) => replyQuotesUngroundedAmount(r, { billing: { outstandingBalance: 0, recentPayments: rows, invoiceStatuses: [] } }, { byMeaning: true, inboundMessage });
+  const paidRow = { amount: 120, status: 'paid', payment_date: '2026-09-12', payment_method_type: 'card' };
+  const ASK = 'Did my payment go through?';
+
+  test('with a payment-scoped environment the fallback fires; without one it does not', () => {
+    for (const s of ['It settled.', 'That cleared out.', "They're sorted.", 'It all worked out.']) {
+      expect({ s, withCtx: V7.unrecognizedPaymentAssertion(s, { paymentContext: true }), without: V7.unrecognizedPaymentAssertion(s) }).toEqual({ s, withCtx: true, without: false });
+    }
+    // still exempt when genuinely non-assertive, even in a payment context
+    for (const s of ['Can you tell me if it settled?', 'If it settled, let us know.', 'You can pay with the link.', 'It is easy to pay online.']) {
+      expect({ s, r: V7.unrecognizedPaymentAssertion(s, { paymentContext: true }) }).toEqual({ s, r: false });
+    }
+  });
+  test('draft: inbound "Did my payment go through?" + reply "It settled." is ungrounded; an unrelated inbound leaves it alone', () => {
+    expect(rq('It settled.', [paidRow], ASK)).toBe(true);
+    expect(rq('It settled.', [paidRow], 'What time is my visit Tuesday?')).toBe(false);
+    expect(rq('It settled.', [paidRow])).toBe(false);
+  });
+  test('send: the gate uses the same environment (inbound in the env) — so the recheck is not skipped', () => {
+    expect(enumeratePaymentClaims('It settled.', { inboundText: ASK }).claims).toEqual([]);
+    expect(paymentClauseNeedsValidation('It settled.', { inboundText: ASK })).toBe(true);
+    expect(paymentClauseNeedsValidation('It settled.', { inboundText: 'What time Tuesday?' })).toBe(false);
+    expect(paymentClauseNeedsValidation('It settled.', { paymentContext: true })).toBe(true); // an earlier clause made a payment claim
+  });
+});

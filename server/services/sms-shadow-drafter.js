@@ -2136,6 +2136,9 @@ function claimTargets(amounts, env) {
 // PAID receipt: amount-free never names a payment (round-2); with amounts each
 // figure must be a settled payment AND bind to one row by date/tender/inbound.
 function validateAck(c, env) {
+  // billing UNAVAILABLE (e.g. the payer-linkage lookup failed, so ownership of the rows is unknown) => a receipt can't bind
+  // any row — same fail-closed rule as status / absence claims (Codex round-30 P1)
+  if (env.billingUnavailable) return true;
   if (!c.amounts.length) return true;
   if (c.amounts.some((a) => !env.paidCents.has(a))) return true;
   const binding = claimBinding(c, env);
@@ -2308,7 +2311,12 @@ function validateInvoiceStatusClaim(claim, text, amounts, env) {
 // The send-time recheck gates its billing read on this same function (Codex round-24 P1), so draft and send
 // can never disagree about whether a clause is judged.
 function paymentClauseNeedsValidation(clause, env = {}) {
-  return enumeratePaymentClaims(clause, env).claims.length > 0 || unrecognizedPaymentAssertion(clause);
+  return enumeratePaymentClaims(clause, env).claims.length > 0 || unrecognizedPaymentAssertion(clause, paymentScope(env));
+}
+// The payment ENVIRONMENT of a clause (Codex round-30 P1): the customer's message is about a payment, or an earlier
+// clause of the reply already made a payment claim — so a pronoun-subject clause ("It settled.") is payment-scoped.
+function paymentScope(env = {}) {
+  return { paymentContext: !!env.paymentContext || inboundNamesPayment(String(env.inboundText || '')) };
 }
 function clauseUngrounded(clause, env) {
   const { claims, spans, negated, amounts, masked, text } = enumeratePaymentClaims(clause, env);
@@ -2319,7 +2327,7 @@ function clauseUngrounded(clause, env) {
   // claim => an unrecognized payment assertion ("we have yet to receive…", whatever comes next). Fail closed,
   // unless the clause is clearly non-assertive (question, conditional, offer/instruction, payment-options
   // reference). Draft and send share this path.
-  if (!claims.length) return unrecognizedPaymentAssertion(text);
+  if (!claims.length) return unrecognizedPaymentAssertion(text, paymentScope(env));
   // Every claim validates on its own binder; ANY ungrounded claim fails the clause.
   const presence = [];
   const anaphoric = isAnaphoricPaymentClause(text, amounts);

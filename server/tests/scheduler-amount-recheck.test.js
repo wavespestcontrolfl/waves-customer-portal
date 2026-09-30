@@ -47,6 +47,17 @@ describe('recheckScheduledSmsAmounts', () => {
     expect(recheck.outgoingAmountsStale).toHaveBeenCalledTimes(3);
   });
 
+  // Codex round-30 P1: every scheduled body the gate selects gets the clause-aware status / receipt check, any prompt version.
+  test('the scheduler always asks for the strict status / receipt check, for pre-v12 non-human decisions too', async () => {
+    dbReturning({ prompt_version: 'house_voice_v11', input_snapshot: null });
+    recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
+    await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your payment failed.' }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ promptVersion: 'house_voice_v11', trustOwedAmounts: false, strictStatusClaims: true }));
+    recheck.outgoingAmountsStale.mockClear();
+    await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'Your balance is $95.' }, claimMeta }); // human edit
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ trustOwedAmounts: true, strictStatusClaims: true }));
+  });
+
   test('a row with NO customer_id falls back to the linked decision\'s customer', async () => {
     dbReturning({ prompt_version: null, input_snapshot: null, customer_id: 'c-from-decision' });
     recheck.outgoingAmountsStale.mockResolvedValue({ stale: false });
@@ -66,7 +77,8 @@ describe('recheckScheduledSmsAmounts', () => {
     // Codex round-13: a HUMAN-edited status claim is now rechecked even pre-v12 => no customer fails closed
     expect(status).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
     const agentDrafted = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: "You're paid up!" }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
-    expect(agentDrafted).toEqual({ stale: false, reason: null }); // pre-v12 agent draft: amount-free claims unchanged
+    // round 30: the clause-aware status / receipt check now runs for EVERY selected body, pre-v12 agent drafts included
+    expect(agentDrafted).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
     const amount = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: null, message_body: 'Your balance is $95.' }, claimMeta });
     expect(amount).toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
     db.mockClear();
