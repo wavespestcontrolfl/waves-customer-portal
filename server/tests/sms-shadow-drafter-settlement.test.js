@@ -415,3 +415,34 @@ describe('round-10: negated amount-bearing acks, Cash App', () => {
     expect(recheck).not.toMatch(/PAYMENT_ACK_RE\.test\(/);
   });
 });
+
+describe('round-11: an unloaded history under a possibly-truncated window is unknown', () => {
+  const shown = [1, 2, 3].map((n) => ({ amount: 50 + n, status: 'paid', payment_date: `2026-09-0${n}`, payment_method_type: 'card' }));
+  test('paymentHistory absent + recentPaymentsTruncated => the absence claim is rejected; not truncated => shown rows are the history', () => {
+    const reply = "Your $120 Zelle payment isn't showing on our end yet.";
+    expect(check(reply, { billing: { outstandingBalance: 0, recentPayments: shown, recentPaymentsTruncated: true } })).toBe(true);
+    expect(check(reply, { billing: { outstandingBalance: 0, recentPayments: shown, recentPaymentsTruncated: false } })).toBe(false);
+  });
+});
+
+describe('round-11: not_received contradicted by reversed rows; settlement needs nothing in flight', () => {
+  const ctx = (payments, extra = {}) => ({ billing: { outstandingBalance: 0, recentPayments: payments, ...extra } });
+  const row = (status) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card' });
+  test('"haven\'t received" is contradicted by paid, refunded AND disputed rows; pending/processing still are not', () => {
+    const reply = "We haven't received your $120 payment yet.";
+    for (const st of ['paid', 'refunded', 'disputed']) expect({ st, bad: check(reply, ctx([row(st)])) }).toEqual({ st, bad: true });
+    for (const st of ['processing', 'pending', 'failed']) expect({ st, bad: check(reply, ctx([row(st)])) }).toEqual({ st, bad: false });
+    const { PAYMENT_STATUS_VOCABULARY } = require('../services/payment-receipt-vocabulary');
+    expect(PAYMENT_STATUS_VOCABULARY.not_received.rowStatuses).toEqual(['paid', 'refunded', 'disputed']);
+  });
+
+  test('settlement claims are rejected while a payment/invoice is processing or pending', () => {
+    for (const reply of ["You're paid up.", 'Your account is current.']) {
+      expect(check(reply, ctx([row('processing')]))).toBe(true);
+      expect(check(reply, ctx([row('pending')]))).toBe(true);
+      expect(check(reply, ctx([], { hasProcessingPayment: true }))).toBe(true); // e.g. a processing invoice the balance excludes
+      expect(check(reply, ctx([row('paid')]))).toBe(false); // settled history is fine
+      expect(check(reply, ctx([]))).toBe(false);
+    }
+  });
+});

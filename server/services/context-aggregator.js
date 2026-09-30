@@ -480,7 +480,6 @@ const DUES_NO_COLLECTION_SHORT = {
 // Exactly what the facts state and nothing more: the dues base whenever a
 // monthly lane published dues, and the total plus the fee it breaks out only
 // when the surcharge was actually resolved and published.
-const PAYMENT_HISTORY_CAP = 200;
 function authorizedDuesCents(context) {
   const lane = context?.customer?.billingLane;
   const dues = lane?.monthlyBilled ? lane.monthlyDues : null;
@@ -637,29 +636,6 @@ class ContextAggregator {
       const invId = paymentInvoiceId(p);
       return !(invId && payerInvoiceIds.has(invId));
     });
-    // Codex round-10 P1 (PR #5331): recentPayments above is a DISPLAY window
-    // (3 rows). An ABSENCE claim ("isn't showing") must be judged against the
-    // authoritative history, not the window the model happened to see — a real
-    // 4th payment would otherwise be falsely denied. A separate bounded read of
-    // this customer's own payments (any status): `rows` + `complete` (false
-    // when the bound was hit, i.e. more history exists than was read). null =
-    // the read failed (unknown ⇒ callers fail closed). Never rendered into the
-    // facts block; consumed only by the drafter's absence-claim binder, at
-    // draft AND send time (the send-time recheck re-reads this context fresh).
-    let paymentHistory = null;
-    try {
-      const cap = PAYMENT_HISTORY_CAP;
-      const rows = await db('payments').where({ 'payments.customer_id': customer.id }).whereNot('status', 'upcoming')
-        .orderBy('payment_date', 'desc').limit(cap + 1);
-      const own = rows.filter((p) => {
-        const invId = paymentInvoiceId(p);
-        return !(invId && payerInvoiceIds.has(invId));
-      });
-      paymentHistory = { rows: own.slice(0, cap), complete: rows.length <= cap };
-    } catch (err) {
-      logger.warn(`[context] payment history read failed for customer ${customer.id}: ${err.message}`);
-      paymentHistory = null;
-    }
     // Canonical balance (Codex r5, mirrors billing-v2 /balance): the sum of
     // collectible OWN invoices (net of credit) plus failed standalone
     // attempts — a customer with a sent-but-unpaid invoice and no failed
@@ -799,8 +775,18 @@ class ContextAggregator {
         // completed/attempted history only (Codex r5): 'upcoming' autopay
         // rows are FUTURE charges, not payments the customer made.
         recentPayments: ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').slice(0, 3),
-        // Authoritative payment history for absence claims (see above); not rendered.
-        paymentHistory,
+        // Codex round-11 P1: recentPayments is a 3-row DISPLAY window. True when
+        // the window may hide more history (the 5-row read was full, or own rows
+        // exceed 3) — an absence claim then needs the authoritative history,
+        // loaded lazily by payment-history.js ONLY when a reply makes one.
+        recentPaymentsTruncated: payments.length >= 5
+          || ownPayments.filter((p) => String(p.status || '').toLowerCase() !== 'upcoming').length > 3,
+        // Codex round-11 P1: a payment or invoice still PROCESSING is unsettled
+        // (the balance above excludes a processing invoice, so "you're paid up"
+        // would read as true while money is in flight). True when any own payment
+        // is pending/processing/requires_action or any own invoice is processing.
+        hasProcessingPayment: ownPayments.some((p) => ['pending', 'processing', 'requires_action'].includes(String(p.status || '').toLowerCase()))
+          || invoiceRows.some((r) => !r.payer_id && String(r.status || '').toLowerCase() === 'processing'),
         // v10: real autopay state (canonical eligibility, null = unknown).
         autopay: autopayState,
         // v10: the newest sent-and-unpaid invoice. payerBilled=true means a

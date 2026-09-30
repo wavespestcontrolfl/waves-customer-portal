@@ -72,7 +72,7 @@ function paymentAckPatternSource() {
 //   refunded / disputed -> a row marked exactly that   ("was refunded" / "is disputed", "charged back"); generic
 //   reversed  -> either                                ("was reversed")
 //                (settled THEN reversed — never a "failed" payment; Codex round-8 P1)
-//   not_received -> NO PAID row exists ("haven't received", "hasn't come through", …)
+//   not_received -> NO paid/refunded/disputed row exists ("haven't received", "hasn't come through", …)
 //   not_found -> NO paid/pending row exists for the named payment
 //                ("isn't showing", "haven't received", …). Its rowStatuses are the
 //                statuses that CONTRADICT the claim: the claim is valid only when no
@@ -120,7 +120,9 @@ const PAYMENT_STATUS_VOCABULARY = Object.freeze({
   // says a processing line means "not received yet"), so only a PAID row
   // contradicts it.
   not_received: Object.freeze({
-    rowStatuses: Object.freeze(['paid']),
+    // Received-then-reversed rows (refunded/disputed) WERE received, so they
+    // contradict "haven't received" too; pending/processing do not (Codex round-11).
+    rowStatuses: Object.freeze(['paid', 'refunded', 'disputed']),
     phrases: Object.freeze([
       "haven't received", 'have not received', "hasn't been received", 'has not been received',
       "wasn't received", 'was not received', 'not received',
@@ -144,6 +146,10 @@ const STATUS_PHRASE_RES = Object.freeze([
   ['failed', familyRe('failed')],
   ['pending', familyRe('pending')],
 ]);
+// Does the text contain a phrase of an ABSENCE family (isn't showing, haven't
+// received, …)? Used to load authoritative history only when a claim needs it.
+const ABSENCE_PHRASE_RE = new RegExp(`\\b(?:${phrasePattern([...PAYMENT_STATUS_VOCABULARY.not_found.phrases, ...PAYMENT_STATUS_VOCABULARY.not_received.phrases])})\\b`, 'i');
+const containsAbsencePhrase = (text) => ABSENCE_PHRASE_RE.test(String(text || ''));
 // The customer's own message is about a payment (used to relax the noun
 // requirement for a bare "it isn't showing on our end yet" reply).
 const INBOUND_PAYMENT_RE = /\b(?:pay(?:ment|ments|ing)?|paid|sent|send|transfer(?:red)?|deposit(?:ed)?|zelle[d']*|venmo|paypal|check|ach)\b/i;
@@ -212,6 +218,7 @@ function mayAssertPaymentStatus(text) {
 }
 
 module.exports = {
+  containsAbsencePhrase,
   PAYMENT_STATUS_VOCABULARY,
   ANY_STATUS,
   inboundNamesPayment,

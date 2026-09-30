@@ -776,3 +776,24 @@ describe('Codex round-8 P1 #3: absence claims ("isn\'t showing") get a send-time
     expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
   });
 });
+
+describe('Codex round-11 P1: absence claims load authoritative history lazily at send time', () => {
+  test('an absence reply over a possibly-truncated window attaches paymentHistory (null when the read fails) before the binder runs', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    const ctx = { customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: [], recentPaymentsTruncated: true } };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
+    replyQuotesUngroundedAmount.mockReturnValue(false);
+    await outgoingAmountsStale({ customerId: 'c1', body: "Your payment isn't showing on our end yet.", dbh: dbWithCustomer({ id: 'c1' }) });
+    expect(ctx.billing.paymentHistory).toBeNull(); // the fake dbh cannot run the history query => unknown => fail closed downstream
+    expect(replyQuotesUngroundedAmount).toHaveBeenCalled();
+  });
+
+  test('a non-absence reply never triggers the history read', async () => {
+    realAnswersGateOn.mockReturnValue(true);
+    const ctx = { customer: { id: 'c1' }, billing: { outstandingBalance: 0, recentPayments: [], recentPaymentsTruncated: true } };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx);
+    replyQuotesUngroundedAmount.mockReturnValue(false);
+    await outgoingAmountsStale({ customerId: 'c1', body: 'We received your $120.00 payment from Sep 12.', dbh: dbWithCustomer({ id: 'c1' }) });
+    expect(ctx.billing.paymentHistory).toBeUndefined();
+  });
+});

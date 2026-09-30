@@ -6,6 +6,64 @@ const db = require('../models/db');
 const PROCESS_BOOT_AT = new Date();
 const TwilioService = require('./twilio');
 const logger = require('./logger');
+
+// Reviewer-facing note for a scheduled reply retired by the fire-time amount /
+// payment recheck (Codex round-11 P1): name the SPECIFIC reason instead of a
+// generic price block. Zelle and credit reasons say what actually changed.
+const AMOUNT_BLOCK_NOTES = {
+  zelle_recipient_stale: 'The Zelle recipient in this scheduled reply is no longer the current one (or Zelle is disabled)',
+  zelle_invoice_unresolved: 'The invoice this scheduled reply\u2019s Zelle instructions were written for no longer resolves (paid off, reassigned, or none open)',
+  zelle_invoice_ineligible: 'This scheduled reply offers Zelle for an invoice that can no longer be paid that way',
+  zelle_recheck_failed: 'The Zelle eligibility recheck could not be completed for this scheduled reply',
+  credit_unverifiable: 'The account-credit state for this scheduled reply\u2019s Zelle instructions could not be verified',
+  payer_owned: 'The invoice in this scheduled reply\u2019s Zelle instructions is now billed to a third-party payer',
+  payer_unverifiable: 'Who owns the invoice in this scheduled reply\u2019s Zelle instructions could not be verified',
+  amount_no_customer: 'This scheduled reply states an amount or payment status but the customer could not be loaded',
+  amount_recheck_no_customer: 'This scheduled reply states an amount or payment status but the customer could not be loaded',
+  amount_recheck_failed: 'The payment/amount recheck for this scheduled reply could not be completed',
+  amount_unverifiable: 'This scheduled reply states an amount that cannot be verified',
+  amount_no_longer_authorized: 'This scheduled reply states an amount or payment status that no longer matches the account',
+};
+// The fire-time amount / Zelle / payment-status recheck for one claimed
+// scheduled reply (extracted from the send loop so the pre-screen and the
+// reason surfacing are unit-testable). { stale, reason }; reason is the
+// SPECIFIC outgoingAmountsStale reason. Fails closed on any read error.
+async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
+  const recheck = require('./sms-amount-recheck');
+  if (!recheck.bodyNeedsPaymentRecheck(msg.message_body)) return { stale: false, reason: null };
+  const { parseInputSnapshot } = require('./agent-decision-send-checks');
+  try {
+    const decision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id');
+    const snapshot = parseInputSnapshot(decision?.input_snapshot);
+    // Codex round-11 P1: a scheduled row with no customer_id (shared phone) must
+    // not skip the recheck — fall back to the linked decision's customer. With none
+    // at all, outgoingAmountsStale fails closed for a Zelle offer, a figure or a
+    // payment-status claim (amount_recheck_no_customer / zelle_invoice_unresolved).
+    const verdict = await recheck.outgoingAmountsStale({
+      customerId: msg.customer_id || decision?.customer_id || null,
+      body: msg.message_body,
+      promptVersion: decision?.prompt_version ?? null,
+      // The invoice the drafter's Zelle fact was built for (null for a human-
+      // authored reply with no snapshot — the recheck resolves the CURRENT
+      // open invoice itself).
+      zelleInvoiceId: snapshot?.zelle_invoice_id || null,
+      // The customer's own inbound (draft-time snapshot) so a confirmation
+      // still binds to the tender/date they named (round-6).
+      inboundMessage: snapshot?.sms?.body || null,
+      // A human edit trusts only the OWED-amount half, never a Zelle offer or
+      // receipt claim (round-4 finding 3).
+      trustOwedAmounts: claimMeta.human_authored === true,
+    });
+    return { stale: !!verdict.stale, reason: verdict.stale ? (verdict.reason || 'amount_recheck_failed') : null };
+  } catch (err) {
+    logger.warn(`[scheduler] amount recheck failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'amount_recheck_failed' };
+  }
+}
+function amountsStaleNote(reason) {
+  const what = AMOUNT_BLOCK_NOTES[reason] || 'This scheduled reply states an amount, payment status or payment instruction that is no longer accurate';
+  return `${what} (${reason || 'amount_recheck'}) — review the thread.`;
+}
 const { scrubSentryText } = require('../utils/sentry-scrub');
 const { etDateString, addETDays, etParts, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
@@ -4261,33 +4319,18 @@ function initScheduledJobs() {
             // receipt claim, both of which assert a fact that can go stale
             // regardless of who wrote the words.
             let amountsStale = false;
-            if (!anchorStale && msg.customer_id) {
-              // Shared with the immediate Agent Review send since PR #5119
-              // follow-up #2 (sms-amount-recheck): fresh context, current
-              // obligations only, payment history only for an ack, fail
-              // closed on any error.
-              const { outgoingAmountsStale } = require('./sms-amount-recheck');
-              const { parseInputSnapshot } = require('./agent-decision-send-checks');
-              const amountDecision = await db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot');
-              // Pre-push audit P1 (finding 2): same recheck the immediate
-              // Agent Review send runs (agent-decision-send-checks.js) — the
-              // invoice the drafter's Zelle fact was built for, re-verified
-              // at fire time. null for a human-authored reply with no
-              // drafted snapshot — outgoingAmountsStale resolves the
-              // customer's CURRENT open invoice itself in that case.
-              const zelleInvoiceId = parseInputSnapshot(amountDecision?.input_snapshot)?.zelle_invoice_id || null;
-              amountsStale = (await outgoingAmountsStale({
-                customerId: msg.customer_id,
-                body: msg.message_body,
-                promptVersion: amountDecision?.prompt_version ?? null,
-                zelleInvoiceId,
-                // Codex round-6 (PR #5331): the customer's own inbound
-                // wording (stashed on the decision's input_snapshot at draft
-                // time) so a confirmation still binds to the tender/date the
-                // customer named when this fires later.
-                inboundMessage: parseInputSnapshot(amountDecision?.input_snapshot)?.sms?.body || null,
-                trustOwedAmounts: claimMeta.human_authored === true,
-              })).stale;
+            // The SPECIFIC reason (zelle_invoice_unresolved, zelle_recipient_stale,
+            // credit_unverifiable, amount_no_longer_authorized, …) — recorded on the
+            // blocked row and shown to the reviewer on the retired card (round-11).
+            let amountsReason = null;
+            // Codex round-11 P1: only read anything when the body actually carries a
+            // figure, a Zelle offer or a payment-status claim (pre-screen inside
+            // recheckScheduledSmsAmounts) — a human reply about scheduling costs no
+            // agent_decisions/customer/billing reads.
+            if (!anchorStale) {
+              const amountsVerdict = await recheckScheduledSmsAmounts({ msg, claimMeta });
+              amountsStale = amountsVerdict.stale;
+              amountsReason = amountsVerdict.reason;
             }
             // OPEN TIMES revalidation (Codex P2): the same "can't see it
             // from an inbound-anchored check" gap as the amount check above
@@ -4400,7 +4443,10 @@ function initScheduledJobs() {
                 await trx('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: new Date(),
-                  metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
+                  // blocked_detail carries the SPECIFIC recheck reason (round-11).
+                  metadata: amountsStale && amountsReason && !anchorStale
+                    ? trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text, 'blocked_detail', ?::text)", [blockedReason, amountsReason])
+                    : trx.raw("COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('blocked_reason', ?::text)", [blockedReason]),
                 });
                 await suggest.supersedeStaleDecision({
                   decisionId: freshMeta.agent_decision_id || claimMeta.agent_decision_id,
@@ -4408,7 +4454,7 @@ function initScheduledJobs() {
                   note: anchorStale
                     ? 'A newer customer message arrived before this scheduled reply fired — review the thread.'
                     : amountsStale
-                      ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
+                      ? amountsStaleNote(amountsReason)
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
                         : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
@@ -7876,6 +7922,8 @@ async function runSmsRecoveryTick({ now = Date.now() } = {}) {
 }
 
 module.exports = {
+  recheckScheduledSmsAmounts,
+  amountsStaleNote,
   initScheduledJobs,
   runSmsRecoveryTick,
   initBankingSync,

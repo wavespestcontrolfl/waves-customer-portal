@@ -1165,7 +1165,12 @@ function billingAmountCents(context, { settledOnly = false } = {}) {
 // authorizedDuesCents), which authorize QUOTING a price, not owing it.
 function billingHasOutstandingObligation(context) {
   const billing = context?.billing || {};
-  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0;
+  // Codex round-11 P1: money still IN FLIGHT (a processing/pending payment row,
+  // or a processing invoice the balance excludes) is unsettled too — never
+  // "paid up" / "current" while it hasn't landed.
+  const inFlight = billing.hasProcessingPayment === true
+    || (billing.recentPayments || []).some((p) => PAYMENT_STATUS_VOCABULARY.pending.rowStatuses.includes(String(p?.status || '').toLowerCase()));
+  return Number(billing.outstandingBalance) > 0 || Number(billing.openInvoice?.amountDue) > 0 || inFlight;
 }
 
 // Independent-review P1 (round 3, PR #5331): ONE shared tender vocabulary,
@@ -1506,10 +1511,13 @@ function validateStatusClaim(c, env) {
 // AUTHORITATIVE history (billing.paymentHistory — every own payment, any
 // status), not the 3-row window (round-10 P1). Unknown completeness fails closed.
 function absenceHistoryUnknown(env, vague) {
-  const shown = env.context?.billing?.recentPayments || [];
-  const hist = env.context?.billing?.paymentHistory;
+  const billing = env.context?.billing;
+  const shown = billing?.recentPayments || [];
+  const hist = billing?.paymentHistory;
   if (hist === null) return true;
-  if (!hist) return false; // legacy/mocked context: the shown rows ARE the history
+  // Not loaded: the 3-row window is the whole history ONLY when the aggregator
+  // says it wasn't truncated (a legacy/mocked context carries no flag = whole).
+  if (!hist) return billing?.recentPaymentsTruncated === true;
   return vague && (hist.complete === false || hist.rows.length > shown.length);
 }
 function validateAbsenceClaim(c, env) {
@@ -2979,6 +2987,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // inbound wording through so a confirmation binds to the tender/date the
     // customer actually asked about, not just what the drafted reply itself
     // restates.
+    // Absence claims read the authoritative history (loaded lazily, only for such a reply).
+    await require('./payment-history').ensureAbsenceHistory(context, parsed.reply);
     const replyHasUngroundedAmount = replyQuotesUngroundedAmount(parsed.reply, context, { inboundMessage });
     if (replyHasUngroundedAmount) {
       logger.warn(`[sms-shadow] draft quotes an amount absent from the facts block — kept shadow (customer=${customer?.id || 'unknown'} intent=${intentName})`);

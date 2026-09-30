@@ -896,9 +896,11 @@ describe('pre-push audit P1: the amount-free receipt guard fires only on AFFIRMA
     expect(replyQuotesUngroundedAmount('We don\'t see a payment from you yet.', ctx, { byMeaning: true, inboundMessage: 'Did my $95 payment arrive?' })).toBe(false);
   });
 
-  test('a truthful negative reply passes against a REFUNDED-only history', () => {
+  test('a "no payment has come through" denial against a REFUNDED-only history is rejected (a refunded payment WAS received); truthful for a different payment', () => {
     const ctx = ctxWith([{ amount: 50, status: 'refunded' }]);
-    expect(replyQuotesUngroundedAmount('No payment has come through on our end yet.', ctx, { byMeaning: true })).toBe(false);
+    // Codex round-11: refunded/disputed rows were received then reversed, so they contradict an unnamed "not received"
+    expect(replyQuotesUngroundedAmount('No payment has come through on our end yet.', ctx, { byMeaning: true })).toBe(true);
+    expect(replyQuotesUngroundedAmount('No payment has come through on our end yet.', ctx, { byMeaning: true, inboundMessage: 'Did my $95 payment arrive?' })).toBe(false);
   });
 
   test('an AFFIRMATIVE receipt claim with no settled payment still fails closed', () => {

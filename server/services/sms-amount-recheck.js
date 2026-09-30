@@ -9,6 +9,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const drafter = require('./sms-shadow-drafter');
+const { ensureAbsenceHistory } = require('./payment-history');
 
 // The amount forms and the payment-acknowledgement grammar are the
 // draft-time guard's own (one definition for both amount guards): every
@@ -301,6 +302,7 @@ async function amountFreeStatusClaimStale({
     // a settlement claim read the emptiness as "nothing owed". Fail closed.
     const ctx = customerRow ? await require('./context-aggregator').getContextForCustomer(customerRow) : null;
     if (!ctx) return { stale: true, reason: 'amount_recheck_no_customer' };
+    await ensureAbsenceHistory(ctx, text, dbh);
     const stale = drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage });
     return stale ? { stale: true, reason: 'amount_no_longer_authorized' } : { stale: false };
   } catch (err) {
@@ -316,6 +318,20 @@ async function amountFreeStatusClaimStale({
 // approved), never a RECEIPT/status claim or a Zelle offer, both of which
 // assert a fact that can go stale between review and fire regardless of who
 // wrote the words.
+// Cheap, read-free pre-screen for the SCHEDULER's fire-time seam (Codex round-11
+// P1): does this body carry anything outgoingAmountsStale could judge — a dollar
+// figure / price grammar, an affirmative Zelle offer, or a payment-status claim?
+// A body with none (a human reply about scheduling, thanks, etc.) needs no
+// agent_decisions / customer / billing reads at all.
+function bodyNeedsPaymentRecheck(body) {
+  const text = String(body || '');
+  if (!text) return false;
+  if (bodyAmountCents(text).length) return true;
+  if (hasAffirmativeZelleMention(text)) return true;
+  if (mayAssertPaymentStatus(text)) return true;
+  try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
+}
+
 async function outgoingAmountsStale({
   customerId, body, promptVersion = null, zelleInvoiceId = null, dbh = db, trustOwedAmounts = false,
   // Independent-review P1 (round 6, PR #5331): the customer's own inbound
@@ -412,6 +428,7 @@ async function outgoingAmountsStale({
     // the ORIGINAL scope of the 2026-07-30 exemption exactly (skip the
     // whole amount check for a human-reviewed legacy reply), same as before
     // this finding widened the STRICT rule's own, finer-grained trust.
+    if (strict) await ensureAbsenceHistory(ctx, text, dbh);
     const stale = strict
       ? drafter.replyQuotesUngroundedAmount(text, ctx, { byMeaning: true, trustOwedAmounts, inboundMessage })
       : !trustOwedAmounts && amounts.some((a) => !owed.has(a) && !(ack && paid.has(a)));
@@ -424,5 +441,5 @@ async function outgoingAmountsStale({
 
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible,
-  hasAffirmativeZelleMention, classifyZelleClause, amountFreeStatusClaimStale,
+  hasAffirmativeZelleMention, classifyZelleClause, amountFreeStatusClaimStale, bodyNeedsPaymentRecheck,
 };
