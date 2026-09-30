@@ -1200,6 +1200,11 @@ function heldTouchFloor(now = new Date()) {
   return anchorTo10amNY(now, 1, 0);
 }
 
+// YYYY-MM-DD of an instant in New York, for day-level comparisons.
+function nyCalendarDay(d) {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+}
+
 // How long the FINAL step may keep being held past its own scheduled day.
 const FINAL_STEP_HOLD_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -1219,26 +1224,51 @@ const FINAL_STEP_HOLD_MAX_MS = 7 * 24 * 60 * 60 * 1000;
  * step has no next step, so its hold is capped at 7 days after its own
  * scheduled date; past that the row is left as it was.
  *
+ * Days are compared as NY calendar days at the day the cron can actually retry
+ * (firstEligibleFireAt: a Friday hold retries Tuesday, which may already be the
+ * next step's day).
+ *
+ * Operator send-now is never held (see the guard at the top).
+ *
  * Guarded like the stale skip: it lands only while this worker still holds the
- * claim (fireStep's stamp) on the same active step, so an admin edit, pause or
- * a manual send-now that moved the sequence since is left alone. Best-effort:
+ * claim (fireStep's stamp) on the same active step AND the claimed next_touch_at
+ * is unchanged, so an admin edit, pause or a manual send-now that moved the
+ * sequence since is left alone. Best-effort:
  * a failed write leaves the prior behaviour (row still due) and never throws
  * out of the touch. Returns whether the retime landed.
  */
-async function holdTouchUntilNextDay(row, claimStamp, why) {
+async function holdTouchUntilNextDay(row, claimStamp, why, { operatorInitiated = false } = {}) {
+  // An operator send-now keeps today's behaviour: its row is selected without
+  // the invoice anchor aliases (the anchor would fall back to the sequence's
+  // created_at), and it is a one-off click, not a cron cadence to protect.
+  if (operatorInitiated) return false;
   const floor = heldTouchFloor();
-  const anchorAt = sequenceAnchor(row);
-  const nextStepAt = computeNextTouchAt(anchorAt, row.step_index + 1);
-  const ownStepAt = computeNextTouchAt(anchorAt, row.step_index);
-  const withinWindow = nextStepAt
-    ? floor.getTime() < nextStepAt.getTime()
-    : !!ownStepAt && floor.getTime() <= ownStepAt.getTime() + FINAL_STEP_HOLD_MAX_MS;
+  let nextStepAt;
+  let withinWindow;
+  try {
+    const anchorAt = sequenceAnchor(row);
+    nextStepAt = computeNextTouchAt(anchorAt, row.step_index + 1);
+    const ownStepAt = computeNextTouchAt(anchorAt, row.step_index);
+    // Compare the day the cron can ACTUALLY retry (first send-window day on or
+    // after the floor), not the raw floor: a Friday hold retries Tuesday, which
+    // may already be the next step's day (Codex #5404 r1 P1).
+    const retryDay = nyCalendarDay(firstEligibleFireAt(floor));
+    withinWindow = nextStepAt
+      ? retryDay < nyCalendarDay(firstEligibleFireAt(nextStepAt))
+      : !!ownStepAt && retryDay <= nyCalendarDay(new Date(ownStepAt.getTime() + FINAL_STEP_HOLD_MAX_MS));
+  } catch (err) {
+    logger.warn(`[invoice-followups] hold bound could not be computed for sequence ${row.id} (${why}): ${err.message} — not held`);
+    return false;
+  }
   if (!withinWindow) {
     logger.info(`[invoice-followups] sequence ${row.id} step ${row.step_index} not held (${why}) — ${nextStepAt ? "the next step's day arrives first" : 'past the final step\'s 7-day hold window'}; left to the stale skip`);
     return false;
   }
   const guard = { id: row.id, status: 'active', step_index: row.step_index };
   if (claimStamp) guard.touch_claimed_at = claimStamp;
+  // A send-now that rewrote next_touch_at meanwhile must not be overwritten
+  // (Codex #5404 r1 P2).
+  if (row.next_touch_at) guard.next_touch_at = row.next_touch_at;
   try {
     const updated = await db('invoice_followup_sequences').where(guard)
       .update({ updated_at: db.fn.now(), next_touch_at: floor });
@@ -1401,6 +1431,9 @@ async function fireStep(row, { operatorInitiated = false } = {}) {
   // decide whether sending would leak the payer's bearer link, and a payer
   // assigned since the batch SELECT would otherwise be invisible to it.
   row.anchor_at = claimedSeq.anchor_at;
+  // The locked, claimed due time: holdTouchUntilNextDay's guard compares it, so a
+  // send-now rewrite after the claim is a no-op there, not an overwrite.
+  row.next_touch_at = claimedSeq.next_touch_at;
   row.customer_id = claimedSeq.customer_id;
   row.invoice_payer_id = claimedInvoice.payer_id ?? null;
   row.invoice_status = claimedInvoice.status;
@@ -1521,7 +1554,7 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
     try { ownLedgerIds = await currentStepLedgerIds(row, step, policyChannels); }
     catch (err) {
       logger.warn(`[invoice-followups] skipped sequence ${row.id} — step ledger unavailable: ${err.message}`);
-      await holdTouchUntilNextDay(row, claimStamp, 'step_ledger_unavailable');
+      await holdTouchUntilNextDay(row, claimStamp, 'step_ledger_unavailable', { operatorInitiated });
       return;
     }
   }
@@ -1534,8 +1567,13 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
   if (!Object.values(channelPolicy).some(Boolean)) {
     logger.info(`[invoice-followups] collections policy denied selected channels for sequence ${row.id} — touch deferred to a later run`);
     // Held, not skipped: retimed past today so the daily tick's stale grace
-    // does not pass this step by. Nothing was drawn or sent here.
-    await holdTouchUntilNextDay(row, claimStamp, 'collections_policy_denied');
+    // does not pass this step by. Nothing was drawn or sent here. Only when
+    // some denied channel is TRANSIENT (a spacing window, a releasable hold):
+    // when every channel is durably denied (flag, suppression, standing) the
+    // denial will not lift, so the step is left due as before — one attempt.
+    if (policyChannels.some((_channel, index) => !verdictDurablyDenied(policyResults[index]))) {
+      await holdTouchUntilNextDay(row, claimStamp, 'collections_policy_denied', { operatorInitiated });
+    }
     return;
   }
   // Apply any available account credit before dunning so the reminder bills amount
@@ -1949,8 +1987,22 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null } =
       // terminally here would turn a 24h frequency window into a
       // permanently silenced sequence, and leaving the row due would let the
       // daily tick's stale grace skip the step instead of retrying it.
-      await holdTouchUntilNextDay(row, claimStamp, smsSkipReason || emailResult.reason);
-      logger.info(`[invoice-followups] touch for sequence ${row.id} held by collections policy/ledger — retrying on a later run`);
+      // Classified by what ACTUALLY happened on each leg: the email result's
+      // default reason reads 'collections_policy_denied' even when Email was
+      // never selected, so it only counts while a leg really has a transient
+      // denial or outage — and never once the SMS/App leg ended on a terminal
+      // sender outcome (blocked, non-mobile, ...), which a retry cannot change.
+      const smsTerminal = smsSkipReason != null && ![
+        'collections_policy_denied', 'ledger_unavailable', 'no_non_email_selected',
+        'no_customer_phone', 'missing_template',
+      ].includes(smsSkipReason);
+      const transientLeg = policyChannels.some((_channel, index) => !verdictAllows(policyResults[index])
+        && !verdictDurablyDenied(policyResults[index]))
+        || smsSkipReason === 'ledger_unavailable' || emailResult.reason === 'ledger_unavailable';
+      if (transientLeg && !smsTerminal) {
+        await holdTouchUntilNextDay(row, claimStamp, smsSkipReason || emailResult.reason, { operatorInitiated });
+      }
+      logger.info(`[invoice-followups] touch for sequence ${row.id} handled by collections policy/ledger — retrying on a later run`);
     } else {
       await db('invoice_followup_sequences').where({ id: row.id }).update({
         updated_at: db.fn.now(),

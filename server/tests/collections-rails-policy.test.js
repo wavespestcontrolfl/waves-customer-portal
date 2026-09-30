@@ -121,7 +121,9 @@ function setDbQueues(queues) {
 }
 
 const ALLOWED = { allowed: true, denialReasons: [], eligibleInvoiceIds: ['inv-1'] };
-const DENIED = { allowed: false, denialReasons: ['flag_do_not_collect'], eligibleInvoiceIds: [] };
+const DENIED = { allowed: false, denialReasons: ['flag_do_not_collect'], eligibleInvoiceIds: [] }; // durable (flag_)
+// A spacing window lifts on its own: the only kind of denial the held retime covers.
+const TRANSIENT_DENIED = { allowed: false, denialReasons: ['spacing_window'], eligibleInvoiceIds: [] };
 
 const savedGate = process.env.GATE_COLLECTIONS_POLICY;
 afterAll(() => {
@@ -593,9 +595,18 @@ function armFollowupHappyPath({ sequenceUpdate = chain(), prefs = { email_enable
 // the daily tick's 20h stale grace would skip the step forward.
 const HELD_FLOOR = new Date('2026-05-27T04:00:00.000Z'); // Wed 00:00 EDT, after the Tue-14:00Z clock
 
-function expectHeldRetime(update, { at = HELD_FLOOR, stepIndex = 0 } = {}) {
+// The default row's next step (d7) falls on Wed 05-27 10:00 ET, the same NY day
+// as the retry, so it would not be held; anchor rows that are meant to hold
+// on 05-21 (d7 = Thu 05-28).
+const HOLD_ROW = { invoice_created_at: '2026-05-21T12:00:00.000Z' };
+const FU_DUE = '2026-05-26T13:00:00.000Z';
+
+function expectHeldRetime(update, { at = HELD_FLOOR, stepIndex = 0, dueAt = FU_DUE } = {}) {
+  // The guard: claim holder, same active step, AND the claimed due time
+  // unchanged (a send-now rewrite in between makes it a 0-row no-op).
   expect(update.where).toHaveBeenCalledWith({
     id: 'seq-1', status: 'active', step_index: stepIndex, touch_claimed_at: expect.any(Date),
+    next_touch_at: dueAt,
   });
   expect(update.update).toHaveBeenCalledTimes(1);
   const [patch] = update.update.mock.calls[0];
@@ -1044,10 +1055,10 @@ describe('invoice-followups rail', () => {
 
   test("gate 'true' + both channels denied: no sends, no ledger rows, sequence held (not paused, not left due) for a later run", async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    ContactPolicy.evaluate.mockResolvedValue(TRANSIENT_DENIED);
     const heldRetime = chain({ result: 1 });
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [
         chain({ first: FU_INVOICE }), // claim-txn row lock read
@@ -1137,7 +1148,7 @@ describe('invoice-followups rail', () => {
     ContactLedger.recordContact.mockRejectedValue(new Error('ledger down'));
     const heldRetime = chain({ result: 1 });
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [
         chain({ first: FU_INVOICE }), // claim-txn row lock read
@@ -1160,10 +1171,10 @@ describe('invoice-followups rail', () => {
 
   test('held retime lands on the claim-holder only: a changed sequence (0 rows) is left alone and never throws', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    ContactPolicy.evaluate.mockResolvedValue(TRANSIENT_DENIED);
     const heldRetime = chain({ result: 0 });
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
       invoice_followup_sequences: [
@@ -1176,11 +1187,11 @@ describe('invoice-followups rail', () => {
 
   test('held retime: a failed write is swallowed (row stays due, the touch does not throw)', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    ContactPolicy.evaluate.mockResolvedValue(TRANSIENT_DENIED);
     const heldRetime = chain();
     heldRetime.update = jest.fn(() => { throw new Error('db blip'); });
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
       invoice_followup_sequences: [
@@ -1196,7 +1207,7 @@ describe('invoice-followups rail', () => {
     const ledgerQuery = chain();
     ledgerQuery.whereIn = jest.fn(() => { throw new Error('ledger read down'); });
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
       notification_prefs: [chain({ first: { invoice_channels: ['push', 'sms'] } })],
@@ -1214,10 +1225,10 @@ describe('invoice-followups rail', () => {
   test('a next-day tick SENDS a policy-held step; the pre-fix due-row shape is stale-skipped instead', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     // Tick 1 (Tue 14:00Z): everything denied -> held, and the retime is captured.
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    ContactPolicy.evaluate.mockResolvedValue(TRANSIENT_DENIED);
     const heldRetime = chain({ result: 1 });
     setDbQueues({
-      'invoice_followup_sequences as s': [chain({ result: [followupRow()] })],
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
       invoice_followup_sequences: [
@@ -1253,7 +1264,7 @@ describe('invoice-followups rail', () => {
   test('a Friday hold rolls to Saturday 00:00, and Tuesday still sends it (weekend roll)', async () => {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     jest.setSystemTime(new Date('2026-05-29T14:16:00.000Z')); // Fri
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    ContactPolicy.evaluate.mockResolvedValue(TRANSIENT_DENIED);
     const heldRetime = chain({ result: 1 });
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow({
@@ -1282,16 +1293,19 @@ describe('invoice-followups rail', () => {
   // Clock: Tue 2026-05-26 14:00Z, so the hold target is Wed 05-27 00:00 ET.
   // The cadence is the legacy d3/d7/d14/d30 (ladder gate unset), anchored at
   // invoice_created_at 10:00 ET: step N is due on anchor + [3,7,14,30] days.
-  function armDeniedTouch({ rowOverrides = {}, stepIndex = 0, third }) {
+  function armDeniedTouch({ rowOverrides = {}, stepIndex = 0, third, liveDueAt = null }) {
     process.env.GATE_COLLECTIONS_POLICY = 'true';
-    ContactPolicy.evaluate.mockResolvedValue(DENIED);
+    ContactPolicy.evaluate.mockResolvedValue(TRANSIENT_DENIED);
     const claimClear = chain({ result: 1 });
     setDbQueues({
       'invoice_followup_sequences as s': [chain({ result: [followupRow({ step_index: stepIndex, ...rowOverrides })] })],
       customers: [chain({ first: FU_CUSTOMER })],
       invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
       invoice_followup_sequences: [
-        chain({ first: { ...FU_LIVE_SEQ, step_index: stepIndex } }),
+        chain({ first: {
+          ...FU_LIVE_SEQ, step_index: stepIndex,
+          next_touch_at: liveDueAt || rowOverrides.next_touch_at || FU_LIVE_SEQ.next_touch_at,
+        } }),
         chain({ result: 1 }), // touch claim
         ...(third ? [third] : []),
         claimClear,
@@ -1358,6 +1372,210 @@ describe('invoice-followups rail', () => {
       stepIndex: 3, rowOverrides: { invoice_created_at: '2026-04-10T12:00:00.000Z' },
     });
     await InvoiceFollowUps.runPending();
+    expect(claimClear.update).toHaveBeenCalledTimes(1);
+    expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
+  });
+
+  test('bound (weekend): a Friday hold whose next step is Tuesday is NOT held; the stale skip then advances it', async () => {
+    // Friday 05-29: the hold would retry Tuesday 06-02. anchor 05-26 puts d7 on
+    // Tue 06-02, so Tuesday is the NEXT step's day: no hold (a raw-instant
+    // compare would wrongly hold: Sat 00:00 is before Tue 10:00).
+    jest.setSystemTime(new Date('2026-05-29T14:16:00.000Z'));
+    const dueAt = '2026-05-29T13:00:00.000Z';
+    const claimClear = armDeniedTouch({
+      rowOverrides: { invoice_created_at: '2026-05-26T12:00:00.000Z', next_touch_at: dueAt },
+    });
+    await InvoiceFollowUps.runPending();
+    expect(claimClear.update).toHaveBeenCalledTimes(1);
+    expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
+
+    // Tue 06-02 10:16 ET: the untouched due row is 4 days old -> stale skip to d7.
+    jest.setSystemTime(new Date('2026-06-02T14:16:00.000Z'));
+    ContactPolicy.evaluate.mockResolvedValue(ALLOWED);
+    const staleSkip = chain({ result: 1 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({
+        invoice_created_at: '2026-05-26T12:00:00.000Z', next_touch_at: dueAt,
+      })] })],
+      invoice_followup_sequences: [staleSkip],
+    });
+    await InvoiceFollowUps.runPending();
+    expect(staleSkip.update.mock.calls[0][0]).toMatchObject({ step_index: 1, status: 'active' });
+  });
+
+  test('bound (weekend): a Friday hold whose next step is Wednesday or later IS held, and Tuesday sends the held step', async () => {
+    // anchor 05-27 -> d7 = Wed 06-03; Tuesday 06-02 is still the current stage.
+    jest.setSystemTime(new Date('2026-05-29T14:16:00.000Z'));
+    const dueAt = '2026-05-29T13:00:00.000Z';
+    const heldRetime = chain({ result: 1 });
+    armDeniedTouch({
+      rowOverrides: { invoice_created_at: '2026-05-27T12:00:00.000Z', next_touch_at: dueAt }, third: heldRetime,
+    });
+    await InvoiceFollowUps.runPending();
+    expectHeldRetime(heldRetime, { at: new Date('2026-05-30T04:00:00.000Z'), dueAt });
+  });
+
+  test('bound (weekend): the FINAL step near the 7-day edge is judged on the Tuesday retry day, not the Saturday floor', async () => {
+    jest.setSystemTime(new Date('2026-05-29T14:16:00.000Z')); // Fri; retry = Tue 06-02
+    const dueAt = '2026-05-29T13:00:00.000Z';
+    // own day 05-26 (+7d = Tue 06-02): retry day is inside the window -> held.
+    const held = chain({ result: 1 });
+    armDeniedTouch({
+      stepIndex: 3, rowOverrides: { invoice_created_at: '2026-04-26T12:00:00.000Z', next_touch_at: dueAt }, third: held,
+    });
+    await InvoiceFollowUps.runPending();
+    expectHeldRetime(held, { at: new Date('2026-05-30T04:00:00.000Z'), stepIndex: 3, dueAt });
+
+    // own day 05-25 (+7d = Mon 06-01): the Saturday floor is inside it, but the
+    // cron cannot retry before Tuesday 06-02 -> outside the window, no hold.
+    const claimClear = armDeniedTouch({
+      stepIndex: 3, rowOverrides: { invoice_created_at: '2026-04-25T12:00:00.000Z', next_touch_at: dueAt },
+    });
+    await InvoiceFollowUps.runPending();
+    expect(claimClear.update).toHaveBeenCalledTimes(1);
+    expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
+  });
+
+  test('send-now race: the hold guard carries the claimed due time and is a 0-row no-op once it changed', async () => {
+    // The batch snapshot says 13:00Z but the locked row (what fireStep claimed)
+    // says 13:30Z; the guard must use the locked value, and a send-now rewrite
+    // after the claim then matches no row (the mock returns 0, as Postgres would).
+    const heldRetime = chain({ result: 0 });
+    armDeniedTouch({
+      rowOverrides: { ...HOLD_ROW }, third: heldRetime, liveDueAt: '2026-05-26T13:30:00.000Z',
+    });
+    expect(await InvoiceFollowUps.runPending()).toEqual({ sent: 1, skipped: 0 });
+    expectHeldRetime(heldRetime, { dueAt: '2026-05-26T13:30:00.000Z' });
+  });
+
+  test('Fable P1 (a): Mon anchor — Thu denied is held to Fri; Fri denied is NOT held (Tue is the next step\'s day); Tue stale-skips step 0 and sends step 1', async () => {
+    // anchor Mon 05-18: step 0 = Thu 05-21, step 1 = Mon 05-25 (eligible Tue 05-26).
+    const anchor = { invoice_created_at: '2026-05-18T12:00:00.000Z' };
+    jest.setSystemTime(new Date('2026-05-21T14:16:00.000Z')); // Thu
+    const thuDue = '2026-05-21T14:00:00.000Z';
+    const held = chain({ result: 1 });
+    armDeniedTouch({ rowOverrides: { ...anchor, next_touch_at: thuDue }, third: held });
+    await InvoiceFollowUps.runPending();
+    expectHeldRetime(held, { at: new Date('2026-05-22T04:00:00.000Z'), dueAt: thuDue }); // Fri 00:00 ET
+
+    jest.setSystemTime(new Date('2026-05-22T14:16:00.000Z')); // Fri, the held retry
+    const friDue = '2026-05-22T04:00:00.000Z';
+    const claimClear = armDeniedTouch({ rowOverrides: { ...anchor, next_touch_at: friDue } });
+    await InvoiceFollowUps.runPending();
+    expect(claimClear.update).toHaveBeenCalledTimes(1); // claim clear only: not held
+    expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
+
+    // Tue 05-26 10:16 ET: the untouched Fri row is stale -> skipped to step 1,
+    // which is due today and goes out in the same run.
+    jest.setSystemTime(new Date('2026-05-26T14:16:00.000Z'));
+    ContactPolicy.evaluate.mockResolvedValue(ALLOWED);
+    const staleSkip = chain({ result: 1 });
+    const sequenceUpdate = chain();
+    const step1Live = { ...FU_LIVE_SEQ, step_index: 1, next_touch_at: '2026-05-25T14:00:00.000Z' };
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow({ ...anchor, next_touch_at: friDue })] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: Array.from({ length: 5 }, () => chain({ first: FU_INVOICE })),
+      notification_prefs: [chain({ first: { email_enabled: true } }), chain({ first: { email_enabled: true } })],
+      customer_interactions: [chain(), chain()],
+      invoice_followup_sequences: [staleSkip, chain({ first: step1Live }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
+    });
+    await InvoiceFollowUps.runPending();
+    expect(staleSkip.update.mock.calls[0][0]).toMatchObject({ step_index: 1, status: 'active' });
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(sendCustomerMessage.mock.calls[0][0].metadata.notificationEventKey).toBe('invoice-followup:seq-1:d7_reminder');
+  });
+
+  test('Fable P1 (b): Fri anchor — step 0 fires Tue; Wed denied is held to Thu; Thu denied is NOT held (Fri is the next step\'s day)', async () => {
+    // anchor Fri 05-22: step 0 = Mon 05-25 (fires Tue), step 1 = Fri 05-29.
+    const anchor = { invoice_created_at: '2026-05-22T12:00:00.000Z' };
+    jest.setSystemTime(new Date('2026-05-27T14:16:00.000Z')); // Wed
+    const wedDue = '2026-05-27T04:00:00.000Z';
+    const held = chain({ result: 1 });
+    armDeniedTouch({ rowOverrides: { ...anchor, next_touch_at: wedDue }, third: held });
+    await InvoiceFollowUps.runPending();
+    expectHeldRetime(held, { at: new Date('2026-05-28T04:00:00.000Z'), dueAt: wedDue }); // Thu 00:00 ET
+
+    jest.setSystemTime(new Date('2026-05-28T14:16:00.000Z')); // Thu
+    const claimClear = armDeniedTouch({
+      rowOverrides: { ...anchor, next_touch_at: '2026-05-28T04:00:00.000Z' },
+    });
+    await InvoiceFollowUps.runPending();
+    expect(claimClear.update).toHaveBeenCalledTimes(1); // floor = Fri = next step's day: not held
+    expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
+  });
+
+  test('Fable P2: every selected channel DURABLY denied (flag) is not held — one attempt, row left due as before', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue(DENIED); // flag_do_not_collect: durable
+    const claimClear = chain({ result: 1 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      invoice_followup_sequences: [chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), claimClear],
+    });
+    await InvoiceFollowUps.runPending();
+    expect(claimClear.update).toHaveBeenCalledTimes(1);
+    expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  test('Fable P2: a durable denial on one channel and a transient one on the other still holds (the transient one can release)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockImplementation(async (_id, { channel }) => (channel === 'sms' ? DENIED : TRANSIENT_DENIED));
+    const heldRetime = chain({ result: 1 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      invoice_followup_sequences: [chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), heldRetime, chain({ result: 1 })],
+    });
+    await InvoiceFollowUps.runPending();
+    expectHeldRetime(heldRetime);
+  });
+
+  test('Fable P2: SMS durably blocked at the sender while Email is only spacing-denied is classified by the SMS outcome — not held, not paused', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    // Email denied by a spacing window (its default result reason stays
+    // 'collections_policy_denied'); SMS is permitted but the sender refuses it
+    // for good. Nothing a retry can change: no hold (and no pause, as before).
+    ContactPolicy.evaluate.mockImplementation(async (_id, { channel }) => (channel === 'email' ? TRANSIENT_DENIED : ALLOWED));
+    sendCustomerMessage.mockResolvedValue({ sent: false, blocked: true, code: 'NON_MOBILE' });
+    const claimClear = chain({ result: 1 });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ result: [followupRow(HOLD_ROW)] })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: Array.from({ length: 4 }, () => chain({ first: FU_INVOICE })),
+      notification_prefs: [chain({ first: { email_enabled: true } })],
+      invoice_followup_sequences: [chain({ first: FU_LIVE_SEQ }), chain({ result: 1 }), claimClear],
+    });
+    await InvoiceFollowUps.runPending();
+    expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+    expect(claimClear.update).toHaveBeenCalledTimes(1);
+    expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
+  });
+
+  test('Fable P2: an operator send-now is never held (its row has no invoice anchor aliases)', async () => {
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue(TRANSIENT_DENIED);
+    const claimClear = chain({ result: 1 });
+    // sendNextTouchNow's row select carries s.* only: created_at, no invoice_* aliases.
+    const sendNowRow = followupRow({ invoice_created_at: undefined, created_at: '2026-05-21T12:00:00.000Z' });
+    setDbQueues({
+      'invoice_followup_sequences as s': [chain({ first: sendNowRow })],
+      customers: [chain({ first: FU_CUSTOMER })],
+      invoices: [chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE }), chain({ first: FU_INVOICE })],
+      invoice_followup_sequences: [
+        chain({ first: FU_LIVE_SEQ }), // sendNextTouchNow's own read
+        chain({ result: 1 }), // its re-arm write
+        chain({ first: FU_LIVE_SEQ }), // fireStep post-lock revalidation
+        chain({ result: 1 }), // touch claim
+        claimClear,
+      ],
+    });
+    await InvoiceFollowUps.sendNextTouchNow('inv-1', { operatorInitiated: true });
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
     expect(claimClear.update).toHaveBeenCalledTimes(1);
     expect(claimClear.update.mock.calls[0][0]).toEqual({ touch_claimed_at: null, updated_at: 'CURRENT_TIMESTAMP' });
   });

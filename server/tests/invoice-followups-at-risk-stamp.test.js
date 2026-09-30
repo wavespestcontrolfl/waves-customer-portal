@@ -299,7 +299,6 @@ test('a delivered Day 30 touch does not stamp at_risk', async () => {
 test('an undelivered Day 60 touch (every selected channel policy-denied) does not stamp at_risk', async () => {
   RailGuard.collectionsChannelPermitted.mockResolvedValue({ allowed: false, durable: true });
   const atRiskChain = chain();
-  const heldRetime = chain({ result: 1 });
   setDbQueues({
     'invoice_followup_sequences as s': [chain({ result: [] }), chain({ result: [followupRow({ step_index: 4, next_touch_at: '2030-01-01T14:00:00.000Z' })] })],
     customers: [chain({ first: customer() }), atRiskChain],
@@ -308,7 +307,6 @@ test('an undelivered Day 60 touch (every selected channel policy-denied) does no
     invoice_followup_sequences: [
       chain({ first: { id: 'seq-1', customer_id: 'cust-1', status: 'active', step_index: 4, next_touch_at: '2026-05-26T13:00:00.000Z', anchor_at: null } }),
       chain({ result: 1 }),
-      heldRetime, // held retime (dunning PR 0): consumed before the claim clear
       chain({ result: 1 }),
     ],
   });
@@ -321,9 +319,6 @@ test('an undelivered Day 60 touch (every selected channel policy-denied) does no
   // below, on the SAME shared helper the delivered-path tests assert on.
   expect(result).toEqual({ sent: 1, skipped: 0 });
   expect(atRiskChain.update).not.toHaveBeenCalled();
-  expect(heldRetime.update).toHaveBeenCalledWith({
-    updated_at: 'CURRENT_TIMESTAMP', next_touch_at: new Date('2026-05-27T04:00:00.000Z'),
-  });
 });
 
 test('a transient at-risk stamp failure never blocks the touch itself (Codex P1: guarded, not bare-awaited)', async () => {
