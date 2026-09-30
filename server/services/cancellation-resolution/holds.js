@@ -388,7 +388,7 @@ async function markHoldsAccepted(holdIds) {
       const row = await trx('plan_holds').where({ id: holdId }).forUpdate().first('moved_visits', 'status');
       // A hold the recovery pass (or anything else) undid in the meantime
       // fails the whole marking: the caller compensates, nothing is skipped.
-      if (!row || row.status !== 'active') throw new Error(`plan hold ${holdId} is no longer active`);
+      if (!row || row.status !== 'active' || readRecord(row.moved_visits).compensating) throw new Error(`plan hold ${holdId} is no longer active`);
       await trx('plan_holds').where({ id: holdId }).update({
         moved_visits: JSON.stringify({ ...readRecord(row.moved_visits), acceptCommitted: true }),
         updated_at: new Date(),
@@ -701,6 +701,19 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
       const record = readRecord(hold.moved_visits);
       if (record.skipsFinal !== false || !Array.isArray(record.toSkip)) continue;
       if (record.acceptCommitted !== true) {
+        // Claim the undo under the row lock markHoldsAccepted takes: an
+        // accept that marked the hold since the bulk read wins, and one
+        // marking after this claim is refused (and compensates itself).
+        const claimed = await db.transaction(async (trx) => {
+          const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('status', 'moved_visits');
+          const liveRecord = readRecord(live?.moved_visits);
+          if (!live || live.status !== 'active' || liveRecord.acceptCommitted !== false) return false;
+          await trx('plan_holds').where({ id: hold.id }).update({
+            moved_visits: JSON.stringify({ ...liveRecord, compensating: true }), updated_at: new Date(),
+          });
+          return true;
+        });
+        if (!claimed) continue;
         // The accept died before all its writes stood: undo this hold
         // (rate restored, prepaid moves reverted) rather than skip visits
         // for an accept the customer was never told succeeded.

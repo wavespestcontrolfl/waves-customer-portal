@@ -388,6 +388,27 @@ describe('runPlanHoldLifecycle', () => {
     expect(bells('plan_hold_accept_interrupted')).toHaveLength(1);
   });
 
+  test('recovery never undoes a hold its accept marked after the bulk read; a hold being undone refuses a late marking', async () => {
+    const { markHoldsAccepted } = require('../services/cancellation-resolution/holds');
+    const unmarked = JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }], skipped: [], skipsFinal: false, acceptCommitted: false });
+    holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000), starts_on: TODAY, moved_visits: unmarked }, [lawnVisit('l1', daysOut(5))]);
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    let first = true;
+    db.transaction = async (cb) => {
+      if (first) { first = false; mockState.tables.plan_holds[0].moved_visits = JSON.stringify({ ...JSON.parse(unmarked), acceptCommitted: true }); }
+      return openTrx(cb);
+    };
+    try {
+      await runPlanHoldLifecycle({ today: TODAY });
+    } finally { db.transaction = openTrx; }
+    expect(mockState.tables.plan_holds[0].status).toBe('active');
+    expect(bells('plan_hold_accept_interrupted')).toHaveLength(0);
+
+    holdSeed({ moved_visits: JSON.stringify({ ...JSON.parse(unmarked), compensating: true }) });
+    await expect(markHoldsAccepted(['h1'])).rejects.toThrow('no longer active');
+  });
+
   test('undoing an unfinished paired accept also puts Away Mode back — unless the preference changed since', async () => {
     const seedPaired = (awayNow) => {
       holdSeed({ created_at: new Date(Date.now() - 60 * 60 * 1000),
