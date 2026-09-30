@@ -153,6 +153,8 @@ async function buildApproxVehicle(row) {
     const pos = await resolveFreshTechPosition({
       techId: row.technician_id,
       allowBouncieFallback: false,
+      // Same remap cutoff as the precise feed (round-37 P2).
+      cachedNotBefore: techMappingCutoff(row.tech_mapping_changed_at),
       logPrefix: 'track-public-approx',
     });
     if (!pos) return null;
@@ -681,6 +683,7 @@ router._test = {
   ensureEnRouteDestinationGeocoded,
   buildSummary,
   buildVehicle,
+  buildApproxVehicle,
 };
 
 module.exports = router;

@@ -65,3 +65,21 @@ test('no technician or no destination pin: no vehicle, no lookup (unchanged)', a
   expect(await trackPublicRouter._test.buildVehicle(service({ latitude: null }))).toBeNull();
   expect(resolveFreshTechPosition).not.toHaveBeenCalled();
 });
+
+// Codex round-37 P2: the approximate (scheduled-state, GATE_STOPS_AWAY) feed gets the same cutoff.
+test('buildApproxVehicle passes the same remap cutoff, keeps cache-only reads and rounded coordinates', async () => {
+  resolveFreshTechPosition.mockResolvedValue({ lat: 27.1234, lng: -82.2678, lastReportedAt: '2026-09-30T12:00:00.000Z' });
+  const v = await trackPublicRouter._test.buildApproxVehicle({ technician_id: 'tech-1', tech_mapping_changed_at: '2026-09-30T10:00:00.000Z' });
+  expect(v).toEqual({ lat: 27.12, lng: -82.27, lastReportedAt: '2026-09-30T12:00:00.000Z' });
+  expect(resolveFreshTechPosition).toHaveBeenCalledWith(expect.objectContaining({
+    techId: 'tech-1', allowBouncieFallback: false, cachedNotBefore: '2026-09-30T10:00:00.000Z',
+  }));
+});
+
+test('buildApproxVehicle: no remap time (NULL) means no cutoff; an unreadable one bypasses the cache', async () => {
+  resolveFreshTechPosition.mockResolvedValue(null);
+  await trackPublicRouter._test.buildApproxVehicle({ technician_id: 'tech-1', tech_mapping_changed_at: null });
+  expect(resolveFreshTechPosition.mock.calls[0][0].cachedNotBefore).toBeNull();
+  await trackPublicRouter._test.buildApproxVehicle({ technician_id: 'tech-1', tech_mapping_changed_at: 'garbage' });
+  expect(resolveFreshTechPosition.mock.calls[1][0].cachedNotBefore).toBeInstanceOf(Date);
+});

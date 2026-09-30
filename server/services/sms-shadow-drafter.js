@@ -915,10 +915,27 @@ function isServiceDurationQuantity(str, index, length) {
 // The ONE shared "this figure is a scheduling/duration span, not an arrival
 // time" predicate every token kind consults: a scheduling window or a
 // service/treatment duration.
+// RETROSPECTIVE durations (Codex round-37 P2): "I emailed it 10 minutes ago", "We
+// sent the invoice 20 minutes ago", "for the last 20 minutes", "in the past hour"
+// look BACK; they are never a technician's arrival time. "N units ago", a "the
+// last/past/previous" lead-in, or a past-tense office action earlier in the SAME
+// clause (I / we / the office + emailed, sent, texted, called, charged, ...).
+const AGO_AFTER_RE = /^\s*(?:(?:min(?:ute)?s?|hours?|hrs?|seconds?|secs?|days?|weeks?)\s+)?ago\b/i;
+const RETRO_LEADIN_BEFORE_RE = /\b(?:for|over|in|during|within|throughout)\s+the\s+(?:last|past|previous)\s+(?:about\s+|roughly\s+)?$/i;
+const PAST_OFFICE_ACTION_RE = /\b(?:i|we|someone|somebody|(?:our|the)\s+office|(?:our|the)\s+team)\s+(?:just\s+|already\s+|both\s+)?(?:sent|emailed|e-mailed|texted|called|phoned|messaged|mailed|posted|charged|refunded|credited|billed|invoiced|submitted|processed|updated|confirmed|scheduled|rescheduled|issued|received|paid|approved|resent|forwarded|replied|responded|left)\b/i;
+function isRetrospectiveDuration(str, index, length) {
+  if (AGO_AFTER_RE.test(str.slice(index + length))) return true;
+  const before = str.slice(Math.max(0, index - 80), index);
+  if (RETRO_LEADIN_BEFORE_RE.test(before)) return true;
+  let last = 0;
+  for (const m of before.matchAll(new RegExp(CLAUSE_BREAK_RE.source, CLAUSE_BREAK_RE.flags))) last = m.index + m[0].length;
+  return PAST_OFFICE_ACTION_RE.test(before.slice(last));
+}
 function isWindowQuantity(str, index, length) {
   return WINDOW_AFTER_RE.test(str.slice(index + length))
     || WINDOW_BEFORE_RE.test(str.slice(Math.max(0, index - 60), index))
-    || isServiceDurationQuantity(str, index, length);
+    || isServiceDurationQuantity(str, index, length)
+    || isRetrospectiveDuration(str, index, length);
 }
 // String.replace that leaves a window figure exactly as written.
 function replaceQuantity(text, re, convert) {
@@ -1131,7 +1148,13 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // payment has arrived at our office" is not a visit claim. Up to two words may
 // sit between the subject and the verb ("the tech, Sam, has arrived" / "your tech
 // Sam just arrived").
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+// First-person plural ARRIVAL / on-site claims (Codex round-37 P2): "We've arrived",
+// "We just got there", "We're on site", "We're at your door". Explicit forms only —
+// bare "we're here" and "we have on-site inspections" stay excluded.
+const WE_ARRIVED_ALT = "we(?:'ve|\\s+have)?\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:arrived|(?:got|gotten)\\s+(?:there|here|to\\s+(?:your|the)\\s+(?:house|home|place|property|address)))"
+  + "|we(?:'re|\\s+are)\\s+(?:now\\s+|just\\s+|already\\s+|finally\\s+)*(?:on[\\s-]?site|at\\s+(?:your|the)\\s+(?:door|house|home|place|property|address)|outside\\s+(?:your|the)\\s+(?:door|house|home|place|property)|on\\s+(?:the|your)\\s+property)";
+const COMPLETED_ARRIVAL_BASE_RE = /\b(?:(?:tech(?:nician)?s?|he|she|they|drivers?|crews?|teams?)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+|now\s+)?(?:arrived|(?:got|gotten)\s+(?:there|here|to\s+(?:your|the)\s+(?:house|home|place|property|address)))|(?:tech(?:nician)?s?|he|she|they|drivers?)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+const COMPLETED_ARRIVAL_RE = new RegExp(COMPLETED_ARRIVAL_BASE_RE.source.replace(/\)\\b$/, `|${WE_ARRIVED_ALT})\\b`), 'i');
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never
@@ -1213,7 +1236,10 @@ function carrySubjectAcrossConjunctions(str, techNames = []) {
 function bodyClaimsCompletedArrival(text, { techNames = [] } = {}) {
   const str = carrySubjectAcrossConjunctions(String(text || ''), techNames);
   for (const m of str.matchAll(new RegExp(statusRegexFor('completed', techNames).source, 'gi'))) {
-    if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length, techNames)) return true;
+    // Same exemptions as the en-route classifiers: negation, question, a governing
+    // conditional ("once we've arrived I'll text"), and an explicit future day.
+    if (!isNegatedInClause(str, m.index) && !isInterrogativeAt(str, m.index, m[0].length, techNames)
+      && !isConditionalBefore(str.slice(Math.max(0, m.index - 60), m.index)) && !isFutureDayStatus(str, m.index, m[0].length)) return true;
   }
   return false;
 }
@@ -1389,7 +1415,7 @@ function buildVisitStatusRe(SUBJ = VISIT_STATUS_SUBJECT) {
   '\\b(?:'
   // Superset of every en-route predicate bodyMentionsArrival classifies, so the
   // default-deny vocabulary can never be narrower than the specific classifier.
-  + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT}`
+  + `${PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})|${WE_ROUTE_ALT}|${WE_ARRIVED_ALT}`
   + `|${SUBJ}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet|was|were|had)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
   // Positional status forms (here / there / outside / nearby / close / on site /
   // at your door / almost there) count ONLY with a technician-type subject

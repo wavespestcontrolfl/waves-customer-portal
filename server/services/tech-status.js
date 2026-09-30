@@ -220,7 +220,7 @@ async function clearTechCurrentJob({ tech_id, current_job_id, status = 'idle' })
  * @param {number|null}  [args.speed_mph] optional, used for status derivation
  * @param {string|Date|null} [args.reported_at] GPS sample timestamp from provider
  */
-async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at }) {
+async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, reported_at, requireBouncieImei = null }) {
   if (!tech_id || lat == null || lng == null) {
     throw new Error('pingTechLocation: tech_id, lat, lng are required');
   }
@@ -235,10 +235,21 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
     // Single-statement upsert. Status uses CASE WHEN to preserve
     // semantic states when the row already exists with one set —
     // see header comment for why.
+    // Compare-and-write (Codex round-37 P2): a caller that fetched this point from
+    // ONE Bouncie device passes that IMEI as `requireBouncieImei`; the write then
+    // happens only while technicians.bouncie_imei STILL equals it — in the same
+    // statement, so a fetch that started before an admin remap can never write the
+    // old vehicle's point (with a provider timestamp newer than the remap) into the
+    // tech-keyed row. Without the option the statement is exactly the plain upsert.
+    const guarded = requireBouncieImei != null && String(requireBouncieImei).trim() !== '';
+    const insertSource = guarded
+      ? `SELECT ?::uuid, ?::text, ?::numeric, ?::numeric, NOW(), ?::timestamptz
+      WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ?)`
+      : 'VALUES (?, ?, ?, ?, NOW(), ?)';
     const [committed] = await trx.raw(
       `
       INSERT INTO tech_status (tech_id, status, lat, lng, updated_at, location_updated_at)
-      VALUES (?, ?, ?, ?, NOW(), ?)
+      ${insertSource}
       ON CONFLICT (tech_id) DO UPDATE SET
         lat = CASE
           WHEN tech_status.location_updated_at IS NULL
@@ -274,11 +285,16 @@ async function pingTechLocation({ tech_id, lat, lng, ignition, speed_mph, report
         END
       RETURNING id, tech_id, status, lat, lng, current_job_id, updated_at, location_updated_at
       `,
-      [tech_id, derivedStatus, lat, lng, locationUpdatedAt]
+      guarded
+        ? [tech_id, derivedStatus, lat, lng, locationUpdatedAt, tech_id, String(requireBouncieImei).trim()]
+        : [tech_id, derivedStatus, lat, lng, locationUpdatedAt]
     ).then((r) => r.rows);
     row = committed;
   });
   // trx committed by here.
+  // The guarded write matched no row: the technician was remapped mid-flight, so the
+  // point is dropped (nothing to enrich or broadcast).
+  if (!row) return null;
 
   // ETA enrichment: when the tech is en_route/driving toward an
   // assigned current_job, look up the job's lat/lng (or the customer's

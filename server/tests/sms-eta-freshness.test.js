@@ -1986,3 +1986,25 @@ describe('link-only rechecks are scoped to the token-owning visit', () => {
     expect(reason).toBe('eta_claim_visit_not_today');
   });
 });
+
+// Codex round-38 P2 (PR #5334): first-person on-site claims and retrospective durations at send time.
+describe('first-person arrival claims and elapsed durations at send time', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+  const onSiteSnap = { entries: [{ minutes: null, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'on_property' }] };
+  const rows = (extra) => [{ id: 'svc-1', status: 'on_site', track_state: 'on_property', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra }];
+  const done = { status: 'completed', track_state: 'completed' };
+  const run = (body, extra) => etaClaimBlockReason({ liveEtaSnapshot: onSiteSnap, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows(extra)) });
+  test.each(["We're on site.", "We've arrived.", "We're at your door.", 'We just got there.'])('%p: passes while on property, blocked once the visit is done', async (body) => {
+    expect(await run(body)).toBeNull();
+    expect(await run(body, done)).toBe('eta_claim_no_longer_en_route');
+  });
+  test.each(["We're here to help.", 'We have on-site inspections available.'])('%p is untouched even on a done visit', async (body) => {
+    expect(await run(body, done)).toBeNull();
+  });
+  test.each(['I emailed it 10 minutes ago.', 'We sent the invoice 20 minutes ago.', 'No news for the last 20 minutes.'])('%p is elapsed time, not an ETA: sends against an on-site snapshot', async (body) => {
+    expect(await run(body)).toBeNull();
+  });
+});

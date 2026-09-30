@@ -194,4 +194,39 @@ describe('tech_status GPS freshness writes', () => {
     const [, values] = raw.mock.calls[0];
     expect(values[4]).toEqual(new Date('2026-05-05T11:58:00.000Z'));
   });
+  // Codex round-37 P2: compare-and-write against the tracker mapping.
+  test('a guarded ping writes only while technicians.bouncie_imei still equals the IMEI the point was fetched from', async () => {
+    const raw = jest.fn().mockResolvedValue({
+      rows: [{ tech_id: 'tech-1', status: 'idle', lat: 27.1, lng: -82.2, current_job_id: null, updated_at: '2026-05-05T12:00:00.000Z', location_updated_at: '2026-05-05T11:58:00.000Z' }],
+    });
+    db.transaction = jest.fn(async (cb) => cb({ raw }));
+    await techStatus.pingTechLocation({ tech_id: 'tech-1', lat: 27.1, lng: -82.2, reported_at: '2026-05-05T11:58:00.000Z', requireBouncieImei: ' 356938035643809 ' });
+    const [sql, values] = raw.mock.calls[0];
+    expect(sql).toContain('WHERE EXISTS (SELECT 1 FROM technicians WHERE id = ?::uuid AND bouncie_imei = ?)');
+    expect(sql).not.toContain('VALUES (?, ?, ?, ?, NOW(), ?)');
+    expect(sql).toContain('ON CONFLICT (tech_id) DO UPDATE SET');
+    expect(values).toHaveLength(7);
+    expect(values.slice(5)).toEqual(['tech-1', '356938035643809']);
+  });
+
+  test('a guarded ping whose mapping moved mid-flight matches no row: nothing is broadcast and null is returned', async () => {
+    const raw = jest.fn().mockResolvedValue({ rows: [] });
+    db.transaction = jest.fn(async (cb) => cb({ raw }));
+    const io = { to: jest.fn(() => ({ emit: jest.fn() })) };
+    require('../sockets').getIo.mockReturnValue(io);
+    const out = await techStatus.pingTechLocation({ tech_id: 'tech-1', lat: 27.1, lng: -82.2, requireBouncieImei: 'OLD-DEVICE' });
+    expect(out).toBeNull();
+    expect(io.to).not.toHaveBeenCalled();
+    require('../sockets').getIo.mockReturnValue(null);
+  });
+
+  test('an unguarded ping is exactly the plain upsert (5 values, VALUES clause)', async () => {
+    const raw = jest.fn().mockResolvedValue({ rows: [{ tech_id: 'tech-1', status: 'idle', lat: 1, lng: 2, current_job_id: null, updated_at: 'x', location_updated_at: 'y' }] });
+    db.transaction = jest.fn(async (cb) => cb({ raw }));
+    await techStatus.pingTechLocation({ tech_id: 'tech-1', lat: 27.1, lng: -82.2 });
+    const [sql, values] = raw.mock.calls[0];
+    expect(sql).toContain('VALUES (?, ?, ?, ?, NOW(), ?)');
+    expect(sql).not.toContain('WHERE EXISTS');
+    expect(values).toHaveLength(5);
+  });
 });

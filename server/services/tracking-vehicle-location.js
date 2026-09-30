@@ -85,6 +85,10 @@ async function resolveBouncieFallback({
       ignition: loc.isRunning,
       speed_mph: loc.speed ?? loc.speed_mph,
       reported_at: lastReportedAt,
+      // Compare-and-write (round-37 P2): only while the tech is STILL mapped to the
+      // IMEI this point was fetched from — an in-flight fetch from a device that was
+      // remapped meanwhile must not seed the cache with the old vehicle's fix.
+      requireBouncieImei: imei,
     }).catch((err) => {
       logger.warn(`[${logPrefix}] tech_status fallback write failed: ${err.message}`);
     });

@@ -53,3 +53,49 @@ test('bypassed cache + the configured device unreadable: no position (fails clos
   const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'NEW', bouncieService: bouncie(null), cachedNotBefore: minutesAgo(2) });
   expect(out).toBeNull();
 });
+
+// Codex round-37 P2: an in-flight Bouncie fetch from a device that was remapped meanwhile
+// must not write the old vehicle's point into the tech-keyed tech_status row.
+describe('fallback cache write is compare-and-write against the tracker mapping', () => {
+  const { pingTechLocation } = require('../services/tech-status');
+  beforeEach(() => pingTechLocation.mockClear());
+
+  test('the fallback write carries the IMEI the point was fetched from', async () => {
+    mockTechStatus(undefined);
+    const svc = bouncie({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.2).toISOString() });
+    await resolveFreshTechPosition({ techId: 't1', bouncieImei: '  OLD-DEVICE ', bouncieService: svc });
+    expect(pingTechLocation).toHaveBeenCalledWith(expect.objectContaining({ tech_id: 't1', requireBouncieImei: 'OLD-DEVICE' }));
+  });
+
+  test('race: the mapping changes while the old device is being fetched -> the guarded write is dropped, the row keeps no old-vehicle point', async () => {
+    mockTechStatus(undefined);
+    const store = { mappedImei: 'OLD-DEVICE', techStatus: null };
+    // In-memory model of the guarded statement: WHERE technicians.bouncie_imei = $imei.
+    pingTechLocation.mockImplementation(async (args) => {
+      if (args.requireBouncieImei != null && store.mappedImei !== args.requireBouncieImei) return null;
+      store.techStatus = { lat: args.lat, lng: args.lng };
+      return store.techStatus;
+    });
+    const svc = { getLocationByImei: jest.fn(async () => {
+      store.mappedImei = 'NEW-DEVICE'; // admin remap lands while the old device is in flight
+      return { lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toISOString() };
+    }) };
+    const out = await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: svc });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(out.source).toBe('bouncie_api'); // this request still answers from the device it asked
+    expect(store.techStatus).toBeNull(); // ...but the old vehicle's point never seeds the cache
+  });
+
+  test('no remap in flight: the same guarded write lands', async () => {
+    mockTechStatus(undefined);
+    const store = { mappedImei: 'OLD-DEVICE', techStatus: null };
+    pingTechLocation.mockImplementation(async (args) => {
+      if (args.requireBouncieImei != null && store.mappedImei !== args.requireBouncieImei) return null;
+      store.techStatus = { lat: args.lat, lng: args.lng };
+      return store.techStatus;
+    });
+    await resolveFreshTechPosition({ techId: 't1', bouncieImei: 'OLD-DEVICE', bouncieService: bouncie({ lat: 28.0, lng: -81.0, updatedAt: minutesAgo(0.1).toISOString() }) });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(store.techStatus).toEqual({ lat: 28.0, lng: -81.0 });
+  });
+});

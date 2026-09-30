@@ -1943,6 +1943,44 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-38 P2s (PR #5334): first-person arrival claims; retrospective durations.
+describe('round 38 P2s: first-person on-site claims; elapsed-time durations', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    "We're on site.", "We've arrived.", "We're at your door.", 'We just got there.', 'We arrived at your home.', "We're outside your house.", 'We are now on-site.',
+  ])('%p is a first-person arrival claim (completed-arrival + visit-status vocabulary)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each([
+    "We're here.", "We're here to help.", 'We have on-site inspections available.', "We haven't arrived yet.", 'Have we arrived?', "Once we've arrived I'll text you.",
+    'We are at your house tomorrow.', "When we're on site I'll text you.",
+  ])('%p is not a live first-person arrival claim (bare here / negated / question / conditional / future day / not arrival)', (t) => {
+    expect(bodyClaimsCompletedArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test('the en-route first-person forms are unchanged', () => {
+    expect(bodyMentionsArrival("We're on our way.")).toBe(true);
+    expect(bodyClaimsCompletedArrival("We're on our way.")).toBe(false);
+  });
+  test.each([
+    'I emailed it 10 minutes ago.', 'We sent the invoice 20 minutes ago.', 'I called about it for the last 20 minutes.', 'No news in the past 30 minutes.',
+    'We texted you 5 minutes ago.', 'Someone from the office called 15 minutes ago.', 'We updated your account 15 minutes before the visit.',
+  ])('%p is a retrospective duration, never an ETA', (reply) => {
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply, factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each([
+    ['The tech is 10 minutes away.', 10], ['We texted the tech and he is 12 minutes away.', 12], ['The tech will be there in 10 minutes, we called him 5 minutes ago.', 10],
+  ])('%p is still an ETA claim (%p)', (reply, minutes) => {
+    expect([...findEtaMinutesClaims(reply), ...findGroundedMinutesFigures(reply)].map((c) => c.minutes)).toContain(minutes);
+  });
+});
+
 // Codex round-37 P2s (PR #5334): "got there" arrivals; publication expiry ignores link digits.
 describe('round 37 P2s: got-there completed arrivals; expiry parsing without tracking links', () => {
   const { bodyMentionsVisitStatus, liveEtaExpiredByPublication } = require('../services/sms-shadow-drafter');
@@ -1959,7 +1997,7 @@ describe('round 37 P2s: got-there completed arrivals; expiry parsing without tra
     expect(bodyClaimsCompletedArrival('Sam just got there.', { techNames: ['Dana'] })).toBe(false);
   });
   test.each([
-    "The technician hasn't got there yet.", 'Did the tech get there?', 'Has the technician got there yet?', 'Your order got there yesterday.', 'We got there.',
+    "The technician hasn't got there yet.", 'Did the tech get there?', 'Has the technician got there yet?', 'Your order got there yesterday.',
     'Once he gets there I will text you.',
   ])('%p is not a completed-arrival claim (negation / question / conditional / not a technician subject)', (t) => {
     expect(bodyClaimsCompletedArrival(t)).toBe(false);
