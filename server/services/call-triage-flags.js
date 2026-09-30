@@ -1869,6 +1869,36 @@ function onFileAddressSatisfaction(flags, extraction, opts = {}) {
   return { flags: list.filter((f) => !FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f)), satisfied };
 }
 
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the sub-score half. True only when
+// the overall score is low AND service_address is a low number AND every other
+// numeric sub-score is at or above the threshold (absent sub-scores are not
+// low). A low caller_identity / primary_service_category / urgency / etc. means
+// the call is unclear for a reason the Assessment fallback does not cover, so
+// it keeps the hold. One predicate, read by both the flag filter and the
+// score-level exit in canAutoRouteDecision.
+function lowConfidenceServiceAddressOnly(confidence, threshold) {
+  const c = confidence || {};
+  if (typeof c.overall !== 'number' || c.overall >= threshold) return false;
+  if (typeof c.service_address !== 'number' || c.service_address >= threshold) return false;
+  return Object.entries(c).every(([key, value]) => (
+    key === 'overall' || key === 'service_address'
+    || typeof value !== 'number' || value >= threshold
+  ));
+}
+
+// GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT — the booking-shape half. Gate on (and
+// the fail-open booking it rides on), a CONFIRMED status with a start, an
+// on-the-hour start, and a trusted address (positively validated, or dispatched
+// to the verified on-file address). Callers only reach this inside the
+// opts.failOpen + confirmed-with-start block.
+function unclearServiceAssessmentApplies(extraction, opts, avPositivelyValidated) {
+  if (opts.unclearServiceAssessment !== true || !opts.failOpen) return false;
+  const scheduling = extraction.scheduling || {};
+  if (scheduling.status !== 'confirmed' || !scheduling.confirmed_start_at) return false;
+  if (!confirmedStartOnTheHour(scheduling.confirmed_start_at)) return false;
+  return avPositivelyValidated || dispatchesToOnFileAddress(extraction, opts);
+}
+
 function canAutoRoute(extraction, opts = {}) {
   const out = {};
   const result = canAutoRouteDecision(extraction, opts, out);
@@ -1926,7 +1956,23 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // would dispatch to the customer's on-file (already Google-verified) address
   // rather than one stated on this call.
   const knownCustomerHasAddress = hasCompleteOnFileAddress(opts.knownCustomer);
+
+  // Hoisted above the fail-open filter (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT
+  // reads it there too).
+  // A POSITIVE Address Validation verdict — Google accepted (or corrected)
+  // the stated address AND placed it in the service area. One of the two
+  // ways the central address-trust gate below is satisfied (codex round-3
+  // P1): when AV is disabled or returns not_attempted,
+  // computeDeterministicTriageFlags raises NO address flag for a populated,
+  // high-confidence address, so without this gate nothing would stand
+  // between an unvalidated address and an auto-dispatch (AGENTS.md
+  // L367-370: never silent auto-route).
+  const avPositivelyValidated = !!opts.addressValidation
+    && ['validated_accept', 'corrected'].includes(String(opts.addressValidation.status || ''))
+    && opts.addressValidation.inServiceArea === true;
   const newAddressGiven = statesNewAddress(extraction, opts.knownCustomer);
+  let unclearServiceOk = false;
+  let lowConfidenceIsServiceAddressOnly = false;
   if (opts.failOpen && confirmedWithStart) {
     const aniPresent = String(opts.callerAni || '').replace(/\D/g, '').length >= 10;
     const knownCustomer = !!opts.knownCustomer;
@@ -1953,27 +1999,31 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     // A spoken community/subdivision ("the Lakewood Ranch property") is
     // location evidence too — without street/city/ZIP it can't be verified,
     // so it must hold for review, not fall back to the on-file primary.
+    // Evaluated once so the blocking filter below and the low-confidence exit
+    // further down agree (see lowConfidenceServiceAddressOnly).
+    lowConfidenceIsServiceAddressOnly = lowConfidenceServiceAddressOnly(extraction.confidence, opts.confidenceThreshold || DEFAULT_CONFIDENCE_THRESHOLD);
+    unclearServiceOk = unclearServiceAssessmentApplies(extraction, opts, avPositivelyValidated);
     appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
       if (f === 'caller_phone_missing' && aniPresent) { failedOpenFlags.push(f); return false; }
       if (f === 'low_extraction_confidence' && knownCustomerConfidenceTrusted) { failedOpenFlags.push(f); return false; }
       if (FAIL_OPEN_KNOWN_CUSTOMER_ADDRESS_FLAGS.has(f) && knownCustomerHasAddress && !newAddressGiven) { failedOpenFlags.push(f); return false; }
+      // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT (owner-approved, 2026-09-30): the
+      // service being unclear must not park a booking whose time and place are
+      // both settled — the existing "Waves Assessment" catalog fallback books
+      // it and the office keeps this advisory card to set the real service.
+      // Every condition is required: gate on, CONFIRMED status with a start
+      // (this block), an ON-THE-HOUR start, and a TRUSTED address (Google
+      // positively validated it, or it dispatches to the verified on-file
+      // one). Anything less keeps the hold. The service resolver's own vetoes
+      // (unsupported / administrative-only) still run downstream and are not
+      // touched here.
+      if (unclearServiceOk && f === 'ambiguous_pest_or_service') { failedOpenFlags.push(f); return false; }
+      if (unclearServiceOk && f === 'low_extraction_confidence' && lowConfidenceIsServiceAddressOnly) { failedOpenFlags.push(f); return false; }
       return true;
     });
   }
 
   const startOnTheHour = confirmedStartOnTheHour(extraction.scheduling?.confirmed_start_at);
-
-  // A POSITIVE Address Validation verdict — Google accepted (or corrected)
-  // the stated address AND placed it in the service area. One of the two
-  // ways the central address-trust gate below is satisfied (codex round-3
-  // P1): when AV is disabled or returns not_attempted,
-  // computeDeterministicTriageFlags raises NO address flag for a populated,
-  // high-confidence address, so without this gate nothing would stand
-  // between an unvalidated address and an auto-dispatch (AGENTS.md
-  // L367-370: never silent auto-route).
-  const avPositivelyValidated = !!opts.addressValidation
-    && ['validated_accept', 'corrected'].includes(String(opts.addressValidation.status || ''))
-    && opts.addressValidation.inServiceArea === true;
 
   // caller_not_authorized now fires only for an EXPLICIT third party
   // (isExplicitlyNonOwner) — an 'unknown' relationship never raises it and a
@@ -2062,7 +2112,15 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
   // this either (codex #4685 r1 P1).
   const failOpenLowConfidence = opts.failOpen && !!opts.knownCustomer && !opts.knownCustomer.addressOnly
     && extraction.scheduling?.status === 'confirmed' && !!extraction.scheduling?.confirmed_start_at;
-  if (!failOpenLowConfidence && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
+  // The unclear-service fail-open above demoted low_extraction_confidence only
+  // when service_address was the sole low sub-score; this exit reads the SAME
+  // decision (unclearServiceOk && lowConfidenceIsServiceAddressOnly) so the
+  // flag-level and score-level checks can never disagree. A missing overall
+  // still blocks (the flag never fires without a number).
+  const unclearServiceLowConfidenceOk = unclearServiceOk && lowConfidenceIsServiceAddressOnly
+    && typeof confidence.overall === 'number';
+  if (!failOpenLowConfidence && !unclearServiceLowConfidenceOk
+      && (typeof confidence.overall !== 'number' || confidence.overall < threshold)) {
     return { allowed: false, reason: 'low_confidence', overall: confidence.overall, failedOpenFlags: failedOpenFlags.length ? failedOpenFlags : undefined };
   }
 

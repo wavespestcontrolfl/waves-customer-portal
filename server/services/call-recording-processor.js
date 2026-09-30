@@ -9993,6 +9993,11 @@ const CallRecordingProcessor = {
             // Slot binding needs the call time: a spoken weekday only names a
             // unique date within the 7 days after the call.
             callStartedAt: call.created_at,
+            // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT: a settled time + trusted
+            // address is not held on an unclear service — the Waves
+            // Assessment fallback below books it (both directions, same as
+            // the fallback itself). Off = today.
+            unclearServiceAssessment: isEnabled('callUnclearServiceAssessment') === true,
           });
           // Address fail-open is only safe when the on-file address really is
           // the booking address — V1-captured address evidence that conflicts
@@ -19396,6 +19401,8 @@ const CallRecordingProcessor = {
           transcript: transcription,
           transcriptLabelsTrusted: isEnabled('callAgentCommitTrustedLabels'),
           callStartedAt: call.created_at,
+          // Mirrors the enforce lane (GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT).
+          unclearServiceAssessment: isEnabled('callUnclearServiceAssessment') === true,
         });
         // Same on-file satisfaction the live merge point applies to its card set.
         if (routingResult?.onFileAddressSatisfiedFlags?.length) {
