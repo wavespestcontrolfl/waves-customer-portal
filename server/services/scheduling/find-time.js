@@ -22,6 +22,8 @@ const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
+const { zoneRouteDaysLive } = require('../../config/feature-gates');
+const { readZoneRouteDays } = require('./zone-route-days');
 const { serviceFamilyPreference } = require('../auto-dispatch/service-category');
 const { travelGapEnabled, violatesTravelGap, travelGapConflicts, isHoldStop } = require('./travel-gap');
 const { ensureCatalogLoaded, expectedMinutesSync } = require('./expected-service-minutes');
@@ -241,7 +243,17 @@ async function findCapacitySlots(opts) {
   // return_time, detour_cap, ...), so a thin week explains itself.
   const rejections = {};
   const reject = (reason) => { rejections[reason] = (rejections[reason] || 0) + 1; };
-  const maxDetour = opts.customerFacing ? customerMaxDetourMinutes() : Infinity;
+  // Zone route days (GATE_ZONE_ROUTE_DAYS): a customer-facing caller that
+  // resolved the request's zone (opts.zoneSlug — /book and the estimate
+  // picker) gets a per-candidate cap, lifted on that zone's route weekday
+  // (scheduling/zone-route-days.js). Config is read once per request, and
+  // only when the gate is on and a zone was passed — otherwise the cap below
+  // is the same flat value as before.
+  const zoneRouteDays = opts.customerFacing && opts.zoneSlug && zoneRouteDaysLive()
+    ? await readZoneRouteDays(db) : null;
+  const capFor = (date, technicianId) => (opts.customerFacing
+    ? customerMaxDetourMinutes(zoneRouteDays ? { date, technicianId, zoneSlug: opts.zoneSlug, zoneRouteDays } : undefined)
+    : Infinity);
   for (const candidate of candidates) {
     const { context, date, tech, start, options } = candidate;
     const fit = evaluateArrivalPlacement(context, options);
@@ -251,7 +263,7 @@ async function findCapacitySlots(opts) {
       reject('conservative_travel');
       continue;
     }
-    if (fit.detourMinutes > maxDetour) { reject('detour_cap'); continue; }
+    if (fit.detourMinutes > capFor(date, tech.id)) { reject('detour_cap'); continue; }
     const index = fit.routeOrder.indexOf(context.target.id);
     const byId = new Map(context.rows.map(row => [row.id, row]));
     const familyScore = serviceFamilyPreference(context.rows.filter(row => row.technician_id === tech.id),

@@ -19028,9 +19028,9 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 
 // A held family (lawn_care / mosquito / tree_shrub — cancellation-
 // resolution/holds.js's startHold, HOLDABLE_FAMILIES) promises "no visits
-// before resume_on": every one of the family's upcoming visits was moved out
-// to no earlier than that date and the monthly component (when the customer
-// is on one) suspended. Top-up must honor that same promise rather than
+// before resume_on": every one of the family's visits inside the pause was
+// skipped (a prepaid one moved to on or after that date) and the monthly
+// component (when the customer is on one) suspended. Top-up must honor that same promise rather than
 // booking a fresh visit into the held window. Codex GitHub r6 P1.
 //
 // Reuses holds.js's own family classifier (familyOfServiceRow,
@@ -19044,8 +19044,8 @@ async function isAnnualPrepaySeries(conn, parent, parentId, cols) {
 //
 // "Active" uses the EXACT status/column semantics runPlanHoldLifecycle
 // itself reads: status: 'active' AND resume_on in the future. A hold whose
-// resume_on has already arrived is not fenced here — startHold moves every
-// visit in the family to no earlier than resume_on, so a visit ON that date
+// resume_on has already arrived is not fenced here — startHold leaves no
+// family visit before resume_on, so a visit ON that date
 // is exactly what the hold always intended to let through once it ends;
 // runPlanHoldLifecycle's own cron flips status to 'resumed' shortly after,
 // independently of top-up.
