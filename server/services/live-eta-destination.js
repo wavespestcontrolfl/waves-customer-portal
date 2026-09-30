@@ -41,4 +41,20 @@ function deviceFingerprint(imei) {
   return v ? require('crypto').createHash('sha256').update(v).digest('hex').slice(0, 16) : null;
 }
 
-module.exports = { resolveLiveEtaDestination, deviceFingerprint };
+// Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns over
+// as Date objects at local midnight, so the local calendar parts are the true day;
+// strings pass through their date prefix. Never treat these as instants. THE one
+// "what day is this visit" reader for live ETA: the aggregator's eligibility
+// (liveEtaEligible / liveEtaOnSite) and the send-time recheck (sms-eta-freshness)
+// both use it against etDateString(), so they cannot disagree.
+function calendarDay(value) {
+  if (!value) return null;
+  if (value instanceof Date) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
+  return m ? m[1] : null;
+}
+
+module.exports = { resolveLiveEtaDestination, deviceFingerprint, calendarDay };

@@ -39,9 +39,14 @@ const { findEtaMinutesClaims } = require('../services/sms-shadow-drafter');
 const { customerTrackState } = require('../services/track-transitions');
 const { etaClaimBlockReason, ETA_FRESHNESS_WINDOW_MS } = require('../services/sms-eta-freshness');
 
+// Round-24 auditor P1: the send-time visit read now includes scheduled_date and
+// requires it to be TODAY (ET). Fixture rows default to today unless they say so.
+const { etDateString } = require('../utils/datetime-et');
+const dated = (rows) => rows.map((r) => ({ scheduled_date: etDateString(), ...r }));
+
 function fakeDb(rows) {
   return () => ({
-    whereIn: () => ({ select: async () => rows }),
+    whereIn: () => ({ select: async () => dated(rows) }),
   });
 }
 
@@ -123,7 +128,7 @@ test('fresh facts but the visit is no longer customer-facing en_route: fails clo
     dbh: fakeDb([{ id: 'svc-1', status: 'on_site', track_state: 'on_property' }]),
   });
   expect(reason).toBe('eta_claim_no_longer_en_route');
-  expect(customerTrackState).toHaveBeenCalledWith({ id: 'svc-1', status: 'on_site', track_state: 'on_property' });
+  expect(customerTrackState).toHaveBeenCalledWith(expect.objectContaining({ id: 'svc-1', status: 'on_site', track_state: 'on_property' }));
 });
 
 test('status="en_route" but a STALE track_state (Codex round-1 finding): fails closed — mirrors track-public.js, never raw status', async () => {
@@ -252,7 +257,7 @@ describe('round 4 (audit P1): written-out minutes and unparsed arrival wording s
     drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
   });
   const liveEtaSnapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
-  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => dated(rows) }) });
 
   test('"twelve minutes away" is bound like "12 minutes" and blocked once the visit is done', async () => {
     const reason = await etaClaimBlockReason({
@@ -299,7 +304,7 @@ describe('round 5 (Codex P2): vague/approximate duration wording is a TIMED clai
     drafter.bodyHasTimedArrivalPhrase.mockReset().mockImplementation(real.bodyHasTimedArrivalPhrase);
   });
   const liveEtaSnapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
-  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => dated(rows) }) });
 
   test.each([
     'He is about half an hour away.',
@@ -493,7 +498,7 @@ describe('tracking-link-only replies (Codex round-4 P2): a reply sharing ONLY th
 describe('round 6 (Codex P2): an arrival sentence with a digit findEtaMinutesClaims could not classify fails closed like a timed phrase', () => {
   const drafter = require('../services/sms-shadow-drafter');
   const liveEtaSnapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] };
-  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => dated(rows) }) });
 
   beforeEach(() => {
     findEtaMinutesClaims.mockReset().mockReturnValue([]);
@@ -543,7 +548,7 @@ describe('round 7 (Codex P2): structural default-deny — a plain minutes figure
     drafter.findGroundedMinutesFigures.mockReset().mockImplementation(real.findGroundedMinutesFigures);
   });
   const liveEtaSnapshot = { entries: [{ minutes: 20, scheduledServiceIds: ['svc-1'] }] };
-  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => dated(rows) }) });
 
   test.each([
     '20 minutes to go.',
@@ -614,7 +619,7 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     drafter.findGroundedMinutesFigures.mockReset().mockImplementation(real.findGroundedMinutesFigures);
   });
   const liveEtaSnapshot = { entries: [{ minutes: 20, scheduledServiceIds: ['svc-1'] }] };
-  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => rows }) });
+  const dbWith = (rows) => () => ({ whereIn: () => ({ select: async () => dated(rows) }) });
 
   test.each([
     'The tech should make it in 20.',
@@ -1565,7 +1570,7 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       // fakeDb with a customers table for the fallback re-read.
       const dbWith = (rows, customer) => (table) => (table === 'customers'
         ? { where: () => ({ first: async () => customer }) }
-        : { whereIn: () => ({ select: async () => rows }) });
+        : { whereIn: () => ({ select: async () => dated(rows) }) });
       const runC = (customer, rows = [noPinRow()]) => etaClaimBlockReason({ liveEtaSnapshot: cSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWith(rows, customer) });
       const cust = (extra = {}) => ({ latitude: '27.1', longitude: '-82.2', address_line1: '1 Test St', zip: '34285', city: 'Venice', ...extra });
       test('same customer coordinates pass', async () => { expect(await runC(cust())).toBeNull(); });
@@ -1587,7 +1592,7 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       const dSnap = () => snap({ deviceImei: FP });
       const dbWithTech = (rows, tech) => (table) => (table === 'technicians'
         ? { where: () => ({ first: async () => tech }) }
-        : { whereIn: () => ({ select: async () => rows }) });
+        : { whereIn: () => ({ select: async () => dated(rows) }) });
       const runD = (tech, body = 'The tech is 9 minutes away.', snapshot = dSnap()) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: dbWithTech([row()], tech) });
       test('same device passes', async () => { expect(await runD({ bouncie_imei: '356938035643809' })).toBeNull(); });
       test('a re-pointed, cleared or unreadable technician device blocks', async () => {
@@ -1614,7 +1619,7 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       const dbWithStatus = (rows, status, tech = TECH) => (table) => {
         if (table === 'tech_status') return { where: () => ({ first: async () => status }) };
         if (table === 'technicians') return { where: () => ({ first: async () => tech }) };
-        return { whereIn: () => ({ select: async () => rows }) };
+        return { whereIn: () => ({ select: async () => dated(rows) }) };
       };
       const runF = (status, body = 'The tech is 9 minutes away.', snapshot = fSnap()) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: dbWithStatus([row()], status) });
       beforeEach(() => resolveLiveEtaMinutesUncached.mockReset());
@@ -1678,5 +1683,51 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       const two = snap({ scheduledServiceIds: ['svc-1'], destinations: [dest, { ...dest, id: 'svc-ghost' }] });
       expect(await run('The tech is 9 minutes away.', [row()], two)).toBe('eta_claim_destination_changed');
     });
+  });
+});
+
+// Auditor P1 (PR #5334): every claim kind is about a visit happening TODAY (ET).
+// Status-only claims skip the draft-freshness window, so yesterday's still-en_route
+// visit must not let a queued "The tech is on the way" send the NEXT day.
+describe('visit must be scheduled today (ET) for every claim kind', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  const NAMES = ['findEtaMinutesClaims', 'bodyMentionsArrival', 'bodyMentionsVisitStatus', 'bodyHasTimedArrivalPhrase', 'bodyHasUnclassifiedArrivalDigit', 'findGroundedMinutesFigures'];
+  beforeEach(() => { for (const name of NAMES) drafter[name].mockReset().mockImplementation(real[name]); });
+
+  const today = etDateString();
+  const yesterday = (() => { const [y, m, d] = today.split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1, d - 1)); return dt.toISOString().slice(0, 10); })();
+  const tomorrow = (() => { const [y, m, d] = today.split('-').map(Number); const dt = new Date(Date.UTC(y, m - 1, d + 1)); return dt.toISOString().slice(0, 10); })();
+  const snapFor = (extra = {}) => ({ entries: [{ minutes: 9, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', ...extra }] });
+  const enRoute = (extra = {}) => ({ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'tok-1', track_token_expires_at: FUTURE, ...extra });
+  const run = (body, rows, snapshot = snapFor()) => etaClaimBlockReason({ liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, outgoingBody: body, now: NOW, dbh: fakeDb(rows) });
+
+  test('today passes for status-only, minutes, link-only and recorded-state bodies', async () => {
+    const rows = [enRoute({ scheduled_date: today })];
+    expect(await run('The tech is on the way.', rows)).toBeNull();
+    expect(await run('The tech is 9 minutes away.', rows)).toBeNull();
+    expect(await run('Track: portal.wavespestcontrol.com/track/tok-1', rows)).toBeNull();
+    expect(await run('The technician showed up.', rows)).toBeNull(); // recorded-state recheck (no narrower classifier)
+  });
+  test.each([['yesterday', yesterday], ['tomorrow', tomorrow]])('a visit dated %s that still reads en_route blocks every claim kind', async (_n, day) => {
+    const rows = [enRoute({ scheduled_date: day })];
+    // status-only (skips draft freshness), stale-day minutes, a bare link, and a recorded-state recheck
+    for (const body of ['The tech is on the way.', 'The tech is 9 minutes away.', 'Track: portal.wavespestcontrol.com/track/tok-1', 'The technician showed up.']) {
+      expect(await run(body, rows)).toBe('eta_claim_visit_not_today');
+    }
+  });
+  test('a status-only claim on yesterday\'s en_route visit is blocked even with stale facts skipped', async () => {
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: snapFor({ minutes: null }), factsGeneratedAt: STALE, outgoingBody: 'The technician is on the way.', now: NOW, dbh: fakeDb([enRoute({ scheduled_date: yesterday })]) })).toBe('eta_claim_visit_not_today');
+  });
+  test('a missing or unreadable scheduled_date blocks', async () => {
+    for (const bad of [null, undefined, 'not-a-date', '']) {
+      expect(await etaClaimBlockReason({ liveEtaSnapshot: snapFor(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is on the way.', now: NOW, dbh: () => ({ whereIn: () => ({ select: async () => [enRoute({ scheduled_date: bad })] }) }) })).toBe('eta_claim_visit_not_today');
+    }
+  });
+  test('a Date-typed DATE value (pg) for today passes; one sibling on another day blocks the group', async () => {
+    const [y, m, d] = today.split('-').map(Number);
+    expect(await run('The tech is on the way.', [enRoute({ scheduled_date: new Date(y, m - 1, d) })])).toBeNull();
+    const two = { entries: [{ minutes: 9, scheduledServiceIds: ['svc-1', 'svc-2'], trackTokens: ['tok-1'], state: 'en_route' }] };
+    expect(await run('The tech is on the way.', [enRoute({ scheduled_date: today }), enRoute({ id: 'svc-2', track_view_token: 'tok-2', scheduled_date: yesterday })], two)).toBe('eta_claim_visit_not_today');
   });
 });

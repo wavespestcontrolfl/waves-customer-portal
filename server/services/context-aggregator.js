@@ -13,7 +13,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // customer would see on their own tracking link.
 const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
 const { calculateBoundedTrackingEta, finiteNumber, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
-const { resolveLiveEtaDestination, deviceFingerprint } = require('./live-eta-destination');
+const { resolveLiveEtaDestination, deviceFingerprint, calendarDay } = require('./live-eta-destination');
 const { sendTimeTrackTokenLive } = require('./sms-track-links');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
@@ -543,21 +543,8 @@ function liveEtaDestination(row, customer) {
   return source ? { lat, lng } : null;
 }
 
-// Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns
-// over as Date objects at local midnight, so the local calendar parts are
-// the true day (same idiom as the shadow drafter's formatEtDate); strings
-// pass through their date prefix. Never treat these as instants — a UTC
-// reparse shifts the day. Module-level (not a class method) so it's a plain
-// function liveEtaEligible below can call without an instance.
-function calendarDay(value) {
-  if (!value) return null;
-  if (value instanceof Date) {
-    const pad = (n) => String(n).padStart(2, '0');
-    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
-  }
-  const m = /^(\d{4}-\d{2}-\d{2})/.exec(String(value));
-  return m ? m[1] : null;
-}
+// calendarDay (Postgres DATE -> 'YYYY-MM-DD') lives in live-eta-destination.js so
+// liveEtaEligible below and the send-time recheck share ONE day rule.
 
 // LIVE ETA eligibility (Codex round-1 finding, PR #5334): a visit is worth
 // a GPS lookup only when it's TODAY, en_route, AND its customer-facing

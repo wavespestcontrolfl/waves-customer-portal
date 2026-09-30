@@ -82,6 +82,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { stripTrackLinks, sendTimeTrackTokenLive } = require('./sms-track-links');
+const { etDateString } = require('../utils/datetime-et');
 
 // 15 minutes: long enough that an ordinary reviewer accept/edit cycle (a
 // human reading a composer card and clicking Send) never gets blocked by
@@ -523,7 +524,16 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite 
   try {
     const { customerTrackState } = require('./track-transitions');
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
-    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip', 'service_address_city');
+    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip', 'service_address_city', 'scheduled_date');
+    // Auditor P1: every claim kind (status-only, minutes, link, recorded-state)
+    // is about a visit happening TODAY (America/New_York). Status-only claims skip
+    // the draft-freshness window, so without this a queued "The tech is on the
+    // way" could send the NEXT day while yesterday's visit still reads en_route.
+    // The SAME calendar-day rule the aggregator's liveEtaEligible / liveEtaOnSite
+    // use; a missing or unreadable date blocks.
+    const { calendarDay } = require('./live-eta-destination');
+    const today = etDateString();
+    if (rows.some((row) => calendarDay(row.scheduled_date) !== today)) return 'eta_claim_visit_not_today';
     // requireOnSite (Codex round-13 P2): a completed-arrival claim ("has
     // arrived") holds only once the tracker says the tech is on the property.
     const liveStates = new Set(requireOnSite ? ['on_property'] : ((allowOnSite || recordedState) ? ['en_route', 'on_property'] : ['en_route']));
