@@ -572,10 +572,10 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
 // carried). A retry_scheduled job may already have texted (its email failed)
 // or hold an uncertain outcome; a job already running or finished has had its
 // text decided. Those set nothing (returns 0) and the stop is not folded.
-async function markTextCarriedBySummary(invoiceId) {
-  return db('receipt_delivery_jobs').where({ invoice_id: invoiceId }).whereIn('status', QUEUED_STATUSES)
+async function markTextCarriedBySummary(invoiceId, { database = db } = {}) {
+  return database('receipt_delivery_jobs').where({ invoice_id: invoiceId }).whereIn('status', QUEUED_STATUSES)
     .where((q) => q.whereNull('sms_result').orWhereRaw("sms_result->>'reason' = ?", [TEXT_CARRIED_BY_SUMMARY]))
-    .update({ sms_result: JSON.stringify({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY }), updated_at: db.fn.now() });
+    .update({ sms_result: JSON.stringify({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY }), updated_at: database.fn.now() });
 }
 
 // The combined-stop charge defers its receipt job (deferReceiptDelivery) until the closeout

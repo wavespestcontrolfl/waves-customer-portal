@@ -5025,6 +5025,23 @@ postgres('visit summary recipient recovery', () => {
         expect(strayTexts).toEqual([]);
       });
 
+      test('lead conversion still happens when the carried email retries run out', async () => {
+        const invoiceId = await stop();
+        await coordinate();
+        notify();
+        const convert = jest.spyOn(require('../services/lead-estimate-link'), 'convertLeadFromEvent').mockResolvedValue(null);
+        require('../services/invoice-email').sendInvoiceEmail.mockResolvedValue({ ok: false, error: 'SendGrid 500' });
+        for (let attempt = 1; attempt < 5; attempt += 1) {
+          await Invoice.processScheduledSends();
+          await dueAgain(invoiceId);
+        }
+        expect(convert).not.toHaveBeenCalled();
+        await Invoice.processScheduledSends();
+        expect((await invoiceRow(invoiceId)).status).toBe('sent');
+        expect(convert).toHaveBeenCalledTimes(1);
+        expect(convert).toHaveBeenCalledWith({ source: 'invoice_sent', customerId: fixture.customerId });
+      });
+
       test('the receipt job with a carried text surfaces to the office at its retry cap and at an expected email skip', async () => {
         const invoiceId = await stop({ status: 'paid' });
         await coordinate();
@@ -5045,6 +5062,60 @@ postgres('visit summary recipient recovery', () => {
         expect(await jobRow(invoiceId)).toMatchObject({ status: 'completed' });
         expect(alert).toHaveBeenCalledTimes(1);
         expect(strayTexts).toEqual([]);
+      });
+    });
+
+    // The decision and the state it depends on are written together: a crash between them
+    // must not leave a receipt or invoice whose text nothing carries.
+    describe('the fold is persisted atomically', () => {
+      const failRecordOnce = () => {
+        const execute = mockPg.client.constructor.prototype._query;
+        let interrupted = false;
+        jest.spyOn(mockPg.client.constructor.prototype, '_query').mockImplementation(function failRecord(connection, query) {
+          if (!interrupted && query.sql.includes('update "visit_completion_packets"') && JSON.stringify(query.bindings || []).includes('summaryBillingLink')) {
+            interrupted = true;
+            return Promise.reject(new Error('Synthetic crash before the fold was recorded'));
+          }
+          return execute.call(this, connection, query);
+        });
+        return () => interrupted;
+      };
+
+      test('paid: a crash before the fold is recorded leaves the receipt text owed, and the replay folds cleanly', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        const interrupted = failRecordOnce();
+        await coordinate().catch(() => {});
+        expect(interrupted()).toBe(true);
+        jest.restoreAllMocks();
+        // Neither half survived: the job still owes its text and nothing was recorded.
+        expect((await jobRow(invoiceId)).sms_result).toBeNull();
+        expect(await recorded()).toBeUndefined();
+        jest.spyOn(require('../services/invoice-email'), 'sendReceiptEmail').mockResolvedValue({ ok: true });
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return handoffSender(async () => ({ sent: true }))(input);
+        });
+        await coordinate();
+        expect(await recorded()).toEqual({ kind: 'receipt', invoiceId });
+        expect((await jobRow(invoiceId)).sms_result).toMatchObject({ reason: 'carried_by_visit_summary' });
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(strayTexts).toEqual([]);
+        expect(sendCustomerMessage.mock.calls.at(-1)[0].body).toMatch(/ Your receipt: /);
+      });
+
+      test('unpaid: a crash before the fold is recorded leaves the invoice unscheduled, and the replay folds cleanly', async () => {
+        const invoiceId = await stop();
+        const interrupted = failRecordOnce();
+        await coordinate().catch(() => {});
+        expect(interrupted()).toBe(true);
+        jest.restoreAllMocks();
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'draft', scheduled_send_error: null });
+        expect(await recorded()).toBeUndefined();
+        jest.spyOn(require('../services/invoice-email'), 'sendInvoiceEmail').mockResolvedValue({ ok: true, sentAt: new Date().toISOString() });
+        sendCustomerMessage.mockImplementation(handoffSender(async () => ({ sent: true })));
+        await coordinate();
+        expect(await recorded()).toEqual({ kind: 'pay_link', invoiceId });
+        expect(await invoiceRow(invoiceId)).toMatchObject({ status: 'scheduled', scheduled_send_error: MARKER });
       });
     });
 

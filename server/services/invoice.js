@@ -7381,6 +7381,8 @@ const InvoiceService = {
       smsEventVisibleAt = undefined,
       emailEventVisibleAt = undefined,
       deduped = false,
+      // The finalized invoice's Text leg was carried by the visit summary text.
+      summaryCarried = false,
     } = {},
   ) {
     const invoice = await db("invoices").where({ id: invoiceId }).first();
@@ -7443,7 +7445,13 @@ const InvoiceService = {
     // this call performed the write; the helper's priorStatus gate (read pre-
     // update) keeps a resend of an already-sent invoice from converting.
     if (updated) {
-      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status, priorDelivered: Boolean(invoice.sent_at || invoice.sms_sent_at) });
+      await convertLeadOnInvoiceSent({ invoiceId, customerId: invoice.customer_id, priorStatus: invoice.status,
+        // The visit summary text's stamp on a carried invoice is its Text leg, not a prior delivery
+        // (the same exception sendViaSMSAndEmail applies when the queue finalizes it). The caller
+        // says so: the failed attempts have already rewritten the row's marker to its plain form.
+        priorDelivered: Boolean(invoice.sent_at
+          || (invoice.sms_sent_at && !summaryCarried
+            && !String(invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR))) });
     }
 
     try {
@@ -7857,6 +7865,7 @@ const InvoiceService = {
         failed += 1;
         await this.markDeliverySent(inv.id, {
           source: "summary_carried_email_exhausted",
+          summaryCarried: true,
           claimToken: claimed.send_claim_token,
           requestReview: Boolean(claimed.scheduled_request_review),
           reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
