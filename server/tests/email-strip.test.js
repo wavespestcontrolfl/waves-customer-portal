@@ -74,4 +74,22 @@ describe('stripQuotedAndSignature', () => {
     expect(stripQuotedAndSignature('---------- Forwarded message ---------\nFrom: Jane\nCan you come out Monday?')).toBe('');
     expect(stripQuotedAndSignature('> can you call me back today')).toBe('');
   });
+
+  describe('"On ... wrote:" needs a real quote header', () => {
+    test('ordinary prose that happens to say "on ... wrote:" is not cut', () => {
+      const body = 'Please note on Tuesday the tech wrote: we are coming Friday morning.';
+      expect(stripQuotedAndSignature(body)).toBe(body);
+      expect(stripQuotedAndSignature('On Tuesday the tech wrote: we are coming')).toBe('On Tuesday the tech wrote: we are coming');
+    });
+
+    test('a dated / addressed quote header still cuts', () => {
+      expect(stripQuotedAndSignature('Sounds good. On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: see you then')).toBe('Sounds good.');
+      expect(stripQuotedAndSignature('Sounds good. On 09/09/2026 8:29 AM, Jane wrote: see you then')).toBe('Sounds good.');
+    });
+
+    test('the digit or address must sit inside the header, before the first "wrote:"', () => {
+      const body = 'On Tuesday the tech wrote: come at 3 and On Friday he wrote: no';
+      expect(stripQuotedAndSignature(body)).toBe(body);
+    });
+  });
 });

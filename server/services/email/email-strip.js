@@ -43,7 +43,11 @@ const CUT_PATTERNS = [
   // address tolerated: "On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@x.com>
   // wrote:" / "On 09/09/2026 8:29 AM, Jane <jane@x.com> wrote:". Bounded gap
   // so an unrelated later "wrote:" elsewhere in a long body never anchors here.
-  /\bOn\s.{0,150}?\swrote:/i,
+  // Case-sensitive "On" and the header span (up to the FIRST "wrote:") must
+  // carry a digit or an '@' — a date or an address — so ordinary prose like
+  // "on Tuesday the tech wrote: we are coming" is never read as a quote header
+  // (audit, 2026-09-30).
+  /\bOn\s(?=.{0,150}?\swrote:)(?:(?!\swrote:).){0,150}?[\d@]/,
   // Outlook: a long underscore rule immediately before the quoted header
   // block, e.g. "________________________________\nFrom: Jane <jane@x.com>".
   /_{10,}\s*From:/i,
