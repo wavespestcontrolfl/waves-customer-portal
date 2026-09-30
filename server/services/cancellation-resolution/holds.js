@@ -70,6 +70,15 @@ function displayDate(dateStr) {
   return new Date(Date.UTC(y, m - 1, d)).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
 
+// A booked visit dated inside the pause. A 'rescheduled' row is a pending-
+// rebook placeholder, not an appointment (firstVisitBack skips it too): it
+// neither makes a hold needed nor gets skipped.
+function inPauseVisit(visit, startsOn, resume) {
+  if (visit.status === 'rescheduled') return false;
+  const date = dateOnlyString(visit.scheduled_date);
+  return !!date && date >= startsOn && date < resume;
+}
+
 async function familyUpcomingVisits(customerId, familyKey, dbh = db) {
   const { familyOfServiceRow } = require('../cancellation-processor');
   const today = etDateString();
@@ -175,13 +184,20 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
   // the day before the return date. A stale past-dated 'rescheduled'
   // placeholder is not one of them — it anchors nothing and is left alone.
   const visits = await familyUpcomingVisits(customerId, familyKey);
-  const inPause = visits.filter((v) => {
-    const date = dateOnlyString(v.scheduled_date);
-    return date && date >= today && date < resume;
-  });
+  const inPause = visits.filter((v) => inPauseVisit(v, today, resume));
   // Rule 2: no visit inside the away dates means nothing to pause — no
   // hold, no suspended dues, no free month.
   if (!inPause.length) {
+    // Re-read under the writer lock the real hold path takes: a visit
+    // booked or moved into the pause since the read above must not be
+    // answered with "nothing to pause" (an away pairing would take that
+    // as success).
+    const stillEmpty = await db.transaction(async (trx) => {
+      await lockCustomerComms(trx, customerId);
+      const live = await familyUpcomingVisits(customerId, familyKey, trx);
+      return !live.some((v) => inPauseVisit(v, today, resume));
+    });
+    if (!stillEmpty) throw codedError('hold_visits_changed', 'Your schedule just changed — please try again');
     const next = visits
       .map((v) => dateOnlyString(v.scheduled_date))
       .filter((date) => date && date >= resume)
@@ -270,10 +286,7 @@ async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 18
       // visit booked into the pause in the gap, refuses the hold. The
       // moved prepaid visits must all still be live.
       const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
-      const liveInPause = liveVisits.filter((v) => {
-        const date = dateOnlyString(v.scheduled_date);
-        return date && date >= today && date < resume;
-      }).map((v) => String(v.id)).sort();
+      const liveInPause = liveVisits.filter((v) => inPauseVisit(v, today, resume)).map((v) => String(v.id)).sort();
       const skipIds = toSkip.map((v) => String(v.id)).sort();
       if (liveInPause.length !== skipIds.length || liveInPause.some((id, i) => id !== skipIds[i])) {
         throw new Error(`${familyKey} visits inside the pause changed before the hold could be written (live ${liveInPause.join(',')} vs planned ${skipIds.join(',')})`);
@@ -421,6 +434,7 @@ async function applyHoldSkips(holdResults) {
   for (const hold of holdResults || []) {
     if (!hold?.holdId || !Array.isArray(hold.pendingSkips)) continue;
     const skipped = [];
+    const unresolved = [];
     for (const visit of hold.pendingSkips) {
       let outcome;
       try {
@@ -429,7 +443,9 @@ async function applyHoldSkips(holdResults) {
           // Idempotent: a recovery pass re-offers visits a crashed accept
           // may already have skipped.
           if (row && row.status === 'skipped') return 'skipped';
-          if (!row || row.status !== visit.status) return 'changed';
+          // A visit that has ended (completed, cancelled, …) or become a
+          // rebook placeholder is no longer bookable: nothing to skip.
+          if (!row || row.status === 'rescheduled' || !CANCELLABLE_STATUSES.includes(row.status)) return 'gone';
           const date = dateOnlyString(row.scheduled_date);
           // Moved out of the pause in the gap: nothing to skip. The pause
           // starts on the hold's own start date — a recovery pass a day
@@ -440,7 +456,7 @@ async function applyHoldSkips(holdResults) {
           if (covered.has(row.id)) return 'prepaid';
           await transitionJobStatus({
             jobId: visit.id,
-            fromStatus: visit.status,
+            fromStatus: row.status,
             toStatus: 'skipped',
             transitionedBy: null,
             notes: `Skipped: ${hold.familyKey} paused until ${hold.resumeOn} (plan hold ${hold.holdId})`,
@@ -461,15 +477,20 @@ async function applyHoldSkips(holdResults) {
         outcome = 'error';
       }
       if (outcome === 'skipped') skipped.push(visit.id);
-      else if (outcome !== 'left_pause') await bellOffice(hold, visit, outcome);
+      else if (outcome !== 'left_pause' && outcome !== 'gone') {
+        unresolved.push(visit.id);
+        await bellOffice(hold, visit, outcome);
+      }
     }
-    // skipsFinal marks the plan as carried out (bells rang for anything
-    // left), so the lifecycle's recovery pass never re-runs it.
+    // skipsFinal only once every target was skipped, left the pause, or
+    // ended: a visit still bookable inside the pause (paid for or live in
+    // the gap, a transient failure) stays in the plan, and the daily
+    // recovery pass retries it (its office bell is deduped per visit).
     try {
       const row = await db('plan_holds').where({ id: hold.holdId }).first('moved_visits');
       const record = readRecord(row?.moved_visits);
       await db('plan_holds').where({ id: hold.holdId }).update({
-        moved_visits: JSON.stringify({ ...record, skipped: [...new Set([...(record.skipped || []), ...skipped])], skipsFinal: true }),
+        moved_visits: JSON.stringify({ ...record, skipped: [...new Set([...(record.skipped || []), ...skipped])], unresolved, skipsFinal: unresolved.length === 0 }),
         updated_at: new Date(),
       });
     } catch (err) { logger.warn(`[holds] skip record failed for hold ${hold.holdId}: ${err.message}`); }
@@ -579,7 +600,11 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
     return 'no_visit';
   }
   const nextOn = dateOnlyString(next.scheduled_date);
-  if (next.status === 'completed' || nextOn < today || nextOn > addDays(today, 7)) return 'not_due';
+  // Once the visit is underway (or done) the text's "move it or cancel"
+  // no longer applies.
+  const underway = ['completed', 'en_route', 'on_site'].includes(next.status)
+    || next.track_state === 'complete' || LIVE_TRACK_STATES.includes(next.track_state);
+  if (underway || nextOn < today || nextOn > addDays(today, 7)) return 'not_due';
   if (!customer.phone) return unsentRestartText(hold, next, nextOn, today);
   // Claim in a SHORT transaction, send outside it: the renderer and the
   // sender query the pool themselves, and a transaction held across the

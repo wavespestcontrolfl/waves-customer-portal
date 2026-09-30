@@ -266,13 +266,13 @@ describe('startHold (ruling C-4)', () => {
 describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the hold stands)', () => {
   const held = (over = {}) => ({
     holdId: 'h1', familyKey: 'lawn_care', resumeOn: daysOut(30),
-    pendingSkips: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'rescheduled', from: daysOut(12) }], ...over,
+    pendingSkips: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }, { id: 'l2', status: 'pending', from: daysOut(12) }], ...over,
   });
   const record = () => JSON.parse(mockState.tables.plan_holds[0].moved_visits);
 
   const seedHeld = (visits) => seed({
     holds: [{ id: 'h1', customer_id: 'c1', family_key: 'lawn_care', status: 'active', moved_visits: JSON.stringify({ moved: [], toSkip: [], skipped: [] }) }],
-    visits: visits || [lawnVisit('l1', daysOut(5), { technician_id: 't1' }), lawnVisit('l2', daysOut(12), { status: 'rescheduled' })],
+    visits: visits || [lawnVisit('l1', daysOut(5), { technician_id: 't1' }), lawnVisit('l2', daysOut(12), { status: 'pending' })],
   });
 
   test('skips every in-pause visit through the canonical transition, under its row lock, with no customer notice; the assigned tech hears after commit', async () => {
@@ -281,7 +281,7 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
     await applyHoldSkips([held()]);
     expect(mockTransition).toHaveBeenCalledTimes(2);
     expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l1', fromStatus: 'confirmed', toStatus: 'skipped', notifyCustomer: false, trx: expect.anything() }));
-    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l2', fromStatus: 'rescheduled', toStatus: 'skipped', notifyCustomer: false }));
+    expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l2', fromStatus: 'pending', toStatus: 'skipped', notifyCustomer: false }));
     expect(mockState.forUpdate).toBeGreaterThanOrEqual(2);
     expect(mockTechCancelled).toHaveBeenCalledTimes(1);
     expect(mockTechCancelled).toHaveBeenCalledWith(expect.objectContaining({ visitId: 'l1', technicianId: 't1', actorId: 'customer', trx: expect.anything() }));
@@ -290,14 +290,14 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
   });
 
   test('the plan is re-checked under the lock: a visit moved out of the pause is left alone quietly; one paid for or gone live in the gap rings the office', async () => {
-    seedHeld([lawnVisit('l1', daysOut(40)), lawnVisit('l2', daysOut(12), { status: 'rescheduled' })]);
+    seedHeld([lawnVisit('l1', daysOut(40)), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
     await applyHoldSkips([held()]);
     expect(mockTransition).toHaveBeenCalledTimes(1);
     expect(mockTransition).toHaveBeenCalledWith(expect.objectContaining({ jobId: 'l2' }));
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
 
     mockTransition.mockClear();
-    seedHeld([lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(12), { status: 'rescheduled', track_state: 'on_property' })]);
+    seedHeld([lawnVisit('l1', daysOut(5)), lawnVisit('l2', daysOut(12), { status: 'pending', track_state: 'on_property' })]);
     mockCovered.mockImplementation(async (_conn, rows) => new Set(rows.filter((r) => r.id === 'l1').map((r) => r.id)));
     await applyHoldSkips([held()]);
     expect(mockTransition).not.toHaveBeenCalled();
@@ -305,6 +305,44 @@ describe('applyHoldSkips (rule 1 — a skip is one-way, so it runs only once the
       expect.objectContaining({ visitId: 'l1', reason: 'prepaid' }),
       expect.objectContaining({ visitId: 'l2', reason: 'live' }),
     ]);
+  });
+
+  test('a visit left bookable inside the pause keeps the plan open, and the daily recovery retries it; an ended visit closes it', async () => {
+    seedHeld([lawnVisit('l1', daysOut(5), { track_state: 'en_route' }), lawnVisit('l2', daysOut(12), { status: 'pending' })]);
+    await applyHoldSkips([held()]);
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ skipped: ['l2'], unresolved: ['l1'], skipsFinal: false });
+
+    mockTransition.mockClear();
+    seedHeld([lawnVisit('l1', daysOut(5), { status: 'completed' }), lawnVisit('l2', daysOut(12), { status: 'cancelled' })]);
+    await applyHoldSkips([held()]);
+    expect(mockTransition).not.toHaveBeenCalled();
+    expect(JSON.parse(mockState.tables.plan_holds[0].moved_visits)).toMatchObject({ unresolved: [], skipsFinal: true });
+  });
+
+  test('a rebook placeholder inside the pause is not a visit: no hold is needed for it and it is never skipped', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],
+      visits: [lawnVisit('ph', daysOut(6), { status: 'rescheduled' }), lawnVisit('back', daysOut(45))],
+    });
+    const out = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) });
+    expect(out).toMatchObject({ notNeeded: true, nextVisitOn: daysOut(45) });
+    expect(mockState.tables.plan_holds || []).toHaveLength(0);
+  });
+
+  test('"nothing to pause" is re-checked under the writer lock: a visit booked into the pause meanwhile refuses it', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership', tier_protected_until: null }],
+      components: [{ customer_id: 'c1', family_key: 'lawn_care', monthly_rate: 90 }],
+      visits: [lawnVisit('back', daysOut(45))],
+    });
+    const db = require('../models/db');
+    const openTrx = db.transaction;
+    db.transaction = async (cb) => { mockState.tables.scheduled_services.push(lawnVisit('new', daysOut(8))); return openTrx(cb); };
+    try {
+      await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) }))
+        .rejects.toMatchObject({ code: 'hold_visits_changed' });
+    } finally { db.transaction = openTrx; }
   });
 
   test('a skip that fails rings the office for that visit, the hold stands, and the other skips still run', async () => {
@@ -485,6 +523,14 @@ describe('runPlanHoldLifecycle', () => {
     ] });
     await expect(markHoldsAccepted(['h1', 'h2'])).rejects.toThrow('no longer active');
     await expect(markHoldsAccepted(['h1', 'missing'])).rejects.toThrow('no longer active');
+  });
+
+  test('no restart text once the first visit back is underway', async () => {
+    holdSeed({ resume_on: daysOut(-2), status: 'resumed' }, [lawnVisit('back', TODAY, { status: 'en_route' })]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    holdSeed({ resume_on: daysOut(-2), status: 'resumed' }, [lawnVisit('back', TODAY, { track_state: 'on_property' })]);
+    await runPlanHoldLifecycle({ today: TODAY });
+    expect(mockSms).not.toHaveBeenCalled();
   });
 
   test('a rescheduled placeholder after the return date is not the first visit back — the text names the real visit', async () => {
