@@ -278,6 +278,34 @@ describe('estimate auto-renew email automation cutover', () => {
     expect(mockLogger.error).not.toHaveBeenCalledWith(expect.stringContaining('partially failed'));
   });
 
+  test.each([
+    ['a skipped run', [{ run: { id: 'r', status: 'skipped' } }]],
+    ['a shadow-only run', [{ run: { id: 'r', status: 'shadow' } }]],
+    ['a deduped replay', [{ run: { id: 'r', status: 'sent' }, deduped: true }]],
+  ])('a partial failure whose only sibling is %s still falls back (nothing reached the customer)', async (_label, partialResults) => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('active template not found'), { partialResults }));
+
+    await EstimateAutoRenew.checkAll();
+
+    expect(mockLogger.warn).toHaveBeenCalledWith(expect.stringContaining('falling back to SMTP'));
+    expect(mockLogger.error).not.toHaveBeenCalledWith(expect.stringContaining('partially failed'));
+  });
+
+  test('a NON-fallback failure is not swallowed by a delivering sibling', async () => {
+    const estimate = staleEstimate();
+    mockDb.__estimateQueries.push(query([estimate]), query(estimate), query(estimate), query(estimate), query(1));
+    mockProcessTrigger.mockRejectedValueOnce(Object.assign(new Error('connection terminated'), {
+      partialResults: [{ run: { id: 'r', status: 'sent' } }],
+    }));
+
+    await EstimateAutoRenew.checkAll().catch(() => {});
+
+    expect(mockLogger.error).not.toHaveBeenCalledWith(expect.stringContaining('partially failed'));
+    expect(mockEmailSend).not.toHaveBeenCalled();
+  });
+
   test('a zero-comms opted-out estimate is never renewed or emailed (uncapped audit r4 P1)', async () => {
     // Publish-without-delivery mints (report click-to-estimate) stamp
     // estimate_data.noEngagementAutomation — renewal would both EXTEND the
