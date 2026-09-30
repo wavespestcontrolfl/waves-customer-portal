@@ -5,15 +5,7 @@ const mockRelease = jest.fn();
 jest.mock('../services/collections/outbound-voice/flags', () => ({
   activeFlags: (...a) => mockActive(...a), releaseFlag: (...a) => mockRelease(...a),
 }));
-const mockReleaseWithheld = jest.fn();
-jest.mock('../services/collections/collection-hold', () => ({
-  ...jest.requireActual('../services/collections/collection-hold'),
-  releaseWithheldInvoices: (...a) => mockReleaseWithheld(...a),
-}));
-const mockCreateAlert = jest.fn(async () => ({}));
-jest.mock('../services/dispatch-alerts', () => ({ createAlert: (...a) => mockCreateAlert(...a) }));
-const { listCollectionHolds, releaseCollectionHold, sendWithheldInvoicesAfterRelease } = require('../services/collections/collection-hold-admin');
-beforeEach(() => { jest.clearAllMocks(); mockReleaseWithheld.mockResolvedValue({ queued: [], cleared: 0 }); });
+const { listCollectionHolds, releaseCollectionHold } = require('../services/collections/collection-hold-admin');
 
 test('lists only collection_hold rows and says which ones stop charges', async () => {
   mockActive.mockResolvedValue([
@@ -29,36 +21,8 @@ test('lists only collection_hold rows and says which ones stop charges', async (
 
 test('release goes through the one writer, only for collection_hold', async () => {
   mockRelease.mockResolvedValue({ ok: true, released: 1 });
-  expect(await releaseCollectionHold('c-1')).toMatchObject({ ok: true, released: 1 });
+  expect(await releaseCollectionHold('c-1')).toEqual({ ok: true, released: 1 });
   expect(mockRelease).toHaveBeenCalledWith({ customerId: 'c-1', flag: 'collection_hold', trx: null });
-});
-
-test('a self-committed release sends the withheld invoices; a caller-owned transaction does not (the caller sends after its commit)', async () => {
-  mockRelease.mockResolvedValue({ ok: true, released: 1 });
-  mockReleaseWithheld.mockResolvedValue({ queued: ['inv-1'], cleared: 0 });
-  expect(await releaseCollectionHold('c-1')).toMatchObject({ withheldSend: { ok: true, queued: ['inv-1'] } });
-  expect(mockReleaseWithheld).toHaveBeenCalledWith({ customerId: 'c-1' });
-  mockReleaseWithheld.mockClear();
-  await releaseCollectionHold('c-1', { trx: { isTrx: true } });
-  expect(mockReleaseWithheld).not.toHaveBeenCalled();
-});
-
-test('a failed release sends nothing', async () => {
-  mockRelease.mockResolvedValue({ ok: false, reason: 'release_failed' });
-  await releaseCollectionHold('c-1');
-  expect(mockReleaseWithheld).not.toHaveBeenCalled();
-});
-
-test('a send failure never throws: it is logged and raised to the office as an alert', async () => {
-  mockReleaseWithheld.mockRejectedValue(new Error('queue down'));
-  await expect(sendWithheldInvoicesAfterRelease('c-1')).resolves.toMatchObject({ ok: false, queued: [] });
-  expect(mockCreateAlert).toHaveBeenCalledWith(expect.objectContaining({
-    type: 'collection_hold_release_send_failed', severity: 'warn',
-    payload: expect.objectContaining({ customerId: 'c-1', error: 'queue down' }),
-  }));
-  // even the alert failing must not throw out of the release
-  mockCreateAlert.mockRejectedValueOnce(new Error('alerts down'));
-  await expect(sendWithheldInvoicesAfterRelease('c-1')).resolves.toMatchObject({ ok: false });
 });
 
 test('the routes are admin-only and audited', () => {

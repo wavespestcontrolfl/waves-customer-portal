@@ -11795,17 +11795,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
     const payLinkHeldByDisputeHold = (invoiceCreated && payUrl && svc.customer_id)
       ? await require('../services/collections/collection-hold').shouldWithholdPayLink(svc.customer_id)
       : false;
-    // Mark the invoice as withheld by the hold so the office RELEASE sends it
-    // (owner ruling 2026-09-30). Without this the report-only text leaves the
-    // visit invoice a draft that nobody sends and the reminder ladder never
-    // starts. Best-effort: a marker write failure never fails the completion.
-    if (payLinkHeldByDisputeHold && invoice?.id) {
-      try {
-        await require('../services/collections/collection-hold').markInvoiceWithheldByHold(invoice.id, db);
-      } catch (markErr) {
-        logger.warn(`[dispatch] could not mark invoice ${invoice.id} as pay-link-withheld by a dispute hold: ${markErr.message}`);
-      }
-    }
     let paymentFailedNoticeSent = false;
     // Resume dedupe: the side-effects resume path reruns the auto-charge, so
     // a crash after this notice delivered but before the completion attempt
@@ -11817,17 +11806,51 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // status to sent/failed), but only a confirmed 'sent' suppresses the
     // completion SMS's pay link.
     const priorPaymentFailedNoticeStatus = String(recordStructuredNotes.paymentFailedNoticeStatus || '');
-    if (priorPaymentFailedNoticeStatus === 'sent') {
-      paymentFailedNoticeSent = true;
-    } else if (paymentFailedSmsContext && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
-      && svc.cust_phone && invoice?.id && invoiceCreated && payUrl
-      && !payLinkHeldByDisputeHold
+    // Delivery of this invoice's pay link belongs to the scheduled-invoice
+    // SENDER once a completion attempt handed it over (a dispute hold withheld
+    // the link and the invoice was queued - see the hand-over below). A retry
+    // or resume of the same completion must not text the link a second time
+    // while the sender owns it, whether or not the hold has since been
+    // released: it sends REPORT-ONLY. The marker lives on the completion's own
+    // record notes (the same idempotency store as paymentFailedNoticeStatus).
+    const invoiceSenderOwnsPayLink = !!invoice?.id
+      && String(recordStructuredNotes.invoiceSenderOwnsPayLinkFor || '') === String(invoice.id);
+    // The decline notice's own eligibility, BEFORE the hold and the sender
+    // hand-over are applied: the hold hand-over asks "would this notice have
+    // carried the pay link?" with exactly the same terms the send uses.
+    const declineNoticeEligibleSansHold = !!paymentFailedSmsContext
+      && !['sending', 'deferred'].includes(priorPaymentFailedNoticeStatus)
+      && !!svc.cust_phone && !!invoice?.id && !!invoiceCreated && !!payUrl
       && require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status)
       && !invoice.payer_id
       // Backfill closeouts are quiet end-to-end — a declined backlog charge
       // parks on the admin payment-failed bell instead of texting the
       // customer about a visit from days/weeks ago.
-      && !isBackfillCompletion) {
+      && !isBackfillCompletion;
+    // The completion text's pay-link terms, BEFORE the hold and the sender
+    // hand-over (evaluated lazily, where the text is composed).
+    const completionPayLinkAllowedSansHold = () => !suppressCompletionInvoiceLink
+      && includePayLink !== false
+      // ADMIN-BUG-R13: the covered base needs no link, the add-ons bill does.
+      && coveredVisitCollectible
+      && !alreadyPaid
+      && !autopayCoversVisit
+      // Collectible statuses only: a crash-resumed completion reloads the
+      // invoice through the existing-invoice path with invoiceCreated/
+      // payUrl set for any non-paid status — a 'processing' invoice (ACH
+      // autopay debit in flight, or the orphaned-charge park) must never
+      // get a pay link texted for money already moving (Codex round-6
+      // P1). Mirrors the invoicePaymentActionRequired guard.
+      && (!invoice || require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status))
+      // Third-party Bill-To: never text the homeowner the pay link for a
+      // payer-billed invoice — AR routes to the payer's AP inbox. The
+      // homeowner still gets the report-only completion SMS (no pay_url).
+      && !invoice?.payer_id;
+    if (priorPaymentFailedNoticeStatus === 'sent') {
+      paymentFailedNoticeSent = true;
+    } else if (declineNoticeEligibleSansHold
+      && !payLinkHeldByDisputeHold
+      && !invoiceSenderOwnsPayLink) {
       // Claim acquisition (#4131 slice 5, deferred by #4632 r2): this notice
       // carries the SAME pay link the ordinary invoice-send path delivers,
       // but used to send with no send_claim_token interaction at all — a
@@ -12252,6 +12275,73 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     };
 
+    // Dispute-hold HAND-OVER (owner ruling 2026-09-30). While a customer has an
+    // active collections dispute hold no completion-time text carries a pay
+    // link; the invoice the link would have delivered is QUEUED onto the
+    // scheduled-invoice sender instead of being left a draft nobody sends. The
+    // sender is the one chokepoint that enforces the hold at delivery (it defers
+    // a held invoice each tick without spending an attempt) and it sends the
+    // invoice, and starts the Day 3-90 ladder, the first tick after the hold is
+    // released by any path. Only when a pay link WOULD have gone out but for the
+    // hold: an includePayLink === false, no-SMS, no-phone, already-handled or
+    // payer-billed completion changes nothing. A lookup failure reads as "held"
+    // (fail closed) and hands over the same way; the sender re-checks each tick,
+    // so nothing is ever parked behind a release that never comes.
+    // The hand-over is durable BEFORE any customer text: it first records on the
+    // completion's own notes that the sender owns this invoice (a retry sends
+    // report-only, never a second pay link), then queues; a failure of either
+    // releases the attempt for resume (503) and raises an office alert - it is
+    // never swallowed. A retry re-runs the queue idempotently.
+    {
+      const completionTextWouldCarryPayLink = effectiveSendCompletionSms && !!svc.cust_phone
+        && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
+        && completionPayLinkAllowedSansHold() && !paymentFailedNoticeSent;
+      const heldPayLinkWouldHaveGone = payLinkHeldByDisputeHold && !!invoice?.id && !paymentFailedNoticeSent
+        && (completionTextWouldCarryPayLink || declineNoticeEligibleSansHold);
+      if (invoice?.id && (invoiceSenderOwnsPayLink || heldPayLinkWouldHaveGone)) {
+        try {
+          if (!invoiceSenderOwnsPayLink) {
+            const ownsDelta = { invoiceSenderOwnsPayLinkFor: String(invoice.id) };
+            await mergeRecordNotesKeys(record.id, ownsDelta);
+            Object.assign(recordStructuredNotes, ownsDelta);
+            record.structured_notes = { ...parseJsonObject(record.structured_notes), ...ownsDelta };
+          }
+          await require('../services/collections/collection-hold').queueHeldInvoiceForSender(invoice.id, db);
+        } catch (handOverErr) {
+          logger.error(`[dispatch] dispute-hold hand-over of invoice ${invoice.id} to the invoice sender FAILED for ${svc.id} — releasing for resume: ${handOverErr.message}`);
+          try {
+            await require('../services/dispatch-alerts').createAlert({
+              type: 'collection_hold_invoice_queue_failed',
+              severity: 'warn',
+              jobId: svc.id,
+              payload: {
+                invoiceId: String(invoice.id),
+                customerId: svc.customer_id ? String(svc.customer_id) : null,
+                error: String(handOverErr.message || handOverErr).slice(0, 300),
+                action: 'A dispute hold withheld this completion\'s pay link but the invoice could not be queued to send once the hold ends. Retry the closeout; if it keeps failing, send the invoice from the invoice page after the hold is released.',
+              },
+            });
+          } catch (alertErr) {
+            logger.error(`[dispatch] office alert for the failed dispute-hold hand-over (invoice ${invoice.id}) also failed: ${alertErr.message}`);
+          }
+          await queueServiceReportEmailIfEligible();
+          await sendPayerInvoiceToApIfEligible();
+          const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, handOverErr);
+          if (!released) {
+            logger.error(`[dispatch] release-for-resume did NOT release attempt ${completionAttempt?.id} for ${svc.id} — retry blocked until the ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)}-minute stale window reclaims it`);
+          }
+          return ({ status: 503, body: {
+            error: released
+              ? 'The invoice could not be queued behind the customer\'s billing hold — the closeout is saved but NOT finalized. Retry the closeout.'
+              : `The invoice could not be queued behind the customer's billing hold — the closeout is saved but NOT finalized. It will become retryable within about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes — retry the closeout then.`,
+            code: 'invoice_hold_handover_failed',
+            ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+            serviceRecordId: record.id,
+          } });
+        }
+      }
+    }
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
       && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
       // Report-v1 visit with no public report token (mint failed above): the
@@ -12370,25 +12460,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // SMS body only; the mobile in-person payment sheet
         // (invoicePaymentActionRequired) is intentionally left untouched so an
         // unpaid invoice always keeps a collection path.
-        const allowCompletionInvoiceLinkBase = !suppressCompletionInvoiceLink
-          && includePayLink !== false
-          // ADMIN-BUG-R13: the covered base needs no link, the add-ons bill does.
-          && coveredVisitCollectible
-          && !alreadyPaid
-          && !autopayCoversVisit
-          // Collectible statuses only: a crash-resumed completion reloads the
-          // invoice through the existing-invoice path with invoiceCreated/
-          // payUrl set for any non-paid status — a 'processing' invoice (ACH
-          // autopay debit in flight, or the orphaned-charge park) must never
-          // get a pay link texted for money already moving (Codex round-6
-          // P1). Mirrors the invoicePaymentActionRequired guard.
-          && (!invoice || require('../services/invoice-helpers').isInvoiceCollectibleStatus(invoice.status))
-          // Third-party Bill-To: never text the homeowner the pay link for a
-          // payer-billed invoice — AR routes to the payer's AP inbox. The
-          // homeowner still gets the report-only completion SMS (no pay_url).
-          && !invoice?.payer_id
+        const allowCompletionInvoiceLinkBase = completionPayLinkAllowedSansHold()
           // Active collections dispute hold (owner ruling 2026-09-30): report-only.
-          && !payLinkHeldByDisputeHold;
+          && !payLinkHeldByDisputeHold
+          // The scheduled-invoice sender owns this invoice's pay link (a hold
+          // withheld it earlier): report-only, never a second copy.
+          && !invoiceSenderOwnsPayLink;
         // The decline notice (sent before this block) carries the pay link
         // as its own text — the completion SMS goes report-only only once
         // that notice has ACTUALLY delivered.

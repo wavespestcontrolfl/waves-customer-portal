@@ -4237,6 +4237,13 @@ function initScheduledJobs() {
                 // terminal path an ordinary eligible:false recheck refusal
                 // takes above: blocked status, claim release, review
                 // fallback armed via onTerminal.
+                // A dispute-hold suppression is this invoice's only pay-link
+                // delivery: queue it onto the scheduled-invoice sender FIRST
+                // (owner ruling 2026-09-30). A queue failure throws into this
+                // row's bounded retry ladder instead of blocking it unqueued.
+                if (recheck.reason === 'collections-dispute-hold' && claimMeta.invoice_id) {
+                  await require('./collections/collection-hold').queueHeldInvoiceForSender(claimMeta.invoice_id);
+                }
                 await db('sms_log').where({ id: msg.id, status: 'sending' }).update({
                   status: 'blocked',
                   updated_at: new Date(),
@@ -4247,8 +4254,9 @@ function initScheduledJobs() {
                 continue;
               }
               const stampedAt = new Date();
-              // A dispute-hold strip also stamps the invoice, atomically
-              // with the strip (see persistStrippedPayLink).
+              // A dispute-hold strip also queues the invoice onto the
+              // scheduled-invoice sender, atomically with the strip (see
+              // persistStrippedPayLink).
               const changed = await require('./dispatch-completion-deferred').persistStrippedPayLink({
                 msgId: msg.id, strippedBody, reason: recheck.reason || null, invoiceId: claimMeta.invoice_id || null, stampedAt,
               });

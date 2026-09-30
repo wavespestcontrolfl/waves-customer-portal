@@ -213,13 +213,73 @@ describe('processScheduledSends send-window handling', () => {
       };
       db.mockReturnValueOnce(chain())
         .mockReturnValueOnce(chain({ rows: [retry] }))
-        .mockReturnValueOnce(chain({ returning: [claimedRow(retry)] }));
+        .mockReturnValueOnce(chain({ returning: [claimedRow(retry)] }))
+        .mockReturnValueOnce(chain({ first: undefined })); // the sender's dispute-hold lookup: no hold
       sendSpy.mockResolvedValue({ ok: true, sms: { ok: true, deduped: true }, email: { ok: true }, creditApplied: 0 });
 
       expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
       expect(sendSpy).toHaveBeenCalledWith('inv-1', expect.objectContaining({ allowClaimed: true }));
-      expect(db).toHaveBeenCalledTimes(3);
+      expect(db).toHaveBeenCalledTimes(4);
     });
+
+  describe('collections dispute hold at the delivery boundary (owner ruling 2026-09-30)', () => {
+    const heldRow = () => ({ ...dueRow, scheduled_send_attempts: 1 });
+
+    test('an active dispute hold defers the claimed invoice: back to scheduled, one tick out, NO attempt spent, claim released, nothing sent', async () => {
+      isWithinSendWindowET.mockReturnValue(true);
+      const restore = chain();
+      db.mockReturnValueOnce(chain())
+        .mockReturnValueOnce(chain({ rows: [heldRow()] }))
+        .mockReturnValueOnce(chain({ returning: [claimedRow({ customer_id: 'cust-1' })] }))
+        .mockReturnValueOnce(chain({ first: { id: 'flag-1' } })) // active dispute hold
+        .mockReturnValueOnce(restore);
+      const before = Date.now();
+
+      const result = await InvoiceService.processScheduledSends();
+
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 1 });
+      const patch = restore.update.mock.calls[0][0];
+      expect(patch).toMatchObject({ status: 'scheduled', send_claim_token: null });
+      expect(patch.scheduled_send_attempts).toBeUndefined();
+      expect(patch.scheduled_send_at.getTime()).toBeGreaterThan(before + 3 * 60 * 1000);
+      expect(patch.scheduled_send_at.getTime()).toBeLessThan(before + 5 * 60 * 1000);
+      // only the exact claim is given back
+      expect(restore.where).toHaveBeenCalledWith({ id: 'inv-1', status: 'sending', send_claim_token: 'claim-1' });
+    });
+
+    test('a hold lookup that fails defers the same way (fail closed, retried next tick) - never a send, never an attempt spent', async () => {
+      isWithinSendWindowET.mockReturnValue(true);
+      const failing = chain();
+      failing.first = jest.fn(async () => { throw new Error('db down'); });
+      const restore = chain();
+      db.mockReturnValueOnce(chain())
+        .mockReturnValueOnce(chain({ rows: [heldRow()] }))
+        .mockReturnValueOnce(chain({ returning: [claimedRow({ customer_id: 'cust-1' })] }))
+        .mockReturnValueOnce(failing)
+        .mockReturnValueOnce(restore);
+
+      const result = await InvoiceService.processScheduledSends();
+
+      expect(sendSpy).not.toHaveBeenCalled();
+      expect(result).toEqual({ sent: 0, failed: 0, deferred: 1 });
+      const patch = restore.update.mock.calls[0][0];
+      expect(patch).toMatchObject({ status: 'scheduled' });
+      expect(patch.scheduled_send_attempts).toBeUndefined();
+      expect(patch.scheduled_send_at).toBeInstanceOf(Date);
+    });
+
+    test('a payer-billed invoice goes to the payer, not the disputing homeowner: no hold lookup', async () => {
+      isWithinSendWindowET.mockReturnValue(true);
+      db.mockReturnValueOnce(chain())
+        .mockReturnValueOnce(chain({ rows: [{ ...dueRow, payer_id: 'payer-9' }] }))
+        .mockReturnValueOnce(chain({ returning: [claimedRow({ customer_id: 'cust-1', payer_id: 'payer-9' })] }));
+      sendSpy.mockResolvedValue({ ok: true, sms: { ok: false, code: 'payer_billed' }, email: { ok: true }, creditApplied: 0 });
+
+      expect(await InvoiceService.processScheduledSends()).toEqual({ sent: 1, failed: 0, deferred: 0 });
+      expect(db).not.toHaveBeenCalledWith('collections_flags');
+    });
+  });
 
   test('outside the window: an email-only invoice (third-party payer) sends at its requested time', async () => {
     isWithinSendWindowET.mockReturnValue(false);

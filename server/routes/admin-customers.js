@@ -2635,7 +2635,7 @@ router.get('/:id/collection-holds', requireAdmin, async (req, res, next) => {
 // the dispute is resolved. Audited; every charge lane resumes on its next attempt.
 router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next) => {
   try {
-    const { releaseCollectionHold, sendWithheldInvoicesAfterRelease } = require('../services/collections/collection-hold-admin');
+    const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
     // The release and its CRITICAL audit row commit together: a failed audit
     // write rolls the release back and the request errors.
     const result = await db.transaction(async (trx) => {
@@ -2655,10 +2655,6 @@ router.post('/:id/collection-holds/release', requireAdmin, async (req, res, next
       });
       return released;
     });
-    // The release has committed. Send the invoices the hold withheld (owner
-    // ruling 2026-09-30); a failure is logged + alerted inside and never
-    // reaches this response - the release stands.
-    await sendWithheldInvoicesAfterRelease(req.params.id);
     res.json({ released: result.released });
   } catch (err) { next(err); }
 });

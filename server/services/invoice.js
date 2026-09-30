@@ -7715,6 +7715,35 @@ const InvoiceService = {
         .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
         .update({ ...payload, send_claim_token: null });
 
+      // Collections DISPUTE hold (owner ruling 2026-09-30): no pay link reaches
+      // a customer while they hold an active dispute, and this is the ONE
+      // chokepoint for every queued self-pay invoice - including one queued
+      // BEFORE the hold was placed. Nothing has been sent yet (the claim is
+      // the only write so far). The invoice stays 'scheduled', moves one cron
+      // tick out with NO attempt spent, and the claim is given back. Fail
+      // closed: a lookup that cannot be answered defers the same way, retried
+      // every tick - never a permanent park. When the hold is released by any
+      // path, the first tick after it sends the invoice through the normal
+      // path below and the reminder ladder starts. A payer-billed invoice goes
+      // to the payer's AP inbox, not the disputing homeowner - not held here.
+      if (!claimed.payer_id) {
+        const holdBlock = await require("./collections/collection-hold")
+          .dueInvoiceHeldByDisputeHold(claimed.customer_id);
+        if (holdBlock.held) {
+          const deferUntil = new Date(Date.now() + require("./collections/collection-hold").HOLD_DEFER_MS);
+          const deferredRows = await restoreClaimedInvoice({
+            status: "scheduled", scheduled_send_at: deferUntil, updated_at: new Date(),
+          });
+          if (deferredRows) {
+            deferred += 1;
+            logger.info(holdBlock.reason === "lookup_failed"
+              ? `[invoice] Scheduled send for ${inv.invoice_number} deferred to ${deferUntil.toISOString()} - the collections dispute-hold lookup failed (${holdBlock.error?.message || "unknown"}); retrying next tick`
+              : `[invoice] Scheduled send for ${inv.invoice_number} deferred to ${deferUntil.toISOString()} - the customer has an active collections dispute hold`);
+          }
+          continue;
+        }
+      }
+
       let result;
       try {
         result = await withRenewalSendGate(claimed, () => this.sendViaSMSAndEmail(claimed.id, {

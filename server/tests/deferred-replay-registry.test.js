@@ -109,6 +109,21 @@ function firstChain(row) {
   return q;
 }
 
+// The invoice-queue UPDATE (collection-hold.queueHeldInvoiceForSender): where/whereNull chain ending in update().
+function queueChain(count) {
+  const q = {};
+  for (const m of ['where', 'whereNull']) q[m] = jest.fn(() => q);
+  q.update = jest.fn(async () => count);
+  return q;
+}
+
+function failingQueueChain() {
+  const q = {};
+  for (const m of ['where', 'whereNull']) q[m] = jest.fn(() => q);
+  q.update = jest.fn(async () => { throw new Error('queue write down'); });
+  return q;
+}
+
 function throwChain() {
   const q = {};
   for (const m of ['where', 'whereNull', 'whereIn', 'whereRaw']) q[m] = jest.fn(() => q);
@@ -1305,17 +1320,20 @@ describe('deferred-replay registry', () => {
       .toEqual({ eligible: true });
   });
 
-  test('decline notice (B10 follow-up): an active dispute hold suppresses the whole notice; the terminal hook restores the record', async () => {
+  test('decline notice (B10 follow-up): an active dispute hold suppresses the whole notice and queues its invoice onto the sender; the terminal hook restores the record', async () => {
     const inv = { id: 'inv-1', status: 'sent', payer_id: null, customer_id: 'cust-1' };
     db.mockReturnValueOnce(firstChain(inv));
     db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
+    const queue = queueChain(1);
+    db.mockReturnValueOnce(queue);
     expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
       .toEqual({ eligible: false, reason: 'collections-dispute-hold' });
     expect(db).toHaveBeenCalledWith('collections_flags');
-    // The suppressed notice was the invoice's only pay-link delivery: the invoice is marked
-    // for the office release (owner ruling 2026-09-30). Behavior is covered against Postgres in
-    // collection-hold-withheld-invoice-release-postgres.test.js.
+    // The suppressed notice was the invoice's only pay-link delivery: the invoice is QUEUED onto the
+    // scheduled-invoice sender (owner ruling 2026-09-30), which holds it while the hold stands.
+    // Behavior is covered against Postgres in collection-hold-invoice-sender-postgres.test.js.
     expect(db).toHaveBeenLastCalledWith('invoices');
+    expect(queue.update).toHaveBeenCalledWith(expect.objectContaining({ status: 'scheduled', scheduled_send_error: null }));
 
     // The scheduler's terminal path for an ineligible, non-retryable recheck runs this hook.
     expect(requiresDurableFinalize('autopay_completion_decline_deferred')).toBe(true);
@@ -1324,13 +1342,32 @@ describe('deferred-replay registry', () => {
     await onTerminalDeferredReplay('autopay_completion_decline_deferred', meta);
     expect(terminalDeferredDeclineNotice).toHaveBeenCalledWith(meta);
 
-    // Released / non-dispute hold: the notice stays eligible. Customer falls back to the invoice's.
+    // Released / non-dispute hold: the notice stays eligible and nothing is queued.
     jest.clearAllMocks();
     db.mockReturnValueOnce(firstChain(inv));
     db.mockReturnValueOnce(firstChain(undefined));
     expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1' }))
       .toEqual({ eligible: true });
     expect(db).toHaveBeenCalledWith('collections_flags');
+    expect(db).not.toHaveBeenCalledWith('dispatch_alerts');
+    expect(db).toHaveBeenCalledTimes(2);
+  });
+
+  test('decline notice (B10 follow-up): a queue write that fails is NOT swallowed - retryable-ineligible plus a durable office alert', async () => {
+    const inv = { id: 'inv-1', status: 'sent', payer_id: null, customer_id: 'cust-1' };
+    db.mockReturnValueOnce(firstChain(inv));
+    db.mockReturnValueOnce(firstChain({ id: 'flag-1' }));
+    db.mockReturnValueOnce(failingQueueChain());
+    const alerts = require('../services/dispatch-alerts');
+    const createAlert = jest.spyOn(alerts, 'createAlert').mockResolvedValue({ id: 'a1' });
+    try {
+      expect(await recheckDeferredReplay('autopay_completion_decline_deferred', { invoice_id: 'inv-1', customer_id: 'cust-1' }))
+        .toEqual({ eligible: false, reason: 'recheck-failed', retryable: true });
+      expect(createAlert).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'collection_hold_invoice_queue_failed',
+        payload: expect.objectContaining({ invoiceId: 'inv-1', customerId: 'cust-1' }),
+      }));
+    } finally { createAlert.mockRestore(); }
   });
 
   test('decline notice (B10 follow-up): a hold lookup failure is retryable-ineligible, never an eligible send', async () => {

@@ -95,20 +95,42 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
     expect(notice).toBeLessThan(sms);
   });
 
-  test('a withheld pay link marks the invoice so the office release can send it (owner ruling 2026-09-30)', () => {
+  test('a withheld pay link is HANDED OVER to the invoice sender before any customer text, durably, and a failure is never swallowed (owner ruling 2026-09-30)', () => {
     const lookup = src.indexOf('const payLinkHeldByDisputeHold =');
-    const mark = src.indexOf('markInvoiceWithheldByHold(invoice.id, db)', lookup);
-    const notice = src.indexOf('let paymentFailedNoticeSent = false;');
-    expect(mark).toBeGreaterThan(lookup);
-    expect(mark).toBeLessThan(notice);
-    expect(src.slice(src.lastIndexOf('if (', mark), mark)).toMatch(/payLinkHeldByDisputeHold && invoice\?\.id/);
+    const handOver = src.indexOf('queueHeldInvoiceForSender(invoice.id, db)', lookup);
+    const firstSmsBranch = src.indexOf('completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery', lookup);
+    expect(handOver).toBeGreaterThan(lookup);
+    // ahead of the completion text branch, so a failed hand-over sends nothing
+    expect(handOver).toBeLessThan(firstSmsBranch);
+    const block = src.slice(src.lastIndexOf('const completionTextWouldCarryPayLink', handOver), src.indexOf('completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery', handOver));
+    // only when a pay link WOULD have gone out but for the hold: same terms the text itself uses
+    expect(block).toMatch(/completionPayLinkAllowedSansHold\(\)/);
+    expect(block).toMatch(/effectiveSendCompletionSms && !!svc\.cust_phone/);
+    expect(block).toMatch(/!completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit/);
+    expect(block).toMatch(/payLinkHeldByDisputeHold && !!invoice\?\.id && !paymentFailedNoticeSent/);
+    expect(block).toMatch(/declineNoticeEligibleSansHold/);
+    // the ownership marker is written BEFORE the queue write; both failures release for resume (503) + raise an alert
+    expect(block.indexOf('invoiceSenderOwnsPayLinkFor: String(invoice.id)')).toBeLessThan(block.indexOf('queueHeldInvoiceForSender(invoice.id, db)'));
+    expect(block).toMatch(/type: 'collection_hold_invoice_queue_failed'/);
+    expect(block).toMatch(/releaseCompletionAttemptForResume\(completionAttempt, handOverErr\)/);
+    expect(block).toMatch(/status: 503/);
+    expect(block).toMatch(/code: 'invoice_hold_handover_failed'/);
+  });
+
+  test('a retry or resume finds the invoice owned by the sender and sends REPORT-ONLY (no second pay link)', () => {
+    expect(src).toMatch(/const invoiceSenderOwnsPayLink = !!invoice\?\.id\s*&& String\(recordStructuredNotes\.invoiceSenderOwnsPayLinkFor \|\| ''\) === String\(invoice\.id\);/);
+    const i = src.indexOf('const allowCompletionInvoiceLinkBase =');
+    expect(src.slice(i, src.indexOf('const allowCompletionInvoiceLink = ', i))).toMatch(/&& !invoiceSenderOwnsPayLink;/);
+    const d = src.indexOf('} else if (declineNoticeEligibleSansHold');
+    expect(src.slice(d, src.indexOf(') {', d))).toMatch(/&& !invoiceSenderOwnsPayLink/);
   });
 
   test('the completion/report SMS drops the pay link (and so the past-due line, the with-invoice lane and the invoice-delivery mark)', () => {
     const i = src.indexOf('const allowCompletionInvoiceLinkBase =');
     const end = src.indexOf('const allowCompletionInvoiceLink = ', i);
     const base = src.slice(i, end);
-    expect(base).toMatch(/&& !payLinkHeldByDisputeHold;/);
+    expect(base).toMatch(/completionPayLinkAllowedSansHold\(\)/);
+    expect(base).toMatch(/&& !payLinkHeldByDisputeHold/);
     // Every pay-link decision downstream keys off allowCompletionInvoiceLink.
     const after = src.slice(end);
     expect(after).toMatch(/completionPastDueLine = \(invoiceCreated && payUrl && allowCompletionInvoiceLink/);
@@ -117,10 +139,15 @@ describe('completion route wiring (complete-scheduled-service.js)', () => {
   });
 
   test('the decline notice (which carries the pay link as its own text) is not armed under a dispute hold', () => {
-    const i = src.indexOf('} else if (paymentFailedSmsContext && !');
+    const i = src.indexOf('} else if (declineNoticeEligibleSansHold');
     expect(i).toBeGreaterThan(0);
     const cond = src.slice(i, src.indexOf(') {', i));
     expect(cond).toMatch(/&& !payLinkHeldByDisputeHold/);
+    // the sans-hold decision carries the notice's own terms (phone, invoice, pay url, collectible, no payer, not backfill)
+    const terms = src.slice(src.indexOf('const declineNoticeEligibleSansHold ='), i);
+    expect(terms).toMatch(/svc\.cust_phone/);
+    expect(terms).toMatch(/!invoice\.payer_id/);
+    expect(terms).toMatch(/!isBackfillCompletion/);
   });
 });
 

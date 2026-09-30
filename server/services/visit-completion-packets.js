@@ -831,23 +831,6 @@ async function closeVisitCompletionPacket(database, { packet, memberId, payment,
   return outcome;
 }
 
-// True while the packet's customer has an active collections dispute hold, or
-// when the hold cannot be verified (fail closed). Read inside a nested
-// transaction (a savepoint on `trx`) so a failing lookup rolls back to the
-// savepoint instead of leaving the caller's transaction aborted.
-async function packetCustomerOnDisputeHold(trx, { visit, invoiceId }) {
-  try {
-    return await trx.transaction(async (sp) => {
-      const customerId = visit?.customer_id
-        || (await sp('invoices').where({ id: invoiceId }).first('customer_id'))?.customer_id;
-      return require('./collections/collection-hold').customerHasActiveCollectionHoldChecked(customerId, sp);
-    });
-  } catch (err) {
-    require('./logger').warn(`[visit-closeout] dispute-hold lookup failed for invoice ${invoiceId} - holding the pay-link send for retry: ${err.message}`);
-    return true;
-  }
-}
-
 /** Run summary and financial effects only after every member is ready. */
 async function runVisitCompletionPacketEffects(packetId, database = db, { actor = null } = {}) {
   if (actor && require('./technician-visit-scope').isTechnicianRequest(actor) && !await packetInTechnicianScope(packetId, actor, database)) {
@@ -884,28 +867,6 @@ async function runVisitCompletionPacketEffects(packetId, database = db, { actor 
       const { visit, billed, payerId: owner } = await resolvePacketOwnershipLocked(packet.id, trx);
       if (owner && await withdrawPacketInvoiceForPayer(trx, { packetId: packet.id, invoiceId: payment.invoiceId, visit, billed, payerId: owner })) {
         return { ...payment, state: 'office_required', reason: 'payer_assigned', payerId: owner };
-      }
-      // An active collections DISPUTE hold (owner ruling 2026-09-30): the
-      // scheduled sender texts/emails a pay link, and the customer was told on
-      // the call that all billing follow-up is on hold. Leave the invoice
-      // draft and report the payment as pending - the closeout retries on its
-      // normal path and schedules the send once the hold is released. Fail
-      // closed: a lookup failure counts as a hold. The read runs in a
-      // SAVEPOINT so a failed query cannot abort this transaction (which
-      // still owns the payer-row locks and the withdrawal decision above).
-      if (await packetCustomerOnDisputeHold(trx, { visit, invoiceId: payment.invoiceId })) {
-        // Mark the draft as withheld by the hold so the office RELEASE queues
-        // it at once (owner ruling 2026-09-30) instead of waiting for this
-        // closeout's next retry. The retry stays correct either way: an
-        // invoice the release already queued is 'scheduled' self-pay, which the
-        // branch below treats as this coordinator's own scheduling - never a
-        // second send. Best-effort: a marker failure only costs the immediacy.
-        try {
-          await require('./collections/collection-hold').markInvoiceWithheldByHold(payment.invoiceId, trx);
-        } catch (markErr) {
-          require('./logger').warn(`[visit-closeout] could not mark invoice ${payment.invoiceId} as withheld by a dispute hold: ${markErr.message}`);
-        }
-        return { ...payment, state: 'payment_pending', reason: 'collections-dispute-hold' };
       }
       const scheduled = await trx('invoices').where({ id: payment.invoiceId, status: 'draft', visit_completion_packet_id: packet.id })
         .whereNull('payer_id').whereNull('payer_statement_id').update({

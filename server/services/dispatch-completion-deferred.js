@@ -320,14 +320,13 @@ async function terminalDeferredDeclineNotice(claimMeta = {}) {
 // `mark_invoice_delivery` so finalize never marks a pay link delivered that
 // never went out. Returns the changed-row count (0 = the claim was lost).
 //
-// A strip caused by a dispute hold (owner ruling 2026-09-30) also stamps the
-// invoice as withheld-by-the-hold in the SAME transaction: the row and the
-// invoice can never disagree about whether the pay link still needs sending.
-// The office release (or a later retry that finds the hold gone - see the
-// completion recheck in deferred-replay-registry.js) queues the invoice
-// through one atomic claim; this text stays report-only either way, so the
-// invoice is sent once, never by both. A marker failure rolls the strip back
-// and the attempt retries with a fresh recheck.
+// A strip caused by a dispute hold (owner ruling 2026-09-30) also QUEUES the
+// invoice onto the scheduled-invoice sender in the SAME transaction: the row
+// and the invoice can never disagree about whether the pay link still needs
+// sending. This text stays report-only; the sender defers the invoice while
+// the hold stands and sends it on the first tick after the hold is released,
+// so the pay link goes out exactly once. A queue failure rolls the strip back
+// and the attempt retries with a fresh recheck (the scheduler's bounded ladder).
 async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invoiceId = null, stampedAt = new Date(), database = db }) {
   return database.transaction(async (trx) => {
     const changed = await trx('sms_log').where({ id: msgId, status: 'sending' }).update({
@@ -339,7 +338,7 @@ async function persistStrippedPayLink({ msgId, strippedBody, reason = null, invo
       updated_at: stampedAt,
     });
     if (changed && reason === 'collections-dispute-hold' && invoiceId) {
-      await require('./collections/collection-hold').markInvoiceWithheldByHold(invoiceId, trx);
+      await require('./collections/collection-hold').queueHeldInvoiceForSender(invoiceId, trx);
     }
     return changed;
   });

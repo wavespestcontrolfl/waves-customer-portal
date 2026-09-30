@@ -14,7 +14,6 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () =
 jest.mock('../services/collections/collection-hold-admin', () => ({
   listCollectionHolds: jest.fn(async () => []),
   releaseCollectionHold: jest.fn(async () => ({ ok: true, released: 1 })),
-  sendWithheldInvoicesAfterRelease: jest.fn(async () => ({ ok: true, queued: [] })),
 }));
 
 const mockTx = { committed: 0, rolledBack: 0, trx: { isTrx: true } };
@@ -28,8 +27,7 @@ jest.mock('../models/db', () => {
 
 const express = require('express');
 const { recordAuditEvent } = require('../services/audit-log');
-const { releaseCollectionHold, sendWithheldInvoicesAfterRelease } = require('../services/collections/collection-hold-admin');
-const db = require('../models/db');
+const { releaseCollectionHold } = require('../services/collections/collection-hold-admin');
 const router = require('../routes/admin-customers');
 
 async function post() {
@@ -56,28 +54,12 @@ test('release + critical audit share one transaction and commit together', async
   expect(mockTx.committed).toBe(1);
 });
 
-test('the withheld invoices are sent only AFTER the release + audit transaction commits (owner ruling 2026-09-30)', async () => {
-  const order = [];
-  db.transaction.mockImplementationOnce(async (fn) => { const out = await fn(mockTx.trx); order.push('commit'); return out; });
-  sendWithheldInvoicesAfterRelease.mockImplementationOnce(async () => { order.push('send'); return { ok: true, queued: [] }; });
-  const res = await post();
-  expect(res).toEqual({ status: 200, body: { released: 1 } });
-  expect(sendWithheldInvoicesAfterRelease).toHaveBeenCalledWith('cust-1');
-  expect(order).toEqual(['commit', 'send']);
-});
-
-test('a failed post-release send (it never throws; it alerts) leaves the release response intact', async () => {
-  sendWithheldInvoicesAfterRelease.mockResolvedValueOnce({ ok: false, error: 'queue down', queued: [] });
-  expect(await post()).toEqual({ status: 200, body: { released: 1 } });
-});
-
 test('a failed audit write rolls the release back and the route errors', async () => {
   recordAuditEvent.mockRejectedValueOnce(new Error('audit down'));
   const res = await post();
   expect(res.status).toBe(500);
   expect(mockTx.rolledBack).toBe(1);
   expect(mockTx.committed).toBe(0);
-  expect(sendWithheldInvoicesAfterRelease).not.toHaveBeenCalled();
 });
 
 test('a failed release errors without writing an audit row', async () => {
@@ -86,5 +68,4 @@ test('a failed release errors without writing an audit row', async () => {
   expect(res.status).toBe(500);
   expect(recordAuditEvent).not.toHaveBeenCalled();
   expect(mockTx.committed).toBe(0);
-  expect(sendWithheldInvoicesAfterRelease).not.toHaveBeenCalled();
 });
