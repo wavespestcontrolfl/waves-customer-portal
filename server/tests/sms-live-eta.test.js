@@ -1938,6 +1938,53 @@ describe('round 23 P2: number-word counts are not bare ETA figures', () => {
   });
 });
 
+// Codex round-30 P2s (PR #5334).
+describe('round 30 P2: route idioms need a technician-type subject', () => {
+  const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+  test.each([
+    'Your receipt is on the way.', 'The replacement trap is en route.', 'Your order is on the way.', 'Your package will arrive tomorrow.',
+    "We'll be there Tuesday.", "You're close to renewal.", 'The parts are en-route from the warehouse.',
+  ])('%p is fulfillment/scheduling copy, not a technician claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each([
+    'Your tech is on the way.', 'Your tech, Sam, is on his way.', "He's en route.", 'The technician is now en-route.', 'Our driver will be on the way shortly.',
+    'The tech will arrive soon.', 'Your tech is almost there.', 'Our crew is heading over.', "They'll be there shortly.",
+  ])('%p is a technician status claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(true);
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test.each(['He is no longer en route.', 'The tech is not on the way yet.', 'Your tech is not en route.'])('%p stays a correction, not a claim', (t) => {
+    expect(bodyMentionsArrival(t)).toBe(false);
+  });
+  test('the default-deny vocabulary is never narrower than the en-route classifier', () => {
+    for (const t of ['Your tech is on the way.', "They'll be there shortly.", 'The tech will arrive soon.', 'Your tech is almost there.', 'The crew is heading over.']) {
+      expect(bodyMentionsArrival(t) && !bodyMentionsVisitStatus(t)).toBe(false);
+    }
+  });
+});
+
+describe('round 30 P2: liveEtaExpiredByPublication', () => {
+  const { liveEtaExpiredByPublication } = require('../services/sms-shadow-drafter');
+  const NOW_D = new Date('2026-09-30T15:00:00.000Z');
+  const ctx = (e = {}) => ({ liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['a'], ...e }] });
+  const claim = 'Your tech is about 12 minutes away.';
+  test('fix deadline passed -> expired; not yet -> fresh', () => {
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx({ fixExpiresAtMs: NOW_D.getTime() - 1 }), now: NOW_D })).toBe(true);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx({ fixExpiresAtMs: NOW_D.getTime() + 60e3 }), now: NOW_D })).toBe(false);
+  });
+  test('facts older than the 15-minute draft window -> expired', () => {
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx(), factsAt: new Date(NOW_D.getTime() - 16 * 60e3), now: NOW_D })).toBe(true);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: ctx(), factsAt: new Date(NOW_D.getTime() - 5 * 60e3), now: NOW_D })).toBe(false);
+  });
+  test('status-only copy, no live entries, or minutes-null entries never expire', () => {
+    expect(liveEtaExpiredByPublication({ reply: 'Your tech is on the way.', context: ctx({ fixExpiresAtMs: 1 }), now: NOW_D })).toBe(false);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: {}, now: NOW_D })).toBe(false);
+    expect(liveEtaExpiredByPublication({ reply: claim, context: { liveEtaGroups: [{ minutes: null, scheduledServiceIds: ['a'], fixExpiresAtMs: 1 }] }, now: NOW_D })).toBe(false);
+  });
+});
+
 // Codex round-29 P2s (PR #5334): conditional scope + interrogatives.
 describe('round 29 P2s: introductory phrases are not conditionals; questions are not claims', () => {
   const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');

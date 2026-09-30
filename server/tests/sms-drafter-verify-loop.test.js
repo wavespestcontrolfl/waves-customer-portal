@@ -697,3 +697,51 @@ describe('generateGroundedDraft — factsGeneratedAt is the exact instant the SL
     expect(r.factsGeneratedAt.toISOString()).toBe('2026-09-29T00:01:00.000Z');
   });
 });
+
+// Codex round-30 P2 (PR #5334): a live ETA that expires while the draft/verify
+// calls run is WITHHELD (not converged) — every send seam would reject the card.
+describe('generateGroundedDraft — a live ETA that expired during generation is withheld', () => {
+  const priorGate = process.env.GATE_SMS_REAL_ANSWERS;
+  beforeEach(() => { process.env.GATE_SMS_REAL_ANSWERS = 'true'; });
+  afterEach(() => {
+    if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate;
+    jest.dontMock('../services/availability');
+    jest.resetModules();
+  });
+  function setup() {
+    jest.resetModules();
+    jest.doMock('../services/availability', () => ({ getAvailableSlots: jest.fn(async () => ({ days: [] })) }));
+    return require('../services/sms-shadow-drafter');
+  }
+  const ctx = (fixExpiresAtMs) => ({
+    summary: 'Dana — Quarterly Pest, Venice',
+    upcomingServices: [{
+      type: 'Quarterly Pest', date: require('../utils/datetime-et').etDateString(), window: null, tech: 'Sam', status: 'en_route', trackState: 'en_route', isToday: true,
+      liveEta: { minutes: 12, asOf: '2:45 PM ET', trackUrl: 'https://portal.wavespestcontrol.com/track/tok-1' },
+    }],
+    liveEtaGroups: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['tok-1'], state: 'en_route', fixExpiresAtMs }],
+  });
+  const run = async (reply, fixExpiresAtMs) => {
+    const drafter = setup();
+    const client = makeClient([
+      { reply, intended_actions: [], missing_info: null },
+      { supported: true, violations: [] },
+    ]);
+    return drafter.generateGroundedDraft({
+      client, context: ctx(fixExpiresAtMs), inboundMessage: 'Where is the tech?', intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+    });
+  };
+  test('control: a still-fresh fix converges', async () => {
+    const r = await run('Your tech is about 12 minutes away.', Date.now() + 120e3);
+    expect(r.converged).toBe(true);
+  });
+  test('the fix expired by publication time: the minutes card is withheld', async () => {
+    const r = await run('Your tech is about 12 minutes away.', Date.now() - 1000);
+    expect(r.converged).toBe(false);
+    expect(r.parsed.reply).toMatch(/12 minutes/); // still returned so the judge can grade the shadow row
+  });
+  test('status-only copy carries no minutes to age: an expired fix does not withhold it', async () => {
+    const r = await run('Your tech is on the way.', Date.now() - 1000);
+    expect(r.converged).toBe(true);
+  });
+});

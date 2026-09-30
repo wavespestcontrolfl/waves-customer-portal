@@ -1164,7 +1164,33 @@ function bodyClaimsCompletedArrival(text) {
 //   - a conditional ("I'll text you once he's on the way", "when the tech
 //     is en route"), or
 //   - part of a scheduling window (isWindowQuantity).
-const EN_ROUTE_STATUS_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en[\s-]?route|(?:head(?:ing|ed)|coming)\s+(?:over|your\s+way|to\s+you|to\s+your\s+\w+)|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:coming|headed|heading|driving|rolling|travell?ing)\b|(?:tech(?:nician)?|he|she|they|driver|crew)(?:'s|'re|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:in\s+the\s+(?:truck|van|vehicle)|on\s+the\s+road)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:has|have|had))?\s+(?:just\s+)?left\s+(?:for|to\s+head|to\s+you)|(?:will|should|'ll)\s+be\s+(?:there|here|with\s+you|at\s+your\s+\w+)|(?:is|are|'s|'re)\s+(?:very\s+|really\s+|getting\s+)?(?:close|nearby|almost\s+(?:there|here))|(?:is|are|'s|'re|will|should|'ll)\s+(?:now\s+)?arriv(?:e|ing)|arriv(?:ing|es)\s+(?:soon|shortly|now)|pull(?:ing)?\s+up|show(?:ing)?\s+up|get(?:ting)?\s+(?:there|to\s+you)|reach(?:ing)?\s+you)\b/gi;
+// ONE technician-subject rule for every visit-status regex (Codex round-30 P2):
+// "Your receipt is on the way" / "The replacement trap is en route" are fulfillment
+// copy, not a claim about the technician. A status idiom counts only behind a
+// technician-type subject (tech / technician / driver / crew / he / she / they),
+// optionally with a possessive/contraction ('s 're 'll 'd) and up to three
+// non-negating filler words between ("Your tech, Sam, is on his way", "He will be
+// arriving", "The tech is now en route"). EN_ROUTE_STATUS_RE (bodyMentionsArrival,
+// the en-route classifier etaClaimBlockReason uses) and VISIT_STATUS_RE (the
+// send-time default-deny vocabulary) are both built from this prefix.
+const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?|driver|crew|he|she|they)";
+const TECH_STATUS_PREFIX = `${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+`;
+const ROUTE_IDIOM = '(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way)';
+const EN_ROUTE_PREDICATES = [
+  ROUTE_IDIOM,
+  '(?:head(?:ing|ed)|coming)\\s+(?:over|your\\s+way|to\\s+you|to\\s+your\\s+\\w+)',
+  '(?:coming|headed|heading|driving|rolling|travell?ing)\\b',
+  '(?:in\\s+the\\s+(?:truck|van|vehicle)|on\\s+the\\s+road)\\b',
+  '(?:just\\s+|already\\s+)?left\\s+(?:for|to\\s+head|to\\s+you)',
+  'be\\s+(?:there|here|with\\s+you|at\\s+your\\s+\\w+)',
+  '(?:close|nearby|almost\\s+(?:there|here))',
+  '(?:arriv(?:e|ing)|arrives\\s+(?:soon|shortly|now))',
+  'pull(?:ing)?\\s+up',
+  'show(?:ing)?\\s+up',
+  'get(?:ting)?\\s+(?:there|to\\s+you)',
+  'reach(?:ing)?\\s+you',
+];
+const EN_ROUTE_STATUS_RE = new RegExp(`\\b${TECH_STATUS_PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})\\b`, 'gi');
 const CONDITIONAL_BEFORE_RE = /\b(?:when|once|if|as\s+soon\s+as|until|before|after|whenever|unless)\b[^.?!\n]*$/i;
 // Does a conditional word GOVERN the status clause (Codex round-29 P2)? Only the
 // text since the last clause boundary counts: "once he's on the way" and "when
@@ -1214,15 +1240,17 @@ function bodyMentionsArrival(text) {
 // (vocabulary, not phrasing); the only exemptions are the same non-claims the
 // narrower classifiers already honor: a conditional ("once he's on the way"), a
 // negated correction ("hasn't arrived"), and a scheduling window.
-const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?|driver|crew|he|she|they)";
 const VISIT_STATUS_RE = new RegExp(
   // "en route" / "on the way" are technician idioms on their own. Verbal "arrive"
   // forms (round-25 P2: not the noun in "arrival instructions") and coming/headed/
   // driving need a technician-type subject (round-28 audit P1): "Your payment has
   // arrived at our office" / "We're coming up on renewal" are not visit status.
   // Up to three non-negating words may sit between ("He will be arriving").
-  '\\b(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way'
-  + `|${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
+  '\\b(?:'
+  // Superset of every en-route predicate bodyMentionsArrival classifies, so the
+  // default-deny vocabulary can never be narrower than the specific classifier.
+  + `${TECH_STATUS_PREFIX}(?:${EN_ROUTE_PREDICATES.join('|')})`
+  + `|${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|no|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
   // Positional status forms (here / there / outside / nearby / close / on site /
   // at your door / almost there) count ONLY with a technician-type subject
   // (round-21 P2): "We are here to help" / "we're here" are not a claim.
@@ -1579,6 +1607,21 @@ function replyClaimsEtaMinutes(reply) {
 // `trackTokens` (Codex round-4 P2, PR #5334): each entry's own
 // /track/:token(s), carried through so sms-eta-freshness.js can revalidate a
 // reply that shares ONLY the tracking link — never rendered into any prompt.
+// Has the LIVE ETA behind this reply's minutes claim already gone stale, by the
+// SAME two clocks the send seams enforce (sms-eta-freshness draftFreshnessReason):
+// the facts are older than the 15-minute draft window, or the GPS fix behind an
+// entry passed its tracker-staleness deadline (fixExpiresAtMs). Only a reply that
+// actually states minutes is affected; status-only copy carries nothing to age.
+function liveEtaExpiredByPublication({ reply, context, factsAt = null, now = new Date() }) {
+  const entries = (buildLiveEtaSnapshot(context)?.entries || []).filter((e) => Number.isFinite(e.minutes));
+  if (!entries.length) return false;
+  const text = String(reply || '');
+  if (!findEtaMinutesClaims(text).length && !findGroundedMinutesFigures(text).length) return false;
+  const { ETA_FRESHNESS_WINDOW_MS } = require('./sms-eta-freshness'); // lazy: that module requires this one lazily too
+  const t = now.getTime();
+  if (factsAt instanceof Date && t - factsAt.getTime() > ETA_FRESHNESS_WINDOW_MS) return true;
+  return entries.some((e) => Number.isFinite(e.fixExpiresAtMs) && t > e.fixExpiresAtMs);
+}
 function buildLiveEtaSnapshot(context) {
   const groups = Array.isArray(context?.liveEtaGroups) ? context.liveEtaGroups : [];
   const entries = groups
@@ -3479,6 +3522,17 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     passes += 1;
   }
 
+  // Codex round-30 P2: the draft/verify calls can outlive the live ETA. A card
+  // whose minutes claim is ALREADY stale at publication time is unusable (every
+  // send seam rejects it as eta_claim_stale_facts), so it is WITHHELD — kept as a
+  // shadow row, never published or auto-sent — instead of re-resolving (a second
+  // GPS + route-provider round trip and a full re-verify for a figure the next
+  // inbound will refresh anyway).
+  if (converged && liveEtaExpiredByPublication({ reply: parsed?.reply, context, factsAt })) {
+    logger.warn('[sms-shadow] live ETA expired while the draft was generated; withholding the card (not converged)');
+    converged = false;
+  }
+
   return {
     parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion,
     // Computed off the FINAL parsed.reply (after every revision pass) — an
@@ -3971,6 +4025,7 @@ module.exports = {
   bodyHasUnconvertedNumberWord,
   bodyClaimsCompletedArrival,
   replyClaimsEtaMinutes,
+  liveEtaExpiredByPublication,
   buildLiveEtaSnapshot,
   replyBindsDeclaredDays,
   liveServiceType,
