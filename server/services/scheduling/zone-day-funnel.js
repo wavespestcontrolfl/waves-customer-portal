@@ -231,6 +231,7 @@ module.exports = {
   getZoneFunnelDays,
   applyZoneDayFunnel,
   isFunnelZone,
+  funnelZoneSlugs,
   fallbackCenterZoneName,
   // Exposed for tests.
   _internals: { funnelZoneSlugs, rowMatchesZone, zoneStopDates },

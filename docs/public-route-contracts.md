@@ -771,7 +771,22 @@ cap (owner 2026-09-25): self-serve callers that pass `customerFacing` (the
 /book availability engine behind /api/booking/availability and the public
 reschedule/re-service pickers, and the estimate slot routes) omit a feasible slot whose added round-trip drive exceeds
 `SCHEDULING_MAX_DETOUR_MINUTES` (default 30; an empty day counts the whole trip
-from HQ). Staff and phone booking see every fit. The finder's per-slot `return_time`
+from HQ). Staff and phone booking see every fit. **Zone route days**
+(`GATE_ZONE_ROUTE_DAYS`, owner 2026-09-29, default OFF): when on, that cap is
+lifted per candidate for an address in a configured zone on that zone's route
+weekday, so an empty route day can be offered and seeded (default: Friday for
+Venice / North Port, lifted cap 150 minutes; override with the
+`system_settings` key `schedule_zone_route_days`, e.g.
+`{"venice":{"weekdays":[5],"max_detour_minutes":150,"technician_id":null}}`;
+`{}` switches the lift off, a `technician_id` pins it to one technician). The
+zone is resolved from the request's coordinates (nearest `service_zones`
+center within 35 miles, so 'North Venice' / 'Northport' resolve), passed to the
+finder as `zoneSlug` by `/api/booking/availability` (and everything sharing its
+builder) and the estimate slot routes, and only ever raises the cap — route
+feasibility (return time, overcommit, arrival window, travel gap) is still
+checked. The estimate picker's south-zone funnel seeds the route day first. The phone
+agent, office Find-a-Time, the Intelligence Bar and auto-dispatch are not
+customer-facing and never had the cap. The finder's per-slot `return_time`
 (modeled return to HQ) and result-level `rejections` tally are staff/diagnostic
 fields only: /api/booking/availability builds each public slot field by field
 (`routes/booking.js`) and the estimate routes build theirs through

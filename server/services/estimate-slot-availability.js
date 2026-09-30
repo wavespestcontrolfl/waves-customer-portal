@@ -41,6 +41,7 @@ const { addETDays, etDateString, etParts, parseETDateTime } = require('../utils/
 const { signSlotOffer, appendOfferToSlotId, CAPACITY_OFFER_POLICY } = require('../utils/slot-offer-token');
 const { resolveEstimateZone, zoneSlugOf } = require('./slot-zone');
 const { getZoneFunnelDays, applyZoneDayFunnel, fallbackCenterZoneName } = require('./scheduling/zone-day-funnel');
+const { resolveZoneRouteDaySlug, readZoneRouteDays, preferRouteDayDates } = require('./scheduling/zone-route-days');
 const {
   CUSTOMER_DAY_END_MINUTES, customerOfferGrid, lunchBlockEnabled,
   refreshCustomerBookingWindowConfig, currentDayEndMinutes, currentLunchInterval, customerWindowAdmits,
@@ -1971,6 +1972,14 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   const skipResultCache = !!serviceProfile.reservationServiceMix
     || (isEnabled('southZoneDayFunnel') && (zoneResolutionFailed || funnelLookupFailed));
   const coords = await resolveEstimateCoords(estimate);
+  // Zone route days (GATE_ZONE_ROUTE_DAYS, owner ruling 2026-09-29): the
+  // picker's find-time call lifts the detour cap on the zone's route day so
+  // an empty Friday can be offered (and seeded by the funnel below). Zone
+  // comes from the estimate's coordinates first, its city-resolved
+  // estimateZone as the fallback. Null with the gate off (no db call).
+  const routeDaySlug = coords
+    ? await resolveZoneRouteDaySlug({ lat: coords.lat, lng: coords.lng, estimateZone, conn: db })
+    : null;
 
   // If we can't resolve coords, degrade gracefully: return empty primary,
   // no route-proximity tags. Getting the customer on the calendar still
@@ -2058,6 +2067,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     Promise.all(slotSegments.map(([segFrom, segTo]) => findAvailableSlots({
       lat: coords.lat,
       lng: coords.lng,
+      zoneSlug: routeDaySlug,
       durationMinutes: serviceProfile.durationMinutes,
       serviceType: serviceProfile.services.map(service => service.label || service.service).join(' '),
       serviceTypes: serviceProfile.services.map(service => service.label || service.service),
@@ -2145,9 +2155,18 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     filterPastSlotsForToday(filterTimeOfDay(classified, opts.timeOfDay), { minimumLeadMinutes: opts.minimumLeadMinutes }),
     serviceProfile,
   );
-  const preferredSeedDates = [];
+  let preferredSeedDates = [];
   for (const s of seedRankedRoute) {
     if (s?.date && !preferredSeedDates.includes(s.date)) preferredSeedDates.push(s.date);
+  }
+  // The zone's route day seeds first (GATE_ZONE_ROUTE_DAYS) — an empty
+  // Friday's detour score is the whole HQ round trip, so score order alone
+  // would rank it behind any other far day. Same-request config read, only
+  // when the gate resolved a route-day zone.
+  if (routeDaySlug) {
+    preferredSeedDates = preferRouteDayDates(preferredSeedDates, {
+      zoneSlug: routeDaySlug, config: await readZoneRouteDays(db),
+    });
   }
   const allBookable = filterTimeOfDay(bookable, opts.timeOfDay).sort(compareCustomerFacingSlots);
   const { slots: funneledBookable, funnel } = applyZoneDayFunnel(allBookable, funnelDays, { preferredSeedDates });
@@ -2297,9 +2316,14 @@ async function getSlotDebug(estimateId, userOpts = {}) {
 
   const { dateFrom, dateTo } = etDateRange(opts.windowDays);
 
+  // Same zone-route-day lift as the live path (GATE_ZONE_ROUTE_DAYS), from
+  // coordinates only — this debug view has no resolved estimateZone.
+  const routeDaySlug = await resolveZoneRouteDaySlug({ lat: coords.lat, lng: coords.lng, conn: db });
+
   const raw = await findAvailableSlots({
     lat: coords.lat,
     lng: coords.lng,
+    zoneSlug: routeDaySlug,
     durationMinutes: serviceProfile.durationMinutes,
     serviceTypes: serviceProfile.services.map(service => service.label || service.service),
     capacityPlacement: true,

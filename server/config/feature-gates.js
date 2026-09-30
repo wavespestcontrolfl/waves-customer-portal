@@ -82,6 +82,7 @@
  *   GATE_CALL_PROPERTY_ROLE=true (call-classified property roles: fill unknown occupancies + park a one-click property_role_confirm review card)
  *   GATE_RESERVICE_REPORT_COPY=true (re-service/callback customer reports key off service_records.is_callback: lawn-vs-pest hero copy below the honest V2 status branches, "$0 — included with WaveGuard" line on web + PDF for member tiers; unset = legacy name-regex headline)
  *   GATE_SOUTH_ZONE_DAY_FUNNEL=true (estimate picker funnels far-south zones onto days with an existing zone stop, seeding one day when none exists)
+ *   GATE_ZONE_ROUTE_DAYS=true (customer-facing booking + estimate picker lift the self-serve detour cap on a far zone's route day — default Friday for Venice / North Port — so an EMPTY route day can be offered and seeded; config in system_settings key schedule_zone_route_days; phone/office/IB/auto-dispatch untouched; read at call time via zoneRouteDaysLive(); unset = today's cap everywhere)
  *   GATE_JOB_CARD=true (Service Protocol drawer "Job card" tab: customer paragraph (FAST-tier rewrite of portal fields, template fallback, cached on scheduled_services.job_card), per-product spray check from NWS hourly at the property, tank mix search; read at call time; unset = tab hidden, endpoint answers {enabled:false})
  *   GATE_REPORT_PHOTO_CONTENT=true (tech-reviewed completion-photo captions/summary ground the AI report writer; read at call time via reportPhotoContentLive(), off unless exactly 'true')
  *   GATE_REPORT_PRODUCT_COPY=true (owner-approved 2026-09-28 wording page: three short customer-facing lines per applied product on the service report — "How it works", "Also labeled for", "Pets & kids" — matched to the applied catalog product by EPA registration number primarily, an explicit name-alias list otherwise; server/config/report-product-copy.js. Unmatched products get NO copy — fail closed, never guessed. Customer-display only — never fed into the AI report writer's grounding. Off unless exactly 'true', read at call time via reportProductCopyGateOn() in report-product-copy.js; the gates-map entry below is for logGateStatus only)
@@ -817,6 +818,17 @@ const gates = {
   // stay deterministic. Kill switch: unset — offers instantly revert to the
   // full pool.
   southZoneDayFunnel: process.env.GATE_SOUTH_ZONE_DAY_FUNNEL === 'true',
+
+  // Zone route days (owner ruling 2026-09-29: Fridays are the Venice / North
+  // Port route day): when ON, the self-serve (customer-facing) detour cap is
+  // lifted for an address in a configured zone on that zone's route weekday,
+  // so an empty Friday — whose first far stop is otherwise charged the full
+  // round trip from HQ as "detour" — can be offered on /book and the
+  // estimate picker, and seeded there by the south-zone funnel. Ships DARK:
+  // off unless exactly 'true'. This entry is for logGateStatus only:
+  // scheduling/zone-route-days.js reads GATE_ZONE_ROUTE_DAYS at call time via
+  // zoneRouteDaysLive(). Kill switch: unset.
+  zoneRouteDays: process.env.GATE_ZONE_ROUTE_DAYS === 'true',
 
   // Booking-funnel conversion canary (2026-07-18): alerts Adam when real
   // /book funnel entries see zero conversions across a window — the July
@@ -3945,10 +3957,19 @@ function outlinkTrackingLive() {
   return process.env.GATE_OUTLINK_TRACKING === 'true';
 }
 
+// GATE_ZONE_ROUTE_DAYS read at CALL time — strict `=== 'true'`, same
+// convention as outlinkTrackingLive(). The canonical reader for
+// scheduling/zone-route-days.js and policy.js's customerMaxDetourMinutes();
+// the `zoneRouteDays` gates-map entry above is for logGateStatus only.
+function zoneRouteDaysLive() {
+  return process.env.GATE_ZONE_ROUTE_DAYS === 'true';
+}
+
 module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, customerIntelAiLive, selfBookDayCapEnabled, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, emailTemplateAutomationsMode, ibCancelAppointmentLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Exported on its own line (not in the shared list above) so concurrent gate
 // PRs appending to that one-line list never conflict with this one.
 module.exports.smsLinkWrapLive = smsLinkWrapLive;
 module.exports.customerActivityTimelineLive = customerActivityTimelineLive;
 module.exports.plantIdRefereeLive = plantIdRefereeLive;
+module.exports.zoneRouteDaysLive = zoneRouteDaysLive;
 // gates 1775330914
