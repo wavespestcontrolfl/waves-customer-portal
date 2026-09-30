@@ -697,7 +697,9 @@ async function fetchZelleEligibilityLookup({ customerId, openInvoiceId } = {}) {
       // and credit-pending fixes so this draft-time fact can never offer
       // Zelle in a case the pay page itself would withhold it.
       const { payPageZelleVisibility } = require('../routes/pay-v2');
-      return Boolean((await payPageZelleVisibility({ invoice: row })).visible);
+      // READ-ONLY (Codex round-26 P1): this runs while DRAFTING an SMS — an inbound question must never release or
+      // promote a saved-card charge claim whose worker may still commit.
+      return Boolean((await payPageZelleVisibility({ invoice: row, readOnly: true })).visible);
     })();
     return await Promise.race([work, timeout]);
   } catch (err) {
@@ -1755,7 +1757,7 @@ function identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows 
   const families = new Set();
   for (const p of rows) {
     if (!p) continue;
-    const amountOk = rowAmountMatches(p, amountCents) || partialRefundCents(p) === amountCents;
+    const amountOk = amountCents == null || rowAmountMatches(p, amountCents) || partialRefundCents(p) === amountCents;
     if (!amountOk) continue;
     if (claimedDate && !paymentDateMatchesClaim(p, claimedDate)) continue;
     if (claimedTender && paymentTenderLabel(p) !== claimedTender) continue;
@@ -1781,7 +1783,9 @@ function bindPaymentRow({
   // attempts with the same identity but different status families (a failed + a paid $120 card payment
   // on the same day) cannot be told apart by a status claim — it needs disambiguation, so it binds to
   // NEITHER row (filtering to the asserted family first would let "your payment failed" pick the failed one).
-  if (amountCents != null && PRESENCE_STATUS_FAMILIES.has(family) && identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows: allRows }).size > 1) return onAmbiguous;
+  // Round-26 P1: for ANY identity — amount, date, tender or any combination (not only an amount).
+  if ((amountCents != null || claimedDate || claimedTender) && PRESENCE_STATUS_FAMILIES.has(family)
+      && identityStatusFamilies({ amountCents, claimedDate, claimedTender, rows: allRows }).size > 1) return onAmbiguous;
   // Codex round-21 P1: a status claim with NO identity at all (no amount, date or tender — clause or inbound)
   // is about "my payment" = the customer's MOST RECENT payment. It must be true of THAT payment: rows tied
   // for the newest date decide (conflicting status families among them => ungrounded), and an older row of

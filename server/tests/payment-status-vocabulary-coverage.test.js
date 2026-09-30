@@ -1009,3 +1009,40 @@ describe('round-25: invoice status claims agree with the invoice the customer as
     expect(rq('Invoice WPC-2026-0202 is paid.', list)).toBe(false);
   });
 });
+
+// Codex round-26 P1: the cross-status ambiguity rule runs for ANY identity — amount, date, tender or a combination.
+describe('round-26: conflicting statuses under a date-only / tender-only / combined identity are ungrounded', () => {
+  const ctx = (rows) => ({ billing: { outstandingBalance: 0, recentPayments: rows } });
+  const rq = (r, c, inboundMessage) => replyQuotesUngroundedAmount(r, c, { byMeaning: true, inboundMessage });
+  const row = (status, over = {}) => ({ amount: 120, status, payment_date: '2026-09-12', payment_method_type: 'card', ...over });
+
+  test('TENDER + DATE: "Your card payment from Sep 12 failed" with paid + failed card rows that day binds neither (either order)', () => {
+    for (const rows of [[row('failed'), row('paid')], [row('paid'), row('failed')]]) {
+      expect(rq('Your card payment from Sep 12 failed.', ctx(rows))).toBe(true);
+      expect(rq('Your card payment from Sep 12 is still processing.', ctx([row('paid'), row('processing')]))).toBe(true);
+    }
+  });
+  test('DATE only: two attempts on the date with conflicting statuses', () => {
+    expect(rq('Your payment from Sep 12 failed.', ctx([row('failed', { amount: 50 }), row('paid', { amount: 60 })]))).toBe(true);
+    expect(rq('Your payment from Sep 12 failed.', ctx([row('failed', { amount: 50 })]))).toBe(false); // single status
+    expect(rq('Your payment from Sep 12 failed.', ctx([row('failed', { amount: 50 }), row('paid', { amount: 60, payment_date: '2026-09-10' })]))).toBe(false); // other date
+  });
+  test('TENDER only (reply or the customer\'s inbound)', () => {
+    const zelleFailed = row('failed', { payment_method_type: undefined, description: 'Invoice INV-9 — zelle' });
+    const zellePaid = row('paid', { payment_method_type: undefined, description: 'Invoice INV-9 — zelle', payment_date: '2026-09-01' });
+    expect(rq('Your Zelle payment failed.', ctx([zelleFailed, zellePaid]))).toBe(true);
+    expect(rq('Your payment failed.', ctx([zelleFailed, zellePaid]), 'Why did my Zelle payment fail?')).toBe(true);
+    expect(rq('Your Zelle payment failed.', ctx([zelleFailed, row('paid')]))).toBe(false); // the paid row is a CARD payment
+  });
+  test('the inbound identity counts: the customer named the date, the reply did not', () => {
+    expect(rq('Your payment failed.', ctx([row('failed', { amount: 50 }), row('paid', { amount: 60 })]), 'Did my Sep 12 payment fail?')).toBe(true);
+    expect(rq('Your payment failed.', ctx([row('failed', { amount: 50 }), row('paid', { amount: 60, payment_date: '2026-09-01' })]), 'Did my Sep 12 payment fail?')).toBe(false);
+  });
+  test('the most-recent fallback for a fully identity-free claim is unchanged', () => {
+    expect(rq('Your payment is processing.', ctx([row('paid', { payment_date: '2026-09-20' }), row('processing', { payment_date: '2026-09-10' })]))).toBe(true);
+  });
+  test('absence claims and same-family rows are unaffected', () => {
+    expect(rq('Your card payment from Sep 12 failed.', ctx([row('failed'), row('failed', { amount: 45 })]))).toBe(false);
+    expect(rq("We haven't received your card payment from Sep 12.", ctx([row('failed')]))).toBe(false);
+  });
+});

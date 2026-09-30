@@ -73,7 +73,8 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
       })),
       authorizedDuesCents: jest.fn(() => []),
     }));
-    jest.doMock('../routes/pay-v2', () => ({ payPageZelleVisibility: jest.fn(async () => ({ visible, reason: null })) }));
+    const payPageZelleVisibility = jest.fn(async () => ({ visible, reason: null }));
+    jest.doMock('../routes/pay-v2', () => ({ payPageZelleVisibility }));
     jest.doMock('../services/estimate-deposits', () => ({ assertInvoiceDepositSettlementReady: jest.fn(async () => {}) }));
     jest.doMock('../services/voice-profile-distiller', () => ({ getApprovedVoiceProfile: jest.fn(async () => null) }));
     jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
@@ -97,7 +98,7 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
       intent: { intent: 'general_customer_sms_needs_review', confidence: 0.9 }, schedulingIntent: false, city: 'Venice',
     });
     const maybeAutoSendResult = result;
-    return { zelleInvoiceId: maybeAutoSendResult.zelleInvoiceId, factsBlock: maybeAutoSendResult.factsBlock, checked };
+    return { zelleInvoiceId: maybeAutoSendResult.zelleInvoiceId, factsBlock: maybeAutoSendResult.factsBlock, checked, payPageZelleVisibility };
   }
   const open = [
     { id: 'inv-3', invoiceNumber: 'WPC-2026-0303', status: 'sent', amountDue: 95 },
@@ -108,6 +109,10 @@ describe('the drafter persists the RESOLVED invoice id (and abstains when it can
     const { zelleInvoiceId, checked } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open });
     expect(checked).toEqual(['inv-1']);
     expect(zelleInvoiceId).toBe('inv-1');
+  });
+  test('drafting runs the pay page Zelle check READ-ONLY (Codex round-26 P1: an inbound question never writes charge-claim state)', async () => {
+    const { payPageZelleVisibility } = await draft({ inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?', open });
+    expect(payPageZelleVisibility).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true }));
   });
   test('a unique amount also resolves it', async () => {
     const { zelleInvoiceId, checked } = await draft({ inboundMessage: 'Can I Zelle the $210?', open });

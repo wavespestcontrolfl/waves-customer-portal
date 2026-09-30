@@ -282,7 +282,8 @@ async function zelleInvoiceStillEligible({ customerId, zelleInvoiceId, dbh = db 
       return { eligible: false, reason: 'zelle_invoice_ineligible' };
     }
     const { payPageZelleVisibility } = require('../routes/pay-v2');
-    const visibility = await payPageZelleVisibility({ invoice: invoiceRow, dbh });
+    // READ-ONLY (Codex round-26 P1): send-time / draft-time rechecks never write to the charge-claim state.
+    const visibility = await payPageZelleVisibility({ invoice: invoiceRow, dbh, readOnly: true });
     return visibility.visible ? { eligible: true } : { eligible: false, reason: zelleRecheckReason(visibility.reason) };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] Zelle eligibility recheck failed for customer ${customerId}: ${err.message}; blocking send`);

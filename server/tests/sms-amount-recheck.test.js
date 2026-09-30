@@ -244,7 +244,7 @@ describe('zelleInvoiceStillEligible / outgoingAmountsStale — pre-push audit P1
     payPageZelleVisibility.mockResolvedValue({ visible: false, reason: 'not_eligible' });
     await expect(zelleInvoiceStillEligible({ customerId: 'c1', zelleInvoiceId: 'inv-1', dbh: dbWithTables({ invoices: invoiceRow }) }))
       .resolves.toEqual({ eligible: false, reason: 'zelle_invoice_ineligible' });
-    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: invoiceRow, dbh: expect.any(Function) });
+    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: invoiceRow, dbh: expect.any(Function), readOnly: true }); // read-only: a recheck never writes charge-claim state
   });
 
   // Codex round-14 P2: the visibility check's SPECIFIC reason survives, so the scheduler's
@@ -948,7 +948,7 @@ describe('several open invoices: the send-time Zelle recheck resolves the same i
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));
     payPageZelleVisibility.mockResolvedValue({ visible: true, reason: null });
     await expect(outgoingAmountsStale({ customerId: 'c1', body: BODY, dbh, inboundMessage: 'Can I pay invoice WPC-2026-0101 by Zelle?' })).resolves.toEqual({ stale: false });
-    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: expect.objectContaining({ id: 'x' }), dbh: expect.any(Function) });
+    expect(payPageZelleVisibility).toHaveBeenCalledWith({ invoice: expect.objectContaining({ id: 'x' }), dbh: expect.any(Function), readOnly: true });
   });
   test('several open and no reference: the offer cannot be tied to one invoice => blocked (unresolved)', async () => {
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctxWith(open));

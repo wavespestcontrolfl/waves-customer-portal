@@ -317,7 +317,7 @@ async function invoiceProjectedCreditApplied(invoice) {
 // denies Zelle the instant the anchor resolves to a LIVE payer, never
 // silently falling through as "no previous balance" the way a bare null
 // return from combinedEligibleSiblings used to.
-async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive } = {}) {
+async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly = false } = {}) {
   if (!invoice) return false;
   if (!isInvoiceCollectibleStatus(invoice.status)) return false;
   if (invoiceWithdrawnFromCustomer(invoice)) return false;
@@ -334,6 +334,8 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
       const siblings = await PayCombined.combinedEligibleSiblings(invoice, {
         reusePaymentIntentId: invoice.stripe_payment_intent_id || null,
         onPayerResolved: () => { payerOwned = true; },
+        // read-only: the sibling charge-claim fences must not release / promote anything either
+        ...(readOnly ? { readOnly: true } : {}),
       });
       hasPrevBalance = !!(siblings && siblings.length);
     }
@@ -341,7 +343,12 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
   if (payerOwned) return false;
   if (hasPrevBalance) return false;
   try {
-    await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
+    // Codex round-26 P1: callers that only ASK (SMS drafting and send-time rechecks) pass readOnly — the
+    // writing default would release a stale pre-submit claim / promote a submitted one while the original
+    // charge worker can still commit, exposing a second payment rail. The public pay page GET keeps main's
+    // behavior (default, writing) — the same call main's own GET makes.
+    if (readOnly) await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id, db, { readOnly: true });
+    else await StripeService.assertNoInvoiceChargeReconciliationPending(invoice.id);
   } catch (err) {
     if (!StripeService.savedCardChargeSuppressesAlternateCollection(err)) throw err;
     return false;
@@ -400,7 +407,7 @@ function withTimeout(promise, ms) {
 // the real amount) — every OTHER caller only ever wants the plain boolean.
 async function payPageZelleVisibility({
   invoiceId = null, invoice = null, dbh = db,
-  creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive,
+  creditWillCoverAnchor, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly = false,
 } = {}) {
   if (!manualPayOptionsFromEnv()) return { visible: false, reason: 'not_configured' };
   const inv = invoice || (invoiceId ? await dbh('invoices').where({ id: invoiceId }).first() : null);
@@ -434,7 +441,7 @@ async function payPageZelleVisibility({
   let eligible;
   try {
     eligible = await withTimeout(
-      isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive }),
+      isZelleTransferEligible(inv, { creditWillCoverAnchor: coverage, hasPreviousBalance, saveRequired, payerOwnedLive, readOnly }),
       ZELLE_ELIGIBILITY_TIMEOUT_MS,
     );
   } catch (err) {
@@ -1875,6 +1882,5 @@ router.get('/:token/invoice.pdf', async (req, res, next) => {
 module.exports = router;
 module.exports.invoiceRequiresSavedMethod = invoiceRequiresSavedMethod;
 module.exports.invoiceCaptureNeeded = invoiceCaptureNeeded;
-module.exports.invoiceCreditWouldFullyCover = invoiceCreditWouldFullyCover;
 module.exports.isZelleTransferEligible = isZelleTransferEligible;
 module.exports.payPageZelleVisibility = payPageZelleVisibility;
