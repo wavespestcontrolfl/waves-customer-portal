@@ -73,7 +73,7 @@ async function sendSubscription(sub, notification, options) {
       // UPDATE must never reject the fan-out — that would discard an
       // earlier device's successful delivery and make push-channel-routing
       // send a duplicate SMS after a push the customer already received.
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
+      await (options?.connection || db)('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
     return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
@@ -85,7 +85,7 @@ async function sendSubscription(sub, notification, options) {
     const result = await fcm.send(sub.device_token, notification, { shouldContinue: options?.shouldContinue });
     if (result.skipped) return { sent: false, skipped: true, reason: result.reason };
     if (result.expired) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
+      await (options?.connection || db)('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, reason: result.reason };
     }
     return result.ok ? { sent: true } : { sent: false, failed: true, reason: result.reason,
@@ -105,7 +105,7 @@ async function sendSubscription(sub, notification, options) {
     return { sent: true };
   } catch (err) {
     if (err.statusCode === 410 || err.statusCode === 404) {
-      await db('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
+      await (options?.connection || db)('push_subscriptions').where({ id: sub.id }).update({ active: false }).catch(() => {});
       return { sent: false, expired: true, statusCode: err.statusCode, reason: 'subscription_expired' };
     }
     logger.error(`Push failed: ${err.message}`);
@@ -304,10 +304,16 @@ class PushNotificationService {
   // beforeDispatch runs after the subscription lookup and immediately before
   // the first provider handoff, so a caller's durable "push started" claim
   // is never burned by a lookup that failed or found nothing to send.
-  async sendToAdminUsers(adminUserIds, notificationForUser, { beforeDispatch = null, deliveredSubscriptionIds = null } = {}) {
+  // `connection` runs the lookup (and any expired-device cleanup) on a
+  // connection the caller already holds; `deadlineAt` (epoch ms) starts no
+  // device leg after it. Both serve utils/tech-visit-push-lock.js, whose
+  // holder must use one connection and release within a bounded time.
+  async sendToAdminUsers(adminUserIds, notificationForUser, {
+    beforeDispatch = null, deliveredSubscriptionIds = null, connection = null, deadlineAt = null,
+  } = {}) {
     const ids = [...new Set((adminUserIds || []).filter(Boolean))];
     if (ids.length === 0) return summarize([], 0);
-    const subs = await db('push_subscriptions as ps')
+    const subs = await (connection || db)('push_subscriptions as ps')
       .join('technicians as t', 'ps.admin_user_id', 't.id')
       .whereIn('ps.admin_user_id', ids)
       .where({ 'ps.active': true, 't.active': true })
@@ -324,10 +330,14 @@ class PushNotificationService {
         results.push({ sent: true, deduped: true });
         continue;
       }
+      if (deadlineAt != null && Date.now() >= deadlineAt) {
+        results.push({ sent: false, skipped: true, reason: 'send_budget_spent' });
+        continue;
+      }
       const notification = typeof notificationForUser === 'function'
         ? notificationForUser(sub.admin_user_id, sub)
         : notificationForUser;
-      const result = await sendSubscription(sub, notification)
+      const result = await sendSubscription(sub, notification, { connection })
         .catch(() => ({ sent: false, failed: true, reason: 'provider_failure' }));
       results.push(result);
       if (result.sent) delivered.add(sub.id);
@@ -337,8 +347,8 @@ class PushNotificationService {
     };
   }
 
-  async sendToAdminUser(adminUserId, notification) {
-    return this.sendToAdminUsers([adminUserId], notification);
+  async sendToAdminUser(adminUserId, notification, opts = {}) {
+    return this.sendToAdminUsers([adminUserId], notification, opts);
   }
 
   async deactivateStaffUser(adminUserId, connection = db) {

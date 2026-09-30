@@ -115,8 +115,8 @@ async function writeCard(scheduledServiceId) {
   });
 }
 
-async function stillAlertable(scheduledServiceId, technicianId) {
-  const q = db('scheduled_services as s')
+async function stillAlertable(scheduledServiceId, technicianId, conn = db) {
+  const q = conn('scheduled_services as s')
     .join('technicians as t', 't.id', 's.technician_id')
     .where('s.id', scheduledServiceId)
     .where('s.technician_id', technicianId)
@@ -161,13 +161,19 @@ async function sendPhotoAlert(scheduledServiceId) {
       // Under the visit's cross-instance push lock (see the header). The
       // liveness check stays in beforeDispatch, so it runs under the lock.
       await sendUnderVisitPushLock(scheduledServiceId, {
-        send: () => PushService.sendToAdminUsers([technicianId], {
+        // One connection per holder: the lookup and the liveness read run on
+        // the lock's own (null on the fail-open path → the pool).
+        send: (conn, { deadlineAt }) => PushService.sendToAdminUsers([technicianId], {
           title: PUSH_TITLE,
           body: '',
           url: '/tech',
           tag: `visit-prep-${scheduledServiceId}`,
           priority: 'high',
-        }, { beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId) }),
+        }, {
+          beforeDispatch: () => stillAlertable(scheduledServiceId, technicianId, conn || db),
+          connection: conn,
+          deadlineAt,
+        }),
       });
     } catch (pushErr) {
       // The card is already durable — a push failure never loses it.

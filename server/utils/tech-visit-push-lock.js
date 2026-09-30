@@ -24,16 +24,30 @@
  * FOR SHARE, so a schedule writer is never blocked by a push in flight. The
  * only thing that ever waits on this lock is another push for the same visit.
  *
- * HOLD TIME. The lock is held across the provider round trip, which is
- * bounded: every transport enforces its own timeout (web-push 8 s in
- * push-notifications.js, apns.js and fcm.js their own), so a hung provider
- * cannot pin the lock forever. The waiter side is bounded too:
- * `SET LOCAL lock_timeout` makes a stuck holder cost a waiter at most
- * LOCK_TIMEOUT_MS. While held, the transaction pins ONE pool connection and
- * the send needs another (subscription lookup), so an in-process cap on
- * concurrent holders (a fraction of the pool) keeps a bulk reschedule from
- * pinning the whole pool and starving the sends; extra pushes wait in
- * memory, holding no connection.
+ * HOLD TIME. The lock is held across the provider round trip, and the hold
+ * is bounded end to end so a waiter never gives up on a holder that is
+ * still legitimately sending (a waiter that timed out and sent unordered
+ * would recreate the very misorder this lock prevents):
+ *   - every query under the lock runs with `SET LOCAL statement_timeout`
+ *     (STATEMENT_TIMEOUT_MS), set only AFTER the lock is granted so it never
+ *     cuts the wait itself short;
+ *   - the sender starts no new device leg after `deadlineAt`
+ *     (SEND_BUDGET_MS after the lock is granted), and each leg is bounded by
+ *     its transport (web-push and APNs 8 s; FCM up to 8 s OAuth + 8 s send,
+ *     MAX_LEG_MS);
+ * so a holder releases within MAX_HOLD_MS, and the waiter's
+ * `SET LOCAL lock_timeout` (LOCK_TIMEOUT_MS) is set above that. A lock
+ * timeout therefore means an abnormal holder (a stalled database session),
+ * not a slow fan-out. A device past the budget is skipped, not sent late.
+ *
+ * POOL. Everything the push does while holding the lock — the recheck, the
+ * subscription lookup, an expired-device cleanup — runs on the lock's OWN
+ * transaction (`send(trx, …)`), so a holder uses exactly one connection. That
+ * matters inside runExclusive (no-show detector), whose cron lock already
+ * pins one: at DB_POOL_MAX=2 a second checkout would wait out the acquire
+ * timeout. An in-process cap on concurrent holders (a fraction of the pool,
+ * at least one) keeps a bulk reschedule from pinning the whole pool; extra
+ * pushes wait in memory, holding no connection.
  *
  * ERROR POLICY (fail open). A CLEAN "stale" verdict from the recheck skips
  * the push — the newer change's own push is the one that lands. A lock or
@@ -46,8 +60,13 @@ const db = require('../models/db');
 const logger = require('../services/logger');
 
 const LOCK_NAMESPACE = 'tech-visit-push';
-// A holder spends at most a few 8 s provider timeouts (one per device) here.
-const LOCK_TIMEOUT_MS = 20000;
+// Bounds on one holder (see HOLD TIME above). The recheck is a few statements
+// and the lookup one; each is capped by STATEMENT_TIMEOUT_MS.
+const STATEMENT_TIMEOUT_MS = 5000;
+const SEND_BUDGET_MS = 20000;
+const MAX_LEG_MS = 16000;
+const MAX_HOLD_MS = 4 * STATEMENT_TIMEOUT_MS + SEND_BUDGET_MS + MAX_LEG_MS;
+const LOCK_TIMEOUT_MS = MAX_HOLD_MS + 10000;
 const DEFAULT_MAX_HOLDERS = 4;
 
 function maxHolders() {
@@ -84,7 +103,10 @@ function errorTag(err) {
  * @param {object} args
  * @param {(trx) => Promise<boolean>} [args.isCurrent]  runs under the lock on
  *   the lock's own connection; resolve false for a clean "stale" verdict.
- * @param {() => Promise<*>} args.send  the provider handoff.
+ * @param {(trx, { deadlineAt: number }) => Promise<*>} args.send  the provider
+ *   handoff. Run every query on `trx` (one connection per holder) and start
+ *   no device leg after `deadlineAt` (epoch ms). On the fail-open path `trx`
+ *   is null (use the pool) and there is no lock to bound, so no deadline.
  * @returns {Promise<{ sent: boolean, stale?: boolean, locked: boolean, result?: * }>}
  *   `send`'s own rejection propagates (after the lock is released).
  */
@@ -98,11 +120,16 @@ async function sendUnderVisitPushLock(visitId, { isCurrent = null, send } = {}) 
       await db.transaction(async (trx) => {
         await trx.raw(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`);
         await trx.raw('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', [`${LOCK_NAMESPACE}:${visitId}`]);
+        // After the grant: bounds the holder, never the wait.
+        await trx.raw(`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`);
+        const deadlineAt = Date.now() + SEND_BUDGET_MS;
         phase = 'check';
         let current = true;
         if (isCurrent) {
           try {
-            current = (await isCurrent(trx)) !== false;
+            // In a savepoint: a failed recheck query would otherwise abort
+            // the lock's transaction and take the fail-open send down with it.
+            current = (await trx.transaction((sp) => isCurrent(sp))) !== false;
           } catch (err) {
             logger.warn(`[tech-visit-push-lock] recheck failed for visit ${visitId} (${errorTag(err)}); sending`);
           }
@@ -113,7 +140,7 @@ async function sendUnderVisitPushLock(visitId, { isCurrent = null, send } = {}) 
         }
         phase = 'send';
         try {
-          outcome = { sent: true, locked: true, result: await send() };
+          outcome = { sent: true, locked: true, result: await send(trx, { deadlineAt }) };
         } catch (err) {
           sendError = err;
         }
@@ -124,7 +151,7 @@ async function sendUnderVisitPushLock(visitId, { isCurrent = null, send } = {}) 
       if (phase !== 'send' && !outcome) {
         logger.warn(`[tech-visit-push-lock] lock failed for visit ${visitId} (${errorTag(err)}); sending unordered`);
         try {
-          outcome = { sent: true, locked: false, result: await send() };
+          outcome = { sent: true, locked: false, result: await send(null, { deadlineAt: null }) };
         } catch (sendErr) {
           sendError = sendErr;
         }
@@ -139,4 +166,7 @@ async function sendUnderVisitPushLock(visitId, { isCurrent = null, send } = {}) 
   return outcome || { sent: false, locked: false };
 }
 
-module.exports = { sendUnderVisitPushLock, LOCK_NAMESPACE, LOCK_TIMEOUT_MS, _test: { maxHolders } };
+module.exports = {
+  sendUnderVisitPushLock, LOCK_NAMESPACE, LOCK_TIMEOUT_MS, STATEMENT_TIMEOUT_MS, SEND_BUDGET_MS, MAX_HOLD_MS,
+  _test: { maxHolders },
+};

@@ -1372,7 +1372,10 @@ async function reconcileOfficeAlert(trx, { card, visit, live, key, type, recipie
 // created the alert and notice and then immediately resolved and dismissed
 // them, re-notifying the tech every five minutes (codex P1 round 10).
 // Members are locked in id order, the same order every pass takes them in.
-async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false, promises = null } = {}) {
+// `lock: false` — the same evaluation as a plain read (no stop lock, no FOR
+// UPDATE), for the push recheck that runs under the visit's push lock and
+// must never block a schedule write across a provider round trip.
+async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = false, promises = null, lock = true } = {}) {
   // The STOP's advisory lock first, the same one visit-groups takes for every
   // create/join/split: its splitChild can lock the higher-id child and then
   // wait for its sibling, while an id-ordered FOR UPDATE here locks the
@@ -1384,7 +1387,7 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   // exactly the inversion it prevents. Each caller's transaction is one row,
   // so the throw skips that row and the next tick retries it (codex P1 round
   // 22, second pass).
-  await require('./visit-groups').lockStopForRow(trx, serviceId);
+  if (lock) await require('./visit-groups').lockStopForRow(trx, serviceId);
   // The first read takes NO lock: it only answers "which stop is this?".
   // Locking the representative and then the group would take row locks in
   // two different orders (this row first, then every member in id order),
@@ -1393,9 +1396,10 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   // pass uses (codex P1 round 10).
   const row = await trx('scheduled_services').where({ id: serviceId }).first();
   if (!row) return { visit: null, members: [], promise: null, live: null };
+  const forUpdate = (q) => (lock ? q.forUpdate() : q);
   let members = row.visit_id
-    ? await trx('scheduled_services').where({ visit_id: row.visit_id }).forUpdate().orderBy('id').select('*')
-    : await trx('scheduled_services').where({ id: serviceId }).forUpdate().select('*');
+    ? await forUpdate(trx('scheduled_services').where({ visit_id: row.visit_id })).orderBy('id').select('*')
+    : await forUpdate(trx('scheduled_services').where({ id: serviceId })).select('*');
   if (!members.length) return { visit: null, members: [], promise: null, live: null };
   // Membership is re-checked against the LOCKED row: visit-groups can attach
   // or split this service between the unlocked read above and the lock, and
@@ -1410,12 +1414,12 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
     // own row has to be read — and locked — or the evaluation would run on
     // the stale pre-lock copy against a stop it no longer belongs to (codex
     // P2 round 21).
-    [locked] = await trx('scheduled_services').where({ id: serviceId }).forUpdate().select('*');
+    [locked] = await forUpdate(trx('scheduled_services').where({ id: serviceId })).select('*');
     if (!locked) return { visit: null, members: [], promise: null, live: null };
   }
   if (String(locked.visit_id || '') !== String(row.visit_id || '')) {
     members = locked.visit_id
-      ? await trx('scheduled_services').where({ visit_id: locked.visit_id }).forUpdate().orderBy('id').select('*')
+      ? await forUpdate(trx('scheduled_services').where({ visit_id: locked.visit_id })).orderBy('id').select('*')
       : [locked];
   }
   const visit = members.find((m) => String(m.id) === String(serviceId)) || row;
@@ -1493,11 +1497,15 @@ async function cleanupAfterDisable(conn) {
 // leaves, and the sweep may have been running for minutes (codex P1 round
 // 24). Read-only and outside the transaction: the card already stands either
 // way.
-async function stillOverdue(conn, notice, { now = new Date() } = {}) {
+// `rethrow`: under the push lock the recheck runs in a savepoint, and a
+// swallowed query error would leave that savepoint aborted; the lock helper
+// catches it instead (rolled back cleanly, its fail-open policy applies).
+async function stillOverdue(conn, notice, { now = new Date(), lock = true, rethrow = false } = {}) {
   try {
-    const { visit, live } = await lockedStop(conn, notice.visitId, { now, ignoreHorizon: true });
+    const { visit, live } = await lockedStop(conn, notice.visitId, { now, ignoreHorizon: true, lock });
     return !!live && !!visit && String(visit.technician_id || '') === String(notice.technicianId || '');
   } catch (err) {
+    if (rethrow) throw err;
     require('./logger').warn(`[no-show-detector] push recheck failed for ${notice.visitId}: ${err.message}`);
     return false;
   }
@@ -1599,7 +1607,14 @@ async function sweep(conn, { now = new Date() } = {}) {
     // missing-tracking push for a visit that has already arrived or moved on:
     // the next sweep dismisses the durable card, but nothing retracts a push
     // (codex P2 round 24).
-    if (notice && await stillOverdue(conn, notice, { now: new Date() })) await techNotices.pushTrackingNotice(notice);
+    // Asked again UNDER the visit's push lock (plain read, on the lock's
+    // connection): a reassignment's own push can take and release that lock
+    // between this check and ours, and ours must then stand down (codex P1).
+    if (notice && await stillOverdue(conn, notice, { now: new Date() })) {
+      await techNotices.pushTrackingNotice(notice, {
+        checkCurrent: (lockConn) => stillOverdue(lockConn, notice, { now: new Date(), lock: false, rethrow: true }),
+      });
+    }
   }
   // The same rows the evidence preload above was built from.
   for (const alert of openAlerts) await withRow(alert.job_id, () => conn.transaction(async (trx) => {

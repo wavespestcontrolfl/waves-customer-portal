@@ -410,21 +410,23 @@ async function pushStillCurrent(notice, conn) {
 }
 
 // Best-effort push; the card is already durable when this runs. Delivered
-// under the visit's cross-instance push lock; `checkCurrent(trx)` is the
+// under the visit's cross-instance push lock; `checkCurrent(conn)` is the
 // recheck under it (a visit_* card passes pushStillCurrent; a tracking
-// notice, already re-verified by its detector, takes the lock alone).
+// notice passes its detector's own still-overdue read). The send runs on the
+// lock's connection and stops starting device legs at its deadline — see
+// utils/tech-visit-push-lock.js.
 async function pushCard(notice, { checkCurrent = null } = {}) {
   try {
     const PushService = require('./push-notifications');
     const out = await sendUnderVisitPushLock(notice.visitId, {
       isCurrent: checkCurrent,
-      send: () => PushService.sendToAdminUser(notice.technicianId, {
+      send: (conn, { deadlineAt }) => PushService.sendToAdminUser(notice.technicianId, {
         title: notice.pushTitle,
         body: '',
         url: '/tech',
         tag: `visit-${notice.visitId}`,
         priority: 'high',
-      }),
+      }, { connection: conn, deadlineAt }),
     });
     if (out.stale) logger.info(`[tech-visit-notifications] stale ${notice.kind || 'tracking'} push skipped for visit ${notice.visitId} (newer state)`);
   } catch (pushErr) {
@@ -628,7 +630,10 @@ module.exports = {
   // commit order (one queue, not two).
   enqueueForVisit,
   recordTrackingNotice,
-  pushTrackingNotice: (notice) => pushCard(notice),
+  // `checkCurrent(conn)`: the detector's still-overdue read, run under the
+  // visit's push lock so a reassignment/arrival/completion whose own push
+  // went first is never followed by a stale tracking push.
+  pushTrackingNotice: (notice, { checkCurrent = null } = {}) => pushCard(notice, { checkCurrent }),
   // Reused by no-show-detector.js so a tracking notice reads the same "who
   // / when" a visit_* card does, instead of a second date formatter.
   formatWhen,

@@ -6,11 +6,14 @@
 // resolve false to fail the insert.
 const mockWriteCard = jest.fn().mockResolvedValue(undefined);
 const mockSendToAdminUser = jest.fn().mockResolvedValue({ sent: 1 });
+const mockSendOpts = [];
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/push-notifications', () => ({
-  sendToAdminUser: (...args) => mockSendToAdminUser(...args),
+  // Options (the lock's connection + deadline) are recorded apart, so the
+  // copy assertions below stay about the notification itself.
+  sendToAdminUser: (id, notification, opts) => { mockSendOpts.push(opts); return mockSendToAdminUser(id, notification); },
 }));
 
 const db = require('../models/db');
@@ -291,6 +294,10 @@ describe('notifyTechVisitChange', () => {
     const out = await notices.notifyTechVisitChange({ visitId: 'visit-1', kind: 'assigned', technicianId: 'tech-1', actorId: ADAM_ID });
     expect(out).toEqual({ sent: true });
     expect(lockCalls()).toEqual([['SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', ['tech-visit-push:visit-1']]]);
+    // The send runs on the lock's own connection, under its deadline.
+    const opts = mockSendOpts[mockSendOpts.length - 1];
+    expect(opts.connection).toBe(db);
+    expect(opts.deadlineAt).toEqual(expect.any(Number));
     // The newer-card check compares against the card this notice wrote.
     expect(lastNewerChain.whereNot).toHaveBeenCalledWith('n.id', 'card-' + cardSeq);
     expect(lastNewerChain.whereRaw).toHaveBeenCalledWith("n.payload->>'visit_id' = ?", ['visit-1']);

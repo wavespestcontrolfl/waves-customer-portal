@@ -7,7 +7,9 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const db = require('../models/db');
 const logger = require('../services/logger');
-const { sendUnderVisitPushLock, LOCK_TIMEOUT_MS, _test } = require('../utils/tech-visit-push-lock');
+const {
+  sendUnderVisitPushLock, LOCK_TIMEOUT_MS, STATEMENT_TIMEOUT_MS, SEND_BUDGET_MS, MAX_HOLD_MS, _test,
+} = require('../utils/tech-visit-push-lock');
 
 function primeDb({ lockError = null } = {}) {
   const trx = {
@@ -15,6 +17,8 @@ function primeDb({ lockError = null } = {}) {
       if (lockError && /pg_advisory_xact_lock/.test(sql)) throw lockError;
     }),
   };
+  // A nested knex transaction is a savepoint on the same connection.
+  trx.transaction = jest.fn(async (fn) => fn(trx));
   db.transaction = jest.fn(async (fn) => fn(trx));
   db.client = { pool: { max: 20 } };
   return trx;
@@ -22,32 +26,47 @@ function primeDb({ lockError = null } = {}) {
 
 beforeEach(() => jest.clearAllMocks());
 
-test('takes a transaction-scoped lock keyed on the visit, with a bounded lock_timeout, then sends', async () => {
+test('takes a transaction-scoped lock keyed on the visit, bounds the holder after the grant, then sends on the lock\'s connection', async () => {
   const trx = primeDb();
   const send = jest.fn(async () => 'ok');
+  const before = Date.now();
   const out = await sendUnderVisitPushLock('visit-1', { send });
   expect(trx.raw.mock.calls).toEqual([
     [`SET LOCAL lock_timeout = '${LOCK_TIMEOUT_MS}ms'`],
     ['SELECT pg_advisory_xact_lock(hashtextextended(?, 0))', ['tech-visit-push:visit-1']],
+    // Only after the grant, so it never cuts the wait short.
+    [`SET LOCAL statement_timeout = '${STATEMENT_TIMEOUT_MS}ms'`],
   ]);
+  const [conn, { deadlineAt }] = send.mock.calls[0];
+  expect(conn).toBe(trx);
+  expect(deadlineAt).toBeGreaterThanOrEqual(before + SEND_BUDGET_MS);
+  expect(deadlineAt).toBeLessThanOrEqual(Date.now() + SEND_BUDGET_MS);
   expect(out).toEqual({ sent: true, locked: true, result: 'ok' });
+});
+
+test('a waiter outlasts the longest legitimate hold (it never gives up on a holder still sending)', () => {
+  // Several statements + the send budget + one worst-case leg (FCM OAuth + send).
+  expect(MAX_HOLD_MS).toBeGreaterThanOrEqual(4 * STATEMENT_TIMEOUT_MS + SEND_BUDGET_MS + 16000);
+  expect(LOCK_TIMEOUT_MS).toBeGreaterThan(MAX_HOLD_MS);
 });
 
 test('the recheck runs under the lock on its connection; a clean false skips the send', async () => {
   const trx = primeDb();
-  const isCurrent = jest.fn(async (conn) => { expect(conn).toBe(trx); expect(trx.raw).toHaveBeenCalledTimes(2); return false; });
+  const isCurrent = jest.fn(async (conn) => { expect(conn).toBe(trx); expect(trx.raw).toHaveBeenCalledTimes(3); return false; });
   const send = jest.fn();
   const out = await sendUnderVisitPushLock('visit-1', { isCurrent, send });
   expect(out).toEqual({ sent: false, stale: true, locked: true });
   expect(send).not.toHaveBeenCalled();
 });
 
-test('a recheck error sends anyway', async () => {
-  primeDb();
+test('a recheck error sends anyway, and the recheck ran in a savepoint so the lock\'s transaction stays usable', async () => {
+  const trx = primeDb();
   const send = jest.fn(async () => 'ok');
   const out = await sendUnderVisitPushLock('visit-1', { isCurrent: async () => { throw new Error('db'); }, send });
+  expect(trx.transaction).toHaveBeenCalledTimes(1);
   expect(out.sent).toBe(true);
   expect(send).toHaveBeenCalledTimes(1);
+  expect(send.mock.calls[0][0]).toBe(trx);
   expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('recheck failed'));
 });
 
@@ -57,6 +76,8 @@ test('a lock error sends once, unordered; no PII or SQL in the log', async () =>
   const out = await sendUnderVisitPushLock('visit-1', { send });
   expect(out).toEqual({ sent: true, locked: false, result: 'ok' });
   expect(send).toHaveBeenCalledTimes(1);
+  // No lock → the pool, and no deadline to honour.
+  expect(send.mock.calls[0]).toEqual([null, { deadlineAt: null }]);
   const msg = logger.warn.mock.calls[0][0];
   expect(msg).toContain('55P03');
   expect(msg).not.toContain('secret');
