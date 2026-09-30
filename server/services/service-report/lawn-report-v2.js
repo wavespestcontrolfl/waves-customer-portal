@@ -471,11 +471,13 @@ function buildAftercare(applications, opts = {}) {
     // the plan's per-run depth. Shallower, it counts toward the week but the
     // plan stays whole (no creditableWaterIn). No plan run to reduce: as before.
     const plan = opts.weekPlan;
-    const runDepth = Number(plan?.depthInches);
+    // Nullish BEFORE coercion: Number(null) is 0 and would credit any water-in.
+    const runDepth = plan?.depthInches == null || plan.depthInches === '' ? NaN : Number(plan.depthInches);
     const creditsRun = !plan?.title || plan.prescribesRun !== true
       || (Number.isFinite(runDepth) && Number(instruction.waterInInches) >= runDepth - 0.001);
     return normalizeLawnAftercare({
-      watering: `${instruction.lines[0]} ${instruction.lines[1]}`,
+      // Every treatment sentence: the PDF and Ask Waves read only this field.
+      watering: instruction.lines.join(' '),
       reentry,
       waterInRequired: instruction.state !== 'hold',
       wateringHold: holds,

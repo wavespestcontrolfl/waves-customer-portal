@@ -2,7 +2,7 @@
 // rules + completion time + the customer's runtime facts in, one instruction out.
 // Synthetic data only.
 
-const { buildWateringInstruction, _private } = require('../services/service-report/lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines, _private } = require('../services/service-report/lawn-watering-instruction');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
 
@@ -15,8 +15,11 @@ const NONE = (source = 'label') => ({ mode: 'none', source });
 
 const build = (rules, extra = {}) => buildWateringInstruction({ rules, completedAt: COMPLETED, ...extra });
 
+const WITH_PLAN = { hasWeekPlan: true, planRunInches: 0.5 };
+
 function expectCleanCopy(instruction) {
-  for (const line of instruction.lines) {
+  // The frozen lines, and the same lines as composed on a render that has a plan.
+  for (const line of [...instruction.lines, ...composeBannerLines(instruction, WITH_PLAN)]) {
     expect(findBannedCustomerCopy(line)).toEqual([]);
     expect(reentrySafetyClaimFinding(line)).toBeFalsy();
     // No probabilities, no county language, no drying / keep-off phrasing.
@@ -27,21 +30,23 @@ function expectCleanCopy(instruction) {
 
 describe('mixed-visit matrix', () => {
   test('hold alone', () => {
-    const r = build([HOLD(24)], { hasWeekPlan: true });
+    const r = build([HOLD(24)]);
     expect(r.state).toBe('hold');
+    // Frozen lines are treatment-only; the plan sentence is composed per render.
     expect(r.lines).toEqual([
       'Skip your turf watering until Thu 3 PM.',
       'That gives today’s treatment time to work.',
-      'Then follow this week’s plan below.',
     ]);
+    expect(composeBannerLines(r, WITH_PLAN)).toEqual([...r.lines, 'Then follow this week’s plan below.']);
     expect(r.holdUntil).toBe('2026-10-01T19:00:00.000Z');
     expect(r.waterInBy).toBeNull();
     expect(r.ruleSource).toBe('label');
     expectCleanCopy(r);
   });
 
-  test('hold without a weekly plan drops the plan line', () => {
-    expect(build([HOLD(24)]).lines).toHaveLength(2);
+  test('hold without a weekly plan on THIS render has no plan sentence', () => {
+    expect(composeBannerLines(build([HOLD(24)]), { hasWeekPlan: false })).toHaveLength(2);
+    expect(composeBannerLines(build([HOLD(24)]))).toHaveLength(2);
   });
 
   test('water-in alone: deadline rounds DOWN, runs on a non-permitted day, no rain talk', () => {
@@ -98,16 +103,16 @@ describe('mixed-visit matrix', () => {
   });
 
   test('none is a positive claim: every product resolved AND at least one label/owner sourced', () => {
-    const r = build([NONE('label'), NONE('default')], { hasWeekPlan: true });
+    const r = build([NONE('label'), NONE('default')]);
     expect(r.state).toBe('none');
-    expect(r.lines).toEqual(['No watering change from today’s treatment.', 'Follow this week’s plan below.']);
+    expect(r.lines).toEqual(['No watering change from today’s treatment.']);
+    expect(composeBannerLines(r, WITH_PLAN)).toEqual(['No watering change from today’s treatment.', 'Follow this week’s plan below.']);
     expectCleanCopy(r);
     expect(build([NONE('owner')]).state).toBe('none');
     // Defaults alone never assert "no change".
     expect(build([NONE('default'), NONE('default')]).state).toBeNull();
     // An unresolved product blocks it.
     expect(build([NONE('label'), null]).state).toBeNull();
-    expect(build([NONE('label')]).lines).toEqual(['No watering change from today’s treatment.']);
   });
 
   test('completedAt missing or invalid -> no claim at all', () => {
@@ -358,7 +363,7 @@ describe('hold until the treatment has dried (no invented duration)', () => {
   };
 
   test('alone: hold, no clock time, expires at the end of the visit day', () => {
-    const r = build([DRY], { hasWeekPlan: true });
+    const r = build([DRY]);
     expect(r.state).toBe('hold');
     expect(r.holdUntil).toBeNull();
     expect(r.holdUntilLabel).toBe('today’s treatment has dried');
@@ -366,8 +371,8 @@ describe('hold until the treatment has dried (no invented duration)', () => {
     expect(r.lines).toEqual([
       'Skip your turf watering until today’s treatment has dried.',
       'That gives today’s treatment time to work.',
-      'Then follow this week’s plan below.',
     ]);
+    expect(composeBannerLines(r, WITH_PLAN)[2]).toBe('Then follow this week’s plan below.');
     expect(r.expiresAt).toBe('2026-10-01T03:59:59.000Z'); // 11:59:59 PM ET, Sep 30
     expect(r.waterInBy).toBeNull();
     expect(r.ruleSource).toBe('label');
@@ -446,24 +451,60 @@ describe('a hold far enough out names its date', () => {
   });
 });
 
-describe('water-in depth against the plan run', () => {
-  const plan = (planRunInches) => build([WATER_IN()], { hasWeekPlan: true, planRunInches, runtime: { headTypes: ['rotor'] } });
-  test('shallower than the plan run: line 3 keeps the any-day sentence and adds "counts toward"', () => {
-    const r = plan(0.5);
+describe('plan-dependent copy is composed per render, never frozen', () => {
+  const water = () => build([WATER_IN()], { runtime: { headTypes: ['rotor'] } });
+  const PLAN_SENTENCE = /this week’s plan|this week’s watering/;
+  test('the frozen lines carry no plan sentence for any state', () => {
+    for (const rules of [[HOLD(24)], [NONE('label')], [WATER_IN()], [HOLD(24), WATER_IN()], [{ mode: 'hold', hold_until: 'dry', source: 'label' }]]) {
+      expect(build(rules).lines.join(' ')).not.toMatch(PLAN_SENTENCE);
+    }
+  });
+  test('none: a plan at completion but none at render -> no plan sentence; none at completion, a plan at render -> the sentence', () => {
+    const frozen = build([NONE('label')]); // built with no knowledge of any plan
+    expect(composeBannerLines(frozen, { hasWeekPlan: false })).toEqual(['No watering change from today’s treatment.']);
+    expect(composeBannerLines(frozen, { hasWeekPlan: true })).toEqual(['No watering change from today’s treatment.', 'Follow this week’s plan below.']);
+    // ...and composing never mutates the frozen instruction.
+    expect(frozen.lines).toEqual(['No watering change from today’s treatment.']);
+  });
+  test('hold: the same, for line 3', () => {
+    const frozen = build([HOLD(24)]);
+    expect(composeBannerLines(frozen, { hasWeekPlan: false })).toHaveLength(2);
+    expect(composeBannerLines(frozen, { hasWeekPlan: true })[2]).toBe('Then follow this week’s plan below.');
+  });
+  test('water-in shallower than the plan run: the any-day sentence gains "counts toward"', () => {
+    const r = water();
     expect(r.waterInInches).toBe(0.25);
-    expect(r.lines).toHaveLength(3);
-    expect(r.lines[2]).toBe('Run it even if it is not your usual day. That counts toward this week’s watering.');
+    expect(r.lines[2]).toBe('Run it even if it is not your usual day.');
+    const lines = composeBannerLines(r, { hasWeekPlan: true, planRunInches: 0.5 });
+    expect(lines).toHaveLength(3);
+    expect(lines[2]).toBe('Run it even if it is not your usual day. That counts toward this week’s watering.');
     expectCleanCopy(r);
   });
   test('as deep, no plan, or a plan with no run depth: the plain any-day line', () => {
-    expect(plan(0.25).lines[2]).toBe('Run it even if it is not your usual day.');
-    expect(plan(0.1).lines[2]).toBe('Run it even if it is not your usual day.');
-    expect(plan(null).lines[2]).toBe('Run it even if it is not your usual day.');
-    expect(build([WATER_IN()], { planRunInches: 0.5 }).lines[2]).toBe('Run it even if it is not your usual day.'); // hasWeekPlan false
+    for (const plan of [{ hasWeekPlan: true, planRunInches: 0.25 }, { hasWeekPlan: true, planRunInches: 0.1 }, { hasWeekPlan: true, planRunInches: null }, { hasWeekPlan: false, planRunInches: 0.5 }]) {
+      expect(composeBannerLines(water(), plan)[2]).toBe('Run it even if it is not your usual day.');
+    }
   });
   test('the depth rides the instruction for every water-in state, and a deeper rule wins', () => {
     expect(build([WATER_IN({ water_in_inches: 0.5 })]).waterInInches).toBe(0.5);
     expect(build([HOLD(24), WATER_IN()]).waterInInches).toBe(0.25);
     expect(build([HOLD(24)]).waterInInches).toBeNull();
+  });
+});
+
+describe('until-dry hold deadline base', () => {
+  test('a dry hold that carries hold_hours uses it (largest across products) as the hidden base; 6 h only when none is set', () => {
+    const dry = (hours) => ({ mode: 'hold', hold_hours: hours, hold_until: 'dry', source: 'label' });
+    const r = build([dry(24), WATER_IN()], { runtime: { headTypes: ['rotor'] } });
+    expect(r.state).toBe('hold_then_water_in');
+    expect(r.holdUntil).toBeNull();
+    // completion 2:40 PM + 24 h + 24 h = Fri 2:40 PM, floored to the hour.
+    expect(r.waterInBy).toBe('2026-10-02T18:00:00.000Z');
+    expect(r.lines[0]).not.toMatch(/\d/); // the hidden base is never printed beside "dried"
+    // The largest configured dry-hold hours win: 30 h + 24 h from 2:40 PM = Sat 12:40 AM, floored.
+    expect(build([dry(12), dry(30), WATER_IN()]).waterInBy).toBe('2026-10-03T00:00:00.000Z');
+  });
+  test('no hold_hours on the dry rule falls back to 6 h', () => {
+    expect(build([{ mode: 'hold', hold_hours: null, hold_until: 'dry', source: 'label' }, WATER_IN()]).waterInBy).toBe('2026-10-02T00:00:00.000Z');
   });
 });

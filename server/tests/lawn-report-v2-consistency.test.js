@@ -754,7 +754,7 @@ describe('Lawn Report V2 — property rainfall is authoritative over the area sn
 // evidenceSource 'product_instruction' and rides the EXISTING verdict table
 // (no new verdict, no new flag); a mixed visit resolves to hold.
 describe('watering instruction drives the aftercare through the existing verdict table', () => {
-  const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+  const { buildWateringInstruction, composeBannerLines } = require('../services/service-report/lawn-watering-instruction');
   const { findBannedCustomerCopy: banned } = require('../services/service-report/activity-indicators');
   const { reentrySafetyClaimFinding } = require('../services/content/content-guardrails');
 
@@ -782,8 +782,8 @@ describe('watering instruction drives the aftercare through the existing verdict
     recommendations: {},
     waterContext: { ...baseAssessment().waterContext, weekPlan },
   });
-  const build = (rules, { runtime = null, assessment = clean(), applications = CELSIUS, planRunInches = 0.5 } = {}) => {
-    const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED, runtime, hasWeekPlan: true, planRunInches });
+  const build = (rules, { runtime = null, assessment = clean(), applications = CELSIUS } = {}) => {
+    const instruction = buildWateringInstruction({ rules, completedAt: COMPLETED, runtime });
     return { instruction, report: buildLawnReportV2({ lawnAssessment: assessment, applications, wateringInstruction: instruction }) };
   };
   // The PDF prints these, in this order, through a de-duplicating pushRec
@@ -853,8 +853,9 @@ describe('watering instruction drives the aftercare through the existing verdict
   test('a quarter-inch water-in against a half-inch run is NOT credited: the plan stays whole and the banner says it counts toward the week', () => {
     const { instruction, report } = build([WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
     expect(instruction.waterInInches).toBe(0.25);
-    expect(instruction.lines[2]).toBe('Run it even if it is not your usual day. That counts toward this week’s watering.');
-    expect(instruction.lines[2]).not.toMatch(/one of this week/);
+    const banner = composeBannerLines(instruction, { hasWeekPlan: true, planRunInches: 0.5 });
+    expect(banner[2]).toBe('Run it even if it is not your usual day. That counts toward this week’s watering.');
+    expect(banner[2]).not.toMatch(/one of this week/);
     expect(report.aftercare).toMatchObject({ evidenceSource: 'product_instruction', wateringHold: false, creditableWaterIn: false, waterInRequired: true, needsReview: false });
     expect(resolveLawnAftercare(report.aftercare, report.water.weekPlan)).toMatchObject({ credited: false, restricts: false });
     const shown = renderedWeekPlan(report.aftercare, report.water.weekPlan);
@@ -863,7 +864,7 @@ describe('watering instruction drives the aftercare through the existing verdict
     // The water-in is still the customer's task: the hero carries it, never "no action needed".
     expect(report.snapshot.customerAction).toBe(instruction.lines[0]);
     expect(report.snapshot.noActionNeeded).toBe(false);
-    expect(banned(instruction.lines[2])).toEqual([]);
+    expect(banned(banner[2])).toEqual([]);
   });
 
   test('a water-in with no plan to reduce is unchanged: creditable, and no "counts toward" line', () => {
@@ -878,10 +879,33 @@ describe('watering instruction drives the aftercare through the existing verdict
     expect(build([WATER_IN_RULE], { assessment: clean(hold) }).report.aftercare.creditableWaterIn).toBe(true);
   });
 
-  test('a run plan with no recorded depth cannot be credited (fail closed)', () => {
-    const { depthInches, ...noDepth } = RUN_PLAN;
-    const { report } = build([{ ...WATER_IN_RULE, water_in_inches: 0.5 }], { assessment: clean(noDepth), planRunInches: null });
-    expect(report.aftercare.creditableWaterIn).toBe(false);
+  test('a run plan whose depth is null (the production shape) or absent credits nothing: fail closed, never Number(null) = 0', () => {
+    const { depthInches, ...absent } = RUN_PLAN;
+    for (const plan of [{ ...RUN_PLAN, depthInches: null }, absent, { ...RUN_PLAN, depthInches: '' }]) {
+      for (const inches of [0.25, 0.5, 2]) {
+        const { report } = build([{ ...WATER_IN_RULE, water_in_inches: inches }], { assessment: clean(plan) });
+        expect(report.aftercare.creditableWaterIn).toBe(false);
+        expect(report.aftercare.waterInTask).toBeTruthy();
+        expect(renderedWeekPlan(report.aftercare, report.water.weekPlan)).toBe(report.water.weekPlan);
+      }
+    }
+  });
+
+  test('aftercare.watering carries every treatment sentence (the PDF and Ask Waves read only that field)', () => {
+    const { instruction, report } = build([WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
+    expect(instruction.lines).toHaveLength(3);
+    expect(report.aftercare.watering).toBe(instruction.lines.join(' '));
+    expect(report.aftercare.watering).toContain('Run it even if it is not your usual day.');
+    const mixed = build([HOLD_RULE, WATER_IN_RULE], { runtime: { headTypes: ['rotor'] } });
+    expect(mixed.report.aftercare.watering).toBe(mixed.instruction.lines.join(' '));
+    expect(mixed.report.aftercare.watering).toContain('Run it even if it is not your usual day.');
+    // A hold has two treatment sentences.
+    const hold = build([HOLD_RULE]);
+    expect(hold.report.aftercare.watering).toBe(`${hold.instruction.lines[0]} ${hold.instruction.lines[1]}`);
+    for (const r of [report, mixed.report, hold.report]) {
+      expect(banned(r.aftercare.watering)).toEqual([]);
+      expect(reentrySafetyClaimFinding(r.aftercare.watering)).toBeFalsy();
+    }
   });
 
   test('without an afterHold overlay a hold keeps today\'s plan object', () => {

@@ -159,19 +159,65 @@ describe('audit trail (local audit P1 on #5393)', () => {
     });
     expect(call.metadata.before).toBeNull();
     expect(call.metadata.after).toMatchObject({ mode: 'hold', hold_hours: 12, source: 'owner', verified_by: 'Owner' });
-    // Inside the PUT transaction the audit is critical (commits or rolls back
-    // with the catalog save); the PATCH path runs outside one and only warns.
-    expect(call.critical === true).toBe(method === 'PUT');
-    expect(Boolean(call.trx)).toBe(method === 'PUT');
+    // Both paths audit inside the locked transaction: critical, so the audit
+    // and the catalog save commit or roll back together.
+    expect(call.critical).toBe(true);
+    expect(call.trx).toBeTruthy();
   });
 
-  test('PUT: a failed audit insert fails the save instead of being swallowed inside the transaction', async () => {
+  test.each([
+    ['PUT', `/${PRODUCT}`],
+    ['PATCH', `/lawn-outline-facts/${PRODUCT}`],
+  ])('%s: a failed audit insert fails the save instead of being swallowed inside the transaction', async (method, path) => {
     wire();
     recordAuditEvent.mockImplementationOnce(async () => { throw new Error('audit down'); });
     await withServer(async (base) => {
-      const res = await send(base, 'PUT', `/${PRODUCT}`, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
+      const res = await send(base, method, path, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
       expect(res.status).toBe(500);
     });
+  });
+
+  test('PATCH reads the product row FOR UPDATE inside the transaction, ahead of the update', async () => {
+    const order = [];
+    const updates = wire();
+    const trxImpl = db.transaction.getMockImplementation();
+    db.transaction.mockImplementation(async (fn) => trxImpl(async (trx) => {
+      const wrapped = jest.fn((table) => {
+        const q = trx(table);
+        const lock = q.forUpdate;
+        q.forUpdate = jest.fn((...a) => { order.push('forUpdate'); return lock(...a); });
+        const upd = q.update;
+        q.update = jest.fn((...a) => { order.push('update'); return upd(...a); });
+        return q;
+      });
+      Object.assign(wrapped, trx);
+      return fn(wrapped);
+    }));
+    await withServer(async (base) => {
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { postApplicationWatering: { mode: 'hold', hold_hours: 12 } });
+      expect(res.status).toBe(200);
+    });
+    expect(order).toEqual(['forUpdate', 'update']);
+    expect(updates).toHaveLength(1);
+  });
+
+  test('PATCH: 404 for a missing product (no write), 422 readiness refusal unchanged, both inside the lock', async () => {
+    const updates = [];
+    const resolve = (q) => {
+      if (q._calls.find(([name]) => name === 'update')) { updates.push(1); return {}; }
+      return q._missing ? null : { id: PRODUCT, name: 'Celsius WG', category: 'herbicide' };
+    };
+    const trx = jest.fn((table) => { const q = makeChain(table, resolve); q._missing = trx.missing; return q; });
+    trx.raw = jest.fn(async () => ({}));
+    db.transaction.mockImplementation(async (fn) => fn(trx));
+    trx.missing = true;
+    await withServer(async (base) => {
+      expect((await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { publicSummary: 'x' })).status).toBe(404);
+      trx.missing = false;
+      const res = await send(base, 'PATCH', `/lawn-outline-facts/${PRODUCT}`, { approve: true });
+      expect(res.status).toBe(422);
+    });
+    expect(updates).toEqual([]);
   });
 
   test('a save that does not mention the field records nothing', async () => {

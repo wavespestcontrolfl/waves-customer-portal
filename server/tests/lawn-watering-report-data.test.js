@@ -240,8 +240,56 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(failed.reportV2.banner).toBeUndefined();
       expect(failed.reportV2.aftercare.evidenceSource).toBeUndefined(); // legacy path
       expect(out.instruction).toBeNull(); // the write gate freezes only a truthy claim
+      // The render omitted the direction: PDF storage must refuse it (the
+      // uncacheable flag pdf-queue / reports-public gate on) and a pinned
+      // delivery defers.
+      expect(failed.lawnAssessment.wateringInputsUnavailable).toBe(true);
+      expect(failed.lawnAssessment.weekWeatherUncacheable).toBe(true);
+      expect(failed.lawnAssessment.weekWeatherPendingReason).toBeTruthy(); // 'unfrozen' (retry ladder) unless the week was already pending
+      expect(failed.lawnAssessment.portalPrefsReadFailed).toBe(true);
       const next = await buildReportV1Data(serviceWith(WATER_IN), 'token-w1', makeKnex(fixtures(PREFS(['rotor']))));
       expect(next.reportV2.banner.lines[1]).toBe('Run each zone about 40 minutes.');
+      // The next successful render caches again.
+      expect(next.lawnAssessment.wateringInputsUnavailable).toBeUndefined();
+      expect(next.lawnAssessment.portalPrefsReadFailed).toBe(false);
+    });
+
+    test('a failed live legacy-catalog lookup, or a failed product read, is uncacheable too; a frozen render never is', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const productsFail = await buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex({ ...fixtures(), service_products: FAIL }));
+      expect(productsFail.lawnAssessment.wateringInputsUnavailable).toBe(true);
+      expect(productsFail.lawnAssessment.weekWeatherUncacheable).toBe(true);
+      // Frozen instruction: nothing was read, so a failing prefs table changes nothing.
+      const frozenService = { ...serviceWith(HOLD), structured_notes: JSON.stringify({ lawnWateringFreeze: { wateringInstruction: { state: 'hold', lines: ['a.', 'b.'], minutes: {}, holdUntil: null } } }) };
+      const frozen = await buildReportV1Data(frozenService, 'token-w1', makeKnex({ ...fixtures(), property_preferences: FAIL }));
+      expect(frozen.lawnAssessment.wateringInputsUnavailable).toBeUndefined();
+      // Gate off: never flagged by this feature.
+      delete process.env.GATE_LAWN_WATERING_RULE;
+      const off = await buildReportV1Data(serviceWith(HOLD), 'token-w1', makeKnex({ ...fixtures(), property_preferences: FAIL }));
+      expect(off.lawnAssessment.wateringInputsUnavailable).toBeUndefined();
+    });
+
+    test('plan-dependent sentences follow the plan on THIS render, not the completion', async () => {
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const NONE_RULE = { mode: 'none', source: 'label' };
+      // A frozen no-plan instruction, rendered with a plan present is not reachable through
+      // fixtures (the plan comes from a snapshot table), so pin the composition seam directly.
+      const { buildWateringBanner } = require('../services/service-report/report-data');
+      const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
+      const frozen = JSON.parse(JSON.stringify(buildWateringInstruction({ rules: [NONE_RULE], completedAt: '2026-09-30T18:40:00Z' })));
+      expect(buildWateringBanner(frozen, null).lines).toEqual(['No watering change from today’s treatment.']);
+      expect(buildWateringBanner(frozen, { title: 'This week: run once', visitInPlanWeek: true }).lines)
+        .toEqual(['No watering change from today’s treatment.', 'Follow this week’s plan below.']);
+      // A plan for another week never adds the sentence.
+      expect(buildWateringBanner(frozen, { title: 'x', visitInPlanWeek: false }).lines).toHaveLength(1);
+      const hold = JSON.parse(JSON.stringify(buildWateringInstruction({ rules: [HOLD], completedAt: '2026-09-30T18:40:00Z' })));
+      expect(buildWateringBanner(hold, null).lines).toHaveLength(2);
+      expect(buildWateringBanner(hold, { title: 'x' }).lines[2]).toBe('Then follow this week’s plan below.');
+      // Shallow water-in against a half-inch run; a null depth or no run never adds it.
+      const water = JSON.parse(JSON.stringify(buildWateringInstruction({ rules: [WATER_IN], completedAt: '2026-09-30T18:40:00Z' })));
+      expect(buildWateringBanner(water, { title: 'x', prescribesRun: true, depthInches: 0.5 }).lines[2]).toMatch(/counts toward this week’s watering/);
+      expect(buildWateringBanner(water, { title: 'x', prescribesRun: true, depthInches: null }).lines[2]).toBe('Run it even if it is not your usual day.');
+      expect(buildWateringBanner(water, { title: 'x', prescribesRun: false, depthInches: 0.5 }).lines[2]).toBe('Run it even if it is not your usual day.');
     });
 
     test('a live rule lookup that fails for a legacy product leaves a partial rule set: no instruction, nothing to freeze', async () => {

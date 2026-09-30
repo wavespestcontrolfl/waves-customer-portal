@@ -27,7 +27,7 @@ const { resolveZoneRowsImageDrift } = require('./zone-drift');
 const { buildStationMapReportContext } = require('../termite-stations');
 const { fetchServiceWeekWeather, toCoordinate } = require('./application-conditions');
 const { resolveWateringRule } = require('./lawn-watering-rule');
-const { buildWateringInstruction } = require('./lawn-watering-instruction');
+const { buildWateringInstruction, composeBannerLines } = require('./lawn-watering-instruction');
 const { pestReportExpectationsGateOn } = require('./pest-report-expectations');
 const { reportProductCopyGateOn, reportProductCopyForApplicationProduct } = require('./report-product-copy');
 const { validatePhotoChainRows } = require('./photo-chain');
@@ -3585,7 +3585,6 @@ async function buildReportWateringInstruction({ products, service, completionTim
       };
     }
   }
-  const weekPlan = waterContext.weekPlan;
   return buildWateringInstruction({
     rules: (Array.isArray(products) ? products : []).map((p) => ({
       name: p?.product_name || null,
@@ -3593,8 +3592,6 @@ async function buildReportWateringInstruction({ products, service, completionTim
     })),
     completedAt: completionTime,
     runtime,
-    hasWeekPlan: !!weekPlan?.title && weekPlan.visitInPlanWeek !== false,
-    planRunInches: weekPlan?.prescribesRun === true && weekPlan.visitInPlanWeek !== false ? numberOrNull(weekPlan.depthInches) : null,
   });
 }
 
@@ -3630,11 +3627,18 @@ function applyAfterHoldOverlay(waterContext, instruction) {
 
 // The banner payload: one server-built object the client, PDF and (later)
 // the completion text all read. expiresAt is when the instruction lapses.
-function buildWateringBanner(instruction) {
+// The plan-dependent sentence is composed here, from the weekly plan present on
+// THIS render (composeBannerLines); the frozen instruction never carries it.
+function buildWateringBanner(instruction, weekPlan = null) {
   if (!instruction || !instruction.state || !instruction.lines.length) return null;
+  const planPresent = !!weekPlan?.title && weekPlan.visitInPlanWeek !== false;
+  const runDepth = weekPlan?.depthInches;
   return {
     state: instruction.state,
-    lines: instruction.lines,
+    lines: composeBannerLines(instruction, {
+      hasWeekPlan: planPresent,
+      planRunInches: planPresent && weekPlan.prescribesRun === true && runDepth != null && runDepth !== '' ? numberOrNull(runDepth) : null,
+    }),
     holdUntil: instruction.holdUntil,
     waterInBy: instruction.waterInBy,
     expiresAt: instruction.state === 'none' ? null : (instruction.expiresAt || instruction.waterInBy || instruction.holdUntil || null),
@@ -5179,6 +5183,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
       // GATE_LAWN_WATERING_RULE. Off = none of this runs and the payload is
       // byte-identical to before.
       let wateringInstruction = null;
+      let wateringInputsFailed = false;
       if (featureGates.lawnWateringRuleLive()) {
         try {
           // Replay the frozen instruction; regenerate only when none exists (and
@@ -5186,7 +5191,18 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
           wateringInstruction = readFrozenWateringInstruction(structured)
             || (products.wateringRuleLookupFailed ? null
               : await buildReportWateringInstruction({ products, service, completionTime, lawnAssessment, knex }));
-        } catch { wateringInstruction = null; }
+        } catch { wateringInstruction = null; wateringInputsFailed = true; }
+        // An UNFROZEN render whose inputs could not be read omits the customer's
+        // watering direction: serve it, never cache it, and let a pinned delivery
+        // defer (the week-weather / prefs-read flags pdf-queue and reports-public
+        // already gate on). A frozen render read nothing and is unaffected.
+        if (!readFrozenWateringInstruction(structured)
+          && (wateringInputsFailed || products.wateringRuleLookupFailed || productsLoadFailed)) {
+          lawnAssessment.wateringInputsUnavailable = true;
+          lawnAssessment.weekWeatherUncacheable = true;
+          lawnAssessment.weekWeatherPendingReason = lawnAssessment.weekWeatherPendingReason || 'unfrozen';
+          lawnAssessment.portalPrefsReadFailed = true;
+        }
         // Out-param for the write gate, which freezes the complete instruction.
         if (opts.wateringInstructionOut && typeof opts.wateringInstructionOut === 'object') {
           opts.wateringInstructionOut.instruction = wateringInstruction;
@@ -5209,7 +5225,7 @@ async function buildReportV1Data(joinedService, token, knex = db, options = {}) 
         mowingTrendFallback,
       });
       if (reportV2 && wateringInstruction) {
-        const banner = buildWateringBanner(wateringInstruction);
+        const banner = buildWateringBanner(wateringInstruction, lawnAssessment.waterContext?.weekPlan);
         if (banner) reportV2.banner = banner;
       }
       // AI "What we applied today" narrative — same contract as the T&S path

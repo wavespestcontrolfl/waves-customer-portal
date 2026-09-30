@@ -53,12 +53,15 @@ const PLAN_LINE = 'Then follow this week’s plan below.';
 const ANY_DAY_LINE = 'Run it even if it is not your usual day.';
 // A water-in shallower than the plan's per-run depth is partial credit only.
 const PARTIAL_CREDIT_LINE = `${ANY_DAY_LINE} That counts toward this week’s watering.`;
+// Plan-dependent sentences are NEVER part of the instruction (which is frozen
+// at completion): they are composed at each render from the plan present on
+// THAT render, by composeBannerLines below.
 const NONE_LINE_1 = 'No watering change from today’s treatment.';
 const NONE_LINE_2 = 'Follow this week’s plan below.';
 // An "until dry" hold has no printed duration (fixed drying figures are
 // prohibited customer copy). This floor is used ONLY as the base for the
 // water-in deadline maths and is never printed.
-const DRY_HOLD_FLOOR_HOURS = 6;
+const DRY_HOLD_FLOOR_HOURS = 6; // used only when no dry-hold rule carries hold_hours
 const DRY_LABEL = 'today’s treatment has dried';
 const DRY_PLAN_LABEL = 'the spray has dried';
 const FULL_CYCLE = 'one full cycle on each turf zone';
@@ -227,11 +230,9 @@ function emptyInstruction() {
  * @param {object|null} [input.runtime] { runMinutes, wateringDays, headTypes,
  *                                    explicitInchesPerWeek, unconfirmed }
  * @param {null} [input.forecast]     reserved (forecast-aware water-in is a later PR)
- * @param {boolean} [input.hasWeekPlan] a weekly plan callout renders below the banner
- * @param {number|null} [input.planRunInches] the plan's per-run depth when it prescribes a run this week
  * @returns {object}
  */
-function buildWateringInstruction({ rules, completedAt, runtime = null, forecast = null, hasWeekPlan = false, planRunInches = null } = {}) {  
+function buildWateringInstruction({ rules, completedAt, runtime = null, forecast = null } = {}) {  
   const out = emptyInstruction();
   const list = Array.isArray(rules) ? rules : [];
   const resolved = list.map(ruleOf);
@@ -255,7 +256,7 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, forecast
     if (unresolved === 0 && nones.length && nones.some((r) => r.source === 'label' || r.source === 'owner')) {
       out.state = 'none';
       out.ruleSource = ruleSourceOf(nones);
-      out.lines = hasWeekPlan ? [NONE_LINE_1, NONE_LINE_2] : [NONE_LINE_1];
+      out.lines = [NONE_LINE_1];
     }
     return out;
   }
@@ -290,8 +291,10 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, forecast
     const holdLabel = out.holdUntilLabel;
     if (waterInDetail) {
       out.state = 'hold_then_water_in';
-      // Until-dry: counted from completion + the floor, for the deadline only.
-      const base = holdEnd || new Date(at.getTime() + DRY_HOLD_FLOOR_HOURS * HOUR_MS);
+      // Until-dry: counted from completion + the longest configured dry-hold
+      // hours (else the floor), for the deadline only; never printed.
+      const dryHours = holds.filter((r) => r.hold_until === 'dry').map((r) => Number(r.hold_hours)).filter((h) => Number.isFinite(h) && h > 0);
+      const base = holdEnd || new Date(at.getTime() + (dryHours.length ? Math.max(...dryHours) : DRY_HOLD_FLOOR_HOURS) * HOUR_MS);
       const thenBy = deadlineAfter(base, waterInDetail.byHours);
       out.waterInBy = thenBy.toISOString();
       out.waterInByLabel = formatWhen(thenBy, at);
@@ -305,7 +308,6 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, forecast
       out.state = 'hold';
       out.expiresAt = (holdEnd || endOfDay(at)).toISOString();
       out.lines = [`Skip your turf watering until ${holdLabel}.`, HOLD_SECOND_LINE];
-      if (hasWeekPlan) out.lines.push(PLAN_LINE);
     }
     return out;
   }
@@ -318,14 +320,35 @@ function buildWateringInstruction({ rules, completedAt, runtime = null, forecast
   out.lines = [
     `Water in today’s treatment by ${formatWhen(by, at)}.`,
     `Run ${waterInDetail.clause}.`,
-    // Shallower than the plan's run: it counts toward the week, it does not replace a run.
-    hasWeekPlan && Number.isFinite(planRunInches) && waterInDetail.inches < planRunInches - 0.001 ? PARTIAL_CREDIT_LINE : ANY_DAY_LINE,
+    ANY_DAY_LINE,
   ];
   return out;
 }
 
+/**
+ * The banner's lines for THIS render: the frozen treatment-specific lines plus
+ * the plan-dependent sentence, judged on the weekly plan present now.
+ *   hold / none    -> "follow this week's plan" when a plan renders below
+ *   water_in       -> the any-day sentence becomes "... That counts toward this
+ *                     week's watering." when the water-in is shallower than the
+ *                     plan's run (no credit for a full run)
+ * @param {object} instruction  buildWateringInstruction result (frozen or fresh)
+ * @param {{hasWeekPlan?: boolean, planRunInches?: number|null}} [plan]
+ */
+function composeBannerLines(instruction, { hasWeekPlan = false, planRunInches = null } = {}) {
+  const lines = Array.isArray(instruction?.lines) ? instruction.lines.slice() : [];
+  if (!lines.length || !hasWeekPlan) return lines;
+  if (instruction.state === 'hold') lines.push(PLAN_LINE);
+  else if (instruction.state === 'none') lines.push(NONE_LINE_2);
+  else if (planRunInches != null && Number.isFinite(Number(planRunInches))
+    && Number(instruction.waterInInches) < Number(planRunInches) - 0.001
+    && lines[lines.length - 1] === ANY_DAY_LINE) lines[lines.length - 1] = PARTIAL_CREDIT_LINE;
+  return lines;
+}
+
 module.exports = {
   buildWateringInstruction,
+  composeBannerLines,
   GENERIC_MINUTES_PER_QUARTER_INCH,
   _private: { ceilToHour, floorToHour, formatWhen, minutesFor, deadlineAfter, endOfDay },
 };

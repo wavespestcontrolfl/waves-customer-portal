@@ -93,6 +93,8 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
     // either. Gate off builds no instruction, so nothing is written, and
     // nothing here ever deletes an existing snapshot.
     let wateringFreeze = null;
+    // The frozen banner keeps only the treatment-specific lines: plan-dependent
+    // sentences are composed at each render, never frozen.
     // Only a real claim is a snapshot: a state-null instruction, or one built
     // while the visit's products could not be read, is never frozen (the next
     // render regenerates it from what the products really are).
@@ -103,7 +105,7 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
         .update({
           structured_notes: knex.raw(
             "COALESCE(structured_notes::jsonb, '{}'::jsonb) || ?::jsonb",
-            [JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instructionOut.instruction, banner: reportV2.banner || null, frozenAt: frozen.generatedAt } })],
+            [JSON.stringify({ lawnWateringFreeze: { wateringInstruction: instructionOut.instruction, banner: reportV2.banner ? { ...reportV2.banner, lines: instructionOut.instruction.lines } : null, frozenAt: frozen.generatedAt } })],
           ),
         });
       // Whichever writer won, the caller needs the persisted value.

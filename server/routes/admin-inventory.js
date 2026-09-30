@@ -1049,9 +1049,6 @@ router.get('/lawn-outline-facts', async (req, res, next) => {
 // =========================================================================
 router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
   try {
-    const product = await db('products_catalog').where({ id: req.params.id }).first();
-    if (!product) return res.status(404).json({ error: 'Product not found' });
-
     const allowed = {
       productType: 'product_type',
       manufacturer: 'manufacturer',
@@ -1085,32 +1082,38 @@ router.patch('/lawn-outline-facts/:id', async (req, res, next) => {
     );
     if (wateringPatch.error) return res.status(400).json({ error: wateringPatch.error });
     if (!wateringPatch.skip) update.post_application_watering = wateringPatch.value;
-    if (!update.product_type) update.product_type = inferProductType({ ...product, ...update });
 
-    const candidate = { ...product, ...update };
-    const readiness = lawnFactReadiness(candidate);
-    if (req.body.approve === true) {
-      if (!readiness.eligible) {
-        return res.status(422).json({
-          error: 'Product fact is not ready for estimate-packet approval',
-          readiness,
-        });
+    // Read, decide, update and audit on ONE locked row (the PUT's pattern), so
+    // overlapping edits produce a correct old -> A -> B audit trail and the
+    // readiness decision is taken on the row this write actually replaces.
+    const outcome = await db.transaction(async (trx) => {
+      const product = await trx('products_catalog').where({ id: req.params.id }).forUpdate().first();
+      if (!product) return { status: 404, body: { error: 'Product not found' } };
+      const rowUpdate = { ...update };
+      if (!rowUpdate.product_type) rowUpdate.product_type = inferProductType({ ...product, ...rowUpdate });
+
+      const readiness = lawnFactReadiness({ ...product, ...rowUpdate });
+      if (req.body.approve === true) {
+        if (!readiness.eligible) {
+          return {
+            status: 422,
+            body: { error: 'Product fact is not ready for estimate-packet approval', readiness },
+          };
+        }
+        rowUpdate.approved_for_estimate_packet = true;
+        rowUpdate.approved_for_public_page = true;
+        rowUpdate.approved_for_service_report = true;
+        rowUpdate.approved_by = req.technicianId || null;
+        rowUpdate.approved_at = new Date();
       }
-      update.approved_for_estimate_packet = true;
-      update.approved_for_public_page = true;
-      update.approved_for_service_report = true;
-      update.approved_by = req.technicianId || null;
-      update.approved_at = new Date();
-    }
-    const [updated] = await db('products_catalog')
-      .where({ id: product.id })
-      .update(update)
-      .returning('*');
-    await auditWateringRuleChange(req, product, wateringPatch);
-    res.json({
-      product: mapProduct(updated),
-      readiness: lawnFactReadiness(updated),
+      const [updated] = await trx('products_catalog')
+        .where({ id: product.id })
+        .update(rowUpdate)
+        .returning('*');
+      await auditWateringRuleChange(req, product, wateringPatch, trx);
+      return { status: 200, body: { product: mapProduct(updated), readiness: lawnFactReadiness(updated) } };
     });
+    res.status(outcome.status).json(outcome.body);
   } catch (err) {
     next(err);
   }

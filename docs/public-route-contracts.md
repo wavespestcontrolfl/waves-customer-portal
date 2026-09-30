@@ -1427,7 +1427,14 @@ the existing fail-closed aftercare stays). The rule itself
 instruction is frozen at completion under `structured_notes.lawnWateringFreeze`
 (first writer wins, atomically) and later reads replay it, so an edit to the customer's
 sprinkler entries after the visit never changes the minutes or times an existing
-report showed; a record with no frozen instruction regenerates it. The gate is
+report showed; a record with no frozen instruction regenerates it. Only the treatment-specific sentences are frozen; the one
+sentence that depends on the weekly plan ("follow this week's plan", or "that
+counts toward this week's watering" for a water-in shallower than the plan's
+run) is composed on each render from the plan present on that render.
+`reportV2.aftercare.watering` carries every treatment sentence. A render whose
+watering inputs could not be read (customer preferences or the catalog) omits
+the direction and adds the boolean marker `lawnAssessment.wateringInputsUnavailable`;
+such a render is served but never cached, and a pinned delivery defers. The gate is
 part of the lawn PDF cache signature.
 A current watering snapshot can originate from
 Monday app publication independently of email delivery; `sent_at` remains an
