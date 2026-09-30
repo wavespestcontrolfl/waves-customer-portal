@@ -31,6 +31,8 @@ const { isLikelyE164 } = require('../utils/phone');
 const { lockTriageCall } = require('../utils/triage-locks');
 const { callStartedAt } = require('../utils/call-timeline');
 const { resolveLocation, SOUTH_HILLSBOROUGH_CITIES } = require('../config/locations');
+const { isInDesotoExclusion } = require('./service-area');
+const { zipToCity } = require('../utils/zip-to-city');
 const { safeErrorToken } = require('../utils/sentry-scrub');
 const { composeRelaySegment } = require('./voice-agent/relay-transfer');
 const { TRANSCRIPTION_PROVIDER: RELAY_TRANSCRIPTION_PROVIDER } = require('./voice-agent/relay-transcript');
@@ -1274,35 +1276,58 @@ async function fileSkippedBookingCard({ call, procToken, customerId, extraction,
 // CALL_EXTRACTION_V2_ENABLED off, or V2 in shadow with
 // CALL_EXTRACTION_V2_DRIVES_ROUTING off, the legacy inbound condition would
 // auto-book an out-of-area address (DeSoto/Arcadia, owner ruling
-// 2026-09-30). This survives every routing mode. Evidence, strongest first:
-//   1. the Address Validation verdict — status out_of_service_area,
-//      inServiceArea === false, or a resolved county outside the served set.
-//      A positive verdict (inServiceArea === true) is final: model/extracted
-//      county text never overrides it.
-//   2. otherwise the extracted county (V2 property.service_address.county,
-//      then the legacy record's county, when present).
-//   3. otherwise a deterministic DeSoto locality (Arcadia and its ZIPs), so
-//      V2-disabled calls, which carry no AV and no county, still fail closed.
-// Served south-Hillsborough towns (config/locations.js) stay bookable: their
-// county is Hillsborough, which is not in SERVICE_AREA_COUNTIES.
+// 2026-09-30). This survives every routing mode. Callers pass only a VALID
+// V2 extraction (v2CanonicalExtraction) — a schema_failed/normalization_failed
+// object is untrusted and must not suppress a valid V1 booking. Evidence:
+//   1. a positive Address Validation verdict (inServiceArea === true) is final.
+//   2. any DeSoto evidence — county named DeSoto, an Arcadia-area city, or a
+//      DeSoto ZIP — vetoes, and is checked BEFORE any served-town exemption
+//      so a disagreeing field (Riverview + 34266) cannot launder it.
+//   3. an AV out_of_service_area / inServiceArea false verdict, or a county
+//      outside the served set, vetoes — except a Hillsborough county whose
+//      city is a served south-Hillsborough town (config/locations.js), which
+//      stays bookable exactly as before.
+//   4. when the call states NO locality at all (a known customer confirming a
+//      time without repeating the address), the booking uses the on-file
+//      address, so its city/ZIP — and stored coordinates that sit in the
+//      DeSoto rectangle with no served ZIP — are judged the same way.
 const DESOTO_LOCALITY_CITIES = new Set(['arcadia', 'nocatee', 'fort ogden']);
 const DESOTO_ZIPS = new Set(['34265', '34266', '34267', '34268', '34269']);
-function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null } = {}) {
+function legacyGeographicVeto({ addressValidation = null, v2Extraction = null, extracted = null, onFile = null } = {}) {
   const av = addressValidation || null;
   const svc = v2Extraction?.property?.service_address || null;
-  const city = String(extracted?.city || svc?.city || av?.normalized?.city || '').toLowerCase().trim();
-  const zip = String(extracted?.zip || svc?.postal_code || av?.normalized?.postal_code || '').trim().slice(0, 5);
-  if (city && SOUTH_HILLSBOROUGH_CITIES.includes(city)) return null;
+  const lower = (v) => String(v || '').toLowerCase().trim();
+  const zip5 = (v) => String(v || '').trim().slice(0, 5);
+  const statedCities = [extracted?.city, svc?.city, av?.normalized?.city].map(lower).filter(Boolean);
+  const statedZips = [extracted?.zip, svc?.postal_code, av?.normalized?.postal_code].map(zip5).filter(Boolean);
+  const statedCounty = av?.county || svc?.county || extracted?.county || null;
+  let cities = statedCities;
+  let zips = statedZips;
+  let coordsInDesoto = false;
+  // Stated locality wins; the on-file address stands in only when the call
+  // gave none.
+  if (!cities.length && !zips.length && !statedCounty && onFile) {
+    cities = [lower(onFile.city)].filter(Boolean);
+    zips = [zip5(onFile.zip)].filter(Boolean);
+    const lat = Number(onFile.latitude);
+    const lng = Number(onFile.longitude);
+    coordsInDesoto = Number.isFinite(lat) && Number.isFinite(lng)
+      && isInDesotoExclusion(lat, lng) && !zips.some((z) => zipToCity(z));
+  }
   if (av && av.inServiceArea === true) return null;
+  const countyKey = normalizeCounty(statedCounty);
+  if (countyKey === 'desoto' || cities.some((c) => DESOTO_LOCALITY_CITIES.has(c))
+    || zips.some((z) => DESOTO_ZIPS.has(z)) || coordsInDesoto) {
+    return { reason: 'desoto_locality', county: 'DeSoto' };
+  }
+  const servedHillsboroughTown = cities.some((c) => SOUTH_HILLSBOROUGH_CITIES.includes(c));
   if (av && (av.status === 'out_of_service_area' || av.inServiceArea === false)) {
+    if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
     return { reason: 'address_validation_out_of_service_area', county: av.county || null };
   }
-  const county = av?.county || svc?.county || extracted?.county || null;
-  if (county && !isInServiceAreaCounty(county)) {
-    return { reason: 'county_out_of_service_area', county: String(county) };
-  }
-  if (DESOTO_LOCALITY_CITIES.has(city) || DESOTO_ZIPS.has(zip)) {
-    return { reason: 'desoto_locality', county: 'DeSoto' };
+  if (statedCounty && !isInServiceAreaCounty(statedCounty)) {
+    if (countyKey === 'hillsborough' && servedHillsboroughTown) return null;
+    return { reason: 'county_out_of_service_area', county: String(statedCounty) };
   }
   return null;
 }
@@ -15471,7 +15496,24 @@ const CallRecordingProcessor = {
         `${appointmentResult.skippedReason} (direction=${call.direction || 'unknown'}, service=${appointmentResult.service || 'none'})`
       );
     }
+    // Geographic hard veto inputs, resolved only when the legacy booking would
+    // otherwise create a visit. The on-file customer row is read here (before
+    // the booking branch loads it) so a known caller who confirms a time
+    // without repeating the address is judged on the address the visit will
+    // use. Only a VALID V2 extraction counts (v2CanonicalExtraction).
     let legacyGeoVeto = null;
+    if (!v2RoutingBlocked && extracted.appointment_confirmed && extracted.preferred_date_time
+        && customerId && hasSpecificTime && canCreateAppointmentFromCall) {
+      let onFileGeo = null;
+      try {
+        onFileGeo = await db('customers').where({ id: customerId }).first('city', 'zip', 'latitude', 'longitude');
+      } catch (geoErr) {
+        logger.warn(`[call-proc] on-file address read for geographic veto failed for ${maskSid(callSid)}: ${geoErr.message}`);
+      }
+      legacyGeoVeto = legacyGeographicVeto({
+        addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
+      });
+    }
     if (v2RoutingBlocked) {
       appointmentResult = {
         service: extracted.matched_service || extracted.requested_service || null,
@@ -15482,7 +15524,7 @@ const CallRecordingProcessor = {
       };
       logger.info(`[call-proc] Appointment blocked by v2 routing gate for ${callSid}`);
     } else if (extracted.appointment_confirmed && extracted.preferred_date_time && customerId && hasSpecificTime && canCreateAppointmentFromCall
-      && (legacyGeoVeto = legacyGeographicVeto({ addressValidation: effectiveAddressValidation, v2Extraction: v2Result?.extraction, extracted }))) {
+      && legacyGeoVeto) {
       // Geographic hard veto (owner ruling 2026-09-30, DeSoto is not served):
       // survives V2-off and V2-shadow routing, where nothing else stops a
       // confirmed booking on an out-of-area address. The customer + lead are

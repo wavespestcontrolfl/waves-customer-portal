@@ -19,6 +19,9 @@
  * the box is not thereby servable, it is merely not absurd.
  */
 
+const { isInServiceAreaCounty } = require('./call-triage-flags');
+const { zipToCity } = require('../utils/zip-to-city');
+
 const SERVICE_AREA_BOUNDS = Object.freeze({
   latMin: 26.3,
   latMax: 27.95,
@@ -34,7 +37,8 @@ const SERVICE_AREA_BOUNDS = Object.freeze({
  * ~-81.55. Served neighbours stay outside it: North Port (27.04, -82.20),
  * Myakka City (27.35, -82.15) and Punta Gorda (26.93, -82.05). It is a
  * rectangle, so it can clip a sliver of a neighbouring county at a corner; the
- * county-name check (SERVICE_AREA_COUNTIES) stays the authoritative test.
+ * county name therefore wins over it wherever county evidence exists (see
+ * isInServiceAreaBox), and the rectangle only decides when no county is known.
  */
 const DESOTO_EXCLUSION = Object.freeze({
   latMin: 27.03,
@@ -53,17 +57,14 @@ function isInDesotoExclusion(lat, lng) {
 }
 
 /**
- * True when a coordinate falls inside the service-area box (and outside the
- * DeSoto exclusion). Null/undefined/
- * unparseable coordinates are NOT in the box — callers treat a missing
- * coordinate the same as an implausible one (both mean "do not route on
- * this"), so a half-set pair can never read as valid.
+ * True when a coordinate falls inside the coarse box, with NO DeSoto carve-out.
+ * Use only where a county lookup follows and decides (inspection-public with a
+ * Google key); everything else calls isInServiceAreaBox.
  */
-function isInServiceAreaBox(lat, lng) {
+function isInServiceAreaCoarseBox(lat, lng) {
   const a = Number(lat);
   const b = Number(lng);
   if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
-  if (isInDesotoExclusion(a, b)) return false;
   return (
     a >= SERVICE_AREA_BOUNDS.latMin &&
     a <= SERVICE_AREA_BOUNDS.latMax &&
@@ -72,4 +73,29 @@ function isInServiceAreaBox(lat, lng) {
   );
 }
 
-module.exports = { SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, isInServiceAreaBox };
+/**
+ * True when a coordinate falls inside the service-area box. Null/undefined/
+ * unparseable coordinates are NOT in the box — callers treat a missing
+ * coordinate the same as an implausible one (both mean "do not route on
+ * this"), so a half-set pair can never read as valid.
+ *
+ * Inside the DeSoto rectangle the coordinate alone cannot decide (the
+ * rectangle clips a sliver of the served neighbours), so the caller's own
+ * evidence does, county first:
+ *   - `county` known: that county's name wins — served county in, anything
+ *     else (DeSoto, Hardee, ...) out.
+ *   - no county but a `zip` in the served ZIP map (utils/zip-to-city, which
+ *     holds no DeSoto ZIP): in.
+ *   - no evidence: out (fail closed — never accept an unknown point in
+ *     DeSoto's rectangle).
+ * Outside the rectangle the evidence is ignored; the coarse box decides.
+ */
+function isInServiceAreaBox(lat, lng, evidence = {}) {
+  if (!isInServiceAreaCoarseBox(lat, lng)) return false;
+  if (!isInDesotoExclusion(Number(lat), Number(lng))) return true;
+  const { county = null, zip = null } = evidence || {};
+  if (county) return isInServiceAreaCounty(county);
+  return !!zipToCity(zip);
+}
+
+module.exports = { SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, isInServiceAreaBox, isInServiceAreaCoarseBox, isInDesotoExclusion };

@@ -43,7 +43,7 @@
 
 const path = require('path');
 const { Client } = require(path.join(__dirname, '..', '..', 'node_modules', 'pg'));
-const { SERVICE_AREA_BOUNDS, isInServiceAreaBox } = require(
+const { SERVICE_AREA_BOUNDS, DESOTO_EXCLUSION, isInServiceAreaBox } = require(
   path.join(__dirname, '..', '..', 'server', 'services', 'service-area'),
 );
 
@@ -59,7 +59,7 @@ async function main() {
   try {
     const b = SERVICE_AREA_BOUNDS;
     const { rows } = await client.query(
-      `SELECT c.id, c.latitude, c.longitude, c.state, c.active, c.pipeline_stage,
+      `SELECT c.id, c.latitude, c.longitude, c.zip, c.state, c.active, c.pipeline_stage,
               btrim(coalesce(c.address_line1, '')) <> '' AS has_street,
               p.id AS primary_property_id,
               (SELECT count(*) FROM scheduled_services s
@@ -72,12 +72,16 @@ async function main() {
           AND p.latitude = c.latitude AND p.longitude = c.longitude
         WHERE c.deleted_at IS NULL
           AND c.latitude IS NOT NULL AND c.longitude IS NOT NULL
-          AND NOT (c.latitude BETWEEN $1 AND $2 AND c.longitude BETWEEN $3 AND $4)
+          AND NOT (c.latitude BETWEEN $1 AND $2 AND c.longitude BETWEEN $3 AND $4
+                   AND NOT (c.latitude BETWEEN $6 AND $7 AND c.longitude BETWEEN $8 AND $9))
         ORDER BY c.active DESC, c.pipeline_stage, c.id`,
-      [b.latMin, b.latMax, b.lngMin, b.lngMax, TERMINAL_VISIT_STATUSES],
+      [b.latMin, b.latMax, b.lngMin, b.lngMax, TERMINAL_VISIT_STATUSES,
+        DESOTO_EXCLUSION.latMin, DESOTO_EXCLUSION.latMax, DESOTO_EXCLUSION.lngMin, DESOTO_EXCLUSION.lngMax],
     );
     // Belt and braces: the JS predicate is the one production uses.
-    const targets = rows.filter((r) => !isInServiceAreaBox(r.latitude, r.longitude));
+    // The DeSoto rectangle clips served neighbours: a row whose own ZIP is a
+    // served ZIP keeps its coordinates.
+    const targets = rows.filter((r) => !isInServiceAreaBox(r.latitude, r.longitude, { zip: r.zip }));
 
     console.log(`${EXECUTE ? 'EXECUTE' : 'DRY RUN'} — box lat ${b.latMin}..${b.latMax}, lng ${b.lngMin}..${b.lngMax}`);
     console.log(`${targets.length} customer row(s) hold out-of-area coordinates:`);

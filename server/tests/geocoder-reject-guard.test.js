@@ -5,7 +5,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
 
 const { rejectGeocodeResult, geocodeAddressWithStatus } = require('../services/geocoder');
-const { isInServiceAreaBox, SERVICE_AREA_BOUNDS } = require('../services/service-area');
+const { isInServiceAreaBox, isInServiceAreaCoarseBox, SERVICE_AREA_BOUNDS } = require('../services/service-area');
 
 const rooftop = (lat, lng, extra = {}) => ({
   types: ['street_address'],
@@ -14,6 +14,34 @@ const rooftop = (lat, lng, extra = {}) => ({
 });
 
 describe('isInServiceAreaBox', () => {
+  test('inside the DeSoto rectangle the county name wins; ZIP is the fallback; no evidence fails closed', () => {
+    const arcadia = [27.2159, -81.8584];
+    expect(isInServiceAreaBox(...arcadia, { county: 'DeSoto County' })).toBe(false);
+    expect(isInServiceAreaBox(...arcadia, { county: 'Sarasota County' })).toBe(true);
+    expect(isInServiceAreaBox(...arcadia, { county: 'Manatee' })).toBe(true);
+    expect(isInServiceAreaBox(...arcadia, { county: 'Charlotte' })).toBe(true);
+    // A known county beats a served-looking ZIP too.
+    expect(isInServiceAreaBox(...arcadia, { county: 'DeSoto', zip: '34240' })).toBe(false);
+    expect(isInServiceAreaBox(...arcadia, { zip: '34240' })).toBe(true); // served ZIP, no county
+    expect(isInServiceAreaBox(...arcadia, { zip: '34266' })).toBe(false); // DeSoto ZIP is not mapped
+    expect(isInServiceAreaBox(...arcadia, {})).toBe(false);
+    // Outside the rectangle the evidence is ignored.
+    expect(isInServiceAreaBox(27.4989, -82.5748, { county: 'DeSoto' })).toBe(true);
+    expect(isInServiceAreaCoarseBox(...arcadia)).toBe(true);
+  });
+
+  test('rejectGeocodeResult: a Sarasota-county result in the rectangle passes; a DeSoto one is rejected', () => {
+    const inRect = (county, zip) => rooftop(27.2159, -81.8584, {
+      address_components: [
+        { long_name: county, types: ['administrative_area_level_2'] },
+        { long_name: zip, types: ['postal_code'] },
+      ],
+    });
+    expect(rejectGeocodeResult(inRect('Sarasota County', '34240'))).toBeNull();
+    expect(rejectGeocodeResult(inRect('DeSoto County', '34266'))).toBe('outside_service_area');
+    expect(rejectGeocodeResult(rooftop(27.2159, -81.8584))).toBe('outside_service_area');
+  });
+
   test('DeSoto County (Arcadia) is excluded; neighbouring served towns stay in', () => {
     expect(isInServiceAreaBox(27.2159, -81.8584)).toBe(false); // Arcadia
     expect(isInServiceAreaBox('27.2159', '-81.8584')).toBe(false);

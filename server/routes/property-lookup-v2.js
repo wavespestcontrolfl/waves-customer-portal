@@ -734,7 +734,7 @@ async function performPropertyLookupCore(address, options = {}) {
     lng = geo.lng;
 
     // Validate within SWFL service area
-    if (!isInServiceAreaBox(lat, lng)) {
+    if (!isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip })) {
       result.errors.push({ source: 'geo', message: 'Outside SWFL service area' });
     }
 
@@ -784,7 +784,7 @@ async function performPropertyLookupCore(address, options = {}) {
         superCloseUrl,
         closeUrl: closeUrlWithKey,
         wideUrl: wideUrlWithKey,
-        inServiceArea: isInServiceAreaBox(lat, lng),
+        inServiceArea: isInServiceAreaBox(lat, lng, { county: geo.county, zip: geo.zip }),
         _microCloseB64: microCloseB64,
         _ultraCloseB64: ultraCloseB64,
         _superCloseB64: superCloseB64,

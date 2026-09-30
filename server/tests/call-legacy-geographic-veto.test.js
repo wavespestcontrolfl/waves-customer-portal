@@ -38,7 +38,7 @@ describe('legacyGeographicVeto', () => {
       v2Extraction: { property: { service_address: { city: 'Arcadia', county: 'DeSoto' } } },
       extracted: { city: 'Arcadia', zip: '34266' },
     });
-    expect(veto).toEqual(expect.objectContaining({ reason: 'address_validation_out_of_service_area' }));
+    expect(veto).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
   });
 
   test('extracted DeSoto county with no AV verdict is vetoed', () => {
@@ -47,7 +47,18 @@ describe('legacyGeographicVeto', () => {
       v2Extraction: { property: { service_address: { city: 'Somewhere', county: 'DeSoto' } } },
       extracted: { city: 'Somewhere' },
     });
-    expect(veto).toEqual(expect.objectContaining({ reason: 'county_out_of_service_area' }));
+    expect(veto).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
+    // A non-DeSoto unserved county with no AV verdict is vetoed by county.
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'api_unavailable', inServiceArea: null },
+      v2Extraction: { property: { service_address: { county: 'Hardee' } } },
+      extracted: { city: 'Somewhere' },
+    })).toEqual(expect.objectContaining({ reason: 'county_out_of_service_area' }));
+    // A non-DeSoto AV verdict is vetoed by the verdict.
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'out_of_service_area', inServiceArea: false, county: 'Hardee County' },
+      extracted: { city: 'Somewhere' },
+    })).toEqual(expect.objectContaining({ reason: 'address_validation_out_of_service_area' }));
   });
 
   test('a positive AV verdict is final; served addresses are not vetoed', () => {
@@ -71,9 +82,69 @@ describe('legacyGeographicVeto', () => {
   });
 });
 
+describe('legacyGeographicVeto: conflicting evidence and on-file address (Codex r2)', () => {
+  test('DeSoto ZIP is not laundered by a served-town city', () => {
+    expect(legacyGeographicVeto({ extracted: { city: 'Riverview', zip: '34266' } })).not.toBeNull();
+  });
+
+  test('a DeSoto AV verdict is not exempted by a Riverview city; only a Hillsborough verdict is', () => {
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'out_of_service_area', inServiceArea: false, county: 'DeSoto County' },
+      extracted: { city: 'Riverview', zip: '33578' },
+    })).not.toBeNull();
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'out_of_service_area', inServiceArea: false, county: 'Hardee County' },
+      extracted: { city: 'Riverview', zip: '33578' },
+    })).not.toBeNull();
+    expect(legacyGeographicVeto({
+      addressValidation: { status: 'out_of_service_area', inServiceArea: false, county: 'Hillsborough County' },
+      extracted: { city: 'Riverview', zip: '33578' },
+    })).toBeNull();
+  });
+
+  test('known caller who states no address: an on-file Arcadia profile is vetoed', () => {
+    expect(legacyGeographicVeto({
+      extracted: { appointment_confirmed: true },
+      onFile: { city: 'Arcadia', zip: '34266', latitude: null, longitude: null },
+    })).toEqual(expect.objectContaining({ reason: 'desoto_locality' }));
+    // City/ZIP blank on file but stored coordinates sit in DeSoto with no served ZIP.
+    expect(legacyGeographicVeto({
+      extracted: {},
+      onFile: { city: null, zip: null, latitude: 27.2159, longitude: -81.8584 },
+    })).not.toBeNull();
+  });
+
+  test('on-file address is ignored when the call states its own locality, and served on-file profiles pass', () => {
+    expect(legacyGeographicVeto({
+      extracted: { city: 'Bradenton', zip: '34209' },
+      onFile: { city: 'Arcadia', zip: '34266' },
+    })).toBeNull();
+    expect(legacyGeographicVeto({
+      extracted: {},
+      onFile: { city: 'Myakka City', zip: '34251', latitude: 27.35, longitude: -82.15 },
+    })).toBeNull();
+    // Sliver: stored coordinates inside the DeSoto rectangle but a served ZIP.
+    expect(legacyGeographicVeto({
+      extracted: {},
+      onFile: { city: null, zip: '34240', latitude: 27.2, longitude: -82.0 },
+    })).toBeNull();
+    expect(legacyGeographicVeto({ extracted: {}, onFile: null })).toBeNull();
+  });
+});
+
 describe('legacy booking branch wiring', () => {
+  test('only a VALID V2 extraction feeds the veto, and the on-file row is read before the booking branch', () => {
+    const callAt = source.indexOf('legacyGeoVeto = legacyGeographicVeto({');
+    expect(callAt).toBeGreaterThan(-1);
+    const call = source.slice(callAt, callAt + 260);
+    expect(call).toContain('v2Extraction: v2CanonicalExtraction');
+    expect(call).not.toContain('v2Result?.extraction');
+    expect(call).toContain('onFile: onFileGeo');
+    expect(source.slice(callAt - 900, callAt)).toContain("db('customers').where({ id: customerId }).first('city', 'zip', 'latitude', 'longitude')");
+  });
+
   test('the geographic veto sits ahead of the booking branch and is not keyed on any V2 mode', () => {
-    const vetoAt = source.indexOf('legacyGeoVeto = legacyGeographicVeto({');
+    const vetoAt = source.indexOf('&& legacyGeoVeto) {');
     expect(vetoAt).toBeGreaterThan(-1);
     const bookAt = source.indexOf('// Declared OUTSIDE the try so the catch', vetoAt);
     expect(bookAt).toBeGreaterThan(vetoAt);

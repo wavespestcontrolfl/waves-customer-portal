@@ -3234,6 +3234,32 @@ describe('checkServiceArea unit coverage (P1 :355)', () => {
     expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 })).toEqual({ ok: true, county: 'Manatee' });
   });
 
+  // DeSoto rectangle clips a sliver of the served neighbours: the county name
+  // wins over the rectangle wherever a county is known (Codex r2 P2).
+  test('key configured: Sarasota county inside the DeSoto rectangle is in area; DeSoto county is not', async () => {
+    mockCounty.mockResolvedValueOnce('Sarasota');
+    expect(await checkServiceArea({ lat: 27.2159, lng: -81.8584 })).toEqual({ ok: true, county: 'Sarasota' });
+    mockCounty.mockResolvedValueOnce('DeSoto');
+    expect(await checkServiceArea({ lat: 27.2159, lng: -81.8584 })).toEqual({ ok: false, county: 'DeSoto' });
+  });
+
+  test('no key: inside the DeSoto rectangle only a served ZIP proves the area; otherwise fail closed', async () => {
+    const savedA = process.env.GOOGLE_API_KEY;
+    const savedB = process.env.GOOGLE_MAPS_API_KEY;
+    delete process.env.GOOGLE_API_KEY;
+    delete process.env.GOOGLE_MAPS_API_KEY;
+    try {
+      expect(await checkServiceArea({ lat: 27.2159, lng: -81.8584 }, { zip: '34240' })).toEqual({ ok: true, county: null });
+      expect(await checkServiceArea({ lat: 27.2159, lng: -81.8584 }, { zip: '34266' })).toEqual({ ok: false, county: null });
+      expect(await checkServiceArea({ lat: 27.2159, lng: -81.8584 })).toEqual({ ok: false, county: null });
+      expect(await checkServiceArea({ lat: 27.4989, lng: -82.5748 })).toEqual({ ok: true, county: null });
+      expect(mockCounty).not.toHaveBeenCalled();
+    } finally {
+      if (savedA !== undefined) process.env.GOOGLE_API_KEY = savedA;
+      if (savedB !== undefined) process.env.GOOGLE_MAPS_API_KEY = savedB;
+    }
+  });
+
   test('key configured, county resolves and is NOT served → out_of_area shape', async () => {
     mockCounty.mockResolvedValueOnce('Hardee');
     expect(await checkServiceArea({ lat: 27.5, lng: -81.8 })).toEqual({ ok: false, county: 'Hardee' });
