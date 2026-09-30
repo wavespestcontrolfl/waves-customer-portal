@@ -481,6 +481,17 @@ function skipReservation(trx, id, reason) {
 }
 
 async function judgeConsent(trx, row, now, expectedRecipientEmail = null, boundaryGuard = null) {
+  // The caller's own last look comes FIRST: it may wait (a share lock on the
+  // entity it reads, held to the end of this transaction), and every read that
+  // decides the send must happen AFTER the last wait — a consent or address change
+  // committed while it waited is then seen by the recheck below, not missed by a
+  // verdict read before the wait. (Customer preference and address updates do not
+  // take the marketing-email advisory lock.)
+  const callerVerdict = boundaryGuard ? await boundaryGuard(trx) : null;
+  if (callerVerdict) {
+    await skipReservation(trx, row.id, callerVerdict.reason);
+    return { ok: false, reason: callerVerdict.reason, row };
+  }
   const verdict = await eligibleForEmail({
     customerId: row.customer_id, stream: row.stream, marketingClass: row.marketing_class,
     emailKey: row.email_key, pestKey: row.pest_key, now, conn: trx,
@@ -500,14 +511,6 @@ async function judgeConsent(trx, row, now, expectedRecipientEmail = null, bounda
     || !recipientMatchesExpected(expectedRecipientEmail, verdict.checks.customerEmail)) {
     await skipReservation(trx, row.id, REASONS.RECIPIENT_CHANGED);
     return { ok: false, reason: REASONS.RECIPIENT_CHANGED, row };
-  }
-  // A caller's own last look, on this same transaction, right before the
-  // provider request (e.g. that the thing the message is about is still
-  // addressed to this recipient).
-  const callerVerdict = boundaryGuard ? await boundaryGuard(trx) : null;
-  if (callerVerdict) {
-    await skipReservation(trx, row.id, callerVerdict.reason);
-    return { ok: false, reason: callerVerdict.reason, row };
   }
   return { ok: true, reason: null, row };
 }

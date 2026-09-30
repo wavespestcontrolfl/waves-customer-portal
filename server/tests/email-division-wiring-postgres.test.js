@@ -236,6 +236,15 @@ describeOrSkip('email division wiring (Postgres)', () => {
     executeImmediately: immediately,
   });
 
+  const waitFor = async (read) => {
+    for (let i = 0; i < 100; i += 1) {
+      const value = await read();
+      if (value) return value;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error('waitFor timed out');
+  };
+
   const events = async (runId) => db('email_template_automation_run_events').where({ run_id: runId }).orderBy('created_at', 'asc');
 
   // ---- executor: the ledger path -----------------------------------------
@@ -582,6 +591,59 @@ describeOrSkip('email division wiring (Postgres)', () => {
       expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
     });
 
+    // The boundary guard can WAIT (a share lock on the service record); consent and
+    // address are read only after the last wait, so a change committed during it counts.
+    test.each([
+      ['changes email', (customer) => db('customers').where({ id: customer.id }).update({ email: 'moved.while.waiting@example.invalid' })],
+      ['turns email off', (customer) => db('notification_prefs').where({ customer_id: customer.id }).update({ email_enabled: false })],
+    ])('the customer %s WHILE the boundary guard waits on the service_records lock: refused, nothing sent', async (_label, change) => {
+      process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
+      const customer = await makeCustomer();
+      const techId = await makeTech();
+      await makeNextVisit(customer.id);
+      const recordId = await makeVisit({ customerId: customer.id, technicianId: techId, products: ['taurus'] });
+      const automation = await makeAutomation({
+        trigger_event_key: 'visit.completed_first', template_key: 'lc.first_visit_pest', suppression_group_key: 'service_operational',
+        idempotency_key_template: `qa-wiring-${randomUUID().slice(0, 6)}:{service_record_id}`,
+      });
+      sendTemplate.mockImplementation(libraryLike());
+
+      // Another writer holds the service record: the boundary guard's FOR SHARE must wait for it.
+      let releaseHolder;
+      let holderLocked;
+      const locked = new Promise((resolve) => { holderLocked = resolve; });
+      const holder = db.transaction(async (trx) => {
+        await trx('service_records').where({ id: recordId }).forUpdate().first('id');
+        holderLocked();
+        await new Promise((resolve) => { releaseHolder = resolve; });
+      });
+      await locked;
+
+      const runPromise = Executor.processTrigger({
+        triggerEventKey: 'visit.completed_first',
+        triggerEventId: `visit_completed_first:${recordId}`,
+        automationKey: automation.automation_key,
+        entityType: 'service_record',
+        entityId: recordId,
+        recipient: { type: 'customer', id: customer.id, email: customer.email },
+        payload: { service_record_id: recordId, customer_id: customer.id },
+        executeImmediately: true,
+      });
+      // The reservation exists and the guard is now blocked on the lock...
+      await waitFor(() => db('marketing_email_ledger').where({ customer_id: customer.id, status: 'reserved' }).first());
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // ...the customer's consent / address changes while it waits, then the lock is released.
+      await change(customer);
+      releaseHolder();
+      await holder;
+
+      const run = (await runPromise).results[0].run;
+      expect(run.status).toBe('skipped');
+      expect(await db('email_messages').where({ idempotency_key: run.idempotency_key })).toHaveLength(0);
+      const ledger = await db('marketing_email_ledger').where({ customer_id: customer.id });
+      expect(ledger[0].status).toBe('skipped');
+    });
+
     test('a lifecycle key (lc.first_visit_pest) rides the ledger lifecycle stream as relationship mail', async () => {
       process.env.GATE_EMAIL_TEMPLATE_AUTOMATIONS = 'true';
       const customer = await makeCustomer();
@@ -627,14 +689,6 @@ describeOrSkip('email division wiring (Postgres)', () => {
       let release;
       const gate = new Promise((resolve) => { release = resolve; });
       return { gate, release };
-    };
-    const waitFor = async (read) => {
-      for (let i = 0; i < 100; i += 1) {
-        const value = await read();
-        if (value) return value;
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-      throw new Error('waitFor timed out');
     };
 
     // Customer with visit 1, two visit-2 records (two eligible reports) on a quarterly pest plan.
