@@ -12217,6 +12217,27 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     };
 
+    // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
+    // source of truth) and run the consistency check. Its smsSummary is no
+    // longer read — the completion text is the plain DB template for every
+    // service line (owner ruling 2026-08-01) — but the freeze and the
+    // consistency check are what the REPORT reads, so the gate stays.
+    // It runs HERE, in the common completion path before either delivery
+    // channel, so every auto-send lawn completion freezes the watering
+    // instruction (and banner) exactly once whether or not the customer gets
+    // the completion text (email-only customers, SMS disabled, no phone,
+    // text already handled). Best-effort; never blocks completion.
+    if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
+      try {
+        const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
+        const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
+        // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
+        // fold the frozen synthesis back in so the later sending/sent writes (which
+        // spread recordStructuredNotes) don't clobber it.
+        if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
+      } catch { /* best-effort — render-time reconciliation still applies */ }
+    }
+
     if (effectiveSendCompletionSms && svc.cust_phone && !completionSmsAlreadyHandled && !recapSmsAlreadySentForVisit
       && completionSmsWithheldForMissingReportToken({ serviceReportV1Delivery, typedDeliveryMode, reportToken })) {
       // Report-v1 visit with no public report token (mint failed above): the
@@ -12365,22 +12386,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
           || prepaidCovered
           || autopayCoversVisit
           || ['paid', 'prepaid'].includes(String(invoice?.status || '').toLowerCase()));
-        // Lawn Report V2 write-gate: freeze the synthesis onto the record (single
-        // source of truth) and run the consistency check. Its smsSummary is no
-        // longer read — the completion text is the plain DB template for every
-        // service line (owner ruling 2026-08-01) — but the freeze and the
-        // consistency check are what the REPORT reads, so the gate stays.
-        // Best-effort; never blocks completion.
-        if (serviceReportV1Delivery && typedDeliveryMode === 'auto_send') {
-          try {
-            const { finalizeLawnReportSynthesis } = require('../services/service-report/lawn-report-write-gate');
-            const gate = await finalizeLawnReportSynthesis({ service: record, knex: db });
-            // recordStructuredNotes was parsed BEFORE the gate wrote structured_notes.lawnReportV2;
-            // fold the frozen synthesis back in so the later sending/sent writes (which
-            // spread recordStructuredNotes) don't clobber it.
-            if (gate.frozen) recordStructuredNotes.lawnReportV2 = gate.frozen;
-          } catch { /* best-effort — render-time reconciliation still applies */ }
-        }
         // The trace/applications lookup that used to feed this call is gone
         // with the re-entry line. It existed so the SMS could apply the same
         // read-time exterior normalization the report does (codex P2 #3007

@@ -61,26 +61,28 @@ async function finalizeLawnReportSynthesis({ service, knex } = {}) {
       logger.warn(`[lawn-report-gate] ${blockers.length} blocker contradiction(s) on service_record ${service.id}: ${blockers.map((b) => b.code).join(', ')}`);
     }
 
-    // First writer wins for the instruction: one already frozen on the record
-    // (read fresh, right before the write) is carried over unchanged, so a
-    // re-run never replaces what the customer was first told.
-    // (Gate off: nothing was built, nothing is read or written.)
-    const existingInstruction = !instructionOut.instruction ? null : await knex('service_records').where({ id: service.id }).first('structured_notes')
-      .then((row) => parseJsonObject(row && row.structured_notes).lawnReportV2?.wateringInstruction)
-      .catch(() => null);
-    const keptInstruction = existingInstruction && typeof existingInstruction === 'object' && !Array.isArray(existingInstruction)
-      ? existingInstruction : null;
-    const wateringInstruction = keptInstruction || instructionOut.instruction || null;
+    // First writer wins for the watering instruction and its banner, and they
+    // are PRESERVED whatever the gate says: the write below replaces the whole
+    // lawnReportV2 object, so a retry during a gate rollback must carry the
+    // frozen keys over or it would erase the customer's snapshot. The gate
+    // controls creation and rendering only, never deletion. Read fresh, right
+    // before the write; a failed read aborts the write (outer catch) rather
+    // than risk overwriting a snapshot it could not see.
+    const existing = await knex('service_records').where({ id: service.id }).first('structured_notes')
+      .then((row) => parseJsonObject(row && row.structured_notes).lawnReportV2);
+    const asObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : null);
+    const wateringInstruction = asObject(existing && existing.wateringInstruction) || instructionOut.instruction || null;
+    const banner = asObject(existing && existing.banner) || reportV2.banner || null;
 
     const frozen = {
       smsSummary: reportV2.smsSummary || null,
       // The watering banner (GATE_LAWN_WATERING_RULE), frozen beside smsSummary
       // so a later read shows what the customer was first told. Key omitted
       // when there is no banner (gate off = frozen object unchanged).
-      ...(reportV2.banner ? { banner: reportV2.banner } : {}),
+      ...(banner ? { banner } : {}),
       // The COMPLETE instruction (minutes, labels, provenance), so later reads
       // replay it instead of rereading the customer's current irrigation
-      // entries. First writer wins (see keptInstruction above).
+      // entries. First writer wins (see above).
       ...(wateringInstruction ? { wateringInstruction } : {}),
       todaysResult: fix.todaysResult || null,
       statusHeadline: reportV2.snapshot?.statusHeadline || null,

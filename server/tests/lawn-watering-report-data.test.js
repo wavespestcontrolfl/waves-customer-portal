@@ -206,6 +206,22 @@ describe('GATE_LAWN_WATERING_RULE on the report payload', () => {
       expect(regenerated.reportV2.banner.lines[1]).toBe('Run each zone about 15 minutes.');
     });
 
+    test('gate rollback then back on: the preserved snapshot replays, not a regenerated instruction', async () => {
+      const service = serviceWith(WATER_IN);
+      const out = {};
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      await buildReportV1Data(service, 'token-w1', makeKnex(fixtures(PREFS(['rotor']))), { wateringInstructionOut: out });
+      const frozenService = withFrozen(service, JSON.parse(JSON.stringify(out.instruction)));
+      const edited = fixtures(PREFS(['spray']));
+      // Rolled back: the customer sees today's un-gated report and the frozen keys are ignored, not erased.
+      delete process.env.GATE_LAWN_WATERING_RULE;
+      expect((await buildReportV1Data(frozenService, 'token-w1', makeKnex(edited))).reportV2.banner).toBeUndefined();
+      // Back on: the ORIGINAL 40-minute instruction, although the entries now say spray (15).
+      process.env.GATE_LAWN_WATERING_RULE = 'true';
+      const back = await buildReportV1Data(frozenService, 'token-w1', makeKnex(edited));
+      expect(back.reportV2.banner.lines[1]).toBe('Run each zone about 40 minutes.');
+    });
+
     test('the frozen instruction also fills the afterHold overlay the same way', () => {
       const { applyAfterHoldOverlay } = require('../services/service-report/report-data');
       const { buildWateringInstruction } = require('../services/service-report/lawn-watering-instruction');
