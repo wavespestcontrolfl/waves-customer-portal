@@ -1997,7 +1997,7 @@ describe('free re-service is an entitlement resolved through the existing mechan
     // specific noun (never a bare "visit") — "callback visit" is one of
     // those specific nouns, so this fixture still exercises a
     // free-word-paired-with-a-noun phrasing distinct from the other two.
-    for (const reply of ['We can come back for a free re-service.', 'We will re-treat at no charge.', 'A complimentary callback visit is on us.']) {
+    for (const reply of ['We can come back for a free re-service.', 'We will re-treat at no charge.', 'A complimentary visit is on us.', 'A complimentary callback visit is on us.']) {
       expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage, intendedActions }).ok).toBe(false);
       expect(validateReserviceOffer({ reply, factsBlock: 'no such line', inboundMessage, intendedActions }).ok).toBe(false);
       expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage, intendedActions }).ok).toBe(true);
@@ -2223,6 +2223,50 @@ describe('free re-service is an entitlement resolved through the existing mechan
       'You are free to return the equipment whenever it suits you.',
     ])('%s → NOT a re-service promise', (text) => {
       expect(isReserviceOfferPromise(text)).toBe(false);
+    });
+
+    // PR #5336 pre-push audit P1: the round-6 narrowing dropped plain
+    // free-visit offers; they are explicit promises and must stay guarded.
+    test.each([
+      'A complimentary visit is on us.',
+      'We can send a technician for a free visit.',
+      "We won't charge you for the visit.",
+      'No charge for the visit.',
+      'The return trip is on the house.',
+      'We can come back out at no cost.',
+    ])('%s → an explicit free-visit offer IS a promise', (text) => {
+      expect(isReserviceOfferPromise(text)).toBe(true);
+    });
+
+    test.each([
+      'Feel free to call us to schedule a visit.',
+      "You're free to visit the portal anytime.",
+      'You can count on us to come back and treat.',
+      'We offer a free estimate, then a visit on Tuesday.',
+    ])('%s → idiom / free estimate, NOT a promise', (text) => {
+      expect(isReserviceOfferPromise(text)).toBe(false);
+    });
+
+    // The two quoted wordings guard end to end: draft time, send time, and
+    // the promise-clause picker (no lane word -> snapshot fallback).
+    test.each([
+      'A complimentary visit is on us.',
+      'We can send a technician for a free visit.',
+    ])('%s → validated at draft time and revalidated at send time', async (reply) => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const sendLink = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const notEligible = `X\n${reserviceFactLine([])}\nBILLING:`;
+      const eligible = `X\n${reserviceFactLine(['pest'])}\nBILLING:`;
+      expect(validateReserviceOffer({ reply, factsBlock: notEligible, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(false);
+      expect(validateReserviceOffer({ reply, factsBlock: eligible, inboundMessage: 'still have ants', intendedActions: sendLink }).ok).toBe(true);
+      // Send time (no lane word in the promise clause -> the pest snapshot decides,
+      // after the excluded-specialty check).
+      const { drafter } = loadWith({ lanes: ['lawn'] });
+      await expect(drafter.reservicePromiseStillEligible({ outgoingBody: `Sorry about the ants in the yard. ${reply}`, customerId: 'cust-1', promisedLanes: ['pest'] }))
+        .resolves.toMatch(/no longer eligible for a free pest re-service/);
+      // ...and an excluded specialty in the same kind of clause is still rejected first.
+      await expect(drafter.reservicePromiseStillEligible({ outgoingBody: reply.replace(/visit/, 'termite visit'), customerId: 'cust-1', promisedLanes: ['pest'] }))
+        .resolves.toMatch(/excluded specialty/);
     });
 
     test('a genuine re-service promise still counts, with each of the specific nouns', () => {

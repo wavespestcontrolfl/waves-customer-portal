@@ -511,23 +511,44 @@ function validateComplianceCopy({ reply }) {
 // Shared by both regexes below (built with `new RegExp` so the fragment
 // can't drift between them) rather than duplicated inline.
 const REVISIT_TERM_SOURCE = 'revisit(?!\\s+(?:the|my|our|your|this|that|its?|their)\\s+(?:options?|quotes?|estimates?|schedules?|pricing|prices?|billing|bills?|invoices?|accounts?|portals?|terms|plans?|polic(?:y|ies)|profiles?|details?|history)\\b)';
-// Codex round-6 P1: the noun set below is the ONE place a re-service
-// PROMISE's noun is recognized — deliberately RE-SERVICE-SPECIFIC (re-service,
-// reservice, re-treat(ment), re-spray, revisit — narrowed by
-// REVISIT_TERM_SOURCE above, callback visit, come back out, follow-up
-// treatment) with no bare "free"/"visit"/"return"/"treatment"/"service"/
-// "callback" fallback: those bare words paired with an unrelated "free"/
-// "return" elsewhere in the same sentence ("Feel free to return to your
-// estimate link anytime" — no snapshot, no re-service promise at all) used to
-// false-positive both regexes below into treating routine copy as a re-service
-// promise.
+// Codex round-6 P1 (narrowed) + PR #5336 pre-push audit P1 (restored): two
+// noun sets, one per detector. RESERVICE_SPECIFIC_NOUN_SOURCE is the
+// RE-SERVICE-SPECIFIC set (re-service, reservice, re-treat(ment), re-spray,
+// revisit — narrowed by REVISIT_TERM_SOURCE above, callback visit, come back
+// out, follow-up treatment): the coverage detector below (link/covered/
+// included, no "free" needed) uses ONLY this set, so an ordinary "your visit
+// is included in your plan" billing line never trips it.
 const RESERVICE_SPECIFIC_NOUN_SOURCE = `re-?service|re-?treat(?:ment)?|re-?spray|${REVISIT_TERM_SOURCE}|callback\\s+visit|come\\s+back\\s+out|follow-?up\\s+treatment`;
+// The explicit-free-offer detector ALSO covers the plain free-visit
+// wordings the round-6 narrowing dropped — "A complimentary visit is on
+// us", "We can send a technician for a free visit", "we won't charge you for
+// the visit" — because a customer offered a free visit while ineligible is
+// exactly what this guard exists for. What round 6 actually needed to stop
+// was a false positive from the WORD "free"/"return" in ordinary copy, so
+// this set keeps the visit/trip/treatment/service/callback/come-back nouns
+// but drops bare "return" (only "return visit/trip" via the visit/trip
+// nouns, or "return out"/"return to your home"), and the free-word below
+// excludes the idioms. Decision against the prompt's allowed wording (the
+// prompt only ever offers a free RE-SERVICE): a free ESTIMATE / quote /
+// consultation is a different, unrestricted thing and is deliberately NOT a
+// re-service promise, so "free estimate" stays out; "free inspection" is a
+// technician visit, so it stays in.
+const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|visit|trip|treatment|service|callback|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))`;
+// "free" as a price word, not an idiom: never "feel free to ...", "you are /
+// you're free to ...", "free of/from ...", and not "free estimate/quote/
+// consultation". The other alternatives are the explicit no-charge
+// wordings, including "won't charge you for ..." and "on us" (but not
+// "count/rely on us").
+const FREE_OFFER_WORD_SOURCE = "(?:(?<!(?:\\b(?:feel|are|is|be)|['’]re)\\s+)\\bfree\\b(?!\\s+(?:to|of|from)\\b)(?!\\s+(?:estimates?|quotes?|consultations?)\\b)"
+  + "|complimentary|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)|at no (?:additional )?(?:charge|cost)"
+  + "|(?<!\\b(?:count|rely|depend|counting|relying|depending)\\s)on us|on the house"
+  + "|(?:won['’]?t|will\\s+not|don['’]?t|do\\s+not)\\s+charge(?:\\s+you)?)";
 // Deterministic backstop: a reply that offers a free visit while the facts
 // do not say eligible is a violation, fed into the same revise/verify loop
 // (and enforced in single-pass mode, where no verifier would catch it).
 const FREE_RESERVICE_OFFER_RE = new RegExp(
-  `\\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\\b[^.?!\\n]{0,60}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b`
-  + `|\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b[^.?!\\n]{0,60}\\b(?:free|complimentary|no[- ]charge|no[- ]cost|at no (?:charge|cost)|on us|on the house)\\b`,
+  `${FREE_OFFER_WORD_SOURCE}[^.?!\\n]{0,60}\\b(?:${FREE_OFFER_NOUN_SOURCE})\\b`
+  + `|\\b(?:${FREE_OFFER_NOUN_SOURCE})\\b[^.?!\\n]{0,60}${FREE_OFFER_WORD_SOURCE}`,
   'i',
 );
 // Codex round-2 finding: a promise can cover a re-service WITHOUT ever
