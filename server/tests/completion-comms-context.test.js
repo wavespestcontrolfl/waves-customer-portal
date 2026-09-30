@@ -241,7 +241,12 @@ describe('buildCompletionCommsContext', () => {
         ],
         service_completion_profiles: [],
         call_log: [],
-        sms_log: [],
+        // Bare credentials texted back to a Waves question (which is left
+        // out as a Waves text), so nothing anchors them.
+        sms_log: [
+          { created_at: mk(5), direction: 'inbound', message_body: '4821' },
+          { created_at: mk(6), direction: 'inbound', message_body: 'BLUE' },
+        ],
         emails: [
           // A reply whose quoted history holds Waves' own words.
           { received_at: mk(1), subject: 'Re: Your visit', body_text: 'Sounds good, see you then.\n\nOn Mon, Sep 28, 2026 at 9:00 AM Waves Pest Control <contact@wavespestcontrol.com> wrote:\n> We will retreat the kitchen for free next week.', from_address: 'pat@example.com', label_ids: ['INBOX'] },
@@ -259,6 +264,7 @@ describe('buildCompletionCommsContext', () => {
     expect(ctx.text).not.toMatch(/\b123\b/);
     expect(ctx.text).not.toContain('4821');
     expect(ctx.text).not.toContain('BLUE');
+    expect(ctx.text).toMatch(/Customer text .*: \[redacted\]/);
   });
 
   test('no customerId returns an empty context', async () => {

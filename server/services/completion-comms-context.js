@@ -185,6 +185,12 @@ async function resolveContextWindow({
   return { floor: cap, reason: `last ${ONE_TIME_CAP_DAYS} days`, serviceLine, isRecurring };
 }
 
+// Credential-shaped tokens (the redactor's 3+ digit codes, all-caps word
+// codes) masked outright where the context that would anchor them is gone.
+function maskCredentialShapes(text) {
+  return String(text || '').replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
+}
+
 // Words that name a credential anywhere in an email (see customerEmailText).
 const CREDENTIAL_ANCHOR_RE = /\b(?:gate|codes?|lock\s*box(?:es)?|alarm|keypad|pins?|pass(?:code|word)s?|combo|combination)\b/i;
 
@@ -292,9 +298,7 @@ async function buildCompletionCommsContext({
     const body = String(email.body_text || '').trim();
     const text = body || String(email.snippet || '');
     let own = source(stripQuotedAndSignature(text));
-    if (!body || CREDENTIAL_ANCHOR_RE.test(text)) {
-      own = own.replace(/\d{3,}/g, '[redacted]').replace(/\b[A-Z]{3,}\b/g, '[redacted]');
-    }
+    if (!body || CREDENTIAL_ANCHOR_RE.test(text)) own = maskCredentialShapes(own);
     return compactText(own, 260);
   };
   const callRows = customerWordsOnly
@@ -320,7 +324,12 @@ async function buildCompletionCommsContext({
   }
   for (const msg of sms) {
     if (customerWordsOnly && msg.direction !== 'inbound') continue;
-    const summary = compactText(source(msg.message_body), 260);
+    // customerWordsOnly: the Waves text a reply answers is left out, so a
+    // bare credential ("4821", "BLUE") has lost its anchor; anything
+    // credential-shaped in a customer text is masked outright.
+    const summary = customerWordsOnly
+      ? compactText(maskCredentialShapes(source(msg.message_body)), 260)
+      : compactText(msg.message_body, 260);
     if (summary) {
       entries.push({
         ts: contextTs(msg.created_at),

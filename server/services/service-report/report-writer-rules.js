@@ -204,7 +204,13 @@ const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
 const PER_VISIT_RE = /\bper[\s-]+visit\b/i;
-const COMPANY_NAME_RE = /\bWaves\s+(?:Pest\s+Control\s*(?:&|&amp;|and)\s*Lawn\b|Lawn\b)/i;
+// Every "Waves …" name but exactly "Waves Pest Control": "& Lawn Care",
+// "Waves Lawn", "Waves Pest & Lawn", "Waves Pest Services", "Waves
+// Exterminating", "Waves Company"…
+const COMPANY_NAME_RE = /\bWaves\s+(?:Pest\s+Control\s*(?:&|&amp;|and)\s*Lawn\b|Lawn\b|Pest\b(?!\s+Control\b)|(?:Termite|Mosquito|Exterminat\w*|Services?|Company|Co|Inc|LLC)\b)/i;
+// Rates and mix strength in words ("at the label rate", "the recorded mix
+// strength", "diluted").
+const RATE_RE = /\brates?\b|\bmix(?:ing)?\s+(?:strength|ratio)\b|\bdilut(?:e|ed|ion)\b|\bconcentrat(?:e|ed|ion)\b|\bper\s+(?:gallon|1,?000)\b/i;
 const SAFE_WORD_RE = /\b(?:safe|safer|safest|safely|unsafe|non-?toxic|harmless)\b/i;
 const CHEMICAL_RE = /\bchemicals?\b/i;
 // Forward-looking timeframes (rule 11): "7–14 days", "over the next two
@@ -212,10 +218,18 @@ const CHEMICAL_RE = /\bchemicals?\b/i;
 // days before the visit", "two weeks ago") is a fact and passes.
 const DURATION_NUMBER = '(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen|twenty|thirty|sixty|ninety)';
 const DURATION_UNIT = '(?:days?|weeks?|months?|hours?|hrs?|minutes?|mins?)';
+// Forward context only: "within", "in/over/for/during the next", "in two
+// weeks", "up to", a range ("7–14 days"), or a future/expectation word
+// earlier in the clause ("activity may continue for a few days"). A past
+// duration ("you saw ants for two weeks", "during the last two weeks",
+// "two weeks ago") passes.
 const TIMEFRAME_RE = new RegExp(
-  `\\b\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}\\b`
-  + `|\\b(?:within|in|over|during|for|after|up\\s+to|about|around|roughly|approximately|takes?|lasts?)\\s+(?:the\\s+)?(?:next\\s+|coming\\s+|first\\s+)?${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`
-  + `|\\bnext\\s+${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b`,
+  `\\b\\d+\\s*(?:-|–|to)\\s*\\d+\\s*${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`
+  + `|\\b(?:within|up\\s+to|(?:in|over|for|during)\\s+the\\s+(?:next|coming|first))\\s+(?:\\w+\\s+)?${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b`
+  + `|\\bin\\s+${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`
+  + `|\\bnext\\s+${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b`
+  // "takes"/"lasts" only: "the last two weeks" is history.
+  + `|\\b(?:will|should|may|might|can|could|expect(?:ed)?|takes|lasts|continues?|keeps?\\s+working)\\b[^.!?]{0,40}?\\b${DURATION_NUMBER}\\s+${DURATION_UNIT}\\b(?!\\s+(?:before|ago|earlier|prior))`,
   'i',
 );
 // Money and entitlement (rule 9). ENTITLEMENT_RE catches the predicate
@@ -260,6 +274,7 @@ function writerRulesRejection(text, { activeIngredients = [] } = {}) {
   if (UNIT_WORD_RE.test(copy)) return 'amount';
   if (FOOTAGE_RE.test(copy)) return 'footage';
   if (PERCENT_RE.test(copy)) return 'percent';
+  if (RATE_RE.test(copy)) return 'rate';
   if (PER_VISIT_RE.test(copy)) return 'per_visit';
   if (COMPANY_NAME_RE.test(copy)) return 'company_name';
   if (SAFE_WORD_RE.test(copy)) return 'safe_word';

@@ -175,6 +175,12 @@ describe('writerRulesRejection', () => {
     ['We mixed 2 gals for the perimeter.', 'amount'],
     ['We used 2 qt in the backpack.', 'amount'],
     ['We used 3 ozs of bait.', 'amount'],
+    ['We applied at the label rate.', 'rate'],
+    ['We used the recorded mix strength.', 'rate'],
+    ['The spray was diluted for the beds.', 'rate'],
+    ['Thank you from Waves Pest & Lawn.', 'company_name'],
+    ['Waves Pest Services came out today.', 'company_name'],
+    ['The treatment lasts three weeks.', 'timeframe'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -198,6 +204,10 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('Web removal was included in today\'s visit.')).toBeNull();
     expect(writerRulesRejection('Mosquito activity was strongest after 8 PM.')).toBeNull();
     expect(writerRulesRejection('We arrived at 10 AM and started at the back fence.')).toBeNull();
+    expect(writerRulesRejection('You mentioned seeing ants for two weeks.')).toBeNull();
+    expect(writerRulesRejection('Activity continued during the last two weeks.')).toBeNull();
+    expect(writerRulesRejection('Waves Pest Control treated the perimeter.')).toBeNull();
+    expect(writerRulesRejection('The activity rating was light.')).toBeNull();
   });
 
   test('a dry cabinet or a note about rain is not re-entry wording', () => {
