@@ -23,7 +23,8 @@ jest.mock('../services/collections/contact-policy', () => ({
 }));
 
 const ContactPolicy = require('../services/collections/contact-policy');
-const { collectionsChannelPermitted } = require('../services/collections/rail-guard');
+const { collectionsChannelPermitted, collectionsChannelVerdict } = require('../services/collections/rail-guard');
+const CollectionHold = require('../services/collections/collection-hold');
 
 const BASE = { customerId: 'cust-1', channel: 'sms', purpose: 'late_payment' };
 
@@ -195,5 +196,49 @@ describe('detail verdict', () => {
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true }))
       .resolves.toEqual({ allowed: true, durable: false, balanceIncomplete: reason });
     await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(true);
+  });
+});
+
+describe('collections dispute hold (owner ruling 2026-09-30)', () => {
+  const held = () => CollectionHold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: true, reason: 'hold' });
+  afterEach(() => CollectionHold.dueInvoiceHeldByDisputeHold.mockResolvedValue({ held: false }));
+
+  test('an automated rail waits on an active dispute hold, gate off or on, as a non-durable denial', async () => {
+    held();
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(false);
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', detail: true })).resolves.toEqual({ allowed: false, durable: false, hold: true });
+    await expect(collectionsChannelVerdict({ ...BASE })).resolves.toMatchObject({ permitted: false, hold: true });
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1' })).resolves.toBe(false);
+    expect(ContactPolicy.evaluate).not.toHaveBeenCalled();
+  });
+
+  test('the operator "send now" exemption skips ONLY the hold wait (gate off permits; gate on still asks the policy)', async () => {
+    held();
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
+    expect(CollectionHold.dueInvoiceHeldByDisputeHold).not.toHaveBeenCalled();
+    process.env.GATE_COLLECTIONS_POLICY = 'true';
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: true, eligibleInvoiceIds: ['inv-1'], denialReasons: [] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(true);
+    expect(ContactPolicy.evaluate).toHaveBeenCalledTimes(1);
+    ContactPolicy.evaluate.mockResolvedValue({ allowed: false, eligibleInvoiceIds: [], denialReasons: ['flag_do_not_collect'] });
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'operator' })).resolves.toBe(false);
+  });
+
+  test('only "operator" exempts (any other value still waits)', async () => {
+    held();
+    await expect(collectionsChannelPermitted({ ...BASE, invoiceId: 'inv-1', holdExempt: 'customer' })).resolves.toBe(false);
+  });
+});
+
+describe('invoice-followups passes the operator exemption for "send now" only', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '../services/invoice-followups.js'), 'utf8');
+
+  test('the ladder consult forwards holdExempt "operator" only for an operator-initiated touch (automated touches wait)', () => {
+    expect(src).toMatch(/collectionsChannelPermitted\(row\.customer_id, row\.invoice_id, channel, ownLedgerIds, true, mdPending, operatorInitiated \? 'operator' : null\)/);
+    expect(src).toMatch(/\.\.\.\(holdExempt \? \{ holdExempt \} : \{\}\)/);
+    // the operator flag is set by sendNextTouchNow's caller and threads fireStep -> fireTouch
+    expect(src).toMatch(/await fireStep\(row, \{ operatorInitiated \}\)/);
+    expect(src).toMatch(/await fireTouch\(row, \{ operatorInitiated \}\)/);
   });
 });

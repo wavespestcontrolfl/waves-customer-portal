@@ -54,7 +54,10 @@ function warnShadowWithoutPolicy() {
  * cannot answer holds it too. Reads on `database` when given (savepoint on a
  * transaction).
  */
-async function disputeHoldHolds(customerId, database) {
+async function disputeHoldHolds(customerId, database, holdExempt = null) {
+  // Only a deliberate operator send (owner ruling 2026-09-30) skips the dispute-hold wait;
+  // every automated rail still waits. The policy gate's own verdict is unaffected.
+  if (holdExempt === 'operator') return false;
   if (!customerId) return false;
   const { held } = await require('./collection-hold').dueInvoiceHeldByDisputeHold(customerId, database || undefined);
   return held;
@@ -80,9 +83,10 @@ async function collectionsChannelVerdict({
   spacingExcludeKey = null,
   spacingExcludeEventKey = null,
   logTag = 'collections',
+  holdExempt = null,
   database,
 }) {
-  if (await disputeHoldHolds(customerId, database)) {
+  if (await disputeHoldHolds(customerId, database, holdExempt)) {
     logger.info(`[${logTag}] dispute hold: ${channel} for customer ${customerId} deferred until it is released`);
     return { permitted: false, eligibleInvoiceIds: [], hold: true };
   }
@@ -139,12 +143,13 @@ async function collectionsChannelPermitted({
   spacingExcludeEventKey = null,
   logTag = 'collections',
   detail = false,
+  holdExempt = null,
   database,
 }) {
   const answer = (allowed, durable = false, balanceIncomplete = false) => (detail
     ? { allowed, durable, ...(balanceIncomplete ? { balanceIncomplete } : {}) }
     : allowed);
-  if (await disputeHoldHolds(customerId, database)) {
+  if (await disputeHoldHolds(customerId, database, holdExempt)) {
     logger.info(`[${logTag}] dispute hold: ${channel} for customer ${customerId} deferred until it is released`);
     return detail ? { allowed: false, durable: false, hold: true } : false;
   }
