@@ -460,6 +460,12 @@ const SERVICE_ID_ALIASES = {
 
 // ── main API ────────────────────────────────────────────────────────
 
+// The brief's topic string (target_keyword): one fallback chain, shared by
+// the brief itself and the photo-subject confirmation that judges it.
+function briefTargetKeyword(opportunity) {
+  return opportunity?.query || opportunity?.signal_metadata?.representative_query || null;
+}
+
 class ContentBriefBuilder {
   /**
    * Compose a brief for a specific opportunity (does not claim).
@@ -543,10 +549,7 @@ class ContentBriefBuilder {
     // LLM CONFIRMS the code-found candidate (photo-subject-confirmer.js). No
     // candidate or any non-confirmation → null → no photo, as before. Never
     // throws, and makes no call for a topic that has no candidate.
-    const photoTopic = opp.query || opp.signal_metadata?.representative_query || null;
-    const photoSubject = (decision.page_type === 'supporting-blog' || decision.page_type === 'customer-question')
-      ? await confirmPhotoSubject(photoTopic)
-      : null;
+    const photoSubject = await this._confirmPhotoSubject(opp, decision);
 
     const brief = this._composeBrief({ opportunity: opp, signals, decision, existingBriefVersions, factsPack, relatedPosts, publishTargetSites, photoSubject });
     if (persist) brief.id = await this._persist(brief);
@@ -770,6 +773,15 @@ class ContentBriefBuilder {
     });
   }
 
+  // The confirmation is bound to the EXACT topic it judged: _composeBrief
+  // honors it only when that topic is the brief's own target_keyword.
+  async _confirmPhotoSubject(opp, decision) {
+    if (decision.page_type !== 'supporting-blog' && decision.page_type !== 'customer-question') return null;
+    const topic = briefTargetKeyword(opp);
+    const confirmed = await confirmPhotoSubject(topic);
+    return confirmed ? { ...confirmed, topic } : null;
+  }
+
   _composeBrief({ opportunity, signals, decision, existingBriefVersions, factsPack = null, relatedPosts = [], publishTargetSites = null, photoSubject = null }) {
     const pageType = decision.page_type;
 
@@ -928,7 +940,7 @@ class ContentBriefBuilder {
     // photo_slots computation below (voice_constraints) resolves the SAME
     // topic string as the brief's own target_keyword, never a second,
     // independently-drifting copy of this fallback chain.
-    const targetKeyword = opportunity.query || opportunity.signal_metadata?.representative_query || null;
+    const targetKeyword = briefTargetKeyword(opportunity);
 
     return {
       facts_pack: factsPack,
@@ -1099,13 +1111,13 @@ class ContentBriefBuilder {
         // stored brief shows WHY these photos are allowed. The draft-time
         // gate needs nothing more: it judges photos against photo_slots only.
         const photoSlots = (pageType === 'supporting-blog' || pageType === 'customer-question')
-          ? buildPhotoSlots(targetKeyword, { confirmedSlug: photoSubject?.slug || null })
+          ? buildPhotoSlots(targetKeyword, { confirmedSlug: photoSubject?.topic === targetKeyword ? photoSubject.slug : null })
           : null;
         const withPhotoSlots = photoSlots
           ? {
             ...withRetry,
             photo_slots: photoSlots,
-            ...(photoSubject?.slug && photoSlots.some((slot) => slot.photo)
+            ...(photoSubject?.slug && photoSubject.topic === targetKeyword && photoSlots.some((slot) => slot.photo)
               ? { photo_subject: { slug: photoSubject.slug, confirmed_by: photoSubject.confirmed_by || 'llm' } }
               : {}),
           }
