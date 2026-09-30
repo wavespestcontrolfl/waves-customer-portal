@@ -675,24 +675,31 @@ function rawReserviceOfferMatch(text) {
 // derivation can never disagree about which text is the promise.
 function affirmativeReservicePromiseClauses(text) {
   const t = String(text || '');
-  const splitters = [/[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]|\b(?:but|however|though|although|instead|whereas)\b|(?<!\bnot\s)\byet\b/i, /[.?!\n]+/];
-  // Codex round-10 (PR #5336), fail closed: EVERY granularity is consulted, not
-  // just the first one with a detector hit. A body is a non-promise only when
-  // clause, sentence AND whole-body all yield zero affirmative spans — "We
-  // can't offer a free lawn re-service, but we can send another pest visit,
-  // free of charge" has a denied hit at the clause level and an affirmative
-  // one only across the comma at the sentence level. Any affirmative span at
-  // any level is a promise, and lanes derive from the FINEST level that
-  // produced one.
-  for (const splitter of splitters) {
-    const affirmative = t.split(splitter)
-      .filter((c) => c.trim() && rawReserviceOfferMatch(c))
-      .map(affirmativeReserviceOfferText)
-      .filter(Boolean);
-    if (affirmative.length) return affirmative;
+  const clauseSplitter = /[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]|\b(?:but|however|though|although|instead|whereas)\b|(?<!\bnot\s)\byet\b/i;
+  // Codex round-11 (PR #5336): the UNION across granularities, not the finest
+  // level that has any affirmative hit — "We'll send your free pest re-service
+  // link. We can also provide a lawn visit, free of charge." has an
+  // affirmative clause hit in sentence 1 and a promise that is only visible at
+  // sentence level in sentence 2 (the offer noun and "free" straddle a
+  // comma); returning sentence 1's clause alone dropped the lawn offer. Per
+  // sentence: every affirmative clause span PLUS the sentence-level spans; the
+  // whole body is consulted only for text NO sentence matched at all. A body
+  // is a non-promise only when every level yields nothing. Lanes then derive
+  // from this whole union.
+  const sentences = t.split(/[.?!\n]+/).filter((sentence) => sentence.trim());
+  const out = [];
+  let anySentenceHit = false;
+  for (const sentence of sentences) {
+    if (!rawReserviceOfferMatch(sentence)) continue;
+    anySentenceHit = true;
+    const clauses = sentence.split(clauseSplitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
+    out.push(...[...clauses, sentence].map(affirmativeReserviceOfferText).filter(Boolean));
   }
-  const whole = affirmativeReserviceOfferText(t);
-  return whole ? [whole] : [];
+  if (!anySentenceHit) {
+    const whole = affirmativeReserviceOfferText(t);
+    if (whole) out.push(whole);
+  }
+  return out;
 }
 // The single entry point every caller below uses — never test either regex
 // alone, or a caller could drift out of sync with the other.
@@ -951,21 +958,27 @@ async function reservicePromiseStillEligible({ outgoingBody, customerId, promise
   }
   const snapshotLanes = Array.isArray(promisedLanes) ? promisedLanes.filter((l) => l === 'pest' || l === 'lawn') : [];
   const namedLanes = namedReserviceLanesInText(body);
-  if (!snapshotLanes.length && decisionMeta && !reserviceSnapshotVersionEmitted(decisionMeta.promptVersion)) {
-    // Grandfathered pre-deploy decision: named lanes must all be live-eligible;
-    // with no lane named, at least one live-eligible lane (limited to the lanes
-    // the persisted draft facts said were eligible, when they are recoverable).
-    // Codex round-10 P2: the card must ALSO carry the send_reservice_link
-    // action (from its snapshot, else the persisted draft) — a promise nothing
-    // would ever send stays blocked, exactly as validateReserviceOffer demands
-    // at draft time.
-    if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
-    let draftRow = null;
-    if (decisionMeta.intendedActions == null || decisionMeta.factsBlock === undefined) draftRow = await loadDraftRowForReservice(decisionMeta.draftId);
+  const newVersion = !!decisionMeta && reserviceSnapshotVersionEmitted(decisionMeta.promptVersion);
+  // Codex round-11 P1: a NEW-version decision ALWAYS carries the snapshot when it
+  // promises — missing means blocked, even if the (edited) body happens to name
+  // a live-eligible lane; the body never stands in for the snapshot.
+  if (newVersion && !snapshotLanes.length) return 'no promised re-service lane on record to revalidate';
+  // Every decision-backed promise (both versions, every branch below) also
+  // needs the send_reservice_link action on record: without it nothing would
+  // actually text the link (Codex round-10 P2, extended to new-version in round 11).
+  let draftRow = null;
+  if (decisionMeta) {
+    if (decisionMeta.intendedActions == null || (!newVersion && decisionMeta.factsBlock === undefined)) draftRow = await loadDraftRowForReservice(decisionMeta.draftId);
     const actions = Array.isArray(decisionMeta.intendedActions) ? decisionMeta.intendedActions : draftIntendedActions(draftRow?.intended_actions);
     if (!(actions || []).some((a) => a?.type === 'escalate' && a?.note === 'send_reservice_link')) {
       return 'no send_reservice_link action on record — nothing would actually send the re-service link';
     }
+  }
+  if (!snapshotLanes.length && decisionMeta) {
+    // Grandfathered pre-deploy decision: named lanes must all be live-eligible;
+    // with no lane named, at least one live-eligible lane (limited to the lanes
+    // the persisted draft facts said were eligible, when they are recoverable).
+    if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
     const live = await liveReserviceLanes(customerId);
     if (namedLanes.length) {
       const ineligible = namedLanes.filter((lane) => !live.includes(lane));
