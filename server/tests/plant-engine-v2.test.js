@@ -2342,6 +2342,15 @@ describe('plant-engine — real catalog', () => {
     }
   });
 
+  test('ground pearls (pest organism with a condition block) is technician-confirmed and keeps the pest hard cap (Codex #5433 r1)', () => {
+    const entry = catalog.getEntry('ground-pearls');
+    const sig = engine.signatureFor(entry);
+    expect(sig.confirmableBy).toBe('technician');
+    expect(sig.isPestPossibility).toBe(true);
+    expect(engine.isHardCapped(entry, sig)).toBe(true);
+    expect(engine.signatureFor(catalog.getEntry('sting-nematode')).isPestPossibility).toBe(false);
+  });
+
   test('a real-catalog lawn workup never shows or names a draft condition, however confident the read', () => {
     const built = engine.buildWorkup({
       subject: 'lawn',

@@ -1211,6 +1211,41 @@
         "claim": "Dig depth for sampling",
         "note": "Owner brief said 4-6 in. IN554 says ground pearls can be found up to 12 in. deep within the root zone, so tech_notes say \"root zone\" without a depth."
       }
-    ]
+    ],
+    "condition": {
+      "hosts": [
+        "turf"
+      ],
+      "signs": [],
+      "symptoms": [
+        "Irregular yellow patches that keep declining even with regular watering",
+        "Turf in the patch pulls up easily and the roots look short and thin"
+      ],
+      "required_signature": {
+        "text": "No photo confirms ground pearls. A technician digs into the root zone and finds the pearl-like cysts on the roots.",
+        "elements": [
+          "Irregular yellow patches that keep declining even with regular watering"
+        ],
+        "confirmable_by": "technician"
+      },
+      "field_tests": [],
+      "differentials": [
+        {
+          "slug": "chinch-bug",
+          "difference": "Chinch bugs are visible insects at the patch edge; ground pearls live in the soil as tiny pearl-like cysts on the roots.",
+          "next_observation": "A technician pulls a plug at the patch edge and checks the roots and soil.",
+          "photo_can_confirm": false
+        },
+        {
+          "slug": "white-grub",
+          "difference": "White grubs are fat, C-shaped grubs under lifting turf; ground pearls are tiny round cysts on thin, short roots.",
+          "next_observation": "A technician pulls a plug at the patch edge and checks the roots and soil.",
+          "photo_can_confirm": false
+        }
+      ],
+      "site_factors": [],
+      "outcome": "manageable",
+      "recovery_note": "There is no reliable chemical control; turf recovers slowly as watering and fertility reduce stress."
+    }
   }
 ]

@@ -70,7 +70,7 @@ describe('L1b catalog size (76 plant + 55 condition + 246 pest = 377 loaded, 358
     expect(plantSection).toHaveLength(76);
     expect(conditionSection).toHaveLength(55);
     expect(allEntries).toHaveLength(377);
-    expect(catalog.CATALOG_VERSION).toBe('2026-09-28.1');
+    expect(catalog.CATALOG_VERSION).toBe('2026-09-30.1');
   });
 
   test('kind <-> section consistency: plant kinds are section plant, condition kinds (+ the nematodes group) are section condition', () => {

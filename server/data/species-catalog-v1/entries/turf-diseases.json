@@ -1247,7 +1247,7 @@
     "verdict": "call",
     "role": "plant_disease",
     "risk": "low",
-    "action": "inspection",
+    "action": "specialist",
     "season_basis": "observed",
     "safety": {
       "stings": false,
@@ -1280,15 +1280,15 @@
       1
     ],
     "service": {
-      "line": "lawn",
+      "line": "none",
       "key": null,
-      "label": "Lawn Care",
+      "label": "Specialist Referral",
       "inspection_first": true,
-      "referral": null
+      "referral": "extension_office"
     },
     "urgency": "high",
     "copy": {
-      "what_it_means": "Broken yellow and light-green streaks, then dying patches, in St. Augustinegrass can suggest sugarcane mosaic virus (lethal viral necrosis). Fungicides and pesticides do not control it. A technician suspects it, photographs it and sends a sample to a lab for confirmation.",
+      "what_it_means": "Broken yellow and light-green streaks, then dying patches, in St. Augustinegrass can suggest sugarcane mosaic virus (lethal viral necrosis). No product stops the virus itself. A technician suspects it, photographs it and sends a sample to a lab for confirmation.",
       "fact": "UF/IFAS reports the most severe damage on Floratam and Provista St. Augustinegrass, and mowers moved between yards can spread it if they are not cleaned."
     },
     "tech_notes": "Suspect, photograph and send a sample to the UF/IFAS Plant Diagnostic Center for confirmation. Fungicides and pesticides do not control this virus. Sanitation matters: let mowers and tools dry or clean them before moving between properties.",
@@ -1302,7 +1302,7 @@
     ],
     "review": {
       "status": "draft",
-      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). outcome is set to manageable rather than no_cure: the catalog rule for no_cure entries forbids a lawn service line, and this is a lawn-line disease. PP313 supports the fall/winter symptom cycle and Floratam susceptibility."
+      "notes": "Draft for owner catalog review (2026-09-30 yard-rotation species set). outcome no_cure: pesticides do not control the virus (PP313), so the entry routes to a specialist referral for lab confirmation rather than the lawn line. PP313 supports the fall/winter symptom cycle and Floratam susceptibility."
     },
     "verification": [],
     "condition": {
@@ -1334,7 +1334,7 @@
       "site_factors": [
         "cool_wet"
       ],
-      "outcome": "manageable",
+      "outcome": "no_cure",
       "recovery_note": "Mild streaking often persists year-round, and some recovery is possible in spring, but there is no recovery from the virus itself."
     }
   }

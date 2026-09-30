@@ -184,7 +184,9 @@ function signatureFor(entry) {
       hosts: c.hosts,
       outcome: c.outcome,
       recoveryNote: c.recovery_note,
-      isPestPossibility: false,
+      // A pest-section organism that carries a condition block (it cannot be
+      // confirmed from a photo, e.g. ground pearls) keeps the pest hard cap.
+      isPestPossibility: catalog.sectionOf(entry) === 'pest',
     };
   }
   const differentials = entry.look_alikes.map((la) => ({
