@@ -225,7 +225,7 @@ const ALLOWLIST = [
   },
   {
     file: 'routes/estimate-public.js',
-    snippet: 'const recentPacketSend = async () => db(\'sms_log\')',
+    snippet: 'let q = db(\'sms_log\')',
     reason: 'message_type restricted to \'estimate_service_details\', disjoint from every reservation message_type (review / manual / ai_autosent) — a reservation can never match this filter.',
   },
   {

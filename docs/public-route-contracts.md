@@ -2032,7 +2032,22 @@ buttons; live by default, kill switch GATE_SERVICE_DETAILS_PDF=false —
 token format gate, generic 404, isEstimateCustomerViewable gate identical
 to `/:token/data` (drafts/expired/send_failed 404 — even for staff, so a
 draft can never produce a customer-facing document), serviceKey must be
-BOTH a known guide key and a recurring service actually on this estimate,
+BOTH a known guide key and a recurring service actually on this estimate —
+one exception: `lawn_care` is also served when the estimate's only lawn work
+is a one-time lawn row (`one_time_lawn`, `plugging`, `dethatching`,
+`top_dressing`), read from the same replayed pricing bundle `/data` sends
+(`pricingBundle.oneTimeBreakdown`, stored breakdown as fallback; malformed
+data fails closed), and that estimate gets the ONE-TIME variant of the guide
+(no visit count, re-service, or recurring-program content). An estimate with
+BOTH a recurring lawn line and a one-time lawn row serves the recurring guide
+unless the request carries the one-time card's hint (`?scope=one_time` on the
+GET, `scope: 'one_time'` in the send body; the texted link keeps it) — the
+hint only picks the variant when a one-time lawn row is present and never
+widens membership; no other guide
+widens for one-time rows, and the Bermuda-removal sections render only when
+the estimate carries the bermudaSuppression add-on with
+GATE_BERMUDA_SUPPRESSION on. The same membership rule gates
+`POST /api/estimates/:token/service-details/send`;
 60 req/min limit, `no-store`/`no-referrer` headers; the PDF contains the
 service guide plus PUBLIC product-registry fields only — active
 ingredient, EPA reg no., label/SDS links — never pricing, vendor, SKU,
@@ -2095,11 +2110,15 @@ when the SPA is built against a separate API origin via VITE_API_URL).
 Admin-only surfaces keep their direct URLs).
 `/api/estimates/:token/service-details/send` (write; emails or texts that
 same packet to the contact info ALREADY ON the estimate — the destination
-is NEVER caller-supplied (body carries only `service` + `channel`), so
+is NEVER caller-supplied (body carries only `service` + `channel`, plus
+the optional one-time lawn hint `scope: 'one_time'`, which only picks the
+lawn guide's one-time variant as described on the GET above), so
 the token cannot be used to spray documents at arbitrary addresses; same
 gate-404 + token format gate + customer-viewable + service-on-estimate
 checks as the GET, 6 req/hour limit, email sends idempotent per
-estimate+service+day, suppression-blocked addresses return 409 with no
+estimate+service+day (the lawn guide's one-time variant is its own packet:
+its idempotency key and SMS dedup claim carry a `:one_time` suffix and its
+texted link keeps `?scope=one_time`; every other guide keeps one key), suppression-blocked addresses return 409 with no
 send, generic errors — no PII in responses or logs; while
 GATE_SEND_REQUIRES_SERVER_PRICING is on, a row or group link that fails
 the engine-pricing-authority verdict (#3750) answers the same generic 404
@@ -2120,8 +2139,8 @@ hit, and the email per-day idempotency dedup all funnel through it, so a
 changed or never-delivered annual offer can never surface through a
 shortcut that skips the check — mapping a blocked verdict to the same
 generic 404, with the SMS dedup claim stamped/released exactly like the
-customer-viewable/call-side-hold case; no new request shape, no new
-payload).
+customer-viewable/call-side-hold case; the only request-shape addition
+is the optional `scope` hint above).
 `/api/estimates/:token/bond` (PUT; customer bond-term switcher on the
 estimate page — same contract family as the service-preferences toggles.
 Token IS the auth: slug-or-64-hex format gate rejects malformed probes
