@@ -366,6 +366,54 @@ describe('classifyListing', () => {
     expect(stated.detail.mismatches[0]).toMatchObject({ field: 'phone', expected: WAVES_LOCATIONS.find((l) => l.id === 'venice').phone });
   });
 
+  describe('Codex round 2', () => {
+    const ENT = (over) => ({ '@type': 'LocalBusiness', name: 'Waves Pest Control', telephone: BRAND.phone, ...over });
+    const via = (over) => classifyListing(page(`<h1>Waves Pest Control</h1>${ld(ENT(over))}`), candidatesFor({}));
+    const text = (body) => classifyListing(page(`<h1>Waves Pest Control</h1><p>${BRAND.phone}</p>${body}`), candidatesFor({}));
+
+    test('P2-1: an address ARRAY is evaluated — the entry matching the office wins, else the first is judged', () => {
+      const ours = { streetAddress: '13649 Luxe Ave #110', addressLocality: 'Bradenton', addressRegion: 'FL', postalCode: '34211' };
+      const other = { streetAddress: '99 Old Rd', addressLocality: 'Tampa', addressRegion: 'FL', postalCode: '33601' };
+      expect(via({ address: [other, ours] })).toMatchObject({ status: 'verified', detail: { address_checked: true } });
+      const none = via({ address: [other, { streetAddress: '7 Elm St', addressLocality: 'Tampa' }] });
+      expect(none.status).toBe('mismatched');
+      expect(none.detail.mismatches[0]).toMatchObject({ field: 'address', seen: '99 Old Rd, Tampa, FL 33601' });
+      expect(via({ address: [] }).status).toBe('verified'); // an empty list states nothing
+      expect(via({ address: ['13649 Luxe Ave #110 Bradenton FL 34211'] }).status).toBe('verified');
+    });
+
+    test.each([
+      ['123 Martin Luther King Jr Memorial Blvd, Tampa, FL 33602', '123 Martin Luther King Jr Memorial Blvd'],
+      ['99 Palm Terrace, Tampa, FL 33601', '99 Palm Terrace'],
+      ['Visit us at Palm Plaza Tampa Florida 33601', 'Tampa Florida 33601'],
+    ])('P2-2: a shown address we cannot recognise (%s) is unverified/address_unconfirmed, not verified', (addr, seenPart) => {
+      const r = text(`<p>${addr}</p>`);
+      expect(r.status).toBe('unverified');
+      expect(r.detail.reason).toBe('address_unconfirmed');
+      expect(r.detail.seen).toContain(seenPart);
+    });
+
+    test('P2-2: our full address among other shown addresses is still confirmed', () => {
+      const r = text(`<p>99 Palm Terrace, Tampa, FL 33601</p><p>${BRAND.address}</p>`);
+      expect(r.status).toBe('verified');
+    });
+
+    test('P2-3: HTML entities are decoded before name, phone and address are read', () => {
+      const r = classifyListing(page('', { html: `<html><head><title>Listing</title></head><body><h1>Waves&nbsp;Pest&nbsp;Control</h1><p>(941)&nbsp;318-7612</p><p>13649&nbsp;Luxe&nbsp;Ave&nbsp;#110,&nbsp;Bradenton,&nbsp;FL&nbsp;34211</p><p>&#87;aves &amp; more${filler}</p></body></html>` }), candidatesFor({}));
+      expect(r).toMatchObject({ status: 'verified', detail: { address_checked: true } });
+      expect(r.nap.nap_name).toBe('Waves Pest Control');
+      const num = classifyListing(page('', { html: `<html><body><h1>W&#97;ves P&#x65;st Control</h1><p>&#40;941&#41; 318-7612</p>${filler}</body></html>` }), candidatesFor({}));
+      expect(num.status).toBe('verified');
+    });
+
+    test('P2-4: a malformed tel: encoding does not fail the page; the other evidence is kept', () => {
+      const r = classifyListing(page('', { html: `<html><body><h1>Waves Pest Control</h1><a href="tel:%">call</a><a href="tel:%E0%A4%A">bad</a><a href="tel:%2B19413187612">ok</a>${filler}</body></html>` }), candidatesFor({}));
+      expect(r.status).toBe('verified');
+      const only = classifyListing(page('', { html: `<html><body><h1>Waves Pest Control</h1><a href="tel:%">call</a>${filler}</body></html>` }), candidatesFor({}));
+      expect(only).toMatchObject({ status: 'fetch-blocked', detail: { reason: 'phone_not_found' } });
+    });
+  });
+
   describe('visible phones are not listing evidence (Codex P2-1)', () => {
     const wavesName = '<h1>Waves Pest Control</h1>';
     test('the Waves name with an unrelated support/ad/sidebar phone and none of ours is unverified/phone_unconfirmed, never mismatched', () => {
@@ -655,9 +703,36 @@ describe('getDashboard() and updateCitation()', () => {
 
   describe('updateCitation', () => {
     let patches;
+    let stored;
     beforeEach(() => {
       patches = [];
-      db.mockImplementation(() => ({ where: () => ({ update: async (p) => { patches.push(p); } }) }));
+      stored = { id: '1', listing_url: 'https://old.example/l', location_id: 'bradenton', status: 'verified', nap_name: 'Waves Pest Control', nap_phone: '(941) 318-7612', nap_address: '13649 Luxe Ave', last_checked: '2026-09-28' };
+      db.mockImplementation(() => ({ where: () => ({ first: async () => stored, update: async (p) => { patches.push(p); } }) }));
+    });
+
+    test('a no-op save (same URL and office, normalized alike) keeps the verified evidence (Codex r2 P2-5)', async () => {
+      await auditor.updateCitation('1', { listing_url: '  https://old.example/l ', location_id: 'bradenton', priority: 'high' });
+      expect(patches).toHaveLength(1);
+      for (const k of ['status', 'status_detail', 'nap_name', 'nap_phone', 'nap_address', 'last_checked', 'nap_consistent']) expect(patches[0]).not.toHaveProperty(k);
+      stored = { ...stored, listing_url: null, location_id: '' };
+      await auditor.updateCitation('1', { listing_url: '', location_id: '' }); // null vs empty is the same "unset"
+      expect(patches[1]).not.toHaveProperty('status');
+    });
+
+    test('a real URL or office change resets the evidence; so does an explicit status', async () => {
+      await auditor.updateCitation('1', { listing_url: 'https://other.example/l' });
+      await auditor.updateCitation('1', { listing_url: 'https://old.example/l', location_id: 'venice' });
+      await auditor.updateCitation('1', { listing_url: 'https://old.example/l', status: 'unverified' });
+      for (const p of patches) expect(p).toMatchObject({ status: expect.stringMatching(/unverified/), nap_name: null, nap_phone: null, nap_address: null, last_checked: null });
+    });
+
+    test('listing URLs are parsed: https://% and hostless, non-http are rejected before persisting (Codex r2 P2-6)', async () => {
+      for (const bad of ['https://%', 'https://', 'ftp://dir.example/l', 'mailto:a@b.co', 'https://a b']) {
+        await expect(auditor.updateCitation('1', { listing_url: bad })).rejects.toMatchObject({ code: 'INVALID_CITATION_UPDATE' });
+      }
+      expect(patches).toHaveLength(0);
+      await auditor.updateCitation('1', { listing_url: 'https://dir.example/a%20b?x=1' });
+      expect(patches).toHaveLength(1);
     });
 
     test('only a human can record "missing"; verified/mismatched/fetch-blocked are refused', async () => {

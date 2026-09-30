@@ -67,6 +67,7 @@ const { etDateString } = require('../../utils/datetime-et');
 const { WAVES_LOCATIONS } = require('../../config/locations');
 const { _internals: contactFinder } = require('./contact-finder');
 const { classifyPageBody } = require('./page-body-classifier');
+const { decodeHTML } = require('entities');
 const { visibleText } = require('../content/content-registry-live-status');
 
 const STATES = ['unverified', 'verified', 'mismatched', 'fetch-blocked', 'missing'];
@@ -75,6 +76,13 @@ const MIN_VISIBLE_CHARS = 200; // below this the body is a JS shell / empty page
 const MAX_REDIRECTS = 4;
 const FETCH_TIMEOUT_MS = 12000;
 
+// http(s) with a real host; a malformed URL (https://%) is rejected, not persisted.
+function isHttpUrl(value) {
+  try {
+    const u = new URL(value);
+    return (u.protocol === 'http:' || u.protocol === 'https:') && Boolean(u.hostname);
+  } catch { return false; }
+}
 const invalid = (message) => Object.assign(new Error(message), { code: 'INVALID_CITATION_UPDATE' });
 const phoneKey = (s) => { const d = String(s || '').replace(/\D/g, ''); return d.length === 11 && d[0] === '1' ? d.slice(1) : d; };
 const alnum = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
@@ -191,7 +199,7 @@ function wavesEntity(html, candidates = []) {
   const mine = jsonLdNodes(html).filter(isWavesNode);
   const score = (node) => {
     const phones = [].concat(node.telephone ?? []).map(phoneKey);
-    const addr = node.address ? addressStrings(node.address).parsed : null;
+    const addr = node.address ? (addressStrings(node.address, candidates) || {}).parsed || null : null;
     const best = candidates.reduce((max, c) => Math.max(max,
       (phones.includes(c.phoneKey) ? 100 : 0) + (addr && addr.street === c.street ? 10 : 0) + (addr && addr.city && c.cities.includes(addr.city) ? 1 : 0)), 0);
     return best + (node.address ? 0.5 : 0);
@@ -199,9 +207,23 @@ function wavesEntity(html, candidates = []) {
   return mine.reduce((top, n) => (top === null || score(n) > score(top) ? n : top), null);
 }
 
+// An `address` given as an array lists several: judge the entry matching the expected office(s)
+// (street, then city — the node-selection scoring), else the first.
+function pickAddress(entries, candidates) {
+  let best = null;
+  let bestScore = -1;
+  for (const entry of entries) {
+    const parsed = addressStrings(entry).parsed;
+    const score = candidates.reduce((max, c) => Math.max(max, (parsed.street === c.street ? 10 : 0) + (parsed.city && c.cities.includes(parsed.city) ? 1 : 0)), 0);
+    if (score > bestScore) { best = entry; bestScore = score; }
+  }
+  return best;
+}
+
 // A JSON-LD address (object or string) as { parsed, raw, display }: `parsed` is normalized for
 // comparison (postal = first 5 digits); `raw` and `display` are the values AS GIVEN.
-function addressStrings(address) {
+function addressStrings(address, candidates = []) {
+  if (Array.isArray(address)) address = pickAddress(address.filter(Boolean), candidates);
   if (!address) return null;
   if (typeof address === 'string') {
     const parsed = parseAddress(address);
@@ -226,16 +248,23 @@ function statedText(v) {
   return typeof one === 'object' ? JSON.stringify(one) : String(one).trim();
 }
 
+const decodeHtmlText = (str) => decodeHTML(String(str || '')).replace(/[\u00a0\u2007\u202f]/g, ' ').replace(/\s+/g, ' ').trim();
+// A malformed percent-encoding (href="tel:%") must not fail the whole page: fall back to the raw value.
+function safeDecodeURI(value) {
+  try { return decodeURIComponent(value); } catch { return String(value); }
+}
+
 // What the page says. `entity` is the Waves JSON-LD entity's own stated fields (null when the
 // page has none); `textPhones` is every phone in the visible text and tel: links.
 function extractNap(html, candidates = []) {
-  const text = visibleText(html);
+  // Entities (&nbsp;, &amp;, numeric) are decoded before name, phone and address are read.
+  const text = decodeHtmlText(visibleText(html));
   const textPhones = new Set();
   for (const m of text.matchAll(PHONE_RE)) if (phoneKey(m[0]).length === 10) textPhones.add(phoneKey(m[0]));
   for (const m of String(html).matchAll(/href\s*=\s*["']tel:([^"']+)["']/gi)) {
-    const k = phoneKey(decodeURIComponent(m[1])); if (k.length === 10) textPhones.add(k);
+    const k = phoneKey(safeDecodeURI(m[1])); if (k.length === 10) textPhones.add(k);
   }
-  const title = (String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '';
+  const title = decodeHtmlText((String(html).match(/<title[^>]*>([\s\S]*?)<\/title>/i) || [])[1] || '');
   const node = wavesEntity(html, candidates);
   // "Stated" is tracked apart from "parsed": a field the entity gives but we cannot read is a
   // stated field that fails, never an unstated one that page text may fill in.
@@ -244,13 +273,15 @@ function extractNap(html, candidates = []) {
     name: statedText(node.name),
     rawPhones,
     phones: rawPhones.map(phoneKey).filter((k) => k.length === 10),
-    address: addressStrings(node.address),
+    address: addressStrings(node.address, candidates),
   };
   return { text, textPhones: [...textPhones], title: title.replace(/\s+/g, ' ').trim(), entity };
 }
 
 // Street-address-like strings in visible text: number + street name + a common suffix.
 const STREET_SUFFIX = 'St|Street|Ave|Avenue|Rd|Road|Blvd|Boulevard|Dr|Drive|Ln|Lane|Ct|Court|Cir|Circle|Pl|Place|Way|Trl|Trail|Hwy|Highway|Pkwy|Parkway';
+// Any Florida state + ZIP on the page means an address is shown, whatever its street looks like.
+const FL_ZIP_RE = /\b(?:FL|Florida)\.?,?\s+\d{5}(?:-\d{4})?\b/gi;
 const ADDRESS_LIKE_RE = new RegExp(`(?<![\\w-])\\d{1,6}\\s+(?:[A-Za-z0-9.'-]+\\s+){1,4}?(?:${STREET_SUFFIX})\\b\\.?(?:\\s+(?:North|South|East|West|N|S|E|W)\\b\\.?)?`, 'gi');
 
 // Address, conservative: a false "unverified" is fine, a false "verified" is not.
@@ -281,7 +312,10 @@ function judgeAddress(nap, office) {
     const ours = seen.find((m) => normalizeStreet(m) === office.street) || seen[0] || null;
     return { confirmed: true, checked: true, mismatches: [], unconfirmed: null, observed: ours };
   }
-  const first = seen[0] ? seen[0].trim() : null;
+  // An address is shown when a street-like string OR any Florida "state ZIP" is on the page; the
+  // latter catches streets we cannot recognise (long names, "Terrace", ...). Not ours -> unconfirmed.
+  const fl = new RegExp(FL_ZIP_RE.source, 'i').exec(nap.text);
+  const first = seen[0] ? seen[0].trim() : (fl ? nap.text.slice(Math.max(0, fl.index - 60), fl.index + fl[0].length).trim() : null);
   return { confirmed: false, checked: false, mismatches: [], unconfirmed: first, observed: (a && a.display) || first };
 }
 
@@ -448,13 +482,19 @@ class CitationAuditor {
     const patch = {};
     for (const k of ['listing_url', 'location_id', 'priority']) if (k in updates) patch[k] = String(updates[k] ?? '').trim() || null;
     if (patch.location_id && !WAVES_LOCATIONS.some((l) => l.id === patch.location_id)) throw invalid(`Unknown location_id: ${patch.location_id}`);
-    if (patch.listing_url && !/^https?:\/\/\S+$/i.test(patch.listing_url)) throw invalid('listing_url must be an http(s) URL');
+    if (patch.listing_url && !isHttpUrl(patch.listing_url)) throw invalid('listing_url must be an http(s) URL');
     if ('priority' in patch && !['high', 'medium', 'low'].includes(patch.priority)) throw invalid('priority must be high, medium or low');
     if (updates.status !== undefined) {
       if (!['missing', 'unverified'].includes(updates.status)) throw invalid("status can only be set to 'missing' or 'unverified'; the audit sets the rest");
       patch.status = updates.status;
     } else if ('listing_url' in patch || 'location_id' in patch) {
-      patch.status = 'unverified';
+      // A save that changes neither the URL nor the office (same values, normalized alike)
+      // is a no-op and must not wipe the audit evidence.
+      const stored = await db('seo_citations').where('id', citationId).first();
+      if (!stored) return;
+      const norm = (v) => String(v ?? '').trim() || null;
+      const changed = ['listing_url', 'location_id'].some((k) => k in patch && patch[k] !== norm(stored[k]));
+      if (changed) patch.status = 'unverified';
     }
     // A reset drops every piece of stale audit evidence, not just the verdict.
     if (patch.status) Object.assign(patch, { status_detail: null, nap_consistent: null, nap_name: null, nap_phone: null, nap_address: null, last_checked: null });
