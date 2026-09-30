@@ -4367,7 +4367,7 @@ function initScheduledJobs() {
                   customerId: reserviceDecision?.customer_id || msg.customer_id || null,
                   promisedLanes: reserviceSnapshot?.reservice_lanes_snapshot || null,
                   // Codex round-9 (PR #5336): same pre-deploy grandfathering as the immediate send path.
-                  decisionMeta: { promptVersion: reserviceDecision?.prompt_version, draftId: reserviceSnapshot?.draft_id || null },
+                  decisionMeta: { promptVersion: reserviceDecision?.prompt_version, draftId: reserviceSnapshot?.draft_id || null, intendedActions: Array.isArray(reserviceSnapshot?.intended_actions) ? reserviceSnapshot.intended_actions : null },
                 });
                 if (reason) {
                   reserviceStale = true;

@@ -2376,36 +2376,162 @@ describe('free re-service is an entitlement resolved through the existing mechan
       })).resolves.toBeNull();
     });
 
+    // Codex round-10 (PR #5336).
+    test.each([
+      ['A free visit to treat your lawn.', ['lawn']],
+      ["We'll send a technician back for a complimentary visit to take care of the ants.", ['pest']],
+      ['Free inspection of your lawn is on us.', ['lawn']],
+    ])('%s → purpose clause / inspection names the lane %j', (reply, expected) => {
+      const { isReserviceOfferPromise, namedReserviceLanesInText } = require('../services/sms-shadow-drafter');
+      expect(isReserviceOfferPromise(reply)).toBe(true);
+      expect(namedReserviceLanesInText(reply)).toEqual(expected);
+    });
+
+    test('a pest-eligible customer is NOT waved through "a free visit to treat your lawn" at send time (lane lawn, not the pest snapshot)', async () => {
+      await expect(loadWith({ lanes: ['pest'] }).drafter.reservicePromiseStillEligible({ outgoingBody: 'A free visit to treat your lawn.', customerId: 'cust-1', promisedLanes: ['pest'] })).resolves.toMatch(/no longer eligible for a free lawn re-service/);
+    });
+
+    test('a denied hit at the clause level never hides an affirmative offer at a coarser level', () => {
+      const { isReserviceOfferPromise, namedReserviceLanesInText } = require('../services/sms-shadow-drafter');
+      const reply = "We can't offer a free lawn re-service, but we can send another pest visit, free of charge.";
+      expect(isReserviceOfferPromise(reply)).toBe(true);
+      expect(namedReserviceLanesInText(reply)).toEqual(['pest']);
+    });
+
+    test('"free inspection" is a guarded technician-visit offer (draft + send time)', async () => {
+      const { validateReserviceOffer, reserviceFactLine } = require('../services/sms-shadow-drafter');
+      const reply = "We'll do a free pest inspection this week.";
+      expect(validateReserviceOffer({ reply, factsBlock: `X\n${reserviceFactLine([])}\nBILLING:`, intendedActions: [{ type: 'escalate', note: 'send_reservice_link' }] }).ok).toBe(false);
+      await expect(loadWith({ lanes: [] }).drafter.reservicePromiseStillEligible({ outgoingBody: reply, customerId: 'cust-1', promisedLanes: null })).resolves.toMatch(/no longer eligible for a free pest re-service/);
+    });
+
+    // Self-audit table (Codex round-10, PR #5336): adversarial promises (punctuation,
+    // conjunctions, purpose clauses, new nouns, plurals, waive/comp wording), denials
+    // and idioms. [sentence, isPromise, promisedLanes].
+    const ADVERSARIAL = [
+
+  ["We can't offer a free lawn re-service, but we can send another pest visit, free of charge.", true, ['pest']],
+  ["A free visit to treat your lawn.", true, ['lawn']],
+  ["We'll send a technician back for a complimentary visit to take care of the ants.", true, ['pest']],
+  ["Free inspection of your lawn is on us.", true, ['lawn']],
+  ["We'll do a free pest inspection this week.", true, ['pest']],
+  ["A complimentary assessment visit for your lawn.", true, ['lawn']],
+  ["We can come back and look at it for free.", true, []],
+  ["No charge - we'll come back out for the pests.", true, ['pest']],
+  ["No charge (we'll come back out to spray the lawn).", true, ['lawn']],
+  ["Your free re-service is covered; the link is coming.", true, []],
+  ["FREE RE-SERVICE: we will send the link now!", true, []],
+  ["We will re-treat your lawn at no cost to you.", true, ['lawn']],
+  ["Your callback visit for the roaches is on the house.", true, ['pest']],
+  ["Good news!! Free re-service for your lawn AND pests.", true, ['pest', 'lawn']],
+  ["We can't offer a refund; however a free pest re-service is yours.", true, ['pest']],
+  ["I can't promise a date but the re-service is free.", true, []],
+  ["Sorry about that. It's free of charge, we'll send a tech back out to re-spray.", true, []],
+  ["We won't charge you for the follow-up treatment on the lawn.", true, ['lawn']],
+  ["The revisit is included in your plan.", true, []],
+  ["Your re-service is complimentary, and we'll text the link.", true, []],
+  ["Can't wait to help - your free pest re-service link is on the way.", true, ['pest']],
+  ["We are unable to offer a free lawn re-service, but a complimentary pest re-service is available.", true, ['pest']],
+  ["Nope, not a problem: the return trip is free.", true, []],
+  ["We'll send a tech out again at no charge to treat your lawn.", true, ['lawn']],
+  ["Complimentary follow-up: we'll re-spray for the ants.", true, ['pest']],
+  ["There's no charge for us to come back out.", true, []],
+  ["We'll gladly re-service the lawn for free.", true, ['lawn']],
+  ["Don't worry, this one's on the house - a pest re-service.", true, ['pest']],
+  ["We're happy to come back out for free. We can't do it this week though.", true, []],
+  ["Free re-service? Yes!", true, []],
+  ["We'll waive the charge for the return visit.", true, []],
+  ["We will not bill you for the follow-up visit.", true, []],
+  ["The re-service will cost you nothing.", true, []],
+  ["We'll re-treat the yard for the ants without charge.", true, ['pest']],
+  ["We don't do free re-services, sorry.", false, []],
+  ["Free re-service isn't something we can do for you.", false, []],
+  ["No free re-service this time, sorry.", false, []],
+  ["That would not be free, unfortunately: the re-service is billable.", false, []],
+  ["We don't give free visits after the warranty period.", false, []],
+  ["Feel free to text us any questions about your visit.", false, []],
+  ["A pest-free home is our goal when we visit.", false, []],
+  ["Waiting on us to schedule the visit? We are on it.", false, []],
+  ["It's on us to get the visit on the calendar.", false, []],
+  ["We'd love to come back sometime, no pressure.", false, []],
+  ["Our free-of-charge estimate is available online.", false, []],
+  ["We offer free visits after every treatment.", true, []],
+  ["Sorry, we cannot offer free re-services.", false, []],
+  ["Free lawn re-service isn't available, but pest visits are complimentary.", true, ['pest']],
+  ["Not free: the visit costs $50, but the inspection is free.", true, []],
+  ["No charge, no problem - I'll have someone come back out.", true, []],
+  ["Your lawn re-service: free. Pest re-service: not eligible.", true, ['lawn']],
+  ["Re-service: not free.", false, []],
+  ["We can't do a free re-service, but we'd be happy to book a paid visit.", false, []],
+  ["A free lawn re-service is not something we can offer.", false, []],
+  ["Free? No. We charge for re-services after 30 days.", false, []],
+  ["Don't worry, we'll make it right at no cost to you and send someone back out to treat the ants.", true, ['pest']],
+  ["It is free. The re-service link is coming.", true, []],
+  ["We can't offer a free lawn re-service.", false, []],
+  ["You're not eligible for a free re-service right now.", false, []],
+  ["Unfortunately that isn't covered - the re-service is not free.", false, []],
+  ["We cannot offer a complimentary visit or a free re-service.", false, []],
+  ["Sorry, your plan doesn't include a free lawn re-service.", false, []],
+  ["A free inspection isn't included in your plan.", false, []],
+  ["There is no longer a free re-service available on your account.", false, []],
+  ["Feel free to call us if the ants come back.", false, []],
+  ["You're free to reschedule your visit any time.", false, []],
+  ["Your balance is $95, due at the next visit.", false, []],
+  ["We offer a free estimate for new customers.", false, []],
+  ["Feel free to visit our website or come back to the estimate link.", false, []],
+  ["Thanks for the review, we hope to visit again soon.", false, []],
+  ["Your annual plan includes two treatments this year.", false, []],
+  ["You can count on us to come back and take care of it.", false, []],
+  ["Is the gate free of dogs on the day of the visit?", false, []],
+  ["We'll inspect the property on Tuesday between 9 and 11.", false, []],
+  ["Your invoice is covered - here is the payment link.", false, []],
+    ];
+    test.each(ADVERSARIAL)('adversarial: %s → promise=%s lanes=%j', (sentence, isPromise, lanes) => {
+      const { isReserviceOfferPromise, namedReserviceLanesInText } = require('../services/sms-shadow-drafter');
+      expect(isReserviceOfferPromise(sentence)).toBe(isPromise);
+      if (isPromise) expect(namedReserviceLanesInText(sentence)).toEqual(lanes);
+    });
+
     // Codex round-9 (PR #5336) P2 #3: pending cards created BEFORE the deploy carry
     // no reservice_lanes_snapshot. Grandfather them on live eligibility; a
     // NEW-version decision missing its snapshot stays fail-closed.
     describe('pre-deploy decisions (no snapshot) are grandfathered on live eligibility', () => {
       const body = "Good news — we'll send your free re-service link now.";
-      const predeploy = { id: 'd1', customer_id: 'cust-1', suggested_message: body, input_snapshot: JSON.stringify({ draft_id: null }), prompt_version: 'house_voice_v12_real_answers' };
+      const sendLinkAction = [{ type: 'escalate', note: 'send_reservice_link' }];
+      const predeploy = { id: 'd1', customer_id: 'cust-1', suggested_message: body, input_snapshot: JSON.stringify({ draft_id: null, intended_actions: sendLinkAction }), prompt_version: 'house_voice_v12_real_answers' };
       const newVersion = { ...predeploy, prompt_version: 'house_voice_v12_real_answers2' };
 
       test('pre-deploy + live-eligible → sends; pre-deploy + ineligible → blocked (both send entry points)', async () => {
         const { drafter } = loadWith({ lanes: ['pest'] });
-        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null } })).resolves.toBeNull();
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', draftId: null, intendedActions: sendLinkAction } })).resolves.toBeNull();
         const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
         await expect(agentDecisionSendBlockReason({ decision: predeploy, outgoingBody: body })).resolves.toBeNull();
         const ineligible = loadWith({ lanes: [] });
-        await expect(ineligible.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v11', draftId: null } })).resolves.toMatch(/no longer eligible/);
+        await expect(ineligible.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v11', draftId: null, intendedActions: sendLinkAction } })).resolves.toMatch(/no longer eligible/);
         const { agentDecisionSendBlockReason: blockAgain } = require('../services/agent-decision-send-checks');
         await expect(blockAgain({ decision: predeploy, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable/);
       });
 
       test('a named lane must itself be live-eligible for a pre-deploy decision', async () => {
         const { drafter } = loadWith({ lanes: ['pest'] });
-        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: 'We can send your free lawn re-service link now.', customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: null, draftId: null } })).resolves.toMatch(/no longer eligible for a free lawn re-service/);
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: 'We can send your free lawn re-service link now.', customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: null, draftId: null, intendedActions: sendLinkAction } })).resolves.toMatch(/no longer eligible for a free lawn re-service/);
       });
 
       test('recovered draft facts limit which live lane counts when no lane is named', async () => {
         const factsPest = `X\n${require('../services/sms-shadow-drafter').reserviceFactLine(['pest'])}\nBILLING:`;
         const { drafter } = loadWith({ lanes: ['lawn'] }); // only lawn live; the draft facts said pest
-        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', factsBlock: factsPest } })).resolves.toMatch(/no longer eligible/);
+        await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', factsBlock: factsPest, intendedActions: sendLinkAction } })).resolves.toMatch(/no longer eligible/);
         const ok = loadWith({ lanes: ['pest'] });
-        await expect(ok.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', factsBlock: factsPest } })).resolves.toBeNull();
+        await expect(ok.drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', factsBlock: factsPest, intendedActions: sendLinkAction } })).resolves.toBeNull();
+      });
+
+      test('a pre-deploy decision WITHOUT a send_reservice_link action stays blocked, even for an eligible customer (Codex round-10 P2)', async () => {
+        const { drafter } = loadWith({ lanes: ['pest'] });
+        for (const intendedActions of [[], [{ type: 'escalate' }], [{ type: 'book_appointment' }]]) {
+          await expect(drafter.reservicePromiseStillEligible({ outgoingBody: body, customerId: 'cust-1', promisedLanes: null, decisionMeta: { promptVersion: 'house_voice_v12_real_answers', factsBlock: null, intendedActions } })).resolves.toMatch(/no send_reservice_link action on record/);
+        }
+        const { agentDecisionSendBlockReason } = require('../services/agent-decision-send-checks');
+        await expect(agentDecisionSendBlockReason({ decision: { ...predeploy, input_snapshot: JSON.stringify({ draft_id: null }) }, outgoingBody: body })).resolves.toMatch(/re-service promise unsendable \(no send_reservice_link action/);
       });
 
       test('a NEW-version decision missing its snapshot stays fail-closed, even for an eligible customer', async () => {

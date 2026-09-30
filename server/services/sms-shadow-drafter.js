@@ -532,8 +532,9 @@ const RESERVICE_SPECIFIC_NOUN_SOURCE = `re-?service|re-?treat(?:ment)?|re-?spray
 // prompt only ever offers a free RE-SERVICE): a free ESTIMATE / quote /
 // consultation is a different, unrestricted thing and is deliberately NOT a
 // re-service promise, so "free estimate" stays out; "free inspection" is a
-// technician visit, so it stays in.
-const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|visit|trip|treatment|service|callback|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))`;
+// technician visit, so it stays in (Codex round-10 P2: inspection / inspect /
+// assessment / look at / check-up are guarded nouns, not just mentioned here).
+const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|visit|trip|treatment|service|callback|come\\s+back|go\\s+back|return\\s+(?:out|to\\s+(?:your|the)\\s+(?:home|house|property))|inspections?|inspect|assessments?|look\\s+(?:at|over)|check-?up|tech(?:nician)?\\s+(?:out|back)|(?:send|sending)\\s+(?:a\\s+|another\\s+)?(?:tech(?:nician)?|someone|somebody)`;
 // "free" as a price word, not an idiom: excluded when "free" is followed by
 // "to <verb>" / "from ..." / "of ..." (except "free of charge"), so "feel
 // free to call", "you are / you're free to return", "free of pests" never
@@ -543,16 +544,19 @@ const FREE_OFFER_NOUN_SOURCE = `${RESERVICE_SPECIFIC_NOUN_SOURCE}|visit|trip|tre
 // estimate/quote/consultation" is not a re-service promise. The other
 // alternatives are the explicit no-charge wordings, including "won't charge
 // you for ..." and "on us" (but not "count/rely on us").
-const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)\\bfree\\b(?!\\s+(?:to|from)\\b)(?!\\s+of\\b(?!\\s+charge\\b))(?!\\s+(?:estimates?|quotes?|consultations?)\\b)"
-  + "|complimentary|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)|at no (?:additional )?(?:charge|cost)"
-  + "|(?<!\\b(?:count|rely|depend|counting|relying|depending)\\s)on us|on the house"
-  + "|(?:won['’]?t|will\\s+not|don['’]?t|do\\s+not)\\s+charge(?:\\s+you)?)";
+const FREE_OFFER_WORD_SOURCE = "(?:(?<!\\bfeel\\s+)(?<!-)\\bfree\\b(?!\\s+(?:to|from)\\b)(?!\\s+of\\b(?!\\s+charge\\b))(?!\\s+(?:estimates?|quotes?|consultations?)\\b)"
+  + "|complimentary|gratis|\\bcomp(?:ed)?\\b|no[- ](?:extra[- ]|additional[- ])?(?:charge|cost|fee)|at no (?:additional )?(?:charge|cost)"
+  + "|without\\s+(?:any\\s+)?(?:charge|cost|fee)|nothing\\s+extra|cost\\s+(?:you\\s+)?nothing"
+  + "|waiv(?:e|ed|ing)\\s+(?:the\\s+|any\\s+)?(?:charge|cost|fee)s?"
+  + "|(?<!\\b(?:count|rely|depend|counting|relying|depending|wait|waiting)\\s)on us(?!\\s+to\\b)|on the house"
+  + "|(?:won['’]?t|will\\s+not|don['’]?t|do\\s+not)\\s+(?:charge|bill)(?:\\s+you)?|(?:won['’]?t|will\\s+not)\\s+(?:cost|be\\s+(?:charged|billed))"
+  + ")";
 // Deterministic backstop: a reply that offers a free visit while the facts
 // do not say eligible is a violation, fed into the same revise/verify loop
 // (and enforced in single-pass mode, where no verifier would catch it).
 const FREE_RESERVICE_OFFER_RE = new RegExp(
-  `${FREE_OFFER_WORD_SOURCE}[^.?!\\n]{0,60}\\b(?:${FREE_OFFER_NOUN_SOURCE})\\b`
-  + `|\\b(?:${FREE_OFFER_NOUN_SOURCE})\\b[^.?!\\n]{0,60}${FREE_OFFER_WORD_SOURCE}`,
+  `${FREE_OFFER_WORD_SOURCE}[^.?!\\n]{0,60}\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b`
+  + `|\\b(?:${FREE_OFFER_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]{0,60}${FREE_OFFER_WORD_SOURCE}`,
   'i',
 );
 // Codex round-2 finding: a promise can cover a re-service WITHOUT ever
@@ -564,8 +568,8 @@ const FREE_RESERVICE_OFFER_RE = new RegExp(
 // link/covered/no charge/no cost/free/complimentary/on us/on the
 // house/included, in either order.
 const RESERVICE_COVERAGE_RE = new RegExp(
-  `\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b[^.?!\\n]{0,60}\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b`
-  + `|\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b[^.?!\\n]{0,60}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})\\b`,
+  `\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})(?:e?s)?\\b[^.?!\\n]{0,60}\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b`
+  + `|\\b(?:link|covered|no[- ]charge|no[- ]cost|at no (?:charge|cost)|free|complimentary|on us|on the house|included)\\b[^.?!\\n]{0,60}\\b(?:${RESERVICE_SPECIFIC_NOUN_SOURCE})(?:e?s)?\\b`,
   'i',
 );
 // PR #5336 pre-push audit P1: an eligibility DENIAL names the same words as
@@ -587,10 +591,16 @@ const RESERVICE_DENIAL_RE = new RegExp(
   // Codex round-8 P2: a negator directly on the PRICE WORD is a denial too ("This
   // re-service is not free", "isn't complimentary", "not at no charge"); the
   // negation INSIDE a price word ("won't charge you", "no charge") is not.
-  + "|(?:not|isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+|actually\\s+|always\\s+)?(?:free|complimentary|at\\s+no\\s+(?:additional\\s+)?(?:charge|cost))\\b"
+  + "|(?:not|isn['’]?t|aren['’]?t|wasn['’]?t|wouldn['’]?t|won['’]?t)\\s+(?:be\\s+)?(?:currently\\s+|actually\\s+|always\\s+)?(?:a\\s+)?(?:free|complimentary|at\\s+no\\s+(?:additional\\s+)?(?:charge|cost))\\b"
+  + "|(?:don['’]?t|do\\s+not|doesn['’]?t|does\\s+not)\\s+(?:do|give|extend|perform|make)\\b"
+  + "|(?:isn['’]?t|is\\s+not|aren['’]?t)\\s+(?:something|an\\s+option|possible|allowed)\\b"
   + "|(?:isn['’]?t|aren['’]?t|wasn['’]?t)\\s+(?:currently\\s+)?(?:covered|included|eligible)"
   + "|(?:can['’]?t|cannot|can\\s+not|won['’]?t\\s+be\\s+able\\s+to|will\\s+not\\s+be\\s+able\\s+to|unable\\s+to|not\\s+able\\s+to)\\s+(?:to\\s+)?(?:offer|send|schedule|provide|book|give|do|arrange)"
   + '|no\\s+longer\\s+(?:eligible|qualif(?:y|ies|ied)|covered|included)'
+  // Availability denials ("no free re-service available", "no longer available", "isn't offered").
+  + "|no\\s+longer\\s+(?:available|offered|(?:an?\\s+|any\\s+)?(?:free|complimentary|no[- ]charge))"
+  + "|no\\s+(?:free|complimentary)\\b"
+  + "|(?:not|isn['’]?t|aren['’]?t)\\s+(?:currently\\s+)?(?:available|offered)|unavailable"
   + "|(?:doesn['’]?t|does\\s+not|don['’]?t|do\\s+not)\\s+(?:currently\\s+)?(?:include|cover|qualify|offer|provide|come\\s+with)"
   + ')',
   'i',
@@ -656,19 +666,30 @@ function rawReserviceOfferMatch(text) {
 // Contrastive conjunctions (but, however, though, although, yet, instead,
 // whereas) are clause breaks too, so each side of "we can't offer a refund
 // but we can provide a free re-service" is judged alone. The first
-// granularity that finds any detector hit decides: hits that are all
-// denials mean NO promise ("You are not eligible for a free re-service"),
-// while a denial clause beside a separate affirmative promise clause
-// ("...not eligible for a free re-service, but your free lawn re-service is
-// covered") leaves the promise. Codex round-7 (PR #5336) used the clause split
+// granularity that finds an affirmative span decides (finest first); hits
+// that are all denials at EVERY granularity mean NO promise ("You are not
+// eligible for a free re-service"), while a denial clause beside a separate
+// affirmative promise clause ("...not eligible for a free re-service, but your
+// free lawn re-service is covered") leaves the promise. Codex round-7 (PR #5336) used the clause split
 // for lane scoping; this is the same split, shared, so detection and lane
 // derivation can never disagree about which text is the promise.
 function affirmativeReservicePromiseClauses(text) {
   const t = String(text || '');
   const splitters = [/[.?!\n]+|[,;:]|\s[-–—]+\s|[–—]|\b(?:but|however|though|although|instead|whereas)\b|(?<!\bnot\s)\byet\b/i, /[.?!\n]+/];
+  // Codex round-10 (PR #5336), fail closed: EVERY granularity is consulted, not
+  // just the first one with a detector hit. A body is a non-promise only when
+  // clause, sentence AND whole-body all yield zero affirmative spans — "We
+  // can't offer a free lawn re-service, but we can send another pest visit,
+  // free of charge" has a denied hit at the clause level and an affirmative
+  // one only across the comma at the sentence level. Any affirmative span at
+  // any level is a promise, and lanes derive from the FINEST level that
+  // produced one.
   for (const splitter of splitters) {
-    const hits = t.split(splitter).filter((c) => c.trim() && rawReserviceOfferMatch(c));
-    if (hits.length) return hits.map(affirmativeReserviceOfferText).filter(Boolean);
+    const affirmative = t.split(splitter)
+      .filter((c) => c.trim() && rawReserviceOfferMatch(c))
+      .map(affirmativeReserviceOfferText)
+      .filter(Boolean);
+    if (affirmative.length) return affirmative;
   }
   const whole = affirmativeReserviceOfferText(t);
   return whole ? [whole] : [];
@@ -719,7 +740,9 @@ function reservicePromiseClauses(text) {
 // excluded-specialty check). Pest words are reservice-scheduler's own
 // (RESERVICE_LANE_WORD_PATTERNS, species included); the lawn words are its
 // lawn SERVICE words minus the location words.
-const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|revisit|callback|follow-?up|treatment|visit|service|application|trip';
+const RESERVICE_OFFER_NOUN_FOR_LANE = 're-?service|re-?treat(?:ment)?|re-?spray|revisit|callback|follow-?up|treatment|visit|service|application|trip|inspections?|assessments?|check-?up|come\\s+back(?:\\s+out)?|go\\s+back(?:\\s+out)?|come\\s+out';
+// Codex round-10 P2: purpose clauses attach a lane to the offer too — "a free visit to treat your lawn".
+const RESERVICE_PURPOSE_VERB = 'treat|re-?treat|handle|take\\s+care\\s+of|spray|service|address|deal\\s+with|control|fix|inspect|check(?:\\s+on)?|look\\s+(?:at|over)|assess|get\\s+rid\\s+of|kill';
 const RESERVICE_LAWN_SERVICE_WORDS = 'lawn|turf|weeds?|fert|fertili[sz]er|fertili[sz]ation|mow(?:ing)?|sod';
 let reservicePromiseLaneRes = null;
 function promiseLaneRegexes() {
@@ -737,9 +760,13 @@ function promiseLaneRegexes() {
     const w = `(?:${any}${conj})?${words[lane]}(?:${conj}${any})?`;
     return [lane, new RegExp(
       // "<lane> [control|care] <offer noun>" — "pest re-service", "weed-treatment re-service"
-      `\\b${w}[\\s-]+(?:(?:control|care)[\\s-]+)?(?:${RESERVICE_OFFER_NOUN_FOR_LANE})\\b`
-      // "<offer noun> [link] for (your) <lane>" — "re-service for your lawn"
-      + `|\\b(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:\\s+link)?\\s+for\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`,
+      `\\b${w}[\\s-]+(?:(?:control|care)[\\s-]+)?(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?\\b`
+      // "<offer noun> [link] for|to <treat/handle/…> (your) <lane>" — "re-service for your lawn", "visit to treat your lawn"
+      + `|\\b(?:${RESERVICE_OFFER_NOUN_FOR_LANE})(?:e?s)?(?:\\s+link)?(?:\\s+(?:your|my|our|the)\\s+[a-z-]+)?\\s+(?:for|of|on|to\\s+(?:${RESERVICE_PURPOSE_VERB}))\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`
+      // "to <verb> (your) <lane>" anywhere in the promise — "at no charge to treat your lawn"
+      + `|\\bto\\s+(?:${RESERVICE_PURPOSE_VERB})\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`
+      // "<verb> (your) <lane>" — "we will re-treat your lawn", "re-spray the lawn"
+      + `|\\b(?:re-?treat|re-?spray|re-?service|revisit|treat|spray|service|handle|take\\s+care\\s+of)\\s+(?:(?:your|my|our|the|his|her)\\s+)?${w}\\b`,
       'i',
     )];
   });
@@ -893,17 +920,24 @@ function reserviceSnapshotVersionEmitted(promptVersion) {
   const major = Number(m[1]);
   return major > 12 || (major === 12 && Number(m[2] || 0) >= 2);
 }
-async function loadDraftFactsBlock(draftId) {
+async function loadDraftRowForReservice(draftId) {
   if (!draftId) return null;
   try {
-    const row = await db('message_drafts').where({ id: draftId }).first('facts_block');
-    return row?.facts_block || null;
+    return (await db('message_drafts').where({ id: draftId }).first('facts_block', 'intended_actions')) || null;
   } catch (err) {
-    logger.warn(`[sms-shadow] draft facts lookup failed for re-service grandfathering (${err.message}); using live eligibility`);
+    logger.warn(`[sms-shadow] draft lookup failed for re-service grandfathering (${err.message}); using live eligibility`);
     return null;
   }
 }
-// decisionMeta = { promptVersion, draftId, factsBlock? } is passed by the send
+function draftIntendedActions(raw) {
+  try {
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return Array.isArray(parsed) ? parsed : (Array.isArray(parsed?.actions) ? parsed.actions : null);
+  } catch {
+    return null;
+  }
+}
+// decisionMeta = { promptVersion, draftId, intendedActions?, factsBlock? } is passed by the send
 // paths that hold a decision row (agent-decision-send-checks, scheduler.js);
 // omitting it keeps the strict, snapshot-only behavior.
 async function reservicePromiseStillEligible({ outgoingBody, customerId, promisedLanes, decisionMeta = null }) {
@@ -921,13 +955,23 @@ async function reservicePromiseStillEligible({ outgoingBody, customerId, promise
     // Grandfathered pre-deploy decision: named lanes must all be live-eligible;
     // with no lane named, at least one live-eligible lane (limited to the lanes
     // the persisted draft facts said were eligible, when they are recoverable).
+    // Codex round-10 P2: the card must ALSO carry the send_reservice_link
+    // action (from its snapshot, else the persisted draft) — a promise nothing
+    // would ever send stays blocked, exactly as validateReserviceOffer demands
+    // at draft time.
     if (!customerId) return 'no customer on record to revalidate re-service eligibility against';
+    let draftRow = null;
+    if (decisionMeta.intendedActions == null || decisionMeta.factsBlock === undefined) draftRow = await loadDraftRowForReservice(decisionMeta.draftId);
+    const actions = Array.isArray(decisionMeta.intendedActions) ? decisionMeta.intendedActions : draftIntendedActions(draftRow?.intended_actions);
+    if (!(actions || []).some((a) => a?.type === 'escalate' && a?.note === 'send_reservice_link')) {
+      return 'no send_reservice_link action on record — nothing would actually send the re-service link';
+    }
     const live = await liveReserviceLanes(customerId);
     if (namedLanes.length) {
       const ineligible = namedLanes.filter((lane) => !live.includes(lane));
       return ineligible.length ? `no longer eligible for a free ${ineligible.join(' and ')} re-service` : null;
     }
-    const factsBlock = decisionMeta.factsBlock !== undefined ? decisionMeta.factsBlock : await loadDraftFactsBlock(decisionMeta.draftId);
+    const factsBlock = decisionMeta.factsBlock !== undefined ? decisionMeta.factsBlock : draftRow?.facts_block;
     const factsLanes = factsBlock ? eligibleReserviceLanes(factsBlock) : [];
     return live.some((lane) => !factsLanes.length || factsLanes.includes(lane)) ? null : 'no longer eligible for a free re-service';
   }
@@ -3149,6 +3193,7 @@ module.exports = {
   reserviceFactLine,
   validateReserviceOffer,
   isReserviceOfferPromise,
+  namedReserviceLanesInText,
   reservicePromiseStillEligible,
   validateComplianceCopy,
   hasBannedCustomerCopy,
