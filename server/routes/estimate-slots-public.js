@@ -1128,9 +1128,29 @@ function hasSavedCustomerSelection(estimate) {
   return !!(selection && (selection.serviceTierKey || selection.frequencyKey || selection.frequency));
 }
 
+// The texting AI's estimate for this customer, by the resolver's own two
+// rules (estimate-conversion-agent resolveEstimateContext): the estimate is on
+// the customer's record, or its customer_phone is the customer's own number —
+// the phone fallback the resolver uses for an estimate with no (or another)
+// customer_id. Both live drafters run only for a webhook-matched customer, so
+// the customer's phone on file stands in for the texting number; a customer
+// texting from some other number is offered nothing (fail closed).
+function last10Digits(phone) {
+  const digits = String(phone || '').replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : '';
+}
+async function estimateBelongsToCustomer(estimate, customerId) {
+  if (!customerId) return false;
+  if (estimate.customer_id && String(estimate.customer_id) === String(customerId)) return true;
+  const estimatePhone = last10Digits(estimate.customer_phone);
+  if (!estimatePhone) return false;
+  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at').first('phone');
+  return last10Digits(customer?.phone) === estimatePhone;
+}
+
 async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
-  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id');
-  if (!estimate || !customerId || String(estimate.customer_id) !== String(customerId)) return null;
+  const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id', 'customer_phone');
+  if (!estimate || !(await estimateBelongsToCustomer(estimate, customerId))) return null;
   if (await slotBrowseRefusal(estimate)) return null;
   // The page's /data resolution for this estimate: its acceptance contract
   // decides whether the slot picker renders at all (quote-required, linked

@@ -113,6 +113,13 @@ describe('booking.js — self-serve callers build through buildFunnelAvailabilit
   });
 });
 
+test('the texting AI\'s /book lookup expands open days like the /book page\'s own request (expand=open)', () => {
+  const src = read('../routes/booking.js');
+  const at = src.indexOf('async function availabilityForExistingCustomer');
+  const callStart = src.indexOf('buildFunnelAvailability({', at);
+  expect(src.slice(callStart, src.indexOf('});', callStart))).toContain('expandOpenDays: true');
+});
+
 describe('reservice-public.js — commits through createSelfBooking (callbackVisit)', () => {
   test('buildAvailabilityForCustomer passes capacityPlacement: bookInsertionOffersLive()', () => {
     const src = read('../routes/reservice-public.js');

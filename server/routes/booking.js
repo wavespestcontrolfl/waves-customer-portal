@@ -2173,6 +2173,10 @@ async function availabilityForExistingCustomer({ customerId, serviceKey }) {
   return buildFunnelAvailability({
     lat: location.lat, lng: location.lng, duration: resolveBookingDuration(null, config, funnelKey),
     rangeFrom: minDate, rangeTo: defaultTo, config, today, serviceKey: funnelKey,
+    // The /book page's own first request always sends expand=open
+    // (PublicBookingPage.jsx), so an open route day offers its full block of
+    // hourly windows there — and here.
+    expandOpenDays: true,
     // Same online-booking arrival grace as /availability + /find-slots (a
     // no-op while GATE_BOOK_ARRIVAL_GRACE is off): the texting AI offers
     // exactly what /book would show this customer, graced slots included.

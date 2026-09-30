@@ -84,11 +84,22 @@ const TOKEN = 'test-token-abc123';
 let server;
 let base;
 let currentEstimate;
+// customers row the texting AI's phone-fallback ownership reads (by id).
+let customersById = {};
 let lastFirstArgs;
 let firstArgsHistory = [];
 
 beforeAll((done) => {
   db.mockImplementation((table) => {
+    if (table === 'customers') {
+      let id;
+      const q = {
+        where: jest.fn((w) => { id = w?.id; return q; }),
+        whereNull: jest.fn(() => q),
+        first: jest.fn(async () => customersById[id]),
+      };
+      return q;
+    }
     if (table !== 'estimates') throw new Error(`unexpected table ${table}`);
     return {
       where: jest.fn().mockReturnThis(),
@@ -397,6 +408,36 @@ describe('offerableEstimateSlots — the page picker, for the texting AI', () =>
     currentEstimate = null;
     await expect(offerableEstimateSlots('est-gone', 'cust-1')).resolves.toBeNull();
     expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
+  // The resolver's phone fallback (resolveEstimateContext): an open estimate
+  // whose customer_phone is the customer's number anchors the conversation
+  // even with no (or another) customer_id — a lead's estimate often has none.
+  describe('phone-matched estimate (the resolver\'s fallback)', () => {
+    afterEach(() => { customersById = {}; });
+
+    test.each([
+      ['no customer_id', null],
+      ['another customer_id', 'cust-9'],
+    ])('%s but the estimate phone is the customer\'s own number → offered', async (_label, estimateCustomer) => {
+      currentEstimate = { ...OWN, customer_id: estimateCustomer, customer_phone: '(941) 555-0142' };
+      customersById = { 'cust-1': { phone: '+19415550142' } };
+      getAvailableSlots.mockResolvedValue(SLOTS);
+      await expect(offerableEstimateSlots('est-1', 'cust-1')).resolves.toEqual(SLOTS);
+      expect(getAvailableSlots).toHaveBeenCalledTimes(1);
+    });
+
+    test.each([
+      ['a different number on file', { 'cust-1': { phone: '+19415550199' } }, '9415550142', 'cust-1'],
+      ['no number on the estimate', { 'cust-1': { phone: '+19415550142' } }, null, 'cust-1'],
+      ['the customer row gone / deleted', {}, '9415550142', 'cust-1'],
+      ['no customer at all', { 'cust-1': { phone: '+19415550142' } }, '9415550142', null],
+    ])('%s → nothing offered, the picker is not asked', async (_label, customers, estimatePhone, customerId) => {
+      currentEstimate = { ...OWN, customer_id: null, customer_phone: estimatePhone };
+      customersById = customers;
+      await expect(offerableEstimateSlots('est-1', customerId)).resolves.toBeNull();
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+    });
   });
 
   test.each([
