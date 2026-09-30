@@ -1189,9 +1189,13 @@ function bodyMentionsArrival(text) {
 // negated correction ("hasn't arrived"), and a scheduling window.
 const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?|driver|crew|he|she|they)";
 const VISIT_STATUS_RE = new RegExp(
-  // Verbal "arrive" forms only (round-25 P2): the noun in "arrival instructions"
-  // is not a status claim; timed "arrival in 10 minutes" is caught by the minutes classifiers.
-  '\\b(?:arriv(?:e|es|ed|ing)|en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way|(?:coming|headed|heading|driving|rolling|travell?ing)'
+  // "en route" / "on the way" are technician idioms on their own. Verbal "arrive"
+  // forms (round-25 P2: not the noun in "arrival instructions") and coming/headed/
+  // driving need a technician-type subject (round-28 audit P1): "Your payment has
+  // arrived at our office" / "We're coming up on renewal" are not visit status.
+  // Up to three non-negating words may sit between ("He will be arriving").
+  '\\b(?:en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way'
+  + `|${VISIT_STATUS_SUBJECT}(?:'s|'re|'ll|'d)?(?:,?\\s+(?!(?:not|never|hasn|haven|hadn|isn|aren|wasn|won|didn|doesn|yet)\\b)\\w+,?){0,3}?\\s+(?:arriv(?:e|es|ed|ing)|coming|headed|heading|driving|rolling|travell?ing)`
   // Positional status forms (here / there / outside / nearby / close / on site /
   // at your door / almost there) count ONLY with a technician-type subject
   // (round-21 P2): "We are here to help" / "we're here" are not a claim.
