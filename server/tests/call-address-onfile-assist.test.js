@@ -6,7 +6,8 @@
 const { recoverStreetAddress } = require('../services/address-validation/recovery');
 const { buildAddressLines } = require('../services/address-validation');
 const {
-  onFileStreetCandidates, validateWithOnFileAssist, isStreetOnlyRequest,
+  onFileStreetCandidates, withOnFileStreetCandidate, validateWithOnFileAssist, isStreetOnlyRequest,
+  bindAssistCaller, streetResemblesOnFile,
 } = require('../services/address-validation/onfile-assist');
 const { callAddressOnFileAssistLive } = require('../config/feature-gates');
 
@@ -300,5 +301,200 @@ describe('item 4 — validateWithOnFileAssist', () => {
     const validate = jest.fn(async () => ({ status: 'api_unavailable' }));
     const out = await validateWithOnFileAssist({ serviceAddress: STREET_ONLY, knownCaller: KNOWN2, validate });
     expect(out.status).toBe('api_unavailable');
+  });
+});
+
+// ── Codex round 1 ────────────────────────────────────────────────────────
+
+describe('complete house-number token (r1 P1)', () => {
+  test('a letter suffix or a hyphenated number never matches a different one', () => {
+    gateOn();
+    const k = (line) => ({ ...KNOWN, addressLine1: line });
+    expect(onFileStreetCandidates({ spokenStreet: '4306B Boone Blade', knownCaller: k('4306A Spoon Blade') })).toEqual([]);
+    expect(onFileStreetCandidates({ spokenStreet: '4306A Boone Blade', knownCaller: k('4306A Spoon Blade') })).toEqual([]);
+    expect(onFileStreetCandidates({ spokenStreet: '12-56 Boone Blade', knownCaller: k('12-34 Spoon Blade') })).toEqual([]);
+    expect(onFileStreetCandidates({ spokenStreet: '4306 Boone Blade', knownCaller: k('4306A Spoon Blade') })).toEqual([]);
+    expect(onFileStreetCandidates({ spokenStreet: '4306A Boone Blade', knownCaller: k('4306 Spoon Blade') })).toEqual([]);
+    expect(onFileStreetCandidates({ spokenStreet: '4306 Boone Blade', knownCaller: k('4306 Spoon Blade') })).toEqual(['Spoon Blade']);
+  });
+
+  test('the locality assist ignores a suffix-only or hyphenated match too', async () => {
+    gateOn();
+    const validate = jest.fn(async () => ({ status: 'validated_accept' }));
+    const known = { addressLine1: '7417A Monteverdi Way', addressCity: 'Exampleton', addressState: 'FL', addressZip: '34299' };
+    await validateWithOnFileAssist({ serviceAddress: { street_line_1: '7417B Monteverdi' }, knownCaller: known, validate });
+    expect(validate).toHaveBeenLastCalledWith({ addressLines: ['7417B Monteverdi'], administrativeArea: 'FL' });
+    await validateWithOnFileAssist({ serviceAddress: { street_line_1: '7417 Monteverdi' }, knownCaller: known, validate });
+    expect(validate).toHaveBeenLastCalledWith({ addressLines: ['7417 Monteverdi'], administrativeArea: 'FL' });
+  });
+});
+
+describe('decoder candidates are never displaced (r1 P1)', () => {
+  const five = ['Alder Way', 'Birch Way', 'Cedar Way', 'Dogwood Way', 'Elm Way'];
+
+  test('the on-file street is appended after every decoder candidate', () => {
+    gateOn();
+    const out = withOnFileStreetCandidate({ spokenStreet: '4306 Boone Blade', knownCaller: KNOWN, decoderCandidates: five });
+    expect(out.slice(0, 5)).toEqual(five);
+    expect(out).toEqual([...five, 'Spoon Blade']);
+  });
+
+  test('recovery evaluates the first five, so all five decoder hypotheses are still tried', async () => {
+    gateOn();
+    const tried = [];
+    const out = await recoverStreetAddress({
+      extracted: { address_line1: '4306 Boone Blade', city: 'Exampleton', state: 'FL', zip: '34299' },
+      avStatus: 'missing_component',
+      extraStreetCandidates: withOnFileStreetCandidate({ spokenStreet: '4306 Boone Blade', knownCaller: KNOWN, decoderCandidates: five }),
+      deps: { autocomplete: async (i) => { tried.push(i); return []; }, phonetic: async () => [], validate: async () => ({}) },
+    });
+    expect(out.recovered).toBeNull();
+    for (const c of five) expect(tried.some((i) => i.includes(c))).toBe(true);
+    expect(tried.some((i) => /spoon blade/i.test(i))).toBe(false);
+  });
+
+  test('with room, both a decoder hypothesis and the on-file street confirm: two premises, not adopted', async () => {
+    gateOn();
+    const validate = async ({ addressLines }) => ({
+      status: 'validated_accept',
+      normalized: { street_line_1: /spoon/i.test(addressLines[0]) ? '4306 Spoon Blade' : '4306 Elm Way', city: 'Exampleton', state: 'FL', postal_code: '34299' },
+    });
+    const autocomplete = async (i) => (/spoon blade/i.test(i) ? ['4306 Spoon Blade, Exampleton, FL'] : /elm way/i.test(i) ? ['4306 Elm Way, Exampleton, FL'] : []);
+    const out = await recoverStreetAddress({
+      extracted: { address_line1: '4306 Boone Blade', city: 'Exampleton', state: 'FL', zip: '34299' },
+      avStatus: 'missing_component',
+      extraStreetCandidates: withOnFileStreetCandidate({ spokenStreet: '4306 Boone Blade', knownCaller: KNOWN, decoderCandidates: ['Elm Way'] }),
+      deps: { autocomplete, phonetic: async () => [], validate },
+    });
+    expect(out.recovered).toBeNull();
+    expect(out.candidates).toHaveLength(2);
+  });
+
+  test('gate off: the decoder list comes back as-is; no duplicate of an existing candidate', () => {
+    expect(withOnFileStreetCandidate({ spokenStreet: '4306 Boone Blade', knownCaller: KNOWN, decoderCandidates: five })).toEqual(five);
+    gateOn();
+    expect(withOnFileStreetCandidate({ spokenStreet: '4306 Boone Blade', knownCaller: KNOWN, decoderCandidates: ['spoon  blade'] })).toEqual(['spoon  blade']);
+    expect(withOnFileStreetCandidate({ spokenStreet: '4306 Boone Blade', knownCaller: KNOWN })).toEqual(['Spoon Blade']);
+  });
+});
+
+describe('raw_text locality blocks the street-only assist (r1 P1)', () => {
+  const KNOWN2 = { addressLine1: '7417 Monteverdi Way', addressCity: 'Exampleton', addressState: 'FL', addressZip: '34299' };
+  const av = { status: 'validated_accept' };
+  const run = (sa, known = KNOWN2, result = av) => {
+    const validate = jest.fn(async () => result);
+    return validateWithOnFileAssist({ serviceAddress: sa, knownCaller: known, validate }).then((out) => ({ out, validate }));
+  };
+
+  test('a locality only in raw_text: not street-only, no on-file city or ZIP injected', async () => {
+    gateOn();
+    for (const raw_text of ['7417 Monteverdi in Otherville', '7417 Monteverdi Otherville 34288', '7417 Monteverdi, 34288']) {
+      const sa = { street_line_1: '7417 Monteverdi', raw_text };
+      expect(isStreetOnlyRequest(sa, buildAddressLines(sa))).toBe(false);
+      const { validate } = await run(sa);
+      expect(validate.mock.calls[0][0].addressLines.join(' ')).not.toMatch(/Exampleton|34299/);
+    }
+  });
+
+  test('a locality-only raw_text out-of-state result is not reclassified', async () => {
+    gateOn();
+    const nj = { status: 'out_of_service_area', inServiceArea: false, normalized: { state: 'NJ' } };
+    const { out } = await run({ street_line_1: '7417 Monteverdi', raw_text: '7417 Monteverdi in Otherville' }, null, nj);
+    expect(out.status).toBe('out_of_service_area');
+  });
+
+  test('raw_text that only repeats the street, filler or Florida stays street-only', async () => {
+    gateOn();
+    for (const raw_text of ['7417 Monteverdi', '7417 Monteverdi Way', "it's 7417 Monteverdi", '7417 Monteverdi Florida', undefined]) {
+      const sa = { street_line_1: '7417 Monteverdi Way', raw_text };
+      expect(isStreetOnlyRequest(sa, buildAddressLines(sa))).toBe(true);
+    }
+    const { validate } = await run({ street_line_1: '7417 Monteverdi', raw_text: '7417 Monteverdi Florida' });
+    expect(validate.mock.calls[0][0].addressLines).toEqual(['7417 Monteverdi', 'Exampleton FL 34299']);
+  });
+});
+
+describe('canonical customer binding (r1 P1)', () => {
+  const caller = { id: 'cust-A', ...KNOWN };
+  const named = (id, ambiguous = false) => jest.fn(async (amb) => { if (ambiguous) amb.candidates = [{ id: 'x' }, { id: 'y' }]; return id ? { id } : null; });
+
+  test('gate off: null and no lookup', async () => {
+    const resolveCustomer = named('cust-A');
+    expect(await bindAssistCaller({ knownCaller: caller, resolveCustomer })).toBeNull();
+    expect(resolveCustomer).not.toHaveBeenCalled();
+  });
+
+  test('name-aware resolution lands on the same customer: bound', async () => {
+    gateOn();
+    expect(await bindAssistCaller({ knownCaller: caller, resolveCustomer: named('cust-A') })).toBe(caller);
+  });
+
+  test('shared number where the caller resolves to a DIFFERENT customer: not bound', async () => {
+    gateOn();
+    expect(await bindAssistCaller({ knownCaller: caller, resolveCustomer: named('cust-B') })).toBeNull();
+  });
+
+  test('ambiguous, unresolved, or a failing lookup: not bound', async () => {
+    gateOn();
+    expect(await bindAssistCaller({ knownCaller: caller, resolveCustomer: named('cust-A', true) })).toBeNull();
+    expect(await bindAssistCaller({ knownCaller: caller, resolveCustomer: named(null) })).toBeNull();
+    expect(await bindAssistCaller({ knownCaller: caller, resolveCustomer: async () => { throw new Error('db'); } })).toBeNull();
+  });
+
+  test('call already linked to another customer: not bound, no lookup', async () => {
+    gateOn();
+    const resolveCustomer = named('cust-A');
+    expect(await bindAssistCaller({ knownCaller: caller, callCustomerId: 'cust-B', resolveCustomer })).toBeNull();
+    expect(resolveCustomer).not.toHaveBeenCalled();
+  });
+
+  test('operator link override: bound only to the linked customer; no known caller: null', async () => {
+    gateOn();
+    const resolveCustomer = named('cust-B');
+    expect(await bindAssistCaller({ knownCaller: caller, callCustomerId: 'cust-A', hasLinkOverride: true, resolveCustomer })).toBe(caller);
+    expect(await bindAssistCaller({ knownCaller: caller, callCustomerId: 'cust-B', hasLinkOverride: true, resolveCustomer })).toBeNull();
+    expect(resolveCustomer).not.toHaveBeenCalled();
+    expect(await bindAssistCaller({ knownCaller: null, resolveCustomer })).toBeNull();
+  });
+
+  test('an unbound (null) caller turns both assist paths into no-ops', async () => {
+    gateOn();
+    expect(onFileStreetCandidates({ spokenStreet: '4306 Boone Blade', knownCaller: null })).toEqual([]);
+    const validate = jest.fn(async () => ({ status: 'validated_accept' }));
+    await validateWithOnFileAssist({ serviceAddress: { street_line_1: '7417 Monteverdi' }, knownCaller: null, validate });
+    expect(validate).toHaveBeenCalledWith({ addressLines: ['7417 Monteverdi'], administrativeArea: 'FL' });
+  });
+});
+
+describe('spoken street must resemble the on-file street for the locality assist', () => {
+  test('resemblance rules', () => {
+    expect(streetResemblesOnFile('Monteverdi', 'Monteverdi Way')).toBe(true);
+    expect(streetResemblesOnFile('Monteverdi Wy', 'Monteverdi Way')).toBe(true);
+    expect(streetResemblesOnFile('Monteverdi Way', 'Monteverdi Way')).toBe(true);
+    expect(streetResemblesOnFile('Monteverdy', 'Monteverdi Way')).toBe(true);
+    expect(streetResemblesOnFile('Monteverdi Drive', 'Monteverdi Way')).toBe(false);
+    expect(streetResemblesOnFile('Sunset', 'Monteverdi Way')).toBe(false);
+    expect(streetResemblesOnFile('Monteverdi Way Extension', 'Monteverdi Way')).toBe(false);
+    expect(streetResemblesOnFile('4th Avenue', 'Fourth Avenue')).toBe(false);
+    expect(streetResemblesOnFile('4th', '4th Avenue East')).toBe(false);
+    expect(streetResemblesOnFile('4th Ave E', '4th Avenue East')).toBe(true);
+    expect(streetResemblesOnFile('4th Street', '4th Avenue')).toBe(false);
+    expect(streetResemblesOnFile('', 'Monteverdi Way')).toBe(false);
+  });
+
+  test('a different street with the same house number gets no on-file city or ZIP', async () => {
+    gateOn();
+    const validate = jest.fn(async () => ({ status: 'validated_accept' }));
+    const known = { addressLine1: '7417 Monteverdi Way', addressCity: 'Exampleton', addressState: 'FL', addressZip: '34299' };
+    await validateWithOnFileAssist({ serviceAddress: { street_line_1: '7417 Sunset Drive' }, knownCaller: known, validate });
+    expect(validate).toHaveBeenCalledWith({ addressLines: ['7417 Sunset Drive'], administrativeArea: 'FL' });
+  });
+
+  test('the same street spoken loosely still gets it', async () => {
+    gateOn();
+    const validate = jest.fn(async () => ({ status: 'validated_accept' }));
+    const known = { addressLine1: '7417 Monteverdi Way', addressCity: 'Exampleton', addressState: 'FL', addressZip: '34299' };
+    await validateWithOnFileAssist({ serviceAddress: { street_line_1: '7417 Monteverdi' }, knownCaller: known, validate });
+    expect(validate).toHaveBeenCalledWith({ addressLines: ['7417 Monteverdi', 'Exampleton FL 34299'], administrativeArea: 'FL' });
   });
 });

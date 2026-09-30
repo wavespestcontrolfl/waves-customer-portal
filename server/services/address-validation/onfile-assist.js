@@ -28,7 +28,14 @@ const { validateAddress, buildAddressLines, STATUSES, SERVICE_STATE } = require(
 const { normalizeState } = require('../../utils/address-normalizer');
 const { callAddressOnFileAssistLive } = require('../../config/feature-gates');
 
-const houseNumberOf = (street) => (String(street || '').trim().match(/^\d+/) || [null])[0];
+// The COMPLETE house-number token, not just its leading digit run: "4306A" and
+// "4306B", or "12-34" and "12-56", are different premises. Only a plain
+// all-digit first token counts; anything else (a letter suffix, a hyphenated
+// number) never matches, so the assist stays out of it.
+const houseNumberOf = (street) => {
+  const first = String(street || '').trim().split(/\s+/)[0].replace(/[.,;]+$/, '');
+  return /^\d+$/.test(first) ? first : null;
+};
 const hasLetters = (s) => /[a-z]/i.test(String(s || ''));
 const streetKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -61,6 +68,91 @@ function onFileStreetCandidates({ spokenStreet, knownCaller } = {}) {
   return [onFile.streetName];
 }
 
+const tokensOf = (text) => String(text || '').toLowerCase().replace(/['\u2019]/g, '').replace(/[^a-z0-9]+/g, ' ').trim().split(' ').filter(Boolean);
+
+// Suffix / direction abbreviations read as their long form, so "Monteverdi Wy"
+// resembles "Monteverdi Way".
+const CANON = {
+  st: 'street', ave: 'avenue', av: 'avenue', dr: 'drive', rd: 'road', ln: 'lane', ct: 'court', blvd: 'boulevard',
+  cir: 'circle', pl: 'place', trl: 'trail', tr: 'trail', wy: 'way', pkwy: 'parkway', ter: 'terrace', terr: 'terrace',
+  n: 'north', s: 'south', e: 'east', w: 'west',
+};
+const canon = (t) => CANON[t] || t;
+
+function editDistanceAtMost1(a, b) {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  if (a.length === b.length) return a.slice(i + 1) === b.slice(i + 1);
+  const [long, short] = a.length > b.length ? [a, b] : [b, a];
+  return long.slice(i + 1) === short.slice(i);
+}
+
+const tokenMatches = (spoken, onFile) => spoken === onFile || (spoken.length >= 5 && onFile.length >= 5 && editDistanceAtMost1(spoken, onFile));
+
+/**
+ * Does the spoken street name plausibly name the on-file street? The spoken
+ * name may leave off the on-file suffix / direction ("Monteverdi" for
+ * "Monteverdi Way") but must otherwise agree token for token (a one-letter
+ * slip is tolerated in words of five letters or more). A bare ordinal ("4th")
+ * does not resemble "4th Avenue East": numbered grids repeat the number across
+ * streets and avenues.
+ */
+function streetResemblesOnFile(spokenName, onFileName) {
+  const spoken = tokensOf(spokenName).map(canon);
+  const onFile = tokensOf(onFileName).map(canon);
+  if (!spoken.length || spoken.length > onFile.length) return false;
+  if (spoken.length === 1 && /^\d/.test(spoken[0]) && onFile.length > 1) return false;
+  return spoken.every((t, i) => tokenMatches(t, onFile[i]));
+}
+
+// Words a caller says around an address that carry no geography.
+const RAW_FILLER = new Set(['fl', 'florida', 'its', 'it', 'is', 'the', 'at', 'my', 'address', 'a', 'an', 'um', 'uh', 'and', 'yeah', 'yes', 'okay', 'ok', 'so', 'thats', 'that']);
+
+// The structured city / postal_code can be null while raw_text still carries a
+// spoken locality ("7417 Monteverdi in Sarasota"). Any raw_text word the
+// structured street does not account for (bar filler and the state Florida)
+// counts as possible locality evidence, so the request is not street-only.
+function rawTextAddsLocality(serviceAddress) {
+  const sa = serviceAddress || {};
+  const raw = tokensOf(sa.raw_text);
+  if (!raw.length) return false;
+  const street = new Set(tokensOf(`${sa.street_line_1 || ''} ${sa.street_line_2 || ''}`).flatMap((t) => [t, canon(t)]));
+  return raw.some((t) => !street.has(t) && !street.has(canon(t)) && !RAW_FILLER.has(t));
+}
+
+/**
+ * Extra street candidates for recoverStreetAddress: the decoder's alternatives
+ * stay first and untouched (recovery evaluates only the first five, so the
+ * on-file street is appended and can never displace a decoder hypothesis).
+ */
+function withOnFileStreetCandidate({ spokenStreet, knownCaller, decoderCandidates } = {}) {
+  const decoder = Array.isArray(decoderCandidates) ? decoderCandidates : [];
+  const seen = new Set(decoder.map((c) => streetKey(c)));
+  return [...decoder, ...onFileStreetCandidates({ spokenStreet, knownCaller }).filter((c) => !seen.has(streetKey(c)))];
+}
+
+/**
+ * The on-file address may only vouch for the customer the call finally
+ * resolves to, and knownCaller is only the phone-only pre-lookup. Returns
+ * knownCaller when Step 3's own inputs agree with it, else null (which makes
+ * both assist paths no-ops):
+ *   - operator link override: the linked customer (call.customer_id) must be it;
+ *   - a call already linked to a DIFFERENT customer: null;
+ *   - otherwise the name-aware phone resolution Step 3 runs (`resolveCustomer`,
+ *     given an ambiguity out-object) must land on this customer, unambiguously.
+ * Gate off: null, and no lookup is made.
+ */
+async function bindAssistCaller({ knownCaller, callCustomerId = null, hasLinkOverride = false, resolveCustomer } = {}) {
+  if (!callAddressOnFileAssistLive() || !knownCaller?.id) return null;
+  if (hasLinkOverride) return knownCaller.id === callCustomerId ? knownCaller : null;
+  if (callCustomerId && callCustomerId !== knownCaller.id) return null;
+  const ambiguity = {};
+  const resolved = await Promise.resolve().then(() => resolveCustomer(ambiguity)).catch(() => null);
+  return resolved?.id === knownCaller.id && !ambiguity.candidates ? knownCaller : null;
+}
+
 const STATE_ONLY_LINE = /^(?:fl|florida)\.?$/i;
 
 // A street-only request: a named street (letters) with no city, no ZIP and no
@@ -71,6 +163,7 @@ function isStreetOnlyRequest(serviceAddress, lines) {
   const sa = serviceAddress || {};
   if (!hasLetters(sa.street_line_1)) return false;
   if (String(sa.city || '').trim() || String(sa.postal_code || '').trim()) return false;
+  if (rawTextAddsLocality(sa)) return false;
   if (!Array.isArray(lines) || lines.length === 0) return false;
   if (lines.length === 1) return true;
   return lines.length === 2 && STATE_ONLY_LINE.test(String(lines[1]).trim());
@@ -84,6 +177,9 @@ function onFileLocalityLine(serviceAddress, knownCaller) {
   const zip = String(knownCaller?.addressZip || '').trim();
   const spokenHouse = houseNumberOf(serviceAddress?.street_line_1);
   if (!onFile || !spokenHouse || spokenHouse !== onFile.houseNumber || !(city || zip)) return null;
+  // The on-file geography only vouches for the street the caller is naming.
+  const spokenName = String(serviceAddress?.street_line_1 || '').trim().replace(/^\d+\s*/, '');
+  if (!streetResemblesOnFile(spokenName, onFile.streetName)) return null;
   return [city, SERVICE_STATE, zip].filter(Boolean).join(' ');
 }
 
@@ -126,7 +222,11 @@ async function validateWithOnFileAssist({
 }
 
 module.exports = {
+  bindAssistCaller,
   onFileStreetCandidates,
+  withOnFileStreetCandidate,
+  streetResemblesOnFile,
+  rawTextAddsLocality,
   validateWithOnFileAssist,
   isStreetOnlyRequest,
 };
