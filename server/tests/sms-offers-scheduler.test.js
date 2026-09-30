@@ -655,7 +655,8 @@ describe('send-time recheck: a quoted window that OVERLAPS the visit\'s new wind
 
 // ── slice 1b: new visits and estimates ────────────────────────────────────────
 const OFFER_REPLY = () => replyWith('8:00 AM - 10:00 AM', 'Wednesday, September 30');
-const COMPLETED = [{ type: 'Quarterly Pest', date: '2026-07-01' }];
+// A catalog name the explicit /book funnel table knows (sms-book-funnel-map.js).
+const COMPLETED = [{ type: 'General Pest Control (Quarterly)', date: '2026-07-01' }];
 const EST_ARGS = { openEstimate: { id: 'est-1', service: 'Lawn' } };
 const EST_IDENTITY = { about: 'estimate', visit: null, service: null };
 
@@ -663,8 +664,8 @@ describe('gate off — estimate and new-visit identities stay byte-identical (zo
   test('last completed visit and open estimate: the zone finder answers, neither new picker is touched, no source on the snapshot', async () => {
     let drafter = freshDrafter();
     let r = await drafter.generateGroundedDraft(argsFor(makeClient(replyWith('10:00 AM - 12:00 PM', 'Friday, October 9')), baseContext([], COMPLETED)));
-    expect(oldFinder).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-9', serviceType: 'Quarterly Pest' });
-    expect(r.openTimesSnapshot.lookup).toEqual({ city: 'Venice', customerId: 'cust-9', estimateId: null, serviceType: 'Quarterly Pest' });
+    expect(oldFinder).toHaveBeenCalledWith('Venice', null, { customerId: 'cust-9', serviceType: 'General Pest Control (Quarterly)' });
+    expect(r.openTimesSnapshot.lookup).toEqual({ city: 'Venice', customerId: 'cust-9', estimateId: null, serviceType: 'General Pest Control (Quarterly)' });
 
     oldFinder.mockClear();
     mockIdentity.answer = EST_IDENTITY;
@@ -699,7 +700,7 @@ describe('gate on — a new visit is offered through the /book funnel picker', (
     expect(facts).toContain('- Wednesday, September 30: 8:00 AM - 10:00 AM, 10:00 AM - 12:00 PM');
     expect(facts).toContain('- Thursday, October 1: 1:00 PM - 3:00 PM');
     expect(r.openTimesSnapshot).toEqual({
-      lookup: { city: 'Venice', customerId: 'cust-9', estimateId: null, serviceType: 'Quarterly Pest', source: 'book', serviceKey: 'pest_control' },
+      lookup: { city: 'Venice', customerId: 'cust-9', estimateId: null, serviceType: 'General Pest Control (Quarterly)', source: 'book', serviceKey: 'pest_control' },
       quotedWindows: [{ date: 'Wednesday, September 30', window: '8:00 AM - 10:00 AM' }],
     });
     // no coordinates, no address, anywhere on the lookup
@@ -725,7 +726,60 @@ describe('gate on — a new visit is offered through the /book funnel picker', (
     expect(r.openTimesSnapshot).toBeNull();
   });
 
-  test.each(['Rodent Bait Stations', 'Termite Bait Station Renewal', 'WDO Inspection', 'Palm Injection'])('%s maps to no funnel key → withheld, zone finder NOT used', async (type) => {
+  // The explicit funnel table (sms-book-funnel-map.js), not a keyword guess.
+  test.each([
+    ['Termite Inspection Service', 'termite'],
+    ['Termite Inspection', 'termite'],
+    ['Rodent Pest Control', 'rodent'],
+    ['Rodent Control', 'rodent'],
+    ['Seasonal Mosquito Control Service', 'mosquito'],
+    ['Tree & Shrub', 'tree_shrub'],
+  ])('a completed "%s" visit is offered through /book as funnel key %s', async (type, funnelKey) => {
+    const drafter = freshDrafter();
+    const r = await drafter.generateGroundedDraft(argsFor(makeClient(OFFER_REPLY()), baseContext([], [{ type, date: '2026-07-01' }])));
+    expect(book.availabilityForExistingCustomer).toHaveBeenCalledWith({ customerId: 'cust-9', serviceKey: funnelKey });
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot.lookup).toEqual(expect.objectContaining({ source: 'book', serviceKey: funnelKey }));
+  });
+
+  test('a visit name only the bookable catalog knows resolves through that row\'s service_key, and only when that key is in the table', async () => {
+    mockCatalog.services = [
+      { service_key: 'pest_general_bimonthly', name: 'Bi-Monthly Pest Care Plan' },
+      { service_key: 'termite_bait', name: 'Bait Station Program' },
+    ];
+    let drafter = freshDrafter();
+    await drafter.generateGroundedDraft(argsFor(makeClient(OFFER_REPLY()), baseContext([], [{ type: 'Bi-Monthly Pest Care Plan', date: '2026-07-01' }])));
+    expect(book.availabilityForExistingCustomer).toHaveBeenCalledWith({ customerId: 'cust-9', serviceKey: 'pest_control' });
+    book.availabilityForExistingCustomer.mockClear();
+    drafter = freshDrafter();
+    const r = await drafter.generateGroundedDraft(argsFor(makeClient(plainReply()), baseContext([], [{ type: 'Bait Station Program', date: '2026-07-01' }])));
+    expect(book.availabilityForExistingCustomer).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+
+  test('new_booking carries the catalog service_key the model picked: termite_inspection → termite; termite_bait → withheld even if its NAME reads like a funnel label', async () => {
+    mockCatalog.services = [
+      { service_key: 'termite_inspection', name: 'Termite Inspection Service' },
+      { service_key: 'termite_bait', name: 'Termite Inspection Bait Plan' },
+    ];
+    mockIdentity.answer = { about: 'new_service', visit: null, service: 'termite_inspection' };
+    let drafter = freshDrafter();
+    await drafter.generateGroundedDraft(argsFor(makeClient(OFFER_REPLY()), baseContext([], [])));
+    expect(book.availabilityForExistingCustomer).toHaveBeenCalledWith({ customerId: 'cust-9', serviceKey: 'termite' });
+    book.availabilityForExistingCustomer.mockClear();
+    mockIdentity.answer = { about: 'new_service', visit: null, service: 'termite_bait' };
+    drafter = freshDrafter();
+    const r = await drafter.generateGroundedDraft(argsFor(makeClient(plainReply()), baseContext([], [])));
+    expect(book.availabilityForExistingCustomer).not.toHaveBeenCalled();
+    expect(oldFinder).not.toHaveBeenCalled();
+    expect(r.openTimesSnapshot).toBeNull();
+  });
+
+  test.each([
+    'Rodent Bait Stations', 'Termite Bait Station Renewal', 'WDO Inspection', 'Palm Injection',
+    // substring look-alikes the old classifier over-matched: "ant", "fungus"
+    'Fire Ant Treatment', 'Lawn Fungus Treatment', 'Giant Wasp Removal', 'Termite Bait Station Installation',
+  ])('%s maps to no funnel key → withheld, zone finder NOT used', async (type) => {
     const drafter = freshDrafter();
     const r = await drafter.generateGroundedDraft(argsFor(makeClient(plainReply()), baseContext([], [{ type, date: '2026-07-01' }])));
     expect(book.availabilityForExistingCustomer).not.toHaveBeenCalled();
@@ -837,8 +891,20 @@ describe('send-time recheck through the /book and estimate pickers (slice 1b)', 
   test('estimate snapshot: the page picker is asked for the same estimate + customer', async () => {
     const drafter = freshDrafter();
     await expect(drafter.openTimesStillOffered({ ...estLookup, quotedWindows: [{ date: 'Friday, October 2', window: '1:00 PM - 3:00 PM' }] })).resolves.toEqual({ ok: true });
-    expect(estimateSlots.offerableEstimateSlots).toHaveBeenCalledWith('est-1', 'cust-9');
+    // the RECHECK asks for the page's picker uncached + uncapped
+    expect(estimateSlots.offerableEstimateSlots).toHaveBeenCalledWith('est-1', 'cust-9', { fresh: true });
     expect(oldFinder).not.toHaveBeenCalled();
+  });
+
+  test('estimate recheck: a quoted slot that is not in the DRAFT cut but is in the fresh, uncapped read still passes; one consumed since (absent from the fresh read) is refused', async () => {
+    // The draft cut (default) shows only 2026-10-02; the fresh read has every slot.
+    estimateSlots.offerableEstimateSlots.mockImplementation(async (id, cust, opts) => (opts && opts.fresh
+      ? { primary: [{ date: '2026-10-02', windowStart: '09:00' }, { date: '2026-10-09', windowStart: '10:00' }], expander: [] }
+      : { primary: [{ date: '2026-10-02', windowStart: '09:00' }], expander: [] }));
+    const drafter = freshDrafter();
+    await expect(drafter.openTimesStillOffered({ ...estLookup, quotedWindows: [{ date: 'Friday, October 9', window: '10:00 AM - 12:00 PM' }] })).resolves.toEqual({ ok: true });
+    await expect(drafter.openTimesStillOffered({ ...estLookup, quotedWindows: [{ date: 'Friday, October 2', window: '1:00 PM - 3:00 PM' }] }))
+      .resolves.toMatchObject({ ok: false, reason: 'open_times_no_longer_offered' });
   });
 
   test('a window no longer offered, the same window on ANOTHER day, or a picker that now offers nothing → fails closed', async () => {

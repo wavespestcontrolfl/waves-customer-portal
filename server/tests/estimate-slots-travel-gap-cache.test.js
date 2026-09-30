@@ -160,4 +160,49 @@ describe('getAvailableSlots — wrapper cache keyed by the travel policy', () =>
     delete process.env.GATE_SLOT_TRAVEL_GAP;
     expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
   });
+
+  // The texting AI's send-time recheck (offerableEstimateSlots {fresh}) must
+  // read the CURRENT calendar and every slot the page's filters allow.
+  test('bypassCache: recomputes over a warm entry, never reads it and never writes its own over it', async () => {
+    await getAvailableSlots('est-rain-1', OPTS);
+    expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
+    findAvailableSlots.mockClear();
+
+    const fresh = await getAvailableSlots('est-rain-1', { ...OPTS, bypassCache: true });
+    expect(fresh.metadata.cacheHit).toBe(false);
+    expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+    // the page's own entry is untouched and still warm
+    expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(true);
+    expect(findAvailableSlots).toHaveBeenCalledTimes(1);
+
+    // a bypass on a COLD cache does not populate it either
+    estimateSlotAvailability._internals.clearCaches();
+    await getAvailableSlots('est-rain-1', { ...OPTS, bypassCache: true });
+    expect((await getAvailableSlots('est-rain-1', OPTS)).metadata.cacheHit).toBe(false);
+  });
+
+  test('uncapped (maxResults large, expanderMaxResults 0) returns every slot the filters allow; the default cut is the curated 9', async () => {
+    const days = [];
+    for (let d = 17; d <= 28; d += 1) days.push(`2027-05-${d}`);
+    const many = () => ({
+      slots: days.map((date) => ({
+        date, start_time: '09:00', technician: { id: 'tech-1', name: 'Adam Benetti' }, detour_minutes: 4, stops_that_day: 3,
+      })),
+      evaluated: days.length,
+      total_feasible: days.length,
+    });
+    const WINDOW = { dateFrom: '2027-05-17', dateTo: '2027-05-28' };
+    findAvailableSlots.mockImplementation(async () => many());
+    const cut = await getAvailableSlots('est-rain-1', WINDOW);
+    const all = await getAvailableSlots('est-rain-1', { ...WINDOW, bypassCache: true, maxResults: 10000, expanderMaxResults: 0 });
+    const count = (r) => r.primary.length + r.expander.length;
+    expect(count(cut)).toBe(9);
+    expect(all.expander).toEqual([]);
+    expect(count(all)).toBeGreaterThan(9);
+    // everything the curated cut showed is inside the uncapped read
+    const keyOf = (s) => `${s.date}|${s.windowStart}`;
+    const allKeys = new Set(all.primary.map(keyOf));
+    for (const slot of [...cut.primary, ...cut.expander]) expect(allKeys.has(keyOf(slot))).toBe(true);
+    findAvailableSlots.mockReset();
+  });
 });

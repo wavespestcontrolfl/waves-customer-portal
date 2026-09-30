@@ -1033,12 +1033,23 @@ router.post('/:token/reserve/:scheduledServiceId/extend', reserveLimiter, async 
 // the same getAvailableSlots the page's GET runs (default window, the page's
 // default service mode), so an offered time is one /reserve would take. null
 // when the estimate is not this customer's, or the page would show none.
-async function offerableEstimateSlots(estimateId, customerId) {
+//
+// `fresh` (the send-time recheck only): the same picker read UNCACHED and
+// UNCAPPED. The page's default read serves a 5-minute cache other estimates'
+// bookings never invalidate, and returns a curated cut (day rotation, scarce
+// day pin, route order) in which one unrelated hold change can drop a still-
+// bookable quoted slot — so the recheck asks for every slot the page's
+// filters allow, straight from the calendar. The draft keeps the default cut.
+const FRESH_MAX_SLOTS = 10000;
+async function offerableEstimateSlots(estimateId, customerId, { fresh = false } = {}) {
   const estimate = await db('estimates').where({ id: estimateId }).first(...SLOT_ESTIMATE_COLUMNS, 'customer_id');
   if (!estimate || !customerId || String(estimate.customer_id) !== String(customerId)) return null;
   if (await slotBrowseRefusal(estimate)) return null;
   try {
-    return await getAvailableSlots(estimate.id, { serviceMode: resolveSlotServiceMode(estimate, '') });
+    return await getAvailableSlots(estimate.id, {
+      serviceMode: resolveSlotServiceMode(estimate, ''),
+      ...(fresh ? { bypassCache: true, maxResults: FRESH_MAX_SLOTS, expanderMaxResults: 0 } : {}),
+    });
   } catch (err) {
     if (['ESTIMATE_NOT_FOUND', 'ESTIMATE_EXPIRED', 'ESTIMATE_TERMINAL'].includes(err.code)) return null;
     throw err;

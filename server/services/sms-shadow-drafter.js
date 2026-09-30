@@ -375,9 +375,12 @@ async function loadSchedulerVisitDays({ customerId, scheduledServiceId }) {
 // picker-day shape the renderers read (the page lists primary chips and an
 // expander; both are offers). null when the page would show none, or the
 // estimate is not this customer's.
-async function loadEstimateDays({ customerId, estimateId }) {
-  const result = estimateId
-    ? await require('../routes/estimate-slots-public')._internals.offerableEstimateSlots(estimateId, customerId)
+// `fresh` is the send-time recheck's: uncached, uncapped (see
+// offerableEstimateSlots); the draft reads the page's default cut.
+async function loadEstimateDays({ customerId, estimateId, fresh = false }) {
+  const offerable = estimateId ? require('../routes/estimate-slots-public')._internals.offerableEstimateSlots : null;
+  const result = offerable
+    ? await (fresh ? offerable(estimateId, customerId, { fresh: true }) : offerable(estimateId, customerId))
     : null;
   if (!result) return null;
   const byDate = new Map();
@@ -402,25 +405,37 @@ async function loadBookDays({ customerId, serviceKey }) {
 // estimateId? | serviceKey? } — what the snapshot lookup carries so the
 // send-time recheck asks the SAME picker. null = nothing to offer. Errors
 // throw — callers fail closed.
-async function loadSchedulerDays(offer, customerId) {
+async function loadSchedulerDays(offer, customerId, { fresh = false } = {}) {
   if (offer.source === SCHEDULER_OFFER_SOURCE) return offer.scheduledServiceId ? loadSchedulerVisitDays({ customerId, scheduledServiceId: offer.scheduledServiceId }) : null;
-  if (offer.source === ESTIMATE_OFFER_SOURCE) return loadEstimateDays({ customerId, estimateId: offer.estimateId });
+  if (offer.source === ESTIMATE_OFFER_SOURCE) return loadEstimateDays({ customerId, estimateId: offer.estimateId, fresh });
   if (offer.source === BOOK_OFFER_SOURCE) return loadBookDays({ customerId, serviceKey: offer.serviceKey });
   return null;
 }
 
 // The /book funnel service a text's service is, or '' when it names none the
-// funnel books (createSelfBooking refuses an empty key). Labels the funnel
-// knows match directly; a catalog or visit name goes through the recurring
-// seeder's own classifier — only its funnel keys count, so a termite bait or
-// rodent bait visit never reads as a funnel termite inspection.
-function bookFunnelKeyFor(serviceType) {
-  const label = String(serviceType || '').trim();
-  if (!label) return '';
+// funnel books (createSelfBooking refuses an empty key). An EXPLICIT table
+// (sms-book-funnel-map.js), never a keyword heuristic:
+//   1. the catalog service_key the identity step's model pick carried
+//      (new_booking) — authoritative when present, mapped or withheld;
+//   2. an exact known display name (the funnel's labels, known catalog names);
+//   3. an exact match of the name against the bookable catalog's own rows
+//      (a completed visit carries a display name, not a key), through the
+//      same key table — ambiguous or unmapped = withheld.
+// Actual bait, WDO, palm-injection and every unlisted service map to nothing.
+async function bookFunnelKeyFor(identity) {
   try {
-    const { normalizeBookingServiceKey } = require('../routes/booking')._internals;
-    return normalizeBookingServiceKey(label)
-      || normalizeBookingServiceKey(require('./recurring-appointment-seeder').serviceKeyFor({ service_type: label }));
+    const map = require('./sms-book-funnel-map');
+    if (identity?.serviceKey) return map.funnelKeyForCatalogKey(identity.serviceKey);
+    const label = String(identity?.serviceType || '').trim();
+    if (!label) return '';
+    const byName = map.funnelKeyForServiceName(label);
+    if (byName) return byName;
+    const lower = label.toLowerCase();
+    const services = await require('./call-booking-catalog').loadBookableCallServices(db);
+    const keys = new Set((services || [])
+      .filter((s) => s && [s.name, s.short_name].some((n) => String(n || '').trim().toLowerCase() === lower))
+      .map((s) => map.funnelKeyForCatalogKey(s.service_key)));
+    return keys.size === 1 ? [...keys][0] : '';
   } catch (err) {
     logger.warn(`[sms-shadow] funnel service lookup failed (${err.message}); OPEN TIMES withheld`);
     return '';
@@ -431,10 +446,10 @@ function bookFunnelKeyFor(serviceType) {
 // that commits the job this text is about. An estimate (linked by the caller,
 // or the open estimate the identity step chose) wins; then an upcoming visit;
 // everything else is a new visit through /book.
-function schedulerOfferFor(identity, estimateId) {
+async function schedulerOfferFor(identity, estimateId) {
   if (estimateId) return { source: ESTIMATE_OFFER_SOURCE, estimateId };
   if (SCHEDULER_VISIT_REASONS.has(identity.reason)) return { source: SCHEDULER_OFFER_SOURCE, scheduledServiceId: identity.scheduledServiceId || null };
-  return { source: BOOK_OFFER_SOURCE, serviceKey: bookFunnelKeyFor(identity.serviceType) };
+  return { source: BOOK_OFFER_SOURCE, serviceKey: await bookFunnelKeyFor(identity) };
 }
 
 // Up to OPEN_TIMES_MAX_SLOTS_PER_DAY starts per day whose 2-hour arrival
@@ -771,7 +786,7 @@ function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
-  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking' };
+  if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
   if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
 }
@@ -1326,7 +1341,7 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
 // = that picker no longer offers times for this job.
 async function currentOfferedDays({ city, customerId, estimateId, serviceType, schedulerOffer }) {
   if (schedulerOffer) {
-    const loaded = await loadSchedulerDays(schedulerOffer, customerId);
+    const loaded = await loadSchedulerDays(schedulerOffer, customerId, { fresh: true });
     return loaded ? { days: loaded.days, labelOf: schedulerDayLabel, currentWindow: loaded.currentWindow } : null;
   }
   const Availability = require('./availability');
@@ -2203,7 +2218,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // commit the job this text is about (schedulerOfferFor) — an estimate's page,
   // a visit's reschedule link, or /book for a new visit — never the zone finder.
   const schedulerOffer = willFetchOpenTimes && identityCertain && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')
-    ? schedulerOfferFor(identity, pricingEstimateId) : null;
+    ? await schedulerOfferFor(identity, pricingEstimateId) : null;
   // A frozen replay validates offered_times against the OPEN TIMES it
   // actually saw (parsed back out of its own facts block); `block` stays
   // null there so no send-time snapshot is minted for a draft nothing sends.

@@ -1882,7 +1882,13 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
     // until TTL (GH codex #3803 r1 P1).
     travelGapEnabled() ? `travel-gap:${travelBufferMinutes()}` : 'travel-gap:off',
   ].join(':');
-  const cached = wrapperCache.get(cacheKey);
+  // opts.bypassCache (explicit, off by default): a caller that must act on
+  // the CURRENT calendar — the texting AI's send-time recheck of a quoted
+  // time — recomputes instead of trusting a 5-minute entry that another
+  // estimate's booking never invalidated, and never writes its own
+  // (uncapped) result over the page's.
+  const bypassCache = userOpts.bypassCache === true;
+  const cached = bypassCache ? null : wrapperCache.get(cacheKey);
   if (cached && !serviceProfile.reservationServiceMix) {
     // The result was cached for 5 min but the bucket can straddle a lead-time
     // boundary — a slot bookable when cached (e.g. 13:00 at 10:59 ET) can be
@@ -2202,7 +2208,7 @@ async function getAvailableSlots(estimateId, userOpts = {}) {
   // cluster-day slot stays invisible until TTL expiry. Funneled-zone
   // estimates are a small slice of traffic; recomputing beats versioning
   // the cache by schedule state. Non-funneled results keep today's caching.
-  if (funnelDays == null && !skipResultCache) {
+  if (funnelDays == null && !skipResultCache && !bypassCache) {
     wrapperCache.set(cacheKey, { result, expiresAt: Date.now() + WRAPPER_TTL_MS });
   }
   return result;

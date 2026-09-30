@@ -10,14 +10,25 @@ const firstResults = {};
 const listResults = {};
 jest.mock('../models/db', () => {
   const mkChain = (table) => {
-    const q = {};
-    for (const m of ['where', 'whereNot', 'andWhere', 'whereIn', 'whereNull', 'whereRaw', 'andWhereRaw', 'orWhere', 'orWhereRaw', 'select', 'limit']) {
+    const q = { filters: {} };
+    // Object-form where() filters are remembered so a row the query's own
+    // filter would exclude (active: true vs an inactive row) is not returned.
+    q.where = (arg) => {
+      if (typeof arg === 'function') arg.call(q, q);
+      else if (arg && typeof arg === 'object') Object.assign(q.filters, arg);
+      return q;
+    };
+    for (const m of ['whereNot', 'andWhere', 'whereIn', 'whereNull', 'whereRaw', 'andWhereRaw', 'orWhere', 'orWhereRaw', 'select', 'limit']) {
       q[m] = (arg) => {
         if (typeof arg === 'function') arg.call(q, q);
         return q;
       };
     }
-    q.first = async () => (firstResults[table] !== undefined ? firstResults[table] : null);
+    q.first = async () => {
+      const row = firstResults[table] !== undefined ? firstResults[table] : null;
+      if (row && q.filters.active === true && row.active === false) return null;
+      return row;
+    };
     q.then = (onOk, onErr) => Promise.resolve(listResults[table] || []).then(onOk, onErr);
     return q;
   };
@@ -282,5 +293,17 @@ describe('availabilityForExistingCustomer — refusals before any picker runs', 
     firstResults.customers = customerRow();
     jest.spyOn(geocoder, 'geocodeAddress').mockResolvedValue(null);
     await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'lawn_care' })).resolves.toBeNull();
+  });
+
+  // The bearer resolver (middleware/auth.js resolveBearerCustomer) only signs
+  // in { active: true } customers — an inactive one could not commit a /book
+  // offer, so the texting AI must not be handed one.
+  test('an INACTIVE customer (active = false) → null: the lookup requires active: true, and no pin is even resolved', async () => {
+    firstResults.customers = customerRow({ latitude: 27.3, longitude: -82.5, active: false });
+    const geocode = jest.spyOn(geocoder, 'geocodeAddress').mockResolvedValue({ lat: 27.3, lng: -82.5 });
+    await expect(availabilityForExistingCustomer({ customerId: CUSTOMER_ID, serviceKey: 'pest_control' })).resolves.toBeNull();
+    expect(geocode).not.toHaveBeenCalled();
+    const customersQuery = db.mock.results.map((r, i) => ({ table: db.mock.calls[i][0], chain: r.value })).find((c) => c.table === 'customers');
+    expect(customersQuery.chain.filters).toEqual({ id: CUSTOMER_ID, active: true });
   });
 });

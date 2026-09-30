@@ -2030,13 +2030,17 @@ function buildFunnelAvailability(args) {
 // pin, the service's catalog duration, the default window) — null when there
 // is nothing to commit against: /book off, no funnel service (createSelfBooking
 // refuses an empty serviceKey), the customer gone, or no resolvable pin (no
-// coordinates and no geocodable address, or a staff review holding it).
+// coordinates and no geocodable address, or a staff review holding it), or
+// an inactive account.
 async function availabilityForExistingCustomer({ customerId, serviceKey }) {
   const funnelKey = normalizeBookingServiceKey(serviceKey);
   if (!customerId || !funnelKey) return null;
   const { isEnabled } = require('../config/feature-gates');
   if (!isEnabled('selfBooking')) return null;
-  const customer = await db('customers').where({ id: customerId }).whereNull('deleted_at')
+  // active: true — the bearer resolver's own rule (middleware/auth.js
+  // resolveBearerCustomer): an inactive/cancelled customer cannot sign in to
+  // /book, so the texting AI must not offer them times it could not commit.
+  const customer = await db('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
     .first('id', 'account_id', 'latitude', 'longitude', 'address_line1', 'address_line2', 'city', 'state', 'zip');
   const location = customer ? await customerBookingLocation(customer) : null;
   if (!location) return null;

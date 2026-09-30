@@ -354,6 +354,27 @@ describe('offerableEstimateSlots — the page picker, for the texting AI', () =>
     expect(lastFirstArgs).toContain('customer_id');
   });
 
+  test('the send-time recheck (fresh): the SAME picker read uncached and uncapped; the draft read passes none of that', async () => {
+    currentEstimate = OWN;
+    getAvailableSlots.mockResolvedValue(SLOTS);
+    await offerableEstimateSlots('est-1', 'cust-1');
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('bypassCache');
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('maxResults');
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('expanderMaxResults');
+    getAvailableSlots.mockClear();
+    await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBe(SLOTS);
+    expect(getAvailableSlots).toHaveBeenCalledWith('est-1', expect.objectContaining({
+      serviceMode: expect.any(String), bypassCache: true, maxResults: expect.any(Number), expanderMaxResults: 0,
+    }));
+    expect(getAvailableSlots.mock.calls[0][1].maxResults).toBeGreaterThanOrEqual(1000);
+    expect(getAvailableSlots.mock.calls[0][1]).not.toHaveProperty('windowDays');
+    // the page's gate still applies to a fresh read
+    currentEstimate = { ...OWN, status: 'draft' };
+    getAvailableSlots.mockClear();
+    await expect(offerableEstimateSlots('est-1', 'cust-1', { fresh: true })).resolves.toBeNull();
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+  });
+
   test('another customer\'s estimate, or no customer, is never offered — the picker is not even asked', async () => {
     currentEstimate = OWN;
     await expect(offerableEstimateSlots('est-1', 'cust-2')).resolves.toBeNull();
