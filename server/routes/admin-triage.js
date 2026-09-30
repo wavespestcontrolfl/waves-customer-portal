@@ -352,8 +352,10 @@ async function emailDisagreementConfirmed(trx, callLogId, cardCreatedAt, holdsTa
 // cancelled — never by a generic call verdict / Resolve / Dismiss, which would
 // hide the work while the visit stays pending. True only while the visit is
 // still pending and unconfirmed.
+// COALESCE keeps the predicate two-valued: a card with no such key must read
+// FALSE here, never NULL (NOT NULL would drop it from the bulk resolve).
 const STREET_LEVEL_HOLD_OPEN_SQL = `(triage_items.reason_code = 'outbound_booking_review'
-  AND triage_items.payload->>'street_level_address' = 'true'
+  AND COALESCE(triage_items.payload->>'street_level_address', '') = 'true'
   AND EXISTS (SELECT 1 FROM scheduled_services hold_ss
     WHERE hold_ss.id::text = triage_items.payload->>'scheduled_service_id'
       AND hold_ss.status = 'pending' AND hold_ss.customer_confirmed = false))`;

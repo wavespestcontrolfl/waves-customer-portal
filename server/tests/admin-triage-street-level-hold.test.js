@@ -39,7 +39,9 @@ describe('streetLevelHoldStillPending', () => {
 describe('the routes keep the hold out of generic verdicts and single-card actions', () => {
   const src = fs.readFileSync(require.resolve('../routes/admin-triage.js'), 'utf8');
   test('the bulk verdict resolve excludes a still-pending hold card (a sibling verdict never sweeps it)', () => {
-    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("payload->>'street_level_address' = 'true'");
+    // Two-valued: an ordinary card (no street_level_address key) must evaluate FALSE, not NULL,
+    // or `NOT (...)` would silently drop it from the bulk resolve.
+    expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("COALESCE(triage_items.payload->>'street_level_address', '') = 'true'");
     expect(STREET_LEVEL_HOLD_OPEN_SQL).toContain("hold_ss.status = 'pending' AND hold_ss.customer_confirmed = false");
     const bulk = src.indexOf('.whereRaw(`NOT ${STREET_LEVEL_HOLD_OPEN_SQL}`)');
     expect(bulk).toBeGreaterThan(src.indexOf('.whereRaw("payload->\'reschedule_proposal\' IS NULL")'));
