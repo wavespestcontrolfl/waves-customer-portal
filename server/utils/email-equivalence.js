@@ -73,7 +73,12 @@ function suppressionCoversEmail(email, column = 'email') {
     this.whereRaw(`LOWER(${column}) = ?`, [normalized]);
     if (mailbox) {
       this.orWhereRaw(
-        `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?)`,
+        // Same dot-placement rule on the stored side: a malformed stored
+      // spelling is not an alias of the valid mailbox either.
+      `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?
+        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '.%'
+        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '%.'
+        AND POSITION('..' IN SPLIT_PART(LOWER(${column}), '@', 1)) = 0)`,
         [mailbox.split('@')[0]],
       );
     }
@@ -122,7 +127,12 @@ function subscriberRowsForBounce(query, subscriberId, mailedEmail) {
   if (mailbox) {
     const column = 'TRIM(email)';
     return query.whereRaw(
-      `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?)`,
+      // Same dot-placement rule on the stored side: a malformed stored
+      // spelling is not an alias of the valid mailbox either.
+      `(${GOOGLE_MAILBOX_SQL.isGoogle(column)} AND ${GOOGLE_MAILBOX_SQL.mailbox(column)} = ?
+        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '.%'
+        AND SPLIT_PART(LOWER(${column}), '@', 1) NOT LIKE '%.'
+        AND POSITION('..' IN SPLIT_PART(LOWER(${column}), '@', 1)) = 0)`,
       [mailbox.split('@')[0]],
     );
   }
