@@ -55,7 +55,8 @@
       1,
       2,
       3,
-      4
+      4,
+      5
     ],
     "peak_months": [
       12,
@@ -87,8 +88,8 @@
     "verification": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "1995484098de7ee7f9803be1224b8402ff0b0860927e16df434bcc91908db0c9"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "4a3a4e6fdb768ca21fd2b3019694f158b15c740de7ae4be5500274da462fda57"
     },
     "condition": {
       "hosts": [
@@ -339,7 +340,8 @@
       6,
       7,
       8,
-      9
+      9,
+      10
     ],
     "peak_months": [
       6,
@@ -358,7 +360,7 @@
       "what_it_means": "Short, black, rotted roots pulled from an irregular yellow patch can suggest take-all root rot, but the same look occurs with Pythium root rot, sting nematode or waterlogged soil. A photo cannot tell them apart; a technician checks the roots and the site conditions before recommending a next step.",
       "fact": "Take-all root rot damages the roots rather than the leaf blades, so the patch often does not recover from the center the way large patch can."
     },
-    "tech_notes": "Confirm short, black roots vs large patch's rotted leaf sheaths before recommending a follow-up visit. Often follows stress from drought, compaction or herbicide injury.",
+    "tech_notes": "Short, black roots vs large patch's rotted leaf sheaths separate the two before recommending a follow-up visit. Roots are infected two to three weeks before leaves show it, so fall decline often started in summer. Often follows stress from drought, compaction or herbicide injury.",
     "links": {
       "site_page": null,
       "guides": []
@@ -370,8 +372,8 @@
     "verification": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "5c19f6a313a73a63352366c4c59d6c6dd5dd630fa6a59f3eeba0dc7c5f81eb3f"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "11a0e7ef6d26798d287622869de9f2a9539721c383381f9c2cea34f65f1e5e5c"
     },
     "condition": {
       "hosts": [
@@ -514,14 +516,13 @@
     },
     "legacy_slugs": [],
     "sources": [
-      "https://ask.ifas.ufl.edu/lh044",
       "https://ask.ifas.ufl.edu/publication/LH046"
     ],
     "verification": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "2aa5b4daeeea80708d3ba9585184bb5e07be72096bda38a8a3d77e88749b3a4b"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "41017f74d8cf1d12c9d1dec0aa23340d38c41794adb06b32b2b9bb7b438073cd"
     },
     "condition": {
       "hosts": [
@@ -649,7 +650,7 @@
       "what_it_means": "General thinning and yellowing in a wet, low-lying spot can suggest a root rot, but no distinct patch forms with this one and a photo cannot confirm it. A technician checks the roots and the drainage before recommending a next step.",
       "fact": "Unlike large patch or take-all root rot, this disease rarely kills turf outright and does not leave a clearly shaped patch, so it is easy to mistake for ordinary wet-soil stress."
     },
-    "tech_notes": "No distinct patch forms; confirm via root inspection and standing water/drainage check rather than pattern alone.",
+    "tech_notes": "No distinct patch forms. Dark, rotted roots in wet or poorly drained turf are consistent with Pythium but do not confirm it; a lab look at affected roots does.",
     "links": {
       "site_page": null,
       "guides": []
@@ -661,8 +662,8 @@
     "verification": [],
     "review": {
       "status": "owner_approved",
-      "notes": "",
-      "approval_hash": "c939e7f36bd5f8eb7c09051f4ed57bc640248f8a9445fb93461ba6a34b3fe683"
+      "notes": "Owner re-approved 2026-09-30 after the SWFL yard-rotation source review (UF/IFAS, FDACS).",
+      "approval_hash": "15ce38f69ffe786e45d9bdc4af8be8c5175eaa4ca0c676d1da225ad05a0aef7a"
     },
     "condition": {
       "hosts": [
