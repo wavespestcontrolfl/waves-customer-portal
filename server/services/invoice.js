@@ -3559,6 +3559,14 @@ async function claimInvoiceForSend(invoiceId, {
     throw invoiceNotSendableError(latest);
   }
   invoice.send_claim_token = freshClaimToken;
+  // A first send that waited for the visit summary's handoff (which holds this invoice through the
+  // pay-link text) finds the claim free only once the text is out. The invoice is stamped after
+  // that release, so the summary's own record is read: a link text that started or was accepted
+  // means the customer has the link, and this first send is refused, not repeated.
+  if (firstDeliveryOnly && current.visit_completion_packet_id && await require("./visit-completion-summary").summaryLinkTextStarted(database, invoiceId, "pay_link")) {
+    await restoreSendClaim(invoiceId, current.status, true, [], database, freshClaimToken);
+    throw invoiceAlreadyDeliveredError(invoice);
+  }
   await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
   const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, freshClaimToken, adoptsQueuedInvoiceSend, database);
   return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
@@ -7927,13 +7935,22 @@ const InvoiceService = {
           });
           await alertSummaryCarriedEmailFailed(inv.id, inv.invoice_number, error);
         } else {
-          await restoreClaimedInvoice({
+          const parked = await restoreClaimedInvoice({
             status: "scheduled",
             scheduled_send_at: null,
             scheduled_send_attempts: Number(inv.scheduled_send_attempts || 0) + 1,
             scheduled_send_error: `${require("./invoice-helpers").STALE_SEND_PARK_ERROR} — ${SUMMARY_LINK_PARK_TEXT} and the invoice email did not go: ${error}`,
             updated_at: new Date(),
           });
+          // Nothing was delivered: the credit this send auto-applied is returned, exactly as after any
+          // other failed scheduled send (the row is 'scheduled' again, so the reversal is allowed).
+          if (parked && result.creditApplied > 0) {
+            try {
+              await require("./customer-credit").reverseAppliedCredit({ invoiceId: inv.id, amount: result.creditApplied, createdBy: "system:scheduled_send_failed" });
+            } catch (e) {
+              logger.warn(`[invoice] credit reversal after parking ${inv.id} skipped: ${e.message}`);
+            }
+          }
           await alertSummaryLinkUndelivered(inv.id, inv.invoice_number, error);
           logger.error(`[invoice] Summary-planned invoice ${inv.invoice_number}: neither the summary text nor the email carried the link — parked for office review: ${error}`);
         }

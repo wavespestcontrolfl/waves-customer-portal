@@ -5656,5 +5656,161 @@ postgres('visit summary recipient recovery', () => {
         expect(convert).toHaveBeenCalledTimes(1);
       });
     });
+
+    // The link-carrying text is accepted inside the summary's locked handoff, but the invoice is
+    // stamped only after the handoff releases: the stamp must not be the only thing standing
+    // between an operator first send and a second pay-link text.
+    describe('the summary text is accepted but not yet stamped on the invoice', () => {
+      // The pay-link stamp goes through the invoice service; the receipt stamp is a direct write,
+      // so a trigger makes that one fail. The returned function restores the write.
+      const failStamp = (kind = 'pay_link') => {
+        if (kind === 'pay_link') {
+          const spy = jest.spyOn(Invoice, 'markSummaryTextAccepted').mockRejectedValue(new Error('stamp write failed'));
+          return async () => spy.mockRestore();
+        }
+        return (async () => {
+          await mockPg.raw(`CREATE OR REPLACE FUNCTION fail_receipt_stamp() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'stamp write failed'; END $$ LANGUAGE plpgsql`);
+          await mockPg.raw('CREATE TRIGGER fail_receipt_stamp BEFORE UPDATE OF receipt_sms_sent_at ON invoices FOR EACH ROW WHEN (OLD.receipt_sms_sent_at IS NULL AND NEW.receipt_sms_sent_at IS NOT NULL) EXECUTE FUNCTION fail_receipt_stamp()');
+          return async () => { await mockPg.raw('DROP TRIGGER IF EXISTS fail_receipt_stamp ON invoices'); await mockPg.raw('DROP FUNCTION IF EXISTS fail_receipt_stamp()'); };
+        })();
+      };
+      const operatorFirstSend = (invoiceId) => Invoice.sendViaSMSAndEmail(invoiceId, { firstDeliveryOnly: true, operatorInitiated: true })
+        .then((result) => ({ result }), (error) => ({ error }));
+      const refused = (outcome) => outcome.error?.code || outcome.result?.code || outcome.result?.sms?.code;
+
+      test('an operator first send waiting on the invoice lock is refused as already delivered, never a second pay-link text', async () => {
+        const invoiceId = await stop();
+        let operator;
+        summaryProvider = async () => {
+          operator = operatorFirstSend(invoiceId);
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          return { sent: true };
+        };
+        await coordinate();
+        const outcome = await operator;
+        expect(strayTexts).toEqual([]);
+        expect(refused(outcome)).toBe('already_delivered');
+        const row = await invoiceRow(invoiceId);
+        expect(row.status).not.toBe('sending');
+        expect(row.send_claim_token).toBeNull();
+        expect(row.sms_sent_at).not.toBeNull();
+      });
+
+      test('a first send after a summary text that was accepted (its stamp failed) is refused the same way', async () => {
+        const invoiceId = await stop();
+        const restore = await failStamp();
+        await coordinate();
+        await restore();
+        expect(await summaryEffect()).toMatchObject({ status: 'sent' });
+        expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+        const outcome = await operatorFirstSend(invoiceId);
+        expect(refused(outcome)).toBe('already_delivered');
+        expect(strayTexts).toEqual([]);
+        expect((await invoiceRow(invoiceId)).status).not.toBe('sending');
+      });
+
+      test('a first send is still allowed when the summary text did not go (nothing to refuse)', async () => {
+        const invoiceId = await stop();
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return { sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' };
+        });
+        await coordinate();
+        expect(await summaryEffect()).toMatchObject({ status: 'suppressed' });
+        const outcome = await operatorFirstSend(invoiceId);
+        expect(refused(outcome)).not.toBe('already_delivered');
+      });
+
+      test.each([
+        ['unpaid', {}, 'sms_sent_at'],
+        ['paid', { status: 'paid' }, 'receipt_sms_sent_at'],
+      ])('%s: a failed acceptance stamp is retried from the durable effect on replay, and the packet stays on recovery until it lands', async (kind, options, column) => {
+        const invoiceId = await stop(options);
+        const restore = await failStamp(options.status === 'paid' ? 'receipt' : 'pay_link');
+        let first;
+        try { first = await coordinate(); } finally { await restore(); }
+        expect(first.status).toBe(202);
+        expect((await invoiceRow(invoiceId))[column]).toBeNull();
+        const second = await coordinate();
+        expect(second).toMatchObject({ status: 200, body: { state: 'done' } });
+        expect((await invoiceRow(invoiceId))[column]).not.toBeNull();
+        expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
+      });
+
+      test('a plain summary (its link went stale) never stamps the invoice, on replay either', async () => {
+        const invoiceId = await stop();
+        let calls = 0;
+        sendCustomerMessage.mockImplementation(async (input) => {
+          calls += 1;
+          if (calls === 1) await mockPg('invoices').where({ id: invoiceId }).update({ status: 'sending', send_claim_token: randomUUID() });
+          return handoffSender()(input);
+        });
+        await coordinate();
+        await mockPg('invoices').where({ id: invoiceId }).update({ status: 'scheduled', send_claim_token: null });
+        await coordinate();
+        expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+      });
+
+      test('a deferred link text whose acceptance stamp failed is retried on the next delivery pass', async () => {
+        const invoiceId = await stop();
+        const nextAllowedAt = new Date(Date.now() + 8 * 3600000).toISOString();
+        sendCustomerMessage.mockImplementation(async () => ({ sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt }));
+        await coordinate();
+        const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+        // The scheduler's locked dispatch records what the queued text carries, then finalizes it.
+        expect(await deferredHandoff(queued.metadata)).toMatchObject({ ok: true });
+        const restore = await failStamp();
+        await Summary.finalizeDeferredSummarySms(queued.metadata);
+        await restore();
+        expect(await summaryEffect()).toMatchObject({ status: 'sent' });
+        expect((await invoiceRow(invoiceId)).sms_sent_at).toBeNull();
+        await Summary.deliverVisitCompletionSummary(fixture.packetId, fixture.token);
+        expect((await invoiceRow(invoiceId)).sms_sent_at).not.toBeNull();
+      });
+    });
+
+    describe('a manual receipt resend after the summary carried the receipt', () => {
+      test('the receipt reads as delivered for the resend flow and the Quick Link, and a deliberate resend is allowed', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await coordinate();
+        const row = await invoiceRow(invoiceId);
+        expect(row.receipt_sms_sent_at).not.toBeNull();
+        expect(row.receipt_sent_at).not.toBeNull();
+        // The route reads the invoice, then claims with sawUnsent from receipt_sent_at.
+        const claimed = await Queue.claimReceiptJobForOperatorSend(invoiceId, { sawUnsent: !row.receipt_sent_at });
+        expect(claimed.alreadySent).toBeUndefined();
+        expect(claimed.id).toBeTruthy();
+        await Queue.releaseOperatorReceiptClaim(claimed, {});
+      });
+
+      test('the carried receipt email still goes out after the text stamped the receipt', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await coordinate();
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(require('../services/invoice-email').sendReceiptEmail).toHaveBeenCalledTimes(1);
+        expect(await jobRow(invoiceId)).toMatchObject({ status: 'completed' });
+      });
+    });
+
+    describe('parking an invoice nobody received', () => {
+      test('account credit the queue applied before the park is reversed', async () => {
+        const invoiceId = await stop();
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return { sent: false, blocked: true, code: 'SUPPRESSED_OPT_OUT' };
+        });
+        await coordinate();
+        // Credit arrives after the closeout's decision, so the queue applies it at send.
+        await mockPg('customers').where({ id: fixture.customerId }).update({ auto_apply_account_credit: true, account_credits: 20 });
+        jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n' });
+        require('../services/invoice-email').sendInvoiceEmail.mockResolvedValue({ ok: false, blocked: true, error: 'Suppressed: bounce' });
+        await Invoice.processScheduledSends();
+        const parked = await invoiceRow(invoiceId);
+        expect(parked.scheduled_send_at).toBeNull();
+        expect(require('../services/invoice-helpers').isStaleClaimReviewHold(parked)).toBe(true);
+        expect(Number(parked.credit_applied || 0)).toBe(0);
+        expect(Number((await mockPg('customers').where({ id: fixture.customerId }).first('account_credits')).account_credits)).toBe(20);
+      });
+    });
   });
 });

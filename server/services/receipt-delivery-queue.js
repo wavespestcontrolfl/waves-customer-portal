@@ -469,7 +469,7 @@ async function claimReceiptJobForOperatorSend(invoiceId, { sawUnsent = false } =
       // The visit summary's receipt text started or was accepted while this request waited for
       // the job row (the summary's handoff holds it through its send): a request that read the
       // receipt unsent is refused as already sent, never a deliberate resend.
-      const summaryTextStarted = async () => sawUnsent && await require('./visit-completion-summary').summaryReceiptTextStarted(trx, invoiceId);
+      const summaryTextStarted = async () => sawUnsent && await require('./visit-completion-summary').summaryLinkTextStarted(trx, invoiceId, 'receipt');
       const inserted = await trx('receipt_delivery_jobs')
         .insert({
           invoice_id: invoiceId,
