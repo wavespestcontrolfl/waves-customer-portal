@@ -78,6 +78,7 @@ const express = require('express');
 const db = require('../models/db');
 const adminScheduleRouter = require('../routes/admin-schedule');
 const { acquireScheduledInvoiceMintLock } = require('../services/scheduled-invoice-mint');
+const { lockTechDays } = require('../services/scheduling/tech-day-lock');
 
 const COLS = {
   id: {}, customer_id: {}, scheduled_date: {}, status: {}, estimated_price: {},
@@ -126,6 +127,11 @@ function chain(table) {
     return c;
   });
   c.first = jest.fn(async () => {
+    if (table === 'technicians') {
+      // Assignable by construction — this fixture only proves lock ORDER
+      // (tech-day fence vs. mint lock), not eligibility refusal.
+      return { id: 'tech-2', name: 'Tech Two', role: 'technician', employment_status: 'active', field_dispatchable: true, active: true };
+    }
     if (table !== 'scheduled_services') return null;
     if (insideTxn && concurrentEstimatedPrice != null) {
       return { ...STORED, estimated_price: concurrentEstimatedPrice };
@@ -172,6 +178,7 @@ beforeEach(() => {
   concurrentEstimatedPrice = null;
   forUpdateSpy.mockClear();
   acquireScheduledInvoiceMintLock.mockClear();
+  lockTechDays.mockClear();
   mockReleaseCombined.mockClear();
   db.mockImplementation((table) => chain(table));
   db.raw = jest.fn(() => 'raw');
@@ -270,6 +277,20 @@ test('changed price is allowed when there is no covered invoice — mint lock is
   const write = captured.find((c) => c.table === 'scheduled_services');
   expect(write).toBeDefined();
   expect(Number(write.payload.estimated_price)).toBeCloseTo(150, 2);
+});
+
+test('a combined price + technician-assignment save takes the tech-day fence BEFORE the mint lock (Codex P2 on #5253: avoids the ABBA deadlock against estimate-public.js\'s accept, which takes the same two locks occupancy -> tech-day fence -> mint)', async () => {
+  invoiceFixture = [];
+  await put({
+    estimatedPrice: 150, technicianId: 'tech-2', notes: 'price change + tech assignment',
+  });
+  expect(lockTechDays).toHaveBeenCalled();
+  expect(acquireScheduledInvoiceMintLock).toHaveBeenCalledWith(expect.anything(), 'svc-1');
+  const fenceCalls = lockTechDays.mock.invocationCallOrder;
+  const mintCalls = acquireScheduledInvoiceMintLock.mock.invocationCallOrder;
+  const fenceOrder = fenceCalls[fenceCalls.length - 1];
+  const mintOrder = mintCalls[mintCalls.length - 1];
+  expect(fenceOrder).toBeLessThan(mintOrder);
 });
 
 test('the free re-service conversion runs the same any-live-invoice check, guards its series siblings, and service edits take the mint lock', () => {
