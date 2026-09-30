@@ -765,7 +765,7 @@ class ContextAggregator {
         // as this customer's price (codex #3128 r6).
         billingLane,
       },
-      smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type, fromPhone: m.from_phone ?? null })),
+      smsHistory: smsHistory.map(m => ({ direction: m.direction, body: m.message_body, date: m.created_at, type: m.message_type, fromPhone: m.from_phone ?? null, toPhone: m.to_phone ?? null })),
       // technician_notes is INTERNAL (owner ruling 2026-07-16: access codes,
       // billing notes, candid remarks live there) — only the reviewed
       // WHAT WE DID / WHAT WE FOUND parse may reach customer-facing prompts

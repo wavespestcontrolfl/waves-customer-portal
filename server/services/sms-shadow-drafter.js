@@ -1421,7 +1421,11 @@ function readInboundThread(context, inboundMessage, inboundPhone) {
   const mixed = (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound' && (!sender || phoneIdentityKey(m.fromPhone) !== sender));
   // Visit references are read over EVERY same-sender inbound row the model is shown, whatever its age (the kind-inheritance
   // window above is shorter): a 3-day-old "the May treatment" sits beside the facts just the same.
-  const shown = sender ? (context?.smsHistory || []).slice(0, 10).filter((m) => m && m.direction === 'inbound' && typeof m.body === 'string' && m.body.trim() && phoneIdentityKey(m.fromPhone) === sender).map((m) => m.body) : [];
+  // ...and over every OUTBOUND row shown too ("[WAVES] I found the record for your May treatment"): the model reads what Waves said as well,
+  // and an outbound row is judged whoever it was sent to (a reply to another number is shown in the same thread), so any other-visit
+  // reference in it means none on file.
+  const rendered = (context?.smsHistory || []).slice(0, 10).filter((m) => m && typeof m.body === 'string' && m.body.trim());
+  const shown = rendered.filter((m) => m.direction === 'outbound' || (m.direction === 'inbound' && sender && phoneIdentityKey(m.fromPhone) === sender)).map((m) => m.body);
   return { texts: [String(inboundMessage ?? ''), ...mine.map((m) => m.body)], shown, unreadable: !sender || (recent.length > 0 && !mine.length), mixed, noSender: !sender, hasInboundRows: (context?.smsHistory || []).slice(0, 10).some((m) => m && m.direction === 'inbound') };
 }
 

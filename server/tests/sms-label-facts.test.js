@@ -1739,6 +1739,50 @@ describe('r25 item 1: every same-sender row the model is shown is read for a vis
   });
 });
 
+describe('r24: permission-entry inbound forms; outbound rows the model sees', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  test('"are we allowed back in?" and its permission-word + entry-target forms ask re-entry', () => {
+    for (const text of ['Are we allowed back in?', 'is it safe to go back', 'are we clear to go in', 'are the kids ok to come back in', 'is it okay to go back inside', 'are we permitted to return', 'are we good to go back in', 'is it safe to come inside', 'Are we cleared to come home?', 'is it fine to head back in', 'are we allowed in?']) {
+      expect([text, asked(text).includes('reentry')]).toEqual([text, true]);
+    }
+    for (const text of ['is Tuesday ok in the morning?', 'are we ok for Tuesday', 'can you come back Tuesday', 'is it ok if you come back tomorrow', 'will you be back Thursday?', 'is it ok to call you back']) {
+      expect([text, asked(text).includes('reentry')]).toEqual([text, false]);
+    }
+  });
+  const { generateGroundedDraft } = require('../services/sms-shadow-drafter');
+  const RE = 'For the products applied at your Jun 5 visit, the label says to keep people and pets off treated areas until dry.';
+  const PHONE = '+19415550100';
+  const NONE = 'LABEL FACTS (none on file for the last visit):';
+  const makeClient = (scripted) => {
+    const queue = [...scripted];
+    return { messages: { create: () => Promise.resolve({ content: [{ text: JSON.stringify(queue.shift()) }] }) } };
+  };
+  const draft = (reply) => ({ reply, intended_actions: [], missing_info: null, offered_times: [] });
+  const run = (smsHistory) => generateGroundedDraft({
+    client: makeClient([draft(RE), draft(RE), draft(RE), { supported: true, violations: [] }]),
+    context: { summary: 'Test customer', customer: { id: 'cust-1' }, upcomingServices: [], smsHistory },
+    inboundMessage: 'Can the dogs go out now?', inboundPhone: PHONE, intent: { intent: 'general_customer_sms_needs_review' }, schedulingIntent: false,
+  });
+  beforeEach(() => {
+    process.env[GATE] = 'true';
+    mockFetchLabelFacts.mockReset();
+    mockFetchLabelFacts.mockResolvedValue({ ...labelFacts([product()]), customerId: 'cust-1', recordIds: ['r2'] });
+  });
+  const days = (n) => new Date(Date.now() - n * 86400000).toISOString();
+  test('an outbound row naming another visit voids the facts: to this sender, to no phone, or to another number', async () => {
+    const out = (extra) => ({ direction: 'outbound', body: '[WAVES] I found the record for your May treatment', date: days(1), ...extra });
+    expect((await run([out({ toPhone: PHONE })])).factsBlock).toContain(NONE);
+    expect((await run([out({})])).factsBlock).toContain(NONE);
+    expect((await run([out({ toPhone: '+19415550199' })])).factsBlock).toContain(NONE);
+    // an outbound row with no visit reference keeps them
+    const benign = { direction: 'outbound', body: 'Thanks, we will see you soon', date: days(1), toPhone: PHONE };
+    expect((await run([benign])).factsBlock).toContain(`- ${RE}`);
+  });
+  test('the context aggregator keeps to_phone on smsHistory rows (additive beside fromPhone)', () => {
+    expect(require('fs').readFileSync(require('path').join(__dirname, '..', 'services/context-aggregator.js'), 'utf8')).toMatch(/fromPhone: m\.from_phone \?\? null, toPhone: m\.to_phone \?\? null/);
+  });
+});
+
 describe('r26: the follow-up deadline the real-answers prompt requires may trail a hand-off (the exact SLA_PHRASES of sms-followup-sla)', () => {
   const { SLA_PHRASES } = require('../services/sms-followup-sla');
   const asked = labelFactsLib.askedLabelKinds('Can the dogs go out now?');
@@ -2166,6 +2210,19 @@ describe('r34: deictic indoor stay; one consistent read of the last visit; the i
       // the send-time recheck reads through the same function
       const snap = { customer_id: 'c1', visit_date: '2026-06-05', record_ids: ['r2'], sentences: [], asked: [] };
       await expect(labelFactsLib.labelFactsSendBlockReason({ snapshot: snap, body: 'Thanks', conn: () => { throw new Error('must not read'); } })).resolves.toBeNull();
+    });
+    test('r24: a knex-style connection issues SET LOCAL statement_timeout as the FIRST statement (server-side cancel); a connection without raw skips it', async () => {
+      const inner = makeConn({ newestDates: ['2026-06-05'] });
+      const order = [];
+      const trx = new Proxy(inner, { apply: (t, _this, a) => { order.push('query'); return t(...a); }, get: (t, k) => (k === 'raw' ? (sql) => { order.push(`raw:${sql}`); return Promise.resolve(); } : (k === 'counters' ? t.counters : typeof t[k] === 'function' ? (...a) => { order.push('query'); return t[k](...a); } : t[k])) });
+      const conn = { transaction: jest.fn(async (work) => work(trx)) };
+      await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, conn });
+      expect(order[0]).toBe("raw:SET LOCAL statement_timeout = '2500ms'");
+      expect(order.filter((x) => x.startsWith('raw:'))).toHaveLength(1);
+      expect(order.indexOf('query')).toBeGreaterThan(0);
+      // no raw on the transaction object (a fake): nothing is issued and the read still works
+      const plain = { transaction: jest.fn(async (work) => work(makeConn({ newestDates: ['2026-06-05'] }))) };
+      expect((await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', today: TODAY, conn: plain })).serviceDate).toBe('2026-06-05');
     });
     test('fetchLabelFacts keeps its time limit and fails safe when the transaction never settles', async () => {
       const conn = { transaction: () => new Promise(() => {}) };

@@ -61,6 +61,7 @@ const escapeRegex = (t) => String(t).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
 const LABEL_SECTION_REGEX_SRC = `(?:${escapeRegex(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''))}|LABEL FACTS \\(from the labels of products applied at the last visit on [^()\n]{1,60}\\):(?:\n- [^\n]{1,${LABEL_LINE_MAX}}){1,${LABEL_LINES_MAX}})`;
 const LABEL_FACTS_HEADER_PREFIX = 'LABEL FACTS (from the labels of products applied at the last visit on ';
 const LABEL_FACTS_TIMEOUT_MS = 3000;
+const LABEL_FACTS_STATEMENT_TIMEOUT_MS = 2500;
 const WATER_CONDITIONER_RE = /water\s*condition|buffer|acidifier|\bph\b|conditioner/i;
 // The catalog's generic placeholder is not a re-entry statement.
 const REENTRY_PLACEHOLDER_RE = /^follow the product label and technician service report[^.]*\.?$/i;
@@ -229,7 +230,11 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   // transactions (knex) reads inside a REPEATABLE READ, READ ONLY transaction; any other connection is re-checked after the read
   // (the newest date and both guards must still hold, else none on file).
   if (typeof conn.transaction === 'function') {
-    return conn.transaction((trx) => readLastVisitLabelFactsOnce({ customerId, conn: trx, today }), { isolationLevel: 'repeatable read', readOnly: true });
+    return conn.transaction(async (trx) => {
+      // The server cancels a slow read itself (a JS-side timeout cannot release the pooled connection); the 3 s race in fetchLabelFacts stays the outer guard.
+      if (typeof trx.raw === 'function') await trx.raw(`SET LOCAL statement_timeout = '${LABEL_FACTS_STATEMENT_TIMEOUT_MS}ms'`);
+      return readLastVisitLabelFactsOnce({ customerId, conn: trx, today });
+    }, { isolationLevel: 'repeatable read', readOnly: true });
   }
   const facts = await readLastVisitLabelFactsOnce({ customerId, conn, today });
   if (!facts) return null;
@@ -1030,7 +1035,7 @@ const ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|you|us|our|my|me|they
 // not re-entry. Every alternative is a plain word list with bounded gaps.
 const INDOOR_PLACE_RE = /\b(?:inside|indoors?|house|home|rooms?|bedrooms?|kitchen|living\s+room|garage|attic|crawlspace|basement|bathroom|closet|cabinets?|pantry|baseboards?|floors?|carpets?|couch|furniture|nursery)\b/;
 const ENTRY_RE = /\b(?:re-?enter|enter|return\s+(?:home|inside|indoors|in|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|come\s+home|(?:get|head|move|be)\s+back\s+(?:home|in|inside|indoors|to\s+(?:the\s+|our\s+|my\s+)?(?:house|home|yard|lawn|property))|(?:go|come|get|walk|move)\s+(?:back\s+)?(?:in|inside|indoors)|let\s+(?:\w+\s+){0,2}?(?:back\s+)?(?:in|inside|indoors)|sleep(?:ing)?\s+in|stay(?:ing)?\s+in|use\s+the\s+(?:kitchen|bathroom|bedroom|room|garage|basement|attic))\b/;
-const STAFF_ENTRY_RE = /\b(?:you|(?:the|our|your)\s+(?:tech|technician|guy|team|crew)|tech|technician|someone)\s+(?:will\s+|can\s+|could\s+|should\s+|would\s+|need\s+to\s+|have\s+to\s+|to\s+)?(?:come|go|get|enter|walk)\s+(?:in|inside|indoors|into)\b/;
+const STAFF_ENTRY_RE = /\b(?:you|(?:the|our|your)\s+(?:tech|technician|guy|team|crew)|tech|technician|someone)\s+(?:will\s+|can\s+|could\s+|should\s+|would\s+|need\s+to\s+|have\s+to\s+|to\s+)?(?:come|go|get|enter|walk)\s+(?:in|inside|indoors|into|back)\b/;
 const OK_WORD_RE = /\b(?:safe|ok|okay|fine|ready|usable|clear|allowed)\b/;
 // ("you" is not the one going in: "do you spray inside the house?" is a question about the service)
 const INDOOR_ASKER_RE = new RegExp(BEING_RE.source + "|\\b(?:we|i|us|our|my|me|they|them|he|she|kids?|family)\\b");
@@ -1039,7 +1044,15 @@ const BE_HOME_ACCESS_RE = /\b(?:(?:need|have|got|supposed|required)\s+to|(?:shou
 // Deictic indoor stay ("can we sleep here tonight?", "is it okay to stay here?", "can the kids stay home today", "ok to be here?"): a being subject
 // (or an ok word) with a question shape. A plain statement ("we will be home Tuesday") and "will you be here Tuesday?" (no being subject) are not.
 const DEICTIC_STAY_RE = /\b(?:sleep(?:ing)?|stay(?:ing)?|be|being|live|living|remain(?:ing)?)\s+(?:in\s+here|here|at\s+home|home)\b/;
+// Permission-entry forms ("are we allowed back in?", "is it safe to go back", "are we clear to go in", "ok to come back in"): an allowed / ok /
+// cleared / safe word + (to) + back / in / inside / home / go in / return. With a being subject, or with the explicit going-in verb.
+const PERMISSION_ENTRY_WORD_SRC = 'allowed|permitted|ok|okay|cleared?|good|fine|safe';
+const PERMISSION_ENTRY_RE = new RegExp(`\\b(?:${PERMISSION_ENTRY_WORD_SRC})\\s+(?:to\\s+)?(?:(?:go|come|get|head|move)\\s+)?(?:back(?:\\s+(?:in|inside|indoors|home))?|in|inside|indoors|home|return)\\b(?!\\s+(?:in\\s+the\\s+(?:morning|afternoon|evening)|the\\s+(?:morning|afternoon|evening)|on\\b|at\\b|by\\b|around\\b|next\\b|tomorrow|\\d|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)))`);
+const PERMISSION_GO_BACK_RE = new RegExp(`\\b(?:${PERMISSION_ENTRY_WORD_SRC})\\s+to\\s+(?:go|come|get|head|move)\\s+(?:back|in|inside|indoors)\\b`);
 const asksIndoorReentry = (text) => !STAFF_ENTRY_RE.test(text) && !BE_HOME_ACCESS_RE.test(text) && (
+  (PERMISSION_ENTRY_RE.test(text) && INDOOR_ASKER_RE.test(text))
+  || PERMISSION_GO_BACK_RE.test(text)
+  ||
   (DEICTIC_STAY_RE.test(text) && ASKED_QUESTION_RE.test(text) && (INDOOR_ASKER_RE.test(text) || OK_WORD_RE.test(text)))
   ||
   (ENTRY_RE.test(text) && (INDOOR_ASKER_RE.test(text) || OK_WORD_RE.test(text)))
