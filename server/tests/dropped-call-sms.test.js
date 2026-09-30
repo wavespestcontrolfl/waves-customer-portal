@@ -40,12 +40,14 @@ jest.mock('../services/messaging/validators/line-type', () => ({
   NON_SMS_LINE_TYPES: new Set(['landline', 'fixedVoip']),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/messaging/auto-text-holds', () => ({ saidNoTextsOnAnyCall: jest.fn(async () => false) }));
 
 const db = require('../models/db');
 const { isEnabled } = require('../config/feature-gates');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 const { renderSmsTemplate } = require('../services/sms-template-renderer');
 const lineType = require('../services/messaging/validators/line-type');
+const { saidNoTextsOnAnyCall } = require('../services/messaging/auto-text-holds');
 const {
   sendDroppedCallAddressRequest,
   handleUndeliveredAddressRequest,
@@ -106,6 +108,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate'] }).setSystemTime(IN_WINDOW);
   state = { firstResults: {}, updateResults: {}, insertResults: {}, insertError: {}, inserts: [], updates: [], deletes: [] };
+  saidNoTextsOnAnyCall.mockImplementation(async () => false);
   db.mockImplementation((table) => makeBuilder(table));
   const trx = (table) => makeBuilder(table);
   trx.raw = db.raw;
@@ -402,6 +405,23 @@ describe('sendDroppedCallAddressRequest gate ladder', () => {
     const staleCall = { ...CALL, created_at: new Date('2026-07-25T12:00:00Z') };
     const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: staleCall });
     expect(res).toEqual({ sent: false, skipped: 'call_too_old' });
+    expect(state.inserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('a caller who said no to texts on a call with this number — no text, one-shot not consumed (owner 2026-09-30)', async () => {
+    saidNoTextsOnAnyCall.mockResolvedValueOnce(true);
+    const res = await sendDroppedCallAddressRequest({ ...sendArgs(), call: { ...CALL, id: 'call-9' } });
+    expect(res).toEqual({ sent: false, skipped: 'said_no_texts' });
+    expect(saidNoTextsOnAnyCall).toHaveBeenCalledWith(PHONE, { originCallId: 'call-9' });
+    expect(state.inserts).toHaveLength(0);
+    expect(sendCustomerMessage).not.toHaveBeenCalled();
+  });
+
+  it('a no-texts read failure fails CLOSED before any claim', async () => {
+    saidNoTextsOnAnyCall.mockRejectedValueOnce(Object.assign(new Error('down'), { code: 'ETIMEDOUT' }));
+    const res = await sendDroppedCallAddressRequest(sendArgs());
+    expect(res).toEqual({ sent: false, skipped: 'said_no_texts_read_failed' });
     expect(state.inserts).toHaveLength(0);
     expect(sendCustomerMessage).not.toHaveBeenCalled();
   });

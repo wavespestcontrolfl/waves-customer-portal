@@ -20,6 +20,7 @@ const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
+const { subscriberRowsForBounce, bounceMailbox } = require('../utils/email-equivalence');
 const logger = require('../services/logger');
 const bounceRecovery = require('../services/email-bounce-recovery');
 const bounceRescue = require('../services/email-bounce-rescue');
@@ -553,7 +554,10 @@ function computeNewsletterEventUpdates(ev, delivery, now = new Date()) {
         },
         sendIncrement: 'bounced_count',
         reconcileSendStatus: true,
-        subscriberAction: delivery.subscriber_id ? 'bounce_increment' : null,
+        // A delivery whose subscriber id a merge cleared (ON DELETE SET NULL)
+        // still bounce-counts the surviving row when the mailed address is a
+        // Gmail mailbox: that fence never needed the id (codex #5413 r3).
+        subscriberAction: (delivery.subscriber_id || bounceMailbox(delivery.email)) ? 'bounce_increment' : null,
         subscriberAt: now,
       };
 
@@ -909,7 +913,7 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
   if (updates.sendIncrement) {
     await client('newsletter_sends').where({ id: delivery.send_id }).increment(updates.sendIncrement, 1);
   }
-  if (updates.subscriberAction && delivery.subscriber_id) {
+  if (updates.subscriberAction && (delivery.subscriber_id || updates.subscriberAction === 'bounce_increment')) {
     const at = updates.subscriberAt;
     // A delivery can be re-pointed at the surviving subscriber when a
     // customer's email typo merges two subscriber rows (customer-email-fanout).
@@ -918,11 +922,11 @@ async function handleNewsletterEvent(ev, delivery, client = db) {
     // address. Opt-outs (unsubscribe / spam complaint) are NEVER fenced: an
     // opt-out is honored on the subscription even if its address moved —
     // over-honoring is safe, dropping one is not.
-    const subscriberRow = () => {
-      const q = client('newsletter_subscribers').where({ id: delivery.subscriber_id });
-      const mailed = String(delivery.email || '').trim().toLowerCase();
-      return mailed ? q.whereRaw('LOWER(TRIM(email)) = ?', [mailed]) : q;
-    };
+    // The fence matches by Gmail mailbox identity (any spelling of the same
+    // inbox, every row on it), exact LOWER/TRIM for other domains.
+    const subscriberRow = () => subscriberRowsForBounce(
+      client('newsletter_subscribers'), delivery.subscriber_id, delivery.email,
+    );
     if (updates.subscriberAction === 'bounce_increment') {
       await subscriberRow().update({
         bounce_count: client.raw('COALESCE(bounce_count,0) + 1'),
