@@ -82,7 +82,7 @@ import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
 import Customer360Summary from "./Customer360Summary";
 import Customer360Estimates from "./Customer360Estimates";
 import useUnreadConversations from "../../hooks/useUnreadConversations";
-import { formatETDate, formatETDateOnly } from "../../lib/timezone";
+import { formatETDateOnly } from "../../lib/timezone";
 import { useCollectionHold } from "../../hooks/useCollectionHold";
 import { CollectionHoldStatus, HOLD_UNKNOWN_MESSAGE } from "./CollectionHoldNotice";
 import useModalFocus from "../../hooks/useModalFocus";
