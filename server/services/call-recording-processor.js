@@ -10000,6 +10000,12 @@ const CallRecordingProcessor = {
             // of the labels. Also needs GATE_CALL_AGENT_COMMIT_BOOKING, the
             // kill switch of the commercial exception. Read at call time
             // (like the GATE_CALL_PROPERTY_ROLE reads); off = false.
+            // TODO(decision version, codex #5377 r2 P1): this demotion changes
+            // a routing decision, so it must stamp a gated decision tag 'c'
+            // (V2_GATED_DECISION_TAGS / resolveDecisionVersion, introduced by
+            // #5371) only while this gate AND GATE_CALL_AGENT_COMMIT_BOOKING
+            // are on, never a plain V2_DECISION_VERSION bump. Register it after
+            // #5371 merges; until then the flip must not happen.
             commercialDictatedBooking: isEnabled('callAgentCommitBooking') && !isOutboundCall(call)
               && require('../config/feature-gates').callCommercialDictatedBookingLive?.() === true,
             // Slot binding needs the call time: a spoken weekday only names a

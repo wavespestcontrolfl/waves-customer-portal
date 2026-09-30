@@ -29,9 +29,11 @@ const TRANSCRIPT = transcriptOf(`Agent: ${COMMIT}`, `Caller: ${ACCEPT}`);
 
 const quote = (fieldPath, speaker, text) => ({ field_path: fieldPath, speaker, quote: text });
 const PRICE_EVIDENCE = [
-  quote('/service_request/quoted_price_usd', 'agent', PRICE_QUOTE),
-  quote('/service_request/quoted_price_usd', 'caller', PRICE_OK),
+  quote('/service_request/price_offered_by_staff', 'agent', PRICE_QUOTE),
+  quote('/service_request/price_accepted_by_caller', 'caller', PRICE_OK),
 ];
+// The extraction's judgements of the price language (schema 1.21.0).
+const PRICE_JUDGEMENTS = { price_offered_by_staff: true, price_accepted_by_caller: true, price_is_final: true };
 const SCHEDULE_EVIDENCE = [
   quote('/scheduling/agent_committed_booking', 'agent', COMMIT),
   quote('/scheduling/confirmed_start_at', 'agent', COMMIT),
@@ -52,7 +54,7 @@ function extraction({
       agreed_slot_words: WORDS,
       ...scheduling,
     },
-    service_request: { quoted_price_usd: 150, ...service },
+    service_request: { quoted_price_usd: 150, ...PRICE_JUDGEMENTS, ...service },
     evidence: [...evidence, ...priceEvidence],
   };
 }
@@ -67,27 +69,22 @@ const grounded = (ex, transcript = TRANSCRIPT) => commercialDictatedBookingGroun
 
 // "Sure, that works." shapes.
 const SURE = 'Sure, that works.';
-const acceptShape = (acceptQuote, lines) => extraction({
+const acceptShape = (acceptQuote, lines) => ({ ex: extraction({
   evidence: [
     quote('/scheduling/agent_committed_booking', 'agent', COMMIT),
     quote('/scheduling/confirmed_start_at', 'agent', COMMIT),
     quote('/scheduling/caller_accepted_slot', 'caller', acceptQuote),
   ],
-}) && { ex: extraction({
-  evidence: [
-    quote('/scheduling/agent_committed_booking', 'agent', COMMIT),
-    quote('/scheduling/confirmed_start_at', 'agent', COMMIT),
-    quote('/scheduling/caller_accepted_slot', 'caller', acceptQuote),
-  ],
-}), transcript: transcriptOf(...lines) };
+}), transcript: transcriptOf(...lines) });
 // Caller proposes, staff replies.
 const PROPOSAL = 'Can you come Thursday at 2?';
 const PROPOSAL_WORDS = { day: 'Thursday', hour: '2', period: null };
-const proposalCase = ({ proposalText = PROPOSAL, replyText = SURE, between = [], evidence, words = PROPOSAL_WORDS, quoteText = proposalText.replace(/\?.*$/, '') } = {}) => ({
+const proposalCase = ({ proposalText = PROPOSAL, replyText = SURE, between = [], evidence, words = PROPOSAL_WORDS, quoteText = proposalText.replace(/\?.*$/, ''), judged = true } = {}) => ({
   ex: extraction({
-    scheduling: { agreed_slot_words: words },
+    scheduling: { agreed_slot_words: words, staff_accepted_proposed_slot: judged },
     evidence: evidence || [
-      quote('/scheduling/agent_committed_booking', 'agent', SURE),
+      quote('/scheduling/agent_committed_booking', 'agent', replyText),
+      quote('/scheduling/staff_accepted_proposed_slot', 'agent', replyText),
       quote('/scheduling/confirmed_start_at', 'caller', quoteText),
       quote('/scheduling/caller_accepted_slot', 'caller', quoteText),
     ],
@@ -95,13 +92,14 @@ const proposalCase = ({ proposalText = PROPOSAL, replyText = SURE, between = [],
   transcript: transcriptOf('Agent: When would you like us to come out?', `Caller: ${proposalText}`, ...between, `Agent: ${replyText}`),
 });
 // Day said earlier, final time turn omits it.
-const dayOmittedCase = ({ dayLine = 'Caller: Thursday works.', dayLines = [dayLine] } = {}) => ({
+const dayOmittedCase = ({ dayLine = 'Caller: Thursday works.', dayLines = [dayLine], selected = 'Thursday', selectedQuote = 'Thursday works', selectedSpeaker = 'caller' } = {}) => ({
   ex: extraction({
-    scheduling: { agreed_slot_words: { day: null, hour: 'two', period: null } },
+    scheduling: { agreed_slot_words: { day: null, hour: 'two', period: null }, selected_day_words: selected },
     evidence: [
       quote('/scheduling/agent_committed_booking', 'agent', 'We will see you at two'),
       quote('/scheduling/confirmed_start_at', 'agent', 'We will see you at two'),
       quote('/scheduling/caller_accepted_slot', 'caller', SURE),
+      ...(selectedQuote ? [quote('/scheduling/selected_day_words', selectedSpeaker, selectedQuote)] : []),
     ],
   }),
   transcript: transcriptOf('Agent: When works for you?', ...dayLines, 'Agent: We will see you at two.', `Caller: ${SURE}`),
@@ -236,32 +234,54 @@ describe('commercial dictated booking: canAutoRoute', () => {
   });
 });
 
-describe('the price must be agreed AND grounded in the transcript', () => {
+describe('the price: the extraction judges it, the code verifies the pinned quotes (schema 1.21.0)', () => {
+  test('each judgement must be true; a missing or false one fails closed', () => {
+    const cases = [
+      ['price_offered_by_staff', 'price_offer_unjudged'],
+      ['price_accepted_by_caller', 'price_acceptance_unjudged'],
+      ['price_is_final', 'price_not_final'],
+    ];
+    for (const [field, reason] of cases) {
+      for (const value of [false, null, undefined]) {
+        const ex = extraction({ service: { [field]: value } });
+        expect([field, value, grounded(ex)]).toEqual([field, value, { ok: false, reason }]);
+        expect(route(ex).allowed).toBe(false);
+      }
+    }
+  });
+
   test('a price the extraction invented (no price talk in the transcript) fails closed', () => {
     const t = ['Caller: Hi, I manage a small office.', 'Agent: Okay.', `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
     expect(grounded(extraction(), t)).toEqual({ ok: false, reason: 'price_not_stated_by_staff' });
     expect(route(extraction(), { transcript: t }).allowed).toBe(false);
   });
 
-  test('staff stated a different amount than the one recorded', () => {
-    const t = TRANSCRIPT.replace('$150', '$120');
-    expect(grounded(extraction(), t).ok).toBe(false);
-    // Two different figures in the staff turn are ambiguous.
-    const two = TRANSCRIPT.replace('$150, does', '$150 or $120, does');
-    expect(grounded(extraction(), two).ok).toBe(false);
+  test('a price offer that is a question about someone else\'s quote is judged false (offer unjudged)', () => {
+    const t = TRANSCRIPT.replace(PRICE_TALK, 'Did another company quote you $150?');
+    const ex = extraction({ service: { price_offered_by_staff: false }, priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', 'another company quote you $150'), PRICE_EVIDENCE[1]] });
+    expect(grounded(ex, t)).toEqual({ ok: false, reason: 'price_offer_unjudged' });
   });
 
-  test('the caller must accept it: the first caller turn after the price is the affirmative reply', () => {
-    const t = [OPENING, `Agent: ${PRICE_TALK}`, 'Caller: What does that include?', `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
-    expect(grounded(extraction(), t)).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
-    const declined = TRANSCRIPT.replace(PRICE_OK, 'No, that is too much for us.');
-    expect(grounded(extraction({ priceEvidence: [PRICE_EVIDENCE[0], quote('/service_request/quoted_price_usd', 'caller', 'No, that is too much for us.')] }), declined).ok).toBe(false);
+  test('the offer quote must state exactly the recorded amount, and no other figure in its turn', () => {
+    expect(grounded(extraction(), TRANSCRIPT.replace('$150', '$120')).ok).toBe(false);
+    expect(grounded(extraction(), TRANSCRIPT.replace('$150, does', '$150 or $120, does')).ok).toBe(false);
+    const noFigure = extraction({ priceEvidence: [quote('/service_request/price_offered_by_staff', 'agent', 'The quarterly service for the office'), PRICE_EVIDENCE[1]] });
+    expect(grounded(noFigure).reason).toBe('price_not_stated_by_staff');
   });
 
-  test('the price quotes must sit in the right speaker\'s turns', () => {
+  test('the acceptance must come after the offer, in a caller turn', () => {
+    const before = [OPENING, `Caller: ${PRICE_OK}`, `Agent: ${PRICE_TALK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
+    expect(grounded(extraction(), before)).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
+    expect(grounded(extraction({ priceEvidence: [PRICE_EVIDENCE[0], quote('/service_request/price_accepted_by_caller', 'agent', PRICE_OK)] })).reason).toBe('price_not_accepted_by_caller');
     expect(grounded(extraction({ priceEvidence: [] })).reason).toBe('price_not_stated_by_staff');
-    expect(grounded(extraction({ priceEvidence: [quote('/service_request/quoted_price_usd', 'caller', PRICE_QUOTE), PRICE_EVIDENCE[1]] })).reason).toBe('price_not_stated_by_staff');
-    expect(grounded(extraction({ priceEvidence: [PRICE_EVIDENCE[0], quote('/service_request/quoted_price_usd', 'agent', PRICE_OK)] })).reason).toBe('price_not_accepted_by_caller');
+    expect(grounded(extraction({ priceEvidence: [quote('/service_request/price_offered_by_staff', 'caller', PRICE_QUOTE), PRICE_EVIDENCE[1]] })).reason).toBe('price_not_stated_by_staff');
+  });
+
+  test('a staff correction between the offer and the "yes" does not attach the "yes" to the old price', () => {
+    const t = [OPENING, `Agent: ${PRICE_TALK}`, 'Agent: Actually, correction, the service is $250.', `Caller: ${PRICE_OK}`, `Agent: ${COMMIT}`, `Caller: ${ACCEPT}`].join('\n');
+    expect(grounded(extraction(), t)).toEqual({ ok: false, reason: 'price_not_accepted_by_caller' });
+    // ...and the extraction judges a corrected price not final.
+    expect(grounded(extraction({ service: { price_is_final: false } }), t).reason).toBe('price_not_final');
   });
 
   test('an accepted price entry without quoted_price_usd is not enough: booking stamps only the accepted total', () => {
@@ -272,7 +292,7 @@ describe('the price must be agreed AND grounded in the transcript', () => {
 });
 
 describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
-  test('the caller\'s "Sure, that works." / "Sure." / "That works." right after staff\'s commitment is the acceptance', () => {
+  test('the caller\'s "Sure, that works." / "Sure." / "That works." right after staff\'s commitment is the acceptance (the extraction judges it, the code verifies the quote)', () => {
     for (const accept of [SURE, 'Sure.', 'That works.', 'Okay, sounds good, thank you.']) {
       const { ex, transcript } = acceptShape(accept, [`Agent: ${COMMIT}`, `Caller: ${accept}`]);
       expect([accept, grounded(ex, transcript)]).toEqual([accept, expect.objectContaining({ ok: true, mode: 'staff_stated' })]);
@@ -280,20 +300,22 @@ describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
     }
   });
 
-  test('...but not when it is not the reply to staff\'s commitment, is hedged, or is a longer non-slot reply', () => {
+  test('...but the quote must be the caller\'s WHOLE turn directly after the commitment, and the judgement true', () => {
     // Not directly after the commitment turn.
     const late = acceptShape(SURE, [`Agent: ${COMMIT}`, 'Agent: Anything else?', `Caller: ${SURE}`]);
     expect(grounded(late.ex, late.transcript)).toEqual({ ok: false, reason: 'caller_acceptance_not_of_the_slot' });
-    const wrongPlace = acceptShape('Yes, that price works for us.', [`Agent: ${COMMIT}`, 'Caller: Thanks, bye.']);
-    expect(grounded(wrongPlace.ex, wrongPlace.transcript).ok).toBe(false);
-    // Hedged / conditional.
-    const cond = acceptShape(SURE, [`Agent: ${COMMIT}`, 'Caller: Sure, that works if my partner agrees.']);
-    expect(grounded(cond.ex, cond.transcript).ok).toBe(false);
-    const hedged = acceptShape(SURE, [`Agent: ${COMMIT}`, 'Caller: Sure, that works, maybe.']);
-    expect(grounded(hedged.ex, hedged.transcript).ok).toBe(false);
-    // A longer reply that never restates the hour.
-    const longer = acceptShape('Sure, thank you for calling us back today.', [`Agent: ${COMMIT}`, 'Caller: Sure, thank you for calling us back today.']);
-    expect(grounded(longer.ex, longer.transcript)).toEqual({ ok: false, reason: 'caller_acceptance_not_of_the_slot' });
+    // A fragment of a longer turn (the rest takes it back).
+    const partial = acceptShape(SURE, [`Agent: ${COMMIT}`, 'Caller: Sure, that works for the price, but the time is bad.']);
+    expect(grounded(partial.ex, partial.transcript)).toEqual({ ok: false, reason: 'caller_acceptance_not_of_the_slot' });
+    // The extraction judged the caller did not accept: fails closed whatever the words.
+    const rejected = acceptShape(SURE, [`Agent: ${COMMIT}`, `Caller: ${SURE}`]);
+    rejected.ex.scheduling.caller_accepted_slot = false;
+    expect(grounded(rejected.ex, rejected.transcript)).toEqual({ ok: false, reason: 'caller_did_not_accept' });
+    rejected.ex.scheduling.caller_accepted_slot = null;
+    expect(grounded(rejected.ex, rejected.transcript).ok).toBe(false);
+    // The acceptance in the wrong speaker's turn.
+    const swapped = acceptShape(SURE, [`Agent: ${COMMIT}`, `Agent: ${SURE}`]);
+    expect(grounded(swapped.ex, swapped.transcript).ok).toBe(false);
   });
 
   test('a caller acceptance that restates the hour must state THIS slot (codex #5377 r1 pre-push P1)', () => {
@@ -336,14 +358,10 @@ describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
       words: { day: 'Thursday', hour: '2', period: 'pm' },
     });
     expect(grounded(pm.ex, pm.transcript).ok).toBe(true);
-    // Other polite forms of the same yes.
-    for (const yes of ['Yes, sounds good.', 'Okay, that will work.', 'Sure, we can do that.']) {
-      const c = proposalCase({ replyText: yes, evidence: [
-        quote('/scheduling/agent_committed_booking', 'agent', yes),
-        quote('/scheduling/confirmed_start_at', 'caller', 'Can you come Thursday at 2'),
-        quote('/scheduling/caller_accepted_slot', 'caller', 'Can you come Thursday at 2'),
-      ] });
-      expect(grounded(c.ex, c.transcript).ok).toBe(true);
+    // Other forms of the same yes are the extraction's judgement, verified by the pinned whole turn.
+    for (const yes of ['Yes, sounds good.', 'Okay, that will work.', 'Sure, we can do that.', 'Absolutely, see you then.']) {
+      const c = proposalCase({ replyText: yes });
+      expect([yes, grounded(c.ex, c.transcript).ok]).toEqual([yes, true]);
     }
   });
 
@@ -357,33 +375,41 @@ describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
     expect(reason(proposalCase({ proposalText: 'Can you come Thursday at 2? I get off at 4.', quoteText: 'Can you come Thursday at 2' })).ok).toBe(false);
     expect(reason(proposalCase({ proposalText: 'Can you come around Thursday at 2?', quoteText: 'Can you come around Thursday at 2' })).ok).toBe(false);
     expect(reason(proposalCase({ proposalText: 'Can you come Thursday at 2:30?', quoteText: 'Can you come Thursday at 2:30' })).ok).toBe(false);
-    // The reply hedges, conditions, or changes the time.
+    // The extraction did not judge that staff accepted the whole proposal.
+    for (const judged of [false, null]) {
+      expect(reason(proposalCase({ judged }))).toEqual({ ok: false, reason: 'staff_acceptance_unjudged' });
+    }
+    const missing = proposalCase();
+    delete missing.ex.scheduling.staff_accepted_proposed_slot;
+    expect(reason(missing)).toEqual({ ok: false, reason: 'staff_acceptance_unjudged' });
+    // The pinned reply must be the ENTIRE reply turn: a fragment of a rejecting reply fails.
+    const partialTurn = 'Sure, that works for the price, but the time is bad.';
+    expect(reason(proposalCase({ replyText: partialTurn, evidence: [
+      quote('/scheduling/agent_committed_booking', 'agent', 'Sure, that works'),
+      quote('/scheduling/staff_accepted_proposed_slot', 'agent', 'Sure, that works'),
+      quote('/scheduling/confirmed_start_at', 'caller', 'Can you come Thursday at 2'),
+      quote('/scheduling/caller_accepted_slot', 'caller', 'Can you come Thursday at 2'),
+    ] })).ok).toBe(false);
+    // The reply is a hedge or condition the shared screens catch.
     expect(reason(proposalCase({ replyText: 'Sure, that works if the tech is free.' })).ok).toBe(false);
-    expect(reason(proposalCase({ replyText: 'Sure, that might work.', evidence: [
-      quote('/scheduling/agent_committed_booking', 'agent', 'Sure, that might work'),
-      quote('/scheduling/confirmed_start_at', 'caller', 'Can you come Thursday at 2'),
-      quote('/scheduling/caller_accepted_slot', 'caller', 'Can you come Thursday at 2'),
-    ] })).ok).toBe(false);
-    expect(reason(proposalCase({ replyText: 'Sure, that works. Actually, make it 3.' })).ok).toBe(false);
-    expect(reason(proposalCase({ replyText: 'No, that does not work.', evidence: [
-      quote('/scheduling/agent_committed_booking', 'agent', 'that does not work'),
-      quote('/scheduling/confirmed_start_at', 'caller', 'Can you come Thursday at 2'),
-      quote('/scheduling/caller_accepted_slot', 'caller', 'Can you come Thursday at 2'),
-    ] })).ok).toBe(false);
-    // A bare "Sure." from staff, and a question, are not commitments.
-    expect(reason(proposalCase({ replyText: 'Sure.', evidence: [
-      quote('/scheduling/agent_committed_booking', 'agent', 'Sure.'),
-      quote('/scheduling/confirmed_start_at', 'caller', 'Can you come Thursday at 2'),
-      quote('/scheduling/caller_accepted_slot', 'caller', 'Can you come Thursday at 2'),
-    ] })).ok).toBe(false);
+    expect(reason(proposalCase({ replyText: 'Sure, that might work.' })).ok).toBe(false);
     // The reply is in a CALLER turn (swapped labels), or the proposal is in a staff turn.
     const swapped = proposalCase();
     expect(grounded(swapped.ex, swapped.transcript.replace(`Agent: ${SURE}`, `Caller: ${SURE}`)).ok).toBe(false);
     const staffProposal = proposalCase();
     expect(grounded(staffProposal.ex, staffProposal.transcript.replace(`Caller: ${PROPOSAL}`, `Agent: ${PROPOSAL}`)).ok).toBe(false);
+    // The staff-acceptance quote is not the commitment turn.
+    const otherTurn = proposalCase({ evidence: [
+      quote('/scheduling/agent_committed_booking', 'agent', 'When would you like us to come out?'),
+      quote('/scheduling/staff_accepted_proposed_slot', 'agent', SURE),
+      quote('/scheduling/confirmed_start_at', 'caller', 'Can you come Thursday at 2'),
+      quote('/scheduling/caller_accepted_slot', 'caller', 'Can you come Thursday at 2'),
+    ] });
+    expect(reason(otherTurn).ok).toBe(false);
     // The proposal is not pinned as the caller's acceptance.
     const noAccept = proposalCase({ evidence: [
       quote('/scheduling/agent_committed_booking', 'agent', SURE),
+      quote('/scheduling/staff_accepted_proposed_slot', 'agent', SURE),
       quote('/scheduling/confirmed_start_at', 'caller', 'Can you come Thursday at 2'),
       quote('/scheduling/caller_accepted_slot', 'caller', SURE),
     ] });
@@ -402,36 +428,46 @@ describe('"Sure, that works." (owner ruling 2026-09-30)', () => {
   });
 });
 
-describe('a new booking whose final time turn omits the day', () => {
-  test('the closest earlier day turn binds it', () => {
+describe('a new booking whose final time turn omits the day: the caller\'s SELECTED day is judged and pinned', () => {
+  test('the selected day, pinned to an earlier caller turn, binds it', () => {
     const { ex, transcript } = dayOmittedCase();
     expect(grounded(ex, transcript)).toMatchObject({ ok: true, mode: 'staff_stated' });
     expect(route(ex, { transcript }).allowed).toBe(true);
   });
 
-  test('a full calendar date is one date, not its fragments (codex #5377 pre-push P1)', () => {
+  test('a full calendar date is one date (verified with the shared date grammar)', () => {
     // Call Wed Sep 23: Sat Oct 24 2026.
-    const saturday = (dayLine) => {
-      const c = dayOmittedCase({ dayLine });
+    const saturday = (words, line) => {
+      const c = dayOmittedCase({ dayLine: `Caller: ${line}`, selected: words, selectedQuote: line.replace(/\.$/, '') });
       c.ex.scheduling.confirmed_start_at = '2026-10-24T14:00:00-04:00';
       return grounded(c.ex, c.transcript);
     };
-    expect(saturday('Caller: October 24th works.').ok).toBe(true);
-    expect(saturday('Caller: Saturday October 24 works.').ok).toBe(true);
-    expect(saturday('Caller: Saturday works.').ok).toBe(false); // the nearest Saturday is Sep 26, not Oct 24
-    expect(saturday('Caller: Saturday October 25 works.').ok).toBe(false); // Oct 25 is a Sunday
-    expect(saturday('Caller: October 25th works.').ok).toBe(false);
+    expect(saturday('October 24th', 'October 24th works.').ok).toBe(true);
+    expect(saturday('Saturday October 24', 'Saturday October 24 works.').ok).toBe(true);
+    expect(saturday('Saturday', 'Saturday works.').ok).toBe(false); // the nearest Saturday is Sep 26
+    expect(saturday('Saturday October 25', 'Saturday October 25 works.').ok).toBe(false); // Oct 25 is a Sunday
+    expect(saturday('October 25th', 'October 25th works.').ok).toBe(false);
   });
 
-  test('fails closed when the earlier day is missing, another date, several, relative or hedged', () => {
-    const notOk = (c) => expect(grounded(c.ex, c.transcript).ok).toBe(false);
-    notOk(dayOmittedCase({ dayLine: 'Caller: Friday works.' }));
-    notOk(dayOmittedCase({ dayLine: 'Caller: Thursday or Friday works.' }));
-    notOk(dayOmittedCase({ dayLine: 'Caller: Next Thursday works.' }));
-    notOk(dayOmittedCase({ dayLine: 'Caller: Thursday might work.' }));
-    notOk(dayOmittedCase({ dayLine: 'Caller: Any day works.' }));
-    // A later day turn overrides an earlier one: the closest names Friday.
-    notOk(dayOmittedCase({ dayLines: ['Caller: Thursday works.', 'Agent: Or Friday?', 'Caller: Friday works.'] }));
+  test('fails closed on a missing or unjudged day, another date, a relative day, the wrong speaker or order', () => {
+    const notOk = (c, reason) => {
+      const r = grounded(c.ex, c.transcript);
+      expect(r.ok).toBe(false);
+      if (reason) expect(r.reason).toBe(reason);
+    };
+    notOk(dayOmittedCase({ selected: null }), 'day_not_bound');
+    notOk(dayOmittedCase({ selectedQuote: null }), 'day_not_bound');
+    notOk(dayOmittedCase({ dayLine: 'Caller: Thursday is impossible for us.', selected: null, selectedQuote: null }), 'day_not_bound');
+    notOk(dayOmittedCase({ dayLine: 'Caller: Friday works.', selected: 'Friday', selectedQuote: 'Friday works' }), 'day_not_bound');
+    notOk(dayOmittedCase({ dayLine: 'Caller: Next Thursday works.', selected: 'Next Thursday', selectedQuote: 'Next Thursday works' }), 'day_not_bound');
+    // Words that are not in the quote, and a quote that is not in a caller turn.
+    notOk(dayOmittedCase({ selected: 'Thursday', selectedQuote: 'Wednesday works' }));
+    notOk(dayOmittedCase({ dayLine: 'Agent: Thursday works.', selectedSpeaker: 'agent' }));
+    notOk(dayOmittedCase({ dayLine: 'Agent: Thursday works.' }));
+    // A selected day said AFTER the time turn does not bind it.
+    const late = dayOmittedCase({ dayLine: 'Caller: Sure, I will be there.' });
+    late.transcript = `${late.transcript}\nCaller: Thursday works.`;
+    notOk(late);
     // The relative-date flag with a day omitted never binds.
     const rel = dayOmittedCase();
     rel.ex.scheduling.relative_date_used = true;

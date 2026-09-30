@@ -46,6 +46,13 @@ const FIELD_GROUPS = {
     'definite_commitment',
     'relative_date_used',
     'moved_appointment_relative_date_used',
+    // The commercial dictated booking judgements (schema 1.21.0) the path
+    // only verifies.
+    'price_offered_by_staff',
+    'price_accepted_by_caller',
+    'price_is_final',
+    'staff_accepted_proposed_slot',
+    'selected_day_words',
     'is_spam',
     'is_voicemail',
     'matched_service',
@@ -457,7 +464,9 @@ function normalizeField(field, value) {
   // explicit false, which the booking-link staging check treats very
   // differently (null fails closed; false does not block).
   if (field === 'sms_declined' || field === 'definite_commitment' || field === 'relative_date_used'
-    || field === 'moved_appointment_relative_date_used') return normalizeBool(value);
+    || field === 'moved_appointment_relative_date_used' || field === 'price_offered_by_staff'
+    || field === 'price_accepted_by_caller' || field === 'price_is_final'
+    || field === 'staff_accepted_proposed_slot') return normalizeBool(value);
   // agent_committed_booking postdates every legacy extraction: absent/null
   // means "not committed", identical to false — collapse them so replays
   // don't report a spurious high-severity delta on every pre-1.8.0 row

@@ -148,6 +148,19 @@ describe('v2 extraction prompt', () => {
     expect(prompt).toContain('When scheduling.agreed_slot_words is set, the /scheduling/confirmed_start_at quote must contain each of its non-null values');
   });
 
+  test('includes the commercial dictated booking judgements (schema 1.21.0, owner direction 2026-09-30)', () => {
+    const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
+    for (const field of ['price_offered_by_staff', 'price_accepted_by_caller', 'price_is_final', 'staff_accepted_proposed_slot', 'selected_day_words']) {
+      expect(prompt).toContain(`- ${field}:`);
+    }
+    expect(prompt).toContain('never a question about a price ("did another company quote you $150?")');
+    expect(prompt).toContain('accepts that WHOLE proposal as stated');
+    expect(prompt).toContain('pin that ENTIRE reply turn as the agent_committed_booking quote');
+    expect(prompt).toContain('never one the caller rejected, called impossible or unavailable');
+    expect(prompt).toContain('/service_request/price_accepted_by_caller');
+    expect(prompt).toContain('/scheduling/selected_day_words');
+  });
+
   test('includes the reschedule language-judgement rules (schema 1.20.0, owner direction 2026-09-30)', () => {
     const prompt = buildExtractionPrompt(transcript, callerPhone, callDateET);
     expect(prompt).toContain('- definite_commitment: for a slot the call agreed');
@@ -334,7 +347,7 @@ describe('v2 extraction function (extractCallDataV2)', () => {
 
 describe('schema version alignment', () => {
   test('schema version matches between validator and prompt', () => {
-    expect(SCHEMA_VERSION).toBe('1.20.0');
+    expect(SCHEMA_VERSION).toBe('1.21.0');
   });
 
   test('persisted schema_version enum accepts the current SCHEMA_VERSION (P1: a missing enum entry fail-closes every extraction)', () => {

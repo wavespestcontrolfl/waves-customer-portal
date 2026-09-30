@@ -1597,7 +1597,8 @@ const gates = {
   // label fails closed. Also needs GATE_CALL_AGENT_COMMIT_BOOKING (its kill
   // switch) and GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS. Only clears
   // commercial_requires_quote; a job with no price agreed on the call still
-  // goes to the office. Ships DARK: off unless exactly 'true'. This entry is
+  // goes to the office. The extraction judges the language (schema 1.21.0);
+  // the code only verifies the pinned quotes. Ships DARK: off unless exactly 'true'. This entry is
   // for logGateStatus only — the canonical CALL-TIME reader is
   // callCommercialDictatedBookingLive() below. Creates real appointments —
   // owner-flip only.

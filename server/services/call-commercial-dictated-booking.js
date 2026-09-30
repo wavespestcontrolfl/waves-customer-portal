@@ -27,10 +27,12 @@
  * On top of that grounding, this path adds what a NEW commercial booking needs:
  *   - a price agreed on the call, grounded in the transcript: the
  *     extraction's quoted_price_usd (the field booking consumes — an accepted
- *     price entry alone is not enough, owner-safe: it carries billing units the
- *     visit price cannot), a staff turn that states that amount, and the
- *     caller's affirmative reply as the first caller turn after it. No price
- *     agreed → the job still goes to the office for a quote.
+ *     price entry alone is not enough: it carries billing units the visit
+ *     price cannot), the extraction's judgements that staff offered that amount
+ *     as Waves' own quote, the caller accepted it and it was final (schema
+ *     1.21.0), and pinned quotes for the offer and the acceptance that the code
+ *     verifies (right speaker, offer states the amount, acceptance later). No
+ *     price agreed → the job still goes to the office for a quote.
  *   - it books a NEW visit: an extraction that also names an existing
  *     appointment being moved is a reschedule, never a commercial booking.
  * canAutoRoute (call-triage-flags.js) applies the rest — a confirmed start on
@@ -48,11 +50,7 @@
 const { groundNewBookingAgreement, groundingTools } = require('./call-reschedule-agreement');
 const { resolveCallAgreedPrice } = require('../utils/call-agreed-price');
 
-const { parseTurns, turnsHolding, plainlySaid, normalize } = groundingTools;
-
-// A caller's reply that agrees: it carries an affirmation word and, being read
-// with plainlySaid(askingFails), is neither a question nor negated or hedged.
-const AFFIRM_TOKENS = new Set(['yes', 'yeah', 'yep', 'sure', 'okay', 'ok', 'alright', 'deal', 'works', 'good', 'fine', 'perfect', 'great', 'agreed', 'go']);
+const { parseTurns, turnsHolding } = groundingTools;
 
 // Dollar figures said in a text, as numbers ("$1,500", "150", "150.00").
 function figuresIn(text) {
@@ -60,36 +58,35 @@ function figuresIn(text) {
     .map((m) => Number(`${m[1].replace(/,/g, '')}${m[2] ? `.${m[2]}` : ''}`));
 }
 
-// The agreed price is real: staff stated exactly this amount in a staff turn,
-// and the FIRST caller turn after it is the caller's plain, affirmative reply.
-// Both are quotes the extraction pinned to service_request.quoted_price_usd
-// (prompt: "quote the agent's price and the caller's acceptance"), each found
-// word for word in a turn of its speaker.
+// The agreed price is real. The extraction JUDGES the language (schema 1.21.0:
+// staff offered this amount as Waves' own quote, the caller accepted it, it was
+// the final price) and pins a quote for the offer and the acceptance; this code
+// only verifies: every judgement is true (a missing one fails closed), each
+// quote is word for word in a turn of its required speaker, the offer's turn
+// states exactly the recorded amount as a figure (and no other figure), and the
+// acceptance comes in a LATER turn than the offer.
 function priceGrounded(v2, transcript, amount) {
+  const svc = v2.service_request || {};
+  if (svc.price_offered_by_staff !== true) return 'price_offer_unjudged';
+  if (svc.price_accepted_by_caller !== true) return 'price_acceptance_unjudged';
+  if (svc.price_is_final !== true) return 'price_not_final';
   const turns = parseTurns(transcript);
   if (!turns || new Set(turns.map((t) => t.agent)).size < 2) return 'price_ungrounded';
-  const evidence = (Array.isArray(v2.evidence) ? v2.evidence : [])
-    .filter((e) => e?.field_path === '/service_request/quoted_price_usd' && typeof e.quote === 'string');
-  const staffTurns = evidence.filter((e) => e.speaker === 'agent').flatMap((e) => {
-    const holding = turnsHolding(turns, e.quote, 'agent');
-    const said = figuresIn(e.quote);
-    // The quote states exactly the agreed amount, and no other dollar figure
-    // is in the turns that hold it.
-    const clean = holding.length > 0 && said.length > 0 && said.every((n) => n === amount)
-      && holding.every((t) => figuresIn(t.raw).every((n) => n === amount) && plainlySaid(t, e.quote, {}));
-    return clean ? holding : [];
-  });
-  if (!staffTurns.length) return 'price_not_stated_by_staff';
-  const replies = evidence.filter((e) => e.speaker === 'caller').filter((e) => {
-    const holding = turnsHolding(turns, e.quote, 'caller');
-    return holding.length > 0 && normalize(e.quote).split(' ').some((t) => AFFIRM_TOKENS.has(t))
-      && holding.every((t) => plainlySaid(t, e.quote, { askingFails: true }));
-  });
-  const firstCallerReply = (staffTurn) => turns.slice(turns.indexOf(staffTurn) + 1).find((t) => !t.agent);
-  const accepted = staffTurns.some((st) => {
-    const reply = firstCallerReply(st);
-    return reply && replies.some((e) => turnsHolding(turns, e.quote, 'caller').includes(reply));
-  });
+  const pinned = (path, speaker) => (Array.isArray(v2.evidence) ? v2.evidence : [])
+    .filter((e) => e?.field_path === path && e.speaker === speaker && typeof e.quote === 'string')
+    .flatMap((e) => turnsHolding(turns, e.quote, speaker).map((turn) => ({ turn, quote: e.quote })));
+  const offers = pinned('/service_request/price_offered_by_staff', 'agent')
+    .filter(({ turn, quote }) => figuresIn(quote).length > 0 && [quote, turn.raw].every((text) => figuresIn(text).every((n) => n === amount)));
+  if (!offers.length) return 'price_not_stated_by_staff';
+  // The acceptance answers an offer: it is in a later turn, and no staff turn
+  // between the two says another figure (a correction before the "yes").
+  const answers = (offer, turn) => {
+    const from = turns.indexOf(offer.turn);
+    const to = turns.indexOf(turn);
+    return to > from && turns.slice(from + 1, to).every((t) => !t.agent || figuresIn(t.raw).every((n) => n === amount));
+  };
+  const accepted = pinned('/service_request/price_accepted_by_caller', 'caller')
+    .some(({ turn }) => offers.some((offer) => answers(offer, turn)));
   return accepted ? null : 'price_not_accepted_by_caller';
 }
 
