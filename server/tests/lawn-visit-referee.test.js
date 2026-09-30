@@ -389,6 +389,16 @@ describe('findDisputes: the deterministic name rule', () => {
     }
   });
 
+  test('a compound or hedged name on either side is ambiguous, never a dispute (pre-push P1)', () => {
+    for (const name of ['Chinch bugs + drought stress', 'Chinch bugs versus drought stress', 'Chinch bugs (possible)', 'Possibly chinch bugs', 'Chinch bugs - drought stress', 'Chinch bugs as well as drought', 'Suspected chinch bugs']) {
+      const out = referee.findDisputes(read([f(name)]), read([f('Brown patch')]));
+      expect(out.disputes).toEqual([]);
+      expect(out.ambiguous).toBe(1);
+      expect(referee.findDisputes(read([f('Brown patch')]), read([f(name)])).disputes).toEqual([]);
+    }
+    expect(referee.findDisputes(read([f('Chinch bug damage')]), read([f('Brown patch')])).disputes).toHaveLength(1);
+  });
+
   test('a name that lists several causes is ambiguous, never a dispute', () => {
     expect([...referee.causeLabelsOf('Chinch bugs and drought stress')].sort()).toEqual(['chinch bug activity', 'drought stress']);
     const result = referee.findDisputes(read([f('Chinch bugs and drought stress')]), read([f('Brown patch')]));

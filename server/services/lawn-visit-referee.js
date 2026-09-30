@@ -75,6 +75,12 @@ const CAUSE_LABELS = Object.freeze(new Set([
 // one catalog label.
 const SPECIFIC_FUNGAL = Object.freeze(new Set(['large patch (fungal) activity', 'gray leaf spot', 'dollar spot']));
 const NAME_PARTS = /\s*(?:\band\b|&|\/|,|;|\bwith\b|\bplus\b|\bor\b|\bvs\.?\b)\s*/i;
+// A name may START a dispute only when it is one plain phrase. Any joining
+// word or mark ("+", "versus", "along with", a comma, parentheses …) makes it
+// compound or hedged, so it counts as ambiguous and never draws the referee —
+// splitting on a separator list alone missed "+" and "versus" (pre-push P1).
+const COMPOUND = /[&+\/,;:()|]|\s-\s|->|\b(?:and|or|with|plus|vs\.?|versus|also|along|as well as|then|either|possibly|maybe|likely|suspected|probable|mixed|combined|multiple|both)\b/i;
+const singlePhrase = (name) => !!String(name || '').trim() && !COMPOUND.test(String(name));
 
 /** The set of cause labels a finding name commits to. A name that lists several
  * causes ("chinch bugs and drought") yields several, and is then never a
@@ -123,7 +129,8 @@ const committed = (finding) => finding?.can_determine === true && finding?.confi
  *  - GRASS: both grass_type values are definite (in the enum, not 'unknown',
  *    not 'mixed') and differ.
  *  - FINDING: for each committed Gemini finding whose name maps to exactly one
- *    cause label, look at the Sol findings citing an overlapping photo (or the
+ *    cause label AND is one plain phrase (no joining words — `singlePhrase`),
+ *    look at the Sol findings citing an overlapping photo (or the
  *    same known zone when a side cites no photo). No dispute when ANY of them
  *    carries a compatible cause (agreement, however Sol scored it), or none
  *    carries a cause. Otherwise, only when exactly ONE committed, single-cause
@@ -156,7 +163,8 @@ function findDisputes(geminiJson, solJson) {
     if (!conflicting.length) return;
     const [j] = conflicting;
     const mutual = gFindings.map((f, k) => k).filter((k) => gLabels[k].size && findingsOverlap(gFindings[k], sFindings[j]));
-    if (gLabels[i].size !== 1 || sLabels[j].size !== 1 || overlapping.length !== 1 || conflicting.length !== 1 || mutual.length !== 1) {
+    if (gLabels[i].size !== 1 || sLabels[j].size !== 1 || !singlePhrase(gFinding.name) || !singlePhrase(sFindings[j].name)
+      || overlapping.length !== 1 || conflicting.length !== 1 || mutual.length !== 1) {
       ambiguous += 1;
       return;
     }
