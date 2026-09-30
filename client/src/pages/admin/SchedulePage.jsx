@@ -13474,18 +13474,22 @@ export function CompletionPanel({
   const isRodentTrappingVisit =
     service.completionProfile?.findingsType === "rodent_trapping";
   const serviceLineForCloseout = serviceLineFromType(serviceTypeForArea);
-  const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[serviceLineForCloseout];
+  // Property areas classify the RAW service type, as the server snapshot does:
+  // a combined "Lawn + Tree & Shrub" visit normalizes to Tree & Shrub above
+  // but its persisted type (and so its frozen coverage) is lawn.
+  const propertyAreaLine = serviceLineFromType(service.serviceTypeRaw || serviceTypeForArea);
+  const propertyAreaKey = { tree_shrub: "beds", lawn: "lawn", mosquito: "mosquito" }[propertyAreaLine];
   const reviewedPropertyArea = currentPropertyAreas?.areas[propertyAreaKey];
   const propertyVisitOverride = propertyVisitArea?.serviceId === service.id
     && propertyVisitArea?.propertyId === currentPropertyAreas?.propertyId
     && propertyVisitArea?.kind === propertyAreaKey ? propertyVisitArea.area : undefined;
-  const propertyTreatedArea = serviceLineForCloseout === "lawn" ? lawnVisitArea
+  const propertyTreatedArea = propertyAreaLine === "lawn" ? lawnVisitArea
     : propertyVisitOverride ?? (reviewedPropertyArea?.reviewedAt ? reviewedPropertyArea.sqft : "");
   // The bed coverage this effect last accounted for (wrote or promoted), so
   // its own earlier value is never mistaken for one the tech entered.
   const bedCoverageSeenRef = useRef(null);
   useEffect(() => {
-    if (!currentPropertyAreas || !isTypedFindings || serviceLineForCloseout !== "tree_shrub") return;
+    if (!currentPropertyAreas || !isTypedFindings || propertyAreaLine !== "tree_shrub") return;
     // The shared coverage field replaces the old internal bed measurement;
     // retain the existing report/estimate-actuals field on normal closeout.
     const entered = String(findingsValues.bed_sqft_serviced ?? "");
@@ -13502,7 +13506,7 @@ export function CompletionPanel({
     invalidateGeneratedReportOnTypedEdit();
     bedCoverageSeenRef.current = String(propertyTreatedArea);
     setFindingsValues(current => ({ ...current, bed_sqft_serviced: String(propertyTreatedArea) }));
-  }, [currentPropertyAreas, isTypedFindings, serviceLineForCloseout, propertyTreatedArea, propertyVisitOverride, findingsValues.bed_sqft_serviced, service.id]);
+  }, [currentPropertyAreas, isTypedFindings, propertyAreaLine, propertyTreatedArea, propertyVisitOverride, findingsValues.bed_sqft_serviced, service.id]);
   // Tree & shrub / palm visits swap the Targets picker suggestions to the
   // ornamental pest list (see targetPickerConfig).
   const isTreeShrub =
@@ -13935,11 +13939,15 @@ export function CompletionPanel({
     const next = selectedProducts.map(product => {
       if (kindChanged(product)) return { ...product, propertyAreaDefault: null };
       if (!currentPropertyAreas || !follows(product)) return product;
-      const pending = product.propertyAreaDefault.pending;
-      const area = pending || product.propertyAreaDefault.propertyId === currentPropertyAreas.propertyId ? propertyTreatedArea : "";
-      if (!pending && String(product.areaValue) === String(area)) return product;
+      // An untouched default follows the visit's CURRENT property: after a
+      // reassignment it rebinds to the new property and takes its area.
+      const bound = !product.propertyAreaDefault.pending
+        && product.propertyAreaDefault.propertyId === currentPropertyAreas.propertyId;
+      const area = propertyTreatedArea;
+      if (bound && String(product.areaValue) === String(area)) return product;
       return { ...product, areaValue: area, areaUnit: 'sqft', propertyServiceAreaField: true,
-        propertyAreaDefault: pending ? { serviceId: service.id, propertyId: currentPropertyAreas.propertyId, kind: propertyAreaKey } : product.propertyAreaDefault,
+        propertyAreaDefault: bound ? product.propertyAreaDefault
+          : { serviceId: service.id, propertyId: currentPropertyAreas.propertyId, kind: propertyAreaKey },
         totalAmount: product.totalAmountManual || isPerGallonUnit(product.rateUnit)
           ? product.totalAmount : amountInUnit(lawnDerivedTotal(product, area), baseUnitOf(product.rateUnit), product.amountUnit) };
     });
@@ -16501,7 +16509,7 @@ export function CompletionPanel({
       // The suggestion stays editable and is still the tech's actual to
       // confirm; a label with no per-1k rate prefills nothing, as before.
       row = planned || { ...row, applicationArea: areasServiced.join(", "), applicationAreaDefault: true,
-        lawnAreaDefault: row.areaUnit === "sqft",
+        lawnAreaDefault: row.areaUnit === "sqft" && (!currentPropertyAreas || productUsesPropertyArea(catalogProduct)),
         lawnAmountReason: row.totalAmount !== ""
           ? "Suggested from the label rate for the visit area. Confirm the actual amount."
           : "Enter the actual amount for this application." };
@@ -16523,6 +16531,14 @@ export function CompletionPanel({
     return productDimension(catalogRow || { name: sp.name, category: sp.category }) === "liquid";
   }
 
+  // Palm feeds (and bed-only products on a lawn visit) never take the shared
+  // property area — on any path that seeds or follows it.
+  function productUsesPropertyArea(product) {
+    return !!propertyAreaKey
+      && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
+      && !(propertyAreaKey === "lawn" && /snapshot|landscape bed/i.test([product.name, ...(Array.isArray(product.target_pests) ? product.target_pests : [])].join(" ")));
+  }
+
   function buildSelectedProduct(product, { applicationMethodOverride } = {}) {
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work on the German-roach protocol) wins over the
@@ -16533,9 +16549,7 @@ export function CompletionPanel({
     // completion-defaults seed only; every other caller is unaffected.
     const applicationMethod = applicationMethodOverride
       || defaultApplicationMethod(product, serviceTypeForArea, { interiorLane: isBedBugVisit });
-    const productUsesServiceArea = propertyAreaKey
-      && !/\bpalm\b|8-0-12|0-0-16/i.test(product.name || "")
-      && !(propertyAreaKey === "lawn" && /snapshot|landscape bed/i.test([product.name, ...(Array.isArray(product.target_pests) ? product.target_pests : [])].join(" ")));
+    const productUsesServiceArea = productUsesPropertyArea(product);
     const areaRequirement = requiredApplicationArea(
       applicationMethod,
       serviceTypeForArea, false, !!currentPropertyAreas && productUsesServiceArea,
@@ -17708,7 +17722,7 @@ export function CompletionPanel({
             return productName ? [{ productId: item?.product?.id || id, productName }] : [];
           })
         : [];
-      const lawnAreaSubmitted = lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined) || (currentPropertyAreas && serviceLineForCloseout === "lawn");
+      const lawnAreaSubmitted = lawnDefaultsEnabled || (completionImprovements && isLawn && lawnAreaOverride !== undefined) || (currentPropertyAreas && propertyAreaLine === "lawn");
       const body = {
         ...(reviewedPricing ? { pricingReview: reviewedPricing.review } : {}),
         idempotencyKey: completionIdempotencyKeyRef.current,
@@ -17716,7 +17730,7 @@ export function CompletionPanel({
         ...(currentPropertyAreas && propertyAreaKey && propertyTreatedArea !== "" && propertyTreatedArea != null
           ? { propertyServiceArea: { propertyId: currentPropertyAreas.propertyId, version: currentPropertyAreas.version, kind: propertyAreaKey, treatedSqft: Number(propertyTreatedArea),
             // The tech set this visit's coverage; absent means the reviewed property default.
-            ...((serviceLineForCloseout === "lawn" ? lawnAreaOverride !== undefined : propertyVisitOverride !== undefined) ? { explicitVisitArea: true } : {}) } } : {}),
+            ...((propertyAreaLine === "lawn" ? lawnAreaOverride !== undefined : propertyVisitOverride !== undefined) ? { explicitVisitArea: true } : {}) } } : {}),
         // Tips from your tech — ids only; the server resolves the copy and
         // freezes it into structured_notes.techTips (freezeTechTips). Only
         // when the picker actually loaded: a restored draft's picks behind a
@@ -18670,8 +18684,8 @@ export function CompletionPanel({
   // Light mode only. Roboto body. No D.palette.
   // ────────────────────────────────────────────────────────────────────
   const propertyAreaPanel = propertyAreaKey && <PropertyServiceAreas key={service.id} serviceId={service.id}
-    serviceLine={serviceLineForCloseout} disabled={submitting || generating}
-    visitArea={serviceLineForCloseout === "lawn" ? lawnAreaOverride : propertyVisitOverride}
+    serviceLine={propertyAreaLine} disabled={submitting || generating}
+    visitArea={propertyAreaLine === "lawn" ? lawnAreaOverride : propertyVisitOverride}
     refreshToken={propertyAreasRefreshToken}
     onMeasurements={data => { setPropertyAreas(data ? { ...data, serviceId: service.id } : null); if (data) setPropertyAreasRefreshing(false); }}
     // A failed load after a stale-version 409 keeps completion blocked (the
@@ -18680,7 +18694,7 @@ export function CompletionPanel({
     onUnavailable={({ failed = false } = {}) => { propertyAreasUnavailableRef.current = service.id; if (!failed) setPropertyAreasRefreshing(false); }}
     onVisitAreaChange={area => {
       invalidateGeneratedReportOnTypedEdit();
-      if (serviceLineForCloseout === "lawn") setLawnAreaOverride(area === null ? undefined : area);
+      if (propertyAreaLine === "lawn") setLawnAreaOverride(area === null ? undefined : area);
       else setPropertyVisitArea(area === null ? null : { serviceId: service.id, propertyId: currentPropertyAreas?.propertyId, kind: propertyAreaKey, area });
     }} />;
   const lawnProgressPanel = completionImprovements && isLawn && (

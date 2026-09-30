@@ -274,3 +274,33 @@ it('a visit-area change recalculates a following total in the row\'s spoon unit,
   // 2,000 sq ft at 0.5 fl oz / 1,000 = 1 fl oz = 6 tsp, never "1 tsp".
   await waitFor(() => expect(screen.getByPlaceholderText('Total')).toHaveValue(6));
 });
+
+it('a combined lawn + tree & shrub visit freezes lawn coverage, the kind the server classifies from the raw type', async () => {
+  measurements = { ...measurements, areas: { ...measurements.areas, lawn: { sqft: 4000, source: 'field', reviewedAt: '2026-09-27' } } };
+  const onSubmit = vi.fn().mockResolvedValue({ success: true });
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', serviceTypeRaw: 'Lawn + Tree & Shrub',
+    scheduledDate: '2026-09-27', completionProfile: { findingsType: 'tree_shrub', requiresProducts: false },
+    findingsSchema: { type: 'tree_shrub', fields: bedField, nextStepChips: [] } }}
+    products={products} onClose={() => {}} onSubmit={onSubmit} />);
+  await waitFor(() => expect(screen.getByLabelText('Area treated today (sq ft)')).toHaveValue(4000));
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  expect(onSubmit.mock.calls[0][1].propertyServiceArea).toMatchObject({ kind: 'lawn', treatedSqft: 4000 });
+});
+
+it('an untouched product default rebinds to the new property after the visit is reassigned', async () => {
+  const onSubmit = vi.fn()
+    .mockRejectedValueOnce(Object.assign(new Error('Property areas changed.'), { status: 409, code: 'property_service_area_changed' }))
+    .mockResolvedValue({ success: true });
+  render(<CompletionPanel service={{ id: 'visit-1', customerId: 'customer-1', serviceType: 'Tree & Shrub Care', scheduledDate: '2026-09-27',
+    completionProfile: { findingsType: 'tree_shrub', requiresProducts: false }, findingsSchema: { type: 'tree_shrub', fields: bedField, nextStepChips: [] } }}
+    products={products} onClose={() => {}} onSubmit={onSubmit} />);
+  await add('Snapshot 2.5TG');
+  expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(1200);
+  measurements = { ...measurements, propertyId: 'property-2', version: 'b'.repeat(64),
+    areas: { ...measurements.areas, beds: { sqft: 800, source: 'field', reviewedAt: '2026-09-27' } } };
+  fireEvent.click(screen.getByRole('button', { name: /complete & send recap/i }));
+  await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+  await waitFor(() => expect(screen.getByPlaceholderText('Sq ft')).toHaveValue(800));
+  expect(screen.getByPlaceholderText('Total')).toHaveValue(1.84);
+});

@@ -1955,6 +1955,23 @@ it('shared reviewed area drives lawn defaults while a partial visit and manual t
   expect(fetch.mock.calls.some(([url, opts]) => url.includes('property-areas') && opts.method === 'PUT')).toBe(false);
 });
 
+it('a palm feed added by hand never takes or follows the shared lawn area under lawn defaults', async () => {
+  enableDefaults();
+  propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
+    lawn: { sqft: 4200, source: 'field', reviewedAt: '2026-09-27' }, beds: null, mosquito: null,
+  } };
+  const palm = { id: 'palm-feed', name: 'Fixture 8-0-12 Palm', category: 'fertilizer', application_method: 'granular_broadcast', rate_unit: 'lb', default_rate_per_1000: 1.3 };
+  render(<CompletionPanel service={service} products={[...catalog, palm]} onClose={() => {}} onSubmit={submit} />);
+  await waitFor(() => expect(totals()).toHaveLength(2));
+  fireEvent.change(screen.getByPlaceholderText('Search products...'), { target: { value: palm.name } });
+  fireEvent.click(screen.getByText(palm.name));
+  await waitFor(() => expect(totals()).toHaveLength(3));
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
+  fireEvent.change(screen.getByLabelText('Area treated today (sq ft)'), { target: { value: '2000' } });
+  await waitFor(() => expect(screen.getAllByPlaceholderText('Sq ft')[0].value).toBe('2000'));
+  expect(screen.getAllByPlaceholderText('Sq ft')[2].value).toBe('');
+});
+
 it.each([null, { sqft: 4200, source: 'imagery', reviewedAt: null }, { sqft: 0, source: 'field', reviewedAt: '2026-09-27' }])('a missing, unreviewed or zero shared lawn area clears planner quantities without an invalid request: %j', async lawn => {
   enableDefaults();
   propertyAreas = { enabled: true, propertyId: 'property-a', version: 'a'.repeat(64), areas: {
