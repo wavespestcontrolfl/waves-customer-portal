@@ -1177,6 +1177,53 @@ describe('r14: a label topic counts as asked whatever the form of the message', 
   });
 });
 
+describe('r15: a verbatim COMPANY FACTS sentence answers a watering question; it never authorizes an answer-shaped add-on', () => {
+  const asked = labelFactsLib.askedLabelKinds;
+  const lf = { serviceDate: '2026-06-05', customerId: 'c1', recordIds: ['r2'], unverifiedCount: 0, products: [product({ rainfastMinutes: 180, reiHours: 4, reentrySummary: null })] };
+  const section = labelFactsLib.renderLabelFactsSection(lf, { formatDate: (d) => d });
+  const [, reentry] = labelFactsLib.labelSentencesIn(section).map((x) => x.text);
+  const guard = (reply, inbound) => labelFactsLib.replyClaimsUngroundedLabelTiming(reply, section, asked(inbound));
+  const Q = 'What days should I water my lawn?';
+  const WATERING = "Follow the county's watering days, water early in the morning, and water deeply and less often.";
+  const { COMPANY_FACTS } = require('../services/sms-company-facts');
+  test('the question is a label-kind question and the approved company answer passes', () => {
+    expect(asked(Q)).toEqual(expect.arrayContaining(['reentry']));
+    expect(guard(WATERING, Q)).toBe(false);
+    expect(guard(WATERING.replace("'", '\u2019').toUpperCase(), Q)).toBe(false); // typography / case do not matter
+    expect(guard(`Hi Jane, ${WATERING} Thanks!`, Q)).toBe(false);
+    expect(guard(`${WATERING} ${reentry}`, Q)).toBe(false);
+  });
+  test('every static COMPANY FACTS sentence (bar the rain line, a rain-question type) is a copyable answer', () => {
+    for (const fact of COMPANY_FACTS.filter((f) => !/treatment needs to dry/.test(f))) {
+      for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
+        // a "Label: text" line is copied as its text (the label is an instruction to the drafter, not customer wording)
+        const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence)?.[1] || sentence;
+        expect([text, guard(text, Q)]).toEqual([text, false]);
+      }
+    }
+  });
+  test('an answer-shaped add-on, a paraphrase or a modified copy is still held', () => {
+    for (const reply of [
+      'Yes, water whenever.', `Sure! ${WATERING}`, `Yes! ${WATERING}`, `${WATERING} Go for it.`, `${WATERING} Yes, they can.`, `Go for it. ${WATERING}`,
+      'Water whenever you like.', "Follow the county's watering days and water any time.", `${WATERING.replace('early in the morning', 'at noon')}`, WATERING.replace(/\.$/, ', or so.'),
+      `Old info: ${WATERING}`, `${WATERING} Just kidding.`,
+    ]) expect([reply, guard(reply, Q)]).toEqual([reply, true]);
+  });
+  test('send time: the same list (the section is static, so nothing needs snapshotting)', async () => {
+    const boom = () => { throw new Error('must not read'); };
+    const send = (body) => labelFactsLib.labelFactsSendBlockReason({ snapshot: { sentences: [], asked: asked(Q) }, body, conn: boom });
+    await expect(send(WATERING)).resolves.toBeNull();
+    await expect(send('Yes, water whenever.')).resolves.toBe('label_facts_unauthorized_claim');
+    await expect(send(`Sure! ${WATERING}`)).resolves.toBe('label_facts_unauthorized_claim');
+  });
+  test('the rain line still answers a rain question only', () => {
+    const line = 'A treatment needs to dry and bond to surfaces; after that it holds up to weather.';
+    expect(guard(line, 'Will rain wash it off?')).toBe(false);
+    expect(guard(line, 'Can the dogs go out now?')).toBe(true);
+    expect(guard(`Sure! ${line}`, 'Will rain wash it off?')).toBe(true);
+  });
+});
+
 describe('other languages: label sentences are English, so another language never gets or slips past them', () => {
   const held = (text) => labelFactsLib.hasUngroundedLabelClaim(text);
   test('a Spanish / Portuguese / French paraphrase of timing, re-entry or rain is held', () => {

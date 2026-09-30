@@ -421,7 +421,7 @@ const copyEndsCleanly = (rest) => rest === '' || (/^\s+(?![a-z])/.test(rest) && 
 // and the two sentences on each side carry no meta or negation vocabulary ("Ignore this.", "Just kidding.",
 // "That is outdated.", "Not anymore."). Draft, snapshot and send time all use this one matcher.
 const META_FRAME_RE = /\b(?:false|untrue|not\s+(?:true|correct|accurate|right|apply|valid)|isn'?t\s+(?:true|correct|accurate|right)|ignore|disregard|do(?:n'?t|\s+not)\s+follow|does(?:n'?t|\s+not)\s+apply|outdated|out\s+of\s+date|old\s+info|wrong|incorrect|kidding|joking|not\s+anymore|no\s+longer|actually|scratch\s+that|correction|used\s+to|mistake|never\s*mind|forget\s+(?:that|this|it)|however|but|although|except|unless)\b/i;
-const OWN_SENTENCE_START_RE = /(?:^|[.!?]|labelsentence\s*;)\s*$|(?:^|[.!?]\s*)(?:hi|hello|hey|thanks|thank\s+you)\b[^.!?:;]{0,30},\s*$/i;
+const OWN_SENTENCE_START_RE = /(?:^|[.!?]|(?:labelsentence|companysentence)\s*;)\s*$|(?:^|[.!?]\s*)(?:hi|hello|hey|thanks|thank\s+you)\b[^.!?:;]{0,30},\s*$/i;
 const SENTENCE_GAP_RE = /(?<=[.!?])\s+/;
 function standsAlone(before, after) {
   if (!OWN_SENTENCE_START_RE.test(before)) return false;
@@ -854,8 +854,38 @@ const isCopyMarker = (sentence) => sentence === 'labelsentence';
 const SANCTIONED_SENTENCE_RE = /^(?:(?:(?:it|that|this|they|everything)(?:'s|'re|\s+(?:is|are|will\s+be))|(?:pets|people|kids|dogs)(?:\s+and\s+(?:pets|people|kids|dogs))?\s+(?:are|will\s+be))\s+)?sanctioned_idiom\s*[,;-]?\s*(?:and\s+)?(?:(?:(?:your|the|our)\s+(?:technician|tech|office|team)|we)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?)?$/;
 const isSanctionedSentence = (sentence) => SANCTIONED_SENTENCE_RE.test(sentence);
 // (c) the COMPANY FACTS rain line, for a rain question (pre-marked before the sentences are split)
+const COMPANY_RAIN_LINE_TEXT_RE = /treatment needs to dry and bond/i;
 const COMPANY_RAIN_LINE_RE = /(?:a|the)\s+treatment\s+needs\s+to\s+dry\s+and\s+bond\s+to\s+surfaces\s*[;,.]?\s*(?:and\s+)?after\s+that,?\s+it\s+holds\s+up\s+to\s+weather/g;
 const isCompanyLine = (sentence) => sentence === 'companyline';
+// (g) a verbatim, complete-sentence copy of a sentence of the static COMPANY FACTS section (the rain line is (c),
+// kept to rain questions); a "Label: text" line is copyable as the whole line or as its text. The section is
+// static, so draft and send time read the same list. A company sentence never authorizes an answer-shaped add-on:
+// each sentence of the reply is judged on its own.
+const isCompanySentence = (sentence) => sentence === 'companysentence';
+let companySentenceCache = null;
+function companyFactSentences() {
+  if (!companySentenceCache) {
+    const facts = require('./sms-company-facts').COMPANY_FACTS;
+    const out = new Set();
+    for (const fact of facts) {
+      for (const sentence of fact.split(/(?<=[.!?])\s+/)) {
+        out.add(sentence);
+        const text = /^[A-Z][^:.]{0,40}:\s+(.+)$/.exec(sentence);
+        if (text) out.add(text[1]);
+      }
+    }
+    companySentenceCache = [...out].filter((sentence) => !COMPANY_RAIN_LINE_TEXT_RE.test(sentence));
+  }
+  return companySentenceCache;
+}
+// the copyable company sentences of `canon` (canonText output) replaced by a marker, longest first
+function markCompanySentences(canon) {
+  let out = canon;
+  for (const sentence of [...companyFactSentences()].sort((a, b) => b.length - a.length)) {
+    for (const { start, end } of completeCopies(out, sentence).reverse()) out = `${out.slice(0, start)} ; companysentence ; ${out.slice(end)}`;
+  }
+  return out;
+}
 // (d) a hand-off: a staff subject, a deferral verb, and nothing but neutral words
 const DEFERRAL_HEAD_RE = /^(?:(?:sure|ok|okay|thanks|thank\s+you|absolutely|of\s+course|happy\s+to\s+help|great\s+question|good\s+question)(?:[,!]|\s[-\u2013\u2014])?\s+)?(?:i'll|we'll|i\s+will|we\s+will|i\s+can|we\s+can|i|we|let\s+me|let\s+us|the\s+office|our\s+office|your\s+technician|the\s+technician|our\s+technician|a\s+teammate|someone|our\s+team|the\s+team|a\s+manager|the\s+owner)\b/;
 const DEFERRAL_VERB_RE = /\b(?:confirm|confirms|check|follow\s+up|get\s+back|look\s+into|find\s+out|reach\s+out|verify|ask|text\s+you|call\s+you|let\s+you\s+know)\b/;
@@ -875,12 +905,12 @@ const isOffTopicScheduling = (sentence) => {
   return clauses.length > 0 && clauses.every((c) => isGreetingOrSignoff(c.clause) || (!hasAnswerForce(c.clause)
     && isSchedulingClause(c.clause, { staffCarry: c.staffCarry, clock: hasClockTime(c.clause), sentence: c.sentence })));
 };
-const ALLOWED_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isDeferral, isGreetingOrSignoff, isOffTopicScheduling];
+const ALLOWED_SENTENCE_TYPES = [isCopyMarker, isSanctionedSentence, isCompanyLine, isCompanySentence, isDeferral, isGreetingOrSignoff, isOffTopicScheduling];
 
 // The non-question sentences of a stripped reply (stripLabelSentences output, sanctioned idiom swapped out),
 // with the COMPANY FACTS rain line pre-marked for a rain question.
 function replySentences(strippedText, asked) {
-  const text = canonText(strippedText).toLowerCase();
+  const text = markCompanySentences(canonText(strippedText)).toLowerCase();
   const parts = (asked.includes('rain') ? text.replace(COMPANY_RAIN_LINE_RE, ' . companyline . ') : text).split(/([!?\n;]+|\.(?!\d))/);
   const out = [];
   for (let i = 0; i < parts.length; i += 2) {
@@ -897,7 +927,7 @@ function replySentences(strippedText, asked) {
  */
 function answersAskedLabelQuestion(strippedText, asked) {
   if (asked === null) {
-    return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !ALLOWED_SENTENCE_TYPES.slice(0, 4).some((allowed) => allowed(sentence)));
+    return replySentences(strippedText, ['rain']).some((sentence) => hasAnswerForce(sentence.replace(WAIT_ALLOWED_RE, ' ')) && !ALLOWED_SENTENCE_TYPES.slice(0, 5).some((allowed) => allowed(sentence)));
   }
   if (!Array.isArray(asked) || !asked.length) return false;
   return replySentences(strippedText, asked).some((sentence) => !ALLOWED_SENTENCE_TYPES.some((allowed) => allowed(sentence)));
