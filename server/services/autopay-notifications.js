@@ -244,7 +244,7 @@ async function sendPreChargeReminders() {
         logger.info(`[autopay-notifications] pre-charge skipped for ${c.id}: ${outcome.reason}`);
         skipped++; continue;
       }
-      if (outcome.code === 'COLLECTION_HOLD_SUPPRESSED') {
+      if (require('./collections/collection-hold').isHoldSuppression(outcome)) {
         // Dispute hold: a wait, not a failure. Nothing is stamped, so the next pass re-tries.
         skipped++; continue;
       }
@@ -458,7 +458,7 @@ async function sendCardExpiryWarnings() {
         },
         hasEmailLeg: reminderStage !== '60_day',
       });
-      if (sendResult.code === 'COLLECTION_HOLD_SUPPRESSED') {
+      if (require('./collections/collection-hold').isHoldSuppression(sendResult)) {
         // Dispute hold: the notice waits (nothing stamped, retried next sweep); the email leg is
         // gated at its own lifecycle boundary.
         await emailPromise;

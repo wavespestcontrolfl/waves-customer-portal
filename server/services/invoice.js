@@ -2745,6 +2745,7 @@ async function restoreConsumedQueuedSend(consumedRows, database = db, claimToken
 // enqueue commits or fails together with the delivery stamp.
 async function queuePendingChannelReplay({
   invoiceId, customerId, toPhone, body, scheduledFor, originalBlockCode, hasEmailLeg = false, templateKey = null, database = db,
+  holdExempt = null,
 }) {
   // Adopting ANY live invoice_send_deferred row for this invoice is safe, even
   // though sendViaSMSAndEmail's held-SMS leg uses the same rail: this runs in
@@ -2784,6 +2785,7 @@ async function queuePendingChannelReplay({
       // which keep finalizeDeferredCompletionSend's SMS-only stamp).
       partial_fanout_retry: true,
       original_block_code: originalBlockCode,
+      ...persistedHoldExempt(holdExempt),
       // The frozen body's template row; the scheduler replay forwards it.
       ...(templateKey ? { template_key: templateKey } : {}),
       // sendViaSMSAndEmail's nested leg: the wrapper's own sendInvoiceEmail
@@ -3497,6 +3499,13 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
 // (allowClaimed: the worker, or the wrapper calling its own leg) was already
 // checked by its owner. Every AUTOMATED caller must handle the refusal as a wait.
 const HOLD_EXEMPT_CALLERS = new Set(["operator", "customer"]);
+// A queued invoice notice replays WITHOUT its caller, so the trusted exemption the immediate send
+// carried (an operator's send, the customer's own estimate accept) is persisted on the row
+// (metadata.hold_exempt) and re-applied by replay eligibility and the deferred provider handoff.
+// Only the two trusted values are ever written; it skips a plain dispute hold, never a fallback hold.
+function persistedHoldExempt(holdExempt) {
+  return HOLD_EXEMPT_CALLERS.has(holdExempt) ? { hold_exempt: holdExempt } : {};
+}
 // `row` is the invoice's { customer_id, payer_id } the caller already read.
 async function directSendHoldRefusal(row, holdExempt) {
   if (!row || row.payer_id) return null;
@@ -6314,7 +6323,7 @@ const InvoiceService = {
       if (updated && pendingChannelToQueue) {
         const queueOutcome = await queuePendingChannelReplay({
           invoiceId, customerId: customer.id, toPhone: customer.phone || "", body,
-          templateKey: renderedTemplateKey,
+          templateKey: renderedTemplateKey, holdExempt,
           database: trx, ...pendingChannelToQueue,
         });
         pendingChannelQueued = queueOutcome.queued === true;
@@ -7125,6 +7134,7 @@ const InvoiceService = {
               // The held body's template row; the scheduler replay forwards it.
               ...(sms.heldTemplateKey ? { template_key: sms.heldTemplateKey } : {}),
               original_block_code: sms.code,
+              ...persistedHoldExempt(holdExempt),
               replay_purpose: "payment_link",
               refresh_customer_phone: true,
               resolve_from_by_customer: true,
@@ -7669,9 +7679,15 @@ const InvoiceService = {
       // tick and oldest first, must not starve the unheld ones behind them.
       // A payer-billed invoice goes to the payer's AP inbox and is never held.
       // A combined-visit (packet) invoice whose Bill-To is not yet resolved
-      // (no payer_id stamped) is NOT excluded either: the live Bill-To fence
-      // below (claimPacketInvoiceForSend) must run first, because a payer
-      // assigned since queueing routes it to the payer, held homeowner or not.
+      // (no payer_id stamped) is admitted to the live Bill-To fence
+      // (claimPacketInvoiceForSend) below, because a payer assigned since
+      // queueing routes it to the payer, held homeowner or not - but only until
+      // the fence has CONFIRMED it is still self-pay (Codex #5424 r14): the
+      // sender then stamps hold_bill_to_checked_at, and a held row with a fresh
+      // stamp is skipped here, so a large held cohort never re-occupies the
+      // delivery page every tick. A payer change is picked up at the next recheck
+      // interval (collection-hold HOLD_BILL_TO_RECHECK_MS, 30 min); a hold RELEASE needs no stamp expiry:
+      // the row is no longer held, so the first tick after it sends.
       // The delivery-boundary check below stays AFTER that fence: it is the
       // authoritative answer for a truly self-pay invoice and for a hold that
       // lands between this read and the send.
@@ -7681,18 +7697,37 @@ const InvoiceService = {
       // fence (withdrawHeldRenewalInvoiceToPayer, run before the hold deferral below) instead of
       // being hidden behind the homeowner's dispute.
       .where((q) =>
-        q.whereNotNull("payer_id").orWhereNotNull("visit_completion_packet_id")
-          .orWhereExists(function renewalSuccessorInvoice() {
-            this.select(1).from("annual_prepay_terms as apt")
-              .whereRaw("apt.prepay_invoice_id = invoices.id")
-              .whereNotNull("apt.renewed_from_term_id").whereNotNull("apt.annual_plan_version");
-          })
+        q.whereNotNull("payer_id")
+          .orWhere((unresolved) => unresolved
+            .where((stale) => stale.whereNull("hold_bill_to_checked_at")
+              .orWhere("hold_bill_to_checked_at", "<", new Date(Date.now() - require("./collections/collection-hold").HOLD_BILL_TO_RECHECK_MS)))
+            .where((fence) => fence.whereNotNull("visit_completion_packet_id")
+              .orWhereExists(function renewalSuccessorInvoice() {
+                this.select(1).from("annual_prepay_terms as apt")
+                  .whereRaw("apt.prepay_invoice_id = invoices.id")
+                  .whereNotNull("apt.renewed_from_term_id").whereNotNull("apt.annual_plan_version");
+              })))
           .orWhereNotExists(function noActiveCollectionHold() {
             // ANY active collection_hold (dispute OR a wrong-number / wrong-party fallback, the
             // all-channel outreach block a released dispute restores): messaging waits on both.
             require("./collections/collection-hold").collectionHoldExistsSql(this, "invoices.customer_id");
           }),
       )
+      // Ordinary rows first: an unresolved-Bill-To packet / renewal row with no fresh stamp (the only
+      // rows a held cohort can occupy) sorts AFTER every other due row, then oldest first, so a large
+      // held cohort never takes a slot ahead of an ordinary invoice - not even on the tick that first
+      // fences it (Codex #5424 r14). The cost is bounded: an unheld packet invoice waits behind a
+      // page-full of ordinary rows for a tick or two.
+      .orderBy(db.raw(
+        `CASE WHEN invoices.payer_id IS NULL
+           AND (invoices.hold_bill_to_checked_at IS NULL OR invoices.hold_bill_to_checked_at < ?)
+           AND (invoices.visit_completion_packet_id IS NOT NULL OR EXISTS (
+             SELECT 1 FROM annual_prepay_terms apt
+             WHERE apt.prepay_invoice_id = invoices.id
+               AND apt.renewed_from_term_id IS NOT NULL AND apt.annual_plan_version IS NOT NULL))
+         THEN 1 ELSE 0 END`,
+        [new Date(Date.now() - require("./collections/collection-hold").HOLD_BILL_TO_RECHECK_MS)],
+      ), "asc")
       .orderBy("scheduled_send_at", "asc")
       .limit(limit)
       .select(
@@ -7935,8 +7970,10 @@ const InvoiceService = {
           // Bill-To fence FIRST so it reaches its payer even while the homeowner's dispute stands.
           // A fence that cannot be judged falls through to the deferral (fail closed toward waiting).
           let renewalFence = null;
+          let renewalFenceRan = false;
           try {
             renewalFence = await withdrawHeldRenewalInvoiceToPayer(claimed);
+            renewalFenceRan = true;
           } catch (fenceErr) {
             logger.warn(`[invoice] Held renewal invoice ${inv.invoice_number}: Bill-To fence failed (${fenceErr.message}) - deferring behind the dispute hold`);
           }
@@ -7946,8 +7983,13 @@ const InvoiceService = {
             continue;
           }
           const deferUntil = new Date(Date.now() + require("./collections/collection-hold").HOLD_DEFER_MS);
+          // The Bill-To fence has now CONFIRMED this held row is self-pay (a packet row's fence ran
+          // above, a renewal's just now; a fence that errored leaves no stamp and retries next tick):
+          // stamp it so the due query stops re-admitting it every tick (Codex #5424 r14).
+          const billToConfirmed = renewalFenceRan;
           const deferredRows = await restoreClaimedInvoice({
             status: "scheduled", scheduled_send_at: deferUntil, updated_at: new Date(),
+            ...(billToConfirmed ? { hold_bill_to_checked_at: new Date() } : {}),
           });
           if (deferredRows) {
             deferred += 1;
@@ -12000,3 +12042,6 @@ module.exports.withPayLinkSendClaim = withPayLinkSendClaim;
 // gate's on/off behavior (incl. the combined-packet member check and the
 // service_record_id-only fallback) can be pinned with a minimal conn mock.
 module.exports._assertUnvoidableLinkedVisit = assertUnvoidableLinkedVisit;
+// Test-only seam (#5424 r14): the pending-channel replay queue row, to pin the persisted trusted
+// dispute-hold exemption (metadata.hold_exempt) that the replay's eligibility and boundary re-apply.
+module.exports._queuePendingChannelReplay = queuePendingChannelReplay;

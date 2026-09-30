@@ -110,7 +110,7 @@ describe('sendCardExpiryWarnings — current-method selection', () => {
       payment_methods: [thenable([{ id: 'pm-cur', method_type: null, card_brand: 'Visa',
         last_four: '4242', exp_month: '9', exp_year: '26' }])],
     });
-    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
     expect(await sendCardExpiryWarnings()).toMatchObject({ sent: 0, skipped: 1 });
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({ purpose: 'autopay', entryPoint: 'autopay_card_expiry_warning' }));
     expect(logAutopay).not.toHaveBeenCalled();

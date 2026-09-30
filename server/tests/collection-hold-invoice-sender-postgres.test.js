@@ -505,6 +505,100 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       expect(rows.every((r) => r.status === 'scheduled' && r.scheduled_send_attempts === 0 && r.send_claim_token === null)).toBe(true);
     });
 
+    test('held PACKET rows stop taking page slots once the Bill-To fence confirms them self-pay (Codex #5424 r14): 26 held packet invoices plus 1 ordinary invoice - the ordinary one sends on the first tick, and from the second tick on the cohort is skipped by the due query', async () => {
+      const held = await newCustomer();
+      const clear = await newCustomer();
+      await placeHold(held);
+      const heldIds = [];
+      for (let i = 0; i < 26; i += 1) {
+        const { inv } = await packetInvoiceFor(held);
+        await db('invoices').where({ id: inv }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 2 * 3600 * 1000 - i * 1000) });
+        heldIds.push(inv);
+      }
+      const ordinary = await newInvoice(clear, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000) });
+      // Tick 1: the ordinary invoice sorts ahead of the unchecked cohort (older though it is), so it sends on the FIRST tick ...
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).toContain(ordinary);
+      // ... the page's remaining slots fence the oldest 24 held rows (retimed a hold tick out and stamped) ...
+      const afterFirst = await db('invoices').whereIn('id', heldIds);
+      expect(afterFirst.filter((r) => r.hold_bill_to_checked_at !== null).length).toBeLessThanOrEqual(25);
+      // ... and once the cohort is stamped no tick re-admits it.
+      await db('invoices').whereIn('id', heldIds).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+      await Invoices.processScheduledSends({ limit: 25 });
+      await db('invoices').whereIn('id', heldIds).update({ scheduled_send_at: new Date(Date.now() - 1000) });
+      await Invoices.processScheduledSends({ limit: 25 });
+      for (const id of heldIds) expect(sentIds()).not.toContain(id);
+      const rows = await db('invoices').whereIn('id', heldIds);
+      expect(rows.every((r) => r.status === 'scheduled' && r.scheduled_send_attempts === 0 && r.send_claim_token === null)).toBe(true);
+      expect(rows.every((r) => r.hold_bill_to_checked_at !== null)).toBe(true);
+    });
+
+    test('a confirmed-held packet row with a fresh stamp is invisible to the due query: 26 of them plus 1 ordinary invoice - the ordinary one sends on the FIRST tick, nothing held is claimed', async () => {
+      const held = await newCustomer();
+      const clear = await newCustomer();
+      await placeHold(held);
+      const heldIds = [];
+      for (let i = 0; i < 26; i += 1) {
+        const { inv } = await packetInvoiceFor(held);
+        await db('invoices').where({ id: inv }).update({
+          status: 'scheduled', scheduled_send_at: new Date(Date.now() - 2 * 3600 * 1000 - i * 1000), hold_bill_to_checked_at: new Date(),
+        });
+        heldIds.push(inv);
+      }
+      const ordinary = await newInvoice(clear, { status: 'scheduled', scheduled_send_at: new Date(Date.now() - 3600 * 1000) });
+      const before = await db('invoices').whereIn('id', heldIds).select('id', 'scheduled_send_at', 'updated_at');
+      const out = await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).toContain(ordinary);
+      expect(out.sent).toBeGreaterThanOrEqual(1);
+      const after = await db('invoices').whereIn('id', heldIds).select('id', 'scheduled_send_at', 'updated_at', 'status');
+      const byId = Object.fromEntries(before.map((r) => [r.id, r]));
+      for (const r of after) {
+        expect(r.status).toBe('scheduled');
+        expect(r.scheduled_send_at.getTime()).toBe(byId[r.id].scheduled_send_at.getTime()); // untouched: never selected
+        expect(r.updated_at.getTime()).toBe(byId[r.id].updated_at.getTime());
+      }
+    });
+
+    test('the stamp is a recheck interval, not a park: a STALE stamp re-enters the fence (a payer assigned since is routed to the payer), and a release sends at the next tick even with a fresh stamp', async () => {
+      const held = await newCustomer();
+      await placeHold(held);
+      const { inv, payerId } = await packetInvoiceFor(held, { payer: true });
+      await db('invoices').where({ id: inv }).update({
+        status: 'scheduled', scheduled_send_at: new Date(Date.now() - 1000),
+        hold_bill_to_checked_at: new Date(Date.now() - (Hold.HOLD_BILL_TO_RECHECK_MS + 60 * 1000)),
+      });
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).not.toContain(inv);
+      expect((await invoice(inv)).scheduled_send_error).toMatch(new RegExp(`^payer_billed:${payerId}`));
+
+      const c2 = await newCustomer();
+      await placeHold(c2);
+      const { inv: inv2 } = await packetInvoiceFor(c2);
+      await db('invoices').where({ id: inv2 }).update({ status: 'scheduled', scheduled_send_at: new Date(Date.now() - 1000), hold_bill_to_checked_at: new Date() });
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).not.toContain(inv2);
+      await releaseViaOpsScript(c2);
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect(sentIds()).toContain(inv2);
+    });
+
+    test('the sender stamps the marker only when the fence actually confirmed the hold (deferral), and a renewal row is stamped too', async () => {
+      const c = await newCustomer();
+      await placeHold(c);
+      const { inv } = await packetInvoiceFor(c);
+      await queueDue(inv);
+      await Invoices.processScheduledSends({ limit: 25 });
+      const stamped = await invoice(inv);
+      expect(stamped.hold_bill_to_checked_at).not.toBeNull();
+      expect(stamped).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
+      const c2 = await newCustomer();
+      await placeHold(c2);
+      const { inv: renewal } = await renewalInvoice(c2);
+      await queueDue(renewal);
+      await Invoices.processScheduledSends({ limit: 25 });
+      expect((await invoice(renewal)).hold_bill_to_checked_at).not.toBeNull();
+    });
+
     test('the deferral is shorter than one cron tick, so a release is sent by the very next tick', () => {
       expect(Hold.HOLD_DEFER_MS).toBeLessThan(5 * 60 * 1000);
     });
@@ -1076,6 +1170,121 @@ run('collections dispute hold: the scheduled-invoice sender is the chokepoint (p
       for (const [entry, meta] of [['invoice_followup_deferred', followup], ['stripe_webhook_billing_deferred', ach]]) {
         expect((await recheckDeferredReplay(entry, meta)).eligible).not.toBe(false);
       }
+    });
+
+    describe('a queued invoice notice keeps the trusted exemption its immediate send carried (Codex #5424 r14)', () => {
+      const FALLBACK = 'wrong-number report on billing follow-up call; wrong_number flag write failed';
+
+      test('the queued row persists hold_exempt (operator | customer only) - and nothing else', async () => {
+        for (const [exempt, expected] of [['customer', 'customer'], ['operator', 'operator'], ['system', undefined], [null, undefined]]) {
+          const c = await newCustomer();
+          const inv = await sentInvoice(c);
+          await Invoices._queuePendingChannelReplay({
+            invoiceId: inv, customerId: c, toPhone: '+15551230000', body: 'Synthetic invoice text',
+            scheduledFor: new Date(Date.now() + 3600 * 1000), originalBlockCode: 'QUIET_HOURS_HOLD', holdExempt: exempt,
+          });
+          const row = await db('sms_log').where({ customer_id: c }).first();
+          expect(row.metadata.entry_point).toBe('invoice_send_deferred');
+          expect(row.metadata.hold_exempt).toBe(expected);
+        }
+      });
+
+      test('Text/App leg: a customer / operator exemption skips a plain dispute hold; a fallback hold and an unexempted row still wait', async () => {
+        const c = await newCustomer();
+        const inv = await sentInvoice(c);
+        const dispatch = jest.fn(async () => accepted);
+        await placeHold(c);
+        expectHoldDefer(await Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c), dispatch));
+        expect(dispatch).not.toHaveBeenCalled();
+        for (const exempt of ['customer', 'operator']) {
+          dispatch.mockClear();
+          await expect(Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c, { hold_exempt: exempt }), dispatch)).resolves.toEqual(accepted);
+          expect(dispatch).toHaveBeenCalledTimes(1);
+        }
+        dispatch.mockClear();
+        expectHoldDefer(await Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(inv, c, { hold_exempt: 'system' }), dispatch));
+        const other = await newCustomer();
+        const otherInv = await sentInvoice(other);
+        await placeHold(other, FALLBACK);
+        expectHoldDefer(await Invoices.withDeferredInvoiceProviderHandoff(queuedMeta(otherInv, other, { hold_exempt: 'customer' }), dispatch));
+        expect(dispatch).not.toHaveBeenCalled();
+      });
+
+      test('Email leg and the billing Email replay eligibility honour it the same way', async () => {
+        const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
+        const c = await newCustomer();
+        const inv = await sentInvoice(c);
+        const check = (meta) => db.transaction(async (trx) => {
+          await trx('invoices').where({ id: inv }).forUpdate().first('id');
+          return Invoices.checkDeferredInvoiceEmailDelivery(meta, { channel: 'email', database: trx });
+        });
+        await placeHold(c);
+        expect(await check(queuedMeta(inv, c))).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER' });
+        expect(await check(queuedMeta(inv, c, { hold_exempt: 'customer' }))).toEqual({ ok: true });
+        const ctx = { source_entry_point: 'invoice_send_deferred', invoice_id: inv, customer_id: c, category: 'invoice' };
+        expect(await billingEmailReplayEligible(ctx, db)).toMatchObject({ eligible: false, holdDefer: true });
+        expect(await billingEmailReplayEligible({ ...ctx, hold_exempt: 'customer' }, db)).toEqual({ eligible: true });
+        const other = await newCustomer();
+        const otherInv = await sentInvoice(other);
+        await placeHold(other, FALLBACK);
+        expect(await billingEmailReplayEligible({ ...ctx, invoice_id: otherInv, customer_id: other, hold_exempt: 'customer' }, db))
+          .toMatchObject({ eligible: false, holdDefer: true });
+      });
+    });
+
+    describe('EVERY billing.notice replay waits on the messaging hold, whatever source produced it (Codex #5424 r14)', () => {
+      const { billingEmailReplayEligible } = require('../services/messaging/billing-email-replay-eligibility');
+      const { etDateString, addETDays } = require('../utils/datetime-et');
+
+      test('autopay pre-charge reminder, both expiry workflows and the previsit reminder: held -> wait (retryable + holdDefer), released -> past the hold gate', async () => {
+        const c = await newCustomer();
+        const held = await placeHold(c);
+        const contexts = [
+          { source_entry_point: 'autopay_pre_charge_reminder', customer_id: c, category: 'billing', charge_date: etDateString(addETDays(new Date(), 2)) },
+          { source_entry_point: 'autopay_card_expiry_warning', customer_id: c, category: 'billing', payment_method_id: 'pm', expiry_month: '1', expiry_year: '2099' },
+          { source_entry_point: 'payment_expiry_workflow', customer_id: c, category: 'billing', payment_method_id: 'pm', expiry_month: '1', expiry_year: '2099' },
+          { source_entry_point: 'previsit_balance_reminder', customer_id: c, category: 'billing' },
+        ];
+        const { replayHoldRefusal } = require('../services/messaging/billing-email-replay-eligibility');
+        for (const meta of contexts) {
+          // the source's own producer checks run first and may refuse for their own reasons on synthetic
+          // rows; the hold gate itself is the same function every source reaches
+          expect(await replayHoldRefusal(meta, db)).toMatchObject({ eligible: false, retryable: true, holdDefer: true });
+        }
+        // previsit: its quote check is stubbed out so the ONLY open question is the hold
+        const previsit = require('../services/previsit-balance-reminder');
+        const quote = jest.spyOn(previsit, 'previsitReplayQuoteEligible').mockResolvedValue({ ok: true });
+        try {
+          expect(await billingEmailReplayEligible(contexts[3], db)).toMatchObject({ eligible: false, retryable: true, holdDefer: true });
+          await db('collections_flags').where({ id: held }).update({ resolved_at: new Date() }).catch(() => null);
+          await releaseViaOpsScript(c);
+          expect(await billingEmailReplayEligible(contexts[3], db)).toEqual({ eligible: true });
+        } finally { quote.mockRestore(); }
+        for (const meta of contexts) expect(await replayHoldRefusal(meta, db)).toBeNull();
+      });
+
+      test('a payment receipt (no pay link) and a payer-billed invoice are exempt; a trusted hold_exempt skips a plain dispute hold only', async () => {
+        const { replayHoldRefusal } = require('../services/messaging/billing-email-replay-eligibility');
+        const c = await newCustomer();
+        await placeHold(c);
+        expect(await replayHoldRefusal({ customer_id: c, category: 'payment_receipt', source_entry_point: 'autopay_pre_charge_reminder' }, db)).toBeNull();
+        expect(await replayHoldRefusal({ customer_id: c, category: 'payment_issue' }, db)).toMatchObject({ holdDefer: true });
+        expect(await replayHoldRefusal({ customer_id: c, category: 'payment_issue', hold_exempt: 'customer' }, db)).toBeNull();
+        const [p] = await db('payers').insert({ display_name: 'Synthetic Bill-To', ap_email: 'ap@example.invalid' }).returning('id');
+        packetFixtures.payers.push(p.id);
+        const payerInv = await newInvoice(c, { status: 'sent', sent_at: db.fn.now(), payer_id: p.id });
+        expect(await replayHoldRefusal({ customer_id: c, category: 'invoice', invoice_id: payerInv }, db)).toBeNull();
+        const other = await newCustomer();
+        await placeHold(other, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
+        expect(await replayHoldRefusal({ customer_id: other, category: 'payment_issue', hold_exempt: 'operator' }, db)).toMatchObject({ holdDefer: true });
+      });
+
+      test('a lookup that cannot answer holds the stored notice too (fail closed)', async () => {
+        const { replayHoldRefusal } = require('../services/messaging/billing-email-replay-eligibility');
+        const c = await newCustomer();
+        const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockResolvedValueOnce({ held: true, reason: 'lookup_failed', error: new Error('db down') });
+        try { expect(await replayHoldRefusal({ customer_id: c, category: 'payment_issue' }, db)).toMatchObject({ holdDefer: true, retryable: true }); } finally { lookup.mockRestore(); }
+      });
     });
 
     test('the payment-retry notice replay (billing_retry_email_deferred) waits while the hold stands', async () => {

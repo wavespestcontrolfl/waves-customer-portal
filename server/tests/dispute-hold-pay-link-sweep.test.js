@@ -30,7 +30,7 @@ describe('customer-message purposes gated by the dispute hold at the send bounda
   test('every sender of a hold-gated purpose is classified', () => {
     expect(filesMatching(GATED_PURPOSE)).toEqual([
       // machine-initiated card-expiry / pre-charge notices (purpose autopay): gated at the boundary,
-      // COLLECTION_HOLD_SUPPRESSED treated as a wait (skipped, nothing stamped, retried next sweep)
+      // the hold refusal (COLLECTION_HOLD_DEFER) treated as a wait (skipped, nothing stamped, retried next sweep)
       'routes/stripe-webhook.js', // sendBillingSms: gated; customerInitiated only from the PI's own markers
       'services/autopay-notifications.js',
       'services/billing-cron.js', // failure / retry notices: gated, never customerInitiated
@@ -60,14 +60,21 @@ describe('customer-message purposes gated by the dispute hold at the send bounda
     expect(asserting).toEqual(['routes/stripe-webhook.js']);
   });
 
-  test('the callers that get COLLECTION_HOLD_SUPPRESSED treat it as a wait, never a failure', () => {
+  test('ONE hold outcome everywhere: nothing emits COLLECTION_HOLD_SUPPRESSED, every consumer reads the shared predicate (Codex #5424 r14)', () => {
+    // The retired non-retryable shape is named only by the predicate that still tolerates a stale one.
+    expect(filesMatching(/COLLECTION_HOLD_SUPPRESSED/)).toEqual(['services/collections/collection-hold.js']);
+    // The customer-message boundary and the lifecycle-email preflight return holdDeferOutcome.
+    expect(read('services/messaging/send-customer-message.js')).toMatch(/return \{ ok: false, \.\.\.collectionHold\.holdDeferOutcome\(held\) \};/);
+    expect(read('services/payment-lifecycle-email.js')).toMatch(/blocked: true, skipped: true, \.\.\.require\('\.\/collections\/collection-hold'\)\.holdDeferOutcome\(held\)/);
     for (const file of ['services/autopay-notifications.js', 'services/workflows/payment-expiry.js']) {
-      expect(read(file)).toMatch(/COLLECTION_HOLD_SUPPRESSED/);
+      expect(read(file)).toMatch(/isHoldSuppression\(/);
     }
-    // the completion decline notice promotes it to the invoice hand-over
+    // the completion decline notice promotes it to the invoice hand-over and never queues it as a delayed text
     expect(read('services/complete-scheduled-service.js'))
-      .toMatch(/failResult\.code === 'COLLECTION_HOLD_SUPPRESSED'\) payLinkHeldByDisputeHold = true/);
+      .toMatch(/const heldAtBoundary = require\('\.\/collections\/collection-hold'\)\.isHoldSuppression\(failResult\);\s*if \(heldAtBoundary\) payLinkHeldByDisputeHold = true;/);
+    expect(read('services/complete-scheduled-service.js')).toMatch(/!failResult\.sent && !heldAtBoundary && /);
   });
+
 });
 
 describe('lifecycle (payment.*) emails that carry a pay / update-card link', () => {
@@ -273,6 +280,28 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
     ]) expect(consumers).toContain(f);
   });
 
+  test('a queued invoice notice persists and re-applies the trusted exemption; every billing.notice replay is hold-gated (Codex #5424 r14)', () => {
+    const inv = read('services/invoice.js');
+    // both invoice_send_deferred producers persist it; the row's own replay checks read it back
+    expect(inv.match(/\.\.\.persistedHoldExempt\(holdExempt\)/g) || []).toHaveLength(2);
+    expect(read('services/messaging/invoice-send-replay-eligibility.js')).toMatch(/holdExemptionApplies\(meta\.hold_exempt\)/);
+    expect(read('services/scheduler.js')).toMatch(/claimMeta\.entry_point === 'invoice_send_deferred' && \['operator', 'customer'\]\.includes\(claimMeta\.hold_exempt\)/);
+    // the replay eligibility gates EVERY contracted source (after the source-specific checks, previsit included) ...
+    const elig = read('services/messaging/billing-email-replay-eligibility.js');
+    expect(elig).toMatch(/invoiceRefusal, replayHoldRefusal, collectionsPolicyRefusal/);
+    expect(elig).toMatch(/await replayHoldRefusal\(meta, database\) \|\| \{ eligible: true \}/);
+    // ... and the provider-replay handoff gates a row with NO contract through the same function
+    expect(read('services/billing-email-provider-replay.js')).toMatch(/uncontractedHoldVerdict\(context, database\)/);
+    expect(read('services/billing-email-provider-replay.js')).toMatch(/replayHoldRefusal\(context, database\)/);
+  });
+
+  test('the sender due query holds back a confirmed-held Bill-To row with a fresh stamp, and the loop stamps it only after the fence ran', () => {
+    const inv = read('services/invoice.js');
+    expect(inv).toMatch(/hold_bill_to_checked_at", "<", new Date\(Date\.now\(\) - require\("\.\/collections\/collection-hold"\)\.HOLD_BILL_TO_RECHECK_MS\)/);
+    expect(inv).toMatch(/const billToConfirmed = renewalFenceRan;[\s\S]{0,400}hold_bill_to_checked_at: new Date\(\)/);
+    expect(inv).toMatch(/\.orderBy\(db\.raw\(\s*`CASE WHEN invoices\.payer_id IS NULL[\s\S]{0,600}hold_bill_to_checked_at/);
+  });
+
   test('the sender due queries skip ANY active hold (collectionHoldExistsSql), not the dispute-only subquery', () => {
     expect(read('services/invoice.js')).toMatch(/noActiveCollectionHold[\s\S]{0,300}collectionHoldExistsSql\(this, "invoices\.customer_id"\)/);
     expect(read('services/automation-runner.js')).toMatch(/collectionHoldExistsSql\(this, 'e\.customer_id'\)/);
@@ -296,7 +325,7 @@ describe('messaging hold predicate vs charging hold predicate (round 13)', () =>
     expect(read('services/billing-channel-email-authority.js')).toMatch(/messagingHeldByCollectionHold\(input\.customerId, database,/);
     expect(read('services/invoice-email.js')).toMatch(/messagingHeldByCollectionHold\(current\.customer_id, trx,/);
     expect(read('services/automation-runner.js')).toMatch(/messagingHeldByCollectionHold\(enrollment\.customer_id, database\)/);
-    expect(read('services/messaging/invoice-send-replay-eligibility.js')).toMatch(/messagingHeldByCollectionHold\(invoice\.customer_id, database\)/);
+    expect(read('services/messaging/invoice-send-replay-eligibility.js')).toMatch(/messagingHeldByCollectionHold\(invoice\.customer_id, database,/);
   });
 
   test('the scheduler hands a pay-link-only replay over through ONE transaction (no separate hand-over then terminal write)', () => {

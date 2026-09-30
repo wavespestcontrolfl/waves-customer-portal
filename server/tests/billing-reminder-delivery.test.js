@@ -614,9 +614,9 @@ describe('billing reminder per-channel delivery progress', () => {
   // which both deliver through sendReminderChannels.
   describe.each([
     ['a Text/App leg refused at the customer-message boundary', 'sms',
-      { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' }],
+      { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' }],
     ['an App leg refused at the customer-message boundary', 'push',
-      { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' }],
+      { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' }],
     ['an Email leg refused at the billing email authority', 'email',
       { ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'COLLECTION_HOLD_DEFER' }],
   ])('%s', (_label, channel, heldResult) => {

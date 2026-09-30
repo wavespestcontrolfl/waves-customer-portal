@@ -11,7 +11,7 @@ jest.mock('../services/email-template-library', () => ({
 }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() }));
 jest.mock('../services/billing-channel-email-authority', () => ({ dispatchUnderBillingEmailAuthority: jest.fn() }));
-jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn() }));
+jest.mock('../services/messaging/billing-email-replay-eligibility', () => ({ billingEmailReplayEligible: jest.fn(), replayHoldRefusal: jest.fn(async () => null) }));
 jest.mock('../services/billing-email-reservation', () => ({
   BILLING_EMAIL_TERMINAL_REFUSAL_PREFIX: 'Billing email terminal refusal: ',
   BILLING_EMAIL_REQUOTE_REFUSAL_PREFIX: 'Billing email re-quote required: ',

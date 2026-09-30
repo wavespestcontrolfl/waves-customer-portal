@@ -161,7 +161,7 @@ function followupEmailOutcomeUncertain(result, explicit) {
 }
 
 // A dispute hold that landed after the preflight consult refused this leg at the provider boundary
-// (COLLECTION_HOLD_SUPPRESSED / COLLECTION_HOLD_DEFER). That is a WAIT: nothing reached the customer
+// (the ONE retryable COLLECTION_HOLD_DEFER outcome). That is a WAIT: nothing reached the customer
 // and nothing failed, so the reservation is released (no failed row, no spent attempt) and the touch
 // stays due (see the held-touch retime in fireTouch); it goes out after the release.
 function heldByDisputeHold(result) {

@@ -114,11 +114,11 @@ run('dispute hold at the dunning send boundaries (postgres)', () => {
       await expect(RailGuard.collectionsChannelPermitted({ customerId: c, channel: 'sms', purpose: 'late_payment', logTag: 'test' })).resolves.toBe(true);
       const holdId = await placeHold(c); // ... and the hold commits during those awaits
       const out = await send(c);
-      expect(out).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+      expect(out).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
       expect(await db('sms_log').where({ customer_id: c }).count('* as n').first()).toMatchObject({ n: '0' });
       // the same send goes through the boundary again once the hold is released (a WAIT, nothing terminal)
       await release(holdId);
-      expect((await send(c)).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
+      expect((await send(c)).code).not.toBe('COLLECTION_HOLD_DEFER');
     });
 
     test('an unanswerable hold lookup holds it too (fail closed)', async () => {
@@ -126,7 +126,7 @@ run('dispute hold at the dunning send boundaries (postgres)', () => {
       const c = await newCustomer();
       const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold').mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
       try {
-        expect(await send(c)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+        expect(await send(c)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
       } finally { lookup.mockRestore(); }
     });
 
@@ -136,24 +136,24 @@ run('dispute hold at the dunning send boundaries (postgres)', () => {
       await placeHold(c);
       const lookup = jest.spyOn(Hold, 'messagingHeldByCollectionHold');
       try {
-        expect((await send(c, { holdExempt: 'operator', operatorInitiated: true })).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
-        expect((await send(c, { holdExempt: 'customer' })).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
-        expect((await send(c, { customerInitiated: true })).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
+        expect((await send(c, { holdExempt: 'operator', operatorInitiated: true })).code).not.toBe('COLLECTION_HOLD_DEFER');
+        expect((await send(c, { holdExempt: 'customer' })).code).not.toBe('COLLECTION_HOLD_DEFER');
+        expect((await send(c, { customerInitiated: true })).code).not.toBe('COLLECTION_HOLD_DEFER');
         for (const call of lookup.mock.calls) expect(call[2]).toEqual({ ignoreDisputeHold: true });
         // an unrecognised exemption value does not exempt
-        expect(await send(c, { holdExempt: 'system' })).toMatchObject({ code: 'COLLECTION_HOLD_SUPPRESSED' });
+        expect(await send(c, { holdExempt: 'system' })).toMatchObject({ code: 'COLLECTION_HOLD_DEFER' });
       } finally { lookup.mockRestore(); }
     });
 
     test('a wrong-number FALLBACK hold stops the notice, and NO exemption skips it; after its release it sends (Codex #5424 r13)', async () => {
       const c = await newCustomer();
       const holdId = await placeHold(c, 'wrong-number report on billing follow-up call; wrong_number flag write failed');
-      expect(await send(c)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+      expect(await send(c)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
       for (const extra of [{ holdExempt: 'operator', operatorInitiated: true }, { holdExempt: 'customer' }, { customerInitiated: true }]) {
-        expect(await send(c, extra)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+        expect(await send(c, extra)).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
       }
       await release(holdId);
-      expect((await send(c)).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
+      expect((await send(c)).code).not.toBe('COLLECTION_HOLD_DEFER');
     });
   });
 
@@ -165,7 +165,7 @@ run('dispute hold at the dunning send boundaries (postgres)', () => {
       audience: 'customer', purpose: 'payment_link', customerId: c, entryPoint: 'admin_project_payment_link',
       metadata: { original_message_type: 'project_payment_link' },
     });
-    expect(out.code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
+    expect(out.code).not.toBe('COLLECTION_HOLD_DEFER');
   });
 
   describe('releasing a held reservation (the wait a suppressed leg leaves behind)', () => {

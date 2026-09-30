@@ -223,7 +223,7 @@ test.each([
 // after the release.
 test('a dispute hold at both send boundaries releases both reservations and the claim (a wait, not a failed reminder)', async () => {
   const { releaseChain } = armOneVisit();
-  sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+  sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
   AccountMembershipEmail.sendPrevisitBalanceReminder.mockResolvedValueOnce({
     ok: false, retryable: true, deliveryOutcome: 'not_sent', reason: 'COLLECTION_HOLD_DEFER',
   });

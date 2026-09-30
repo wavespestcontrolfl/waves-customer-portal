@@ -41,7 +41,12 @@ async function invoiceSendRefusal(meta, database) {
   // third-party payer's AP delivery is exempt. A hold - or a lookup that cannot
   // answer - keeps the leg retryable and DEFERRED (holdDefer), never terminal:
   // it sends after the release. Read on the caller's held handle (savepoint).
-  const held = await require('../collections/collection-hold').messagingHeldByCollectionHold(invoice.customer_id, database);
+  // A trusted exemption the immediate send carried (an operator's send, the customer's own estimate
+  // accept) rides on the queued row / stored replay context as hold_exempt and skips a plain DISPUTE
+  // hold only (Codex #5424 r14); a wrong-number / wrong-party fallback hold still waits.
+  const collectionHold = require('../collections/collection-hold');
+  const held = await collectionHold.messagingHeldByCollectionHold(invoice.customer_id, database,
+    { ignoreDisputeHold: collectionHold.holdExemptionApplies(meta.hold_exempt) });
   if (held.held) {
     return { eligible: false, reason: held.reason === 'lookup_failed' ? 'collection-hold-lookup-failed' : 'collection-hold', retryable: true, holdDefer: true, held };
   }

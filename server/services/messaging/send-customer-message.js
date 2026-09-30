@@ -269,9 +269,16 @@ const HOLD_GATED_MESSAGE_PURPOSES = Object.freeze(['payment_failure', 'autopay']
 // 'payment_link' / 'billing', which the invoice sender, an operator's project payment link and
 // the price-change notice also use - so they are recognised by their entry point
 // (collection-hold HOLD_GATED_DUNNING_ENTRY_POINTS), not by purpose alone.
+// A queued replay (every deferred row replays under entry point scheduled_sms_cron) of a dunning
+// text whose purpose is the shared 'payment_link': the follow-up ladder's quiet-hours requeue. Its
+// registry recheck reads the hold before dispatch; this is the boundary read for a hold that commits
+// after it (Codex #5424 r14). The other gated queued rows replay under a gated purpose already.
+const HOLD_GATED_REPLAY_ORIGINS = Object.freeze(['invoice_followup_deferred']);
 function isHoldGatedBillingMessage(input = {}) {
   if (input.audience !== 'customer' || !input.customerId) return false;
   if (HOLD_GATED_MESSAGE_PURPOSES.includes(input.purpose)) return true;
+  if (input.entryPoint === 'scheduled_sms_cron'
+    && HOLD_GATED_REPLAY_ORIGINS.includes(String(input.metadata?.original_entry_point || ''))) return true;
   return require('../collections/collection-hold').HOLD_GATED_DUNNING_ENTRY_POINTS.has(String(input.entryPoint || ''));
 }
 
@@ -295,12 +302,11 @@ async function billingHoldBlock(input = {}, database = undefined) {
   const held = await collectionHold.messagingHeldByCollectionHold(input.customerId, database, { ignoreDisputeHold });
   if (!held.held) return null;
   logger.info(`[send_customer_message] billing notice (${input.purpose}${input.entryPoint ? `/${input.entryPoint}` : ''}) suppressed for customer ${input.customerId}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
-  return {
-    ok: false,
-    code: 'COLLECTION_HOLD_SUPPRESSED',
-    reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed',
-    retryable: true,
-  };
+  // ONE hold outcome everywhere (Codex #5424 r14): the retryable, deferred COLLECTION_HOLD_DEFER
+  // shape with nextAllowedAt. A queued replay (scheduler, registry, email retry rails) treats it as
+  // a wait and refunds the attempt; a caller that must not retry (the immediate completion text)
+  // reads it through collectionHold.isHoldSuppression and decides itself.
+  return { ok: false, ...collectionHold.holdDeferOutcome(held) };
 }
 
 function isAutopayCustomerSms(input = {}) {
@@ -407,7 +413,8 @@ async function sendCustomerMessageCore(input) {
   // these senders (they pause or skip before sending).
   const heldBlock = await billingHoldBlock(input);
   if (heldBlock) {
-    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: heldBlock.code, reason: heldBlock.reason };
+    const { ok: _heldOk, ...heldOutcome } = heldBlock;
+    return { sent: false, blocked: true, ...heldOutcome };
   }
 
   // 2. Resolve policy

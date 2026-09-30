@@ -4759,6 +4759,10 @@ function initScheduledJobs() {
               // and the lane stamped at enqueue ride along in metadata for
               // the owner autopay digest to classify the send.
               ...(claimMeta.entry_point ? { original_entry_point: String(claimMeta.entry_point) } : {}),
+              // The queued invoice notice's trusted dispute-hold exemption (an operator's send, the
+              // customer's own accept) rides into the replay's stored Email context.
+              ...(claimMeta.entry_point === 'invoice_send_deferred' && ['operator', 'customer'].includes(claimMeta.hold_exempt)
+                ? { hold_exempt: claimMeta.hold_exempt } : {}),
               ...(Object.prototype.hasOwnProperty.call(claimMeta, 'billing_mode_at_send')
                 ? { billing_mode_at_send: claimMeta.billing_mode_at_send ?? null }
                 : {}),

@@ -236,7 +236,10 @@ async function sendLifecycleTemplate({
     const held = await require('./collections/collection-hold').messagingHeldByCollectionHold(customer.id, undefined, holdOpts);
     if (held.held) {
       logger.info(`[payment-lifecycle-email] ${templateKey} suppressed for customer ${customer.id}: collections dispute hold${held.reason === 'lookup_failed' ? ' (lookup failed - fail closed)' : ''}`);
-      return { ok: false, skipped: true, reason: 'collection_hold', code: 'COLLECTION_HOLD_SUPPRESSED', deliveryOutcome: 'not_sent' };
+      // The ONE retryable hold outcome (Codex #5424 r14): a replay handler recognises only
+      // COLLECTION_HOLD_DEFER, so a hold that commits after a caller's early check waits, never
+      // terminalizes.
+      return { ok: false, blocked: true, skipped: true, ...require('./collections/collection-hold').holdDeferOutcome(held) };
     }
   }
 
@@ -892,7 +895,10 @@ async function sendPaymentFailed({
     // reads it before its dispute-hold check).
     categories: customerInitiated === true ? [CUSTOMER_INITIATED_EMAIL_CATEGORY] : [],
   });
-  if (emailResult?.retryable) {
+  // A hold refusal (the ONE retryable COLLECTION_HOLD_DEFER outcome) is a wait, not an unavailable
+  // preference read: nothing to retry the webhook for - the Text/App legs below are gated at their own
+  // boundary and dunning after the release covers the email.
+  if (emailResult?.retryable && !require('./collections/collection-hold').isHoldSuppression(emailResult)) {
     const err = new Error('Payment-issue delivery preferences are unavailable');
     err.code = 'BILLING_PREFS_UNAVAILABLE';
     err.retryable = true;

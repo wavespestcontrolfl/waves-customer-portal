@@ -299,7 +299,10 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
       // No hold exists at the up-front read or at the pre-send recheck; the boundary check
       // inside sendCustomerMessage is what suppresses the decline notice.
       sendCustomerMessage.mockImplementation(async (input) => (input.purpose === 'payment_failure'
-        ? { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED', reason: 'synthetic boundary hold' }
+        ? { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER', reason: 'synthetic boundary hold',
+          // the REAL boundary shape (holdDeferOutcome): retryable + deferred + a next time - the immediate completion
+          // text must NOT queue it as a delayed text (the queued row would carry the pay link); the invoice hand-over owns it
+          retryable: true, deferred: true, nextAllowedAt: new Date(Date.now() + 4 * 60 * 1000).toISOString() }
         : { sent: true, channel: 'sms', sid: `SM${randomUUID().replace(/-/g, '').slice(0, 32)}` }));
       expect(await complete(f)).toMatchObject({ status: 200 });
       expect(Stripe.chargeInvoiceWithSavedCard).toHaveBeenCalled();
@@ -308,6 +311,9 @@ postgres('completion under a dispute hold: hand the invoice to the sender, text 
       const inv = await invoiceFor(f);
       expect(inv).toMatchObject({ status: 'scheduled', scheduled_send_attempts: 0 });
       expect((await recordFor(f)).structured_notes.invoiceSenderOwnsPayLinkFor).toBe(String(inv.id));
+      // no delayed decline text was queued for the held notice, and its status is not 'deferred'
+      expect(await mockPg('sms_log').where({ customer_id: f.customerId }).whereRaw("metadata->>'entry_point' = 'autopay_completion_decline_deferred'").count('* as n').first()).toMatchObject({ n: '0' });
+      expect((await recordFor(f)).structured_notes.paymentFailedNoticeStatus).not.toBe('deferred');
       for (const [input] of sendCustomerMessage.mock.calls.filter(([i]) => i.purpose !== 'payment_failure')) {
         expect(payLinkIn(String(input.body || ''), inv)).toBe(false);
       }

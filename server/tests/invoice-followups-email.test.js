@@ -558,7 +558,7 @@ describe('invoice follow-up email sidecar', () => {
     // The Email leg cannot deliver (its context read fails), so the Text leg is the only one in play.
     BillingEmailAuthority.loadBillingEmailContext.mockRejectedValueOnce(new Error('connection terminated'));
     sendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
       reason: 'Customer has an active collections dispute hold; the billing follow-up notice was suppressed',
     });
     await InvoiceFollowUps.runPending();
@@ -567,7 +567,7 @@ describe('invoice follow-up email sidecar', () => {
     expect(sendCustomerMessage.mock.calls[0][0]).not.toHaveProperty('holdExempt'); // an automated touch waits
     // the SMS reservation is released; only the never-sent email attempt's own stamp remains
     expect(ContactLedger.releaseHeldReservation).toHaveBeenCalledTimes(1);
-    expect(ContactLedger.markSendFailed).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'COLLECTION_HOLD_SUPPRESSED' }));
+    expect(ContactLedger.markSendFailed).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'COLLECTION_HOLD_DEFER' }));
     expect(smsLogInsert.insert).not.toHaveBeenCalled(); // no scheduled-SMS row carrying the pay link
     const [update] = sequenceUpdate.update.mock.calls[0];
     expect(update).not.toHaveProperty('status');
@@ -589,7 +589,7 @@ describe('invoice follow-up email sidecar', () => {
       invoice_followup_sequences: [chain({ first: sequence }), chain({ result: 1 }), sequenceUpdate, chain({ result: 1 })],
     });
     sendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
     });
     await InvoiceFollowUps.runPending();
     expect(sendCustomerMessage).toHaveBeenCalledTimes(1);

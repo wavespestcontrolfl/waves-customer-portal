@@ -90,24 +90,24 @@ describe('the hold is re-checked in providerPreparationCheck', () => {
   test('a hold committed AFTER step 1.5 stops a gated payment_failure text at the provider boundary, coded and audited', async () => {
     Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
     const result = await sendCustomerMessage({ ...BASE_INPUT });
-    expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(result).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
     expect(Hold.messagingHeldByCollectionHold).toHaveBeenCalledTimes(2);
     expect(persistAudit).toHaveBeenCalledWith(expect.objectContaining({
       validatorsFailed: ['collection_hold_boundary'],
-      blockedBy: expect.objectContaining({ code: 'COLLECTION_HOLD_SUPPRESSED' }),
+      blockedBy: expect.objectContaining({ code: 'COLLECTION_HOLD_DEFER' }),
     }));
   });
 
   test('a lookup failure at the boundary fails closed the same way', async () => {
     Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false })
       .mockResolvedValueOnce({ held: true, reason: 'lookup_failed', error: new Error('db down') });
-    expect(await sendCustomerMessage({ ...BASE_INPUT })).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(await sendCustomerMessage({ ...BASE_INPUT })).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
   });
 
   test('the machine-initiated dunning entry points (shared purposes) are gated at the boundary too', async () => {
     Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
     const result = await sendCustomerMessage({ ...BASE_INPUT, purpose: 'payment_link', entryPoint: 'invoice_followup_sequence' });
-    expect(result).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
   });
 
   // A realistic predicate: a trusted exemption (ignoreDisputeHold) skips a plain DISPUTE row only; a
@@ -134,7 +134,7 @@ describe('the hold is re-checked in providerPreparationCheck', () => {
   ])('%s is NOT exempt from a wrong-number / wrong-party FALLBACK hold: the send waits, coded', async (_label, extra) => {
     holdKind('fallback');
     const result = await sendCustomerMessage({ ...BASE_INPUT, ...extra });
-    expect(result).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(result).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
     expect(sendViaTwilio).not.toHaveBeenCalled();
   });
 
@@ -165,5 +165,55 @@ describe('the hold is re-checked in providerPreparationCheck', () => {
     const result = await sendCustomerMessage({ ...BASE_INPUT });
     expect(result.sent).toBe(true);
     expect(Hold.messagingHeldByCollectionHold).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('ONE retryable hold outcome at every boundary (Codex #5424 r14)', () => {
+  const holdOutcome = { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true };
+
+  test('step 1.5 refuses with the schedulable holdDeferOutcome shape: retryable, deferred, a future nextAllowedAt - what the scheduler refunds an attempt for', async () => {
+    Hold.messagingHeldByCollectionHold.mockResolvedValue({ held: true, reason: 'hold' });
+    const result = await sendCustomerMessage({ ...BASE_INPUT });
+    expect(result).toMatchObject(holdOutcome);
+    expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
+    expect(require('../services/messaging/billing-channel-routing').REPLAY_HOLD_CODES).toContain(result.code);
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  });
+
+  test('the final provider-boundary refusal carries the same fields through the send result', async () => {
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: false }).mockResolvedValueOnce({ held: true, reason: 'hold' });
+    const result = await sendCustomerMessage({ ...BASE_INPUT });
+    expect(result).toMatchObject({ sent: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true });
+    expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
+  });
+
+  test('a lookup failure is the same outcome (fail closed = wait)', async () => {
+    Hold.messagingHeldByCollectionHold.mockResolvedValue({ held: true, reason: 'lookup_failed', error: new Error('db down') });
+    expect(await sendCustomerMessage({ ...BASE_INPUT })).toMatchObject(holdOutcome);
+  });
+
+  test.each([
+    ['a queued billing_failure_deferred replay (replayed under its payment_failure purpose)', { purpose: 'payment_failure', entryPoint: 'scheduled_sms_cron', metadata: { original_entry_point: 'billing_failure_deferred' } }],
+    ['a queued invoice_followup_deferred replay (shared payment_link purpose)', { purpose: 'payment_link', entryPoint: 'scheduled_sms_cron', metadata: { original_entry_point: 'invoice_followup_deferred' } }],
+  ])('%s that meets a hold at the boundary is a WAIT the scheduler reschedules (attempt refunded), never the terminal blocked path', async (_label, extra) => {
+    Hold.messagingHeldByCollectionHold.mockResolvedValue({ held: true, reason: 'hold' });
+    const result = await sendCustomerMessage({ ...BASE_INPUT, ...extra });
+    expect(result).toMatchObject(holdOutcome);
+    // exactly the branch processScheduledSends refunds: code in its hold list + a nextAllowedAt
+    expect(['QUIET_HOURS_HOLD', 'COLLECTION_HOLD_DEFER'].includes(result.code) && Boolean(result.nextAllowedAt)).toBe(true);
+    expect(sendViaTwilio).not.toHaveBeenCalled();
+  });
+
+  test('a queued replay of a NON-dunning row (a different original entry point on the shared purpose) is not hold-gated here', async () => {
+    Hold.messagingHeldByCollectionHold.mockResolvedValue({ held: true, reason: 'hold' });
+    const result = await sendCustomerMessage({ ...BASE_INPUT, purpose: 'payment_link', entryPoint: 'scheduled_sms_cron', metadata: { original_entry_point: 'invoice_send_deferred' } });
+    expect(result.sent).toBe(true);
+    expect(Hold.messagingHeldByCollectionHold).not.toHaveBeenCalled();
+  });
+
+  test('the predicate every caller reads recognises the one outcome (and still tolerates the retired code)', () => {
+    expect(Hold.isHoldSuppression(holdOutcome)).toBe(true);
+    expect(Hold.isHoldSuppression({ code: 'COLLECTION_HOLD_SUPPRESSED' })).toBe(true);
+    expect(Hold.isHoldSuppression({ sent: false, blocked: true, code: 'QUIET_HOURS_HOLD' })).toBe(false);
   });
 });

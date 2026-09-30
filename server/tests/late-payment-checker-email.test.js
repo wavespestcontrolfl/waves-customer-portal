@@ -286,7 +286,7 @@ describe('late-payment checker email sidecar', () => {
 
     test('the Text leg refused at the send boundary is released, not failed; nothing else sends and the tier stays open', async () => {
       sendCustomerMessage.mockResolvedValueOnce({
-        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+        sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
       });
       ContactLedger.recordContact.mockImplementation(async ({ channel }) => ({ id: `${channel}-14`, metadata: {} }));
       const dedupeInsertSpy = jest.fn(async () => undefined);

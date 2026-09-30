@@ -188,13 +188,34 @@ async function collectionsPolicyRefusal(meta, database) {
   return permitted?.allowed === true ? null : refused('collections-policy-denied', permitted?.durable !== true);
 }
 
+// THE messaging-hold gate for EVERY billing.notice replay (Codex #5424 r14): whatever source produced
+// the stored notice (the dunning rails, the pre-charge reminder, both expiry workflows, the previsit
+// balance reminder, a direct invoice notice, or a row with no replay contract at all) it carries a
+// pay / update-card / billing link the customer was told is on hold, so a stored copy never reaches
+// SendGrid while any collection_hold is active. Only a payment RECEIPT (no link) is untouched, a
+// payer-billed invoice (it goes to the payer's AP inbox) is exempt, and a trusted hold_exempt
+// (an operator's / the customer's own send) skips a plain dispute hold only. A hold - or a lookup that
+// cannot answer - is a WAIT (retryable + holdDefer), never terminal.
+async function replayHoldRefusal(meta, database) {
+  if (!meta?.customer_id || meta.category === 'payment_receipt') return null;
+  if (meta.invoice_id) {
+    const invoice = await database('invoices').where({ id: meta.invoice_id }).first('payer_id');
+    if (invoice?.payer_id) return null;
+  }
+  const collectionHold = require('../collections/collection-hold');
+  const held = await collectionHold.messagingHeldByCollectionHold(meta.customer_id, database,
+    { ignoreDisputeHold: collectionHold.holdExemptionApplies(meta.hold_exempt) });
+  return held.held ? { ...refused('collection-hold', true), holdDefer: true, held } : null;
+}
+
 async function billingEmailReplayEligible(meta, database = db) {
   try {
     if (meta?.source_entry_point === 'previsit_balance_reminder') {
       const verdict = await require('../previsit-balance-reminder').previsitReplayQuoteEligible(meta, database);
-      return verdict.ok === true ? { eligible: true } : refused(verdict.supersessionReason || verdict.reason, verdict.retryable === true);
+      return verdict.ok === true ? (await replayHoldRefusal(meta, database) || { eligible: true })
+        : refused(verdict.supersessionReason || verdict.reason, verdict.retryable === true);
     }
-    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, collectionsPolicyRefusal];
+    const checks = [prechargeRefusal, expiryRefusal, balanceReminderVisitRefusal, invoiceRefusal, replayHoldRefusal, collectionsPolicyRefusal];
     for (const check of checks) {
       const refusal = await check(meta || {}, database);
       if (refusal) return refusal;
@@ -207,4 +228,4 @@ async function billingEmailReplayEligible(meta, database = db) {
 
 // Producer-state eligibility only. Recipient resolution and provider-boundary
 // send authorization remain the caller's responsibility when this is wired.
-module.exports = { billingEmailReplayEligible };
+module.exports = { billingEmailReplayEligible, replayHoldRefusal };

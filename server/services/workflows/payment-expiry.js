@@ -332,7 +332,7 @@ class PaymentExpiry {
           },
           hasEmailLeg: reminderStage !== '60_day',
         });
-        if (sendResult.code === 'COLLECTION_HOLD_SUPPRESSED') {
+        if (require('../collections/collection-hold').isHoldSuppression(sendResult)) {
           // Dispute hold: the notice waits (no alert row, no interaction stamped; the next sweep
           // re-tries); the email leg is gated at its own lifecycle boundary.
           await emailPromise;

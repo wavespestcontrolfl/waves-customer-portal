@@ -976,7 +976,7 @@ describe('collections policy + ledger on latePaymentCheck', () => {
   test('a dispute hold at the send boundary releases the legacy late-payment SMS reservation instead of stamping it failed', async () => {
     armHappyPath();
     sendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
     });
     await BalanceReminder.latePaymentCheck();
     expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'balance_reminder_late_payment_check' });
@@ -1011,7 +1011,7 @@ describe('collections policy + ledger on latePaymentCheck', () => {
     });
     process.env.GATE_COLLECTIONS_POLICY = 'true';
     sendCustomerMessage.mockResolvedValueOnce({
-      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED',
+      sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER',
     });
     await expect(BalanceReminder.sendReminder(service, balance, 'gentle', 5)).resolves.toBe(false);
     expect(sendCustomerMessage.mock.calls[0][0]).toMatchObject({ purpose: 'payment_link', entryPoint: 'balance_reminder_workflow' });

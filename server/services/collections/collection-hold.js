@@ -287,6 +287,10 @@ async function recordHoldOverrideOn(database, { customerId, actorId, ip, userAge
 // land a hair AFTER that tick and cost a whole extra tick). A release is
 // therefore sent within one tick.
 const HOLD_DEFER_MS = 4 * 60 * 1000;
+// How long a held, unresolved-Bill-To invoice (a packet or renewal-successor row) that the live fence
+// confirmed self-pay stays out of the scheduled sender's due query (invoices.hold_bill_to_checked_at):
+// the recheck interval at which a payer change is next picked up while the hold stands.
+const HOLD_BILL_TO_RECHECK_MS = 30 * 60 * 1000;
 
 // Lifecycle (payment.*) email templates whose body carries a pay / update-card link. ONE list
 // for the fresh-send guard (payment-lifecycle-email.js) and the provider-retry rail
@@ -332,10 +336,12 @@ function holdExemptionApplies(holdExempt) {
   return holdExempt === 'operator' || holdExempt === 'customer';
 }
 
-// A send result the hold refused BEFORE the provider (the customer-message boundary's
-// COLLECTION_HOLD_SUPPRESSED, the email authority's COLLECTION_HOLD_DEFER, the sender's
-// hold-deferral). It is a WAIT: the owed touch stays due and goes out after the release; the
-// caller must not stamp a failure, spend an attempt or pause anything for it.
+// A send result the hold refused BEFORE the provider. Every hold refusal anywhere in messaging is ONE
+// outcome (holdDeferOutcome: COLLECTION_HOLD_DEFER, retryable + deferred + nextAllowedAt; Codex
+// #5424 r14) - the customer-message boundary, the email authority, the lifecycle emails, the sender.
+// It is a WAIT: the owed touch stays due and goes out after the release; the caller must not stamp a
+// failure, spend an attempt or pause anything for it. (The retired COLLECTION_HOLD_SUPPRESSED code is
+// still read here so a stale result shape is never mistaken for a failure; nothing emits it.)
 function isHoldSuppression(result) {
   const code = result?.code || result?.reason;
   return code === 'COLLECTION_HOLD_SUPPRESSED' || code === HOLD_DEFER_CODE || result?.holdDefer === true;
@@ -534,6 +540,7 @@ module.exports = {
   collectionHoldExistsSql,
   rowBlocksMessaging,
   holdDeferOutcome,
+  HOLD_BILL_TO_RECHECK_MS,
   HOLD_DEFER_CODE,
   queueHeldInvoiceForSender,
   requeueHeldInvoice,

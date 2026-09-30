@@ -200,7 +200,7 @@ async function markSendFailed(entry, extra = {}, { database = db, match = {} } =
 async function releaseHeldReservation(entry, { database = db } = {}) {
   if (!entry || !entry.id) return false;
   const released = await deleteUnsettledReservation(entry, database);
-  return released || markSendFailed(entry, { code: 'COLLECTION_HOLD_SUPPRESSED' }, { database });
+  return released || markSendFailed(entry, { code: 'COLLECTION_HOLD_DEFER' }, { database });
 }
 
 async function deleteUnsettledReservation(entry, database) {

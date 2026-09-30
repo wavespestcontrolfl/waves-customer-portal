@@ -85,10 +85,11 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       audience: 'customer', purpose: 'payment_failure', customerId: c, entryPoint: 'monthly_billing_failure',
       metadata: { original_message_type: 'autopay_charge_failed' },
     });
-    expect(out).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
-    // suppressed, NOT deferred: no replay row is queued for it (dunning after the release covers it)
-    expect(out.deferred).toBeUndefined();
-    expect(out.retryable).toBeUndefined();
+    expect(out).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
+    // the ONE hold outcome (Codex #5424 r14): a retryable WAIT with a next-allowed time - the queued
+    // replay rails refund the attempt for it; the boundary itself queues nothing
+    expect(out).toMatchObject({ retryable: true, deferred: true });
+    expect(new Date(out.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
     expect(await db('sms_log').where({ customer_id: c }).count('* as n').first()).toMatchObject({ n: '0' });
   });
 
@@ -101,7 +102,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
         to: '+15551230001', body: 'Your payment failed.', channel: 'sms', audience: 'customer', purpose: 'payment_failure',
         customerId: c, entryPoint: 'stripe_webhook', metadata: { original_message_type: 'ach_retry_notice' },
       });
-      expect(out).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+      expect(out).toMatchObject({ sent: false, blocked: true, code: 'COLLECTION_HOLD_DEFER' });
     } finally { lookup.mockRestore(); }
     const src = fs.readFileSync(path.join(__dirname, '../services/messaging/send-customer-message.js'), 'utf8');
     expect(src).toMatch(/if \(!isHoldGatedBillingMessage\(input\)\) return null;\s*const ignoreDisputeHold = input\.customerInitiated === true \|\| collectionHold\.holdExemptionApplies\(input\.holdExempt\);/);
@@ -116,15 +117,15 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       audience: 'customer', purpose: 'autopay', customerId: c, entryPoint: 'autopay_card_expiry_warning',
       metadata: { original_message_type: 'payment_expiry' }, ...extra,
     });
-    expect(await autopay()).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(await autopay()).toMatchObject({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
     // the same boundary carries the payment-expiry workflow's entry point
-    expect(await autopay({ entryPoint: 'payment_expiry_workflow' })).toMatchObject({ code: 'COLLECTION_HOLD_SUPPRESSED' });
+    expect(await autopay({ entryPoint: 'payment_expiry_workflow' })).toMatchObject({ code: 'COLLECTION_HOLD_DEFER' });
     expect(await db('sms_log').where({ customer_id: c }).count('* as n').first()).toMatchObject({ n: '0' });
     // a customer-initiated autopay notice (customerInitiated) passes the hold boundary
     const exempt = await autopay({ customerInitiated: true });
-    expect(exempt.code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
+    expect(exempt.code).not.toBe('COLLECTION_HOLD_DEFER');
     await release(holdId);
-    expect((await autopay()).code).not.toBe('COLLECTION_HOLD_SUPPRESSED');
+    expect((await autopay()).code).not.toBe('COLLECTION_HOLD_DEFER');
   });
 
   describe('lifecycle emails that carry a pay / update-card link (payment.failed, payment.retry_notice, payment.method_expiring)', () => {
@@ -142,7 +143,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       const methodId = await expiringMethod(c);
       const holdId = await placeHold(c);
       const held = await Lifecycle.sendPaymentMethodExpiring({ customerId: c, paymentMethodId: methodId, reminderStage: '30_day' });
-      expect(held).toMatchObject({ ok: false, skipped: true, reason: 'collection_hold', code: 'COLLECTION_HOLD_SUPPRESSED' });
+      expect(held).toMatchObject({ ok: false, blocked: true, skipped: true, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
       expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
       await release(holdId);
       await Lifecycle.sendPaymentMethodExpiring({ customerId: c, paymentMethodId: methodId, reminderStage: '30_day' });
@@ -163,7 +164,7 @@ run('live payment-failure notices under a dispute hold (postgres)', () => {
       const c = await newCustomer();
       await placeHold(c);
       const machine = await Lifecycle.sendPaymentFailed({ customerId: c, paymentIntentId: `pi_synthetic_${randomUUID()}`, attemptId: 'a1', customerInitiated: false });
-      expect(machine).toMatchObject({ ok: false, skipped: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+      expect(machine).toMatchObject({ ok: false, skipped: true, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true });
       expect(EmailTemplateLibrary.sendTemplate).not.toHaveBeenCalled();
       const own = await Lifecycle.sendPaymentFailed({ customerId: c, paymentIntentId: `pi_synthetic_${randomUUID()}`, attemptId: 'a2', customerInitiated: true });
       expect(own).toMatchObject({ ok: true });

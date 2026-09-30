@@ -160,9 +160,9 @@ describe('PaymentExpiry.checkExpiringCards routing outcome', () => {
     const interactionInsert = jest.fn(async () => [1]);
     paymentExpiry.resolveAlertsForExemptCustomers = jest.fn(async () => {});
     const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
-    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_SUPPRESSED' });
+    sendCustomerMessage.mockResolvedValueOnce({ sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'COLLECTION_HOLD_DEFER' });
     require('../services/sms-template-renderer').renderSmsTemplate.mockResolvedValueOnce('expiry body');
-    require('../services/payment-lifecycle-email').sendPaymentMethodExpiring.mockResolvedValueOnce({ ok: false, skipped: true, code: 'COLLECTION_HOLD_SUPPRESSED' });
+    require('../services/payment-lifecycle-email').sendPaymentMethodExpiring.mockResolvedValueOnce({ ok: false, skipped: true, code: 'COLLECTION_HOLD_DEFER' });
     db.mockImplementation((table) => {
       if (table === 'payment_methods as pm') return query([{
         id: 'pm-1', customer_id: 'cust-1', last_four: '4242', exp_month: '9', exp_year: '2026', card_brand: 'Visa',

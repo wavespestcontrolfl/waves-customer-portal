@@ -12025,7 +12025,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // it to the SAME flag the recheck sets so handOverInvoiceToSender queues the invoice
             // onto the sender (it then sends after the release) and the completion text goes
             // report-only, instead of an ordinary failed notice on an unqueued draft.
-            if (failResult.code === 'COLLECTION_HOLD_SUPPRESSED') payLinkHeldByDisputeHold = true;
+            // The hold refusal is the ONE retryable COLLECTION_HOLD_DEFER outcome (Codex #5424 r14);
+            // this immediate completion text must not retry or queue it as a delayed text - the
+            // invoice itself goes to the hold-aware sender below.
+            const heldAtBoundary = require('./collections/collection-hold').isHoldSuppression(failResult);
+            if (heldAtBoundary) payLinkHeldByDisputeHold = true;
             const noticeLegs = (failResult.channelResults || failResult.deduped === true)
               && require('./messaging/billing-prior-delivery').settledLegTimes(failResult);
             const noticeSentAt = failResult.deduped ? noticeLegs?.eventAt : new Date();
@@ -12042,7 +12046,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // confirmed 'sent' drops it) — a morning double-link is coherent
             // copy; a night with no link is not.
             let paymentFailedNoticeDeferred = false;
-            if (!failResult.sent && require('./messaging/billing-channel-routing').REPLAY_HOLD_CODES.includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
+            if (!failResult.sent && !heldAtBoundary && require('./messaging/billing-channel-routing').REPLAY_HOLD_CODES.includes(failResult.code) && failResult.deferred && failResult.nextAllowedAt) {
               try {
                 const TWILIO_NUMBERS = require('../config/twilio-numbers');
                 await db('sms_log').insert({

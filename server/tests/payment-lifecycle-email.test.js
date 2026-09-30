@@ -412,6 +412,24 @@ describe('payment lifecycle email sender', () => {
     expect(beforeProviderHandoff).not.toHaveBeenCalled();
   });
 
+  test('a hold already standing at the lifecycle PREFLIGHT is the same coded retryable defer (a replay handler recognises only COLLECTION_HOLD_DEFER; Codex #5424 r14)', async () => {
+    const Hold = require('../services/collections/collection-hold');
+    setDbQueues({
+      payments: [chain({ first: payment() })],
+      payment_methods: [chain({ first: paymentMethod() })],
+      customers: [chain({ first: customer() })],
+      notification_prefs: [chain({ first: { payment_issue_channels: ['email'] } })],
+    });
+    Hold.messagingHeldByCollectionHold.mockResolvedValueOnce({ held: true, reason: 'hold' });
+    const result = await PaymentLifecycleEmail.sendPaymentRetryNotice({
+      customerId: 'cust-1', paymentId: 'pay-1', retryDate: '2026-05-23',
+    });
+    expect(result).toMatchObject({ ok: false, code: 'COLLECTION_HOLD_DEFER', retryable: true, deferred: true, deliveryOutcome: 'not_sent' });
+    expect(new Date(result.nextAllowedAt).getTime()).toBeGreaterThan(Date.now());
+    expect(Hold.isHoldSuppression(result)).toBe(true);
+    expect(EmailTemplates.sendTemplate).not.toHaveBeenCalled();
+  });
+
   test.each(['INVOICE_UNREADABLE', 'INVOICE_PAYER_BILLED'])('a retry notice classifies ownership refusal %s before provider handoff', async (code) => {
     const ownership = jest.spyOn(require('../services/invoice-helpers'), 'selfPayAtDispatch')
       .mockReturnValueOnce(async () => ({ ok: false, code }));
