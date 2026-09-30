@@ -893,8 +893,13 @@ time of day / note as plain English in `transcript_summary` and structured in
 admin bell (the /book first-touch attribution — click ids, UTMs, referrer — is
 resolved through `resolveLeadSource` onto the lead like every other funnel's);
 lookup and write run under a per-phone advisory lock, so a repeat or overlapping
-submit from the same phone inside 24h refreshes that lead (no second row or
-bell). It sends NOTHING to the customer — no SMS, no email — and
+submit from the same phone inside 24h refreshes that still-open lead (no second
+row or bell). Recency is `extracted_data.last_requested_at`, written only by a
+submit — office edits (status, notes, assignment) never extend the dedupe
+window or the suppression. A completed self-booking (`createSelfBooking`,
+every service type) marks the booked customer's open preferred-time leads
+`won`/converted and links them to the customer, so staff do not chase someone
+who already booked. It sends NOTHING to the customer — no SMS, no email — and
 retires every open abandoned-booking intent for the same phone or session, and
 capture-intent skips a phone that filed a request in the last day, and the
 recovery worker itself re-checks for a request filed since the intent was

@@ -23,6 +23,7 @@ const {
   validatePreferredTimeRequest,
   recordPreferredTimeRequest,
   hasRecentPreferredTimeRequest,
+  convertPreferredTimeLeadsOnBooking,
 } = require('../services/booking-preferred-time');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 const { capacityEnabled, applySchedulingPolicy, placementFitsShift } = require('../services/scheduling/policy');
@@ -6218,6 +6219,16 @@ async function createSelfBooking(payload = {}) {
       }
     }
 
+    // A "Can't find a time?" request (GATE_BOOK_PREFERRED_TIME) from this same
+    // customer is moot once they have booked: mark it converted so staff don't
+    // chase someone who already booked. Keyed on the verified customer's phone,
+    // so it covers one-time services too. Best-effort;
+    // runs whatever the gate reads (a request already filed still closes).
+    let preferredLeadConverted = false;
+    if (!callbackVisit) {
+      preferredLeadConverted = (await convertPreferredTimeLeadsOnBooking(db, { customerId: custId })) > 0;
+    }
+
     // Persist an ad-tracked self-booking's click id onto a won lead so the
     // offline-conversion pipeline (data-manager qualified_lead / Meta CAPI) can
     // report it to Google/Meta by deterministic click id, not just hashed PII.
@@ -6245,7 +6256,7 @@ async function createSelfBooking(payload = {}) {
           customerCreated: !!createdCustomerId,
           selfBookedAppointmentId: booking?.id || null,
           bookingSource: source || null,
-          leadConverted: !!leadConversion?.converted,
+          leadConverted: !!leadConversion?.converted || preferredLeadConverted,
         });
       } catch (err) {
         logger.warn(`[booking:confirm] self-booking attribution failed for customer=${custId}: ${err.message}`);

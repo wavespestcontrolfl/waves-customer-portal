@@ -24,7 +24,13 @@ const logger = require('./logger');
 const { resolveLeadSource } = require('./lead-source-resolver');
 const { etDateString, addETDays, parseETDateTime, validCalendarDate } = require('../utils/datetime-et');
 
+const { OPEN_LEAD_STATUSES } = require('./lead-statuses');
+
 const LEAD_TYPE = 'book_preferred_time';
+// When the customer last asked: the submit-only stamp in extracted_data, falling
+// back to created_at for a row without one. leads.updated_at is deliberately
+// NOT used — office edits (status, notes, assignment) stamp it.
+const LAST_REQUESTED_SQL = "COALESCE(NULLIF(extracted_data->>'last_requested_at', '')::timestamptz, created_at) > ?";
 const FIRST_CONTACT_CHANNEL = 'book_preferred_time';
 const HORIZON_DAYS = 120;
 const DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -160,9 +166,7 @@ async function hasRecentPreferredTimeRequest(db, phone, { sessionId = null, sinc
   const q = db('leads')
     .where({ lead_type: LEAD_TYPE })
     .whereNull('deleted_at')
-    // updated_at, not created_at: a resubmit refreshes the one lead in place
-    // (updated_at = now), and the request is as recent as its LAST refresh.
-    .where('updated_at', '>', floor)
+    .whereRaw(LAST_REQUESTED_SQL, [floor])
     .where((w) => {
       tenMatch(w, phone);
       if (sessionId) w.orWhereRaw("extracted_data->>'session_id' = ?", [sessionId]);
@@ -196,6 +200,10 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
     state: value.state,
     session_id: value.sessionId,
     customer_messaged: false,
+    // The customer's latest submit — written ONLY by a submit (never by office
+    // edits, which stamp updated_at), so suppression and dedupe recency mean
+    // "when the customer last asked".
+    last_requested_at: new Date().toISOString(),
     utm: attr?.utm || null,
     referrer: attr?.referrer || null,
     landing_url: attr?.landing_url || null,
@@ -219,10 +227,14 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
       trx('leads')
         .where({ lead_type: LEAD_TYPE })
         .whereNull('deleted_at')
-        // Sliding window on the last refresh (see hasRecentPreferredTimeRequest).
-        .where('updated_at', '>', new Date(Date.now() - DEDUPE_WINDOW_MS)),
+        // Sliding window on the customer's latest submit (LAST_REQUESTED_SQL),
+        // and only a lead the office has not already worked or closed — a
+        // genuinely new request after that is a new lead + bell.
+        .whereIn('status', OPEN_LEAD_STATUSES)
+        .whereNull('converted_at')
+        .whereRaw(LAST_REQUESTED_SQL, [new Date(Date.now() - DEDUPE_WINDOW_MS)]),
       value.phone,
-    ).orderBy('updated_at', 'desc').first('id');
+    ).orderBy('created_at', 'desc').first('id');
 
     if (existing) {
       await trx('leads').where({ id: existing.id }).update({
@@ -291,7 +303,45 @@ async function recordPreferredTimeRequest(db, value, { serviceLabel = null, serv
   return { created, leadId };
 }
 
+/**
+ * A customer who just completed a booking no longer needs the office to chase
+ * their preferred-time request: mark every OPEN preferred-time lead for their
+ * phone (or funnel session) converted (status 'won', the status the Leads page
+ * and the conversion helpers use), linked to the customer so the new_lead bell's
+ * relevance sweep retires it. Server-side, keyed on the VERIFIED customer's
+ * phone, so it covers every confirm path (one-time services included) with no
+ * client cooperation. Returns the number of leads converted. Never throws into
+ * the booking.
+ */
+async function convertPreferredTimeLeadsOnBooking(db, { customerId, sessionId = null } = {}) {
+  if (!customerId) return 0;
+  try {
+    const customer = await db('customers').where({ id: customerId }).first('phone');
+    const ten = tenDigitPhone(customer && customer.phone);
+    if (!ten && !sessionId) return 0;
+    const q = db('leads')
+      .where({ lead_type: LEAD_TYPE })
+      .whereNull('deleted_at')
+      .whereIn('status', OPEN_LEAD_STATUSES)
+      .whereNull('converted_at')
+      .where((w) => {
+        if (ten) tenMatch(w, ten);
+        if (sessionId) w.orWhereRaw("extracted_data->>'session_id' = ?", [sessionId]);
+      });
+    return await q.update({
+      status: 'won',
+      converted_at: db.fn.now(),
+      customer_id: customerId,
+      updated_at: db.fn.now(),
+    });
+  } catch (err) {
+    logger.warn(`[booking:preferred-time] converting preferred-time lead on booking failed for customer=${customerId}: ${err.message}`);
+    return 0;
+  }
+}
+
 module.exports = {
+  convertPreferredTimeLeadsOnBooking,
   LEAD_TYPE,
   TIME_OF_DAY_LABELS,
   validatePreferredTimeRequest,

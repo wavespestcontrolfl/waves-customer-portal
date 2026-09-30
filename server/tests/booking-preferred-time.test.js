@@ -13,6 +13,7 @@ jest.setTimeout(30000);
 
 const mockOps = [];            // { table, op, arg }
 let mockExistingLead = null;   // what a phone lookup on leads returns
+let mockCustomer = null;       // what customers .first() returns
 
 function builder(table) {
   const b = {
@@ -26,7 +27,7 @@ function builder(table) {
     orWhereRaw: () => b,
     leftJoin: () => b,
     orderBy: () => b,
-    first: () => Promise.resolve(table === 'leads' ? mockExistingLead : null),
+    first: () => Promise.resolve(table === 'leads' ? mockExistingLead : (table === 'customers' ? mockCustomer : null)),
     insert: (row) => {
       mockOps.push({ table, op: 'insert', arg: row });
       return { returning: () => Promise.resolve([{ id: 'lead-1' }]) };
@@ -128,6 +129,7 @@ beforeEach(() => {
   mockOps.length = 0;
   mockLocks.length = 0;
   mockExistingLead = null;
+  mockCustomer = null;
   mockTriggerNotification.mockClear();
   mockSendCustomerMessage.mockClear();
   mockSendSMS.mockClear();
@@ -448,38 +450,93 @@ describe('abandoned-booking recovery re-checks at send time', () => {
   });
 });
 
-describe('a refreshed request keeps suppressing recovery (recency is the LAST refresh)', () => {
+describe('request recency is the customer\'s own latest submit, not lead edits', () => {
   const HOUR = 3600000;
-  // In-memory leads table that honours only the timestamp comparisons — the
-  // part under test — so a query on the wrong column reads as "no request".
+  const ago = (h) => new Date(Date.now() - h * HOUR);
+  // In-memory leads table that evaluates only the recency comparison (the part
+  // under test): the submit-only extracted_data.last_requested_at expression,
+  // or a plain column comparison, so a query on the wrong column reads as
+  // "no request".
   function fakeDb(row) {
     const conds = [];
     const chain = {
       where: (a, op, val) => { if (typeof a === 'string' && op === '>') conds.push([a, val]); else if (typeof a === 'function') a(chain); return chain; },
-      whereNull: () => chain, whereRaw: () => chain, orWhereRaw: () => chain,
-      first: async () => (conds.every(([col, val]) => new Date(row[col]).getTime() > new Date(val).getTime()) ? { id: row.id } : undefined),
+      whereNull: () => chain, whereIn: () => chain, orWhereRaw: () => chain,
+      whereRaw: (sql, [val]) => {
+        if (/last_requested_at/.test(sql)) {
+          conds.push([null, val, () => new Date(row.last_requested_at || row.created_at)]);
+        }
+        return chain;
+      },
+      first: async () => (conds.every(([col, val, get]) => (get ? get() : new Date(row[col])).getTime() > new Date(val).getTime()) ? { id: row.id } : undefined),
     };
     return () => chain;
   }
 
-  test('created 25h ago, refreshed 1h ago: still blocks an intent captured 2h ago (created_at alone would miss it)', async () => {
-    const row = { id: 'lead-1', created_at: new Date(Date.now() - 25 * HOUR), updated_at: new Date(Date.now() - 1 * HOUR) };
+  test('created 25h ago, customer resubmitted 1h ago: still blocks an intent captured 2h ago and capture-intent', async () => {
+    const row = { id: 'lead-1', created_at: ago(25), updated_at: ago(1), last_requested_at: ago(1).toISOString() };
     const db = fakeDb(row);
-    expect(await hasRecentPreferredTimeRequest(db, '9415550100', { since: new Date(Date.now() - 2 * HOUR) })).toBe(true);
-    // capture-intent's default 24h window sees it too
+    expect(await hasRecentPreferredTimeRequest(db, '9415550100', { since: ago(2) })).toBe(true);
     expect(await hasRecentPreferredTimeRequest(db, '9415550100')).toBe(true);
   });
 
-  test('never refreshed and older than the window: does not block a fresh abandonment', async () => {
-    const row = { id: 'lead-1', created_at: new Date(Date.now() - 30 * HOUR), updated_at: new Date(Date.now() - 30 * HOUR) };
+  test('an office edit (updated_at bumped) does NOT extend suppression', async () => {
+    const row = { id: 'lead-1', created_at: ago(30), updated_at: ago(0.1), last_requested_at: ago(30).toISOString() };
     expect(await hasRecentPreferredTimeRequest(fakeDb(row), '9415550100')).toBe(false);
   });
 
-  test('the dedupe refresh stamps updated_at with now', async () => {
+  test('a resubmit stamps last_requested_at (and only a submit writes it)', async () => {
     mockExistingLead = { id: 'lead-existing' };
     await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value, { notify: false });
     const upd = mockOps.find((o) => o.table === 'leads' && o.op === 'update');
-    expect(upd.arg.updated_at).toBe('NOW');
+    const stamp = JSON.parse(upd.arg.extracted_data).last_requested_at;
+    expect(Math.abs(Date.now() - new Date(stamp).getTime())).toBeLessThan(5000);
+
+    mockOps.length = 0;
+    mockExistingLead = null;
+    await recordPreferredTimeRequest(mockDb, validatePreferredTimeRequest(validBody()).value, { notify: false });
+    const ins = mockOps.find((o) => o.table === 'leads' && o.op === 'insert');
+    expect(JSON.parse(ins.arg.extracted_data).last_requested_at).toBeTruthy();
+  });
+
+  test('the dedupe lookup and the suppression check both read the submit-only stamp, never updated_at', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/booking-preferred-time.js'), 'utf8');
+    expect(src).toContain("extracted_data->>'last_requested_at'");
+    expect(src).not.toMatch(/\.where\('updated_at'/);
+    expect((src.match(/LAST_REQUESTED_SQL, \[/g) || []).length).toBe(2);
+  });
+});
+
+describe('a completed booking closes the customer\'s open preferred-time lead', () => {
+  const { convertPreferredTimeLeadsOnBooking } = require('../services/booking-preferred-time');
+
+  test('marks open request leads for the booked customer\'s phone won + converted, linked to the customer', async () => {
+    mockCustomer = { phone: '+1 (941) 555-0100' };
+    const n = await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' });
+    expect(n).toBe(1);
+    const upd = mockOps.find((o) => o.table === 'leads' && o.op === 'update');
+    expect(upd.arg).toMatchObject({ status: 'won', customer_id: 'cust-1' });
+    expect(upd.arg.converted_at).toBeTruthy();
+    expect(mockSendCustomerMessage).not.toHaveBeenCalled();
+    expect(mockSendSMS).not.toHaveBeenCalled();
+  });
+
+  test('no customer, or no phone and no session: nothing is touched', async () => {
+    expect(await convertPreferredTimeLeadsOnBooking(mockDb, {})).toBe(0);
+    mockCustomer = { phone: null };
+    expect(await convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).toBe(0);
+    expect(mockOps.filter((o) => o.table === 'leads')).toHaveLength(0);
+  });
+
+  test('a failure never reaches the booking', async () => {
+    mockDb.mockImplementationOnce(() => { throw new Error('db down'); });
+    await expect(convertPreferredTimeLeadsOnBooking(mockDb, { customerId: 'cust-1' })).resolves.toBe(0);
+  });
+
+  test('createSelfBooking runs it for the verified customer and stops attributeSelfBooking double-minting (source guard)', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../routes/booking.js'), 'utf8');
+    expect(src).toContain('convertPreferredTimeLeadsOnBooking(db, { customerId: custId })');
+    expect(src).toMatch(/leadConverted: !!leadConversion\?\.converted \|\| preferredLeadConverted/);
   });
 });
 
