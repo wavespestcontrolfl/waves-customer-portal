@@ -69,7 +69,9 @@ describe('stripQuotedAndSignature', () => {
     });
   });
 
-  test('a marker at the very start (cut index < 2) is not applied — keeps the whole text rather than leave almost nothing', () => {
-    expect(stripQuotedAndSignature('On Tue wrote: this whole message')).toBe('On Tue wrote: this whole message');
+  test('a body that opens with quoted history or a forwarded header strips to nothing', () => {
+    expect(stripQuotedAndSignature('On Tue, Sep 22, 2026 at 3:21 PM, Jane <jane@example.invalid> wrote: please send a quote by Friday')).toBe('');
+    expect(stripQuotedAndSignature('---------- Forwarded message ---------\nFrom: Jane\nCan you come out Monday?')).toBe('');
+    expect(stripQuotedAndSignature('> can you call me back today')).toBe('');
   });
 });

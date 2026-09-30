@@ -388,6 +388,30 @@ postgres('Email commitments on PostgreSQL', () => {
     await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
   });
 
+  test('resolveEmailCustomerLink: a send in the customer\'s thread that never went to the customer (internal forward) resolves to nobody', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const inbound = await insertEmail({ customer_id: customerId });
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'Office <office@wavespestcontrol.com>' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
+    await expect(resolveEmailCustomerLink(mockPg, { ...row, to_address: null })).resolves.toBeNull();
+  });
+
+  test('resolveEmailCustomerLink: a thread send that also names another customer resolves to nobody', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    await mockPg('customers').insert({ id: randomUUID(), first_name: 'Third', last_name: 'Fixture',
+      phone: '+12025559998', email: 'third.customer@example.invalid', address_line1: '3 Fixture Way', city: 'Sarasota', zip: '34236' });
+    const inbound = await insertEmail({ customer_id: customerId });
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'customer@example.invalid, third.customer@example.invalid' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBeNull();
+  });
+
+  test('resolveEmailCustomerLink: a thread reply to the address the customer wrote in from resolves to that customer', async () => {
+    const { resolveEmailCustomerLink } = require('../services/email/email-customer-link');
+    const inbound = await insertEmail({ customer_id: customerId, from_address: 'Dryrun Fixture <work.inbox@example.invalid>' });
+    const row = { id: randomUUID(), gmail_thread_id: inbound.gmail_thread_id, to_address: 'work.inbox@example.invalid' };
+    await expect(resolveEmailCustomerLink(mockPg, row)).resolves.toBe(customerId);
+  });
+
   test('D1 reverse: an SMS reply closes an email-sourced general ask (through refreshEmailCommitments end-to-end)', async () => {
     const email = await insertEmail({ customer_id: customerId, classification: 'customer_request',
       body_text: 'Did you come to my house today?' });

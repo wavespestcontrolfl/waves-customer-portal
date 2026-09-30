@@ -50,6 +50,28 @@ function extractEmailAddresses(raw) {
   return [...new Set(matches.map((a) => a.toLowerCase()))];
 }
 
+// A send in the customer's thread counts as reaching THAT customer only
+// when its own recipients prove it: some to_address is the customer's email
+// or an address the customer wrote to us from in this thread, and none is
+// another active customer's email. Forwarding the thread internally, or
+// replying to someone else on it, never closes the customer's ask
+// (pre-push audit, 2026-09-30).
+async function threadSendReachesCustomer(conn, row, customerId) {
+  const toAddresses = extractEmailAddresses(row.to_address);
+  if (!toAddresses.length) return false;
+  const customer = await conn('customers').where({ id: customerId }).whereNull('deleted_at').first('email');
+  if (!customer) return false;
+  const inboundFrom = await conn('emails')
+    .where({ gmail_thread_id: row.gmail_thread_id, customer_id: customerId })
+    .whereNotNull('from_address').pluck('from_address');
+  const customerAddresses = new Set([customer.email, ...inboundFrom].flatMap(extractEmailAddresses));
+  if (!toAddresses.some((a) => customerAddresses.has(a))) return false;
+  const others = await conn('customers').whereNull('deleted_at').whereNotNull('email')
+    .whereNot('id', customerId)
+    .whereIn(conn.raw('LOWER(TRIM(email))'), toAddresses).first('id');
+  return !others;
+}
+
 async function resolveEmailCustomerLink(conn, row) {
   if (!row?.gmail_thread_id && !row?.to_address) return null;
   if (row.gmail_thread_id) {
@@ -58,8 +80,10 @@ async function resolveEmailCustomerLink(conn, row) {
       .whereNotNull('customer_id')
       .modify((q) => { if (row.id) q.whereNot('id', row.id); })
       .distinct('customer_id').pluck('customer_id');
-    if (threadCustomers.length === 1) return threadCustomers[0];
     if (threadCustomers.length > 1) return null; // a mixed thread never guesses
+    if (threadCustomers.length === 1) {
+      return (await threadSendReachesCustomer(conn, row, threadCustomers[0])) ? threadCustomers[0] : null;
+    }
   }
   const toAddresses = extractEmailAddresses(row.to_address);
   if (!toAddresses.length) return null;

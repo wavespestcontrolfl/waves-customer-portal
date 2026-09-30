@@ -72,12 +72,12 @@ function stripQuotedAndSignature(bodyText) {
     return m ? m.index : null;
   }).filter((i) => i != null);
   let text = decoded;
-  if (indices.length) {
-    const cut = Math.min(...indices);
-    // A cut this early would leave almost nothing — likely a misfire on a
-    // very short message; keep the whole (decoded) text instead.
-    if (cut >= 2) text = decoded.slice(0, cut);
-  }
+  // A marker at the very start cuts too: a body that OPENS with quoted
+  // history or a forwarded header has no new text of its own, and keeping
+  // the history would let an old ask or promise be recorded with THIS
+  // email's timestamp (pre-push audit, 2026-09-30). An empty result means
+  // no obligations — the under-stripping posture above.
+  if (indices.length) text = decoded.slice(0, Math.min(...indices));
   // A trailing run of '>'-quoted lines the cut above did not reach (a
   // bottom-poster's own new text always precedes these).
   const lines = text.split('\n');
