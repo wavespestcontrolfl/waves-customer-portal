@@ -54,4 +54,35 @@ async function billingTextVerdict(kind, invoice, { phone, database }) {
   return { ok: true };
 }
 
-module.exports = { billingTextVerdict };
+/**
+ * Would the canonical invoice / receipt EMAIL be sent to this customer right now?
+ * The fold leaves the Email as the customer's only guaranteed path to the link, so it
+ * asks what the email senders ask (invoice-email.js, email-template-library.js) and
+ * fails closed: a deliverable recipient, the customer's billing choice selecting Email,
+ * the receipt kill switch, the template being live, and no active suppression for the
+ * address. A read failure answers no.
+ */
+async function billingEmailDeliverable(kind, { customer, prefs, database }) {
+  try {
+    const shape = SENDER_SHAPE[kind];
+    if (!shape) return false;
+    const contact = require('../customer-contact');
+    const recipients = kind === 'receipt'
+      ? contact.getReceiptEmailRecipients(customer, prefs || {}) : contact.getInvoiceEmailRecipients(customer, prefs || {});
+    if (!recipients.length) return false;
+    if (kind === 'receipt' && prefs?.payment_receipt === false) return false;
+    const explicit = explicitBillingChannels(prefs || {}, shape.category);
+    if (explicit && !explicit.includes('email')) return false;
+    const library = require('../email-template-library');
+    const loaded = await library.loadTemplateByKey(kind === 'receipt' ? 'invoice.receipt' : 'invoice.sent', database);
+    if (!loaded?.template) return false;
+    for (const recipient of recipients) {
+      if (await library.activeSuppressionFor(loaded.template, recipient.email, null, database)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+module.exports = { billingTextVerdict, billingEmailDeliverable };

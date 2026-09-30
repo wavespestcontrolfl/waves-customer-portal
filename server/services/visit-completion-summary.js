@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const db = require('../models/db');
 const VisitGroups = require('./visit-groups');
 const { portalUrl } = require('../utils/portal-url');
-const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, getInvoiceEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
+const { getServiceContactSmsRecipient, getServiceReportEmailRecipients, withAccountPrimaryContact } = require('./customer-contact');
 const { invoiceAmountDue, isInvoiceCollectibleStatus } = require('./invoice-helpers');
 const { createDefaultCustomerRows } = require('./customer-default-rows');
 
@@ -317,6 +317,7 @@ async function beginDeferredSummarySms(meta, dispatch) {
 }
 
 async function finalizeDeferredSummarySms(meta) {
+  if (meta.billing_link) await recordSummaryLinkTextAccepted({ kind: meta.billing_link.kind, invoiceId: meta.billing_link.invoice_id }).catch(() => {});
   return VisitGroups.finalizeVisitNotification(meta.visit_id, 'completion_sms', 'sent', new Date(), meta.visit_summary_claim_token);
 }
 
@@ -354,6 +355,16 @@ async function terminalDeferredSummarySms(meta) {
 // The summary token never reaches billing: the link is the invoice's own /pay or /receipt link.
 // A dispute hold on pay links (collection-hold.js shouldWithholdPayLink, when it lands)
 // belongs in this function beside the payer checks.
+// The summary text can still carry the link only while its effect is unclaimed or provably
+// unsent: none yet, a retry, or a claim whose lease ran out (with the pre-provider marker
+// still on it, or never marked). Sent, suppressed, queued, ambiguous or live is already decided.
+function summaryTextStillAhead(effect) {
+  if (!effect || effect.status === 'failed') return true;
+  const stale = new Date(effect.claimed_at).getTime() <= Date.now() - VisitGroups.NOTIFICATION_CLAIM_LEASE_MS;
+  return stale && (effect.status === 'claimed'
+    || (effect.status === 'unknown_delivery' && VisitGroups.isHandoffPending(effect.last_error)));
+}
+
 async function planSummaryBillingLink(packetId, token, database = db) {
   try {
     const context = await summaryDeliveryContext(packetId, token, database);
@@ -366,10 +377,13 @@ async function planSummaryBillingLink(packetId, token, database = db) {
     if (!(invoiceAmountDue(invoice) > 0)) return null;
     const kind = invoice.status === 'paid' ? 'receipt' : invoice.status === 'draft' ? 'pay_link' : null;
     if (!kind) return null;
-    // The email leg carries the link whatever happens to the text: it must exist.
-    const { explicitBillingChannels } = require('./billing-delivery-channels');
-    const explicit = explicitBillingChannels(prefs || {}, kind === 'receipt' ? 'payment_receipt' : 'invoice');
-    if ((explicit && !explicit.includes('email')) || !getInvoiceEmailRecipients(customer, prefs || {}).length) return null;
+    // The email leg carries the link whatever happens to the text: it must be deliverable
+    // (recipient, billing choice, template, no suppression), or nothing folds.
+    if (!(await require('./messaging/billing-text-verdict').billingEmailDeliverable(kind, { customer, prefs, database }))) return null;
+    // The summary text must still be ahead of this decision: a replay that charges after the
+    // plain summary already went would otherwise leave no text carrying the link.
+    if (!summaryTextStillAhead(await database('visit_effects').where({ visit_id: visit.id, effect_type: 'completion_sms' })
+      .first('status', 'last_error', 'claimed_at'))) return null;
     if (!(await summaryLinkSendable(database, invoice, kind, recipient.phone))) return null;
     return { kind, invoiceId: invoice.id };
   } catch (err) {
@@ -395,7 +409,21 @@ async function summaryLinkStillValid(database, link, visitId, recipientPhone) {
   const visit = await database('service_visits').where({ id: visitId }).first('billing_hold');
   if (!invoice || !visit || visit.billing_hold || invoice.payer_id || invoice.payer_statement_id) return false;
   if (link.kind === 'receipt' ? invoice.status !== 'paid' : !(isInvoiceCollectibleStatus(invoice.status) && invoiceAmountDue(invoice) > 0)) return false;
+  // The invoice's own text already went or is queued (an operator send-now): the link is
+  // not texted a second time. Read from the text's own event key, not sms_sent_at, which
+  // the queue's email-only finalization stamps too.
+  if (link.kind === 'pay_link' && await database('sms_log')
+    .where({ customer_id: invoice.customer_id, direction: 'outbound' })
+    .whereRaw("metadata->>'notificationEventKey' = ?", [`invoice:${invoice.id}:sent`])
+    .whereNotIn('status', ['failed', 'blocked', 'cancelled', 'undelivered']).first('id')) return false;
   return summaryLinkSendable(database, invoice, link.kind, recipientPhone);
+}
+
+// The link-carrying summary text was accepted: the invoice's Text leg is recorded as
+// delivered (an operator Resend sees it, and no later text carries the link again).
+async function recordSummaryLinkTextAccepted(link, database = db) {
+  if (link?.kind !== 'pay_link') return;
+  await database('invoices').where({ id: link.invoiceId }).whereNull('sms_sent_at').update({ sms_sent_at: database.fn.now(), updated_at: database.fn.now() });
 }
 
 async function summaryBillingLinkText(link) {
@@ -483,6 +511,7 @@ async function sendSummarySms({ visit, member, customer, summaryUrl, requested, 
     }
     const retryable = result.retryable || result.code === 'CONSENT_LOOKUP_FAILED';
     const outcome = result.sent ? 'sent' : retryable ? 'retry' : 'suppressed';
+    if (outcome === 'sent') await recordSummaryLinkTextAccepted(link).catch(() => {});
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', outcome, new Date(), claim.token);
   } catch {
     await VisitGroups.finalizeVisitNotification(visit.id, 'completion_sms', dispatched ? 'unknown_delivery' : 'retry', new Date(), claim.token);

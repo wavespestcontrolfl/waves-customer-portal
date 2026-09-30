@@ -4078,6 +4078,21 @@ function cancelVoidAmountsMatch(a, b) {
   return ["total", "credit_applied", "deposit_credit"].every((k) => (a[k] ?? null) === (b[k] ?? null));
 }
 
+// The customer's link rides the visit summary text, and the invoice Email that backs it up
+// did not go: the office is told (one alert per invoice, the existing admin feed).
+async function alertSummaryCarriedEmailFailed(invoiceId, invoiceNumber, reason) {
+  try {
+    await require("./notification-service").notifyAdmin(
+      "alert",
+      "Invoice email did not go out",
+      `Invoice ${invoiceNumber || invoiceId}: its pay link was sent only in the visit summary text, and the invoice email did not go (${reason}). Check that the customer has the link, or resend the invoice.`,
+      { link: "/admin/invoices", metadata: { dedupeKey: `summary-carried-email:${invoiceId}`, invoice_id: invoiceId } },
+    );
+  } catch (err) {
+    logger.warn(`[invoice] summary-carried email alert failed for ${invoiceId}: ${err.message}`);
+  }
+}
+
 const InvoiceService = {
   async buildLineItemsForScheduledService(scheduledServiceId, options = {}) {
     return buildScheduledServiceInvoiceLines(scheduledServiceId, options);
@@ -7048,6 +7063,9 @@ const InvoiceService = {
         if (r?.error) email.error = r.error;
         if (r?.code) email.code = r.code;
         if (r?.deliveryOutcome) email.deliveryOutcome = r.deliveryOutcome;
+        // A refusal (suppressed address, the choice no longer selecting Email) is not a transient failure.
+        if (r?.blocked) email.blocked = true;
+        if (r?.skipped) email.skipped = true;
         if (!payUrl && r?.payUrl) payUrl = r.payUrl;
         if (r?.recipient) email.recipient = r.recipient;
         if (r?.messageId) email.messageId = r.messageId;
@@ -7057,9 +7075,16 @@ const InvoiceService = {
     }
 
     // A Text leg the visit summary text carries leaves the Email as the customer's path to the
-// link: any failed Email retries, not only an unreadable preference.
+    // link: a transient failure retries (the queue's attempt cap ends it, see processScheduledSends),
+    // not only an unreadable preference. A deterministic refusal (blocked, or the choice no
+    // longer selecting Email) retries nothing: like any accepted-Text row whose Email fails,
+    // the invoice finalizes as sent (so dunning arms) and the office is told.
     const carriedBySummary = String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR);
-    const emailMustRetry = !operatorInitiated && (email.code === "billing_prefs_unavailable" || (carriedBySummary && !email.ok));
+    const emailMustRetry = !operatorInitiated && (email.code === "billing_prefs_unavailable"
+      || (carriedBySummary && !email.ok && !email.blocked && !email.skipped));
+    if (carriedBySummary && !operatorInitiated && !email.ok && !emailMustRetry) {
+      await alertSummaryCarriedEmailFailed(invoiceId, claim.invoice.invoice_number, email.error || email.code || "refused");
+    }
     const acceptedSmsAt = sms.ok ? (sms.deduped ? billingLegContactTime(sms) : new Date()) : null;
     if (emailMustRetry && sms.ok && claimed && !allowClaimed
       && ["draft", "scheduled"].includes(previousStatus)) {
@@ -7203,7 +7228,9 @@ const InvoiceService = {
         // Covers the email-only case the inner sendViaSMS hook can't (it skips when
         // allowClaimed). Resend-safe via the priorStatus gate.
         if (ownedDeliveryFinalized) {
-          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at || claim.invoice.sms_sent_at) });
+          await convertLeadOnInvoiceSent({ invoiceId, customerId: claim.invoice.customer_id, priorStatus: previousStatus, priorDelivered: Boolean(claim.invoice.sent_at
+            // The summary text's stamp on a carried invoice is this delivery's Text leg, not a prior delivery.
+            || (claim.invoice.sms_sent_at && !String(claim.invoice.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR))) });
         }
         // Arm/re-arm follow-ups on ANY successful channel (Codex #3493 r5):
         // the inner sendViaSMS hook only runs on SMS success, so an
@@ -7818,11 +7845,26 @@ const InvoiceService = {
         && !["APP_PROVIDER_RETRY", "SUPPRESSION_LOOKUP_FAILED", "BILLING_EMAIL_PREPARATION_HOLD"].includes(result.sms?.code)
         && result.sms?.nextAllowedAt;
       // The carried marker stays through every retry: losing it would text the pay link.
-      const durableSendError = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR)
+      const summaryCarriedRow = String(inv.scheduled_send_error || "").startsWith(SUMMARY_TEXT_CARRIED_ERROR);
+      const durableSendError = summaryCarriedRow
         ? `${SUMMARY_TEXT_CARRIED_ERROR}${result.email?.error ? `: ${result.email.error}` : ""}`
         : result.sms?.ok && result.email?.code === "billing_prefs_unavailable"
           ? BILLING_EMAIL_PENDING_AFTER_CHANNEL_ACCEPTED
           : error;
+      // A carried invoice that reaches the attempt cap must not strand: it is finalized as
+      // sent (dunning arms, as for any accepted-Text row whose Email fails) and the office is told.
+      if (!smsHeld && summaryCarriedRow && Number(inv.scheduled_send_attempts || 0) + 1 >= 5) {
+        failed += 1;
+        await this.markDeliverySent(inv.id, {
+          source: "summary_carried_email_exhausted",
+          claimToken: claimed.send_claim_token,
+          requestReview: Boolean(claimed.scheduled_request_review),
+          reviewDelayMinutes: claimed.scheduled_review_delay_minutes,
+        });
+        await alertSummaryCarriedEmailFailed(inv.id, inv.invoice_number, error);
+        logger.error(`[invoice] Summary-carried invoice ${inv.invoice_number} email failed ${Number(inv.scheduled_send_attempts || 0) + 1} times — finalized as sent, office alerted: ${error}`);
+        continue;
+      }
       let restored = 0;
       if (smsHeld) {
         deferred += 1;

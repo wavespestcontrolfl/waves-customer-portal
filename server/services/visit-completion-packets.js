@@ -1225,7 +1225,7 @@ async function reconcileWithdrawnPacketInvoices(trx, { customerId = null, payerI
   if (scheduledServiceId) {
     query.whereIn('visit_completion_packet_id', trx('visit_completion_packet_items').where({ scheduled_service_id: scheduledServiceId }).select('packet_id'));
   }
-  const withdrawn = await query.select('id', 'status', 'visit_completion_packet_id', 'scheduled_send_error');
+  const withdrawn = await query.select('id', 'status', 'visit_completion_packet_id', 'scheduled_send_error', 'sms_sent_at');
   let released = 0;
   for (const invoice of withdrawn) {
     if (await releaseWithdrawnPacketInvoice(trx, invoice)) released += 1;
@@ -1265,7 +1265,10 @@ async function releaseWithdrawnPacketInvoice(trx, invoice) {
   const requeue = invoice.status === 'draft' && packet?.status !== 'failed';
   const moved = await trx('invoices').where({ id: invoice.id, status: invoice.status, scheduled_send_error: invoice.scheduled_send_error }).whereNull('payer_id')
     .update(requeue
-      ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0, scheduled_send_error: null, updated_at: trx.fn.now() }
+      // A pay link the visit summary text already carried (its acceptance stamped the invoice's
+      // Text leg) goes back to the queue email-only, not to text it a second time.
+      ? { status: 'scheduled', scheduled_send_at: trx.fn.now(), scheduled_send_attempts: 0,
+        scheduled_send_error: invoice.sms_sent_at ? SUMMARY_TEXT_CARRIED_ERROR : null, updated_at: trx.fn.now() }
       // A parked ambiguous send returns to the park it came from — its
       // evidence restored, its send time still empty — never to the queue.
       : { scheduled_send_error: parked ? STALE_SEND_PARK_ERROR : null, updated_at: trx.fn.now() });

@@ -220,6 +220,21 @@ async function markJobCompleted(job, { smsResult, emailResult }) {
     });
 }
 
+// The customer's receipt link rides the visit summary text, and the receipt email that
+// backs it up did not go (or the job gave up): the office is told, one alert per invoice.
+async function alertCarriedReceiptEmail(job, reason) {
+  try {
+    await require('./notification-service').notifyAdmin(
+      'alert',
+      'Receipt email did not go out',
+      `Invoice ${job.invoice_id}: its receipt link was sent only in the visit summary text, and the receipt email did not go (${reason}). Check that the customer has the receipt, or resend it.`,
+      { link: '/admin/invoices', metadata: { dedupeKey: `summary-carried-receipt-email:${job.invoice_id}`, invoice_id: job.invoice_id } },
+    );
+  } catch (err) {
+    logger.warn(`[receipt-delivery-queue] carried-receipt email alert failed for invoice ${job.invoice_id}: ${err.message}`);
+  }
+}
+
 async function markJobRetry(job, err, { smsResult = null, emailResult = null } = {}) {
   // Send-window hold: not a delivery failure. Schedule the retry exactly at
   // the window open and REFUND the claimed attempt — an after-8PM payment's
@@ -247,6 +262,9 @@ async function markJobRetry(job, err, { smsResult = null, emailResult = null } =
   const attempts = Number(job.attempts || 0);
   const maxAttempts = Number(job.max_attempts || DEFAULT_MAX_ATTEMPTS);
   const terminal = attempts >= maxAttempts;
+  if (terminal && (smsResult?.reason === TEXT_CARRIED_BY_SUMMARY || job.sms_result?.reason === TEXT_CARRIED_BY_SUMMARY)) {
+    await alertCarriedReceiptEmail(job, err?.message || 'gave up after its retries');
+  }
   const delayMinutes = Math.min(60, Math.pow(2, Math.max(0, attempts - 1)) * 5);
   await db('receipt_delivery_jobs')
     .where({ id: job.id })
@@ -376,6 +394,11 @@ async function processReceiptDeliveryJob(job) {
         .catch((e) => logger.warn(`[receipt-delivery-queue] receipt_sent_at stamp failed for ${invoice.invoice_number}: ${e.message}`));
     }
 
+    // A job that completes without its email (an expected skip: no recipient, opted out, the
+    // choice no longer selecting Email) while its Text leg is carried by the summary.
+    if (smsResult?.reason === TEXT_CARRIED_BY_SUMMARY && !emailResult?.ok) {
+      await alertCarriedReceiptEmail(job, emailResult?.error || 'skipped');
+    }
     await markJobCompleted(job, { smsResult, emailResult });
     return { ok: true, sms: smsResult, email: emailResult };
   } catch (err) {
