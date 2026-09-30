@@ -131,6 +131,14 @@ export default function MobileCardOnFileSheet({
     getAdminUser()?.role === "admin",
   );
 
+  // The hold is UNKNOWN while the read is loading or failed: the Charge
+  // buttons stay disabled (no confirm step is added — owner decision F0348 —
+  // so the only safe one-tap charge is one made with the hold state known).
+  // A non-admin never reads the hold (status "idle") and never reaches an
+  // override charge (the route is requireAdmin), so they are not locked out.
+  const holdUnknown =
+    collectionHold.status === "loading" || collectionHold.status === "error";
+
   useEffect(() => {
     if (!resolvedCustomerId) {
       setLoading(false);
@@ -165,7 +173,7 @@ export default function MobileCardOnFileSheet({
   }, [resolvedCustomerId, readAttempt]);
 
   async function handleCharge(card) {
-    if (chargingRef.current || chargingId || chargeBlocked) return;
+    if (chargingRef.current || chargingId || chargeBlocked || holdUnknown) return;
     chargingRef.current = true;
     setChargingId(card.id);
     setError(null);
@@ -312,7 +320,9 @@ export default function MobileCardOnFileSheet({
                   <Button
                     variant="secondary"
                     onClick={() => handleCharge(card)}
-                    disabled={chargeBlocked || chargingId !== null}
+                    disabled={
+                      chargeBlocked || chargingId !== null || holdUnknown
+                    }
                     loading={!chargeBlocked && chargingId === card.id}
                     aria-label={
                       chargeBlocked
@@ -395,7 +405,9 @@ export default function MobileCardOnFileSheet({
             const style = brandStyle(c.brand);
             const isCharging = chargingId === c.id;
             const anotherCharging =
-              chargeBlocked || (chargingId && chargingId !== c.id);
+              chargeBlocked ||
+              holdUnknown ||
+              (chargingId && chargingId !== c.id);
             return (
               <div
                 key={c.id}

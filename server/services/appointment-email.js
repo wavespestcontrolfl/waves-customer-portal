@@ -586,6 +586,9 @@ async function sendAppointmentNoShowEmail({
   // 'review' = the charge attempt hit an ambiguous Stripe error and was
   // parked for reconciliation — the fee may still have been accepted, so
   // neither "was charged" nor "no charge" is safe to claim.
+  // 'held' = a collections dispute hold refused the fee before Stripe was
+  // contacted: definite no-charge, so it reads exactly like 'none' — never
+  // the review copy about a receipt.
   const chargeLine = feeOutcome === 'charged'
     ? 'Per your booking terms, the missed-visit fee was charged to your card on file — it will show on your emailed receipt.'
     : feeOutcome === 'review'
