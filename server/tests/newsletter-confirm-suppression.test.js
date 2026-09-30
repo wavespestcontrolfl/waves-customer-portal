@@ -29,7 +29,7 @@ jest.mock('../services/newsletter-subscribers', () => ({
 const express = require('express');
 const db = require('../models/db');
 const sendgrid = require('../services/sendgrid-mail');
-const { sendConfirmationEmail } = require('../services/newsletter-confirm');
+const { sendConfirmationEmail, CONFIRMATION_SEND_TIMEOUT_MS } = require('../services/newsletter-confirm');
 
 // Per-table canned results. A value that is an Error is thrown by the query.
 let tables;
@@ -271,6 +271,36 @@ describe('locking, ordering and connection reuse (B13 review)', () => {
     tables.notification_prefs = new Error('boom');
     await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ reason: 'veto_unverifiable' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
+  });
+});
+
+describe('provider timeout bound while the connection and address lock are held', () => {
+  test('the confirmation send asks for the short dedicated timeout', async () => {
+    await sendConfirmationEmail(SUB);
+    expect(CONFIRMATION_SEND_TIMEOUT_MS).toBeLessThanOrEqual(15_000);
+    expect(sendgrid.sendOne).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: CONFIRMATION_SEND_TIMEOUT_MS }));
+  });
+
+  test('a provider timeout is a failed send: it rejects, and the public route answers uniformly', async () => {
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' }));
+    await expect(sendConfirmationEmail(SUB)).rejects.toMatchObject({ name: 'TimeoutError' });
+
+    const router = require('../routes/public-newsletter');
+    const app = express();
+    app.use(express.json());
+    app.use('/api/public/newsletter', router);
+    mockSubscribe.mockResolvedValue({ action: 'confirmation_sent', subscriber: SUB });
+    sendgrid.sendOne.mockRejectedValueOnce(Object.assign(new Error('timeout'), { name: 'TimeoutError' }));
+    const server = app.listen(0);
+    try {
+      const r = await fetch(`http://127.0.0.1:${server.address().port}/api/public/newsletter/subscribe`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'neighbor@example.com' }),
+      });
+      expect(r.status).toBe(200);
+      expect(await r.json()).toEqual({ success: true, pending: true });
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 });
 

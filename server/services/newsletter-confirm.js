@@ -59,6 +59,15 @@ class ConfirmationVetoedError extends Error {
 // assignment, so a wait normally just delays the send by a moment.
 const OWNERSHIP_WAIT_MS = 3000;
 
+// The provider request runs while this send holds a pooled connection and the
+// per-address advisory lock (webhooks and ownership writers for the address
+// queue behind it). The 120 s default is sized for newsletter chunks; a single
+// confirmation email gets a short bound so a SendGrid slowdown or a burst of
+// anonymous subscribes cannot drain the pool. A timeout is a failed send, like
+// any provider failure (callers already swallow/handle it; a repeat subscribe
+// re-sends).
+const CONFIRMATION_SEND_TIMEOUT_MS = 10_000;
+
 /**
  * Ownership fence for the send: the shared helper's bounded wait
  * (customer-comms-lock.lockEmailOwnershipForSend, waitMs) owns key
@@ -251,6 +260,7 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
       text,
       categories: ['newsletter_confirm'],
       asmGroupId: 0,
+      timeoutMs: CONFIRMATION_SEND_TIMEOUT_MS,
     });
   };
   const result = dbh && dbh.isTransaction ? await handoff(dbh) : await (dbh || db).transaction(handoff);
@@ -260,5 +270,5 @@ async function sendConfirmationEmail(subscriber, { dbh = null } = {}) {
 }
 
 module.exports = {
-  sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError,
+  CONFIRMATION_SEND_TIMEOUT_MS, sendConfirmationEmail, confirmationUrl, assertConfirmationAllowed, ConfirmationVetoedError,
 };
