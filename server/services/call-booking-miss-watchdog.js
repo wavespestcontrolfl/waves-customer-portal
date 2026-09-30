@@ -359,7 +359,9 @@ async function ringMiss(m, { dedupeKey, repeat }) {
       action: `book ${cutAtWord(`${m.slot.name}'s ${m.slot.service || 'visit'}`, MAX_HEADLINE_CHARS - 'Schedule — book '.length)}`,
       why: `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenDay} at ${formatETTime(slotAt)} on a call; nothing is on the calendar.`,
       severity: 'needs-you',
-      link: `/admin/communications#tab=calls&call=${encodeURIComponent(m.call.id)}`,
+      // Booking happens on the schedule, so the tap opens the confirmed day there;
+      // the call itself is named in `detail` and in the subject.
+      link: `/admin/dispatch?tab=schedule&date=${encodeURIComponent(m.slot.dateET)}`,
       subject: { type: 'call', id: m.call.id },
       doneWhen: 'visit_booked',
       who: 'person',

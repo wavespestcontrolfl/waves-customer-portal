@@ -5,7 +5,7 @@ const rateLimit = require('express-rate-limit');
 const db = require('../models/db');
 const { authenticate, authenticateAllowInactive } = require('../middleware/auth');
 const logger = require('../services/logger');
-const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+const { raiseAdminAlert, cutAtWord, firstSentence, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
 const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
 // A non-GSM first name (Á) would flip the whole confirmation text to UCS-2
 // and past two segments — fold it before rendering (codex pre-push P1).
@@ -783,7 +783,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
     // full request description rides in `detail` — it's capped at 500 chars by
     // the create-request validation above.
     try {
-      const firstSentence = (cleanDescription || cleanSubject).replace(/\s+/g, ' ').trim().split(/(?<=[.!?])\s/)[0].replace(/!+/g, '.');
+      const requestSummary = firstSentence(cleanDescription || cleanSubject).replace(/!+/g, '.');
       const action = isCancellation
         ? `review ${customerName}'s cancellation`
         : `answer ${customerName}'s ${validUrgency === 'urgent' ? 'urgent ' : ''}${categoryLabel} request`;
@@ -806,7 +806,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         {
           area: 'Customers',
           action: cutAtWord(action, MAX_HEADLINE_CHARS - 'Customers — '.length),
-          why: cutAtWord(isCancellation ? cancelWhy : firstSentence, MAX_WHY_CHARS),
+          why: cutAtWord(isCancellation ? cancelWhy : requestSummary, MAX_WHY_CHARS),
           severity: 'needs-you',
           link: `/admin/customers?customerId=${encodeURIComponent(req.customer.id)}`,
           subject: { type: 'customer', id: req.customer.id },

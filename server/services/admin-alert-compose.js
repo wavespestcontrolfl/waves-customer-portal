@@ -29,16 +29,28 @@ const FORBIDDEN = [
   ['emoji', (t) => { const tidy = t.replace(/[ \t]{2,}/g, ' ').trim(); return stripEmoji(tidy) !== tidy; }],
 ];
 
-// One sentence: no sentence end followed by more text. A full stop after a common
-// abbreviation or a single initial ("Dr. Lee", "St. Pete", "J. Smith") is not an end.
-const ABBREVIATION = /(?:\b(?:Mr|Mrs|Ms|Dr|St|Ave|Blvd|Rd|Ln|Ct|Apt|No|vs|approx|Inc|Co|Jr|Sr|Mt|Ft|a\.m|p\.m|e\.g|i\.e)|\b[A-Z])\.$/i;
-function hasSecondSentence(text) {
-  const end = /[.?!]["')\]]?\s+(?=\S)/g;
+// One rule for where a sentence ends, shared by the check and by callers that take a
+// first sentence: a `.`, `?` or `!` followed by whitespace and an uppercase letter.
+// The one exception is a title that is always followed by a name (Dr. Lee, St.
+// Augustine, Mt. Dora). Anything else ending in a full stop and followed by a
+// capital (Acme Inc. Retry, plan A. Review, an initial) is an end: regex cannot tell
+// those apart, so the rule does not try. Lowercase or a digit after the stop never
+// ends a sentence (11:00 a.m. on a call, approx. 40).
+const TITLE_BEFORE_NAME = /\b(?:Mr|Mrs|Ms|Dr|St|Mt|Ft)\.$/;
+function firstSentenceEnd(text) {
+  const end = /[.?!]["')\]]?\s+(?=[A-Z])/g;
   for (let m = end.exec(text); m; m = end.exec(text)) {
     const upTo = text.slice(0, m.index + 1);
-    if (!(upTo.endsWith('.') && ABBREVIATION.test(upTo))) return true;
+    if (!(upTo.endsWith('.') && TITLE_BEFORE_NAME.test(upTo))) return m.index + m[0].trimEnd().length;
   }
-  return false;
+  return -1;
+}
+const hasSecondSentence = (text) => firstSentenceEnd(text) !== -1;
+// The first sentence of free text (a customer's message), by the same rule.
+function firstSentence(text) {
+  const tidy = String(text || '').replace(/\s+/g, ' ').trim();
+  const at = firstSentenceEnd(tidy);
+  return at === -1 ? tidy : tidy.slice(0, at);
 }
 
 const ACTIVITY_FEED_LINK = /^\/admin\/agents\b.*\btab=activity/;
@@ -125,5 +137,5 @@ async function raiseAdminAlert(category, spec = {}, opts = {}) {
 
 module.exports = {
   AREAS, SEVERITIES, WHO, SUBJECT_TYPES, MAX_HEADLINE_CHARS, MAX_WHY_CHARS,
-  composeAdminAlert, raiseAdminAlert, cutAtWord: truncateAtWord,
+  composeAdminAlert, raiseAdminAlert, cutAtWord: truncateAtWord, firstSentence,
 };

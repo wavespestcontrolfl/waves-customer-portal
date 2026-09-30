@@ -91,7 +91,7 @@ describe('first bell', () => {
     expect(category).toBe('alert');
     expect(title).toBe("Schedule — book Robin Example's Wasp Nest Removal");
     expect(why).toBe('Confirmed Sun Oct 4 at 11:00 AM on a call; nothing is on the calendar.');
-    expect(opts.link).toBe(`/admin/communications#tab=calls&call=${CALL_ID}`);
+    expect(opts.link).toMatch(/^\/admin\/dispatch\?tab=schedule&date=\d{4}-\d{2}-\d{2}$/);
     expect(opts.metadata).toMatchObject({ call_log_id: CALL_ID, area: 'Schedule', severity: 'needs-you', subject: { type: 'call', id: CALL_ID }, doneWhen: 'visit_booked', who: 'person' });
     expect(opts.detail).toMatch(/2026-10-04 11:00 ET/);
     expect(opts.bell).toBe(true);

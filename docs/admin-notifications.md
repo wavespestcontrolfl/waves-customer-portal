@@ -54,6 +54,13 @@ news, emoji, exclamation marks. Those belong in `detail` or in the record behind
 
 A weekday or a short date a person would say ("Sat Oct 4 at 11:00") is fine.
 
+**What counts as one sentence.** The check is deliberately simple: a `.`, `?` or `!`
+followed by a space and a capital letter ends a sentence, except after a title that is
+always followed by a name (Mr, Mrs, Ms, Dr, St, Mt, Ft). So "Acme Inc. Retry it now" and
+"plan A. Review it" are two sentences, and "J. Rivera asked" reads as two as well: write
+the full name. `firstSentence(text)` in the same module takes the first sentence of a
+customer's message by this rule.
+
 ## 4. Lifecycle
 
 1. **Ring once per episode.** A refresh of the same subject and class updates the row in

@@ -5,7 +5,7 @@ jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn() })
 
 const logger = require('../services/logger');
 const NotificationService = require('../services/notification-service');
-const { composeAdminAlert, raiseAdminAlert, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
+const { firstSentence, composeAdminAlert, raiseAdminAlert, MAX_HEADLINE_CHARS, MAX_WHY_CHARS } = require('../services/admin-alert-compose');
 
 const spec = (over = {}) => ({
   area: 'Comms',
@@ -179,6 +179,8 @@ describe('why is one sentence', () => {
     'The charge failed. Retry it now.',
     'Is the card still valid? Ask on the next call.',
     'Done! Nothing else to do.',
+    'The invoice belongs to Acme Inc. Retry it now.',
+    'Use plan A. Review it first.',
   ])('two sentences are refused: %s', (why) => {
     expect(() => composeAdminAlert(spec({ why }))).toThrow(expect.objectContaining({
       violations: expect.arrayContaining(['why_multiple_sentences']),
@@ -189,9 +191,22 @@ describe('why is one sentence', () => {
     '$1,254 never charged; the oldest is 41 days old.',
     'Parked awaiting your approval: a.org, b.org, c.org +2 more.',
     'Dr. Lee confirmed Sat Oct 4 at 11:00 a.m. on a call.',
-    'J. Rivera asked about the St. Pete property.',
-    'Version 2.5 of the label is on file',
+    'St. Augustine grass has brown patches near Mt. Dora.',
+    'Version 2.5 of the label is on file, approx. 40 pages',
   ])('one sentence passes: %s', (why) => {
     expect(composeAdminAlert(spec({ why })).why).toBe(why);
+  });
+});
+
+describe('firstSentence takes the first sentence by the same rule', () => {
+  test.each([
+    ['St. Augustine grass has brown patches. Please inspect.', 'St. Augustine grass has brown patches.'],
+    ['I need to change the email on this account. My partner pays the bills.', 'I need to change the email on this account.'],
+    ['Ants are back by the patio door', 'Ants are back by the patio door'],
+    ['  Two\n lines.  Second one. ', 'Two lines.'],
+    ['', ''],
+  ])('%s', (text, expected) => {
+    expect(firstSentence(text)).toBe(expected);
+    expect(() => composeAdminAlert(spec({ why: expected || 'x' }))).not.toThrow();
   });
 });
