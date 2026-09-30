@@ -74,6 +74,7 @@ const { redactAccessCodes } = require('../services/context-aggregator');
 const { technicianReportCustomerCopy, containsReportAccessCode } = require('../services/service-report/technician-report-copy');
 const {
   TECHNICIAN_NOTE_HEADER, CUSTOMER_WORDS_HEADER, withheldProductsLine, writerRulesRejection,
+  activeIngredientsMentioned,
 } = require('../services/service-report/report-writer-rules');
 const CompletionRecap = require('../services/completion-recap');
 const {
@@ -24765,11 +24766,15 @@ Photos taken this visit: ${Number.isInteger(photoCount) ? photoCount : 0} (a cou
       try {
         const catalogRows = await db('products_catalog').select('name', 'active_ingredient');
         for (const row of Array.isArray(catalogRows) ? catalogRows : []) {
-          if (!row?.name || !CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true })) continue;
-          mentionedCatalogNames.push(row.name);
+          const named = Boolean(row?.name)
+            && CompletionRecap.containsProductName(fullUserMessage, [{ name: row.name }], { wholeWord: true });
+          if (named) mentionedCatalogNames.push(row.name);
           // Its actives too: a draft must not swap the named product for
-          // its active ingredient.
-          if (row.active_ingredient) mentionedCatalogActives.push(row.active_ingredient);
+          // its active ingredient; and an active the prompt names on its own
+          // ("azoxystrobin" in a note) is screened even with no product name.
+          if (row?.active_ingredient && (named || activeIngredientsMentioned(fullUserMessage, row.active_ingredient))) {
+            mentionedCatalogActives.push(row.active_ingredient);
+          }
         }
       } catch (err) {
         logger.warn(`[generate-report] catalog name screen build failed — failing retryable: ${err.message}`);

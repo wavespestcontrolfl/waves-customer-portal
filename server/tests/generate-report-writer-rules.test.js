@@ -27,12 +27,27 @@ jest.mock('../services/completion-comms-context', () => ({
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => {
     const chain = {};
-    for (const name of ['where', 'whereIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
+    // The visit's own product lookup filters the catalog by id or name
+    // (a callback where); the prompt scan reads every row.
+    let match = null;
+    for (const name of ['whereIn', 'select', 'orderBy', 'limit', 'leftJoin']) chain[name] = () => chain;
+    chain.where = (arg) => {
+      if (typeof arg === 'function') {
+        const sets = [];
+        const q = {
+          whereIn: (col, vals) => { sets.push([col, vals]); return q; },
+          orWhereIn: (col, vals) => { sets.push([col, vals]); return q; },
+        };
+        arg(q);
+        match = (row) => sets.some(([col, vals]) => vals.includes(row[col]));
+      }
+      return chain;
+    };
     chain.first = async () => (table === 'scheduled_services'
       ? { id: '11111111-1111-4111-8111-111111111111', service_type: mockServiceType, customer_id: 'customer-1' } : null);
     chain.then = (resolve, reject) => (table === 'products_catalog' && mockCatalogFails
       ? Promise.reject(new Error('catalog read failed'))
-      : Promise.resolve(table === 'products_catalog' ? mockCatalogRows : [])).then(resolve, reject);
+      : Promise.resolve(table === 'products_catalog' ? mockCatalogRows.filter((row) => !match || match(row)) : [])).then(resolve, reject);
     return chain;
   });
   db.raw = jest.fn(); db.fn = { now: () => new Date() }; return db;
@@ -233,11 +248,23 @@ test('gate on: the active ingredients of a mentioned catalog product are screene
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
 });
 
+test('gate on: a catalog active the note names on its own is screened', async () => {
+  process.env.GATE_REPORT_WRITER_RULES = 'true';
+  mockCatalogRows = [{ name: 'AzaGuard', active_ingredient: 'Azadirachtin' }];
+  mockProvider
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('Ghost ants were trailing', 'You asked about azadirachtin. Ghost ants were trailing') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
+  const res = mkRes();
+  await handler(mkReq({ serviceNotes: 'Customer asked about azadirachtin. Treated the thresholds (direct active case).' }), res);
+  expect(mockProvider).toHaveBeenCalledTimes(2);
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ report: CLEAN }));
+});
+
 test('gate on: a name-only product still has its catalog actives screened', async () => {
   process.env.GATE_REPORT_WRITER_RULES = 'true';
-  mockCatalogRows = [{ active_ingredient: 'Bacillus thuringiensis israelensis (Bti)' }];
+  mockCatalogRows = [{ name: 'Mosquito Dunks', active_ingredient: 'Beauveria bassiana' }];
   mockProvider
-    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('We treated the door thresholds', 'We placed Bti in the pond and treated the door thresholds') }))
+    .mockImplementationOnce(async () => ({ ok: true, text: CLEAN.replace('We treated the door thresholds', 'We placed Beauveria bassiana in the pond and treated the door thresholds') }))
     .mockImplementationOnce(async () => ({ ok: true, text: CLEAN }));
   const res = mkRes();
   await handler(mkReq({

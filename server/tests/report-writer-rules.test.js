@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { selectReportCopyPrompt, writerRulesInScope } = require('../services/service-report/lawn-report-copy-prompt');
 const {
-  OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection,
+  OWNER_RULES, PROMPT_REWRITES, REPORT_WRITER_RULES_VERSION, writerRulesRejection, activeIngredientsMentioned,
 } = require('../services/service-report/report-writer-rules');
 const { HUMAN_PROSE_RULES } = require('../services/llm/human-prose-rules');
 
@@ -227,6 +227,11 @@ describe('writerRulesRejection', () => {
     ['We treated the kitchen, and no pest activity was observed across the property.', 'unscoped_absence'],
     ['Your next visit is at noon.', 'time'],
     ['We will return at midnight.', 'time'],
+    ['Activity may continue for a week.', 'timeframe'],
+    ['We mixed two gals for the perimeter.', 'amount'],
+    ['We used three qts in the backpack.', 'amount'],
+    ['Your next visit is in the morning.', 'time'],
+    ['We will arrive this afternoon.', 'time'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -253,6 +258,10 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('In the kitchen, no activity was found.')).toBeNull();
     expect(writerRulesRejection('Mosquitoes were most active near midnight.')).toBeNull();
     expect(writerRulesRejection('We walked the fence line and treated the beds.')).toBeNull();
+    expect(writerRulesRejection('Mosquitoes may bite several times a day.')).toBeNull();
+    expect(writerRulesRejection('You mentioned seeing ants for a week.')).toBeNull();
+    expect(writerRulesRejection('Mosquitoes will be most active in the evening.')).toBeNull();
+    expect(writerRulesRejection('The technician arrived in the morning.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
@@ -285,6 +294,13 @@ describe('writerRulesRejection', () => {
   test('a dry cabinet or a note about rain is not re-entry wording', () => {
     expect(writerRulesRejection('The cabinet under the sink was dry.')).toBeNull();
     expect(writerRulesRejection('About 1.4 inches of rain fell after the rain dried up the week before.')).toBeNull();
+  });
+
+  test('a catalog active named on its own is found; a lone nutrient or material word is not a name', () => {
+    expect(activeIngredientsMentioned('Customer asked about azadirachtin for the roses', 'Azadirachtin')).toBe(true);
+    expect(activeIngredientsMentioned('Treated along the wrought iron fence', 'Iron + N (foliar)')).toBe(false);
+    expect(writerRulesRejection('We packed copper mesh into the gap.', { activeIngredients: ['Copper hydroxide', 'Copper'] })).toBeNull();
+    expect(writerRulesRejection('We treated along the wrought iron fence.', { activeIngredients: ['Iron + N (foliar)'] })).toBeNull();
   });
 
   test("the catalog's taxonomic Bti name still screens the Bti alias", () => {

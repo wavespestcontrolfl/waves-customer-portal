@@ -199,15 +199,26 @@ function activeIngredientPattern(name) {
 // Devices carry a descriptive placeholder there ("Mechanical snap trap"),
 // which is not a chemical and must never make its own words forbidden.
 const NON_CHEMICAL_ACTIVE_RE = /\b(?:mechanical|traps?|glue|devices?|stations?|monitors?|equipment|none|n\/?a|not\s+applicable|no\s+active|unknown|test\s+product)\b/i;
+// A lone nutrient, material or label word left by the split ("Iron + N
+// (foliar)", "Prodiamine (preemergent)") is not a name to screen: "the
+// wrought iron fence" and "copper mesh" are ordinary copy.
+const GENERIC_ACTIVE_WORD_RE = /^(?:iron|nitrogen|potash|potassium|phosphate|phosphorus|sulfur|sulphur|manganese|magnesium|zinc|calcium|copper|boron|micronutrients?|foliar|pre-?emergent|post-?emergent|surfactant|fertilizer|water|oil|soap|clay|sand|kelp|mesh)$/i;
 function activeIngredientNames(values) {
   return (Array.isArray(values) ? values : [])
     .filter((value) => !NON_CHEMICAL_ACTIVE_RE.test(String(value || '')))
     .flatMap((value) => String(value || '').split(/[,;/+&()]|\band\b/i))
     .map((part) => part.replace(/[\d.]+\s*%?/g, ' ').replace(/\s+/g, ' ').trim())
-    .filter((part) => part.length >= 3);
+    .filter((part) => part.length >= 3 && !GENERIC_ACTIVE_WORD_RE.test(part));
 }
 
-const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|cc|ccs|cubic\s+centimet(?:er|re)s?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gal|gallons?|lbs?|pounds?|grams?|kilograms?|kg)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
+// Whether text names any active in a catalog active_ingredient value (a
+// note that says "azoxystrobin" with no product name beside it).
+function activeIngredientsMentioned(text, value) {
+  const patterns = activeIngredientNames([value]).map(activeIngredientPattern).filter(Boolean);
+  return patterns.length > 0 && new RegExp(`\\b(?:${patterns.join('|')})\\b`, 'i').test(String(text || ''));
+}
+
+const UNIT_WORD_RE = /\b(?:ml|mls|milliliters?|millilitres?|liters?|litres?|cc|ccs|cubic\s+centimet(?:er|re)s?|tsp|teaspoons?|tbsp|tablespoons?|fl\.?\s*oz|fluid\s+ounces?|oz|ounces?|pints?|quarts?|gals?|gallons?|qts?|ozs|pts?|tsps|tbsps|lbs?|pounds?|grams?|kilograms?|kgs?)\b|\b\d+(?:[.,]\d+)?\s*(?:cc|gals?|qts?|ozs?|pts?|tsps?|tbsps?|kgs?|g)\b/i;
 const FOOTAGE_RE = /\b(?:linear|square|sq\.?)\s*(?:feet|foot|ft)\b|\bsqft\b|\b\d[\d,.]*\s*(?:-|–)?\s*(?:ft|feet|foot)\b|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|hundred)\s+(?:linear\s+|square\s+)?(?:feet|foot)\b|\bacres?\b|\bacreage\b/i;
 // Any percentage, spelled or not ("50%", "five percent").
 const PERCENT_RE = /\d\s*%|\bpercent(?:age)?s?\b/i;
@@ -226,7 +237,9 @@ const CHEMICAL_RE = /\bchemicals?\b/i;
 // Forward-looking timeframes (rule 11): "7–14 days", "over the next two
 // weeks", "within 24 hours", "for a few days". A past window ("in the seven
 // days before the visit", "two weeks ago") is a fact and passes.
-const DURATION_NUMBER = '(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen|twenty|thirty|sixty|ninety)';
+// "A"/"an" count ("continue for a week") but not in a frequency ("twice a
+// day", "three times a week").
+const DURATION_NUMBER = '(?:\\d+|a\\s+few|a\\s+couple(?:\\s+of)?|several|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fourteen|twenty|thirty|sixty|ninety|(?<!\\b(?:times|once|twice)\\s)an?)';
 const DURATION_UNIT = '(?:days?|weeks?|months?|hours?|hrs?|minutes?|mins?)';
 // Forward context only: "within", "in/over/for/during the next", "in two
 // weeks", "up to", a range ("7–14 days"), or a future/expectation word
@@ -264,11 +277,17 @@ const FUTURE_CUE_AFTER_RE = /^[^.!?]{0,30}\b(?:next|upcoming)\s+(?:visit|appoint
 // ("strongest after 8 PM") or a past arrival ("we arrived at 10 AM") passes.
 const CLOCK_RE = /\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|\b(?:noon|midnight|midday)\b/gi;
 const ARRIVAL_CUE_RE = /\b(?:arriv(?:e|al|ing)|window)\b/i;
-function forwardMention(copy, pattern, extraCue = null) {
+// A part of the day is an arrival window only beside the visit itself
+// ("your next visit is in the morning", "we will arrive this afternoon");
+// "mosquitoes will be most active in the evening" is behavior, so a bare
+// "will" is no cue here.
+const DAY_PART_RE = /\b(?:morning|afternoon|evening)s?\b/gi;
+const VISIT_CUE_RE = /\b(?:next|upcoming|scheduled|appointment|arriv(?:e|al|ing)|window|return(?:ing)?|be\s+back|come\s+back|see\s+you)\b/i;
+function forwardMention(copy, pattern, extraCue = null, beforeCue = FUTURE_CUE_BEFORE_RE) {
   for (const match of copy.matchAll(pattern)) {
     const before = copy.slice(Math.max(0, match.index - 40), match.index).split(/[.!?]/).pop();
     const after = copy.slice(match.index + match[0].length);
-    if (FUTURE_CUE_BEFORE_RE.test(before) || extraCue?.test(before) || FUTURE_CUE_AFTER_RE.test(after)) return true;
+    if (beforeCue.test(before) || extraCue?.test(before) || FUTURE_CUE_AFTER_RE.test(after)) return true;
   }
   return false;
 }
@@ -359,6 +378,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [WEEKDAY_RE, 'date'],
   [(copy) => forwardMention(copy, BARE_WEEKDAY_RE), 'date'],
   [(copy) => forwardMention(copy, CLOCK_RE, ARRIVAL_CUE_RE), 'time'],
+  [(copy) => forwardMention(copy, DAY_PART_RE, null, VISIT_CUE_RE), 'time'],
 ]);
 
 // Returns a short rejection reason, or null when the copy passes. Runs on
@@ -384,5 +404,6 @@ module.exports = {
   CUSTOMER_WORDS_HEADER,
   withheldProductsLine,
   COMMON_ACTIVE_INGREDIENTS,
+  activeIngredientsMentioned,
   writerRulesRejection,
 };
