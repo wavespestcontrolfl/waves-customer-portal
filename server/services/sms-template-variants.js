@@ -1,8 +1,8 @@
 const db = require('../models/db');
 
-async function activeVariants(templateKey) {
+async function activeVariants(templateKey, database = db) {
   try {
-    return await db('sms_template_variants')
+    return await database('sms_template_variants')
       .where({ template_key: templateKey, status: 'active' })
       .orderBy('created_at', 'asc');
   } catch (err) {
@@ -24,7 +24,7 @@ function pickWeightedVariant(variants, random = Math.random) {
 }
 
 async function selectVariant(templateKey, options = {}) {
-  const variants = await activeVariants(templateKey);
+  const variants = await activeVariants(templateKey, options.database);
   return pickWeightedVariant(variants, options.random);
 }
 

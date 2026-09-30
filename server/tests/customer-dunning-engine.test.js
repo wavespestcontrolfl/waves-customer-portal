@@ -280,6 +280,16 @@ function failLedgerAccess(nth, message = 'ledger down') {
   });
 }
 
+// A promotion whose seeded first touch is due NOW (a catch-up seed): the promotion decision as it is, with the
+// seed dated at `now`, so the projected schedule is one the live due scan could process this run.
+function seedDueNow() {
+  const actual = jest.requireActual('../services/customer-dunning/schedule');
+  return jest.spyOn(Schedule, 'promotionDecision').mockImplementation((set, rows, now) => {
+    const d = actual.promotionDecision(set, rows, now);
+    return d.promote ? { ...d, seed: { ...d.seed, next_touch_at: new Date(now.getTime() - 1000) } } : d;
+  });
+}
+
 // A read handle for the shadow run: serves the same customer / prefs / template
 // rows the live guards read, the given open schedules, and records any write.
 function shadowDb(schedules = []) {
@@ -731,22 +741,40 @@ describe('review batch: told legs, member freshness, pre-provider failures, shad
     const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
     const emptyTableDb = (schedules = []) => shadowDb(schedules);
 
-    test('C6: shadow-only (empty table): a customer that WOULD be promoted also logs the schedule\'s would-send, and a held one logs would-hold; nothing is written', async () => {
-      Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID, 'cust-held']);
+    test('C6: shadow-only (empty table): a promotion whose first touch is DUE NOW also logs the schedule\'s would-send, and a held one logs would-hold; nothing is written', async () => {
+      const seed = seedDueNow();
+      try {
+        Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID, 'cust-held']);
+        memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
+        mockResolve.mockImplementation(async (id) => (id === 'cust-held'
+          ? makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'account_credit_available' })
+          : makeSet(['inv-a', 'inv-b', 'inv-c'])));
+        const database = emptyTableDb();
+        const tally = await Runner.shadowRun(NOW, { database });
+        const out = lines();
+        expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
+        expect(out).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=projected step=\w+ kind=multi members=3 total_cents=\d+ due=\d{4}-/);
+        expect(out).toMatch(/SHADOW would hold customer=cust-held reason=account_credit_available/);
+        expect(tally).toMatchObject({ promote: 1, send: 1, hold: 1, failed: 0 });
+        expect(database.writes).toEqual([]);
+        for (const writer of ['claim', 'markHeld', 'markPaused', 'alertStaff', 'close']) expect(Schedule[writer]).not.toHaveBeenCalled();
+        expect(mockNotify).not.toHaveBeenCalled();
+      } finally { seed.mockRestore(); }
+    });
+
+    test('R6-1: a promotion seeded for a FUTURE run logs only the promotion (step and next), with no send / hold judgment today', async () => {
+      Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
       memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
-      mockResolve.mockImplementation(async (id) => (id === 'cust-held'
-        ? makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'account_credit_available' })
-        : makeSet(['inv-a', 'inv-b', 'inv-c'])));
+      mockOnAutopay.mockResolvedValue(true); // today's autopay state must not be judged for a touch that is not yet due
       const database = emptyTableDb();
       const tally = await Runner.shadowRun(NOW, { database });
       const out = lines();
-      expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
-      expect(out).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=projected step=\w+ kind=multi members=3 total_cents=\d+ due=\d{4}-/);
-      expect(out).toMatch(/SHADOW would hold customer=cust-held reason=account_credit_available/);
-      expect(tally).toMatchObject({ promote: 1, send: 1, hold: 1, failed: 0 });
+      expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic members=3 active=3 step=d60_reminder next=2026-10-07T\d\d:\d\d:\d\d\.000Z/);
+      expect(out).not.toMatch(/schedule=projected/);
+      expect(out).not.toMatch(/would (send|hold|pause|close|settle)/);
+      expect(mockOnAutopay).not.toHaveBeenCalled();
+      expect(tally).toMatchObject({ promote: 1, send: 0, hold: 0, pause: 0, failed: 0 });
       expect(database.writes).toEqual([]);
-      for (const writer of ['claim', 'markHeld', 'markPaused', 'alertStaff', 'close']) expect(Schedule[writer]).not.toHaveBeenCalled();
-      expect(mockNotify).not.toHaveBeenCalled();
     });
 
     test('C7: the canary allowlist narrows the shadow scan of OPEN schedules like the live due-scan', async () => {
@@ -814,8 +842,9 @@ describe('shadow runs the live pre-send guards (R2-1)', () => {
     logger.info.mockClear();
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
+    const seed = seedDueNow(); // a projection the due scan could process now
     const database = shadowDb();
-    await Runner.shadowRun(NOW, { database });
+    try { await Runner.shadowRun(NOW, { database }); } finally { seed.mockRestore(); }
     expect(lines()).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
     expect(lines()).toMatch(/SHADOW would hold customer=cust-0000-synthetic schedule=projected step=\w+ reason=autopay_hold/);
     expect(lines()).not.toMatch(/would send/);
@@ -1063,6 +1092,7 @@ describe('every helper in the runner path uses the injected handle, never the de
     expect(mockResolve.mock.calls.filter(([, o]) => o?.now).every(([, o]) => o.database === fakeDb)).toBe(true);
     expect(mockLoadContext).toHaveBeenCalledWith(expect.anything(), fakeDb);
     expect(mockLoadTemplate.mock.calls.every((c) => c[1] === fakeDb)).toBe(true);
+    expect(smsTemplates.getTemplate.mock.calls.every((c) => c[3]?.database === fakeDb)).toBe(true); // the SMS render reads the probe's snapshot
     expect(Schedule.claim.mock.calls.every((c) => c[2].database === fakeDb)).toBe(true);
     expect(Schedule.advance.mock.calls[0][1].database).toBe(fakeDb);
     expect(Schedule.releaseClaim.mock.calls.every((c) => c[1].database === fakeDb)).toBe(true);
@@ -1097,7 +1127,8 @@ describe('every helper in the runner path uses the injected handle, never the de
     Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
     memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
     const database = shadowDb([{ id: 's-open', customer_id: CUSTOMER_ID, step_index: 4, episode: 1, status: 'active' }]);
-    await withPoolPoisoned(async () => { await Runner.shadowRun(NOW, { database }); });
+    const seed = seedDueNow();
+    try { await withPoolPoisoned(async () => { await Runner.shadowRun(NOW, { database }); }); } finally { seed.mockRestore(); }
     expect(lines()).toMatch(/would send .*schedule=projected/);
     expect(lines()).toMatch(/would send .*schedule=s-open/);
     expect(mockOnAutopay.mock.calls.every(([, o]) => o.db === database)).toBe(true);

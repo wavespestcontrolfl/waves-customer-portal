@@ -70,7 +70,7 @@ async function sendTextLeg(ctx, channel, ledger) {
   let body;
   try {
     const payUrl = await ensureLink(ctx);
-    body = await Render.renderSms({ step, set, customer, payUrl });
+    body = await Render.renderSms({ step, set, customer, payUrl, database: ctx.database });
   } catch (err) {
     // Nothing reached the provider: a definite, retryable non-send. Left to
     // throw, sendReminderChannels would read it as UNCERTAIN and hold the

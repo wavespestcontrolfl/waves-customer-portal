@@ -612,7 +612,11 @@ async function shadowPromote(customerId, now, database) {
   }
   // In a shadow-only rollout no schedule row is ever written, so the schedule
   // decisions would never be seen: model the schedule this promotion WOULD
-  // create (in memory, never stored) and judge it the way the live run would.
+  // create (in memory, never stored) and judge it the way the live run would —
+  // but only once the live due scan could process it. A seed dated in the future
+  // (the normal case: promotion never sends in its own run) is not judged today: its
+  // preferences, autopay state, policy and templates are read on the day it is due.
+  if (new Date(d.seed.next_touch_at).getTime() > now.getTime()) return ['promote'];
   const projected = { id: 'projected', customer_id: customerId, episode: 1, status: 'active', step_index: d.seed.step_index, touches_sent: d.seed.touches_sent };
   return ['promote', await judgeShadowSchedule(projected, set, { now, database, due: d.seed.next_touch_at })];
 }

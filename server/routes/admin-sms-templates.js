@@ -489,11 +489,21 @@ router.isTemplateActive = async function(messageType) {
   } catch { return true; }
 };
 
+// The weighted variant of a template (null when pinned to the base row or none applies), read on `reader`.
+async function selectTemplateVariant(templateKey, reader, pinned) {
+  if (pinned) return null;
+  return SmsTemplateVariants.selectVariant(templateKey, { database: reader }).catch(() => null);
+}
+
 // Get template body by key (returns null if disabled)
 router.getTemplate = async function(templateKey, vars = {}, context = {}, opts = {}) {
   const audit = opts.audit === false ? () => {} : auditSmsTemplateIssue;
+  // opts.database: the handle every READ here uses (a caller running on its own handle reads the
+  // same snapshot it probed). The audit writes stay on their own connection: they must commit
+  // independently of the caller's work.
+  const reader = opts.database || db;
   try {
-    if (!(await db.schema.hasTable('sms_templates'))) {
+    if (!(await reader.schema.hasTable('sms_templates'))) {
       audit(templateKey, 'missing_table', 'sms_templates table missing', context);
       return null;
     }
@@ -506,7 +516,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     const snapshot = opts.templateBody != null;
     const t = snapshot
       ? { body: String(opts.templateBody), is_active: true }
-      : await db('sms_templates').where({ template_key: templateKey }).first();
+      : await reader('sms_templates').where({ template_key: templateKey }).first();
     if (!t) {
       audit(templateKey, 'missing_template', 'template row missing', context);
       return null;
@@ -522,9 +532,7 @@ router.getTemplate = async function(templateKey, vars = {}, context = {}, opts =
     // rain-out custom rung pre-renders for a segment cap and mirrors a
     // client counter) pin the base row — a weighted random variant can't be
     // predicted by a pre-check or a preview.
-    const variant = (opts.noVariants || snapshot)
-      ? null
-      : await SmsTemplateVariants.selectVariant(templateKey).catch(() => null);
+    const variant = await selectTemplateVariant(templateKey, reader, opts.noVariants || snapshot);
     let body = variant?.body || t.body;
     // opts.requiredVars: placeholders the SELECTED body must still carry —
     // the unresolved-check below only rejects UNKNOWN placeholders, so an

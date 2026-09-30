@@ -79,13 +79,13 @@ function smsVars(kind, set, customer, payUrl) {
 }
 
 /** SMS/push body for the set at `step`; null when the template will not render. */
-async function renderSms({ step, set, customer, payUrl }) {
+async function renderSms({ step, set, customer, payUrl, database }) {
   const kind = set.kind;
   return smsTemplatesRouter.getTemplate(smsTemplateKey(step, kind), smsVars(kind, set, customer, payUrl), {
     workflow: 'invoice_followup_customer',
     entity_type: 'customer',
     entity_id: customer.id,
-  });
+  }, database ? { database } : {}); // the same handle the template probe read
 }
 
 /** Email template key + payload for the set at `step`. */
