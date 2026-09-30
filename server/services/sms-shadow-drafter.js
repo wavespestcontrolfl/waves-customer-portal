@@ -286,7 +286,7 @@ function realAnswersHandoffBullets() {
   if (!gateEnvValue('GATE_SMS_AGENT_CHEMICAL_MEDICAL')) {
     // Owner ruling 2026-09-30: timing answered from LABEL FACTS is not a
     // chemical/medical concern (the gate itself is unchanged).
-    lines.push('- A question ONLY about timing — when people or pets can go back out, how long until it is dry, will rain wash it off — is NOT a chemical/medical concern when LABEL FACTS lists timing for the visit\'s products: answer it from LABEL FACTS (see LABEL FACTS below) and do not hand it off. Symptoms, illness, exposure, or anyone or any pet that touched, ate, or breathed something still HOLD for a person. When LABEL FACTS says none is on file, a pets/people timing question is held for a person as before, while a rain-only question is answered from the COMPANY FACTS rain line.');
+    lines.push('- Keyed to the KIND asked (LABEL FACTS sentences: "keep people and pets off treated areas ..." is the re-entry kind, "rain won\'t wash it off ..." is the rainfast kind): a question ONLY about when people or pets can go back out is NOT a chemical/medical concern when LABEL FACTS has a re-entry sentence, and a question ONLY about rain washing it off is NOT one when LABEL FACTS has a rainfast sentence - answer by copying that sentence word for word and do not hand it off. A rainfast sentence never excuses a people/pets question, nor a re-entry sentence a rain question. A people/pets timing question with no re-entry sentence (or none on file) is held for a person as before; a rain-only question with no rainfast sentence is answered from the COMPANY FACTS rain line. Symptoms, illness, exposure, or anyone or any pet that touched, ate, or breathed something always HOLD for a person.');
   }
   lines.push('- CANCELLATIONS are never escalated as their own category: acknowledge, ask what\'s driving it, and offer ONLY real options — skipping or rescheduling the next visit using 2–3 SPECIFIC times from OPEN TIMES. NEVER invent a discount, credit, or refund. Always add {"type":"escalate","note":"cancel_request"} to intended_actions so a person still processes the actual cancellation.');
   return lines.join('\n');
@@ -564,13 +564,7 @@ async function fetchLabelFacts({ customerId } = {}) {
 function renderLabelFactsSection(labelFacts) {
   // Always a header gate-on (sealed-eval contract marker for '_cfl'): the
   // "none on file" section when there is no verified label timing to state.
-  return labelFactsLib.renderLabelFactsSection(labelFacts, {
-    formatDate: formatEtDate,
-    // Each timing clause screens against the compliance guard with ITSELF as
-    // grounding, so a label sentence that would be unpublishable (a "safe"
-    // claim, an unparseable number) never reaches the facts block.
-    isBanned: (clause) => hasBannedCustomerCopy(clause, { labelFactsText: `- product: ${clause}`, rainTimeGuard: true }),
-  }) || labelFactsLib.LABEL_FACTS_NONE_SECTION;
+  return labelFactsLib.renderLabelFactsSection(labelFacts, { formatDate: formatEtDate }) || labelFactsLib.LABEL_FACTS_NONE_SECTION;
 }
 
 // The rendered fact line, and its reader. One line, fixed wording, so the
@@ -598,10 +592,13 @@ function reserviceFactLine(lanes) {
 // token rather than removed so nothing around it is altered.
 const SANCTIONED_SAFE_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b(?!\s*[-–—,]?\s*(?:in|within|after|by|around|about|roughly|approximately|~)\s*(?:about\s+|around\s+)?\d)/i;
 const CONFIRM_TIMING_RE = /\b(?:tech(?:nician)?|office|we)\b[^.\n]{0,40}\bconfirm(?:s|ed|ing)?\b[^.\n]{0,25}\b(?:timing|time|when)\b/i;
-// `opts.labelFactsText` (LABEL FACTS, owner ruling 2026-09-30): the draft's
-// LABEL FACTS section. A numeric rainfast/re-entry time is allowed ONLY when
-// the same number+unit is in it (neutralizeGroundedTimes); every other
-// numeric dry/re-entry time, and every "safe"/EPA claim, stays banned.
+// `opts.rainTimeGuard` + `opts.labelFactsText` (LABEL FACTS, owner ruling
+// 2026-09-30, the EXACT-SENTENCE contract): label timing may reach a customer
+// only by copying a rendered LABEL FACTS sentence word for word. Those
+// sentences are stripped from the reply first; every screen below (the label
+// claim guard, the older banned lists, the "safe" claims) then reads only the
+// REMAINDER, so any other rainfast / re-entry / drying time or clearance
+// claim, and every "safe"/EPA claim, stays banned.
 function hasBannedCustomerCopy(text, opts = {}) {
   let bannedCopyGuard = null;
   try {
@@ -609,12 +606,12 @@ function hasBannedCustomerCopy(text, opts = {}) {
   } catch { bannedCopyGuard = null; }
   if (!bannedCopyGuard) return true;
   let t = String(text || '');
-  // Rainfast times are not on the older banned-copy lists; with the guard on
-  // (validateComplianceCopy, gate-on only) an ungrounded one is banned too.
-  if (opts && opts.rainTimeGuard && labelFactsLib.hasUngroundedLabelTime(t, opts.labelFactsText || '')) return true;
-  if (opts && opts.labelFactsText) t = labelFactsLib.neutralizeGroundedTimes(t, opts.labelFactsText);
   if (SANCTIONED_SAFE_RE.test(t) && CONFIRM_TIMING_RE.test(t)) {
     t = t.replace(SANCTIONED_SAFE_RE, ' SANCTIONED_IDIOM ');
+  }
+  if (opts && opts.rainTimeGuard) {
+    t = labelFactsLib.stripLabelSentences(t, opts.labelFactsText || '');
+    if (labelFactsLib.hasUngroundedLabelClaim(t)) return true;
   }
   return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
 }
@@ -628,10 +625,10 @@ function validateComplianceCopy({ reply, factsBlock } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
   const labelFactsText = labelFactsLib.labelFactsSectionFrom(factsBlock);
   if (!reply || !hasBannedCustomerCopy(reply, { labelFactsText, rainTimeGuard: true })) return { ok: true, violations: [] };
-  // The LABEL FACTS wording only when the section actually states a figure.
-  const groundedKeys = labelFactsLib.groundedTimeKeys(labelFactsText);
-  return { ok: false, violations: [(groundedKeys.rain.size || groundedKeys.reentry.size)
-    ? 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved; a rainfast or re-entry time may be given ONLY exactly as written in LABEL FACTS (digits, same number and unit, rainfast time only about rain, re-entry time only as re-entry); any other drying or re-entry time is banned; "safe once dry" with the technician confirming timing is also allowed'
+  // The LABEL FACTS wording only when the section actually carries a sentence.
+  const kinds = labelFactsLib.groundedLineKinds(labelFactsText);
+  return { ok: false, violations: [(kinds.rain || kinds.reentry)
+    ? 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved; rainfast or re-entry timing may be given ONLY by copying a LABEL FACTS sentence word for word (the whole sentence, unchanged, with its visit date) - any other drying, rainfast, re-entry or "you can go back out" wording, number, or clock time is banned; "safe once dry" with the technician confirming timing is also allowed'
     : 'the reply makes a banned product-safety or timing claim — never call a treatment safe, never say EPA-approved, never give a fixed re-entry or drying time; the only allowed wording is "safe once dry" together with the technician confirming timing'] };
 }
 
@@ -1305,6 +1302,14 @@ function computeOpenTimesSnapshot({ openTimesBlock, offeredTimes, city, customer
   };
 }
 
+// The LABEL FACTS source a delayed send re-verifies (sms-label-facts
+// labelFactsSendBlockReason): persisted next to open_times_snapshot, null when
+// the final reply copies no label sentence.
+function computeLabelFactsSnapshot({ labelFacts, reply, factsBlock }) {
+  if (!labelFacts || !reply) return null;
+  return labelFactsLib.labelFactsSnapshotFor({ labelFacts, reply, sectionText: labelFactsLib.labelFactsSectionFrom(factsBlock) });
+}
+
 // The days a send-time recheck compares against: the scheduler picker's for
 // a snapshot that carries a visit id, else the zone finder's. null = the
 // visit is no longer one the picker offers times for.
@@ -1456,9 +1461,9 @@ COMPANY FACTS:
 - The COMPANY FACTS section in the context block is owner-approved and authoritative. When the customer asks about anything it covers, state that fact directly and plainly instead of deferring, hedging, or saying you'll confirm. It is the one place besides the sections above that you may draw company policy from.
 
 LABEL FACTS (product timing from the label):
-- When a LABEL FACTS section is in the context block it lists, for the visit named in its header, at most two whole-visit figures taken from the product labels: the longest rainfast time and the longest re-entry. State them as applying to the whole visit — never attribute one to a particular product, area, or service line, and never say which product it came from. You may answer "will rain wash it off", "how long until it's dry", and "when can the kids or pets go back out" from it — and ONLY from it. Quote a time exactly as written there: the number as digits, the same unit, never spelled out, rounded, converted, added, or stretched. A rainfast time answers only rain questions; a re-entry time answers only re-entry questions. Never name a product or brand. "Until dry" (as the section words it) is a complete answer.
-- With no LABEL FACTS line covering it, never state any number of minutes or hours for drying, rainfast, or re-entry. For a rain question with no rainfast time listed (or with LABEL FACTS saying none is on file), answer from the COMPANY FACTS rain line — a treatment needs to dry and bond to surfaces, and after that it holds up to weather — plainly, as your own knowledge of how we work; never say the label is silent, missing, or does not list a rainfast time.
-- Never call a treatment safe, pet-safe, kid-safe, or non-toxic, and never say EPA-approved or "safe for" anyone — LABEL FACTS gives timing, not safety claims. A question about symptoms, illness, or exposure is not a timing question: it stays with a person.
+- When a LABEL FACTS section is in the context block, each line is ONE finished sentence about the visit named in its header (a re-entry sentence and/or a rainfast sentence). To give label timing at all, COPY the sentence word for word - the whole sentence, unchanged, including its visit date. Never paraphrase, shorten, split, combine, round, convert, spell out, or add to it, and never give a time, a number of hours or minutes, a clock time, "overnight", "a couple of hours", "until dry", "rainfast", or a "you can go back out now" / "safe for the pets now" / "fine to water or mow" line in your own words. A re-entry sentence answers only when people or pets can go back out; a rainfast sentence answers only whether rain washes it off. Never name a product or brand.
+- With no LABEL FACTS sentence of the kind asked about (or with LABEL FACTS saying none is on file), give no timing of that kind at all. For a rain question with no rainfast sentence, answer from the COMPANY FACTS rain line - a treatment needs to dry and bond to surfaces, and after that it holds up to weather - plainly, as your own knowledge of how we work; never say the label is silent, missing, or does not list a rainfast time.
+- Never call a treatment safe, pet-safe, kid-safe, or non-toxic, and never say EPA-approved or "safe for" anyone - LABEL FACTS gives timing, not safety claims. A question about symptoms, illness, or exposure is not a timing question: it stays with a person.
 `
     : '';
   const handoffBullet = realAnswersOn
@@ -2223,7 +2228,13 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live
   // draft resolves eligibility through the existing re-service mechanism.
   const reserviceLanes = presetFactsBlock ? null : await fetchReserviceLanes({ customerId: context?.customer?.id || null });
-  const labelFacts = presetFactsBlock ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null });
+  const fetchedLabelFacts = presetFactsBlock ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null });
+  // LABEL FACTS speaks for the customer's LATEST performed visit only: a text
+  // pointing at another visit (a coming one, an older one, another day) gets
+  // the none-on-file section for that draft. Ambiguity reads as another visit.
+  const labelFacts = fetchedLabelFacts && labelFactsLib.inboundRefersToOtherVisit(inboundMessage, fetchedLabelFacts.serviceDate)
+    ? null
+    : fetchedLabelFacts;
   // Codex #5194 P2 ("Timestamp the SLA when its facts are generated"): the
   // FOLLOW-UP SLA RIGHT NOW line above is rendered off ONE captured instant,
   // not off created_at — the row's created_at lands only after this whole
@@ -2293,6 +2304,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     return {
       parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
       openTimesSnapshot: null,
+      labelFactsSnapshot: null,
     };
   }
   if (!VERIFY_ENABLED) {
@@ -2315,6 +2327,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       return {
         parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion,
         openTimesSnapshot: null,
+        labelFactsSnapshot: null,
       };
     }
     return {
@@ -2322,6 +2335,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
       openTimesSnapshot: computeOpenTimesSnapshot({
         openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
       }),
+      labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock }),
     };
   }
 
@@ -2412,6 +2426,8 @@ async function generateGroundedDraft({ client, context, inboundMessage, intent, 
     openTimesSnapshot: computeOpenTimesSnapshot({
       openTimesBlock, offeredTimes: parsed?.offered_times, city, customerId: context?.customer?.id || null, estimateId: pricingEstimateId, serviceType, scheduledServiceId,
     }),
+    // The LABEL FACTS source, only when the final reply copies a label sentence.
+    labelFactsSnapshot: computeLabelFactsSnapshot({ labelFacts, reply: parsed?.reply, factsBlock }),
   };
 }
 
@@ -2517,7 +2533,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot, factsGeneratedAt,
+      openTimesSnapshot, labelFactsSnapshot, factsGeneratedAt,
     } = await generateGroundedDraft({
       client, context, inboundMessage, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
     });
@@ -2616,6 +2632,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // auto-send publish creates, so every send path can re-verify
           // without re-deriving it from facts_block text.
           open_times_snapshot: openTimesSnapshot ?? null,
+          // The LABEL FACTS source a delayed send re-verifies (null = the
+          // reply copies no label sentence).
+          ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
           ...(gratitudeCandidate ? {
             gratitude: {
               source: 'live_webhook',
@@ -2690,6 +2709,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
           // TIMES at send time — dispatchClaimedSend re-fetches and refuses
           // to send if a quoted window is no longer offered.
           openTimesSnapshot,
+          labelFactsSnapshot,
           // Codex #5194 P2: the instant the drafter rendered the SLA phrase
           // into factsBlock — claimAutoSend persists it on the decision's
           // input_snapshot so slaDraftedAt can anchor the deadline to it
@@ -2730,6 +2750,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
               promptVersion,
               lintFailures: lint.failures,
               openTimesSnapshot,
+              labelFactsSnapshot,
               intendedActions: parsed.intended_actions,
               // Codex #5194 P2 — see the maybeAutoSend call's comment above.
               factsGeneratedAt,
@@ -2781,6 +2802,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
             promptVersion,
             lintFailures: lint.failures,
             openTimesSnapshot,
+            labelFactsSnapshot,
             intendedActions: parsed.intended_actions,
             // Codex #5194 P2 — see the maybeAutoSend call's comment above.
             factsGeneratedAt,

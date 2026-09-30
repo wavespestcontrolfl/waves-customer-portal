@@ -68,6 +68,16 @@ async function amountsBlock({ decision, outgoingBody }) {
   return amounts.stale ? `amount no longer authorized (${amounts.reason})` : null;
 }
 
+// LABEL FACTS: a draft that copied a label sentence persists which visit it
+// came from; the copied timing must still be the customer's current latest
+// performed visit (a newer visit, a visit today or a changed label refuses).
+async function labelFactsBlock({ decision, outgoingBody }) {
+  const snapshot = parseInputSnapshot(decision.input_snapshot)?.label_facts_snapshot || null;
+  if (!snapshot) return null;
+  const reason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot, body: outgoingBody });
+  return reason ? `label timing no longer current (${reason})` : null;
+}
+
 /**
  * Returns null when the body may go out, else a short reason string the
  * caller logs before superseding the decision.
@@ -75,6 +85,7 @@ async function amountsBlock({ decision, outgoingBody }) {
 async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
   return (await openTimesBlock({ decision, outgoingBody }))
     || followupBlock({ decision, outgoingBody })
+    || (await labelFactsBlock({ decision, outgoingBody }))
     || (await amountsBlock({ decision, outgoingBody }));
 }
 

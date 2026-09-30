@@ -4448,14 +4448,40 @@ function initScheduledJobs() {
                 slaStale = true;
               }
             }
-            if (anchorStale || amountsStale || openTimesStale || slaStale) {
+            // LABEL FACTS revalidation: a scheduled reply that copies a label
+            // sentence (rainfast / re-entry) must still be backed by the
+            // customer's CURRENT latest performed visit - a newer visit, a
+            // visit today, or a changed label blocks it. Same fail-closed
+            // block+retire path, no new mechanism.
+            let labelStale = false;
+            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
+              try {
+                const labelDecision = await db('agent_decisions')
+                  .where({ id: claimMeta.agent_decision_id })
+                  .first('input_snapshot');
+                let labelSnapshot = labelDecision?.input_snapshot;
+                if (typeof labelSnapshot === 'string') {
+                  try { labelSnapshot = JSON.parse(labelSnapshot); } catch { labelSnapshot = null; }
+                }
+                if (labelSnapshot?.label_facts_snapshot) {
+                  const { labelFactsSendBlockReason } = require('./sms-label-facts');
+                  labelStale = Boolean(await labelFactsSendBlockReason({ snapshot: labelSnapshot.label_facts_snapshot, body: msg.message_body }));
+                }
+              } catch (err) {
+                logger.warn(`[scheduler] label-facts revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
+                labelStale = true;
+              }
+            }
+            if (anchorStale || amountsStale || openTimesStale || slaStale || labelStale) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale
                   ? 'stale_amount_agent_decision'
                   : openTimesStale
                     ? 'stale_open_times_agent_decision'
-                    : 'stale_sla_agent_decision';
+                    : slaStale
+                      ? 'stale_sla_agent_decision'
+                      : 'stale_label_facts_agent_decision';
               const threadKey = String(msg.to_phone || '').replace(/\D/g, '').slice(-10) || msg.customer_id || msg.id;
               // Everything under the lock, metadata read THROUGH the trx
               // AFTER acquiring it — the cancel route can transfer parked
@@ -4485,7 +4511,9 @@ function initScheduledJobs() {
                       ? 'This scheduled reply quoted a price — house rule: no prices in SMS. Review the thread.'
                       : openTimesStale
                         ? `This scheduled reply quoted an appointment time that is no longer open (${openTimesReason}) — review the thread.`
-                        : 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.',
+                        : slaStale
+                          ? 'This scheduled reply’s follow-up timing no longer matches the current window — review the thread.'
+                          : 'This scheduled reply quoted product label timing that is no longer current for the customer’s latest visit — review the thread.',
                   dbi: trx,
                   strict: true,
                 });

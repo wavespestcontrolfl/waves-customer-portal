@@ -243,6 +243,30 @@ describe('processInboundSms — grounded LLM review draft', () => {
     expect(JSON.parse(lastDecisionInsert().input_snapshot)).not.toHaveProperty('facts_generated_at');
   });
 
+  test('persists the LABEL FACTS source as input_snapshot.label_facts_snapshot so the delayed send can recheck it; omitted when the reply copies none', async () => {
+    seedActiveSchedulingThread();
+    const labelFactsSnapshot = { customer_id: 'c1', visit_date: '2026-09-29', record_ids: ['r2'], sentences: ['For the products applied at your Sep 29 visit, the label says to keep people and pets off treated areas until dry.'] };
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: labelFactsSnapshot.sentences[0], intended_actions: [], auto_send_safe: false, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers_cfl', labelFactsSnapshot,
+    });
+    await processInboundSms({
+      customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
+      body: 'Hello what happened this morning', smsLogId: 'sms-in-12',
+    });
+    expect(JSON.parse(lastDecisionInsert().input_snapshot).label_facts_snapshot).toEqual(labelFactsSnapshot);
+
+    generateGroundedDraft.mockResolvedValue({
+      parsed: { reply: 'Happy to help.', intended_actions: [], auto_send_safe: true, missing_info: null },
+      passes: 1, converged: true, model: MODELS.OPENAI_SMS_DRAFT, promptVersion: 'house_voice_v12_real_answers_cfl', labelFactsSnapshot: null,
+    });
+    await processInboundSms({
+      customer: CUSTOMER, from: '+19415551234', to: '+19415550000',
+      body: 'Hello what happened this morning', smsLogId: 'sms-in-13',
+    });
+    expect(JSON.parse(lastDecisionInsert().input_snapshot)).not.toHaveProperty('label_facts_snapshot');
+  });
+
   test('passes the already-resolved estimate id through to generateGroundedDraft (pre-push audit P2)', async () => {
     // fetchOpenTimesBlock's getAvailableSlots(city, estimateId, {customerId})
     // needs THAT estimate's own service minutes, not a generic default —

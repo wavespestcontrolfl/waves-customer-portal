@@ -193,7 +193,7 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
-async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, factsGeneratedAt = null }) {
+async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null }) {
   const suggest = require('./sms-suggest-mode');
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
@@ -255,6 +255,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
           // revalidate quoted OPEN TIMES windows at dispatch, threaded from
           // the drafter through draftShadowReply's maybeAutoSend params.
           ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+          ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
           ...(factsGeneratedAtIso ? { facts_generated_at: factsGeneratedAtIso } : {}),
         }),
         suggested_message: reply,
@@ -300,7 +301,7 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
     });
     if (!reservationId) throw new Error('Auto-send holding reservation was not created');
 
-    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot };
+    return { decisionId: row.id, toPhone, fromNumber, threadLast10, parkedIds, reservationId, openTimesSnapshot, labelFactsSnapshot };
   });
 }
 
@@ -822,6 +823,19 @@ async function dispatchClaimedSend({ claim, gratitudeLane, eligibilityPin, draft
           await reopenParked('Auto-send held: a quoted appointment time is no longer open — suggestion reopened.');
           return outcome;
         }
+      }
+    }
+    // LABEL FACTS send-time recheck: a reply that copies a label sentence
+    // must still be backed by the customer's CURRENT latest performed visit
+    // (a newer visit, a visit today, a changed label all refuse). Same
+    // supersede-via-failClaim refusal as the open-times recheck above.
+    if (claim.labelFactsSnapshot) {
+      const labelReason = await require('./sms-label-facts').labelFactsSendBlockReason({ snapshot: claim.labelFactsSnapshot, body: reply });
+      if (labelReason) {
+        logger.warn(`[sms-auto-send] label facts stale (decision ${claim.decisionId}): ${labelReason}`);
+        const outcome = await notSent(labelReason);
+        await reopenParked('Auto-send held: the label timing in the draft is no longer current — suggestion reopened.');
+        return outcome;
       }
     }
     const verdict = checkHandoff ? await checkHandoff() : { ok: true };

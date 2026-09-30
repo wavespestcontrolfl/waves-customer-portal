@@ -548,7 +548,7 @@ function sanitizeIntendedActions(intendedActions) {
  * not published (failure, or a newer suggestion is already up) — the caller
  * reverts the draft to shadow so the judge still covers it.
  */
-async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
+async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, lintFailures, openTimesSnapshot = null, labelFactsSnapshot = null, intendedActions = null, factsGeneratedAt = null }) {
   try {
     return await db.transaction(async (trx) => {
       // The inbound row is immutable — safe to read before the lock; the
@@ -658,6 +658,7 @@ async function publishSuggestion({ draftId, customerId, smsLogId, inboundMessage
             // OPEN TIMES without a live re-fetch at publish time — this is
             // just the snapshot, never a probe.
             ...(openTimesSnapshot ? { open_times_snapshot: openTimesSnapshot } : {}),
+            ...(labelFactsSnapshot ? { label_facts_snapshot: labelFactsSnapshot } : {}),
             // Codex r3 P1: the actions this draft promises (payment link,
             // booking, escalation…) must ride the same snapshot a reviewer's
             // card reads — otherwise a card can promise an action the

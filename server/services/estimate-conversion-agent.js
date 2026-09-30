@@ -590,7 +590,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     const Anthropic = require('@anthropic-ai/sdk');
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
+    const { parsed, passes, converged, model, promptVersion, openTimesSnapshot, labelFactsSnapshot, factsGeneratedAt } = await drafter.generateGroundedDraft({
       laneId: 'estimate_followup', // the drafter's own lanes are the live SMS ones
       client,
       context,
@@ -658,7 +658,7 @@ async function generateLlmReviewDraft({ customer, body, decision, estimate, esti
     // booking, escalate for a follow-up) ride to the review card the same
     // way the suggestion lane's do, so /agent-draft can show them.
     return {
-      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null,
+      reply: parsed.reply, model, promptVersion, passes, openTimesSnapshot: openTimesSnapshot ?? null, labelFactsSnapshot: labelFactsSnapshot ?? null,
       intendedActions: Array.isArray(parsed.intended_actions) ? parsed.intended_actions : [],
       factsGeneratedAt: factsGeneratedAt ?? null,
     };
@@ -767,6 +767,8 @@ async function processInboundSms({ customer, from, to, body, smsLogId, sourceMes
         // at /sms and /schedule-sms time. Absent for template drafts and for
         // any llm draft whose reply never quoted an open-times window.
         ...(llmDraft?.openTimesSnapshot ? { open_times_snapshot: llmDraft.openTimesSnapshot } : {}),
+        // LABEL FACTS source, re-verified at send (agent-decision-send-checks).
+        ...(llmDraft?.labelFactsSnapshot ? { label_facts_snapshot: llmDraft.labelFactsSnapshot } : {}),
         // Same sanitized shape publishSuggestion persists, read back by
         // GET /agent-draft (pre-push audit P1). Template drafts carry none.
         ...(llmDraft && Array.isArray(llmDraft.intendedActions)

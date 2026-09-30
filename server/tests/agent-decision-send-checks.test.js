@@ -16,9 +16,11 @@ jest.mock('../services/sms-followup-sla', () => ({
   followupPromiseBlockReason: jest.fn(() => null),
 }));
 jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
+jest.mock('../services/sms-label-facts', () => ({ labelFactsSendBlockReason: jest.fn(async () => null) }));
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
+const { labelFactsSendBlockReason } = require('../services/sms-label-facts');
 const { agentDecisionSendBlockReason, parseInputSnapshot } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
@@ -29,6 +31,7 @@ beforeEach(() => {
   drafter.openTimesStillOffered.mockReset().mockResolvedValue({ ok: true });
   followupPromiseBlockReason.mockReset().mockReturnValue(null);
   outgoingAmountsStale.mockReset().mockResolvedValue({ stale: false });
+  labelFactsSendBlockReason.mockReset().mockResolvedValue(null);
 });
 
 test('parseInputSnapshot: string, object, malformed, absent', () => {
@@ -107,4 +110,23 @@ test('no snapshot → no availability call; an older-prompt decision skips the a
   await expect(agentDecisionSendBlockReason({ decision: decision({ input_snapshot: JSON.stringify({}), prompt_version: 'house_voice_v11' }), outgoingBody: 'You owe $5.' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).not.toHaveBeenCalled();
   expect(outgoingAmountsStale).not.toHaveBeenCalled();
+});
+
+// LABEL FACTS (exact-sentence contract, D): a draft that copied a label
+// sentence persists its source; the Agent Review send (and the queue-time
+// /schedule-sms check) refuses when that visit is no longer the current one.
+const LABEL_SNAP = { customer_id: 'c1', visit_date: '2026-09-29', record_ids: ['r2'], sentences: ['For the products applied at your Sep 29 visit, the label says to keep people and pets off treated areas until dry.'] };
+
+test('a decision carrying a label snapshot is rechecked against the body that will go out; a stale one refuses with its reason', async () => {
+  const withLabel = decision({ input_snapshot: JSON.stringify({ label_facts_snapshot: LABEL_SNAP }) });
+  await expect(agentDecisionSendBlockReason({ decision: withLabel, outgoingBody: LABEL_SNAP.sentences[0] })).resolves.toBeNull();
+  expect(labelFactsSendBlockReason).toHaveBeenCalledWith({ snapshot: LABEL_SNAP, body: LABEL_SNAP.sentences[0] });
+  labelFactsSendBlockReason.mockResolvedValue('label_facts_visit_changed');
+  await expect(agentDecisionSendBlockReason({ decision: withLabel, outgoingBody: LABEL_SNAP.sentences[0] }))
+    .resolves.toBe('label timing no longer current (label_facts_visit_changed)');
+});
+
+test('no label snapshot -> no label recheck', async () => {
+  await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' });
+  expect(labelFactsSendBlockReason).not.toHaveBeenCalled();
 });

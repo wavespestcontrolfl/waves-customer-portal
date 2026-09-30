@@ -8,10 +8,14 @@
 //                               visit -> service_products -> products_catalog.
 //   renderLabelFactsSection()   the per-draft facts section (gate-on only; the
 //                               drafter passes it in through buildFactsBlock).
-//   neutralizeGroundedTimes()   the deterministic compliance grounding: a
-//                               numeric rainfast/re-entry time in a reply is
-//                               allowed ONLY when the same number+unit is in
-//                               that draft's LABEL FACTS section.
+//                               Each line is ONE exact customer-safe sentence.
+//   stripLabelSentences() +     the deterministic compliance guard (the EXACT-
+//   hasUngroundedLabelClaim()   SENTENCE CONTRACT): label timing reaches a
+//                               customer only by copying a rendered sentence
+//                               word for word. The sentences are stripped from
+//                               the reply and ANY label-context timing or
+//                               clearance claim left over is held.
+//   labelFactsSendBlockReason() the send-time recheck of a delayed reply.
 //
 // Gate handling lives in the caller (sms-shadow-drafter): this file never
 // reads GATE_SMS_REAL_ANSWERS, so gate off never reaches it.
@@ -42,8 +46,8 @@ const LABEL_FACTS_FILLED_HEADER_RE = /^LABEL FACTS \(from the labels of products
 // Structural bounds of a rendered section (shared by the judge exemption and
 // the sealed-eval exact-structure test; 255 is also the Postgres regex
 // repetition ceiling the SQL twin runs under).
-const LABEL_LINE_MAX = 160;
-const LABEL_LINES_MAX = 2; // the longest rainfast + the longest re-entry, nothing else
+const LABEL_LINE_MAX = 240;
+const LABEL_LINES_MAX = 2; // one rainfast sentence + one re-entry sentence, nothing else
 const escapeRegex = (t) => String(t).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
 // Regex SOURCE (JS + Postgres ARE compatible) of a whole rendered LABEL FACTS
 // section, no leading/trailing newline: the exact "none on file" section, or
@@ -202,7 +206,7 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
     else if (p) products.push(p);
   }
   if (unverified) logger.info(`[sms-label-facts] ${unverified} applied product(s) omitted — label not verified`);
-  return products.length ? { serviceDate, products, unverifiedCount: unverified } : null;
+  return products.length ? { customerId, serviceDate, recordIds: recordIds.map(String).sort(), products, unverifiedCount: unverified } : null;
 }
 
 // Timeout wrapper + fail-safe: any error or timeout -> null (section omitted).
@@ -225,18 +229,17 @@ async function fetchLabelFacts({ customerId, conn = db, timeoutMs = LABEL_FACTS_
 
 function plural(n, unit) { return `${n} ${unit}${n === 1 ? '' : 's'}`; }
 
-function rainfastClause(minutes) {
+function rainfastDuration(minutes) {
   if (!Number.isFinite(minutes) || minutes <= 0) return null;
-  return `rainfast after ${minutes % 60 === 0 ? plural(minutes / 60, 'hour') : plural(minutes, 'minute')}`;
+  return minutes % 60 === 0 ? plural(minutes / 60, 'hour') : plural(minutes, 'minute');
 }
 
 // VISIT-LEVEL, CONSERVATIVE values only (pre-push audit P1). A visit can apply
 // several products (a lawn product and a pest spray, different areas); a
-// per-product line invites quoting one product's time for another's area, and
-// per-number grounding cannot tell them apart. So the section states at most
-// TWO figures, each true of the whole visit: the LONGEST re-entry and the
-// LONGEST rainfast time (only when EVERY product has one) across the verified customer-visible products, named
-// as such and never per product or area.
+// per-product line invites quoting one product's time for another's area. So
+// the section states at most TWO facts, each true of the whole visit: the
+// LONGEST re-entry and the LONGEST rainfast time (only when EVERY product has
+// one) across the verified customer-visible products, never per product or area.
 //
 // Re-entry level per product, in hours: rei_hours > 0 -> that many hours;
 // rei_hours = 0 (the residential value) or a summary that says "until dry" ->
@@ -255,43 +258,81 @@ function reentryLevelHours(product) {
   const summary = singleLine(product.reentrySummary || product.reentryText, 160);
   return summary && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary) && !statesOwnDuration(product) ? 0 : null;
 }
-const WHOLE_VISIT_LABEL = 'Whole visit (the longest across every product applied)';
-function wholeVisitReentryClause(products, isBanned) {
+// A product with a fixed hour figure whose own label text ALSO says "until dry".
+function figureAlsoUntilDry(product) {
+  const summary = singleLine(product.reentrySummary || product.reentryText, 160);
+  return Boolean(summary) && UNTIL_DRY_RE.test(summary) && !REENTRY_PLACEHOLDER_RE.test(summary);
+}
+// { hours, untilDry } for the whole visit, or null when ANY product's re-entry
+// is unknown. `untilDry` with hours > 0 is the mixed case (a fixed figure on
+// one product, "until dry" on another): stated as "at least N hours AND until
+// dry, whichever is later", never as just the hour figure.
+function wholeVisitReentry(products) {
   const levels = products.map(reentryLevelHours);
   if (!levels.length || levels.some((l) => l == null)) return null;
   const hours = Math.max(...levels);
-  const clause = `re-entry: keep people and pets off treated areas ${hours === 0 ? 'until dry' : `for ${plural(hours, 'hour')}`}`;
-  return !isBanned || !isBanned(clause) ? clause : null;
+  const untilDry = hours === 0 || levels.some((l) => l === 0) || products.some((p, i) => levels[i] > 0 && figureAlsoUntilDry(p));
+  return { hours, untilDry };
 }
 // Same all-known rule as re-entry: ONE product without a rainfast time makes
 // the whole-visit figure unstatable (the longest of the known ones would
-// understate it), so the line is omitted and the COMPANY FACTS rain line applies.
-function wholeVisitRainfastClause(products) {
+// understate it), so the sentence is omitted and the COMPANY FACTS rain line applies.
+function wholeVisitRainfastMinutes(products) {
   const minutes = products.map((p) => p.rainfastMinutes);
   if (!minutes.length || minutes.some((m) => !Number.isFinite(m) || m <= 0)) return null;
-  return rainfastClause(Math.max(...minutes));
+  return Math.max(...minutes);
+}
+
+// ---- The exact-sentence contract ----------------------------------------
+// LABEL FACTS renders, per kind, ONE exact customer-safe sentence naming the
+// visit date. Label timing may reach a customer ONLY by copying such a
+// sentence word for word; the reply guard strips those sentences and holds
+// anything label-like that is left.
+const SHORT_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+function shortVisitDate(iso) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+  return m && SHORT_MONTHS[Number(m[2]) - 1] ? `${SHORT_MONTHS[Number(m[2]) - 1]} ${Number(m[3])}` : null;
+}
+const SENTENCE_LEAD = 'For the products applied at your ';
+const SENTENCE_LEAD_TAIL = ' visit, the label says ';
+const REENTRY_CLAUSE = 'to keep people and pets off treated areas ';
+const RAIN_CLAUSE = "rain won't wash it off after ";
+// The exact shape of a rendered sentence (kind is read from it).
+const REENTRY_SENTENCE_RE = /^For the products applied at your [A-Z][a-z]{2} \d{1,2} visit, the label says to keep people and pets off treated areas (?:until dry|for \d+(?:\.\d+)? hours?|for at least \d+(?:\.\d+)? hours? and until it is dry, whichever is later)\.$/;
+const RAIN_SENTENCE_RE = /^For the products applied at your [A-Z][a-z]{2} \d{1,2} visit, the label says rain won't wash it off after \d+(?:\.\d+)? (?:hours?|minutes?)\.$/;
+
+/** [{ kind: 'rainfast' | 'reentry', text }] the sentences this visit's facts support ([] = none on file). */
+function labelFactsSentences(labelFacts) {
+  if (!labelFacts || !Array.isArray(labelFacts.products) || !labelFacts.products.length) return [];
+  if (labelFacts.unverifiedCount > 0) return [];
+  const date = shortVisitDate(labelFacts.serviceDate);
+  if (!date) return [];
+  const lead = `${SENTENCE_LEAD}${date}${SENTENCE_LEAD_TAIL}`;
+  const out = [];
+  const rain = rainfastDuration(wholeVisitRainfastMinutes(labelFacts.products));
+  if (rain) out.push({ kind: 'rainfast', text: `${lead}${RAIN_CLAUSE}${rain}.` });
+  const re = wholeVisitReentry(labelFacts.products);
+  if (re) {
+    const tail = re.hours === 0 ? 'until dry'
+      : (re.untilDry ? `for at least ${plural(re.hours, 'hour')} and until it is dry, whichever is later` : `for ${plural(re.hours, 'hour')}`);
+    out.push({ kind: 'reentry', text: `${lead}${REENTRY_CLAUSE}${tail}.` });
+  }
+  return out;
 }
 
 /**
  * Render the LABEL FACTS section, '' when there is nothing to render.
  * `formatDate` is the drafter's SERVICE HISTORY date formatter, so the date in
- * the header matches SERVICE HISTORY verbatim. `isBanned(clause)` screens each
- * timing clause against the compliance guard with that clause as its own
- * grounding. Fail closed: a visit with ANY applied product whose label is not
- * verified (`unverifiedCount`) states nothing, since that product's own times
- * are unknown and a "whole visit" figure would understate them.
+ * the header matches SERVICE HISTORY verbatim. Fail closed: a visit with ANY
+ * applied product whose label is not verified (`unverifiedCount`) states
+ * nothing, since that product's own times are unknown and a "whole visit"
+ * figure would understate them.
  */
-function renderLabelFactsSection(labelFacts, { formatDate, isBanned } = {}) {
-  if (!labelFacts || !Array.isArray(labelFacts.products) || !labelFacts.products.length) return '';
-  if (labelFacts.unverifiedCount > 0) return '';
-  const lines = [];
-  const rain = wholeVisitRainfastClause(labelFacts.products);
-  const reentry = wholeVisitReentryClause(labelFacts.products, isBanned);
-  if (rain) lines.push(`- ${WHOLE_VISIT_LABEL}: ${rain}`);
-  if (reentry) lines.push(`- ${WHOLE_VISIT_LABEL}: ${reentry}`);
-  if (!lines.length) return '';
+function renderLabelFactsSection(labelFacts, { formatDate } = {}) {
+  const sentences = labelFactsSentences(labelFacts);
+  if (!sentences.length) return '';
   const date = (formatDate ? formatDate(labelFacts.serviceDate) : labelFacts.serviceDate) || labelFacts.serviceDate;
-  return `${LABEL_FACTS_HEADER_PREFIX}${date}):\n${lines.join('\n')}\n`;
+  return `${LABEL_FACTS_HEADER_PREFIX}${date}):\n${sentences.map((s) => `- ${s.text}`).join('\n')}\n`;
 }
 
 /** The LABEL FACTS section text out of a rendered facts block ('' if absent). */
@@ -301,311 +342,349 @@ function labelFactsSectionFrom(factsBlock) {
   return require('./sms-company-facts').exactLabelFactsSection(factsBlock);
 }
 
-// "3 hours", "3-hour", "30 min", "1-2 hours", "1.5 hrs" (digits only: a
-// spelled-out figure never grounds, so it stays banned and the reply is
-// revised to digits).
-const TIME_EXPR_RE = /(?<![\w./])(\d+(?:\.\d+)?)(?:\s*(?:-|–|to|or)\s*(\d+(?:\.\d+)?))?\s*-?\s*(minutes?|mins?|hours?|hrs?|days?)\b/gi;
-function timeKey(match) {
-  const unit = /^h/i.test(match[3]) ? 'h' : (/^d/i.test(match[3]) ? 'd' : 'm');
-  return `${Number(match[1])}${match[2] ? `-${Number(match[2])}` : ''}${unit}`;
-}
-function timeKeysIn(text) {
-  const keys = new Set();
-  for (const m of String(text || '').matchAll(TIME_EXPR_RE)) keys.add(timeKey(m));
-  return keys;
-}
-
-// The kinds of time the section grounds, read from the exact lines
-// renderLabelFactsSection writes: a "rainfast ..." clause grounds a rainfast
-// time, a "re-entry: ..." clause a re-entry time. Anything else in the
-// section grounds nothing (fail closed).
-function groundedTimeKeys(sectionText) {
-  const rain = new Set();
-  const reentry = new Set();
+// The rendered sentences of a section (only lines of the exact rendered shape).
+function labelSentencesIn(sectionText) {
+  const out = [];
   for (const line of String(sectionText || '').split('\n')) {
     if (!line.startsWith('- ')) continue;
-    const body = line.slice(2);
-    const colon = body.indexOf(': ');
-    if (colon < 0) continue;
-    for (const clause of body.slice(colon + 2).split(';')) {
-      const c = clause.trim();
-      if (/^rainfast\b/i.test(c)) for (const k of timeKeysIn(c)) rain.add(k);
-      else if (/^re-?entry\b/i.test(c)) for (const k of timeKeysIn(c)) reentry.add(k);
-    }
+    const text = line.slice(2);
+    if (REENTRY_SENTENCE_RE.test(text)) out.push({ kind: 'reentry', text });
+    else if (RAIN_SENTENCE_RE.test(text)) out.push({ kind: 'rainfast', text });
   }
-  return { rain, reentry };
+  return out;
 }
 
+/** Which kinds of label sentence a section carries: { rain, reentry }. */
+function groundedLineKinds(sectionText) {
+  const sentences = labelSentencesIn(sectionText);
+  return { rain: sentences.some((s) => s.kind === 'rainfast'), reentry: sentences.some((s) => s.kind === 'reentry') };
+}
+
+// Whitespace, curly quotes, width forms and zero-width characters folded, so a
+// reply cannot dodge (or forge) a verbatim match with typography.
+function canonText(text) {
+  return String(text || '').normalize('NFKC')
+    .replace(/[‘’‛′`´]/g, "'")
+    .replace(/[“”„″]/g, '"')
+    .replace(/[​-‍⁠﻿]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+const sentenceCore = (text) => canonText(text).replace(/\.+$/, '');
+
+/** The rendered sentences of `sectionText` that `reply` copies verbatim (case-insensitive after canonText). */
+function labelSentencesCopiedIn(reply, sectionText) {
+  const body = canonText(reply).toLowerCase();
+  return labelSentencesIn(sectionText).filter((s) => body.includes(sentenceCore(s.text).toLowerCase()));
+}
+
+/**
+ * `text` (canonText-normalized) with every verbatim copy of a LABEL FACTS
+ * sentence replaced by a clause break, so what remains is exactly the part of
+ * the reply the guard must judge. Every other screen reads this same remainder.
+ */
+function stripLabelSentences(text, sectionText) {
+  let out = canonText(text);
+  for (const s of labelSentencesIn(sectionText)) out = out.replace(new RegExp(escapeRegex(sentenceCore(s.text)), 'gi'), ' ; labelsentence ; ');
+  return out;
+}
+
+// ---- Time quantities -----------------------------------------------------
+// "3 hours", "3-hour", "30 min", "1-2 hours", "1.5 hrs", "2h" (digits).
+const TIME_EXPR_RE = /(?<![\w./\u2044])(\d+(?:\.\d+)?)(?:\s*(?:-|–|to|or)\s*(\d+(?:\.\d+)?))?\s*-?\s*(minutes?|mins?|hours?|hrs?|h|days?)\b/gi;
 // Every quantity a reply can attach to a time unit, not a whitelist of
 // numbers: a spelled number word (zero-nineteen, the tens with an optional
 // hyphen/space unit, hundred), an "a"/"an", a fraction or "half", a range, and
 // the vague quantities (a couple, a few, several, a day or two, overnight, the
-// next day). A quantity converts to the same "<number><unit>" key a digit
-// figure has, or to null when it cannot be converted exactly; null is never
-// grounded. Digits are matched by TIME_EXPR_RE above; this covers the rest.
+// next day). Digits are matched by TIME_EXPR_RE above; this covers the rest.
 const ONES_SRC = 'zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen';
 const TENS_SRC = 'twenty|thirty|forty|fourty|fifty|sixty|seventy|eighty|ninety';
 const NUM_WORD_SRC = `(?:(?:${TENS_SRC})(?:[-\\s]+(?:${ONES_SRC}))?|${ONES_SRC}|hundred)`;
 const NUM_SEQ_SRC = `${NUM_WORD_SRC}(?:[-\\s]+(?:and\\s+)?${NUM_WORD_SRC})*`;
-const FRACTION_SRC = '(?:\\d+\\s*\\/\\s*\\d+|[\\u00BC-\\u00BE\\u2150-\\u215E])';
-const QTY_SRC = `(?:${NUM_SEQ_SRC}(?:\\s+and\\s+a\\s+half)?|(?:\\d+\\s*)?${FRACTION_SRC}|half(?:\\s+an?)?|an?\\s+half|(?:an?\\s+)?(?:couple|few|several|handful|bunch|dozen)(?:\\s+of)?(?:\\s+more)?|an?)`;
+const FRACTION_SRC = '(?:\\d+\\s*[\\/\\u2044]\\s*\\d+|[\\u00BC-\\u00BE\\u2150-\\u215E])';
+const QTY_SRC = `(?:${NUM_SEQ_SRC}(?:[-\\s]+and[-\\s]+a[-\\s]+half)?|(?:\\d+\\s*)?${FRACTION_SRC}|half(?:\\s+an?)?|an?\\s+half|(?:an?\\s+)?(?:couple|few|several|handful|bunch|dozen|number|lot|ton|load)(?:\\s+of)?(?:\\s+more)?|(?:some|many|multiple|numerous|countless|plenty\\s+of|quite\\s+a\\s+few|a\\s+good\\s+few|a\\s+lot\\s+of)|an?)`;
 const TIME_UNIT_SRC = '(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|nights?|weeks?)';
 const VAGUE_WHOLE_SRC = '(?:overnight|over\\s+night|(?:the\\s+)?next\\s+(?:day|morning)|all\\s+(?:day|night)|an?\\s+(?:day|night|hour|week)\\s+(?:or\\s+(?:two|three|so|more)|and\\s+a\\s+half))';
-const SPELLED_QTY_RE = new RegExp(`(?<![\\w-])(?:${VAGUE_WHOLE_SRC}|(${QTY_SRC})(?:\\s*(?:-|\\u2013|to|or)\\s*(${QTY_SRC}))?[\\s-]*(?:more\\s+)?(${TIME_UNIT_SRC}))\\b`, 'gi');
-const NUM_WORD_VALUES = {
-  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
-  thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
-  twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90,
-};
-// The exact value of one quantity phrase, or null (vague / unparseable).
-function quantityValue(raw) {
-  const t = String(raw || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  if (!t) return null;
-  if (/^(?:an?|half(?: an?)?|an? half)$/.test(t)) return /^an?$/.test(t) ? 1 : 0.5;
-  if (/^[¼-¾⅐-⅞]$/.test(t)) return null;
-  const frac = t.match(/^(?:(\d+)\s*)?(\d+)\s*\/\s*(\d+)$/);
-  if (frac) return Number(frac[3]) ? Number(frac[1] || 0) + Number(frac[2]) / Number(frac[3]) : null;
-  const words = t.replace(/\s+and\s+a\s+half$/, '').split(/[-\s]+/).filter((w) => w && w !== 'and');
-  if (!words.length) return null;
-  let total = 0;
-  let current = 0;
-  for (const w of words) {
-    if (w === 'hundred') { current = (current || 1) * 100; continue; }
-    if (!(w in NUM_WORD_VALUES)) return null;
-    current += NUM_WORD_VALUES[w];
-  }
-  total = current + (/\s+and\s+a\s+half$/.test(t) ? 0.5 : 0);
-  return total;
-}
-function spelledKey(match) {
-  if (!match[3]) return null; // overnight / next day / a day or two: never exact
-  const first = quantityValue(match[1]);
-  const second = match[2] ? quantityValue(match[2]) : undefined;
-  if (first == null || second === null) return null;
-  const unit = /^h/i.test(match[3]) ? 'h' : (/^d/i.test(match[3]) ? 'd' : (/^m/i.test(match[3]) ? 'm' : null));
-  if (!unit) return null; // seconds / nights / weeks have no label figure
-  return `${first}${second !== undefined ? `-${second}` : ''}${unit}`;
-}
-// Every time quantity in `text`, digit or spelled or vague, in order, with the
-// key it converts to (null = cannot be grounded).
-function timeQuantities(text) {
-  const src = String(text || '');
-  const out = [];
-  for (const m of src.matchAll(TIME_EXPR_RE)) out.push({ index: m.index, length: m[0].length, key: timeKey(m), spelled: false });
-  for (const m of src.matchAll(SPELLED_QTY_RE)) {
-    if (out.some((q) => m.index < q.index + q.length && q.index < m.index + m[0].length)) continue;
-    out.push({ index: m.index, length: m[0].length, key: spelledKey(m), spelled: true });
-  }
-  return out.sort((x, y) => x.index - y.index);
-}
-
-// The sentence around index i (a "." between digits is a decimal point).
-function sentenceAt(text, i) {
-  let s = i;
-  while (s > 0) {
-    const ch = text[s - 1];
-    if (ch === '\n' || ch === '!' || ch === '?' || (ch === '.' && !/\d/.test(text[s] || '') )) break;
-    s -= 1;
-  }
-  let e = i;
-  while (e < text.length) {
-    const ch = text[e];
-    if (ch === '\n' || ch === '!' || ch === '?' || (ch === '.' && !/\d/.test(text[e + 1] || ''))) break;
-    e += 1;
-  }
-  return { text: text.slice(s, e), start: s };
-}
-
+const SPELLED_QTY_RE = new RegExp(`(?<![\\w-])(?:${VAGUE_WHOLE_SRC}|(${QTY_SRC})(?:\\s*(?:-|\\u2013|to|or)\\s*(${QTY_SRC}))?[\\s-]*(?:(?:more|full|whole|entire|good|solid|short|long|few|extra|additional)\\s+)*(${TIME_UNIT_SRC}))\\b`, 'gi');
 // A clock time: "2 PM", "2:30", "14:00", "noon", "midnight", "by 5", "until 5".
 // A bare "by/until/till N" is a clock time unless a unit follows ("by 5 hours").
-const CLOCK_TIME_RE = /(?<![\w.:])(?:(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)|noon\b|midnight\b|(?:by|until|till)\s+(?:1[0-2]|[1-9])(?![\d:]|\.\d|\s*(?:-|–|to)\s*\d|\s*(?:%|percent|minutes?|mins?|hours?|hrs?|days?|weeks?|inch|inches|feet|ft|gallons?|oz|ounces?|times|treatments?|people|pets?|dogs?|kids?)\b))/gi;
-
-// Which KIND of label time a duration is, from the words it is grammatically
-// attached to: within a short span of the duration itself, in the same
-// clause, a rainfast / wash-off / rain word (rain kind), a re-entry / stay-off /
-// go-back-out / wait word (re-entry kind) or a dry / drying word (dry kind);
-// the nearest wins. A duration next to an arrival, window, appointment or
-// "we'll be back" word is scheduling ('schedule'); a duration with no
-// trigger at all is null.
-//
-// The labels give a re-entry time and a rainfast time, never a "dry" time, so
-// the dry kind is grounded by nothing.
-const RAIN_TRIGGER_RE = /\brain[-\s]?fast\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this\s+|that\s+|them\s+)?(?:off|away|out)\b/gi;
-// Ordinary rain wording counts only when directly connected to the duration
-// (no comma between them): "Rain is fine after 2 hours", "if it rains within
-// 2 hours" - but not "we'll be there in 2 hours, rain is expected".
-const RAIN_WORD_TRIGGER_RE = /\b(?:rain(?:s|ed|ing|fall|y)?|showers?|storms?|thunderstorms?|downpours?|sprinklers?|irrigation)\b/gi;
-// The re-entry topic words, in three parts so the loose "go / come / be back
-// out" movement wording can be told from an explicit stay-off / re-entry word.
-const REENTRY_STRONG_A_SRC = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.!?\n]{0,25}\boff\b|\b(?:stay|stays|staying|keep|keeps|keeping)\s+(?:out|away|inside|indoors)\b/.source;
-const REENTRY_MOVE_SRC = /\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|on\s+(?:it|the\s+(?:lawn|grass|yard|treated)))\b/.source;
-const REENTRY_STRONG_B_SRC = /\b(?:walk|play|sit|lie|run)(?:ing)?\s+on\b|\bthe\s+(?:kids?|children|dogs?|cats?|pets?|pups?)\s+(?:out|outside|back)\b|\bgood\s+to\s+go\b/.source;
-const REENTRY_TRIGGER_RE = new RegExp(`${REENTRY_STRONG_A_SRC}|\\bwait(?:ing)?\\b|${REENTRY_MOVE_SRC}|${REENTRY_STRONG_B_SRC}`, 'gi');
-const DRY_TRIGGER_RE = /\bdr(?:y|ies|ied|ying)\b/gi;
-const SCHEDULE_BEFORE_RE = /\b(?:arriv\w*|arrival|be\s+there|be\s+out|be\s+by|come\s+(?:by|out)|coming\s+(?:by|out)|stop(?:ping)?\s+by|between|eta|scheduled?|appointment|technician\s+(?:will|is)|tech\s+(?:will|is))\b[^.!?\n]{0,25}$|\b(?:we|i|tech(?:nician)?|team)(?:'ll|'re|\s+will|\s+can|\s+are|\s+would)?\s+(?:be\s+|come\s+|coming\s+|get\s+)?back(?:\s+(?:out|by|over))?\b[^.!?\n]{0,15}$/i;
-const SCHEDULE_AFTER_RE = /^[^.!?\n]{0,6}\b(?:window|arrival|appointment)\b/i;
-const TRIGGER_SPAN_BEFORE = 45;
-const TRIGGER_SPAN_AFTER = 40;
-// Distance from the duration to the nearest match of `re` in the same clause.
-// `clause` cuts the text at commas as well as semicolons.
-function nearestTrigger(re, beforeRaw, afterRaw, { clause = false } = {}) {
-  const cut = clause ? /[,;:—–]/ : /;/;
-  const beforeParts = beforeRaw.split(cut);
-  const before = beforeParts[beforeParts.length - 1];
-  const after = afterRaw.split(cut)[0];
-  let best = Infinity;
-  const g = new RegExp(re.source, 'gi');
-  for (let m = g.exec(before); m; m = g.exec(before)) best = Math.min(best, before.length - (m.index + m[0].length));
-  const a = new RegExp(re.source, 'i').exec(after);
-  if (a) best = Math.min(best, a.index);
-  return best;
-}
-function timeKind(src, index, length) {
-  const { text: sentence, start } = sentenceAt(src, index);
-  const rel = index - start;
-  const before = sentence.slice(Math.max(0, rel - TRIGGER_SPAN_BEFORE), rel);
-  const after = sentence.slice(rel + length, rel + length + TRIGGER_SPAN_AFTER);
-  if (SCHEDULE_BEFORE_RE.test(sentence.slice(Math.max(0, rel - 30), rel)) || SCHEDULE_AFTER_RE.test(sentence.slice(rel + length))) return 'schedule';
-  const d = {
-    dry: nearestTrigger(DRY_TRIGGER_RE, before, after),
-    rain: Math.min(nearestTrigger(RAIN_TRIGGER_RE, before, after), nearestTrigger(RAIN_WORD_TRIGGER_RE, before, after, { clause: true })),
-    reentry: nearestTrigger(REENTRY_TRIGGER_RE, before, after),
-  };
-  const best = Math.min(d.dry, d.rain, d.reentry);
-  if (best === Infinity) return null;
-  // ties: the stricter kind (dry grounds nothing) wins
-  return d.dry === best ? 'dry' : (d.rain === best ? 'rain' : 'reentry');
-}
-
-/**
- * The deterministic grounding: replace every numeric time in `text` that the
- * LABEL FACTS section grounds with a neutral token, so the ordinary
- * compliance screens (which ban any fixed re-entry/drying time) no longer see
- * it. A time is grounded when its number+unit is in the section AND it is
- * used as the kind of time the section states: a rainfast number only in a
- * sentence about rain, a re-entry number as a re-entry time. So "rainfast
- * after 3 hours" passes, but "the dog can go out after 3 hours" (when 3
- * hours is only the rainfast time) and "dry in 2 hours" do not.
- */
-function neutralizeGroundedTimes(text, sectionText) {
-  const src = String(text || '');
-  const { rain, reentry } = groundedTimeKeys(sectionText);
-  if (!rain.size && !reentry.size) return src;
-  let out = '';
-  let at = 0;
-  for (const q of timeQuantities(src)) {
-    const kind = timeKind(src, q.index, q.length);
-    // Only a duration classified as that kind may consume that kind's keys: a
-    // null / schedule duration ("give it 4 hours", "the tech arrives in 4
-    // hours") is left visible to the older compliance screens.
-    const grounded = q.key != null && ((kind === 'rain' && rain.has(q.key)) || (kind === 'reentry' && reentry.has(q.key)));
-    if (!grounded) continue;
-    out += `${src.slice(at, q.index)}LABELTIME`;
-    at = q.index + q.length;
+const CLOCK_TIME_RE = /(?<![\w.:])(?:(?:1[0-2]|0?[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)(?![a-z])|(?:[01]?\d|2[0-3]):[0-5]\d(?!\d)|\b(?:1[0-2]|[1-9])ish\b|(?:at|around|about|after|before)\s+(?:1[0-2]|[1-9])(?::[0-5]\d)?(?=\s*(?:ish\b|o'clock|[.,;!?]|$)|\s+(?:today|tonight|tomorrow|this|on)\b)|noon\b|midnight\b|(?:by|until|till)\s+(?:1[0-2]|[1-9])(?![\d:]|\.\d|\s*(?:-|–|to)\s*\d|\s*(?:%|percent|minutes?|mins?|hours?|hrs?|days?|weeks?|inch|inches|feet|ft|gallons?|oz|ounces?|times|treatments?|people|pets?|dogs?|kids?)\b))/i;
+// Label timing is minutes and hours (a day at most); a pest-results timeline
+// ("7 to 10 days", "a couple of weeks") is not, so a clause whose EVERY
+// duration is weeks, or three-plus days, is not a duration claim - unless the
+// clause has label context (checked by the caller).
+const LONG_QTY_WORD_RE = /^(?:three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|several|a\s+few|few|a\s+couple\s+of|couple\s+of|a\s+couple|couple)\b/;
+function durationsIn(clause) {
+  const out = [];
+  for (const m of clause.matchAll(new RegExp(TIME_EXPR_RE.source, 'gi'))) {
+    const top = Number(m[2] ?? m[1]);
+    out.push(/^(?:w)/i.test(m[3]) ? 'long' : (/^d/i.test(m[3]) && top >= 3 ? 'long' : 'short'));
   }
-  return out + src.slice(at);
+  for (const m of clause.matchAll(new RegExp(SPELLED_QTY_RE.source, 'gi'))) {
+    if (out.length && /\d/.test(m[0])) continue; // already counted by the digit pass
+    const unit = m[3] || '';
+    const qty = String(m[2] || m[1] || '').trim();
+    out.push(/^weeks?$/i.test(unit) ? 'long' : (/^days?$/i.test(unit) && LONG_QTY_WORD_RE.test(qty) ? 'long' : 'short'));
+  }
+  return out;
 }
+const hasDuration = (clause) => durationsIn(clause).length > 0;
+const hasShortDuration = (clause) => durationsIn(clause).includes('short');
+const hasClockTime = (clause) => CLOCK_TIME_RE.test(clause);
 
-// What kinds of label line the section actually carries (not its figures):
-// a rainfast line, a re-entry line, and whether that re-entry line is "until dry".
-function groundedLineKinds(sectionText) {
-  const kinds = { rain: false, reentry: false, reentryUntilDry: false };
-  for (const line of String(sectionText || '').split('\n')) {
-    if (!line.startsWith('- ')) continue;
-    const body = line.slice(2);
-    const colon = body.indexOf(': ');
-    if (colon < 0) continue;
-    for (const clause of body.slice(colon + 2).split(';')) {
-      const c = clause.trim();
-      if (/^rainfast\b/i.test(c)) kinds.rain = true;
-      else if (/^re-?entry\b/i.test(c)) {
-        kinds.reentry = true;
-        if (/\buntil dry\b/i.test(c) && !timeKeysIn(c).size) kinds.reentryUntilDry = true;
-      }
+// ---- The reply guard -----------------------------------------------------
+// After the verbatim sentences are stripped, the remainder of a reply is
+// judged clause by clause (a clause ends at , ; : a sentence end, a dash or a
+// linking word). Label timing is never legitimately in the remainder, so ANY
+// of these in a clause is held:
+//   - a duration (digits, spelled, vague) or a clock time, unless the clause
+//     is positively scheduling (staff subject + scheduling verb, a scheduling
+//     noun + copula, business hours, billing/plan/guarantee terms) AND has no
+//     label-context word (people, pets, dry, rain, stay-off, wait, water, mow...);
+//   - "rainfast", "wash it off", "until dry", re-entry / stay-off wording;
+//   - clearance or permission wording in a re-entry or rain context ("can go
+//     back out now", "safe for pets now", "it's rainfast now", "fine to water").
+// The sanctioned none-on-file idiom ("safe once dry" + the technician
+// confirming timing) and the COMPANY FACTS rain line are not claims; the
+// drafter rewrites the former before calling this and the latter carries none
+// of the above.
+const RAIN_WORD_RE = /\b(?:rain(?:s|ed|ing|fall|y|fast)?|rain-fast|showers?|storms?|thunderstorms?|downpours?|sprinklers?|irrigation|drizzle)\b/;
+const RAINFAST_RE = /\brain[-\s]?fast\b|\bwash(?:es|ed|ing)?\s+(?:it\s+|this\s+|that\s+|them\s+|the\s+\w+\s+)?(?:off|away|out)\b|\bwashed\s+off\b/;
+const UNTIL_DRY_HOLD_RE = /\b(?:until|till|til|unless|before)\b[^.]{0,40}\bdr(?:y|ies|ied|ying)\b/;
+const DRY_RE = /\bdr(?:y|ies|ied|ying)\b|\bto\s+set\b|\b(?:cure[sd]?|curing|bond(?:s|ed|ing)?|settle[sd]?|settling|soak(?:s|ed|ing)?|absorb(?:s|ed|ing)?|sink(?:s|ing)?\s+in)\b/;
+const DRY_CONDITIONAL_RE = /\b(?:once|after|when|as\s+long\s+as|provided|if|since)\b[^.]{0,40}\b(?:dr(?:y|ies|ied|ying)|bond(?:s|ed)?|cure[sd]?)\b/;
+const REENTRY_TOPIC_RE = /\bre-?entr(?:y|ies)\b|\bre-?enter(?:ing)?\b|\b(?:stay|stays|staying|stayed|keep|keeps|keeping|kept)\b[^.]{0,25}\b(?:off|out|away|inside|indoors)\b|\b(?:off|away\s+from)\s+(?:of\s+)?(?:the\s+|your\s+|those\s+|any\s+)?(?:lawn|grass|yard|turf|treated|area|areas|surface|surfaces|patio|deck|lanai|garden|sod)\b|\b(?:walk|play|sit|lie|run|step|stand)(?:ing)?\s+(?:on|in|across|through|over)\b|\bgood\s+to\s+go\b|\bwait(?:ing)?\b[^.]{0,20}\b(?:until|till|before|for\s+(?:it|them|the\s+(?:lawn|treatment|application|product|spray|area|grass|yard|surface|surfaces)))\b|\bhold\s+off\b|\bsit\s+tight\b|\b(?:can|could|may|will|should)\s+be\s+(?:used|walked|played|entered|accessed|mowed|watered|enjoyed)\b|\b(?:use|using)\s+(?:the\s+|your\s+)?(?:lawn|yard|grass|patio|deck|lanai|garden|pool|area|outdoors?)\b|\bavoid(?:ing)?\b[^.]{0,20}\b(?:area|areas|lawn|grass|yard|turf|treated|surfaces?|sod|patio|deck|lanai|garden|it)\b/;
+// "go back out", "let them out", "be back outside": a re-entry movement (staff scheduling is excluded by the caller)
+const REENTRY_MOVE_RE = /\b(?:go|goes|going|come|comes|coming|get|gets|getting|be|is|are|let|lets|letting|head|heads|heading)\b[^.!?\n]{0,20}\b(?:back\s+(?:out|outside|inside|in|on)|out\s+(?:on|to)|outside|outdoors)\b|\bon\s+(?:it|the\s+(?:lawn|grass|yard|treated))\b/;
+const BEING_RE = /\b(?:pets?|dogs?|cats?|pups?|puppies|kittens?|animals?|kids?|children|child|toddlers?|babies|baby|people|persons?|family|families|everyone|everybody|anybody|nobody|folks|anyone|humans?|grandkids?|guests?|visitors?|neighbou?rs?|horses?|birds?|chickens?)\b/;
+const ACTIVITY_RE = /\b(?:water(?:ing|ed)?|mow(?:ing|ed)?|irrigat\w*|sprinklers?|swim(?:ming)?|walk(?:ing)?|play(?:ing)?|garden(?:ing)?|weed(?:ing)?|edging|trim(?:ming)?)\b/;
+const PERMISSION_RE = /\b(?:can|could|may|might|able|allowed|allow|permitted|ok|okay|alright|fine|safe|good|clear|cleared|free|ready|welcome|all\s+set|no\s+problem|not\s+a\s+(?:problem|concern|issue|worry)|no\s+need|no\s+worries|isn'?t\s+a\s+(?:problem|concern|issue))\b/;
+// The state words of PERMISSION_RE without the modals (rain "can delay us" is not a clearance).
+const CLEARANCE_STATE_RE = /\b(?:ok|okay|alright|fine|safe|good|clear|cleared|ready|all\s+set|no\s+problem|not\s+a\s+(?:problem|concern|issue|worry)|no\s+worries|isn'?t\s+a\s+(?:problem|concern|issue))\b/;
+const DIRECTIVE_RE = /\b(?:keep|kept|keeping|stay|stays|staying|avoid|avoiding|wait|waiting|hold|holding|leave)\b/;
+const MOVEMENT_RE = /\b(?:out|outside|outdoors?|inside|indoors?|back|off|onto|on\s+(?:it|the|your|that|this)|in\s+the\s+(?:yard|lawn|grass|garden|backyard))\b/;
+// Telling a customer where the pets are when the tech arrives is access, not re-entry.
+const ACCESS_RE = /\b(?:when|before|while|as)\s+(?:we|i|our\s+\w+|the\s+\w+|your\s+\w+)\s+(?:arrive|arrives|get|gets|come|comes|are|is|show|shows|stop|stops|head|pull)\b/;
+// Pronoun clearance with no noun: "you're good", "it's fine", "all clear", "you'll be okay".
+const PRONOUN_CLEARANCE_RE = /\b(?:you|it|they|everything|that|all|things|we|he|she|everyone|everybody|nobody)(?:'s|'re|'ll|'d|\s+(?:is|are|will|would|should|could|can|may|might|shall))?(?:\s+(?:be|been|get|stay|look))?\s+(?:all\s+)?(?:good|fine|ok|okay|safe|clear|set|free|ready)\b|\bin\s+the\s+clear\b|\bgreen\s+light\b/;
+// A place cleared for use: "the lawn will be ready", "the yard is fine".
+const PLACE_CLEARANCE_RE = /\b(?:yard|lawn|grass|turf|patio|deck|lanai|garden|pool|area|areas|surfaces?|treated\s+\w+)(?:'s)?\s+(?:is|are|will\s+be|should\s+be|would\s+be|'ll\s+be|be)\s+(?:all\s+)?(?:ready|good|fine|ok|okay|safe|clear|usable|dry)\b/;
+const CLEARANCE_TIMING_RE = /\b(?:in\s+the\s+(?:morning|evening|afternoon)|lunchtime|dinnertime|bedtime|now|already|right\s+away|immediately|straight\s+away|at\s+once|then|later|soon|tomorrow|tonight|today|(?:this|next)\s+(?:morning|afternoon|evening|night|day|weekend)|(?:after|by|before|around|until|till)\s+(?:lunch|dinner|breakfast|noon|midnight|work|school|dark|sunset|sundown|sunrise|morning|evening|afternoon|night|that|then|tomorrow|tonight))\b/;
+// "give it a bit", "let it dry / sit / set", "allow it time": a wait in other words.
+const GIVE_IT_RE = /\b(?:give|giving|gave|allow|allowing|let|letting|leave|leaving)\s+(?:it|them|that|this|the\s+\w+)\s+(?:a\s+(?:bit|while|little|day|moment|minute|hour)|some\s+time|time|enough\s+time|plenty\s+of\s+time|overnight|dry|sit|set|settle|cure|rest|(?:\S+\s+){0,3}?(?:seconds?|minutes?|mins?|hours?|hrs?|days?|nights?|weeks?))\b/;
+const TAKES_A_WHILE_RE = /\b(?:takes?|needs?|requires?|will\s+take|just\s+needs?)\s+(?:\S+\s+){0,2}?(?:a\s+while|some\s+time|a\s+bit|a\s+little|time|a\s+moment|a\s+half\s+day)\b/;
+const WAIT_ALLOWED_RE = /\bwait(?:ing)?\s+(?:for|to\s+hear|on)\s+(?:us|our|my|a|an|the)?\s*(?:call|text|tech(?:nician)?|team|office|reply|message|email|confirmation|response|estimate|quote|invoice|link|update|callback)\b/;
+const UNTIL_TIME_RE = /\b(?:until|till|til|through)\s+(?:tomorrow|tonight|morning|evening|noon|later|then|the\s+(?:morning|evening|next\s+day|weekend)|this\s+(?:evening|afternoon|weekend)|(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?)\b/;
+// Staff / scheduling language.
+const STAFF_SUBJECT_RE = /\b(?:we|we'll|we're|we've|we'd|i|i'll|i'm|i've|our\s+(?:team|tech(?:nician)?s?|crew|office|dispatcher)|(?:the|a|your)\s+(?:tech(?:nician)?|team|crew|office|teammate|dispatcher|specialist)|tech(?:nician)?s?|teammates?|someone|somebody|dispatch|manager|owner|supervisor|coordinator|representative|rep|staff|specialist|scheduler|customer\s+service|support|adam)\b/;
+const SCHEDULING_VERB_RE = /\b(?:be|arrive|arrives|arriving|come|comes|coming|stop|stops|stopping|swing|swings|swinging|head|heads|reach|reaches|call|calls|text|texts|email|emails|follow|follows|circle|circles|hear|respond|reply|get\s+back|getting\s+back|return|returns|show\s+up|drop\s+by|dispatch|send|visit|schedule|reschedule|contact|touch\s+base|check\s+(?:in|back|on))\b/;
+// the scheduling noun IS the subject: "your next visit is in 3 weeks", "the arrival window is 2 hours"
+const SCHEDULING_SUBJECT_RE = /\b(?:appointments?|visits?|windows?|arrivals?|follow-?ups?|callbacks?|inspections?|estimates?|quotes?|next\s+service|tech(?:nician)?)\s+(?:\w+\s+){0,2}?(?:is|are|was|will\s+be|starts?|runs?|lasts?|takes?|comes?|arrives?)\b/;
+const SCHEDULE_WORD_RE = /\b(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?s?\b|\b(?:tomorrow|tonight|next\s+(?:week|month|visit)|this\s+(?:week|weekend|morning|afternoon)|between|slot|opening|available|availability|window|arrival|arrive|arrives|appointments?)\b/;
+const BUSINESS_RE = /\b(?:invoice|balance|payment|pay|paid|due|price|pricing|plan|membership|renew\w*|contract|guarantee[sd]?|warranty|cancel\w*|billing|bill|charge[sd]?|refund\w*|credit|autopay|subscription|re-?service|re-?treat\w*|callbacks?|open|opens|closed|closes|hours\s+of\s+operation|office\s+hours|business\s+hours|quote|estimate)\b/;
+// Words that make a clause label-context: a quantity next to any of these is
+// never scheduling, whoever the subject is.
+const LABEL_CONTEXT_PARTS = [
+  BEING_RE.source, ACTIVITY_RE.source, DRY_RE.source, REENTRY_TOPIC_RE.source, RAINFAST_RE.source,
+  /\b(?:wait(?:ing)?|hold|sits?|sitting|treated|sprayed|applied|application|reapply|off|stay|keep|kept|safe|unsafe|toxic|residue|wet|damp|soaked)\b/.source,
+];
+const LABEL_CONTEXT_RE = new RegExp([...LABEL_CONTEXT_PARTS, RAIN_WORD_RE.source].join('|'));
+// weather alone ("if rain is forecast in the next few days we'll reschedule") is no label context for a LONG span
+const LABEL_CONTEXT_NO_RAIN_RE = new RegExp(LABEL_CONTEXT_PARTS.join('|'));
+
+const STAY_OFF_CONTEXT_RE = new RegExp([BEING_RE.source, REENTRY_TOPIC_RE.source, DRY_RE.source, /\b(?:off|stay|keep|kept|wait)\b/.source].join('|'));
+const CLAUSE_LINK_RE = /\s+(?:and|but|so|then|which|because|since|plus|though|although|whereas)\s+/;
+// [{ clause, staffCarry, sentence, question }] for `text` (already lowercase).
+function clausesOf(text) {
+  // "8 and 10 AM" / "2 to 3 hours" stay one clause; a decimal point is not a sentence end.
+  const prepared = text
+    .replace(/(\d(?::\d\d)?\s*(?:[ap]\.?m\.?)?)\s+(?:and|through|to)\s+(?=\d)/g, '$1 - ')
+    .replace(/\b([ap])\.m\./g, '$1m');
+  const out = [];
+  const parts = prepared.split(/([!?\n]+|\.(?!\d))/);
+  for (let i = 0; i < parts.length; i += 2) {
+    const sentence = parts[i];
+    const question = /\?/.test(parts[i + 1] || '');
+    let staffCarry = false;
+    for (const raw of sentence.split(/[,;]+|:(?=\s|$)|\u2014|\s--\s/).flatMap((part) => part.split(CLAUSE_LINK_RE))) {
+      const clause = raw.trim();
+      if (!clause) continue;
+      out.push({ clause, staffCarry, sentence, question });
+      // a staff subject carries onto the NEXT clause of the same sentence only
+      // while this clause is itself clean scheduling.
+      staffCarry = STAFF_SUBJECT_RE.test(clause) && !LABEL_CONTEXT_RE.test(clause) && SCHEDULING_VERB_RE.test(clause);
     }
   }
-  return kinds;
+  return out;
 }
 
-// A claim with no number in it. Structural rule instead of a phrase list: a
-// sentence that is ABOUT re-entry (the REENTRY_TRIGGER topic words, "wait"
-// only when paired with drying, or a person / pet paired with drying) is a
-// re-entry claim, and one that says rainfast / wash-off is a rain claim. The
-// claim is ungrounded unless LABEL FACTS has a line of that kind, and an
-// "until dry" re-entry claim is grounded only by a re-entry line that itself
-// says "until dry". A sentence that carries a quantity is decided by the
-// quantity path above, and the sanctioned "safe once dry" idiom is not a claim.
-const REENTRY_STRONG_RE = new RegExp(`${REENTRY_STRONG_A_SRC}|${REENTRY_STRONG_B_SRC}`, 'i');
-const REENTRY_MOVE_RE = new RegExp(REENTRY_MOVE_SRC, 'i');
-// Scheduling, not re-entry: the loose movement wording ("come back out
-// Thursday", "the tech will be outside") with staff as the subject or a
-// scheduling word in the clause, and no person / pet in it.
-const STAFF_SUBJECT_RE = /\b(?:we|we'll|we're|i|i'll|our\s+(?:team|tech(?:nician)?s?|crew)|(?:the|a|your)\s+(?:tech(?:nician)?|team|crew|office)|tech(?:nician)?s?|someone|somebody)\b/i;
-const SCHEDULE_WORD_RE = /\b(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?s?\b|\b(?:tomorrow|tonight|next\s+(?:week|month|visit)|this\s+(?:week|weekend|morning|afternoon)|appointments?|visits?|re-?schedul\w*|schedul\w*|arriv\w*|window|stop(?:ping)?\s+by|swing\s+by|come\s+by)\b/i;
-const WAIT_RE = /\bwait(?:ing)?\b/i;
-const BEING_RE = /\b(?:pets?|dogs?|cats?|pups?|puppies|kids?|children|people|family|everyone|anyone|humans?|toddlers?)\b/i;
-const SAFE_ONCE_DRY_RE = /(?<![\w-])safe\s+(?:once|when|after)\s+(?:it(?:'s| is| has)?\s+)?dr(?:y|ied|ying)\b/gi;
-function hasUngroundedNonNumericClaim(text, sectionText) {
-  const kinds = groundedLineKinds(sectionText);
-  const rainRe = new RegExp(RAIN_TRIGGER_RE.source, 'i');
-  const dryRe = new RegExp(DRY_TRIGGER_RE.source, 'i');
-  // Sentence by sentence. A sentence with a quantity is judged by the quantity
-  // path for the clauses that carry one; its OTHER clauses ("...after 3
-  // hours, and the kids can go back out once it's dry") are still judged here.
-  for (const sentenceRaw of String(text || '').split(/[!?\n]+|\.(?!\d)/)) {
-    const hasQuantity = timeQuantities(sentenceRaw).length > 0;
-    const parts = hasQuantity
-      ? sentenceRaw.split(/[,;:]+|\s[-\u2013\u2014]+\s|\s(?:and|but|then|or|so|while|because)\s/i).filter((c) => !timeQuantities(c).length)
-      : [sentenceRaw];
-    for (const raw of hasQuantity ? [parts.join(' ')] : parts) {
-      if (!raw.trim()) continue;
-      const sentence = raw.replace(SAFE_ONCE_DRY_RE, ' ');
-      const dry = dryRe.test(sentence);
-      const scheduling = !BEING_RE.test(sentence) && (STAFF_SUBJECT_RE.test(sentence) || SCHEDULE_WORD_RE.test(sentence));
-      const reentryClaim = REENTRY_STRONG_RE.test(sentence)
-        || (REENTRY_MOVE_RE.test(sentence) && !scheduling)
-        || (dry && (WAIT_RE.test(sentence) || BEING_RE.test(sentence)));
-      if (reentryClaim && (!kinds.reentry || (dry && !kinds.reentryUntilDry))) return true;
-      if (rainRe.test(sentence) && !kinds.rain) return true;
-    }
-  }
+// Positive scheduling shapes for a quantity in a clause with NO label-context word.
+function isSchedulingClause(clause, { staffCarry, clock, sentence = clause }) {
+  if (LABEL_CONTEXT_RE.test(clause)) return false;
+  if (BUSINESS_RE.test(clause)) return true;
+  // staff subject, then a scheduling verb, then the quantity ("we'll be back out in a couple of days")
+  if ((STAFF_SUBJECT_RE.test(clause) || staffCarry) && SCHEDULING_VERB_RE.test(clause)) return true;
+  // "your next visit is in 3 weeks", "the arrival window is 2 hours"
+  if (SCHEDULING_SUBJECT_RE.test(clause)) return true;
+  // a clock time beside a scheduling word ("between 8 and 10 AM", "Thursday at 2 PM"), but never "until/by N"
+  // (the whole sentence supplies the scheduling word and must itself carry no label context)
+  if (clock && SCHEDULE_WORD_RE.test(sentence) && !LABEL_CONTEXT_RE.test(sentence) && !/\b(?:until|till|by)\b/.test(clause)) return true;
+  return false;
+}
+
+const RAIN_REASSURE_RE = /\b(?:won'?t|will\s+not|doesn'?t|does\s+not|wouldn'?t|would\s+not|can'?t|cannot|shouldn'?t|should\s+not)\s+(?:\w+\s+){0,2}?(?:affect|hurt|harm|matter|damage|ruin|undo|change|impact|wash|remove|rinse|dilute|bother|be\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b|\b(?:don'?t\s+worry|no\s+need\s+to\s+worry|nothing\s+to\s+worry|not\s+to\s+worry|(?:isn'?t|is\s+not|not)\s+(?:an?\s+)?(?:issue|problem|concern|worry))\b/;
+function clauseIsLabelClaim({ clause: c, staffCarry, sentence, question, replyContext, replyDryCondition }) {
+  const being = BEING_RE.test(c);
+  const staffLed = (STAFF_SUBJECT_RE.test(c) || staffCarry) && !being;
+  // a results timeline ("7 to 10 days", "a couple of weeks") is no duration claim
+  // unless the clause carries label context (people, pets, dry, rain, stay-off, wait...)
+  const duration = LABEL_CONTEXT_NO_RAIN_RE.test(c) ? hasDuration(c) : hasShortDuration(c);
+  const clock = hasClockTime(c);
+  if (duration || clock) return !isSchedulingClause(c, { staffCarry, clock: clock && !duration, sentence });
+  if (RAINFAST_RE.test(c) || UNTIL_DRY_HOLD_RE.test(c)) return true;
+  if (REENTRY_TOPIC_RE.test(c)) return true;
+  if (UNTIL_TIME_RE.test(c) && !isSchedulingClause(c, { staffCarry, clock: true, sentence })) return true;
+  if (GIVE_IT_RE.test(c) && !staffLed) return true;
+  if (REENTRY_MOVE_RE.test(c) && !staffLed && !ACCESS_RE.test(c)) return true;
+  if (TAKES_A_WHILE_RE.test(c) && DRY_RE.test(c)) return true;
+  if (/\bwait(?:ing)?\b/.test(c) && !staffLed && !WAIT_ALLOWED_RE.test(c)) return true;
+  // rain: "rain is fine / not a concern / don't worry / won't matter" needs the dried-and-bonded condition
+  const rain = RAIN_WORD_RE.test(c);
+  const rainSentence = RAIN_WORD_RE.test(sentence);
+  if ((!replyDryCondition || CLEARANCE_TIMING_RE.test(c))
+    && ((rain && CLEARANCE_STATE_RE.test(c)) || (rainSentence && RAIN_REASSURE_RE.test(c)))) return true;
+  if (question) return false; // a question asks, it does not claim
+  // people / pets, or a lawn activity, with permission, a directive or a movement word
+  if ((being || ACTIVITY_RE.test(c)) && (PERMISSION_RE.test(c) || DIRECTIVE_RE.test(c) || MOVEMENT_RE.test(c)) && !staffLed && !ACCESS_RE.test(c)) return true;
+  if (being && DRY_RE.test(c)) return true;
+  // "it will be dry by tonight / after lunch / by the time you get home": a drying time in other words
+  if (DRY_RE.test(c) && (CLEARANCE_TIMING_RE.test(c) || /\bby\s+the\s+time\b|\b(?:quick(?:ly)?|fast|rapidly|shortly|in\s+no\s+time|within)\b/.test(c)) && !staffLed) return true;
+  // "tonight is fine", "tomorrow should be good": a day named as the clearance
+  if (replyContext && /\b(?:tonight|tomorrow|today|this\s+(?:evening|afternoon|morning))\b(?:'s)?\s+(?:is\s+|will\s+be\s+|should\s+be\s+)?(?:fine|ok|okay|good|safe|clear)\b/.test(c) && !staffLed) return true;
+  if (PLACE_CLEARANCE_RE.test(c) && !staffLed) return true;
+  // "not before evening", "not until Thursday": a wait in other words
+  if (/\bnot\s+(?:before|until|till)\b/.test(c) && !staffLed && !isSchedulingClause(c, { staffCarry, clock: true, sentence })) return true;
+  // a bare unit beside label wording: "dries in hours", "off for days"
+  if (LABEL_CONTEXT_NO_RAIN_RE.test(c) && /\b(?:hours|minutes|mins|hrs|overnight)\b/.test(c) && !isSchedulingClause(c, { staffCarry, clock: false, sentence })) return true;
+  if (STAY_OFF_CONTEXT_RE.test(c) && /\b(?:days|nights|weeks)\b/.test(c) && !isSchedulingClause(c, { staffCarry, clock: false, sentence })) return true;
+  // "they can go outside as soon as it's dry": a movement with permission, in a reply that is about drying / rain / pets
+  if (replyContext && (PERMISSION_RE.test(c) || DIRECTIVE_RE.test(c)) && MOVEMENT_RE.test(c) && !staffLed && !ACCESS_RE.test(c)) return true;
+  // "you're good", "all clear": only with a label-context sentence, or a "now / tomorrow / later" qualifier,
+  // and never when the sentence is plainly about a booked day ("you're all set for Thursday").
+  if (PRONOUN_CLEARANCE_RE.test(c)
+    && (replyContext || CLEARANCE_TIMING_RE.test(c) || hasDuration(c))
+    && !(SCHEDULE_WORD_RE.test(sentence) && !/\b(?:by|until|till|after|once|when|now|already|later|then|soon)\b/.test(sentence))) return true;
   return false;
 }
 
 /**
- * The older banned-copy lists screen only dry / re-entry phrasing, so an
- * invented time in other words ("rain won't wash it off after 2 hours", "keep
- * the kids off for 6 hours") needs its own deterministic check. A duration
- * counts only when it is grammatically the rainfast / drying / re-entry /
- * stay-off time (see timeKind: attached to those words, never an arrival,
- * window or scheduling time), and then it must be a figure the LABEL FACTS
- * section states for that kind (same number+unit). Spelled-out figures never
- * ground. No section -> none grounded.
+ * True when the remainder of a reply (`strippedText`, see stripLabelSentences)
+ * still makes a label-context timing or clearance claim. Label timing is
+ * given only by copying a LABEL FACTS sentence, so nothing else may claim it.
  */
-function hasUngroundedLabelTime(text, sectionText) {
-  const src = String(text || '');
-  const { rain, reentry } = groundedTimeKeys(sectionText);
-  for (const q of timeQuantities(src)) {
-    const k = timeKind(src, q.index, q.length);
-    if (k === 'schedule') continue;
-    // A quantity in label context (dry / rain / re-entry wording) is held
-    // unless it converts EXACTLY to a figure the section states for that
-    // kind; a vague or unconvertible one ("a couple of hours", "overnight",
-    // "thirteen hours" with no 13-hour line) has no key and is always held.
-    if (k === 'dry') return true; // no label states a drying time
-    if (k === 'rain' && !(q.key != null && rain.has(q.key))) return true;
-    if (k === 'reentry' && !(q.key != null && reentry.has(q.key))) return true;
-    // no trigger at all: a figure that is only ever the RAINFAST time must not
-    // be used as some other time ("give it 2 hours and the pups are good to go")
-    if (k === null && q.key != null && rain.has(q.key) && !reentry.has(q.key)) return true;
+function hasUngroundedLabelClaim(strippedText) {
+  const text = canonText(strippedText).toLowerCase();
+  // The reply as a whole is about label timing when it copied a sentence or
+  // mentions drying, rain, pets or a stay-off anywhere.
+  const replyContext = /labelsentence/.test(text) || LABEL_CONTEXT_RE.test(text);
+  // "a treatment needs to dry and bond ... after that it holds up" / "once dried, rain is fine"
+  const replyDryCondition = DRY_CONDITIONAL_RE.test(text) || /\bneeds?\s+to\s+dry\b/.test(text);
+  return clausesOf(text).some((c) => clauseIsLabelClaim({ ...c, replyContext, replyDryCondition }));
+}
+
+// ---- Send-time recheck ---------------------------------------------------
+// What a decision persists (input_snapshot.label_facts_snapshot) when its
+// final reply copies a LABEL FACTS sentence: which customer and visit the
+// figures came from and exactly which sentences went out.
+function labelFactsSnapshotFor({ labelFacts, reply, sectionText }) {
+  const copied = labelSentencesCopiedIn(reply, sectionText).map((s) => s.text);
+  if (!copied.length || !labelFacts) return null;
+  return {
+    customer_id: labelFacts.customerId ?? null,
+    visit_date: labelFacts.serviceDate,
+    record_ids: Array.isArray(labelFacts.recordIds) ? labelFacts.recordIds.map(String).sort() : [],
+    sentences: copied,
+  };
+}
+
+/**
+ * Send-time revalidation, the same refuse-don't-rewrite shape as the other
+ * delayed-send checks. A body that still copies a snapshotted sentence must
+ * still be backed by the customer's CURRENT latest performed visit: same
+ * visit date, same service records, and the same sentence. A newer visit, a
+ * visit today (the today guard now fires), a changed label or any lookup error
+ * refuses. A body with no snapshotted sentence (edited out) needs no check.
+ * Returns null when it may go out, else a short reason.
+ */
+async function labelFactsSendBlockReason({ snapshot, body, conn = db, today } = {}) {
+  const sentences = snapshot && Array.isArray(snapshot.sentences) ? snapshot.sentences : [];
+  if (!sentences.length) return null;
+  const text = canonText(body).toLowerCase();
+  const present = sentences.filter((s) => text.includes(sentenceCore(s).toLowerCase()));
+  if (!present.length) return null;
+  if (!snapshot.customer_id) return 'label_facts_recheck_no_customer';
+  let current;
+  try {
+    current = await readLastVisitLabelFacts({ customerId: snapshot.customer_id, conn, ...(today ? { today } : {}) });
+  } catch (err) {
+    logger.warn(`[sms-label-facts] send-time recheck failed (${err.message}); refusing`);
+    return 'label_facts_recheck_failed';
   }
-  // Label facts are durations, so no clock time ("after 2 PM", "by 5", "until
-  // noon") is groundable: one attached to rain / drying / re-entry wording is held.
-  for (const m of src.matchAll(CLOCK_TIME_RE)) {
-    const k = timeKind(src, m.index, m[0].length);
-    if (k && k !== 'schedule') return true;
+  if (!current) return 'label_facts_no_longer_current';
+  const same = current.serviceDate === snapshot.visit_date
+    && JSON.stringify(current.recordIds) === JSON.stringify([...(snapshot.record_ids || [])].map(String).sort());
+  if (!same) return 'label_facts_visit_changed';
+  const nowTexts = labelFactsSentences(current).map((s) => s.text);
+  return present.every((s) => nowTexts.includes(s)) ? null : 'label_facts_changed';
+}
+
+// ---- Which visit is the customer asking about? ---------------------------
+// LABEL FACTS speaks for the customer's LATEST performed visit. A message that
+// points at a different visit (a future one, or an older one) gets the none-on-file
+// section instead. Conservative: anything ambiguous reads as a different visit.
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+const WEEKDAY_ABBR_RE = /\b(sun|mon|tues?|wed|thu(?:rs?)?|fri|sat)(?:day|nesday|rsday|urday)?s?\b/g;
+const MONTH_NAMES = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+const FUTURE_VISIT_RE = /\b(?:tomorrow|tonight|upcoming|scheduled|next\s+(?:visit|treatment|service|spray|spraying|application|time|week|month|appointment|round|one|apt)|your\s+next|this\s+(?:coming|upcoming)|when\s+(?:you|y'?all|ya|the\s+(?:tech|technician|guy|man|team)|he|she|they|we|adam)\s+(?:come|comes|coming|get|gets|getting|are|is|arrive|arrives|show|swing|stop|spray|treat|do|did)|(?:coming|swinging|stopping)\s+(?:out|by)|before\s+(?:you|the\s+(?:tech|technician))\s+(?:come|comes|arrive)|will\s+(?:be\s+)?(?:spray|treat|apply)\w*|going\s+to\s+(?:spray|treat|apply)|plan(?:ning)?\s+to\s+(?:spray|treat|apply)|in\s+(?:a\s+)?(?:few|couple|\d+)\s+(?:days|weeks)|later\s+this)\b/;
+const OLDER_VISIT_RE = /\b(?:previous|prior|earlier|before\s+that|last\s+(?:week|month|year|quarter|spring|summer|fall|winter)|(?:weeks?|months?|years?)\s+ago|a\s+while\s+(?:ago|back)|the\s+(?:other|first)\s+time|two\s+visits?\s+ago|second\s+to\s+last)\b/;
+
+function isoAddDays(iso, days) {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+/**
+ * True when the inbound message refers to a visit other than the facts' visit
+ * (`visitDate`, YYYY-MM-DD, `today` the ET date). Errs toward true.
+ */
+function inboundRefersToOtherVisit(inboundText, visitDate, today = etDateString()) {
+  const text = canonText(inboundText).toLowerCase();
+  if (!text || !/^\d{4}-\d{2}-\d{2}$/.test(String(visitDate || ''))) return false;
+  if (FUTURE_VISIT_RE.test(text) || OLDER_VISIT_RE.test(text)) return true;
+  const visit = new Date(`${visitDate}T12:00:00Z`);
+  const sinceVisit = Math.round((new Date(`${today}T12:00:00Z`) - visit) / 86400000);
+  // "yesterday" / "N days ago" resolve against today and must land on the visit date
+  if (/\byesterday\b/.test(text) && isoAddDays(today, -1) !== visitDate) return true;
+  for (const m of text.matchAll(/\b(\d{1,3}|a|one|two|three|four|five|six|seven)\s+days?\s+ago\b/g)) {
+    const words = { a: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7 };
+    const n = words[m[1]] ?? Number(m[1]);
+    if (isoAddDays(today, -n) !== visitDate) return true;
   }
-  return hasUngroundedNonNumericClaim(src, sectionText);
+  // a weekday name: only the visit's own weekday, and only when the visit was within the last 6 days
+  for (const m of text.matchAll(WEEKDAY_ABBR_RE)) {
+    const name = WEEKDAYS.find((w) => w.startsWith(m[1].slice(0, 3)));
+    if (!name || name !== WEEKDAYS[visit.getUTCDay()] || sinceVisit < 0 || sinceVisit > 6) return true;
+  }
+  // an explicit date ("Sep 29", "September 29th", "9/29", "9/29/26") must be the visit's date
+  const [vy, vmo, vday] = visitDate.split('-').map(Number);
+  for (const m of text.matchAll(new RegExp(`\\b(${MONTH_NAMES.map((n) => n.slice(0, 3)).join('|')})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'g'))) {
+    if (MONTH_NAMES.findIndex((n) => n.startsWith(m[1])) + 1 !== vmo || Number(m[2]) !== vday) return true;
+  }
+  for (const m of text.matchAll(/(?<![\d/])(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?(?![\d/])/g)) {
+    const yr = m[3] ? (m[3].length === 2 ? 2000 + Number(m[3]) : Number(m[3])) : vy;
+    if (Number(m[1]) !== vmo || Number(m[2]) !== vday || yr !== vy) return true;
+  }
+  return false;
 }
 
 module.exports = {
@@ -616,14 +695,19 @@ module.exports = {
   LABEL_SECTION_REGEX_SRC,
   escapeRegex,
   LABEL_FACTS_NONE_SECTION,
-  hasUngroundedLabelTime,
   LABEL_FACTS_HEADER_PREFIX,
   LABEL_FACTS_TIMEOUT_MS,
   readLastVisitLabelFacts,
   fetchLabelFacts,
   renderLabelFactsSection,
+  labelFactsSentences,
   labelFactsSectionFrom,
-  groundedTimeKeys,
+  labelSentencesIn,
+  labelSentencesCopiedIn,
   groundedLineKinds,
-  neutralizeGroundedTimes,
+  stripLabelSentences,
+  hasUngroundedLabelClaim,
+  labelFactsSnapshotFor,
+  labelFactsSendBlockReason,
+  inboundRefersToOtherVisit,
 };
