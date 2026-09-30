@@ -8,11 +8,13 @@
  * submit_gsc_sitemap (IB scope expansion item 1, owner ruling 2026-09-28) is
  * the one outside-write tool here: structurally two-step (write-gates.js
  * OUTSIDE_WRITE_TOOL_NAMES), full-access-only (ib-access.js ibFullAccess,
- * enforced in routes/admin-intelligence-bar.js — not here). THIS PR IS
- * PREVIEW ONLY: called with confirmed:true it refuses — the commit path (an
- * actual Search Console sitemaps.submit call) ships in a follow-up PR.
- * GOOGLE_SERVICE_ACCOUNT_JSON is read-scoped (webmasters.readonly) today; a
- * write needs the webmasters scope (see the IB scope doc's token checklist).
+ * enforced in routes/admin-intelligence-bar.js — not here). Confirmed, it
+ * submits ONLY the pinned property + sitemap URL /confirm-action verified
+ * against the live preview (`_verified_gsc_property` /
+ * `_verified_gsc_sitemap_url`), through search-console-v2.js's submitSitemap
+ * — its own client scoped `webmasters`; every read keeps the read-only
+ * (`webmasters.readonly`) client. The service account must be a Full user of
+ * the property; a 401/403 surfaces as "needs write access", nothing changed.
  */
 
 const db = require('../../models/db');
@@ -341,7 +343,7 @@ Use for: "find orphan pages", "internal linking gaps", "which pages have no inbo
   },
   {
     name: 'submit_gsc_sitemap',
-    description: `Submit a domain's sitemap to Google Search Console so Google re-crawls it sooner. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to Search Console.
+    description: `Submit a domain's sitemap to Google Search Console so Google re-crawls it sooner. Owner login only, through a confirmation card.
 Use for: "resubmit the sitemap for bradentonflpestcontrol.com", "tell Google to recrawl the sitemap"`,
     input_schema: {
       type: 'object',
@@ -356,7 +358,6 @@ Use for: "resubmit the sitemap for bradentonflpestcontrol.com", "tell Google to 
 
 const GSC_NOT_CONFIGURED_MESSAGE = 'Search Console access is not configured. Add the GOOGLE_SERVICE_ACCOUNT_JSON service variable (a Google service account with Search Console access) in the Railway dashboard.';
 const DEFAULT_SITEMAP_PATH = '/sitemap-index.xml';
-const NOT_YET_IMPLEMENTED_MESSAGE = 'Search Console write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
 
 
 // ─── EXECUTION ──────────────────────────────────────────────────
@@ -1480,10 +1481,9 @@ async function internalLinkGraphReport(input) {
 
 // Unconfirmed: resolve the domain against fleet_sites live so the card names
 // the actual site (not just an operator-typed domain string), never submits
-// anything. Confirmed: the commit path (a Search Console sitemaps.submit
-// call) is not built in this PR. Full access is enforced by the route
-// (ib-access.js ibFullAccess) — GOOGLE_SERVICE_ACCOUNT_JSON is read-scoped
-// (webmasters.readonly) today regardless; a write needs the webmasters scope.
+// anything. Confirmed: submits the pinned property + sitemap URL (see
+// SearchConsoleV2.submitSitemap). Full access is enforced by the route
+// (ib-access.js ibFullAccess).
 // The two hub domains never have a fleet_sites row (see the NETWORK_DOMAINS
 // import note below), so their display name is fixed here rather than read
 // from a table that doesn't carry them.
@@ -1545,7 +1545,7 @@ async function submitGscSitemap(input) {
     // (reusing search-console-v2.js's own URL-prefix/sc-domain: resolution)
     // rather than synthesizing a URL that merely looks right (codex r3 P1 on
     // #5275) — a synthesized property that isn't accessible would commit to
-    // nothing once the write path ships.
+    // nothing.
     const SearchConsoleV2 = require('../seo/search-console-v2');
     const resolved = await SearchConsoleV2.resolveAccessibleProperty(canonicalDomain);
     if (resolved.error === 'not_accessible') {
@@ -1553,8 +1553,8 @@ async function submitGscSitemap(input) {
     }
     if (resolved.error) throw new Error(resolved.error);
     // The pinned canonical property identifier — Search Console's own
-    // verified form, never a synthesized guess — is what a future commit
-    // path must submit against.
+    // verified form, never a synthesized guess — is what the confirmed
+    // commit submits against.
     const siteUrl = resolved.siteUrl;
     // A URL-prefix property only accepts sitemaps under its own origin
     // (e.g. https://www.wavespestcontrol.com/), so build the feed URL from
@@ -1572,7 +1572,40 @@ async function submitGscSitemap(input) {
       note: `Submit "${sitemapUrl}" to Google Search Console property "${siteUrl}" for ${site.name} (${site.domain}).`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned property + sitemap URL /confirm-action
+  // verified against the live preview above — never re-resolve domain or
+  // sitemap_path from this call's own input (untrusted here). The submit runs
+  // on SearchConsoleV2's own write-scoped client; every read stays on the
+  // read-only one.
+  const pinnedProperty = String(input._verified_gsc_property || '');
+  const pinnedSitemapUrl = String(input._verified_gsc_sitemap_url || '');
+  if (!pinnedProperty || !pinnedSitemapUrl) {
+    return {
+      error: 'Missing the verified property/sitemap identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  // A URL-prefix property only accepts sitemaps under its own origin.
+  if (!pinnedProperty.startsWith('sc-domain:')) {
+    let origin = null;
+    try { origin = new URL(pinnedProperty).origin; } catch { /* malformed pin */ }
+    if (!origin || !pinnedSitemapUrl.startsWith(`${origin}/`)) {
+      return {
+        error: 'The verified sitemap is not under the verified Search Console property — ask again for a fresh confirmation card.',
+        code: 'target_changed',
+        preview_changed: true,
+      };
+    }
+  }
+  const SearchConsoleV2 = require('../seo/search-console-v2');
+  const submitted = await SearchConsoleV2.submitSitemap(pinnedProperty, pinnedSitemapUrl);
+  if (!submitted?.ok) {
+    return {
+      error: submitted?.error || 'Search Console did not accept the sitemap.',
+      ...(submitted?.writeAccessRequired ? { code: 'write_access_required' } : {}),
+    };
+  }
+  return { success: true, tool: 'submit_gsc_sitemap', property: pinnedProperty, sitemap_url: pinnedSitemapUrl };
 }
 
 async function seoActionQueueReport(input) {

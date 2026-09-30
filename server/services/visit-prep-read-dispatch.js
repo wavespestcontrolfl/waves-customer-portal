@@ -10,9 +10,15 @@
  * new gaps. Now:
  *
  * - createVisitPrepSubmission (and the recovery sweep) call
- *   dispatchVisitPrepRead once; it picks the engine for the stop as it is
- *   NOW — pest wins (visit-prep-plant-applicability.js), then lawn / tree &
- *   shrub — among the engines whose gate is live, and runs only that one.
+ *   dispatchVisitPrepRead once; it picks the read for the stop as it is NOW
+ *   (visit-prep-read-key.js) among the engines whose gate is live, and runs
+ *   only that one:
+ *     'pest' | 'plant:<subject>' | 'combo:<subject>'.
+ *   A combined Lawn & Pest stop (one combined service_type, or separate pest
+ *   and lawn / tree & shrub members) gets BOTH reads under one claim
+ *   ('combo:<subject>', visit-prep-combo-read.js) while both gates are live
+ *   (owner ruling 2026-09-30, replacing "pest wins, never both"); with one
+ *   gate dark it degrades to the one live engine.
  * - Each engine still re-proves applicability under the stop lock at the
  *   claim and again before settling (visit-prep-read-claim.js), and any
  *   "not this read's stop any more" outcome comes back HERE through
@@ -28,36 +34,17 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { visitPrepPestReadLive, visitPrepPlantReadLive } = require('../config/feature-gates');
-const { isPestStop } = require('./visit-prep-pest-applicability');
-const { plantSubjectForStop } = require('./visit-prep-plant-applicability');
+const {
+  currentReadKey, storedReadKey, engineOfKey,
+} = require('./visit-prep-read-key');
 const { markUnclaimed, UNCLAIMED_STATUSES } = require('./visit-prep-read-claim');
 
 const MAX_DISPATCHES = 3;
 
-// The read the stop wants as it is now, among live engines: 'pest',
-// 'plant:lawn', 'plant:tree_shrub', or null. plantSubjectForStop is null for
-// any pest stop ("pest wins"), so a pest stop with only the plant gate live
-// is never read by the plant engine.
-async function currentReadKey(svc, conn, { pestLive, plantLive }) {
-  if (pestLive && await isPestStop(svc, conn)) return 'pest';
-  const subject = plantLive ? await plantSubjectForStop(svc, conn) : null;
-  return subject ? `plant:${subject}` : null;
-}
-
-// The read a finished row holds, in the same terms: a plant read carries
-// its engine marker and subject in read_result; anything else is pest.
-function storedReadKey(readResult) {
-  let parsed = readResult;
-  if (typeof readResult === 'string') {
-    try { parsed = JSON.parse(readResult); } catch { parsed = null; }
-  }
-  return parsed?.engine === 'plant' ? `plant:${parsed.subject_type}` : 'pest';
-}
-
-// 'pest' | 'plant' | null for the stop as it is now, among live engines.
+// 'pest' | 'plant' | 'combo' | null for the stop as it is now, among live
+// engines.
 async function chooseEngine(svc, conn, live) {
-  const key = await currentReadKey(svc, conn, live);
-  return key ? key.split(':')[0] : null;
+  return engineOfKey(await currentReadKey(svc, conn, live));
 }
 
 /**
@@ -96,6 +83,7 @@ async function dispatchVisitPrepRead({
   const args = { submissionId, svc, photos, conn, expectStatus, dispatches: dispatches + 1 };
   if (engine === 'pest') return require('./visit-prep-pest-read').triggerVisitPrepPestRead(args);
   if (engine === 'plant') return require('./visit-prep-plant-read').triggerVisitPrepPlantRead(args);
+  if (engine === 'combo') return require('./visit-prep-combo-read').triggerVisitPrepComboRead(args);
   await markUnclaimed(conn, submissionId, 'unsupported', logger, expectStatus);
   return 'unsupported';
 }

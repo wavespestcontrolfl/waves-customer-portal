@@ -156,6 +156,7 @@ const {
 } = require('../services/scheduling/customer-windows');
 const { violatesSelfServeNotice } = require('../services/scheduling/self-serve-notice');
 const { selfBookDayCapEnabled, reserviceRankAfterNewLive, bookCapacityCommitLive } = require('../config/feature-gates');
+const { multiTechConfirmLive } = require('../config/feature-gates');
 const { etDateString, addETDays, addETBusinessDays } = require('../utils/datetime-et');
 const TwilioService = require('../services/twilio');
 const { applyContactNormalization } = require('../utils/intake-normalize');
@@ -3996,6 +3997,21 @@ async function createSelfBooking(payload = {}) {
             .whereRaw('scheduled_services.reservation_expires_at > NOW()');
         });
       });
+      // Second technician (GATE_MULTI_TECH_CONFIRM + capacity mode, dark):
+      // the legs above are OR'd and tech-blind past the tech's own route — a
+      // zone/city leg matches ANOTHER technician's overlapping row, and a
+      // hold leg matches a hold stamped for another technician — even though
+      // the offer (buildBookingAvailability's occupancy mirror) only counts
+      // rows that are unassigned or on the slot's own technician. AND the
+      // same predicate onto the whole probe so a slot offered on technician
+      // B's day is not refused for technician A's stop. Unassigned rows still
+      // block everyone. Off (or no technician, or capacity off): untouched.
+      if (technician_id && multiTechConfirmLive() && capacityEnabled()) {
+        conflictQuery.where((q) => {
+          q.whereNull('scheduled_services.technician_id')
+            .orWhere('scheduled_services.technician_id', technician_id);
+        });
+      }
       const conflict = await conflictQuery.first('scheduled_services.id');
       if (conflict) {
         throw Object.assign(new Error('That time slot was just taken. Please pick another.'), {
@@ -4023,6 +4039,7 @@ async function createSelfBooking(payload = {}) {
         date: slotDateStr,
         windowStart: slot_start,
         windowEnd: endTime,
+        technicianId: technician_id || null, // tech-aware scope, gate-dark (occupancy.js header)
         // Travel gap (GATE_SLOT_TRAVEL_GAP): the booking's own pin, resolved
         // for the offer location key above; NaN → null → buffer-only.
         travel: {

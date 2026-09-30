@@ -53,61 +53,57 @@ function optionalText(v, field, errors) {
 }
 
 // validateRule(json) -> { valid, errors, rule }
+function validateHoldFields(value, errors) {
+  // A label that says "do not irrigate until the spray has dried" is a
+  // CONDITION, not a duration; it is stored as hold_until 'dry' with no
+  // hours, so no surface can turn it into a fixed drying time (codex P2
+  // #5389 r2). hold_hours may still accompany it as an optional floor.
+  const untilDry = value.hold_until === 'dry';
+  if (value.hold_until != null && !untilDry) errors.push("hold_until must be 'dry' when present");
+  const out = untilDry ? { hold_until: 'dry' } : {};
+  if (untilDry && value.hold_hours == null) return { ...out, hold_hours: null };
+  const hours = value.hold_hours == null ? DEFAULT_HOLD_HOURS : positiveNumber(value.hold_hours, MAX_HOURS);
+  if (hours == null) errors.push(`hold_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
+  return { ...out, hold_hours: hours };
+}
+
+function validateWaterInFields(value, errors) {
+  const inches = value.water_in_inches == null ? DEFAULT_WATER_IN_INCHES : positiveNumber(value.water_in_inches, MAX_INCHES);
+  const byHours = value.water_in_by_hours == null ? DEFAULT_WATER_IN_BY_HOURS : positiveNumber(value.water_in_by_hours, MAX_HOURS);
+  if (inches == null) errors.push(`water_in_inches must be a number greater than 0 and at most ${MAX_INCHES}`);
+  if (byHours == null) errors.push(`water_in_by_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
+  return { water_in_inches: inches, water_in_by_hours: byHours };
+}
+
+function validateVerifiedAt(value, errors) {
+  if (value == null || value === '') return null;
+  const t = new Date(value);
+  if (Number.isNaN(t.getTime())) { errors.push('verified_at must be a valid date'); return null; }
+  return t.toISOString();
+}
+
+const MODE_FIELDS = { hold: validateHoldFields, water_in: validateWaterInFields, none: () => ({}) };
+
 // `json` is an object or a JSON string. `rule` is the normalized rule (only
 // the keys that apply to its mode, defaults filled in) when valid, else null.
 function validateRule(json) {
   const value = parseJson(json);
-  const errors = [];
   if (!isPlainObject(value)) {
     return { valid: false, errors: ['rule must be a JSON object'], rule: null };
   }
-  for (const key of Object.keys(value)) {
-    if (!RULE_KEYS.includes(key)) errors.push(`unknown key: ${key}`);
-  }
+  const errors = Object.keys(value).filter((key) => !RULE_KEYS.includes(key)).map((key) => `unknown key: ${key}`);
   if (!MODES.includes(value.mode)) errors.push(`mode must be one of ${MODES.join(', ')}`);
   if (!SOURCES.includes(value.source)) errors.push(`source must be one of ${SOURCES.join(', ')}`);
 
-  const rule = { mode: value.mode };
-  if (value.mode === 'hold') {
-    // A label that says "do not irrigate until the spray has dried" is a
-    // CONDITION, not a duration; it is stored as hold_until 'dry' with no
-    // hours, so no surface can turn it into a fixed drying time (codex P2
-    // #5389 r2). hold_hours may still accompany it as an optional floor.
-    if (value.hold_until != null && value.hold_until !== 'dry') errors.push("hold_until must be 'dry' when present");
-    const untilDry = value.hold_until === 'dry';
-    if (untilDry) {
-      rule.hold_until = 'dry';
-      if (value.hold_hours == null) {
-        rule.hold_hours = null;
-      } else {
-        const hours = positiveNumber(value.hold_hours, MAX_HOURS);
-        if (hours == null) errors.push(`hold_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
-        rule.hold_hours = hours;
-      }
-    } else {
-      const hours = value.hold_hours == null ? DEFAULT_HOLD_HOURS : positiveNumber(value.hold_hours, MAX_HOURS);
-      if (hours == null) errors.push(`hold_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
-      rule.hold_hours = hours;
-    }
-  } else if (value.mode === 'water_in') {
-    const inches = value.water_in_inches == null ? DEFAULT_WATER_IN_INCHES : positiveNumber(value.water_in_inches, MAX_INCHES);
-    const byHours = value.water_in_by_hours == null ? DEFAULT_WATER_IN_BY_HOURS : positiveNumber(value.water_in_by_hours, MAX_HOURS);
-    if (inches == null) errors.push(`water_in_inches must be a number greater than 0 and at most ${MAX_INCHES}`);
-    if (byHours == null) errors.push(`water_in_by_hours must be a number greater than 0 and at most ${MAX_HOURS}`);
-    rule.water_in_inches = inches;
-    rule.water_in_by_hours = byHours;
-  }
-  rule.source = value.source;
-  rule.label_note = optionalText(value.label_note, 'label_note', errors);
-  let verifiedAt = null;
-  if (value.verified_at != null && value.verified_at !== '') {
-    const t = new Date(value.verified_at);
-    if (Number.isNaN(t.getTime())) errors.push('verified_at must be a valid date');
-    else verifiedAt = t.toISOString();
-  }
-  rule.verified_at = verifiedAt;
-  rule.verified_by = optionalText(value.verified_by, 'verified_by', errors);
-
+  const modeFields = MODE_FIELDS[value.mode] ? MODE_FIELDS[value.mode](value, errors) : {};
+  const rule = {
+    mode: value.mode,
+    ...modeFields,
+    source: value.source,
+    label_note: optionalText(value.label_note, 'label_note', errors),
+    verified_at: validateVerifiedAt(value.verified_at, errors),
+    verified_by: optionalText(value.verified_by, 'verified_by', errors),
+  };
   return errors.length ? { valid: false, errors, rule: null } : { valid: true, errors: [], rule };
 }
 
@@ -168,6 +164,10 @@ function deriveDefaultRule(row) {
   const flagFalse = row.irrigation_required === false;
   const preEmergent = isPreEmergent(row);
   const herbicide = category.includes('herbicide') || preEmergent;
+
+  // An affirmative catalog flag is label-derived and outranks the generic
+  // post-emergent spray default (codex P2 #5389 r3).
+  if (row.irrigation_required === true) return defaultRule({ mode: 'water_in' });
 
   if (herbicide && !preEmergent && form === 'spray') {
     const rainfastMinutes = Number(row.rainfast_minutes);

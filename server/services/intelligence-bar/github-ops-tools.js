@@ -19,12 +19,14 @@
  * routes/admin-intelligence-bar.js — not here). request_codex_review always
  * posts the EXACT body "@codex review" — never a model- or caller-supplied
  * string — because a bare "@codex" tag (with no "review") runs a different
- * task instead of a code review. THIS PR IS PREVIEW ONLY: called with
- * confirmed:true, all three refuse — the commit path (the actual GitHub
- * rerun-failed-jobs / add-labels / create-comment calls) ships in a
- * follow-up PR. GITHUB_TOKEN is read-scoped today; a write needs Actions
- * read/write + Pull requests read/write added (see the IB scope doc's token
- * checklist).
+ * task instead of a code review. Confirmed, each acts ONLY on the pinned
+ * identifiers /confirm-action verified against the live preview's
+ * fingerprint (`_verified_github_pr_number`, `_verified_github_run_ids`,
+ * `_verified_github_head_sha`, `_verified_github_label`, threaded in by
+ * admin-intelligence-bar.js) — never a re-resolve of pr_number/label from the
+ * confirmed call's own input. GITHUB_TOKEN needs Actions read/write + Pull
+ * requests read/write (+ Contents read) for the writes to succeed; a 401/403
+ * surfaces as a plain "the token needs write access" error.
  */
 
 const logger = require('../logger');
@@ -65,7 +67,7 @@ Use for: "what is commit abae45b?", "what's live right now?" (after getting the 
   },
   {
     name: 'rerun_failed_github_checks',
-    description: `Rerun the failed jobs (only the failed jobs, not the whole run) of every failed GitHub Actions workflow run on a pull request's current head commit — a head commit can have more than one workflow run, and this reruns each that failed. A failed check from a non-Actions app (e.g. a third-party status check) cannot be rerun from here. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
+    description: `Rerun the failed jobs (only the failed jobs, not the whole run) of every failed GitHub Actions workflow run on a pull request's current head commit — a head commit can have more than one workflow run, and this reruns each that failed. A failed check from a non-Actions app (e.g. a third-party status check) cannot be rerun from here. Owner login only, through a confirmation card.
 Use for: "rerun the failed checks on PR 5230", "that CI run flaked, retry it"`,
     input_schema: {
       type: 'object',
@@ -77,7 +79,7 @@ Use for: "rerun the failed checks on PR 5230", "that CI run flaked, retry it"`,
   },
   {
     name: 'add_github_pr_label',
-    description: `Add a label to a pull request on the portal repo. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
+    description: `Add a label to a pull request on the portal repo. Owner login only, through a confirmation card.
 Use for: "label PR 5230 as needs-review", "tag that PR blocked"`,
     input_schema: {
       type: 'object',
@@ -90,7 +92,7 @@ Use for: "label PR 5230 as needs-review", "tag that PR blocked"`,
   },
   {
     name: 'request_codex_review',
-    description: `Post a comment on a pull request that triggers a Codex review round. The comment body is ALWAYS the exact text "@codex review" — never anything else — because a bare "@codex" mention with no "review" runs a different automated task instead. Owner login only, through a confirmation card. PREVIEW ONLY for now — this does not yet commit to GitHub.
+    description: `Post a comment on a pull request that triggers a Codex review round. The comment body is ALWAYS the exact text "@codex review" — never anything else — because a bare "@codex" mention with no "review" runs a different automated task instead. Owner login only, through a confirmation card.
 Use for: "tag Codex on PR 5230", "ask for a review round on that PR"`,
     input_schema: {
       type: 'object',
@@ -102,7 +104,7 @@ Use for: "tag Codex on PR 5230", "ask for a review round on that PR"`,
   },
 ];
 
-const NOT_YET_IMPLEMENTED_MESSAGE = 'GitHub write commits are not enabled yet — this preview cannot be confirmed. The commit path ships in a follow-up PR.';
+const WRITE_ACCESS_MESSAGE = 'The GitHub token needs write access — GITHUB_TOKEN must grant Actions read/write and Pull requests read/write (plus Contents read) on the portal repo before this action can commit.';
 const CODEX_REVIEW_COMMENT_BODY = '@codex review';
 
 const NOT_CONFIGURED_MESSAGE = 'GitHub access is not configured. Add the GITHUB_TOKEN service variable (a fine-grained PAT with read access to the portal repo) in the Railway dashboard.';
@@ -135,6 +137,51 @@ async function githubGet(path, params = {}) {
     }
     if (!res.ok) throw new Error(`GitHub API returned HTTP ${res.status}`);
     return await res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`GitHub API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The one write helper — POST only, always against a pinned id from a
+// fingerprint-verified preview. 401/403 means the PAT can read but not write
+// (GitHub answers 403 "Resource not accessible by personal access token"),
+// surfaced as a plain, actionable message. A 403 that is really a rate limit
+// is NOT a permission problem and keeps its own text.
+async function githubPost(path, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${GITHUB_API_BASE}${path}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'waves-portal-intelligence-bar',
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (res.status === 401 || res.status === 403) {
+      let rateLimited = false;
+      try {
+        const j = await res.json();
+        rateLimited = /rate limit/i.test(String(j?.message || ''));
+      } catch { /* body wasn't JSON */ }
+      const err = new Error(rateLimited ? 'GitHub rate limit reached — try again shortly.' : WRITE_ACCESS_MESSAGE);
+      err.status = res.status;
+      if (!rateLimited) err.writeAccessRequired = true;
+      throw err;
+    }
+    if (!res.ok) {
+      const err = new Error(`GitHub API returned HTTP ${res.status}`);
+      err.status = res.status;
+      throw err;
+    }
+    return await res.json().catch(() => ({}));
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`GitHub API timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
     throw err;
@@ -217,15 +264,15 @@ async function resolvePr(prNumber) {
 
 // Unconfirmed: resolve the PR and its head commit's check-runs live, so the
 // card names the PR and lists exactly which jobs are currently failing.
-// Confirmed: the commit path (a GitHub rerun-failed-jobs POST) is not built
-// in this PR. Full access is enforced by the route (ib-access.js).
+// Confirmed: POSTs rerun-failed-jobs to each pinned workflow run. Full
+// access is enforced by the route (ib-access.js).
 const GITHUB_ACTIONS_APP_SLUG = 'github-actions';
 const FAILED_CONCLUSIONS = ['failure', 'timed_out', 'cancelled'];
 
 // The Checks API (commits/{sha}/check-runs) returns one row per CHECK — for
 // a GitHub Actions job that is one row per job, but third-party apps
 // (Codecov, a status-check bot, …) post their own check runs the same way,
-// and the rerun-failed-jobs endpoint that a future commit path calls takes a
+// and the rerun-failed-jobs endpoint that the commit path calls takes a
 // WORKFLOW-RUN id, not a check-run id (codex r3 P1 on #5275 — check-run ids
 // were being pinned as `run_id` and would 404 against that endpoint even
 // when they did happen to be Actions-backed). Actions-backed check runs
@@ -246,7 +293,7 @@ async function rerunFailedGithubChecks(input) {
     // Only resolve workflow runs when at least one failed check is
     // Actions-backed — several failed checks can share one workflow run, and
     // rerun-failed-jobs reruns every failed job in the run it names, so the
-    // run id (never a per-check id) is what a future commit path needs.
+    // run id (never a per-check id) is what the commit needs.
     let failedRuns = [];
     if (failedChecks.length > nonActionsFailed.length) {
       const runsResp = await githubGet(`/repos/${repoPath()}/actions/runs`, { head_sha: sha, per_page: 100 });
@@ -275,14 +322,59 @@ async function rerunFailedGithubChecks(input) {
       preview: true,
       tool: 'rerun_failed_github_checks',
       pr: { number: pr.number, title: pr.title, head_sha: sha.slice(0, 10) },
-      // The pinned canonical workflow-run identity a future commit path must
-      // call rerun-failed-jobs against — never a check-run id.
+      // The pinned canonical workflow-run identity the confirmed commit calls
+      // rerun-failed-jobs against — never a check-run id.
       workflow_runs: failedRuns,
       ...(nonActionsFailed.length ? { non_actions_failed_checks: nonActionsFailed } : {}),
       note: `Rerun the failed jobs in ${failedRuns.length} workflow run(s) on PR #${pr.number} "${pr.title}" (${failedRuns.map(r => r.name).join(', ')})${nonActionsFailed.length ? ` — ${nonActionsFailed.map(f => f.name).join(', ')} cannot be rerun from here` : ''}.`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned PR number, head SHA and workflow-run
+  // ids /confirm-action verified against the live preview above — never
+  // re-resolve pr_number or "the failed runs" from this call's own input.
+  const pinnedPr = Number(input._verified_github_pr_number);
+  const pinnedHeadSha = String(input._verified_github_head_sha || '');
+  const pinnedRunIds = Array.isArray(input._verified_github_run_ids) ? input._verified_github_run_ids.map(String) : [];
+  if (!Number.isInteger(pinnedPr) || pinnedPr <= 0 || !pinnedHeadSha || !pinnedRunIds.length) {
+    return {
+      error: 'Missing the verified workflow-run identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  // Re-assert each pinned run under this call: still on the approved head
+  // commit and still a failed, completed run. A run that was already rerun
+  // (now in progress / passing) or moved to a new head means the card is
+  // stale — refuse before touching anything.
+  for (const runId of pinnedRunIds) {
+    const run = await githubGet(`/repos/${repoPath()}/actions/runs/${encodeURIComponent(runId)}`);
+    if (String(run?.head_sha || '').slice(0, pinnedHeadSha.length) !== pinnedHeadSha
+      || run?.status !== 'completed' || !FAILED_CONCLUSIONS.includes(run?.conclusion)) {
+      return {
+        error: `A workflow run on PR #${pinnedPr} changed after the card was shown (new commit, or it was already rerun). Ask again for a fresh confirmation card.`,
+        code: 'target_changed',
+        preview_changed: true,
+      };
+    }
+  }
+  const rerun = [];
+  for (const runId of pinnedRunIds) {
+    try {
+      await githubPost(`/repos/${repoPath()}/actions/runs/${encodeURIComponent(runId)}/rerun-failed-jobs`);
+      rerun.push(runId);
+    } catch (err) {
+      if (!rerun.length) throw err;
+      // Some runs already restarted — never report a clean failure for a
+      // half-applied action.
+      return {
+        partial: true,
+        tool: 'rerun_failed_github_checks',
+        pr_number: pinnedPr,
+        rerun_run_ids: rerun,
+        warning: `Reran ${rerun.length} of ${pinnedRunIds.length} workflow run(s); the rest could not be rerun (${err.message}).`,
+      };
+    }
+  }
+  return { success: true, tool: 'rerun_failed_github_checks', pr_number: pinnedPr, rerun_run_ids: rerun };
 }
 
 const MAX_LABEL_SUGGESTIONS = 5;
@@ -333,13 +425,24 @@ async function addGithubPrLabel(input) {
       tool: 'add_github_pr_label',
       pr: { number: pr.number, title: pr.title },
       // The pinned canonical label name (its real, existing casing) — never
-      // the operator's raw string — is what a future commit path must use.
+      // the operator's raw string — is what the confirmed commit uses.
       label: label.name,
       existing_labels: existing,
       note: `Add the "${label.name}" label to PR #${pr.number} "${pr.title}".`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned PR number + canonical label name
+  // /confirm-action verified against the live preview above.
+  const pinnedPr = Number(input._verified_github_pr_number);
+  const pinnedLabel = String(input._verified_github_label || '');
+  if (!Number.isInteger(pinnedPr) || pinnedPr <= 0 || !pinnedLabel) {
+    return {
+      error: 'Missing the verified PR/label identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  await githubPost(`/repos/${repoPath()}/issues/${pinnedPr}/labels`, { labels: [pinnedLabel] });
+  return { success: true, tool: 'add_github_pr_label', pr_number: pinnedPr, label: pinnedLabel };
 }
 
 async function requestCodexReview(input) {
@@ -353,7 +456,18 @@ async function requestCodexReview(input) {
       note: `Post the comment "${CODEX_REVIEW_COMMENT_BODY}" on PR #${pr.number} "${pr.title}" — this starts a Codex review round.`,
     };
   }
-  return { error: NOT_YET_IMPLEMENTED_MESSAGE, code: 'not_yet_implemented' };
+  // Confirmed: act ONLY on the pinned PR number /confirm-action verified
+  // against the live preview above. The body is the fixed constant — never a
+  // caller-supplied string.
+  const pinnedPr = Number(input._verified_github_pr_number);
+  if (!Number.isInteger(pinnedPr) || pinnedPr <= 0) {
+    return {
+      error: 'Missing the verified PR identity for this confirmed action — ask again for a fresh confirmation card.',
+      code: 'missing_verified_pin',
+    };
+  }
+  await githubPost(`/repos/${repoPath()}/issues/${pinnedPr}/comments`, { body: CODEX_REVIEW_COMMENT_BODY });
+  return { success: true, tool: 'request_codex_review', pr_number: pinnedPr };
 }
 
 async function executeGithubOpsTool(toolName, input = {}) {
@@ -376,7 +490,7 @@ async function executeGithubOpsTool(toolName, input = {}) {
     // The operator sees the detailed message; the log never does — a
     // rejected label or PR title can carry customer text (Codex r4 on #5275).
     logger.error(`[intelligence-bar:github-ops] Tool ${toolName} failed (status=${err.status || 'n/a'})`);
-    return { error: err.message };
+    return { error: err.message, ...(err.writeAccessRequired ? { code: 'write_access_required' } : {}) };
   }
 }
 

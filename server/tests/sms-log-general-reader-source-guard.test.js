@@ -194,6 +194,11 @@ const ALLOWLIST = [
     reason: 'status filtered to queued/sent/delivered, which excludes \'sending\' — an unresolved reservation cannot match (once promoted to \'sent\' it is real delivery evidence by design, not a reservation).',
   },
   {
+    file: 'services/scheduled-sms-cancel.js',
+    snippet: 'const current = await trx(\'sms_log\').where({ id, status: \'scheduled\' }).first(\'metadata\');',
+    reason: 'by-id, status \'scheduled\' read of the one row being cancelled (workflow-ownership recheck after the CAS matched nothing) — not a message-history reader, and \'scheduled\' excludes \'sending\' reservations.',
+  },
+  {
     file: 'routes/admin-communications.js',
     snippet: 'const logged = outcome.providerMessageId && await db(\'sms_log\')',
     reason: 'keyed by twilio_sid — a send reservation never has one until it is promoted to a real send, at which point it is legitimate delivery evidence, not a placeholder.',
@@ -480,11 +485,6 @@ const ALLOWLIST = [
     file: 'services/sms-operational-actions.js',
     snippet: 'const candidates = await conn(\'sms_log as s\').modify(withoutScheduledDeliveryTwins, \'s\').where(\'s.created_at\', \'>=\', since).where(\'s.created_at\', \'<=\', now)',
     reason: 'inbound-only (direction: \'inbound\') — a send reservation is always an outbound row.',
-  },
-  {
-    file: 'services/sms-operational-actions.js',
-    snippet: 'const source = await trx(\'sms_log\').where({ id: initial.sms_log_id }).forUpdate().first();',
-    reason: 'single-row lookup by id — not a list read.',
   },
   {
     file: 'services/sms-operational-actions.js',

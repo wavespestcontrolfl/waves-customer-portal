@@ -3921,10 +3921,26 @@ async function recruitingReplyContext(messageId, to) {
 // status flip that strands one of those obligations (Codex round 1 on
 // #5224, P1). This handler only translates that shared result back to the
 // exact responses it always gave.
+//
+// `refuseWorkflowOwned: true` (found during a #5224 pre-push audit): a row an
+// automated workflow owns (any metadata.entry_point other than recruiting,
+// replay_purpose, or a bundled review request) is refused with 409 rather
+// than silently deleted — deleting it here never runs that workflow's own
+// cleanup and would strand its state, exactly like the Intelligence Bar's
+// cancel_queued_message already refuses to. Recruiting texts and
+// Agent-Review-linked rows are unaffected (the writer reconciles both).
 router.delete('/scheduled/:id', async (req, res, next) => {
   try {
-    const result = await cancelScheduledSmsRow({ id: req.params.id, techRole: req.techRole, technicianId: req.technicianId });
+    const result = await cancelScheduledSmsRow({
+      id: req.params.id, techRole: req.techRole, technicianId: req.technicianId, refuseWorkflowOwned: true,
+    });
     if (result.outcome === 'forbidden') return res.status(403).json({ error: 'Admin access required' });
+    if (result.outcome === 'workflow_owned') {
+      const label = String(result.workflow || '').replace(/_/g, ' ').trim();
+      return res.status(409).json({
+        error: `This text is queued by an automated workflow${label ? ` (${label})` : ''} and can't be deleted from the inbox. It will send or resolve on its own as that workflow finishes.`,
+      });
+    }
     res.json({ success: true });
   } catch (err) { next(err); }
 });
