@@ -2550,7 +2550,9 @@ class PinnedAssessmentUnavailable extends Error {
 // p7: GATE_LAWN_WATERING_RULE — the report can carry a product-instruction
 // aftercare, a top-of-report banner payload and a hold "not before" plan
 // overlay; PDFs rendered before the watering instruction existed must re-key.
-const LAWN_RENDER_STRATEGY = 'p7-watering-instruction-20260929';
+// p8: the watering banner renders under the visit status card, not inside the
+// lawn section (P3); lawn PDFs laid out the old way must re-key.
+const LAWN_RENDER_STRATEGY = 'p8-banner-under-status-20260930';
 
 // ':wr=1' for a frozen visit; otherwise ':wr=1:<hash>' of the (product, rule)
 // pairs the render would use. Reads the record itself, so a partial row from a

@@ -121,6 +121,16 @@ describe('ReportViewPage — Lawn Report V2 (the lawn report)', () => {
     expect(container.querySelectorAll('#products-applied')).toHaveLength(1);
     expect(container.querySelectorAll('#service-timeline')).toHaveLength(1);
   });
+
+  it('the watering banner renders once, directly under the visit status card', async () => {
+    const banner = { state: 'hold', lines: ['Skip your turf watering until Thu 3 PM.', 'That gives today’s treatment time to work.'], expiresAt: '2999-01-01T00:00:00.000Z' };
+    const { container } = renderReport({ ...lawnReportV2, reportV2: { ...lawnReportV2.reportV2, banner } });
+    await screen.findByText('Stable — watching thin areas');
+    expect(screen.getAllByTestId('lawn-watering-banner')).toHaveLength(1);
+    const status = container.querySelector('#service-status');
+    const card = screen.getByTestId('lawn-watering-banner').closest('[data-glass="card"]');
+    expect(status.nextElementSibling).toBe(card);
+  });
 });
 
 describe('ReportViewPage — Termite Report V2 (bait-station dashboard)', () => {

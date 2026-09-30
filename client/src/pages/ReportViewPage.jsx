@@ -7,7 +7,7 @@ import LawnReportV2Section from '../components/report/lawnV2/LawnReportV2Section
 import { StationMapCard } from '../components/StationMapCard';
 import MarkedPhotoCard from '../components/report/MarkedPhotoCard';
 import PoisonControlCopy, { applicatorIdLine } from '../components/report/PoisonControlCopy';
-import { LawnVisitTimeline, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
+import { LawnVisitTimeline, LawnWateringBanner, PrintContext as LawnPrintContext } from '../components/report/lawnV2/LawnReportV2';
 import PestReportV2Section from '../components/report/pestV2/PestReportV2Section';
 import { PestCustomerConcern } from '../components/report/pestV2/PestReportV2';
 import TracedTreatmentZoneMap from '../components/report/TracedTreatmentZoneMap';
@@ -9033,6 +9033,15 @@ function ServiceReportV1({ data, token, mode = 'live' }) {
         <FloatingAskWaves mode={mode} token={token} serviceLine={data.serviceLine} data={data} />
 
         <ServiceStatusCard data={data} mode={mode} resultOverride={data.reportV2?.todaysResult || null} />
+
+        {/* The lawn watering instruction (GATE_LAWN_WATERING_RULE) sits right
+            under the visit status, ahead of everything else the customer
+            reads; the lawn section below no longer repeats it. */}
+        {isLawnReport && data.reportV2?.banner && (
+          <LawnPrintContext.Provider value={mode === 'pdf' || mode === 'static'}>
+            <LawnWateringBanner banner={data.reportV2.banner} />
+          </LawnPrintContext.Provider>
+        )}
 
         <PlanSummaryCard data={data} mode={mode} />
 
