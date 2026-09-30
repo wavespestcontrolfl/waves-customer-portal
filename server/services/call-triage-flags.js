@@ -2043,6 +2043,32 @@ function canAutoRouteDecision(extraction, opts = {}, out = {}) {
     });
   }
 
+  // Commercial dictated booking (opts.commercialDictatedBooking ←
+  // GATE_CALL_COMMERCIAL_DICTATED_BOOKING, owner ruling 2026-09-30): a SECOND
+  // path beside the agent-commitment block above — that block and
+  // hasAgentCommittedEvidence are untouched. Direction-independent. Clears
+  // ONLY commercial_requires_quote, and only when the staff commitment quote
+  // AND the caller's acceptance quote each ground word for word in a turn of
+  // their own speaker (the reschedule grounding, reused unchanged) with a price
+  // agreed on the call — see services/call-commercial-dictated-booking.js. A
+  // missing/swapped speaker label fails closed there. Like the block above it
+  // needs trusted labels, a confirmed start and an on-the-hour start; the
+  // address, unit, capacity and every other hold below still apply. The flag
+  // rides in failedOpenFlags so the office still gets the advisory card.
+  // Required lazily: that module requires this one.
+  if (opts.commercialDictatedBooking === true && opts.transcriptLabelsTrusted === true
+      && confirmedWithStart
+      && commitStartOnTheHour
+      && appointmentBlockingFlags.includes('commercial_requires_quote')
+      && require('./call-commercial-dictated-booking').commercialDictatedBookingGrounded({
+        v2: extraction, transcript: opts.transcript, callStartedAt: opts.callStartedAt,
+      }).ok) {
+    appointmentBlockingFlags = appointmentBlockingFlags.filter((f) => {
+      if (f === 'commercial_requires_quote') { failedOpenFlags.push(f); return false; }
+      return true;
+    });
+  }
+
   if (appointmentBlockingFlags.length > 0) {
     // Carry demoted flags on blocked returns too (codex round-4 P2): a call
     // whose caller_not_authorized was demoted can STILL block on another flag
