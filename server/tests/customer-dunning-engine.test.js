@@ -11,7 +11,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../routes/admin-sms-templates', () => ({ getTemplate: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ gates: {}, dunningCustomerScheduleAllowlist: () => null }));
+let mockAllowlist = null;
+jest.mock('../config/feature-gates', () => ({ gates: {}, dunningCustomerScheduleAllowlist: () => mockAllowlist }));
 jest.mock('../services/stripe', () => ({}));
 jest.mock('../services/microdeposit-verification-email', () => ({ sendMicrodepositVerificationEmail: jest.fn() }));
 jest.mock('../utils/portal-url', () => ({ publicPortalUrl: () => 'https://portal.example.test' }));
@@ -277,6 +278,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockLedger.length = 0;
   mockLocked.length = 0;
+  mockAllowlist = null;
   mockEmailMessages.length = 0;
   mockRepairImpl = async () => new Set();
   process.env.GATE_DUNNING_LADDER_90 = 'true';
@@ -505,6 +507,213 @@ describe('the boundary check at every rail (A-1, A-6, A-12, A-13, B-15, B-16, A-
     expect(out.outcome).toBe('advanced');
     const payload = mockSendTemplate.mock.calls.at(-1)[0].payload;
     expect(payload.invoice_count).toBe('2');
+  });
+});
+
+describe('review batch: told legs, member freshness, pre-provider failures, shadow', () => {
+  const emailFirst = () => { prefs = { invoice_channels: ['email', 'sms'] }; };
+  const smsBlocked = (over) => mockSendMessage.mockResolvedValue({ sent: false, blocked: true, deliveryOutcome: 'not_sent', ...over });
+
+  describe('F1: a definitely-unsendable text leg never leaves the step TOLD forever', () => {
+    test.each([
+      ['final notice (index 5)', 5, 95, 'completed', 'completeFinal'],
+      ['a middle step (index 4)', 4, 60, 'advanced', 'advance'],
+    ])('%s: email delivered, SMS refused for good (opted out / non-mobile / template) => the touch is done', async (_name, stepIndex, sentDaysAgo, outcomeKind, writer) => {
+      setup({ stepIndex, sentDaysAgo });
+      smsBlocked({ code: 'SUPPRESSED_NON_MOBILE' });
+      const out = await run();
+      expect(out.outcome).toBe(outcomeKind);
+      expect(Schedule[writer]).toHaveBeenCalledTimes(1);
+      expect(Schedule.markTold).not.toHaveBeenCalled();
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('a text template that is unavailable (definite not_sent, no retryable flag) is the same', async () => {
+      setup({ stepIndex: 4, sentDaysAgo: 60 });
+      smsBlocked({ code: 'TEMPLATE_UNAVAILABLE' });
+      expect((await run()).outcome).toBe('advanced');
+    });
+
+    test('a RETRYABLE / deferred text block keeps the step told (the leg is retried), and a told step older than 7 days rings the office ONCE', async () => {
+      setup({ stepIndex: 4, sentDaysAgo: 60 });
+      smsBlocked({ code: 'OUTSIDE_SEND_WINDOW', retryable: true, deferred: true });
+      const email = () => mockLedger.find((r) => r.channel === 'email');
+      expect((await run()).outcome).toBe('told');
+      expect(Schedule.advance).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled(); // reached the customer just now
+      // the same step, 8 days on: the email leg was delivered 8 days ago and the text is still failing
+      email().occurred_at = ago(8);
+      Schedule.markTold.mockClear();
+      expect((await run()).outcome).toBe('told');
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      expect(mockNotify.mock.calls[0][1]).toBe('Customer reminder half-delivered');
+      expect(mockNotify.mock.calls[0][3].dedupeKey).toBe(`customer-dunning-told:${SCHEDULE_ID}:1:d60_reminder`);
+    });
+  });
+
+  describe('C1: the next touch is driven by the members active AFTER the send', () => {
+    test('a member paid during the tick does not keep the cadence: advance receives a fresh read, not the pre-send rows', async () => {
+      const preSend = memberSeqRows;
+      mockSendMessage.mockImplementation(async (input) => {
+        // inv-a (the oldest, cadence-driving member) is paid while the message is going out
+        memberSeqRows = memberSeqRows.filter((r) => r.invoice_id !== 'inv-a');
+        await input.preDispatchCheck({ channel: input.channel });
+        return { sent: true, blocked: false, deliveryOutcome: 'accepted' };
+      });
+      const out = await run();
+      expect(out.outcome).toBe('advanced');
+      const { activeRows } = Schedule.advance.mock.calls[0][1];
+      expect(activeRows.map((r) => r.invoice_id).sort()).toEqual(['inv-b', 'inv-c']);
+      expect(preSend).toHaveLength(3);
+    });
+
+    test('after a re-render the rows narrowed to the FIRST set are dropped (read again, not reused)', async () => {
+      let calls = 0;
+      const changed = makeSet(['inv-b', 'inv-c']);
+      mockResolve.mockImplementation(async () => { calls += 1; return calls === 1 ? live : changed; });
+      Schedule.activeMemberRows.mockClear();
+      await run();
+      // catch-up read + the fresh read before advance (+ the re-render dropped the cache in between)
+      expect(Schedule.activeMemberRows.mock.calls.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  describe('C3/C4: pre-provider failures', () => {
+    test('C3: a never_contacted stamp is cleared on EVERY attempt, explicit channel choice or not; only ADDING it depends on default channels', async () => {
+      prefs = undefined;
+      mockLoadContext.mockResolvedValueOnce({ error: mockBlocked('BILLING_EMAIL_RECHECK_FAILED', 'x', { retryable: true }) });
+      await run();
+      expect(rowFor('email').metadata.never_contacted).toBe(true);
+      prefs = { invoice_channels: ['email', 'sms'] }; // the customer has since chosen channels explicitly
+      await run();
+      expect(rowFor('email').metadata.never_contacted).toBeUndefined();
+      expect(rowFor('email').metadata.delivered).toBe(true);
+    });
+
+    test('C4: a short-link failure BEFORE the provider is a definite, retryable non-send on both legs (not an uncertain, never-retried hold)', async () => {
+      emailFirst();
+      mockShorten.mockRejectedValueOnce(new Error('short store down')).mockRejectedValueOnce(new Error('short store down'));
+      const out = await run();
+      expect(out.outcome).toBe('held');
+      expect(mockSendTemplate).not.toHaveBeenCalled();
+      expect(rowFor('email').metadata.send_failed).toBe(true); // reopened for the retry, not left ambiguous
+      expect(rowFor('sms')).toBeDefined();
+      expect(rowFor('sms').metadata.send_failed).toBe(true);
+      expect((await run()).outcome).toBe('advanced'); // the retry claims the reservations and delivers
+      expect(mockSendTemplate).toHaveBeenCalledTimes(1);
+    });
+
+    test('C4: the template library throwing before the handoff is retryable (catch path), a disabled template is terminal', async () => {
+      prefs = { invoice_channels: ['email'] };
+      mockSendTemplate.mockRejectedValueOnce(new Error('template store down'));
+      expect(await run()).toMatchObject({ outcome: 'held' });
+      expect(rowFor('email').metadata.send_failed).toBe(true);
+      mockSendTemplate.mockRejectedValueOnce(Object.assign(new Error('off'), { code: 'EMAIL_TEMPLATE_DISABLED' }));
+      expect((await run()).outcome).toBe('paused');
+    });
+  });
+
+  describe('F3: runner-internal closes carry the run\'s own claim', () => {
+    test('a set that empties, and a missing customer, close under OUR claimStamp (so an in-flight guard never refuses the run itself)', async () => {
+      live = { kind: 'empty', reason: 'no_open_invoices', members: [], anchor: null, totalCents: 0, digest: null, activeCount: 0 };
+      await run();
+      expect(Schedule.close).toHaveBeenLastCalledWith(expect.anything(), 'balance_cleared', NOW, expect.objectContaining({ claimStamp: NOW }));
+      customer = undefined;
+      await run();
+      expect(Schedule.close).toHaveBeenLastCalledWith(expect.anything(), 'customer_missing', NOW, expect.objectContaining({ claimStamp: NOW }));
+    });
+  });
+
+  describe('F5: a failed post-send progress read keeps what an earlier tick already delivered', () => {
+    test('email delivered earlier, text retrying now, the post-send read fails => TOLD (not held / paused)', async () => {
+      const key = `customer-dunning:${SCHEDULE_ID}:1:d60_reminder`;
+      mockLedger.push({
+        id: 'pre-email', customer_id: CUSTOMER_ID, channel: 'email', source: 'invoice_followups_customer', occurred_at: ago(0.1),
+        invoice_ids: ['inv-a', 'inv-b', 'inv-c'], idempotency_key: 'k-email',
+        metadata: { notificationEventKey: key, delivered: true, selectedChannels: ['email', 'sms'] },
+      });
+      smsBlocked({ code: 'OUTSIDE_SEND_WINDOW', retryable: true, deferred: true });
+      const db = require('../models/db');
+      const impl = db.getMockImplementation();
+      db.mockImplementationOnce(impl); // recover-first read
+      db.mockImplementationOnce(impl); // sendReminderChannels' read
+      db.mockImplementationOnce(() => { throw new Error('ledger down'); }); // the post-send read
+      const out = await run();
+      expect(out.outcome).toBe('told');
+      expect(Schedule.markTold).toHaveBeenCalledTimes(1);
+      expect(Schedule.markHeld).not.toHaveBeenCalled();
+      expect(Schedule.markPaused).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('shadow: schedule decisions in a shadow-only rollout, allowlist, no held transaction across Stripe I/O', () => {
+    const logger = require('../services/logger');
+    const lines = () => logger.info.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('SHADOW would')).join('\n');
+    const emptyTableDb = (schedules = []) => {
+      const writes = [];
+      const database = jest.fn((table) => {
+        const q = {
+          where() { return q; }, whereIn() { return q; },
+          insert: (...a) => { writes.push(['insert', table, a]); return q; },
+          update: (...a) => { writes.push(['update', table, a]); return q; },
+          del: (...a) => { writes.push(['del', table, a]); return q; },
+          then: (resolve) => resolve(table === 'customer_dunning_schedules' ? schedules : []),
+        };
+        return q;
+      });
+      database.writes = writes;
+      return database;
+    };
+
+    test('C6: shadow-only (empty table): a customer that WOULD be promoted also logs the schedule\'s would-send, and a held one logs would-hold; nothing is written', async () => {
+      Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID, 'cust-held']);
+      memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
+      mockResolve.mockImplementation(async (id) => (id === 'cust-held'
+        ? makeSet(['inv-a', 'inv-b'], { kind: 'hold', reason: 'account_credit_available' })
+        : makeSet(['inv-a', 'inv-b', 'inv-c'])));
+      const database = emptyTableDb();
+      const tally = await Runner.shadowRun(NOW, { database });
+      const out = lines();
+      expect(out).toMatch(/SHADOW would promote customer=cust-0000-synthetic/);
+      expect(out).toMatch(/SHADOW would send customer=cust-0000-synthetic schedule=projected step=\w+ kind=multi members=3 total_cents=\d+ due=\d{4}-/);
+      expect(out).toMatch(/SHADOW would hold customer=cust-held reason=account_credit_available/);
+      expect(tally).toMatchObject({ promote: 1, send: 1, hold: 1, failed: 0 });
+      expect(database.writes).toEqual([]);
+      for (const writer of ['claim', 'markHeld', 'markPaused', 'alertStaff', 'close']) expect(Schedule[writer]).not.toHaveBeenCalled();
+      expect(mockNotify).not.toHaveBeenCalled();
+    });
+
+    test('C7: the canary allowlist narrows the shadow scan of OPEN schedules like the live due-scan', async () => {
+      Schedule.promotionCandidates.mockResolvedValue([]);
+      const rowsOpen = [
+        { id: 's-in', customer_id: 'cust-in', step_index: 4 },
+        { id: 's-out', customer_id: 'cust-out', step_index: 4 },
+      ];
+      mockAllowlist = new Set(['cust-in']);
+      await Runner.shadowRun(NOW, { database: emptyTableDb(rowsOpen) });
+      expect(lines()).toMatch(/schedule=s-in/);
+      expect(lines()).not.toMatch(/schedule=s-out/);
+      logger.info.mockClear();
+      mockAllowlist = null; // empty allowlist = everyone
+      await Runner.shadowRun(NOW, { database: emptyTableDb(rowsOpen) });
+      expect(lines()).toMatch(/schedule=s-out/);
+    });
+
+    test('F6: the set resolve (Stripe I/O) never runs while a shadow transaction is held', async () => {
+      Schedule.promotionCandidates.mockResolvedValue([CUSTOMER_ID]);
+      memberSeqRows = rowsFor(['inv-a', 'inv-b', 'inv-c'], 60, 3);
+      let inTransaction = false;
+      const heldDuringResolve = [];
+      Schedule.inReadOnlyTransaction.mockImplementation(async (database, fn) => {
+        inTransaction = true;
+        try { return await fn(database); } finally { inTransaction = false; }
+      });
+      mockResolve.mockImplementation(async () => { heldDuringResolve.push(inTransaction); return makeSet(['inv-a', 'inv-b', 'inv-c']); });
+      await Runner.shadowRun(NOW, { database: emptyTableDb([{ id: 's1', customer_id: CUSTOMER_ID, step_index: 4 }]) });
+      expect(heldDuringResolve.length).toBeGreaterThanOrEqual(2); // promotion and the open schedule
+      expect(heldDuringResolve.every((held) => held === false)).toBe(true);
+      Schedule.inReadOnlyTransaction.mockImplementation(async (database, fn) => fn(database));
+    });
   });
 });
 
@@ -786,7 +995,8 @@ describe('the engine never applies account credit (owner ruling 2026-09-30)', ()
     expect(row).toMatchObject({ status: 'held', held_reason: 'account_credit_available' });
     expect(mockNotify).toHaveBeenCalledTimes(1);
     expect(mockNotify).toHaveBeenCalledWith('alert', 'Apply customer account credit', expect.stringMatching(/unused account credit.*Apply the credit/), expect.objectContaining({
-      dedupeKey: `customer-dunning-held:${SCHEDULE_ID}:1:account_credit_available`,
+      // one alert per HOLD: the hold's start is part of the key
+      dedupeKey: `customer-dunning-held:${SCHEDULE_ID}:1:account_credit_available:${NOW.getTime()}`,
       metadata: { customer_id: CUSTOMER_ID },
     }));
     expect(row.hold_alerted_at).toEqual(NOW);

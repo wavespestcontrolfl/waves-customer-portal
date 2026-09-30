@@ -60,7 +60,7 @@ function channelsFor(run, prefs, customer) {
 async function loadCustomer(run) {
   const customer = await run.database('customers').where({ id: run.schedule.customer_id }).first();
   if (!customer) {
-    await Schedule.close(run.schedule, 'customer_missing', run.now, { database: run.database });
+    await Schedule.close(run.schedule, 'customer_missing', run.now, { database: run.database, claimStamp: run.claimStamp });
     await Schedule.alertStaff({
       title: 'Customer reminders stopped',
       body: 'A customer reminder schedule points at a customer record that no longer exists; it was closed.',
@@ -152,6 +152,10 @@ async function finishDelivered(run, facts) {
     const done = await Schedule.completeFinal(run.schedule, { ...base, namedInvoiceIds: named.length ? named : (run.memberIds || []) });
     ok = done.completed;
   } else {
+    // The next date is driven by the members active NOW: a member paid or
+    // voided during the send must not keep the cadence (fresh read, never the
+    // rows cached before the send).
+    run.rows = null;
     ok = await Schedule.advance(run.schedule, { ...base, activeRows: await memberRows(run) });
   }
   if (!ok) return outcome('stale');
@@ -171,12 +175,13 @@ async function recoverFirst(run) {
   run.step = STEPS[run.schedule.step_index];
   if (!run.step) {
     logger.error(`[customer-dunning] schedule ${run.schedule.id} has no step at index ${run.schedule.step_index}; releasing`);
-    await Schedule.close(run.schedule, 'released_prereq_off', run.now, { database: run.database });
+    await Schedule.close(run.schedule, 'released_prereq_off', run.now, { database: run.database, claimStamp: run.claimStamp });
     return outcome('closed', { reason: 'no_step' });
   }
   run.eventKey = eventKey(run.schedule, run.step.id);
   const event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey);
   if (!event || event.delivered.size === 0) return event?.complete ? pause(run, 'all_channels_terminal') : null;
+  run.priorEvent = event; // a partial delivery from an earlier tick, kept in case the post-send read fails
   // Delivered before: settle from the ledger. No render, no set read.
   if (event.complete || await nextStageArrived(run)) {
     return finishDelivered(run, { event, delivered: event.delivered, deliveredAt: event.deliveredAt, deliveredNow: [] });
@@ -205,7 +210,7 @@ async function checkAutopay(run) {
 async function endForSet(run, set) {
   if (set.kind === 'hold') return hold(run, set.reason);
   const reason = set.reason === 'no_open_invoices' ? 'balance_cleared' : 'no_active_member';
-  await Schedule.close(run.schedule, reason, run.now, { database: run.database });
+  await Schedule.close(run.schedule, reason, run.now, { database: run.database, claimStamp: run.claimStamp });
   return outcome('closed', { reason });
 }
 
@@ -295,6 +300,7 @@ async function sendWithRerender(run, set) {
   const first = await attemptSend(run, set);
   if (!setChanged(first) || first.deliveredNow.length) return { result: first, set };
   const fresh = await resolveDunnableSet(run.schedule.customer_id, { now: run.now });
+  run.rows = null; // the rows narrowed to the first set no longer describe the send
   if (!sendable(fresh)) return { result: first, set: fresh, ended: true };
   return { result: await attemptSend(run, fresh), set: fresh };
 }
@@ -306,6 +312,9 @@ async function deliveryFacts(run, result) {
     event = progress.find((e) => e.metadata.notificationEventKey === run.eventKey) || null;
   } catch (err) {
     logger.warn(`[customer-dunning] post-send progress unreadable for schedule ${run.schedule.id}: ${err.message}`);
+    // What this tick's recover-first read already saw as delivered still is:
+    // a partial delivery must not turn into a hold or pause for want of a re-read.
+    event = run.priorEvent || null;
   }
   const delivered = new Set([...(event?.delivered || []), ...result.deliveredNow]);
   const deliveredAt = event?.deliveredAt || (result.deliveredNow.length ? run.now : null);
@@ -321,6 +330,7 @@ async function dispose(run, facts) {
     const ok = await Schedule.markTold(run.schedule, { ...run, deliveredAt: facts.deliveredAt ? new Date(facts.deliveredAt) : run.now });
     if (ok && facts.deliveredNow.length) await recordInteraction(run, facts.delivered);
     if (ok) await markAtRisk(run);
+    if (ok) await Schedule.alertTold(run.schedule, { deliveredAt: facts.deliveredAt, now: run.now });
     return outcome(ok ? 'told' : 'stale');
   }
   return verdict.kind === 'held' ? hold(run, verdict.reason) : pause(run, verdict.reason);
@@ -360,8 +370,7 @@ async function processSchedule(scheduleId, now = new Date(), { database = db, op
 async function dueScheduleIds(now, database) {
   const rows = await database(Schedule.TABLE).whereIn('status', ['active', 'held'])
     .where('next_touch_at', '<=', now).orderBy('next_touch_at', 'asc').select('id', 'customer_id');
-  const allow = dunningCustomerScheduleAllowlist();
-  return rows.filter((r) => !allow || allow.has(String(r.customer_id))).map((r) => r.id);
+  return allowlisted(rows).map((r) => r.id);
 }
 
 /** Every due schedule, one at a time; one failure never stops the rest. */
@@ -386,50 +395,68 @@ const line = (verb, fields) => logger.info(`[customer-dunning] SHADOW would ${ve
   .map(([k, v]) => `${k}=${v}`).join(' ')}`);
 const iso = (d) => (d ? new Date(d).toISOString() : 'none');
 
-async function shadowPromote(customerId, now, database) {
-  return Schedule.inReadOnlyTransaction(database, async (trx) => {
-    const rows = await Schedule.activeMemberRows(customerId, { database: trx });
-    const set = await resolveDunnableSet(customerId, { database: trx, now });
-    const d = Schedule.promotionDecision(set, rows, now);
-    if (!d.promote) { line('hold', { customer: customerId, reason: d.reason }); return 'hold'; }
-    line('promote', {
-      customer: customerId, members: set.members.length, active: d.active.length, step: d.seed.step_id,
-      next: iso(d.seed.next_touch_at), total_cents: set.totalCents,
-    });
-    for (const row of d.absorbed) {
-      line('absorb', { customer: customerId, seq: row.id, invoice: row.invoice_id, step: STEPS[row.step_index]?.id, next: iso(row.next_touch_at) });
-    }
-    return 'promote';
-  });
-}
-
-async function shadowSchedule(schedule, now, database) {
-  return Schedule.inReadOnlyTransaction(database, async (trx) => {
-    const set = await resolveDunnableSet(schedule.customer_id, { database: trx, now });
-    const fields = { customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id };
-    if (set.kind === 'hold') { line('hold', { ...fields, reason: set.reason }); return 'hold'; }
-    if (!sendable(set)) { line('close', { ...fields, reason: set.reason }); return 'close'; }
-    line('send', { ...fields, kind: set.kind, members: set.members.length, total_cents: set.totalCents });
-    return 'send';
-  });
+// The customers the canary allowlist names (empty = everyone): the ONE filter
+// for the live due-scan and the shadow scan alike.
+function allowlisted(rows) {
+  const allow = dunningCustomerScheduleAllowlist();
+  return allow ? rows.filter((r) => allow.has(String(r.customer_id))) : rows;
 }
 
 /**
- * The shadow gate's whole job. Every read goes through a READ ONLY
- * transaction (PostgreSQL itself refuses a write), and this function never
- * calls a writer: no promotion, claim, mint, reservation, send,
- * or alert. It only logs `[customer-dunning] SHADOW would ...` lines.
+ * What the live run would do with a schedule's resolved set: hold, close, or
+ * send. `due` is set for a schedule that does not exist yet (a projected one).
+ */
+function judgeShadowSchedule(fields, set, due = null) {
+  if (set.kind === 'hold') { line('hold', { ...fields, reason: set.reason }); return 'hold'; }
+  if (!sendable(set)) { line('close', { ...fields, reason: set.reason }); return 'close'; }
+  line('send', { ...fields, kind: set.kind, members: set.members.length, total_cents: set.totalCents, ...(due ? { due: iso(due) } : {}) });
+  return 'send';
+}
+
+// The set resolve makes Stripe calls (pay-combined's live PaymentIntent check),
+// so it runs on the pool with NO transaction held (a pinned connection would
+// starve DB_POOL_MAX=2, as in promotion). It is a documented pure read; only
+// the member-row read below sits inside the READ ONLY transaction.
+async function shadowPromote(customerId, now, database) {
+  const set = await resolveDunnableSet(customerId, { database, now });
+  const rows = await Schedule.inReadOnlyTransaction(database, (trx) => Schedule.activeMemberRows(customerId, { database: trx }));
+  const d = Schedule.promotionDecision(set, rows, now);
+  if (!d.promote) { line('hold', { customer: customerId, reason: d.reason }); return ['hold']; }
+  line('promote', {
+    customer: customerId, members: set.members.length, active: d.active.length, step: d.seed.step_id,
+    next: iso(d.seed.next_touch_at), total_cents: set.totalCents,
+  });
+  for (const row of d.absorbed) {
+    line('absorb', { customer: customerId, seq: row.id, invoice: row.invoice_id, step: STEPS[row.step_index]?.id, next: iso(row.next_touch_at) });
+  }
+  // In a shadow-only rollout no schedule row is ever written, so the schedule
+  // decisions would never be seen: model the schedule this promotion WOULD
+  // create (in memory, never stored) and judge it the way the live run would.
+  const projected = { customer: customerId, schedule: 'projected', step: d.seed.step_id };
+  return ['promote', judgeShadowSchedule(projected, set, d.seed.next_touch_at)];
+}
+
+async function shadowSchedule(schedule, now, database) {
+  const set = await resolveDunnableSet(schedule.customer_id, { database, now });
+  return judgeShadowSchedule({ customer: schedule.customer_id, schedule: schedule.id, step: STEPS[schedule.step_index]?.id }, set);
+}
+
+/**
+ * The shadow gate's whole job. It never calls a writer: no promotion, claim,
+ * mint, reservation, send, or alert. Table reads go through a READ ONLY
+ * transaction (PostgreSQL itself refuses a write); the set resolve is a pure
+ * read outside it. It only logs `[customer-dunning] SHADOW would ...` lines.
  */
 async function shadowRun(now = new Date(), { database = db } = {}) {
   const tally = { promote: 0, hold: 0, send: 0, close: 0, failed: 0 };
   const bump = (kind) => { tally[kind] += 1; };
   for (const customerId of await Schedule.promotionCandidates({ database })) {
-    try { bump(await shadowPromote(customerId, now, database)); } catch (err) {
+    try { (await shadowPromote(customerId, now, database)).forEach(bump); } catch (err) {
       tally.failed += 1;
       logger.warn(`[customer-dunning] SHADOW promote check failed for customer ${customerId}: ${err.message}`);
     }
   }
-  const open = await database(Schedule.TABLE).whereIn('status', ['active', 'held']).where('next_touch_at', '<=', now);
+  const open = allowlisted(await database(Schedule.TABLE).whereIn('status', ['active', 'held']).where('next_touch_at', '<=', now));
   for (const schedule of open) {
     try { bump(await shadowSchedule(schedule, now, database)); } catch (err) {
       tally.failed += 1;

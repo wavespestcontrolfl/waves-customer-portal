@@ -21,6 +21,7 @@ const {
   billingEmailRecipient, operatorEmailRecipient, billingEmailSendOutcome, billingEmailSendFailure,
 } = require('../billing-email-sender');
 const ContactLedger = require('../collections/contact-ledger');
+const { isTerminalEmailRefusal } = require('../billing-reminder-delivery');
 const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../short-url');
 const { publicPortalUrl } = require('../../utils/portal-url');
 const { withCustomerCommsLock } = require('../../utils/customer-comms-lock');
@@ -66,8 +67,17 @@ const totalDue = (set) => (Number(set.totalCents) / 100).toFixed(2);
 /** SMS or push leg. */
 async function sendTextLeg(ctx, channel, ledger) {
   const { set, customer, step } = ctx;
-  const payUrl = await ensureLink(ctx);
-  const body = await Render.renderSms({ step, set, customer, payUrl });
+  let body;
+  try {
+    const payUrl = await ensureLink(ctx);
+    body = await Render.renderSms({ step, set, customer, payUrl });
+  } catch (err) {
+    // Nothing reached the provider: a definite, retryable non-send. Left to
+    // throw, sendReminderChannels would read it as UNCERTAIN and hold the
+    // reservation for good.
+    logger.warn(`[customer-dunning] ${channel} leg for schedule ${ctx.schedule.id} not prepared: ${err.message}`);
+    return { sent: false, blocked: true, deliveryOutcome: 'not_sent', retryable: true, code: 'REMINDER_PREPARATION_FAILED' };
+  }
   if (!body) return { sent: false, blocked: true, deliveryOutcome: 'not_sent', code: 'TEMPLATE_UNAVAILABLE' };
   const boundary = Boundary.check(ctx.snapshot);
   return sendCustomerMessage({
@@ -160,13 +170,16 @@ async function resolveEmailRecipient(ctx) {
 }
 
 async function deliverEmail(ctx, ledger, { recipient, to }) {
-  const payUrl = await ensureLink(ctx);
-  const { templateKey, payload } = Render.renderEmail({
-    step: ctx.step, set: ctx.set, customer: ctx.customer, recipient, payUrl,
-  });
   const state = { boundaryBlock: null, handoffStarted: false, providerAccepted: false };
   const log = async () => {};
   try {
+    // Inside the try: a short-link, render or template-library failure before
+    // the provider handoff is a definite non-send (billingEmailSendFailure maps
+    // it to not_sent), never an uncertain one.
+    const payUrl = await ensureLink(ctx);
+    const { templateKey, payload } = Render.renderEmail({
+      step: ctx.step, set: ctx.set, customer: ctx.customer, recipient, payUrl,
+    });
     const result = await EmailTemplateLibrary.sendTemplate({
       templateKey,
       to,
@@ -192,11 +205,16 @@ async function deliverEmail(ctx, ledger, { recipient, to }) {
 
 /** Email leg. */
 async function sendEmailLeg(ctx, ledger) {
-  if (!ctx.explicit) await stampNeverContacted(ledger, false);
+  // Every attempt starts clean: an earlier refusal's stamp must not outlive a
+  // retry that reaches the customer, whatever the channel selection.
+  await stampNeverContacted(ledger, false);
   const who = await resolveEmailRecipient(ctx);
   const result = who.refusal || await deliverEmail(ctx, ledger, who);
-  const preProvider = result?.retryable === true && result.deliveryOutcome === 'not_sent';
-  if (!ctx.explicit && preProvider) await stampNeverContacted(ledger, true);
+  // Only the decision to ADD the stamp depends on default channels: a definite
+  // non-send (retryable refusal or a provider/preparation failure), not a
+  // terminal refusal, used no frequency window.
+  const notSent = result?.deliveryOutcome === 'not_sent' && !isTerminalEmailRefusal(result);
+  if (!ctx.explicit && notSent) await stampNeverContacted(ledger, true);
   return result;
 }
 

@@ -109,6 +109,8 @@ async function openScheduleFor(customerId, { database = db } = {}) {
 const claimIsFresh = (row, now) => !!row.touch_claimed_at
   && new Date(row.touch_claimed_at).getTime() > now.getTime() - CLAIM_TTL_MS;
 
+const sameStamp = (a, b) => !!a && !!b && new Date(a).getTime() === new Date(b).getTime();
+
 // ── promotion ────────────────────────────────────────────────────────────
 
 async function promotionCandidates({ database = db } = {}) {
@@ -240,19 +242,19 @@ const claimReadable = (row, { expectedStepIndex, force, now }) => {
   return !claimIsFresh(row, now);
 };
 
-async function stampMemberClaims(trx, customerId, claimStamp, now) {
-  const rows = await activeMemberRows(customerId, { database: trx, forUpdate: true });
-  const free = rows.filter((r) => !claimIsFresh(r, now)).map((r) => r.id);
-  if (free.length) {
-    await trx('invoice_followup_sequences').whereIn('id', free)
+async function stampMemberClaims(trx, rows, claimStamp) {
+  const ids = rows.map((r) => r.id);
+  if (ids.length) {
+    await trx('invoice_followup_sequences').whereIn('id', ids)
       .update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
   }
-  return free;
+  return ids;
 }
 
 /**
  * CLAIM (§5 step 1): one short transaction, no external work. Stamps the
- * schedule and the customer's free ACTIVE member rows so InvoiceService.update's
+ * schedule and the customer's ACTIVE member rows (null when any of them holds
+ * a fresh foreign claim) so InvoiceService.update's
  * existing fence (a fresh touch_claimed_at on the sequence row) applies for the
  * whole send. Returns { schedule, claimStamp, memberSeqIds } or null.
  */
@@ -264,8 +266,14 @@ async function claim(scheduleId, now = new Date(), { database = db, force = fals
     await takeLock(trx, peek.customer_id);
     const schedule = await trx(TABLE).where({ id: scheduleId }).forUpdate().first();
     if (!claimReadable(schedule, { expectedStepIndex, force, now })) return null;
+    // A member row another worker is sending right now (the per-invoice batch,
+    // a payment-side fence) means this customer is being contacted: do not
+    // claim, exactly as promotion refuses (member_claim_fresh). The next run
+    // finds the row settled.
+    const memberRows = await activeMemberRows(schedule.customer_id, { database: trx, forUpdate: true });
+    if (memberRows.some((r) => claimIsFresh(r, now))) return null;
     await trx(TABLE).where({ id: scheduleId }).update({ touch_claimed_at: claimStamp, updated_at: trx.fn.now() });
-    const memberSeqIds = await stampMemberClaims(trx, schedule.customer_id, claimStamp, now);
+    const memberSeqIds = await stampMemberClaims(trx, memberRows, claimStamp);
     return { schedule: { ...schedule, touch_claimed_at: claimStamp }, claimStamp, memberSeqIds };
   });
 }
@@ -348,15 +356,23 @@ async function alertPastFinal(schedule, landed) {
  * Close a schedule (guarded on it still being open) and release surviving
  * members in ONE transaction. Returns { closed, landed }.
  */
-async function close(schedule, reason, now = new Date(), { database = db, extra = {} } = {}) {
+async function close(schedule, reason, now = new Date(), { database = db, extra = {}, claimStamp = null } = {}) {
   const out = await database.transaction(async (trx) => {
     await takeLock(trx, schedule.customer_id);
-    const changed = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).update({
+    // Re-read under the lock: the landings below start from the row AS IT IS
+    // NOW (a step that advanced since the caller read it), and a FRESH claim
+    // that is not the caller's is a send in flight — closing under it would
+    // hand its members back to the per-invoice ladder, which repeats the step
+    // it is delivering. Runner-internal closes pass their own claimStamp;
+    // control writes (admin release) pass none and are refused.
+    const row = await trx(TABLE).where({ id: schedule.id }).whereIn('status', OPEN_STATUSES).forUpdate().first();
+    if (!row) return { closed: false, landed: [] };
+    if (claimIsFresh(row, now) && !sameStamp(row.touch_claimed_at, claimStamp)) return { closed: false, landed: [], reason: 'in_flight' };
+    await trx(TABLE).where({ id: row.id }).update({
       status: terminalStatusFor(reason), closed_reason: reason, closed_at: now,
       next_touch_at: null, updated_at: trx.fn.now(), ...extra,
     });
-    if (!changed) return { closed: false, landed: [] };
-    return { closed: true, landed: await releaseMembers(trx, schedule, now) };
+    return { closed: true, landed: await releaseMembers(trx, row, now) };
   });
   await alertPastFinal(schedule, out.landed);
   logger.info(`[customer-dunning] schedule ${schedule.id} closed (${reason}); ${out.landed.length} member row(s) released`);
@@ -464,14 +480,39 @@ function firstCode(results) {
  */
 function dispositionOf(facts) {
   const delivered = facts.delivered || new Set();
-  if (delivered.size > 0) return { kind: facts.complete ? 'advance' : 'told' };
   const results = Object.entries(facts.results || {});
+  if (delivered.size > 0) {
+    if (facts.complete) return { kind: 'advance' };
+    // A leg that is still owed only because it was DEFINITELY not sent (a
+    // non-mobile / opted-out number, an unavailable template — no retryable or
+    // deferred flag) can never succeed on retry: with a sibling delivered the
+    // touch is done, as the per-invoice ladder treats it. Anything retryable
+    // keeps the step TOLD so the leg is retried.
+    const owed = results.filter(([channel]) => !delivered.has(channel));
+    const stuck = owed.some(([channel, r]) => !r || isTransientResult(channel, r));
+    return { kind: owed.length && !stuck ? 'advance' : 'told' };
+  }
   if (facts.complete) return { kind: 'paused', reason: 'all_channels_terminal' };
   if (!results.length || results.some(([channel, r]) => isTransientResult(channel, r))) return { kind: 'held', reason: firstCode(facts.results) };
   return { kind: 'paused', reason: firstCode(facts.results) };
 }
 
 const heldSince = (schedule, now) => schedule.held_since || now;
+
+// A step that stays TOLD (a leg delivered, another retrying) for HELD_ALERT_DAYS
+// gets ONE staff alert, so a retry loop can never be silent. Age = since the
+// leg first reached the customer (that leg is delivered once, so its time is
+// stable across the daily retries).
+async function alertTold(schedule, { deliveredAt, now = new Date() }) {
+  if (!deliveredAt || now.getTime() - new Date(deliveredAt).getTime() < HELD_ALERT_DAYS * 24 * HOUR_MS) return false;
+  const stepId = STEPS[schedule.step_index]?.id || `step${schedule.step_index}`;
+  return alertStaff({
+    title: 'Customer reminder half-delivered',
+    body: `A customer's overdue reminder (${stepId}) reached them on one channel ${HELD_ALERT_DAYS}+ days ago but another channel keeps failing and retrying daily. The office should check the customer's contact details.`,
+    dedupeKey: `customer-dunning-told:${schedule.id}:${schedule.episode}:${stepId}`,
+    customerId: schedule.customer_id,
+  });
+}
 
 /** TOLD: a leg reached the customer; the pending leg retries at the next tick. */
 async function markTold(schedule, { claimStamp, deliveredAt, now = new Date(), database = db }) {
@@ -493,12 +534,14 @@ async function alertHeld(schedule, reason, now, database) {
   const long = now.getTime() - since.getTime() >= HELD_ALERT_DAYS * 24 * HOUR_MS;
   const office = OFFICE_HOLD_REASONS.includes(reason);
   if (schedule.hold_alerted_at || (!long && !office)) return false;
+  // held_since is part of the key: one alert per HOLD, so a hold that comes
+  // back after a release or resume rings again (notifyAdmin dedupes a key for good).
   const sent = await alertStaff({
     title: office ? (reason === 'account_credit_available' ? 'Apply customer account credit' : 'Customer reminders on hold') : 'Customer reminder stuck',
     body: office
       ? officeHoldBody(reason, stepId)
       : `A customer's overdue reminder (${stepId}) has been held ${HELD_ALERT_DAYS}+ days (${reason}) and keeps retrying daily.`,
-    dedupeKey: `customer-dunning-held:${schedule.id}:${schedule.episode}:${office ? reason : stepId}`,
+    dedupeKey: `customer-dunning-held:${schedule.id}:${schedule.episode}:${office ? reason : stepId}:${since.getTime()}`,
     customerId: schedule.customer_id,
   });
   if (sent) {
@@ -509,11 +552,20 @@ async function alertHeld(schedule, reason, now, database) {
 
 /** HELD: retry at the next run; never stale-skipped (A-7, A-15). */
 async function markHeld(schedule, reason, { claimStamp, now = new Date(), database = db }) {
+  const heldReason = String(reason).slice(0, 80);
+  // A DIFFERENT reason than the stored one is a new hold: its clock and its
+  // alert start over, so an office hold (account credit, paused member) is
+  // never swallowed by an earlier alert for another reason.
+  const newHold = !!schedule.held_reason && schedule.held_reason !== heldReason;
+  const since = newHold ? now : heldSince(schedule, now);
   const changed = await guardedOpen(database, schedule, claimStamp).update({
-    status: 'held', held_reason: String(reason).slice(0, 80), held_since: heldSince(schedule, now),
+    status: 'held', held_reason: heldReason, held_since: since,
+    ...(newHold ? { hold_alerted_at: null } : {}),
     next_touch_at: Followups.heldTouchFloor(now), updated_at: database.fn.now(),
   });
-  if (Number(changed) === 1) await alertHeld(schedule, String(reason), now, database);
+  if (Number(changed) === 1) {
+    await alertHeld(newHold ? { ...schedule, held_since: since, hold_alerted_at: null } : schedule, String(reason), now, database);
+  }
   return Number(changed) === 1;
 }
 
@@ -528,7 +580,8 @@ async function markPaused(schedule, reason, { claimStamp, now = new Date(), data
   await alertStaff({
     title: isFinalIndex(schedule.step_index) ? 'Final notice not delivered' : 'Customer reminders paused',
     body: `${isFinalIndex(schedule.step_index) ? 'The final notice was not delivered. ' : ''}The customer's overdue reminders (${stepId}) were paused: ${reason}. The office should contact the customer or resume the schedule.`,
-    dedupeKey: `customer-dunning-paused:${schedule.id}:${schedule.episode}:${stepId}:${reason}`,
+    // one alert per pause EVENT (a resumed schedule that pauses again rings again)
+    dedupeKey: `customer-dunning-paused:${schedule.id}:${schedule.episode}:${stepId}:${reason}:${now.getTime()}`,
     customerId: schedule.customer_id,
   });
   return true;
@@ -584,6 +637,8 @@ module.exports = {
   completeFinal,
   dispositionOf,
   markTold,
+  alertTold,
+  claimIsFresh,
   markHeld,
   markPaused,
   markAutopayHold,

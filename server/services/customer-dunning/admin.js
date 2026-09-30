@@ -10,15 +10,27 @@
 const db = require('../../models/db');
 const Schedule = require('./schedule');
 const Runner = require('./runner');
-const { OPEN_STATUSES } = require('./constants');
+const { OPEN_STATUSES, CLAIM_TTL_MS } = require('./constants');
+
+// One rule for every control write against a claim: while another run holds a
+// FRESH claim (a send in flight) pause and release refuse and say so; resume
+// clears the claim so a worker from before the pause cannot regain authority.
+const IN_FLIGHT = Object.freeze({
+  ok: false, reason: 'in_flight', message: 'The reminder is sending right now. Try again in a minute.',
+});
 
 const openScheduleQuery = (database, scheduleId) => database(Schedule.TABLE).where({ id: scheduleId }).whereIn('status', OPEN_STATUSES);
 
-async function pause(scheduleId, { reason = 'admin_paused', adminId = null, database = db } = {}) {
-  const changed = await openScheduleQuery(database, scheduleId).whereIn('status', ['active', 'held', 'autopay_hold']).update({
-    status: 'paused', paused_reason: String(reason), paused_by_admin_id: adminId, next_touch_at: null, updated_at: database.fn.now(),
-  });
-  return { ok: Number(changed) === 1 };
+async function pause(scheduleId, { reason = 'admin_paused', adminId = null, now = new Date(), database = db } = {}) {
+  const staleBefore = new Date(now.getTime() - CLAIM_TTL_MS);
+  const changed = await openScheduleQuery(database, scheduleId).whereIn('status', ['active', 'held', 'autopay_hold'])
+    .where(function unclaimedOrStale() { this.whereNull('touch_claimed_at').orWhere('touch_claimed_at', '<=', staleBefore); })
+    .update({
+      status: 'paused', paused_reason: String(reason), paused_by_admin_id: adminId, next_touch_at: null, updated_at: database.fn.now(),
+    });
+  if (Number(changed) === 1) return { ok: true };
+  const row = await openScheduleQuery(database, scheduleId).first();
+  return row && Schedule.claimIsFresh(row, now) ? { ...IN_FLIGHT } : { ok: false };
 }
 
 // A resumed schedule picks up at its current step no earlier than the next
@@ -26,7 +38,7 @@ async function pause(scheduleId, { reason = 'admin_paused', adminId = null, data
 async function resume(scheduleId, { now = new Date(), database = db } = {}) {
   const changed = await database(Schedule.TABLE).where({ id: scheduleId, status: 'paused' }).update({
     status: 'active', next_touch_at: require('../invoice-followups').heldTouchFloor(now), paused_reason: null,
-    paused_by_admin_id: null, held_reason: null, held_since: null, hold_alerted_at: null, updated_at: database.fn.now(),
+    touch_claimed_at: null, paused_by_admin_id: null, held_reason: null, held_since: null, hold_alerted_at: null, updated_at: database.fn.now(),
   });
   return { ok: Number(changed) === 1 };
 }
@@ -35,6 +47,7 @@ async function release(scheduleId, { now = new Date(), database = db } = {}) {
   const schedule = await openScheduleQuery(database, scheduleId).first();
   if (!schedule) return { ok: false, reason: 'not_open' };
   const out = await Schedule.release(schedule, 'released_admin', now, { database });
+  if (out.reason === 'in_flight') return { ...IN_FLIGHT };
   return { ok: out.closed, released: out.landed.length };
 }
 

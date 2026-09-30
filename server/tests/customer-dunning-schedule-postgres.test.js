@@ -364,15 +364,27 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       expect(await Schedule.claim(s.id, NOW, { database: app, force: true })).toBeNull();
     });
 
-    test('a stale claim (crashed sender) is replaced; a member row with a FRESH claim is left alone', async () => {
+    test('a stale claim (crashed sender) is replaced, stale member stamps included', async () => {
       const c = await customer();
       const a = await member(c, { sentDaysAgo: 60, step: 4 });
-      const busy = await member(c, { sentDaysAgo: 30, step: 3, claimedAt: new Date(NOW.getTime() - 60 * 1000) });
+      const old = await member(c, { sentDaysAgo: 30, step: 3, claimedAt: new Date(NOW.getTime() - 30 * 60 * 1000) });
       const s = await openSchedule(c, { touch_claimed_at: new Date(NOW.getTime() - 30 * 60 * 1000) });
       const claimed = await Schedule.claim(s.id, NOW, { database: app });
       expect(claimed).not.toBeNull();
-      expect(claimed.memberSeqIds).not.toContain(busy.seq.id);
-      expect(claimed.memberSeqIds).toEqual([a.seq.id]);
+      expect(claimed.memberSeqIds.sort()).toEqual([a.seq.id, old.seq.id].sort());
+    });
+
+    test('F4: a member row another worker holds a FRESH claim on refuses the claim outright (nothing is stamped)', async () => {
+      const c = await customer();
+      const a = await member(c, { sentDaysAgo: 60, step: 4 });
+      const busy = await member(c, { sentDaysAgo: 30, step: 3, claimedAt: new Date(NOW.getTime() - 60 * 1000) });
+      const s = await openSchedule(c);
+      expect(await Schedule.claim(s.id, NOW, { database: app })).toBeNull();
+      expect((await app('customer_dunning_schedules').where({ id: s.id }).first()).touch_claimed_at).toBeNull();
+      expect((await seqRow(a.seq.id)).touch_claimed_at).toBeNull();
+      // the busy worker settles; the next run claims
+      await app('invoice_followup_sequences').where({ id: busy.seq.id }).update({ touch_claimed_at: null });
+      expect(await Schedule.claim(s.id, NOW, { database: app })).not.toBeNull();
     });
 
     test('release clears OUR stamps only: a successor that replaced the claim keeps its own', async () => {
@@ -619,7 +631,8 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
 
     test('pause after the claim: the boundary refuses (pool and transaction) and the schedule stays paused', async () => {
       const { s, check } = await claimedWithBoundary();
-      expect(await Admin.pause(s.id, { database: app })).toEqual({ ok: true });
+      // a control write that got past the in-flight guard (e.g. after a claim TTL expiry)
+      await app('customer_dunning_schedules').where({ id: s.id }).update({ status: 'paused' });
       expect(await check({ database: app })).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED, retryable: true });
       await app.transaction(async (trx) => {
         expect(await check({ database: trx })).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED });
@@ -628,8 +641,9 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
     });
 
     test('release / close after the claim: the boundary refuses and the schedule stays released', async () => {
-      const { s, check } = await claimedWithBoundary();
-      expect(await Admin.release(s.id, { now: NOW, database: app })).toMatchObject({ ok: true });
+      const { s, claim, check } = await claimedWithBoundary();
+      // the run's own close (or an expired-claim release) lands after the claim
+      expect((await Schedule.close(claim.schedule, 'released_admin', NOW, { database: app, claimStamp: claim.claimStamp })).closed).toBe(true);
       expect(await check({ database: app })).toMatchObject({ ok: false, code: Boundary.SCHEDULE_CHANGED });
       expect(await fresh(s.id)).toMatchObject({ status: 'released' });
     });
@@ -646,12 +660,148 @@ postgres('customer_dunning_schedules engine (PostgreSQL)', () => {
       let pausing;
       await app.transaction(async (trx) => {
         expect(await check({ database: trx })).toEqual({ ok: true }); // locks the row FOR UPDATE
-        pausing = Admin.pause(s.id, { database: app }).then((out) => { pauseSettled = true; return out; });
+        pausing = app('customer_dunning_schedules').where({ id: s.id }).update({ status: 'paused' }).then((n) => { pauseSettled = true; return n; });
         await new Promise((resolve) => setTimeout(resolve, 400));
         expect(pauseSettled).toBe(false); // the dispatch window: the control write is queued behind us
       });
-      expect(await pausing).toEqual({ ok: true });
+      expect(await pausing).toBe(1);
       expect(await fresh(s.id)).toMatchObject({ status: 'paused' });
+    });
+  });
+
+  // ── control writes vs a claim (F3 / C2 / C5) ──────────────────────────
+  describe('control writes against a claim', () => {
+    const fresh = (id) => app('customer_dunning_schedules').where({ id }).first();
+    async function inFlight() {
+      const c = await customer();
+      const m = await member(c, { sentDaysAgo: 25, step: 2 });
+      const s = await openSchedule(c, { step_index: 4 });
+      const claim = await Schedule.claim(s.id, NOW, { database: app }); // a worker is sending right now
+      return { c, m, s, claim };
+    }
+
+    test('pause and release REFUSE while another run holds a fresh claim; nothing changes, no member is handed back', async () => {
+      const { s, m } = await inFlight();
+      const memberBefore = await seqRow(m.seq.id);
+      expect(await Admin.pause(s.id, { now: NOW, database: app })).toMatchObject({ ok: false, reason: 'in_flight', message: expect.stringMatching(/try again in a minute/i) });
+      expect(await Admin.release(s.id, { now: NOW, database: app })).toMatchObject({ ok: false, reason: 'in_flight' });
+      expect(await fresh(s.id)).toMatchObject({ status: 'active' });
+      const memberAfter = await seqRow(m.seq.id);
+      expect(memberAfter.step_index).toBe(memberBefore.step_index);
+      expect(memberAfter.status).toBe('active');
+    });
+
+    test('once the claim has expired (crashed sender) pause and release go through', async () => {
+      const { s } = await inFlight();
+      const later = new Date(NOW.getTime() + 11 * 60 * 1000);
+      expect(await Admin.pause(s.id, { now: later, database: app })).toEqual({ ok: true });
+      expect(await fresh(s.id)).toMatchObject({ status: 'paused' });
+      expect(await Admin.release(s.id, { now: later, database: app })).toMatchObject({ ok: true });
+    });
+
+    test('the run\'s OWN claim never blocks its own close; another run\'s stamp does', async () => {
+      const { s, claim } = await inFlight();
+      expect((await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: new Date(NOW.getTime() - 1) })).reason).toBe('in_flight');
+      expect((await Schedule.close(claim.schedule, 'balance_cleared', NOW, { database: app, claimStamp: claim.claimStamp })).closed).toBe(true);
+      expect((await fresh(s.id)).status).toBe('completed');
+    });
+
+    test('C2: resume clears the claim, so a worker from before the pause cannot regain authority', async () => {
+      const { s, claim } = await inFlight();
+      await app('customer_dunning_schedules').where({ id: s.id }).update({ status: 'paused', next_touch_at: null });
+      expect(await Admin.resume(s.id, { now: NOW, database: app })).toEqual({ ok: true });
+      const row = await fresh(s.id);
+      expect(row.status).toBe('active');
+      expect(row.touch_claimed_at).toBeNull();
+      // the old worker's guarded writes now match nothing
+      expect(await Schedule.advance(claim.schedule, { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(false);
+      expect(await Schedule.markTold(claim.schedule, { claimStamp: claim.claimStamp, now: NOW, database: app })).toBe(false);
+      expect((await fresh(s.id)).step_index).toBe(4);
+    });
+
+    test('C5: release lands the members from the schedule row AS LOCKED, not from the caller\'s stale copy', async () => {
+      const c = await customer();
+      const m = await member(c, { sentDaysAgo: 25, step: 2 });
+      const s = await openSchedule(c, { step_index: 4 });
+      const stale = { ...s, step_index: 0 }; // what a pre-lock read would have said
+      expect((await Schedule.close(stale, 'released_admin', NOW, { database: app })).closed).toBe(true);
+      expect((await seqRow(m.seq.id)).step_index).toBe(4);
+    });
+  });
+
+  // ── hold / pause alert identity (F2) ───────────────────────────────────
+  describe('hold and pause alerts are per event', () => {
+    const fresh = (id) => app('customer_dunning_schedules').where({ id }).first();
+    async function claimAt(id, now) { return Schedule.claim(id, now, { database: app }); }
+    const keys = () => mockNotify.mock.calls.map((c) => c[3].dedupeKey);
+
+    test('a DIFFERENT hold reason is a new hold: held_since and hold_alerted_at start over, so the office alert rings', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      const first = await claimAt(s.id, NOW);
+      await Schedule.markHeld(first.schedule, 'COLLECTIONS_POLICY', { claimStamp: first.claimStamp, now: new Date(NOW.getTime() - 9 * DAY), database: app });
+      // 9 days on, the same hold has been alerted once (long-held), then the reason changes
+      const secondNow = new Date(NOW.getTime());
+      await Schedule.releaseClaim(first, { database: app });
+      const second = await claimAt(s.id, secondNow);
+      await Schedule.markHeld(second.schedule, 'COLLECTIONS_POLICY', { claimStamp: second.claimStamp, now: secondNow, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(1); // the 7-day alert
+      await Schedule.releaseClaim(second, { database: app });
+      const third = await claimAt(s.id, new Date(NOW.getTime() + DAY));
+      await Schedule.markHeld(third.schedule, 'account_credit_available', { claimStamp: third.claimStamp, now: new Date(NOW.getTime() + DAY), database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+      expect(mockNotify.mock.calls[1][1]).toBe('Apply customer account credit');
+      const row = await fresh(s.id);
+      expect(row.held_reason).toBe('account_credit_available');
+      expect(new Date(row.held_since).getTime()).toBe(NOW.getTime() + DAY);
+      expect(row.hold_alerted_at).not.toBeNull();
+    });
+
+    test('the same reason keeps its clock and its single alert', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      for (let day = 0; day < 3; day += 1) {
+        const at = new Date(NOW.getTime() + day * DAY);
+        const claim = await claimAt(s.id, at);
+        await Schedule.markHeld(claim.schedule, 'account_credit_available', { claimStamp: claim.claimStamp, now: at, database: app });
+        await Schedule.releaseClaim(claim, { database: app });
+      }
+      expect(mockNotify).toHaveBeenCalledTimes(1);
+      expect(new Date((await fresh(s.id)).held_since).getTime()).toBe(NOW.getTime());
+    });
+
+    test('a hold that comes back after a release/resume uses a NEW dedupe key (notifyAdmin dedupes a key for good)', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      const a = await claimAt(s.id, NOW);
+      await Schedule.markHeld(a.schedule, 'member_paused', { claimStamp: a.claimStamp, now: NOW, database: app });
+      await Schedule.releaseClaim(a, { database: app });
+      // the hold clears (a delivered step resets the hold fields), then a later step holds for the same reason
+      await app('customer_dunning_schedules').where({ id: s.id }).update({ status: 'active', held_reason: null, held_since: null, hold_alerted_at: null, next_touch_at: NOW });
+      const later = new Date(NOW.getTime() + 20 * DAY);
+      const b = await claimAt(s.id, later);
+      await Schedule.markHeld(b.schedule, 'member_paused', { claimStamp: b.claimStamp, now: later, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+      expect(new Set(keys()).size).toBe(2);
+    });
+
+    test('paused alerts are per pause event: pause, resume, pause again rings twice', async () => {
+      const c = await customer();
+      await member(c, { sentDaysAgo: 60, step: 4 });
+      const s = await openSchedule(c);
+      const a = await claimAt(s.id, NOW);
+      await Schedule.markPaused(a.schedule, 'all_channels_terminal', { claimStamp: a.claimStamp, now: NOW, database: app });
+      await Schedule.releaseClaim(a, { database: app });
+      await Admin.resume(s.id, { now: NOW, database: app });
+      await app('customer_dunning_schedules').where({ id: s.id }).update({ next_touch_at: NOW });
+      const later = new Date(NOW.getTime() + 3 * DAY);
+      const b = await claimAt(s.id, later);
+      await Schedule.markPaused(b.schedule, 'all_channels_terminal', { claimStamp: b.claimStamp, now: later, database: app });
+      expect(mockNotify).toHaveBeenCalledTimes(2);
+      expect(new Set(keys()).size).toBe(2);
     });
   });
 
