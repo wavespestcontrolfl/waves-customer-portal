@@ -13,7 +13,7 @@ const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-re
 // customer would see on their own tracking link.
 const { resolveFreshTechPosition } = require('./tracking-vehicle-location');
 const { calculateBoundedTrackingEta, finiteNumber, STALE_TECH_STATUS_MS } = require('./customer-tracking-eta');
-const { stampedAddressDiverges } = require('./stamped-address');
+const { resolveLiveEtaDestination } = require('./live-eta-destination');
 const { publicPortalUrl } = require('../utils/portal-url');
 const { gateEnvValue } = require('../config/feature-gates');
 
@@ -536,26 +536,10 @@ async function fetchDuesChargeCandidates(customer) {
 // so getContextForCustomer can also use it to DEDUPE grouped-stop siblings
 // (see the LIVE ETA block there) without duplicating the divergence logic.
 function liveEtaDestination(row, customer) {
-  const diverges = stampedAddressDiverges({
-    service_address_line1: row.service_address_line1,
-    service_address_zip: row.service_address_zip,
-    service_address_city: row.service_address_city,
-    customer_address_line1: customer?.address_line1,
-    customer_zip: customer?.zip,
-    customer_city: customer?.city,
-  });
-  // Coordinates are used as a PAIR only (Codex round-17 P2, PR #5334): the
-  // visit's own lat+lng when BOTH are present, else the customer's lat+lng
-  // when both are present (and the stamped address doesn't diverge) — never a
-  // visit latitude mixed with a customer longitude, which is a synthetic point
-  // nobody lives at. No complete pair fails closed (no ETA, status-only).
-  const visitLat = finiteNumber(row.service_lat);
-  const visitLng = finiteNumber(row.service_lng);
-  if (visitLat != null && visitLng != null) return { lat: visitLat, lng: visitLng };
-  if (diverges) return null;
-  const custLat = finiteNumber(customer?.latitude);
-  const custLng = finiteNumber(customer?.longitude);
-  return custLat != null && custLng != null ? { lat: custLat, lng: custLng } : null;
+  // Resolution lives in live-eta-destination.js so the send-time freshness check
+  // re-derives the SAME destination (round-21 P2). No complete pair → null.
+  const { lat, lng, source } = resolveLiveEtaDestination(row, customer);
+  return source ? { lat, lng } : null;
 }
 
 // Calendar day 'YYYY-MM-DD' of a Postgres DATE value. pg hands DATE columns
@@ -896,7 +880,12 @@ async function loadUpcomingServices(customer, includeLiveEta) {
 // stamped to plus the stamped coordinates and street/ZIP. Numbers are compared
 // numerically and strings case/space-folded by sms-eta-freshness, so pg's
 // numeric-as-string and trimming differences never read as a move.
-function liveEtaDestinationIdentity(row) {
+function liveEtaDestinationIdentity(row, customer = null) {
+  // Round-21 P2: also the RESOLVED destination and its source. A visit with no
+  // pin resolves to the customer's coordinates; a re-geocoded customer address
+  // must then invalidate the figure, so the customer id + resolved pair ride
+  // along and send time re-derives the same resolution from current rows.
+  const resolved = resolveLiveEtaDestination(row, customer);
   return {
     id: row.id,
     propertyId: row.property_id ?? null,
@@ -904,9 +893,12 @@ function liveEtaDestinationIdentity(row) {
     lng: finiteNumber(row.service_lng),
     line1: row.service_address_line1 ?? null,
     zip: row.service_address_zip ?? null,
+    city: row.service_address_city ?? null,
+    resolved: { source: resolved.source, lat: resolved.lat, lng: resolved.lng },
+    ...(resolved.source === 'customer' && customer?.id != null ? { customerId: customer.id } : {}),
   };
 }
-function liveEtaGroupFor(members, result, state = 'en_route') {
+function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
   const technicianId = members.find((s) => s.technician_id != null)?.technician_id;
   return {
     minutes: result ? result.minutes : null,
@@ -922,7 +914,7 @@ function liveEtaGroupFor(members, result, state = 'en_route') {
     // Round-20 P2: WHERE the ETA/status was about — each member's property id +
     // the coordinates/address stamp the destination came from. Send time
     // refuses when staff moved the appointment to another property.
-    destinations: members.map(liveEtaDestinationIdentity),
+    destinations: members.map((m) => liveEtaDestinationIdentity(m, customer)),
     ...(result && result.fixExpiresAtMs != null ? { fixExpiresAtMs: result.fixExpiresAtMs } : {}),
   };
 }
@@ -932,9 +924,9 @@ function liveEtaOnSite(row, todayStr = etDateString()) {
 }
 function buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer = null }) {
   if (!includeLiveEta) return [];
-  const keyed = uniqueLiveEtaKeys.map((key) => liveEtaGroupFor(upcomingServices.filter((s, i) => liveEtaKeys[i] === key), liveEtaResultByKey.get(key)));
+  const keyed = uniqueLiveEtaKeys.map((key) => liveEtaGroupFor(upcomingServices.filter((s, i) => liveEtaKeys[i] === key), liveEtaResultByKey.get(key), 'en_route', customer));
   // Live rows with no dedupe key (no technician / destination): singleton groups.
-  const keyless = upcomingServices.filter((s, i) => liveEtaKeys[i] == null && liveEtaEligible(s)).map((s) => liveEtaGroupFor([s], null));
+  const keyless = upcomingServices.filter((s, i) => liveEtaKeys[i] == null && liveEtaEligible(s)).map((s) => liveEtaGroupFor([s], null, 'en_route', customer));
   // On-site (on_property) visits today: status-only groups, so a completed
   // arrival claim is rechecked against the visit's state at send time.
   // Round-19 P2: on-site grouped siblings sharing one physical stop (same
@@ -945,11 +937,11 @@ function buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, 
   const onSite = [];
   for (const row of onSiteRows) {
     const key = customer ? liveEtaDedupeKey(row, customer) : null;
-    if (key == null) { onSite.push(liveEtaGroupFor([row], null, 'on_property')); continue; }
+    if (key == null) { onSite.push(liveEtaGroupFor([row], null, 'on_property', customer)); continue; }
     if (!onSiteByKey.has(key)) onSiteByKey.set(key, []);
     onSiteByKey.get(key).push(row);
   }
-  for (const members of onSiteByKey.values()) onSite.push(liveEtaGroupFor(members, null, 'on_property'));
+  for (const members of onSiteByKey.values()) onSite.push(liveEtaGroupFor(members, null, 'on_property', customer));
   return [...keyed, ...keyless, ...onSite];
 }
 

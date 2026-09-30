@@ -1523,7 +1523,7 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
 
   test('novel wording the classifiers never heard of still triggers the state recheck through the broad vocabulary gate', async () => {
     // No numeric / timed / completed-arrival / en-route-phrase classifier reads this.
-    const body = 'Our driver has pulled in and is at your door.';
+    const body = 'Our driver is at your door.';
     expect(await run(body, [row({ status: 'completed', track_state: 'completed' })])).toBe('eta_claim_no_longer_en_route');
   });
 
@@ -1554,6 +1554,29 @@ describe('round 20 P2s: always-recheck on visit-status wording, destination iden
       expect(await run('The tech is 9 minutes away.', [row(extra)])).toBe('eta_claim_destination_changed');
       expect(await run('Your technician is en-route.', [row(extra)])).toBe('eta_claim_destination_changed');
       expect(await run('Track: portal.wavespestcontrol.com/track/tok-1', [row(extra)])).toBe('eta_claim_destination_changed');
+    });
+    describe('customer-coordinate fallback (visit has no pin)', () => {
+      const customerDest = { id: 'svc-1', propertyId: 'prop-1', lat: null, lng: null, line1: '1 Test St', zip: '34285', resolved: { source: 'customer', lat: 27.1, lng: -82.2 }, customerId: 'cust-1' };
+      const noPinRow = (extra = {}) => row({ lat: null, lng: null, ...extra });
+      const cSnap = () => snap({ destinations: [customerDest] });
+      // fakeDb with a customers table for the fallback re-read.
+      const dbWith = (rows, customer) => (table) => (table === 'customers'
+        ? { where: () => ({ first: async () => customer }) }
+        : { whereIn: () => ({ select: async () => rows }) });
+      const runC = (customer, rows = [noPinRow()]) => etaClaimBlockReason({ liveEtaSnapshot: cSnap(), factsGeneratedAt: FRESH, outgoingBody: 'The tech is 9 minutes away.', now: NOW, dbh: dbWith(rows, customer) });
+      const cust = (extra = {}) => ({ latitude: '27.1', longitude: '-82.2', address_line1: '1 Test St', zip: '34285', city: 'Venice', ...extra });
+      test('same customer coordinates pass', async () => { expect(await runC(cust())).toBeNull(); });
+      test('a re-geocoded customer address blocks', async () => {
+        expect(await runC(cust({ latitude: '27.9' }))).toBe('eta_claim_destination_changed');
+        expect(await runC(cust({ longitude: '-82.9' }))).toBe('eta_claim_destination_changed');
+      });
+      test('customer coordinates cleared, or the customer row unreadable, block', async () => {
+        expect(await runC(cust({ latitude: null }))).toBe('eta_claim_destination_changed');
+        expect(await runC(null)).toBe('eta_claim_destination_changed');
+      });
+      test('the visit later getting its own pin changes the source and blocks', async () => {
+        expect(await runC(cust(), [row({ lat: '27.1', lng: '-82.2' })])).toBe('eta_claim_destination_changed');
+      });
     });
     test('a recorded destination whose visit row cannot be read blocks', async () => {
       expect(await run('The tech is 9 minutes away.', [row({ id: 'svc-other' })])).toBe('eta_claim_no_longer_en_route');

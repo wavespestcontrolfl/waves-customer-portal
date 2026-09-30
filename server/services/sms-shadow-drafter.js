@@ -766,10 +766,19 @@ const WORD_AFTER_RE = /^(?:\s*|-(?!ish\b))[A-Za-z]+\b/i;
 // most", "20 give or take", "20 approx". Only when the qualifier ends the
 // phrase, so "20 or so visits" still reads as a count.
 const ETA_QUALIFIER_AFTER_RE = /^\s*(?:max(?:imum)?|tops|or\s+so|or\s+less|or\s+more|or\s+thereabouts|at\s+(?:most|least)|give\s+or\s+take|approx(?:\.|imately)?|roughly|min(?:imum)?)(?=\s*(?:[.,;:!?)\u2014]|$|\s(?:away|out|from)\b))/i;
+// "N." / "N)" as a line's first token (optionally after a bullet), followed by
+// text: a numbered-list marker.
+function isListMarker(str, index, length) {
+  const prefix = str.slice(str.lastIndexOf('\n', index - 1) + 1, index);
+  return /^\s*(?:[-*\u2022]\s*)?$/.test(prefix) && /^[.)]\s+\S/.test(str.slice(index + length, index + length + 4));
+}
 // A number that is plainly NOT a duration/ETA figure: ordinal, percentage,
 // money, time of day / address / phone token, or a date. Shared by
 // classifyBareEtaNumber and the unclassified-ETA backstop.
 function isNonDurationNumber(str, index, length) {
+  // A numbered-list marker ("1. Check the invoice", "2) Call us") at the start
+  // of a line is structure, never a duration (round-21 P2).
+  if (isListMarker(str, index, length)) return true;
   const before = str.slice(Math.max(0, index - 15), index);
   const after = str.slice(index + length, index + length + 24);
   // Ordinal ("the 20th") / percentage ("100%") checked first — both would
@@ -1128,7 +1137,14 @@ function bodyMentionsArrival(text) {
 // (vocabulary, not phrasing); the only exemptions are the same non-claims the
 // narrower classifiers already honor: a conditional ("once he's on the way"), a
 // negated correction ("hasn't arrived"), and a scheduling window.
-const VISIT_STATUS_RE = /\b(?:arriv\w*|en[\s-]?route|on\s+(?:the|his|her|their|our|my)\s+way|(?:coming|headed|heading|driving|rolling|travell?ing)|(?:is|are|'s|'re|be|been|was|were)\s+(?:now\s+|just\s+|already\s+)?(?:here|outside|there|nearby|close|on[\s-]?site|on\s+(?:the|your)\s+property)|left\s+(?:for|to)|pull(?:ed|ing)?\s+up|show(?:ed|ing)?\s+up|at\s+(?:your|the)\s+(?:door|house|home|place|address)|on[\s-]?site|almost\s+there)\b/gi;
+const VISIT_STATUS_SUBJECT = "(?:tech(?:nician)?|driver|crew|he|she|they)";
+const VISIT_STATUS_RE = new RegExp(
+  '\\b(?:arriv\\w*|en[\\s-]?route|on\\s+(?:the|his|her|their|our|my)\\s+way|(?:coming|headed|heading|driving|rolling|travell?ing)'
+  // Positional status forms (here / there / outside / nearby / close / on site /
+  // at your door / almost there) count ONLY with a technician-type subject
+  // (round-21 P2): "We are here to help" / "we're here" are not a claim.
+  + `|${VISIT_STATUS_SUBJECT}(?:'s|'re|\\s+(?:is|are|was|were|has\\s+been|have\\s+been|will\\s+be|should\\s+be))\\s+(?:(?:now|just|already|almost|very|really|getting)\\s+)*(?:(?:here|outside|there|nearby|close|on[\\s-]?site|on\\s+(?:the|your)\\s+property|at\\s+(?:your|the)\\s+(?:door|house|home|place|address))(?!\\s+to\\s+(?:help|assist|answer|support))|almost\\s+there)`
+  + '|left\\s+(?:for|to)|pull(?:ed|ing)?\\s+up|show(?:ed|ing)?\\s+up)\\b', 'gi');
 function bodyMentionsVisitStatus(text) {
   const str = String(text || '');
   for (const m of str.matchAll(new RegExp(VISIT_STATUS_RE.source, VISIT_STATUS_RE.flags))) {

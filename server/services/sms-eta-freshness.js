@@ -417,27 +417,55 @@ function technicianChanged(boundEntries, rows) {
 }
 const foldStr = (v) => (v == null ? '' : String(v).trim().toLowerCase());
 const sameNum = (a, b) => (a == null || b == null ? a == null && b == null : Number(a) === Number(b));
-function destinationMatches(recorded, row) {
+function stampedDestinationMatches(recorded, row) {
   return Boolean(row)
     && String(recorded.propertyId ?? '') === String(row.property_id ?? '')
     && sameNum(recorded.lat, row.lat) && sameNum(recorded.lng, row.lng)
     && foldStr(recorded.line1) === foldStr(row.service_address_line1)
-    && foldStr(recorded.zip) === foldStr(row.service_address_zip);
+    && foldStr(recorded.zip) === foldStr(row.service_address_zip)
+    // Older destinations without a city keep the previous comparison.
+    && (recorded.city === undefined || foldStr(recorded.city) === foldStr(row.service_address_city));
+}
+// Round-21 P2: the figure may have been computed for the CUSTOMER's coordinates
+// (a visit with no pin falls back to them), so a re-geocoded customer address
+// moves the destination without touching the visit row. Re-derive the SAME
+// resolution (live-eta-destination.js) from current rows and require the same
+// source and coordinates. A customer row that cannot be read blocks.
+async function resolvedDestinationMatches(recorded, row, dbh) {
+  const rec = recorded.resolved;
+  if (!rec || typeof rec !== 'object') return true; // older snapshot: stamped-field comparison only
+  let customer = null;
+  if (rec.source === 'customer') {
+    if (recorded.customerId == null) return false;
+    customer = await dbh('customers').where({ id: recorded.customerId }).first('latitude', 'longitude', 'address_line1', 'zip', 'city');
+    if (!customer) return false;
+  }
+  const { resolveLiveEtaDestination } = require('./live-eta-destination');
+  const now = resolveLiveEtaDestination({
+    service_lat: row.lat, service_lng: row.lng, service_address_line1: row.service_address_line1, service_address_zip: row.service_address_zip, service_address_city: row.service_address_city,
+  }, customer);
+  return now.source === (rec.source ?? null) && sameNum(now.lat, rec.lat) && sameNum(now.lng, rec.lng);
 }
 // An entry that recorded destinations (every entry the aggregator builds does)
 // must find EACH of its recorded visits at the same destination; a missing
 // row/field pair is a mismatch. Entries from older snapshots without the field
 // keep the previous behavior.
-function destinationChanged(boundEntries, rows) {
+async function destinationChanged(boundEntries, rows, dbh) {
   const rowById = new Map(rows.map((row) => [row.id, row]));
-  return boundEntries.some((entry) => Array.isArray(entry.destinations)
-    && entry.destinations.some((d) => !d || !destinationMatches(d, rowById.get(d.id))));
+  for (const entry of boundEntries) {
+    if (!Array.isArray(entry.destinations)) continue;
+    for (const d of entry.destinations) {
+      const row = d ? rowById.get(d.id) : null;
+      if (!row || !stampedDestinationMatches(d, row) || !(await resolvedDestinationMatches(d, row, dbh))) return true;
+    }
+  }
+  return false;
 }
 async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite = false, recordedState = false, dbh, trackTokensToVerify = [] }) {
   try {
     const { customerTrackState } = require('./track-transitions');
     const allIds = [...new Set(boundEntries.flatMap((e) => e.scheduledServiceIds))];
-    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip');
+    const rows = await dbh('scheduled_services').whereIn('id', allIds).select('id', 'status', 'track_state', 'track_view_token', 'track_token_expires_at', 'technician_id', 'property_id', 'lat', 'lng', 'service_address_line1', 'service_address_zip', 'service_address_city');
     // requireOnSite (Codex round-13 P2): a completed-arrival claim ("has
     // arrived") holds only once the tracker says the tech is on the property.
     const liveStates = new Set(requireOnSite ? ['on_property'] : ((allowOnSite || recordedState) ? ['en_route', 'on_property'] : ['en_route']));
@@ -465,7 +493,7 @@ async function checkEntriesStillLive({ boundEntries, allowOnSite, requireOnSite 
     // Round-20 P2: the figure/status was about a specific destination; staff
     // moving the appointment to another property keeps the row en route but
     // makes the minutes wrong. Unreadable or mismatched → block (every path).
-    if (destinationChanged(boundEntries, rows)) return 'eta_claim_destination_changed';
+    if (await destinationChanged(boundEntries, rows, dbh)) return 'eta_claim_destination_changed';
     // Recorded-state recheck (no classified claim): each entry's visits must
     // still be in the exact state the draft carried — on site stays on site,
     // en route stays en route.

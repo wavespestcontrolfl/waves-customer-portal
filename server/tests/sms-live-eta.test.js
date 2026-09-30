@@ -1752,7 +1752,44 @@ describe('round 20 P2s: bare-past arrival, en-route hyphen, destination identity
     const today = require('../utils/datetime-et').etDateString();
     const row = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', property_id: 'prop-1', service_lat: '27.4', service_lng: '-82.5', service_address_line1: '1 Test St', service_address_zip: '34285' };
     const [g] = buildLiveEtaGroups({ upcomingServices: [row], liveEtaKeys: [null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true });
-    expect(g.destinations).toEqual([{ id: 'a', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285' }]);
+    expect(g.destinations).toEqual([{ id: 'a', propertyId: 'prop-1', lat: 27.4, lng: -82.5, line1: '1 Test St', zip: '34285', city: null, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } }]);
+  });
+});
+
+// Codex round-21 P2s (PR #5334).
+describe('round 21 P2s: list markers, subjectless "here", resolved destination', () => {
+  test.each(['1. Check the invoice', '2) Call us to confirm', '- 3. Pay online', 'Here is what to do:\n1. Check the invoice\n2. Call the office\n3) Reply YES'])('list markers are not ETA minutes: %p', (reply) => {
+    expect(findGroundedMinutesFigures(reply)).toEqual([]);
+    expect(findEtaMinutesClaims(reply)).toEqual([]);
+    expect(bodyHasTimedArrivalPhrase(reply, { unclassifiedSignalOnly: true })).toBe(false);
+  });
+  test('a real figure on a list line is still read; a mid-sentence "3." is unaffected', () => {
+    expect(findGroundedMinutesFigures('1. The tech is 15 minutes away').map((c) => c.minutes)).toContain(15);
+    expect(findGroundedMinutesFigures('The tech is 9 minutes away.').map((c) => c.minutes)).toEqual([9]);
+  });
+  test('the draft-time validator ignores list markers under a live ETA', () => {
+    const prior = process.env[GATE]; process.env[GATE] = 'true';
+    try {
+      expect(validateLiveEtaMinutes({ reply: '1. Check the invoice\n2. Reply YES', factsBlock: 'LIVE ETA: about 9 minutes (GPS, as of 2:45 PM ET)' }).ok).toBe(true);
+    } finally { if (prior === undefined) delete process.env[GATE]; else process.env[GATE] = prior; }
+  });
+  test.each(['We are here to help.', "We're here if you need anything.", 'Our office is here for you.', 'The technician is here to help with any questions.'])('%p is not visit status', (t) => {
+    const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+    expect(bodyMentionsVisitStatus(t)).toBe(false);
+  });
+  test.each(['The technician is here.', "Your tech's outside.", 'The driver is at your door.', "They're almost there.", 'The crew is on-site.'])('%p is visit status', (t) => {
+    const { bodyMentionsVisitStatus } = require('../services/sms-shadow-drafter');
+    expect(bodyMentionsVisitStatus(t)).toBe(true);
+  });
+  test('destination identity records the RESOLVED destination and its source (visit pin vs customer fallback)', () => {
+    const today = require('../utils/datetime-et').etDateString();
+    const customer = { ...baseCustomer(), id: 'cust-1', latitude: 27.1, longitude: -82.2 };
+    const noPin = { id: 'a', scheduled_date: today, status: 'en_route', track_state: 'en_route', track_view_token: 'tok-a', technician_id: 'tech-1', property_id: 'prop-1', service_lat: null, service_lng: null };
+    const pinned = { ...noPin, id: 'b', service_lat: 27.4, service_lng: -82.5 };
+    const [gA, gB] = buildLiveEtaGroups({ upcomingServices: [noPin, pinned], liveEtaKeys: [null, null], uniqueLiveEtaKeys: [], liveEtaResultByKey: new Map(), includeLiveEta: true, customer });
+    expect(gA.destinations[0]).toMatchObject({ id: 'a', lat: null, lng: null, resolved: { source: 'customer', lat: 27.1, lng: -82.2 }, customerId: 'cust-1' });
+    expect(gB.destinations[0]).toMatchObject({ id: 'b', lat: 27.4, lng: -82.5, resolved: { source: 'visit', lat: 27.4, lng: -82.5 } });
+    expect(gB.destinations[0].customerId).toBeUndefined();
   });
 });
 
