@@ -92,8 +92,12 @@ function windowStart(now) {
 async function loadWeek(now = new Date()) {
   const rows = await db('call_log')
     .modify((q) => whereNotSandboxCall(q)) // the sweep never texts a sandbox call either
-    .where('created_at', '>=', new Date(windowStart(now).getTime() - LOOKBACK_EXTRA_MS))
     .whereRaw('metadata->? IS NOT NULL', [METADATA_KEY])
+    // An unresolved send is loaded whatever its age, so a stuck row keeps
+    // being reported until it resolves (pre-push P1).
+    .where((q) => q
+      .where('created_at', '>=', new Date(windowStart(now).getTime() - LOOKBACK_EXTRA_MS))
+      .orWhereRaw('metadata->?->>? IN (?, ?)', [METADATA_KEY, 'status', 'pending', 'claimed']))
     .select(
       'created_at',
       db.raw('metadata->?->>? AS status', [METADATA_KEY, 'status']),
@@ -317,5 +321,5 @@ async function runCallBookingLinkWeeklyCheck(opts = {}) {
 
 module.exports = {
   runCallBookingLinkWeeklyCheck,
-  _private: { composeWeeklyCheck, dedupeKeyFor, reasonLabel, clampSummary, OPS_KEY, SUMMARY_MAX },
+  _private: { composeWeeklyCheck, dedupeKeyFor, reasonLabel, clampSummary, loadWeek, OPS_KEY, SUMMARY_MAX },
 };
