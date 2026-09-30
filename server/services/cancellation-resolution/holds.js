@@ -573,15 +573,20 @@ function emitHoldTechNotices(techNotices) {
 async function cancelHold(holdId, { compensateVisits = true } = {}) {
   const hold = await db('plan_holds').where({ id: holdId }).first('*');
   if (!hold || hold.status !== 'active') return false;
-  await db.transaction(async (trx) => {
+  const undone = await db.transaction(async (trx) => {
     await lockCustomerComms(trx, hold.customer_id); // rung 6 — see startHold
     // The saved rate is re-read under the lock: a scoped wind-down reprices
     // plan_holds.held_monthly_rate for a held family, and restoring the
-    // pre-lock copy would resurrect the pre-demotion price.
-    const live = await trx('plan_holds').where({ id: holdId }).first('status', 'held_monthly_rate');
-    if (!live || live.status !== 'active') return;
+    // pre-lock copy would resurrect the pre-demotion price. The row lock is
+    // the one markHoldsAccepted takes: a hold an accept already marked
+    // (another run of the same accept may have skipped its visits) is never
+    // undone by a compensation — and a hold cancelled here can no longer be
+    // marked.
+    const live = await trx('plan_holds').where({ id: holdId }).forUpdate().first('status', 'held_monthly_rate', 'moved_visits');
+    if (!live || live.status !== 'active') return false;
+    if (readRecord(live.moved_visits).acceptCommitted === true) return false;
     const claimed = await trx('plan_holds').where({ id: holdId, status: 'active' }).update({ status: 'cancelled', updated_at: new Date() });
-    if (!claimed) return;
+    if (!claimed) return false;
     if (live.held_monthly_rate != null) {
       const component = await trx('customer_plan_rates').where({ customer_id: hold.customer_id, family_key: hold.family_key }).first('source');
       if (component && component.source === 'plan_hold') {
@@ -594,7 +599,9 @@ async function cancelHold(holdId, { compensateVisits = true } = {}) {
     }
     const others = await trx('plan_holds').where({ customer_id: hold.customer_id, status: 'active' }).whereNot({ id: holdId }).max('resume_on as max');
     await trx('customers').where({ id: hold.customer_id }).update({ tier_protected_until: others?.[0]?.max || null, updated_at: new Date() });
+    return true;
   });
+  if (!undone) return false;
   if (compensateVisits) {
     let movedVisits = [];
     try {

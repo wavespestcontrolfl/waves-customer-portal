@@ -455,6 +455,15 @@ describe('runPlanHoldLifecycle', () => {
     expect(bells('plan_hold_accept_interrupted')).toHaveLength(1);
   });
 
+  test('a compensation never undoes a hold an accept already marked: dues stay suspended, nothing moves back', async () => {
+    const { cancelHold } = require('../services/cancellation-resolution/holds');
+    holdSeed({ moved_visits: JSON.stringify({ moved: [{ id: 'p1', from: daysOut(5), to: daysOut(20), window: { start: null, end: null } }], toSkip: [], skipped: [], skipsFinal: true, acceptCommitted: true }) });
+    expect(await cancelHold('h1', { compensateVisits: true })).toBe(false);
+    expect(mockState.tables.plan_holds[0].status).toBe('active');
+    expect(Number(mockState.tables.customer_plan_rates.find((c) => c.family_key === 'lawn_care').monthly_rate)).toBe(0);
+    expect(mockReschedule).not.toHaveBeenCalled();
+  });
+
   test('recovery never undoes a hold its accept marked after the bulk read; a hold being undone refuses a late marking', async () => {
     const { markHoldsAccepted } = require('../services/cancellation-resolution/holds');
     const unmarked = JSON.stringify({ moved: [], toSkip: [{ id: 'l1', status: 'confirmed', from: daysOut(5) }], skipped: [], skipsFinal: false, acceptCommitted: false });
