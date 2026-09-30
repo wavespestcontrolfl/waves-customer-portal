@@ -237,12 +237,19 @@ async function verifyAndDispatch({
   return { ok: true };
 }
 
+// `database` (default: the process-wide pool, so every existing caller is unchanged) is where the lock
+// transaction opens. Given a Knex instance, a new transaction on it; given a transaction handle, Knex's
+// nested transaction (a savepoint on that same connection). The customer-comms / phone / address advisory
+// locks are transaction-scoped in PostgreSQL, so with a caller's transaction they live until the OUTER
+// transaction ends (re-acquisition is a no-op, and one connection cannot deadlock itself); with an
+// instance they release at this transaction's end, as before. Every read below runs on that transaction,
+// so the caller's own uncommitted rows (a schedule claim) are what the authority and the boundary see.
 async function dispatchUnderBillingEmailAuthority({
   input, recipientEmail, authorityRecipientEmail = recipientEmail,
-  templateKey = null, emailSuppression = null, preSendCheck, dispatch, state,
+  templateKey = null, emailSuppression = null, preSendCheck, dispatch, state, database = db,
 }) {
   try {
-    const outcome = await withCustomerCommsLock(db, input.customerId, async (trx) => {
+    const outcome = await withCustomerCommsLock(database, input.customerId, async (trx) => {
       // Suppression writers take phone before recipient rows. Resolve it
       // without a row lock, then verify it again under the customer lock.
       const customer = await trx('customers').where({ id: input.customerId }).first('phone');

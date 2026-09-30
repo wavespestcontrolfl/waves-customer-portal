@@ -207,7 +207,7 @@ jobs:
         working-directory: server
         env:
           APP_TEST_DATABASE_URL: postgresql://waves:waves@localhost:5432/waves_test
-        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js
+        run: npx jest --ci --silent --runInBand --forceExit tests/customer-dunning-schedules-migration-postgres.test.js tests/reconciliation-fence-read-only-postgres.test.js tests/customer-dunning-schedule-postgres.test.js tests/customer-dunning-email-authority-postgres.test.js
       - name: Booking capacity commit transaction tests
         working-directory: server
         env:

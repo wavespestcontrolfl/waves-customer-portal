@@ -182,6 +182,9 @@ function emailHandoff(ctx, to, templateKey, state) {
     preSendCheck: Boundary.check(ctx.snapshot, { database: ctx.database }),
     dispatch,
     state,
+    // the authority's lock transaction and every read under it ride the run's handle, so the customer,
+    // preferences and (uncommitted) schedule claim it sees are the ones the run read
+    database: ctx.database,
   });
 }
 

@@ -1101,6 +1101,9 @@ describe('every helper in the runner path uses the injected handle, never the de
     expect(mockPolicy.mock.calls.every(([a]) => a.database === fakeDb)).toBe(true);
     expect(mockResolve.mock.calls.filter(([, o]) => o?.now).every(([, o]) => o.database === fakeDb)).toBe(true);
     expect(mockLoadContext).toHaveBeenCalledWith(expect.anything(), fakeDb);
+    // the billing email authority opens its lock transaction on the run's handle (real authority: customer-dunning-email-authority-postgres.test.js)
+    expect(require('../services/billing-channel-email-authority').dispatchUnderBillingEmailAuthority)
+      .toHaveBeenCalledWith(expect.objectContaining({ database: fakeDb }));
     expect(mockLoadTemplate.mock.calls.every((c) => c[1] === fakeDb)).toBe(true);
     expect(smsTemplates.getTemplate.mock.calls.every((c) => c[3]?.database === fakeDb)).toBe(true); // the SMS render reads the probe's snapshot
     expect(Schedule.claim.mock.calls.every((c) => c[2].database === fakeDb)).toBe(true);
