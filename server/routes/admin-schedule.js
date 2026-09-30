@@ -4686,7 +4686,7 @@ const ANCHORED_PRICE_AUTHORITY_KEYS = new Set(['estimated_price', 'primary_line_
 // pass only re-checks. Returns the locked sibling targets.
 async function lockAndGuardFollowingSiblings(conn, {
   editedId, editedRow = null, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields = null,
-  proposedDateById = null,
+  proposedOverlayById = null,
 }) {
   // C (owner ruling 2026-09-28): this loop re-derives and writes a sibling's
   // estimated_price below whenever billingRelevant, so each affected sibling
@@ -4773,12 +4773,13 @@ async function lockAndGuardFollowingSiblings(conn, {
   for (const col of SECURE_PREPAY_COVERAGE_COLUMNS) {
     if (proposedFields && proposedFields[col] !== undefined) overlay[col] = proposedFields[col];
   }
-  // Plus each sibling's cadence-rewrite destination (proposedDateById): the
-  // rewrite runs after these guards and can move a repriced sibling INTO a
-  // pending term's window (Codex r2 P1 on #5387).
+  // Plus each sibling's own series-wide changes (proposedOverlayById: the
+  // cadence rewrite's destination date, a series address move's property):
+  // both land after these guards and can move a repriced sibling INTO a
+  // pending term's window or renewal scope (Codex r2 + r3 P1s on #5387).
   const withProposed = (row) => {
-    const cadenceDate = proposedDateById?.get(String(row.id));
-    const rowOverlay = cadenceDate ? { ...overlay, scheduled_date: cadenceDate } : overlay;
+    const own = proposedOverlayById?.get(String(row.id));
+    const rowOverlay = own ? { ...overlay, ...own } : overlay;
     return Object.keys(rowOverlay).length === 0 ? row
       : { ...row, _proposed: { ...rowOverlay, ...(row._proposed || {}) } };
   };
@@ -4848,11 +4849,11 @@ async function lockAndGuardFollowingSiblings(conn, {
 
 async function propagatePriceServiceToFollowingSiblings(conn, {
   editedId, editedRow = null, parentId, fromDateStr, fields, serviceChanged, priceChanged, cols,
-  proposedDateById = null,
+  proposedOverlayById = null,
 }) {
   const targets = await lockAndGuardFollowingSiblings(conn, {
     editedId, editedRow, parentId, fromDateStr, serviceChanged, priceChanged, proposedFields: fields,
-    proposedDateById,
+    proposedOverlayById,
   });
   const billingRelevant = priceChanged || serviceChanged;
   // Missing-table compat probe, ONCE — inside the loop the add-on reads run
@@ -13223,13 +13224,23 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
     // term's sold slots, so they join the coverage pass as context rows
     // (_coverageContext — candidates, never themselves marked). Read on the
     // guard's trx; the rewrite's own destination guard aborts on drift.
+    // Per-visit series-wide changes this save will make to OTHER rows of
+    // the series: the cadence rewrite's destination date and the address
+    // move's property (addressPlan.rows). One map for every guard.
+    const saveSeriesOverlayById = () => {
+      const byId = new Map();
+      const put = (id, patch) => byId.set(String(id), { ...(byId.get(String(id)) || {}), ...patch });
+      for (const [id, date] of plannedRecurrenceDates.cadenceTargetById || []) put(id, { scheduled_date: date });
+      if (addressPlan) for (const row of addressPlan.rows) put(row.id, { property_id: addressPlan.propertyId });
+      return byId;
+    };
     const cadenceCoverageContext = async (conn, cols) => {
-      const targets = plannedRecurrenceDates.cadenceTargetById;
-      const ids = [...(targets?.keys() || [])].filter((id) => id !== String(req.params.id));
+      const overlays = saveSeriesOverlayById();
+      const ids = [...overlays.keys()].filter((id) => id !== String(req.params.id));
       if (ids.length === 0) return [];
       const select = ['id', ...SECURE_PREPAY_COVERAGE_COLUMNS.filter((col) => cols && col in cols)];
       const rows = await conn('scheduled_services').whereIn('id', ids).select(select);
-      return rows.map((row) => ({ ...row, _proposed: { scheduled_date: targets.get(String(row.id)) } }));
+      return rows.map((row) => ({ ...row, _proposed: overlays.get(String(row.id)) }));
     };
     const saveCoverageProposed = () => {
       const proposed = {};
@@ -13768,7 +13779,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               serviceChanged: earlyGroups.serviceChanged,
               priceChanged: earlyGroups.priceChanged,
               proposedFields: earlyGroups.fields,
-              proposedDateById: plannedRecurrenceDates.cadenceTargetById,
+              proposedOverlayById: saveSeriesOverlayById(),
             });
           }
         }
@@ -14695,7 +14706,7 @@ router.put('/:id/update-details', requireAdmin, async (req, res, next) => {
               _proposed: saveCoverageProposed(),
               _coverageContext: await cadenceCoverageContext(trx, priceServiceBeforeRow),
             } : priceServiceBeforeRow,
-            proposedDateById: plannedRecurrenceDates.cadenceTargetById,
+            proposedOverlayById: saveSeriesOverlayById(),
             parentId: scopeParentId,
             // A parent edit covers the WHOLE remaining plan — a date
             // threshold there would race the cadence rewrite that re-dates
@@ -17960,6 +17971,7 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
   }
 
   const NO_MONEY_HELD = ['void', 'refunded', 'canceled', 'cancelled'];
+  const disputeSuspendedColumn = await conn.schema.hasColumn('annual_prepay_terms', 'dispute_suspended_at');
   // Every term that has money held at the price it was minted with and
   // whose canonical coverage decides which visits it stamps: payment_pending
   // (the /secure pick, not yet paid) AND active / renewal_pending (Codex r2
@@ -17971,11 +17983,17 @@ async function securePendingPrepayCoverageReasons(conn, visits) {
   // a refresh that threw after the flip, or a repaid dispute whose OLD
   // links survive while the current set moved on. has_linked_visit decides
   // only whether the first-activation window slide is projected.
-  const pendingTerms = await conn('annual_prepay_terms as t')
+  let heldTermsQuery = conn('annual_prepay_terms as t')
     .join('invoices as inv', 'inv.id', 't.prepay_invoice_id')
     .whereIn('t.customer_id', customerIds)
     .whereIn('t.status', ['payment_pending', 'active', 'renewal_pending'])
-    .whereNotIn('inv.status', NO_MONEY_HELD)
+    .whereNotIn('inv.status', NO_MONEY_HELD);
+  // A dispute-suspended term is flipped BACK to payment_pending on purpose
+  // (suspendActiveTermsForDisputedInvoice) so its visits bill per
+  // application during the dispute — no coverage is held, and those visits
+  // need their price editable (Codex r3 P1 on #5387).
+  if (disputeSuspendedColumn) heldTermsQuery = heldTermsQuery.whereNull('t.dispute_suspended_at');
+  const pendingTerms = await heldTermsQuery
     .select('t.*', conn.raw(
       'EXISTS (SELECT 1 FROM scheduled_services ss_link WHERE ss_link.annual_prepay_term_id = t.id) AS has_linked_visit',
     ));

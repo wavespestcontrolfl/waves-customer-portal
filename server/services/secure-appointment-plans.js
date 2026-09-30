@@ -1270,7 +1270,7 @@ async function selectSecurePlan({ token, plan }) {
       const liveVisit = await trx('scheduled_services')
         .where({ id: visit.id })
         .forUpdate()
-        .first('id', 'status', 'scheduled_date', 'estimated_price');
+        .first('id', 'status', 'scheduled_date', 'estimated_price', 'service_type', 'service_id');
       // Also lock the CUSTOMER row (Codex #2980 r4): resolveForInvoice
       // falls back to customers.payer_id, which staff can change from
       // Customer360 — a default-payer attach must serialize behind this
@@ -1315,6 +1315,15 @@ async function selectSecurePlan({ token, plan }) {
       // so a price that moved in that window is never minted into a prepay
       // invoice. The customer retries and re-quotes at the current price.
       if (cents(liveVisit.estimated_price) !== cents(context.perVisit)) {
+        throw fail('plan_unavailable');
+      }
+      // Same for the service identity (Codex r3 P1 on #5387): the coverage
+      // family (coverageServiceType above) and the invoice title came from
+      // the pre-lock `visit` read; a service-only edit that committed before
+      // this lock would otherwise sell and seed coverage for the OLD service.
+      const sameId = (a, b) => (a == null ? null : String(a)) === (b == null ? null : String(b));
+      if (!sameId(liveVisit.service_id, visit.service_id)
+        || String(liveVisit.service_type || '') !== String(visit.service_type || '')) {
         throw fail('plan_unavailable');
       }
       let payerNow = null;

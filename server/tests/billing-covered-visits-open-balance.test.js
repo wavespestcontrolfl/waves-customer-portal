@@ -657,6 +657,23 @@ describe('findBillingCoveredVisits: the /secure payment_pending prepay rail', ()
     expect(covered.has('v2')).toBe(false);
   });
 
+  test('dispute-suspended terms are filtered out of the held-terms read (Codex r3 P1 on #5387)', async () => {
+    const v1 = visit();
+    const base = fixture({ visits: [v1] });
+    const whereNullCalls = [];
+    const wrapped = (table) => {
+      const q = base(table);
+      if (table === TERM_TABLE) {
+        const orig = q.whereNull ? q.whereNull.bind(q) : null;
+        q.whereNull = (...args) => { whereNullCalls.push(args[0]); return orig ? orig(...args) : q; };
+      }
+      return q;
+    };
+    wrapped.schema = base.schema; wrapped.raw = base.raw;
+    await findBillingCoveredVisits(wrapped, [v1], { liveInvoice: true });
+    expect(whereNullCalls).toContain('t.dispute_suspended_at');
+  });
+
   test('contention on the customer\'s annual-prepay advisory namespace maps to VISIT_BUSY_RETRY', async () => {
     const v1 = visit();
     const conn = fixture({ visits: [v1], securePrepayLockAcquired: false });
