@@ -1025,6 +1025,31 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
     expect(result).toEqual({ ok: true, violations: [] });
   });
 
+  // Codex round-10 P2 (PR #5334): "12.5 minutes away" was read as "5" (the
+  // unit regex matched after the decimal point) and the "." split the
+  // sentence, so a live "5 minutes" fact accepted a 12.5-minute claim.
+  describe('decimal minutes are one value, never a fractional suffix (Codex round-10 P2)', () => {
+    test.each([
+      ['The tech is 12.5 minutes away.', [12.5]],
+      ['12.5 min out', [12.5]],
+      ['about 7.5 minutes from you', [7.5]],
+      ['between 10.5 and 12 minutes away', [10.5, 12]],
+    ])('findEtaMinutesClaims(%p) reads %p', (reply, minutes) => {
+      expect(findEtaMinutesClaims(reply).map((c) => c.minutes)).toEqual(minutes);
+    });
+
+    test('a decimal claim never equals an integer LIVE ETA — even the fractional suffix or truncated integer', () => {
+      for (const n of [5, 12]) {
+        const result = validateLiveEtaMinutes({ reply: 'The tech is 12.5 minutes away.', factsBlock: `LIVE ETA: about ${n} minutes (GPS, as of 2:45 PM ET)` });
+        expect(result.ok).toBe(false);
+      }
+    });
+
+    test('"1.5 hours" still normalizes to 90 minutes', () => {
+      expect(normalizeTimeQuantities('1.5 hours away')).toBe('90 minutes away');
+    });
+  });
+
   describe('normalizeTimeQuantities — every hour quantity is read WITH its unit (Codex round-9 P2)', () => {
     test.each([
       ['about 2 hours out', 'about 120 minutes out'],

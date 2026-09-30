@@ -73,15 +73,35 @@ async function amountsBlock({ decision, outgoingBody }) {
 // scheduler's queued-send path and the auto-send executor check (see
 // sms-eta-freshness.js): the visit is still customer-facing en_route AND
 // the draft's facts are still fresh. Fails closed on any missing evidence.
-async function etaBlock({ decision, outgoingBody }) {
+async function etaBlockReason({ decision, outgoingBody }) {
   const snapshot = parseInputSnapshot(decision.input_snapshot);
   const { etaClaimBlockReason } = require('./sms-eta-freshness');
-  const reason = await etaClaimBlockReason({
+  return etaClaimBlockReason({
     liveEtaSnapshot: snapshot?.live_eta_snapshot || null,
     factsGeneratedAt: snapshot?.facts_generated_at || null,
     outgoingBody,
   });
+}
+
+async function etaBlock({ decision, outgoingBody }) {
+  const reason = await etaBlockReason({ decision, outgoingBody });
   return reason ? `live ETA unsendable (${reason})` : null;
+}
+
+// The scheduler's queued-send path (Codex round-10 P2, PR #5334): the same
+// check the immediate send runs, reading the claimed decision row itself so
+// scheduler.js carries one flat call instead of a nested parse block. Fails
+// CLOSED on any read/parse/recheck error — 'eta_recheck_failed'.
+async function scheduledEtaBlockReason({ decisionId, outgoingBody, skip = false }) {
+  if (skip) return null; // an earlier revalidation already blocked this send
+  try {
+    const db = require('../models/db');
+    const decision = await db('agent_decisions').where({ id: decisionId }).first('input_snapshot');
+    return await etaBlockReason({ decision: decision || {}, outgoingBody });
+  } catch (err) {
+    require('./logger').warn(`[agent-decision-send-checks] LIVE ETA revalidation failed for decision ${decisionId}: ${err.message}; blocking send`);
+    return 'eta_recheck_failed';
+  }
 }
 
 /**
@@ -95,4 +115,4 @@ async function agentDecisionSendBlockReason({ decision, outgoingBody }) {
     || (await etaBlock({ decision, outgoingBody }));
 }
 
-module.exports = { agentDecisionSendBlockReason, parseInputSnapshot };
+module.exports = { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason };

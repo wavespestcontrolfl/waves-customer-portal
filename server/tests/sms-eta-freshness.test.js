@@ -821,3 +821,91 @@ describe('round 5 (Codex P2): a /track/ link\'s own token expiry is re-checked, 
   });
 });
 
+
+describe('round 10 (Codex P2, PR #5334): decimal ETAs, status+link with two live visits, case-insensitive /Track/ links', () => {
+  const drafter = require('../services/sms-shadow-drafter');
+  const real = jest.requireActual('../services/sms-shadow-drafter');
+  beforeEach(() => {
+    drafter.findEtaMinutesClaims.mockReset().mockImplementation(real.findEtaMinutesClaims);
+    drafter.bodyMentionsArrival.mockReset().mockImplementation(real.bodyMentionsArrival);
+    drafter.bodyHasTimedArrivalPhrase.mockReset().mockImplementation(real.bodyHasTimedArrivalPhrase);
+    drafter.bodyHasUnclassifiedArrivalDigit.mockReset().mockImplementation(real.bodyHasUnclassifiedArrivalDigit);
+    drafter.findGroundedMinutesFigures.mockReset().mockImplementation(real.findGroundedMinutesFigures);
+  });
+  const twoEntrySnapshot = {
+    entries: [
+      { minutes: 5, scheduledServiceIds: ['svc-pest'], trackTokens: ['pest-token'] },
+      { minutes: 9, scheduledServiceIds: ['svc-lawn'], trackTokens: ['lawn-token'] },
+    ],
+  };
+  const liveRows = [
+    { id: 'svc-pest', status: 'en_route', track_state: 'en_route', track_view_token: 'pest-token', track_token_expires_at: FUTURE },
+    { id: 'svc-lawn', status: 'en_route', track_state: 'en_route', track_view_token: 'lawn-token', track_token_expires_at: FUTURE },
+  ];
+
+  test('"12.5 minutes away" is one decimal claim — never matched as "5" against a live 5-minute entry', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 5, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: FRESH, outgoingBody: 'The tech is 12.5 minutes away.', now: NOW,
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_unbound');
+  });
+
+  test('status + link with TWO live visits binds to the entry the link token names, not ambiguous', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: twoEntrySnapshot, factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Your pest tech is on the way: wavespestcontrol.com/track/pest-token',
+      dbh: fakeDb(liveRows),
+    });
+    expect(reason).toBeNull();
+  });
+
+  test('status + link with two live visits still fails closed when the named visit is no longer en_route', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: twoEntrySnapshot, factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Your pest tech is on the way: wavespestcontrol.com/track/pest-token',
+      dbh: fakeDb([{ ...liveRows[0], status: 'completed', track_state: 'complete' }, liveRows[1]]),
+    });
+    expect(reason).toBe('eta_claim_no_longer_en_route');
+  });
+
+  test('status with two live visits and NO link (or a stray one) is still ambiguous', async () => {
+    const noLink = await etaClaimBlockReason({
+      liveEtaSnapshot: twoEntrySnapshot, factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Your tech is on the way, about a few minutes out.', dbh: fakeDb(liveRows),
+    });
+    expect(noLink).toBe('eta_claim_ambiguous');
+    const stray = await etaClaimBlockReason({
+      liveEtaSnapshot: twoEntrySnapshot, factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Your tech is on the way: wavespestcontrol.com/track/stray-token', dbh: fakeDb(liveRows),
+    });
+    expect(stray).toBe('eta_claim_ambiguous');
+  });
+
+  test('a capitalised /Track/<token> link is validated like /track/<token> — a stray one is refused', async () => {
+    const reason = await etaClaimBlockReason({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] },
+      factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/Track/stray-token',
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route' }]),
+    });
+    expect(reason).toBe('eta_claim_untracked_link');
+  });
+
+  test('a capitalised /TRACK/<own token> link whose visit is terminal is blocked, and a live one passes', async () => {
+    const snapshot = { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'], trackTokens: ['abc123'] }] };
+    const blocked = await etaClaimBlockReason({
+      liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/TRACK/abc123',
+      dbh: fakeDb([{ id: 'svc-1', status: 'completed', track_state: 'complete' }]),
+    });
+    expect(blocked).toBe('eta_claim_no_longer_en_route');
+    const passed = await etaClaimBlockReason({
+      liveEtaSnapshot: snapshot, factsGeneratedAt: FRESH, now: NOW,
+      outgoingBody: 'Track your tech here: portal.wavespestcontrol.com/TRACK/abc123',
+      dbh: fakeDb([{ id: 'svc-1', status: 'en_route', track_state: 'en_route', track_view_token: 'abc123', track_token_expires_at: FUTURE }]),
+    });
+    expect(passed).toBeNull();
+  });
+});

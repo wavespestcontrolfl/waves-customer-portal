@@ -4348,34 +4348,10 @@ function initScheduledJobs() {
             // window on its own facts. Same shared check the immediate
             // /sms send and the auto-send executor run (sms-eta-freshness),
             // same fail-closed block+retire path, no new mechanism.
-            let etaStale = false;
-            let etaReason = null;
-            if (!anchorStale && !amountsStale && !openTimesStale && !slaStale) {
-              try {
-                const { etaClaimBlockReason } = require('./sms-eta-freshness');
-                const etaDecision = await db('agent_decisions')
-                  .where({ id: claimMeta.agent_decision_id })
-                  .first('input_snapshot');
-                let etaSnapshot = etaDecision?.input_snapshot;
-                if (typeof etaSnapshot === 'string') {
-                  try { etaSnapshot = JSON.parse(etaSnapshot); } catch { etaSnapshot = null; }
-                }
-                const reason = await etaClaimBlockReason({
-                  liveEtaSnapshot: etaSnapshot?.live_eta_snapshot || null,
-                  factsGeneratedAt: etaSnapshot?.facts_generated_at || null,
-                  outgoingBody: msg.message_body,
-                });
-                if (reason) {
-                  etaStale = true;
-                  etaReason = reason;
-                }
-              } catch (err) {
-                logger.warn(`[scheduler] LIVE ETA revalidation failed for scheduled sms ${msg.id}: ${err.message}; blocking send`);
-                etaStale = true;
-                etaReason = 'eta_recheck_failed';
-              }
-            }
-            if (anchorStale || amountsStale || openTimesStale || slaStale || etaStale) {
+            const { scheduledEtaBlockReason } = require('./agent-decision-send-checks');
+            const priorStale = anchorStale || amountsStale || openTimesStale || slaStale;
+            const etaReason = await scheduledEtaBlockReason({ decisionId: claimMeta.agent_decision_id, outgoingBody: msg.message_body, skip: priorStale });
+            if (priorStale || etaReason != null) {
               const blockedReason = anchorStale
                 ? 'stale_agent_decision'
                 : amountsStale

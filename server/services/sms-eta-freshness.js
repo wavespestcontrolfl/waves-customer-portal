@@ -97,8 +97,12 @@ const ETA_FRESHNESS_WINDOW_MS = 15 * 60 * 1000;
 // A /track/:token link anywhere in the outgoing body (Codex round-4 P2) —
 // matched on the bare path, never a full URL parse, since the send path
 // (and comms-lint) can strip the https:// scheme before or after this runs;
-// "/track/" itself never appears in ordinary customer copy.
-const TRACK_LINK_TOKEN_RE = /\/track\/([A-Za-z0-9_-]+)/g;
+// "/track/" itself never appears in ordinary customer copy. Case-INSENSITIVE
+// (Codex round-10 P2): the customer-facing React route is not case-sensitive,
+// so "portal.example/Track/<token>" is a working link and must be validated
+// like "/track/<token>"; the host is never matched at all (path only), and
+// the captured token keeps its own case (tokens are case-sensitive).
+const TRACK_LINK_TOKEN_RE = /\/track\/([A-Za-z0-9_-]+)/gi;
 
 function extractTrackTokens(text) {
   const tokens = new Set();
@@ -130,6 +134,105 @@ function sendTimeTrackTokenLive(expiresAt) {
   return Number.isFinite(expiresMs) && expiresMs > Date.now();
 }
 
+// The send-time decision is three phases (Codex round-10 P2, PR #5334 —
+// split from one 43-branch function; each phase is its own function so a
+// future safety change touches exactly one of them):
+//   1. classifyEtaBody      — what does the outgoing body CLAIM?
+//   2. bindEtaClaim         — which snapshot entry (or entries) does that
+//                             claim bind to, and is the draft fresh enough?
+//   3. checkEntriesStillLive — are those visits (and each /track/ token)
+//                             still live right now? (below)
+
+// Phase 1. Every structural default-deny / backstop rule from the header
+// comment lives here and only here. Lazy require: avoids a require cycle at
+// module load.
+//   claims             minutes figures (trigger-based, unioned with the
+//                      structural default-deny once there's a snapshot or a
+//                      /track/ link to check them against — Codex round-7)
+//   timedArrivalClaim  a vague/unread timed phrase ("half an hour",
+//                      "shortly", an arrival digit the parser couldn't read,
+//                      an hour word normalization couldn't convert) — fails
+//                      closed as unbound; ages out like a stated number
+//   unparsedStatusClaim pure status copy ("on the way") — rechecked against
+//                      the CURRENT tracker state only, no freshness window
+function classifyEtaBody({ outgoingBody, snapshotHasEntries }) {
+  const drafter = require('./sms-shadow-drafter');
+  const trackTokens = extractTrackTokens(outgoingBody);
+  const hasTrackLink = trackTokens.length > 0;
+  const liveContext = snapshotHasEntries || hasTrackLink;
+  const claims = liveContext
+    ? [...drafter.findEtaMinutesClaims(outgoingBody), ...drafter.findGroundedMinutesFigures(outgoingBody)]
+    : drafter.findEtaMinutesClaims(outgoingBody);
+  const unreadTimed = drafter.bodyHasTimedArrivalPhrase(outgoingBody) || drafter.bodyHasUnclassifiedArrivalDigit(outgoingBody);
+  // Codex round-9 P2: an hour word normalization could NOT turn into minutes
+  // is a timed claim even beside a real minutes figure, once a live ETA
+  // context exists to hold the body to.
+  const unreadHours = liveContext && drafter.bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true });
+  const timedArrivalClaim = (!claims.length && unreadTimed) || unreadHours;
+  // Backstop (audit P1, round 4): a body that talks about the tech arriving
+  // is checked whenever the draft carried a LIVE ETA, or whenever it
+  // mentions minutes at all.
+  const mentionsMinutes = snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || ''));
+  const unparsedStatusClaim = !claims.length && !timedArrivalClaim && drafter.bodyMentionsArrival(outgoingBody) && mentionsMinutes;
+  return {
+    claims, trackTokens, hasTrackLink, timedArrivalClaim, unparsedStatusClaim,
+    hasClaim: claims.length > 0 || timedArrivalClaim || unparsedStatusClaim,
+  };
+}
+
+// Only the current grouped shape is accepted — { entries: [{ minutes,
+// scheduledServiceIds, trackTokens }] }. A missing/malformed snapshot, or the
+// old flat shape (no `entries`), yields no entries and fails closed.
+function usableSnapshotEntries(liveEtaSnapshot) {
+  return Array.isArray(liveEtaSnapshot?.entries)
+    ? liveEtaSnapshot.entries.filter((e) => e && Number.isFinite(e.minutes) && Array.isArray(e.scheduledServiceIds) && e.scheduledServiceIds.length)
+    : [];
+}
+
+// The entries whose own /track/ token(s) appear in the outgoing body.
+function entriesForTokens(entries, tokens) {
+  return entries.filter((e) => Array.isArray(e.trackTokens) && e.trackTokens.some((t) => tokens.includes(t)));
+}
+
+// A stated timeframe ages out: the draft's facts must be within the
+// freshness window (null when fresh).
+function draftFreshnessReason(factsGeneratedAt, now) {
+  const draftedAt = parseDraftedAt(factsGeneratedAt);
+  if (!draftedAt) return 'eta_claim_no_facts_time';
+  return now.getTime() - draftedAt.getTime() > ETA_FRESHNESS_WINDOW_MS ? 'eta_claim_stale_facts' : null;
+}
+
+// Phase 2a — status-only claim ("the tech is on the way"): no minutes figure
+// to go stale, so no freshness window. With one live entry it binds to it;
+// with several, the /track/ token in the body selects the entry it names
+// (Codex round-10 P2) — only an unselectable status claim is ambiguous.
+function bindStatusClaim(claim, entries) {
+  if (entries.length === 1) return { entries: [...entries] };
+  const linked = entriesForTokens(entries, claim.trackTokens);
+  return linked.length ? { entries: linked } : { reason: 'eta_claim_ambiguous' };
+}
+
+// Phase 2b — every distinct minutes figure claimed must equal the ONE live
+// entry's minutes; a vague/unread timed claim has no exact number to bind, so
+// it fails closed as unbound after passing the same freshness window.
+function bindTimedOrMinutesClaim(claim, entries, { factsGeneratedAt, now }) {
+  const staleReason = draftFreshnessReason(factsGeneratedAt, now);
+  if (staleReason) return { reason: staleReason };
+  if (claim.timedArrivalClaim) return { reason: 'eta_claim_unbound' };
+  const [entry] = entries;
+  return claim.claims.every((c) => c.minutes === entry.minutes) ? { entries: [entry] } : { reason: 'eta_claim_unbound' };
+}
+
+// Phase 2. Returns { entries } (the bound entries) or { reason }.
+function bindEtaClaim(claim, entries, freshness) {
+  if (claim.unparsedStatusClaim) return bindStatusClaim(claim, entries);
+  // Two distinct live ETAs (Codex r3): a minutes/timed claim can't be tied
+  // to the right visit deterministically, so even the right number fails
+  // closed.
+  if (entries.length > 1) return { reason: 'eta_claim_ambiguous' };
+  return bindTimedOrMinutesClaim(claim, entries, freshness);
+}
+
 /**
  * null when the outgoing body may go out, else a short reason string the
  * caller logs before blocking/superseding. `liveEtaSnapshot` and
@@ -140,133 +243,28 @@ function sendTimeTrackTokenLive(expiresAt) {
  * instead of round-tripping through JSON.
  */
 async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, now = new Date(), dbh = db }) {
-  const { findEtaMinutesClaims, bodyMentionsArrival, bodyHasTimedArrivalPhrase, bodyHasUnclassifiedArrivalDigit, findGroundedMinutesFigures } = require('./sms-shadow-drafter'); // lazy: avoids a require cycle at module load
-  const snapshotHasEntries = Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0;
-  const trackTokens = extractTrackTokens(outgoingBody);
-  const hasTrackLink = trackTokens.length > 0;
-  // Structural default-deny (Codex round-7 P2): once there's a live ETA
-  // snapshot to check a claim against, or a /track/ link that implies one,
-  // stop relying on findEtaMinutesClaims's arrival-trigger-word list (which
-  // has missed a new phrasing every round this PR has gone through) — union
-  // in findGroundedMinutesFigures, which treats EVERY plain minutes figure
-  // as a claim unless its own clause is an explicit non-arrival duration.
-  // With neither a snapshot nor a link, there is nothing to check a claim
-  // against anyway, so the trigger-based detection is kept as-is.
-  const claims = (snapshotHasEntries || hasTrackLink)
-    ? [...findEtaMinutesClaims(outgoingBody), ...findGroundedMinutesFigures(outgoingBody)]
-    : findEtaMinutesClaims(outgoingBody);
-  // TIMED unparsed claim (Codex round-5 P2): a vague/approximate duration
-  // ("half an hour away", "an hour out", "a few minutes away", "a couple
-  // minutes", "quarter hour", "shortly", "any minute now", "soon") states
-  // WHEN the tech arrives just as surely as a parsed number does, even
-  // though findEtaMinutesClaims can never bind an exact figure to it — so it
-  // gets the SAME 15-minute freshness window a numeric claim gets, AND
-  // always fails closed as unbound below: there is no number here that
-  // could ever match the snapshot's exact minutes. bodyHasTimedArrivalPhrase
-  // runs its own arrival-trigger check (it also recognizes the weak "out"
-  // trigger, e.g. "an hour out"/"a quarter hour out" — narrower than
-  // bodyMentionsArrival below, which only looks for a STRONG trigger), so
-  // it's checked independently, BEFORE the status-only backstop, so a timed
-  // phrase is never waved through as status copy just because it also
-  // happens to contain the word "minutes".
-  // Round 6 (Codex P2): a digit sitting in a STRONG-arrival-triggered
-  // sentence that findEtaMinutesClaims could not turn into a claim (a
-  // phrasing this module's parser doesn't yet read) is treated exactly like
-  // a vague timed phrase — fails closed as unbound rather than falling
-  // through to the lenient status-only path below, which would recheck only
-  // the CURRENT tracker state and never bind the unread figure to anything.
-  // Codex round-9 P2 (PR #5334): hour-based durations are normalized to
-  // minutes inside findGroundedMinutesFigures (so "About 2 hours out" reads
-  // as 120, never as a raw "2" that a live "2 minutes" fact would accept). An
-  // hour word that normalization could NOT turn into minutes ("an hour",
-  // "half an hour", "a couple hours") is treated as a vague timed claim even
-  // when a real minutes figure sits beside it, once there is a live ETA
-  // context to hold the body to — fail closed as unbound below.
-  const liveContext = snapshotHasEntries || hasTrackLink;
-  const timedArrivalClaim = (!claims.length
-    && (bodyHasTimedArrivalPhrase(outgoingBody) || bodyHasUnclassifiedArrivalDigit(outgoingBody)))
-    || (liveContext && bodyHasTimedArrivalPhrase(outgoingBody, { unnormalizedHoursOnly: true }));
-  // Backstop (audit P1, round 4): the claim parser can't read every way a
-  // person or model writes an ETA. A body that talks about the tech arriving
-  // is checked whenever the draft carried a LIVE ETA, or whenever it mentions
-  // minutes at all — every snapshot entry must then still be live and fresh.
-  // Pure status copy only ("on the way", "en route") — no duration wording
-  // of any kind — lands here.
-  const unparsedStatusClaim = !claims.length && !timedArrivalClaim && bodyMentionsArrival(outgoingBody)
-    && (snapshotHasEntries || /\b(?:min(?:ute)?s?)\b/i.test(String(outgoingBody || '')));
-  if (!claims.length && !timedArrivalClaim && !unparsedStatusClaim && !hasTrackLink) return null;
-
-  // Only the current grouped shape is accepted — { entries: [{ minutes,
-  // scheduledServiceIds, trackTokens }] }. A missing/malformed snapshot, or
-  // the old flat shape (no `entries`), fails closed exactly like no snapshot
-  // at all.
-  const entries = Array.isArray(liveEtaSnapshot?.entries)
-    ? liveEtaSnapshot.entries.filter((e) => e && Number.isFinite(e.minutes) && Array.isArray(e.scheduledServiceIds) && e.scheduledServiceIds.length)
-    : [];
+  const claim = classifyEtaBody({ outgoingBody, snapshotHasEntries: Array.isArray(liveEtaSnapshot?.entries) && liveEtaSnapshot.entries.length > 0 });
+  if (!claim.hasClaim && !claim.hasTrackLink) return null;
+  const entries = usableSnapshotEntries(liveEtaSnapshot);
   if (!entries.length) return 'eta_claim_no_snapshot';
 
   // Tracking-link-only path (Codex round-4 P2): no minutes figure, no
-  // arrival wording — a reply that shares ONLY the link. Bind it directly by
-  // token (never by "the one live entry", since a link genuinely names ONE
-  // visit) so more than one live ETA in the snapshot is not itself
-  // disqualifying here the way it is for an unbound minutes/arrival claim
-  // below. A token this draft's snapshot never minted fails closed.
-  if (!claims.length && !timedArrivalClaim && !unparsedStatusClaim) {
-    const linkedEntries = entries.filter((e) => Array.isArray(e.trackTokens) && e.trackTokens.some((t) => trackTokens.includes(t)));
+  // arrival wording — bound directly by token (a link genuinely names ONE
+  // visit), so more than one live ETA is not disqualifying here. A token
+  // this draft's snapshot never minted fails closed.
+  if (!claim.hasClaim) {
+    const linkedEntries = entriesForTokens(entries, claim.trackTokens);
     if (!linkedEntries.length) return 'eta_claim_untracked_link';
-    return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh, trackTokensToVerify: trackTokens });
+    return checkEntriesStillLive({ boundEntries: linkedEntries, allowOnSite: true, dbh, trackTokensToVerify: claim.trackTokens });
   }
 
-  if (entries.length > 1) return 'eta_claim_ambiguous';
-
-  let boundEntries;
-  if (timedArrivalClaim) {
-    // A vague timeframe still ages out like a stated number (round-5 P2):
-    // apply the SAME 15-minute draft-freshness window a numeric claim gets.
-    const draftedAt = parseDraftedAt(factsGeneratedAt);
-    if (!draftedAt) return 'eta_claim_no_facts_time';
-    if (now.getTime() - draftedAt.getTime() > ETA_FRESHNESS_WINDOW_MS) return 'eta_claim_stale_facts';
-    // Even within the freshness window, there is no exact number here to
-    // bind to the snapshot's minutes figure — fails closed as unbound rather
-    // than pass on "some entry is still live", the same way an unmatched
-    // numeric claim would.
-    return 'eta_claim_unbound';
-  }
-  if (unparsedStatusClaim) {
-    // Status-only claim (Codex round-4 P2): "the tech is on the way" carries
-    // no minutes figure to go stale — recheck ONLY whether the tracker still
-    // says en route right now. The 15-minute freshness window is about a
-    // STATED TIMEFRAME outliving the moment it was true; a bare status claim
-    // never carries one, so the window never applies to it.
-    boundEntries = [...entries];
-  } else {
-    const draftedAt = parseDraftedAt(factsGeneratedAt);
-    if (!draftedAt) return 'eta_claim_no_facts_time';
-    if (now.getTime() - draftedAt.getTime() > ETA_FRESHNESS_WINDOW_MS) return 'eta_claim_stale_facts';
-
-    // Bind each DISTINCT claimed minutes figure to exactly one snapshot entry
-    // — never to the snapshot's ids as a whole, which is exactly the bug this
-    // round fixes (a claim about a completed stop must not pass on some other
-    // stop's still-en_route status).
-    const claimedMinutes = [...new Set(claims.map((c) => c.minutes))];
-    boundEntries = [];
-    for (const minutes of claimedMinutes) {
-      const matches = entries.filter((e) => e.minutes === minutes);
-      if (matches.length === 0) return 'eta_claim_unbound';
-      if (matches.length > 1) return 'eta_claim_ambiguous';
-      boundEntries.push(matches[0]);
-    }
-  }
-
+  const bound = bindEtaClaim(claim, entries, { factsGeneratedAt, now });
+  if (bound.reason) return bound.reason;
   // A minutes/arrival claim that ALSO carries a track link must have that
-  // link genuinely belong to the SAME bound visit(s) — never let a
-  // mismatched or stale link ride along on an otherwise-valid claim.
-  if (hasTrackLink) {
-    const linkedOk = boundEntries.some((e) => Array.isArray(e.trackTokens) && e.trackTokens.some((t) => trackTokens.includes(t)));
-    if (!linkedOk) return 'eta_claim_untracked_link';
-  }
-
-  return checkEntriesStillLive({ boundEntries, allowOnSite: false, dbh, trackTokensToVerify: hasTrackLink ? trackTokens : [] });
+  // link belong to the SAME bound visit(s) — never let a mismatched or stale
+  // link ride along on an otherwise-valid claim.
+  if (claim.hasTrackLink && !entriesForTokens(bound.entries, claim.trackTokens).length) return 'eta_claim_untracked_link';
+  return checkEntriesStillLive({ boundEntries: bound.entries, allowOnSite: false, dbh, trackTokensToVerify: claim.hasTrackLink ? claim.trackTokens : [] });
 }
 
 // Shared "is the bound entry's visit still customer-facing live" recheck —

@@ -497,7 +497,11 @@ const ARRIVAL_TRIGGER_RE = /\b(?:on\s+(?:the|his|her|their|my|our)\s+way|en\s*ro
 // Up to 5 digits (Codex round-9 P2, PR #5334): normalizeTimeQuantities below
 // rewrites hour figures into minutes ("17 hours" -> "1020 minutes"), so the
 // unit token must be able to read a normalized figure wider than 3 digits.
-const ETA_MINUTES_TOKEN_RE = /\b(\d{1,5})\s*(?:min(?:ute)?s?)\b/gi;
+// Decimal figures are one value (Codex round-10 P2, PR #5334): "12.5 minutes
+// away" is 12.5, never a fractional suffix "5" read on its own — a non-
+// integer claim can never equal an integer live-ETA minutes fact, so it is
+// rejected at both draft time and send time.
+const ETA_MINUTES_TOKEN_RE = /\b(\d{1,5}(?:\.\d+)?)\s*(?:min(?:ute)?s?)\b/gi;
 const DURATION_EXCLUDE_AFTER_RE = /^\s*(?:to\s+dry|before\s+(?:letting|you|your|pets|children|kids|re-?entry|reentry)|before\s+it'?s?\s+(?:dry|safe))\b/i;
 const DURATION_EXCLUDE_BEFORE_RE = /\b(?:takes?|taking|allow(?:ing)?|wait(?:ing)?|give\s+it|lasts?)\b[^.?!\n]{0,20}$/i;
 // A bare "in <number>" with no minutes unit at all ("be at your place in
@@ -612,7 +616,10 @@ function classifyBareEtaNumber(str, index, length) {
 function sentenceSpans(str) {
   const spans = [];
   let start = 0;
-  const re = /[.?!\n]+/g;
+  // A "." between two digits is a decimal point, never a sentence end (Codex
+  // round-10 P2): "12.5 minutes away" is ONE sentence, so the arrival word
+  // still shares it with the figure.
+  const re = /(?:[?!\n]|(?<!\d)\.|\.(?!\d))+/g;
   let m;
   while ((m = re.exec(str))) {
     spans.push([start, m.index]);
@@ -775,120 +782,74 @@ function bodyHasTimedArrivalPhrase(text, { unnormalizedHoursOnly = false } = {})
 // alike — they share one clause ("takes 10-12 minutes to dry" excludes both,
 // "10-12 minutes out" includes both) — and the span is marked `consumed` so
 // the single-number pass never double-claims the bound already covered.
-const RANGE_MINUTES_RE = /\b(\d{1,5})\s*(?:[-–—]|to|or)\s*(\d{1,5})\s*(?:min(?:ute)?s?)\b/gi;
-const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,5})\s+and\s+(\d{1,5})\s*(?:min(?:ute)?s?)\b/gi;
+const RANGE_MINUTES_RE = /\b(\d{1,5}(?:\.\d+)?)\s*(?:[-–—]|to|or)\s*(\d{1,5}(?:\.\d+)?)\s*(?:min(?:ute)?s?)\b/gi;
+const BETWEEN_MINUTES_RE = /\bbetween\s+(\d{1,5}(?:\.\d+)?)\s+and\s+(\d{1,5}(?:\.\d+)?)\s*(?:min(?:ute)?s?)\b/gi;
+// ONE ordered tokenizer over the normalized text (Codex round-10 P2, PR #5334;
+// replaces six successive passes with overlapping dedupe/consume rules — the
+// shape every "one more ETA phrasing" round kept extending). Each token spec
+// is a regex, the capture groups that carry a minutes figure, and a judge
+// rule. Specs run in this order over the SAME string; a match whose figure
+// span was already claimed by an earlier spec is skipped (consume-once, by
+// the figure's own span, so an unrelated later figure in the same phrase is
+// still judged on its own). Adding an ETA form means adding a row here.
+//   trigger  range/between/unit figures: need an arrival trigger in the
+//            sentence; a STRONG trigger always claims, a weak one ("out")
+//            consults the dry-time/wait-before duration exclusions.
+//   always   the phrase itself is the trigger ("be there in 20", "he'll be
+//            by in 20").
+//   out      "<N> out" with no unit: 1-180, not a time of day/address/phone.
+//   bare     a bare integer 1-180 in a STRONG-trigger sentence that
+//            classifyBareEtaNumber reads as neither time, money, address, a
+//            date, a non-time count, an ordinal nor a percentage.
+function inBareMinutesRange(m) {
+  const minutes = Number(m[1]);
+  return minutes >= 1 && minutes <= 180;
+}
+function durationExcluded(str, index, length) {
+  const after = str.slice(index + length, index + length + 30);
+  const before = str.slice(Math.max(0, index - 30), index);
+  return DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before);
+}
+const ETA_CLAIM_JUDGES = {
+  trigger: (str, m, sentence) => ARRIVAL_TRIGGER_RE.test(sentence)
+    && (STRONG_ARRIVAL_TRIGGER_RE.test(sentence) || !durationExcluded(str, m.index, m[0].length)),
+  always: () => true,
+  out: (str, m) => inBareMinutesRange(m) && !looksLikeTimeAddressOrPhone(str, m.index, m[0].length),
+  bare: (str, m, sentence) => STRONG_ARRIVAL_TRIGGER_RE.test(sentence)
+    && inBareMinutesRange(m)
+    && classifyBareEtaNumber(str, m.index, m[0].length) === 'claim',
+};
+const ETA_CLAIM_TOKENS = [
+  { re: RANGE_MINUTES_RE, groups: [1, 2], judge: 'trigger' },
+  { re: BETWEEN_MINUTES_RE, groups: [1, 2], judge: 'trigger' },
+  { re: ETA_MINUTES_TOKEN_RE, groups: [1], judge: 'trigger' },
+  { re: IMPLICIT_MINUTES_ARRIVAL_RE, groups: [1], judge: 'always' },
+  { re: FUTURE_ARRIVAL_IN_MINUTES_RE, groups: [1], judge: 'always' },
+  { re: BARE_MINUTES_OUT_RE, groups: [1], judge: 'out' },
+  { re: BARE_ETA_NUMBER_RE, groups: [1], judge: 'bare' },
+];
+function spansOverlap([s1, e1], [s2, e2]) {
+  return s1 < e2 && s2 < e1;
+}
+function sentenceAt(str, spans, index) {
+  const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
+  return str.slice(span[0], span[1]);
+}
 function findEtaMinutesClaims(text) {
   const claims = [];
   const str = normalizeHourMinuteCompounds(normalizeNumberWords(text));
   const spans = sentenceSpans(str);
-  const sentenceFor = (index) => {
-    const span = spans.find(([s, e]) => index >= s && index < e) || spans[spans.length - 1];
-    return str.slice(span[0], span[1]);
-  };
-  // Shared claim/exclusion logic for both the range pass and the
-  // single-number pass below — one definition, so a range bound and a lone
-  // number are judged by the exact same rule.
-  const maybeClaim = (minutes, matchIndex, matchLength, sentence) => {
-    if (!ARRIVAL_TRIGGER_RE.test(sentence)) return false;
-    if (STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) {
-      claims.push({ minutes, index: matchIndex });
-      return true;
-    }
-    const after = str.slice(matchIndex + matchLength, matchIndex + matchLength + 30);
-    const before = str.slice(Math.max(0, matchIndex - 30), matchIndex);
-    if (DURATION_EXCLUDE_AFTER_RE.test(after) || DURATION_EXCLUDE_BEFORE_RE.test(before)) return false;
-    claims.push({ minutes, index: matchIndex });
-    return true;
-  };
-
-  const consumed = []; // [start, end) spans a range match already judged
-  for (const rangeRe of [RANGE_MINUTES_RE, BETWEEN_MINUTES_RE]) {
-    const re = new RegExp(rangeRe.source, rangeRe.flags);
-    let rm;
-    while ((rm = re.exec(str))) {
-      const sentence = sentenceFor(rm.index);
-      const addedFirst = maybeClaim(parseInt(rm[1], 10), rm.index, rm[0].length, sentence);
-      const addedSecond = maybeClaim(parseInt(rm[2], 10), rm.index, rm[0].length, sentence);
-      if (addedFirst || addedSecond) consumed.push([rm.index, rm.index + rm[0].length]);
+  const consumed = []; // [start, end) of every figure already claimed
+  for (const token of ETA_CLAIM_TOKENS) {
+    const re = new RegExp(token.re.source, `${token.re.flags}d`);
+    for (const m of str.matchAll(re)) {
+      const figureSpans = token.groups.map((g) => m.indices[g]);
+      if (figureSpans.some((fs) => consumed.some((c) => spansOverlap(fs, c)))) continue;
+      if (!ETA_CLAIM_JUDGES[token.judge](str, m, sentenceAt(str, spans, m.index))) continue;
+      for (const g of token.groups) claims.push({ minutes: Number(m[g]), index: m.index });
+      consumed.push(...figureSpans);
     }
   }
-
-  const re = new RegExp(ETA_MINUTES_TOKEN_RE.source, ETA_MINUTES_TOKEN_RE.flags);
-  let m;
-  while ((m = re.exec(str))) {
-    // Already judged (and claimed, if warranted) as one bound of a range —
-    // never re-judge it stand-alone, which could either drop the exclusion
-    // context a range shares or double-push the same claim.
-    if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
-    maybeClaim(parseInt(m[1], 10), m.index, m[0].length, sentenceFor(m.index));
-  }
-
-  // Implicit-minutes pass (round 4): "be at your place in 20" carries no
-  // "min(ute)s" unit at all, so it can never surface from the unit-based
-  // passes above however the trigger words are extended — the phrase itself
-  // IS the trigger here, matched narrowly right before the number.
-  const implicitRe = new RegExp(IMPLICIT_MINUTES_ARRIVAL_RE.source, IMPLICIT_MINUTES_ARRIVAL_RE.flags);
-  let im;
-  while ((im = implicitRe.exec(str))) {
-    claims.push({ minutes: parseInt(im[1], 10), index: im.index });
-  }
-
-  // Future-verb "in N" pass (round 8): "he'll be by in 20" — the number sits
-  // after words the fixed implicit-phrase list above can't enumerate; the
-  // subject + future-tense marker earlier in the clause is itself the
-  // trigger, same reasoning as the implicit-minutes pass.
-  const futureRe = new RegExp(FUTURE_ARRIVAL_IN_MINUTES_RE.source, FUTURE_ARRIVAL_IN_MINUTES_RE.flags);
-  let fm;
-  while ((fm = futureRe.exec(str))) {
-    if (claims.some((c) => c.index === fm.index)) continue;
-    claims.push({ minutes: parseInt(fm[1], 10), index: fm.index });
-  }
-
-  // "<N> out" pass (round 6): the bare "out" idiom carries no unit at all —
-  // the phrase itself is the trigger, same reasoning as the implicit-minutes
-  // pass above.
-  const outRe = new RegExp(BARE_MINUTES_OUT_RE.source, BARE_MINUTES_OUT_RE.flags);
-  let om;
-  while ((om = outRe.exec(str))) {
-    // Never re-judge a number a range match (e.g. "between 10 and 12
-    // minutes") already consumed — the range's OWN index is its match
-    // start, not each bound's own position, so a bound sitting mid-range
-    // ("10" in "between 10 and 12 minutes") would otherwise dodge the
-    // index-equality dedup below and double-push the same claim.
-    if (consumed.some(([s, e]) => om.index >= s && om.index < e)) continue;
-    const minutes = parseInt(om[1], 10);
-    if (minutes < 1 || minutes > 180) continue;
-    if (looksLikeTimeAddressOrPhone(str, om.index, om[0].length)) continue;
-    if (claims.some((c) => c.index === om.index)) continue;
-    claims.push({ minutes, index: om.index });
-  }
-
-  // Bare-integer pass (round 6): "ETA: 20" / "his ETA is 20" / "ETA 20" /
-  // "eta ~20" carry no unit and no connector word at all — nothing above can
-  // ever catch them however the trigger words are extended. A STRONG arrival
-  // trigger anywhere in the sentence (see maybeClaim above — "eta" itself is
-  // one) makes ANY bare integer 1-180 in that sentence a claim, unless
-  // classifyBareEtaNumber (round 8) reads it as something else entirely — a
-  // time of day, money, an address/phone-like token, a date, a count with a
-  // non-time noun right after it ("2 visits left" — "left" is itself a
-  // STRONG trigger, so this pass must not claim the unrelated "2"), an
-  // ordinal, or a percentage.
-  const bareRe = new RegExp(BARE_ETA_NUMBER_RE.source, BARE_ETA_NUMBER_RE.flags);
-  let bm;
-  while ((bm = bareRe.exec(str))) {
-    // Same range-consumed guard as the "out" pass above — a range bound
-    // that isn't immediately adjacent to the unit word ("10" in "between 10
-    // and 12 minutes") must not double-claim under this rule too.
-    if (consumed.some(([s, e]) => bm.index >= s && bm.index < e)) continue;
-    if (claims.some((c) => c.index === bm.index)) continue;
-    const sentence = sentenceFor(bm.index);
-    if (!STRONG_ARRIVAL_TRIGGER_RE.test(sentence)) continue;
-    const minutes = parseInt(bm[1], 10);
-    if (minutes < 1 || minutes > 180) continue;
-    if (classifyBareEtaNumber(str, bm.index, bm[0].length) !== 'claim') continue;
-    claims.push({ minutes, index: bm.index });
-  }
-
   return claims;
 }
 // Structural default-deny (Codex round-7 P2, PR #5334): findEtaMinutesClaims
@@ -944,8 +905,8 @@ function findGroundedMinutesFigures(text) {
     let rm;
     while ((rm = re.exec(str))) {
       const sentence = sentenceFor(rm.index);
-      const addedFirst = maybeGroundedClaim(parseInt(rm[1], 10), rm.index, rm[0].length, sentence);
-      const addedSecond = maybeGroundedClaim(parseInt(rm[2], 10), rm.index, rm[0].length, sentence);
+      const addedFirst = maybeGroundedClaim(Number(rm[1]), rm.index, rm[0].length, sentence);
+      const addedSecond = maybeGroundedClaim(Number(rm[2]), rm.index, rm[0].length, sentence);
       if (addedFirst || addedSecond) consumed.push([rm.index, rm.index + rm[0].length]);
     }
   }
@@ -954,7 +915,7 @@ function findGroundedMinutesFigures(text) {
   let m;
   while ((m = re.exec(str))) {
     if (consumed.some(([s, e]) => m.index >= s && m.index < e)) continue;
-    maybeGroundedClaim(parseInt(m[1], 10), m.index, m[0].length, sentenceFor(m.index));
+    maybeGroundedClaim(Number(m[1]), m.index, m[0].length, sentenceFor(m.index));
   }
 
   // Bare-integer default-deny (Codex round-8 P2, PR #5334): "the tech should

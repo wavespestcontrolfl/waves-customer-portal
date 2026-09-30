@@ -17,11 +17,13 @@ jest.mock('../services/sms-followup-sla', () => ({
 }));
 jest.mock('../services/sms-amount-recheck', () => ({ outgoingAmountsStale: jest.fn(async () => ({ stale: false })) }));
 jest.mock('../services/sms-eta-freshness', () => ({ etaClaimBlockReason: jest.fn(async () => null) }));
+jest.mock('../models/db', () => jest.fn());
+const db = require('../models/db');
 const drafter = require('../services/sms-shadow-drafter');
 const { followupPromiseBlockReason } = require('../services/sms-followup-sla');
 const { outgoingAmountsStale } = require('../services/sms-amount-recheck');
 const { etaClaimBlockReason } = require('../services/sms-eta-freshness');
-const { agentDecisionSendBlockReason, parseInputSnapshot } = require('../services/agent-decision-send-checks');
+const { agentDecisionSendBlockReason, parseInputSnapshot, scheduledEtaBlockReason } = require('../services/agent-decision-send-checks');
 
 const SNAP = { open_times_snapshot: { lookup: { city: 'Venice', customerId: 'c1', estimateId: null, serviceType: 'Lawn Care' }, quotedWindows: [{ date: 'Tuesday, September 29', window: '9:00 AM - 11:00 AM' }] } };
 const decision = (over = {}) => ({ id: 'd1', customer_id: 'c1', suggested_message: 'How about Tuesday 9:00 AM - 11:00 AM?', input_snapshot: JSON.stringify(SNAP), prompt_version: 'house_voice_v12_real_answers', ...over });
@@ -134,5 +136,38 @@ describe('LIVE ETA send-time recheck', () => {
     drafter.planOpenTimesRecheck.mockReturnValue({ action: 'refuse', reason: 'edited_offer_text' });
     await agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'x' });
     expect(etaClaimBlockReason).not.toHaveBeenCalled();
+  });
+});
+
+// The scheduler's queued-send path (Codex round-10 P2, PR #5334): one flat
+// call into this same ETA check, reading the claimed decision row itself.
+describe('scheduledEtaBlockReason — the scheduler seam over the same ETA check', () => {
+  const rowFor = (row) => { db.mockImplementation(() => ({ where: () => ({ first: async () => row }) })); };
+
+  test('reads the decision row and hands its live_eta_snapshot + facts_generated_at to the shared check', async () => {
+    rowFor({ input_snapshot: { live_eta_snapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] }, facts_generated_at: '2026-09-29T14:00:00.000Z' } });
+    etaClaimBlockReason.mockResolvedValue('eta_claim_stale_facts');
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'The tech is 12 minutes away.' })).resolves.toBe('eta_claim_stale_facts');
+    expect(etaClaimBlockReason).toHaveBeenCalledWith(expect.objectContaining({
+      liveEtaSnapshot: { entries: [{ minutes: 12, scheduledServiceIds: ['svc-1'] }] },
+      factsGeneratedAt: '2026-09-29T14:00:00.000Z',
+    }));
+  });
+
+  test('a JSON-string snapshot is parsed; a clean recheck returns null', async () => {
+    rowFor({ input_snapshot: JSON.stringify({ facts_generated_at: '2026-09-29T14:00:00.000Z' }) });
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'Thanks!' })).resolves.toBeNull();
+  });
+
+  test('skip: an earlier revalidation already blocked — no read, no recheck', async () => {
+    db.mockClear();
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'x', skip: true })).resolves.toBeNull();
+    expect(db).not.toHaveBeenCalled();
+    expect(etaClaimBlockReason).not.toHaveBeenCalled();
+  });
+
+  test('fails CLOSED when the row read throws', async () => {
+    db.mockImplementation(() => { throw new Error('db down'); });
+    await expect(scheduledEtaBlockReason({ decisionId: 'd1', outgoingBody: 'x' })).resolves.toBe('eta_recheck_failed');
   });
 });
