@@ -378,7 +378,10 @@ async function processReceiptDeliveryJob(job) {
     // invoice. The dropdown governs the SMS leg (via the consent gate); the
     // emailed PDF receipt is the durable payment record and always sends
     // unless the payment_receipt kill switch is off.
-    emailResult = prefsLookupFailed
+    // A job folded after a quiet-hours pass already sent its email then: it is not sent again.
+    emailResult = smsResult?.reason === TEXT_CARRIED_BY_SUMMARY && job.email_result?.ok === true
+      ? job.email_result
+      : prefsLookupFailed
       ? { ok: false, error: 'receipt prefs lookup failed' }
       : receiptKillSwitch
         ? { ok: false, error: 'receipt_opted_out' }
@@ -588,13 +591,16 @@ async function releaseOperatorReceiptClaim(claim, { emailDelivered = false, smsD
 }
 
 // Set the still-queued job's Text leg as carried by the summary text. Only a
-// provably unsent Text leg folds: no recorded SMS outcome yet (or already
-// carried). A retry_scheduled job may already have texted (its email failed)
+// provably unsent Text leg folds: no recorded SMS outcome yet, already carried, or held for the
+// send window (quiet hours). A retry_scheduled job may already have texted (its email failed)
 // or hold an uncertain outcome; a job already running or finished has had its
 // text decided. Those set nothing (returns 0) and the stop is not folded.
 async function markTextCarriedBySummary(invoiceId, { database = db } = {}) {
   return database('receipt_delivery_jobs').where({ invoice_id: invoiceId }).whereIn('status', QUEUED_STATUSES)
-    .where((q) => q.whereNull('sms_result').orWhereRaw("sms_result->>'reason' = ?", [TEXT_CARRIED_BY_SUMMARY]))
+    .where((q) => q.whereNull('sms_result').orWhereRaw("sms_result->>'reason' = ?", [TEXT_CARRIED_BY_SUMMARY])
+      // A receipt text the send window held (recorded by the worker: not sent, the hold's own
+      // code, no provider outcome) provably never reached the provider, so the summary may carry it.
+      .orWhereRaw("(sms_result->>'code' = 'QUIET_HOURS_HOLD' AND sms_result->>'sent' = 'false' AND NOT jsonb_exists_any(sms_result::jsonb, ARRAY['sid', 'messageId', 'providerMessageId', 'twilioSid']))"))
     .update({ sms_result: JSON.stringify({ sent: false, reason: TEXT_CARRIED_BY_SUMMARY }), updated_at: database.fn.now() });
 }
 

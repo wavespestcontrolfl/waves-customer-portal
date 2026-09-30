@@ -1,5 +1,5 @@
 /** Summary delivery recovery on a migrated, task-private PostgreSQL database. */
-jest.mock('../models/marker-db', () => () => require('../models/db'));
+jest.mock('../models/marker-db', () => () => global.mockMarkerOverride || require('../models/db'));
 jest.mock('../models/db', () => {
   const db = (...args) => mockPg(...args);
   for (const name of ['raw', 'transaction', 'queryBuilder', 'ref']) db[name] = (...args) => mockPg[name](...args);
@@ -5535,6 +5535,56 @@ postgres('visit summary recipient recovery', () => {
       });
     });
 
+    describe('a receipt job the send window held folds into the summary', () => {
+      const held = (over = {}) => ({ status: 'retry_scheduled', attempts: 0, next_attempt_at: new Date(Date.now() + 8 * 3600000),
+        sms_result: JSON.stringify({ sent: false, reason: 'held for the send window', code: 'QUIET_HOURS_HOLD', nextAllowedAt: new Date(Date.now() + 8 * 3600000).toISOString() }),
+        email_result: JSON.stringify({ ok: true }), ...over });
+      const nextAllowedAt = () => new Date(Date.now() + 8 * 3600000).toISOString();
+
+      test('recovery at night finds the job held for quiet hours: folded, the deferred summary carries the link, no receipt text at 8 AM, no second email', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update(held());
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return { sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: nextAllowedAt() };
+        });
+        await coordinate();
+        expect(await recorded()).toEqual({ kind: 'receipt', invoiceId });
+        expect(JSON.parse(JSON.stringify((await jobRow(invoiceId)).sms_result))).toMatchObject({ reason: 'carried_by_visit_summary' });
+        const queued = await mockPg('sms_log').where({ customer_id: fixture.customerId, message_type: 'visit_summary' }).first();
+        expect(queued.message_body).toMatch(/ Your receipt: /);
+        // 8 AM: the drain finds the carried job and sends nothing.
+        await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() - 1000) });
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(strayTexts).toEqual([]);
+        expect(require('../services/invoice-email').sendReceiptEmail).not.toHaveBeenCalled();
+        expect(await jobRow(invoiceId)).toMatchObject({ status: 'completed' });
+      });
+
+      test('a held job whose email had not gone still sends its email (once), never a text', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update(held({ email_result: JSON.stringify({ ok: false, error: 'SendGrid 500' }) }));
+        sendCustomerMessage.mockImplementation(async (input) => {
+          if (['payment_receipt', 'payment_link'].includes(input.purpose)) { strayTexts.push(input.purpose); return { sent: true }; }
+          return { sent: false, blocked: true, retryable: true, deferred: true, code: 'QUIET_HOURS_HOLD', nextAllowedAt: nextAllowedAt() };
+        });
+        await coordinate();
+        expect(await recorded()).toEqual({ kind: 'receipt', invoiceId });
+        await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() - 1000) });
+        await Queue.processDueReceiptDeliveryJobs();
+        expect(require('../services/invoice-email').sendReceiptEmail).toHaveBeenCalledTimes(1);
+        expect(strayTexts).toEqual([]);
+      });
+
+      test('an uncertain retry outcome (not a send-window hold) is still not folded', async () => {
+        const invoiceId = await stop({ status: 'paid' });
+        await mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update(held({ sms_result: JSON.stringify({ sent: false, reason: 'provider timeout' }) }));
+        await coordinate();
+        expect(await recorded()).toBeUndefined();
+        expect(JSON.parse(JSON.stringify((await jobRow(invoiceId)).sms_result))).toMatchObject({ reason: 'provider timeout' });
+      });
+    });
+
     describe('a stop that is not folded gets its deferred receipt back', () => {
       const waitFor = async (check) => { for (let i = 0; i < 60; i += 1) { if (await check()) return true; await new Promise((resolve) => setTimeout(resolve, 50)); } return false; };
       const deferJob = (invoiceId) => mockPg('receipt_delivery_jobs').where({ invoice_id: invoiceId }).update({ next_attempt_at: new Date(Date.now() + 3 * 60000) });
@@ -5854,6 +5904,23 @@ postgres('visit summary recipient recovery', () => {
         expect(require('../services/invoice-helpers').isStaleClaimReviewHold(parked)).toBe(true);
         expect(Number(parked.credit_applied || 0)).toBe(0);
         expect(Number((await mockPg('customers').where({ id: fixture.customerId }).first('account_credits')).account_credits)).toBe(20);
+      });
+    });
+
+    // The attempt record is written from inside the held handoff, so it goes on the dedicated marker
+    // connection (never a second root-pool connection while the handoff holds one, which can wait on
+    // itself when the pool is busy), exactly like the provider-start marker.
+    describe('the pre-send attempt record', () => {
+      test.each([['a link summary', {}], ['a plain summary', { plain: true }]])('%s is written on the marker connection', async (_label, { plain }) => {
+        await stop();
+        if (plain) await mockPg('service_visits').where({ id: fixture.visitId }).update({ billing_hold: true });
+        const markerPg = knex({ client: 'pg', connection, pool: { min: 0, max: 1 } });
+        const seen = [];
+        markerPg.on('query', (q) => seen.push(q.sql));
+        global.mockMarkerOverride = markerPg;
+        try { await coordinate(); } finally { global.mockMarkerOverride = null; await markerPg.destroy(); }
+        expect(seen.some((sql) => /update "visit_effects"/i.test(sql))).toBe(true);
+        expect(seen.some((sql) => /update "visit_completion_packets"/i.test(sql) && /summaryLinkTextAttempt|payload/.test(sql))).toBe(true);
       });
     });
 

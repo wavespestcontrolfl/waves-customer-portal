@@ -519,7 +519,9 @@ async function recordSummaryLinkTextAccepted(link, database = db) {
 // What the summary's next provider request will carry, recorded durably BEFORE the request (the
 // packet payload is the system-snapshot store): the link, or nothing for a plain summary. It is
 // the evidence a later pass needs to tell an accepted link text from an accepted plain one.
-async function noteSummaryLinkAttempt(visitId, link, database = db) {
+// Written on the marker connection: it runs from inside the held handoff, like the provider-start
+// marker, and a second root-pool connection there can wait on itself when the pool is busy.
+async function noteSummaryLinkAttempt(visitId, link, database = require('../models/marker-db')()) {
   const update = link
     ? database.raw('payload || ?::jsonb', [JSON.stringify({ summaryLinkTextAttempt: { kind: link.kind, invoiceId: link.invoiceId } })])
     : database.raw("payload - 'summaryLinkTextAttempt'");
