@@ -1126,7 +1126,11 @@ function bodyHasUnclassifiedEtaSignal(text) {
 // arrived", "arrived at your home", "the tech is here / outside / at your
 // door", "pulled up" state the tech IS on site — a different fact from "on
 // the way". "Will arrive"/"arriving"/"hasn't arrived" are not matched.
-const COMPLETED_ARRIVAL_RE = /\b(?:(?:has|have|had)\s+(?:just\s+|already\s+)?arrived|just\s+arrived|(?:tech(?:nician)?|he|she|they|driver|crew|team)\s+(?:just\s+|already\s+|finally\s+)?arrived|arrived\s+(?:at|and)\b|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
+// Every "arrived" form needs a technician-type subject (round-28 P2): "Your
+// payment has arrived at our office" is not a visit claim. Up to two words may
+// sit between the subject and the verb ("the tech, Sam, has arrived" / "your tech
+// Sam just arrived").
+const COMPLETED_ARRIVAL_RE = /\b(?:(?:tech(?:nician)?|he|she|they|driver|crew|team)(?:,?\s+(?!(?:has|have|had|not|never|hasn|haven|hadn|didn|isn|yet)\b)\w+,?){0,2}?\s+(?:(?:has|have|had)\s+)?(?:just\s+|already\s+|finally\s+)?arrived|(?:tech(?:nician)?|he|she|they|driver)(?:'s|\s+(?:is|are))\s+(?:now\s+|just\s+)?(?:here|outside|on[\s-]?site|on\s+(?:the|your|our)\s+(?:property|premises)|at\s+(?:your|the)\s+(?:house|home|place|property|door|address))|(?:crew|team)\s+(?:is|are)\s+(?:now\s+)?(?:on[\s-]?site|here)|(?:tech(?:nician)?|he|she|they|driver|crew)\s+(?:has\s+|have\s+|just\s+|already\s+)*pulled\s+up(?!\s+(?:your|the|an?|my|our|his|her|their|it|that|this)\b))\b/i;
 // A negator governing a status phrase within the SAME clause (Codex pre-push
 // P1, round 15, PR #5334): "He is no longer en route", "The tech is not on the
 // way yet", "The tech hasn't arrived" are accurate CORRECTIONS, never

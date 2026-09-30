@@ -1459,6 +1459,9 @@ describe('round 8 (Codex P2): bare-integer default-deny — "The tech should mak
       'The tech is arriving in 2 minutes.',
       "The tech hasn't arrived yet.",
       'We are here to help — the tech is on the way!',
+      // Round-28 P2: non-technician subjects are not a visit arrival.
+      'Your payment has arrived at our office — the tech is on the way!',
+      'The package arrived at the office; the tech is on the way.',
     ])('%p stays en-route status (not a completed arrival)', (reply) => {
       expect(validateLiveEtaMinutes({ reply, factsBlock: facts(2) }).ok).toBe(true);
     });
