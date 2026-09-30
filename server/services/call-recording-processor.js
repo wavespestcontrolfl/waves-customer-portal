@@ -132,22 +132,14 @@ function recoveryMarkerPayload(db, passStamp) {
 }
 const { detectContactDictationSignals, decodeDictatedContacts, applyEmailDictationPolicy, CONTACT_DICTATION_TRANSCRIPTION_PROMPT } = require('./contact-dictation');
 const { arbitrateQuarantinedEmail } = require('./contact-quarantine-arbiter');
-const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, buildTriageItem, V2_DECISION_VERSION, V2_DECISION_VERSION_UNCLEAR_SERVICE } = require('./call-routing-gates');
+const { computeAppointmentIdempotencyKey, computeAddressHash, checkTcpaConsent, buildRouteDecision, upsertRouteDecision, buildTriageItem, V2_DECISION_VERSION } = require('./call-routing-gates');
 // Zero-triage layers (2026-07-10) — all dark-gated in feature-gates.js.
 const { isEnabled } = require('../config/feature-gates');
 
-// The route_decisions version stamped THIS pass: the tagged version while the
-// dark-gated unclear-service behavior is live (see call-routing-gates). Gate
-// off = the plain base version, as before.
-function currentDecisionVersion(enabled = isEnabled) {
-  return unclearServiceAssessmentActive(enabled) ? V2_DECISION_VERSION_UNCLEAR_SERVICE : V2_DECISION_VERSION;
-}
-
 // GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT is only EFFECTIVE together with its
 // prerequisite GATE_CALL_FAIL_OPEN_BOOKING (the Assessment fallback and the
-// fail-open filter both need it). ONE predicate for the canAutoRoute option and
-// the decision-version tag, so the tag is stamped exactly when the gate can
-// change a decision — never while the gate alone is on (codex #5371 r2 P1).
+// fail-open filter both need it). ONE predicate for the canAutoRoute option in
+// both processor lanes, so the gate alone never half-applies (codex #5371 r2).
 function unclearServiceAssessmentActive(enabled = isEnabled) {
   return enabled('callUnclearServiceAssessment') === true && enabled('callFailOpenBooking') === true;
 }
@@ -1774,6 +1766,23 @@ function demoteFailOpenOnV1AddressConflict(routingResult, extracted, knownCaller
       unclearServiceDemotedFlags: [...routingResult.unclearServiceDemotedFlags],
     } : {}),
   };
+}
+
+// The downstream half of the GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT contract for
+// the OFFLINE production-parity audits (readiness, replay, shadow verify): a
+// call the gate admitted is still vetoed when the resolver — reading the FULL
+// transcript, exactly as the live pass does for every gate admission — finds an
+// unsupported / administrative-only call. The live path skips the appointment
+// there; an audit that stops at canAutoRoute would count it auto-routable.
+// Returns the routing verdict unchanged unless that veto applies. One helper,
+// shared by all three scripts.
+function applyUnclearServiceTranscriptVeto(routingResult, extracted, transcription) {
+  if (!routingResult?.allowed || routingResult.unclearServiceGateAdmitted !== true) return routingResult;
+  const resolution = resolveSchedulableCallService(extracted || {}, { transcription, fullTranscriptVeto: true });
+  // ok:true books; noMatch:true books the Assessment fallback. Only a hard
+  // veto (ok:false without noMatch) holds the call.
+  if (resolution.ok || resolution.noMatch === true) return routingResult;
+  return { ...routingResult, allowed: false, reason: resolution.reason || 'unsupported_service' };
 }
 
 // Fail-open on-file address PROOF is customer-scoped (codex P1, 2026-09-09):
@@ -5704,7 +5713,9 @@ async function loadCustomerServiceContext(customerId, conn = db) {
 // A forced Assessment carries NO treatment signals: the returned
 // `extractedPatch` clears the quoted treatment price (so pricing falls back to
 // the Assessment's own catalog handling) and the follow-up-visit signals (so no
-// "Follow-up treatment" visit 2 is created for a service nobody identified).
+// "Follow-up treatment" visit 2 is created for a service nobody identified)
+// and the call summary (it may name a treatment or price; it would land in the
+// customer-visible scheduled_services.notes).
 // The caller books from `{ ...extracted, ...extractedPatch }`.
 //
 // Applies only where the resolver did not hard-veto the call (ok:false WITHOUT
@@ -5726,7 +5737,7 @@ function forcedAssessmentBooking({ serviceResolution, services, current, extract
   return {
     applied: true,
     row,
-    extractedPatch: { quoted_price: null, follow_up_visit_mentioned: false, follow_up_date_time: null },
+    extractedPatch: { quoted_price: null, follow_up_visit_mentioned: false, follow_up_date_time: null, call_summary: null },
   };
 }
 
@@ -10227,13 +10238,13 @@ const CallRecordingProcessor = {
             action: routingResult.allowed ? 'auto_route' : 'triage_review',
             mode: 'enforce',
             recordingSid: call.recording_sid,
-            decisionVersion: currentDecisionVersion(),
           });
-          // Targetless DO NOTHING: tolerant of BOTH the legacy three-column
-          // constraint (kept until the contract migration) and the
-          // recording-keyed index, so no release depends on a constraint by
-          // name during a rolling deploy (Codex #3736 r9 P1).
-          await db('route_decisions').insert(routeDecision).onConflict().ignore();
+          // Insert-or-REFRESH on the recording-keyed key (see
+          // upsertRouteDecision): a reprocess that decides differently — a
+          // dark gate flipped either way — replaces the recommendation and
+          // created_at instead of leaving the first pass's verdict as the
+          // newest decision. Fenced to the pass that owns the processing token.
+          await upsertRouteDecision(db, routeDecision, { callLogId: call.id, processingToken: procToken });
 
           // Advisory flags (missing surname / rental / second address) reach the
           // Needs Review inbox even when the call AUTO-ROUTES — they inform, they
@@ -17091,7 +17102,10 @@ const CallRecordingProcessor = {
                     priceInfo.price != null
                       ? `Price ${priceInfo.source === 'transcript' ? 'quoted on call' : 'from service catalog'}: $${priceInfo.price.toFixed(2)}.`
                       : null,
-                    extracted.call_summary || null,
+                    // bookingExtracted: a forced Assessment drops the model's summary
+                    // (it may name a treatment or price nobody agreed to) from this
+                    // customer-visible note.
+                    bookingExtracted.call_summary || null,
                   ].filter(Boolean).join(' ').trim(),
                   // Dispatcher-only price provenance: scheduled_services.notes
                   // is customer-visible (GET /api/schedule returns it verbatim),
@@ -18887,7 +18901,7 @@ const CallRecordingProcessor = {
           // Same-run outcome update: targets the row THIS process wrote
           // moments ago, so the CURRENT version only (a reprocess writes —
           // and updates — its own fresh v2-1.1.0 row).
-          .where({ call_log_id: call.id, decision_version: currentDecisionVersion(), mode: 'enforce', recording_sid: call.recording_sid || '' })
+          .where({ call_log_id: call.id, decision_version: V2_DECISION_VERSION, mode: 'enforce', recording_sid: call.recording_sid || '' })
           .update({
             final_action_taken: bookedServiceId ? 'auto_route' : 'auto_route_skipped',
             ...(bookedServiceId ? { created_scheduled_service_id: bookedServiceId } : {}),
@@ -19606,18 +19620,14 @@ const CallRecordingProcessor = {
             action: routingResult.allowed ? 'shadow_auto_route_candidate' : 'shadow_needs_review_candidate',
             mode: 'shadow',
             recordingSid: call.recording_sid,
-            decisionVersion: currentDecisionVersion(),
           });
-          await db('route_decisions')
-            .insert(shadowDecision)
-            .onConflict()
-            .ignore()
+          await upsertRouteDecision(db, shadowDecision, { callLogId: call.id, processingToken: procToken })
             .catch((err) => logger.warn(`[call-proc-v2] Shadow route decision skipped for ${maskSid(callSid)}: ${err.message}`));
         }
       }
 
       const validationPayload = {
-        validator: currentDecisionVersion(),
+        validator: V2_DECISION_VERSION,
         mode: validationMode,
         extraction_status: v2Result.status || null,
         routing: routingResult ? {
@@ -21021,7 +21031,7 @@ CallRecordingProcessor._test = {
   resolveSchedulableCallService,
   forcedAssessmentBooking,
   demoteOpenTriageCards,
-  currentDecisionVersion,
+  applyUnclearServiceTranscriptVeto,
   unclearServiceAssessmentActive,
   maskPhone,
   validatePhoneCallAppointmentCustomer,
@@ -21120,6 +21130,7 @@ CallRecordingProcessor.updateUnifiedVoiceMessage = updateUnifiedVoiceMessage;
 // changing the gate. Deliberately on the module surface, not `_test`.
 CallRecordingProcessor.buildFailOpenRoutingContext = buildFailOpenRoutingContext;
 CallRecordingProcessor.demoteFailOpenOnV1AddressConflict = demoteFailOpenOnV1AddressConflict;
+CallRecordingProcessor.applyUnclearServiceTranscriptVeto = applyUnclearServiceTranscriptVeto;
 // Codex #4933 r3 P2: the customer the audits pass INTO buildFailOpenRoutingContext
 // must be selected the same way production's Step 2 pre-lookup selects it
 // (operator override outranks the phone lookup; an explicit unlink is no

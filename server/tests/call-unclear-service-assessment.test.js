@@ -10,10 +10,10 @@ const CallRecordingProcessor = require('../services/call-recording-processor');
 
 const {
   resolveSchedulableCallService, forcedAssessmentBooking, demoteOpenTriageCards,
-  currentDecisionVersion, unclearServiceAssessmentActive,
+  applyUnclearServiceTranscriptVeto, unclearServiceAssessmentActive,
 } = CallRecordingProcessor._test;
 const { resolveCallBookingPrice, resolveCallFollowUpPlan } = require('../services/call-booking-catalog');
-const { buildRouteDecision, V2_DECISION_VERSION, V2_DECISION_VERSION_UNCLEAR_SERVICE, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
+const { buildRouteDecision, upsertRouteDecision, ROUTE_DECISION_REFRESH_COLUMNS, V2_DECISION_VERSION, V2_DECISION_VERSIONS } = require('../services/call-routing-gates');
 
 const AV_CLEAN = { status: 'validated_accept', inServiceArea: true, county: 'Manatee County' };
 const ON_FILE = Object.freeze({ hasAddress: true, addressLine1: '100 Synthetic St', addressZip: '34202' });
@@ -331,21 +331,11 @@ describe('gate wiring', () => {
     expect(loadGates('true').isEnabled('callUnclearServiceAssessment')).toBe(true);
   });
 
-  test('the base decision version is NOT consumed while the gate is dark (codex r1 P1)', () => {
+  test('no gate-specific decision version exists: the write chokepoint refreshes instead (codex r5 P1)', () => {
     expect(V2_DECISION_VERSION).toBe('v2-1.50.0');
-    // gate on: a distinct, listed, column-sized (varchar 30) version
-    const live = V2_DECISION_VERSION_UNCLEAR_SERVICE;
-    expect(live).toBe('v2-1.50.0+u');
-    expect(live.length).toBeLessThanOrEqual(30);
-    expect(V2_DECISION_VERSIONS).toContain(live);
-    expect(V2_DECISION_VERSIONS).toContain(V2_DECISION_VERSION);
-    expect(new Set(V2_DECISION_VERSIONS).size).toBe(V2_DECISION_VERSIONS.length);
-  });
-
-  test('buildRouteDecision stamps the base version by default and the live one when handed it', () => {
-    const args = { callLogId: 'c1', extraction: extraction(), routingResult: { allowed: true }, action: 'auto_route' };
-    expect(buildRouteDecision(args).decision_version).toBe('v2-1.50.0');
-    expect(buildRouteDecision({ ...args, decisionVersion: V2_DECISION_VERSION_UNCLEAR_SERVICE }).decision_version).toBe('v2-1.50.0+u');
+    expect(V2_DECISION_VERSIONS.some((v) => v.includes('+'))).toBe(false);
+    expect(V2_DECISION_VERSIONS[V2_DECISION_VERSIONS.length - 1]).toBe(V2_DECISION_VERSION);
+    expect(buildRouteDecision({ callLogId: 'c1', extraction: extraction(), routingResult: { allowed: true }, action: 'auto_route' }).decision_version).toBe('v2-1.50.0');
   });
 });
 
@@ -541,23 +531,48 @@ describe('an open blocking card is demoted on reprocess, fenced to the owning pa
   });
 });
 
-describe('the version tag needs BOTH gates (codex r2 P1)', () => {
+describe('the effective gate needs BOTH switches (codex r2 P1)', () => {
   const on = (...names) => (g) => names.includes(g);
-  test('unclear-service alone (fail-open off): no tag, plain base version', () => {
-    const e = on('callUnclearServiceAssessment');
-    expect(unclearServiceAssessmentActive(e)).toBe(false);
-    expect(currentDecisionVersion(e)).toBe('v2-1.50.0');
+  test('unclear-service alone (fail-open off): not active', () => {
+    expect(unclearServiceAssessmentActive(on('callUnclearServiceAssessment'))).toBe(false);
   });
-  test('fail-open alone: no tag', () => {
-    expect(currentDecisionVersion(on('callFailOpenBooking'))).toBe('v2-1.50.0');
+  test('fail-open alone: not active', () => {
+    expect(unclearServiceAssessmentActive(on('callFailOpenBooking'))).toBe(false);
   });
-  test('both gates on: tagged', () => {
-    const e = on('callUnclearServiceAssessment', 'callFailOpenBooking');
-    expect(unclearServiceAssessmentActive(e)).toBe(true);
-    expect(currentDecisionVersion(e)).toBe('v2-1.50.0+u');
+  test('both gates on: active', () => {
+    expect(unclearServiceAssessmentActive(on('callUnclearServiceAssessment', 'callFailOpenBooking'))).toBe(true);
   });
-  test('neither: plain', () => {
-    expect(currentDecisionVersion(on())).toBe('v2-1.50.0');
+});
+
+describe('the route_decisions write refreshes on conflict (codex r5 P1)', () => {
+  const knex = require('knex')({ client: 'pg' });
+  const decision = { call_log_id: 'c1', decision_version: 'v2-1.50.0', mode: 'enforce', recording_sid: 'RE1', final_action_taken: 'auto_route' };
+
+  test('insert-or-refresh on the recording-keyed index; decision columns and created_at only', () => {
+    const q = upsertRouteDecision(knex, decision, { callLogId: 'c1', processingToken: 'tok' }).toSQL();
+    expect(q.sql).toMatch(/on conflict \("call_log_id", "decision_version", "mode", "recording_sid"\) do update set/i);
+    for (const col of ROUTE_DECISION_REFRESH_COLUMNS) expect(q.sql).toContain(`"${col}" = excluded."${col}"`);
+    // outcome linkage is never refreshed
+    expect(q.sql).not.toMatch(/"created_scheduled_service_id" = excluded/);
+    expect(q.sql).not.toMatch(/"sms_enqueued" = excluded/);
+    expect(ROUTE_DECISION_REFRESH_COLUMNS).toContain('created_at');
+  });
+
+  test('the refresh is fenced to the pass that owns the processing token', () => {
+    const q = upsertRouteDecision(knex, decision, { callLogId: 'c1', processingToken: 'tok' }).toSQL();
+    expect(q.sql).toMatch(/where EXISTS \(SELECT 1 FROM call_log WHERE call_log\.id = \? AND call_log\.processing_token = \?\)/i);
+    expect(q.bindings.slice(-2)).toEqual(['c1', 'tok']);
+  });
+
+  test('no fence handed: unfenced refresh (audit/backfill callers)', () => {
+    expect(upsertRouteDecision(knex, decision).toSQL().sql).not.toMatch(/EXISTS/);
+  });
+
+  test('both processor lanes write through it and nothing writes a route decision with a bare ignore', () => {
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toMatch(/upsertRouteDecision\(db, routeDecision, \{ callLogId: call\.id, processingToken: procToken \}\)/);
+    expect(src).toMatch(/upsertRouteDecision\(db, shadowDecision, \{ callLogId: call\.id, processingToken: procToken \}\)/);
+    expect(src).not.toMatch(/db\('route_decisions'\)\.insert\(routeDecision\)/);
   });
 });
 
@@ -584,5 +599,64 @@ describe('the offline production-parity audits carry the same effective gate (co
       const src = fs.readFileSync(path.join(__dirname, '../scripts', f), 'utf8');
       expect(src).toMatch(/unclearServiceAssessmentEnabled:\s*process\.env\.GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT === 'true'/);
     }
+  });
+});
+
+describe('the offline audits run the downstream transcript veto (codex r5 P1)', () => {
+  const extracted = { matched_service: 'General Pest Control', requested_service: 'pest control', call_summary: 'Caller about pest control.' };
+  const seo = 'Agent: Hello.\nCaller: I can improve your website SEO and Google ranking for your pest control company, organic traffic guaranteed.\n';
+  const ordinary = 'Agent: Hi.\nCaller: I have ants in my kitchen, can someone come Tuesday at ten?\n';
+  const admitted = () => canAutoRoute(extraction({ flags: ['ambiguous_pest_or_service'] }), GATE_ON);
+
+  test('a gate-admitted call the live resolver vetoes is reported HELD', () => {
+    const held = applyUnclearServiceTranscriptVeto(admitted(), extracted, seo);
+    expect(held).toMatchObject({ allowed: false, reason: 'unsupported_service' });
+  });
+
+  test('an ordinary gate-admitted call stays allowed', () => {
+    const r = admitted();
+    expect(applyUnclearServiceTranscriptVeto(r, extracted, ordinary)).toBe(r);
+  });
+
+  test('a noMatch (Assessment fallback) call stays allowed', () => {
+    const r = admitted();
+    expect(applyUnclearServiceTranscriptVeto(r, { call_summary: 'Something about the yard.' }, 'Agent: Hi.\nCaller: something is off around the yard.\n')).toBe(r);
+  });
+
+  test('a call the gate did NOT admit is untouched, whatever the transcript says (gate off = today)', () => {
+    const r = canAutoRoute(extraction(), GATE_OFF);
+    expect(applyUnclearServiceTranscriptVeto(r, extracted, seo)).toBe(r);
+    const blocked = { allowed: false, reason: 'triage_flags' };
+    expect(applyUnclearServiceTranscriptVeto(blocked, extracted, seo)).toBe(blocked);
+  });
+
+  test('the low-confidence-only admission is vetoed the same way', () => {
+    const r = canAutoRoute(extraction({ confidence: { overall: 0.3, service_address: 0.2, primary_service_category: 0.9 } }), GATE_ON);
+    expect(r.unclearServiceGateAdmitted).toBe(true);
+    expect(applyUnclearServiceTranscriptVeto(r, extracted, seo).allowed).toBe(false);
+  });
+
+  test('all three audit scripts call the ONE shared helper', () => {
+    const fs = require('fs');
+    const path = require('path');
+    for (const f of ['v2-promotion-readiness.js', 'replay-call-extraction-variance.js', 'verify-v2-shadow-path.js']) {
+      const src = fs.readFileSync(path.join(__dirname, '../scripts', f), 'utf8');
+      expect(src).toMatch(/applyUnclearServiceTranscriptVeto/);
+    }
+  });
+});
+
+describe('a forced Assessment keeps the model summary off the customer-visible note (codex r5 P2)', () => {
+  test('the patch drops call_summary and the booking note reads the patched copy', () => {
+    const out = forcedAssessmentBooking({
+      serviceResolution: { ok: true, service: 'General Pest Control' },
+      services: [{ id: 'a', name: 'Waves Assessment' }],
+      current: { id: 'p', name: 'General Pest Control' },
+      extracted: { is_lead: true, call_summary: 'Agreed to a $189 roach treatment.' },
+      transcription: 'Agent: Hi.\nCaller: bug.\n',
+    });
+    expect({ call_summary: 'Agreed to a $189 roach treatment.', ...out.extractedPatch }.call_summary).toBeNull();
+    const src = require('fs').readFileSync(require('path').join(__dirname, '../services/call-recording-processor.js'), 'utf8');
+    expect(src).toMatch(/bookingExtracted\.call_summary \|\| null,\n\s*\]\.filter\(Boolean\)\.join\(' '\)\.trim\(\),/);
   });
 });

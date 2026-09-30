@@ -378,25 +378,51 @@ function checkTcpaConsent(extraction, opts = {}) {
 // one an earlier pass parked on not_confirmed can move to auto-route and must
 // write a fresh decision row. A stated period that conflicts with the
 // reading, approximations, alternatives and offers stay unconfirmed.
-// DARK-GATED decision behavior (codex #5371 r1 P1). The route_decisions insert
-// is append-only on (call, version, mode, recording), so a version bump that a
-// dark gate "consumes" would stamp the NEW version on rows the OLD behavior
-// decided; after the flip a force-reprocess would then collide with the stale
-// row and its outcome update would mutate the wrong recommendation. A gate
-// that changes what canAutoRoute decides therefore does NOT bump the base
-// version: it gets its own version, the base plus a one-character tag, stamped
-// only while the gate is LIVE at decision time. Gate off, every row carries
-// the plain base version, byte-identical to before; gate on, rows carry
-// `<base>+<tag>`, a fresh key. V2_DECISION_VERSIONS lists it FIRST so the
-// plain base version stays the last entry (the convention the version tests
-// pin). The column is varchar(30).
-//   +u = GATE_CALL_UNCLEAR_SERVICE_ASSESSMENT (a confirmed on-the-hour booking
-//        at a trusted address no longer holds on ambiguous_pest_or_service, or
-//        on low_extraction_confidence when service_address is the only low
-//        sub-score; the Waves Assessment books it)
 const V2_DECISION_VERSION = 'v2-1.50.0';
-const V2_DECISION_VERSION_UNCLEAR_SERVICE = `${V2_DECISION_VERSION}+u`;
-const V2_DECISION_VERSIONS = [V2_DECISION_VERSION_UNCLEAR_SERVICE, 'v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0', 'v2-1.47.0', 'v2-1.48.0', 'v2-1.49.0', 'v2-1.50.0'];
+const V2_DECISION_VERSIONS = ['v2-1.0.0', 'v2-1.1.0', 'v2-1.2.0', 'v2-1.3.0', 'v2-1.4.0', 'v2-1.5.0', 'v2-1.6.0', 'v2-1.7.0', 'v2-1.8.0', 'v2-1.9.0', 'v2-1.10.0', 'v2-1.11.0', 'v2-1.12.0', 'v2-1.13.0', 'v2-1.14.0', 'v2-1.15.0', 'v2-1.16.0', 'v2-1.17.0', 'v2-1.18.0', 'v2-1.19.0', 'v2-1.20.0', 'v2-1.21.0', 'v2-1.22.0', 'v2-1.23.0', 'v2-1.24.0', 'v2-1.25.0', 'v2-1.26.0', 'v2-1.27.0', 'v2-1.28.0', 'v2-1.29.0', 'v2-1.30.0', 'v2-1.31.0', 'v2-1.32.0', 'v2-1.33.0', 'v2-1.34.0', 'v2-1.35.0', 'v2-1.36.0', 'v2-1.37.0', 'v2-1.38.0', 'v2-1.39.0', 'v2-1.40.0', 'v2-1.41.0', 'v2-1.42.0', 'v2-1.43.0', 'v2-1.44.0', 'v2-1.45.0', 'v2-1.47.0', 'v2-1.48.0', 'v2-1.49.0', 'v2-1.50.0'];
+
+// Columns a later pass REFRESHES on an existing route_decisions row. The audit
+// key (call, version, mode, recording) used to make a reprocess a no-op
+// (ON CONFLICT DO NOTHING), so a pass that decided DIFFERENTLY — a dark gate
+// flipped on or off, a rule changed without a version bump — left the first
+// pass's recommendation, blocked reasons and created_at standing, and every
+// "newest decision per call" reader (admin-triage's DISTINCT ON ... created_at
+// DESC, the feedback and resolution readers) kept showing the superseded
+// verdict. A version bump only papered over that for ONE flip direction. The
+// write now refreshes the DECISION columns and created_at on conflict, so the
+// newest row for a call/mode/recording is always the latest pass, whatever the
+// version. Outcome linkage (created_scheduled_service_id, sms_enqueued) is
+// deliberately NOT refreshed: a booking made by an earlier pass still exists,
+// and a held reprocess must not orphan it.
+const ROUTE_DECISION_REFRESH_COLUMNS = [
+  'validator_recommendation',
+  'final_action_taken',
+  'blocked_reasons',
+  'allowed_reasons',
+  'ai_validation_model',
+  'ai_validation_prompt_version',
+  'ai_validation_schema_version',
+  'created_at',
+];
+
+// Query builder (await it). Insert-or-refresh on the recording-keyed unique
+// index. `fence` ({ callLogId, processingToken }) scopes the REFRESH to the
+// pass that still owns the call's processing_token, exactly like the
+// processor's other ownership fences — a superseded worker can insert the
+// first row for a key but never overwrite a newer pass's decision.
+function upsertRouteDecision(conn, decision, fence = null) {
+  const query = conn('route_decisions')
+    .insert(decision)
+    .onConflict(['call_log_id', 'decision_version', 'mode', 'recording_sid'])
+    .merge(ROUTE_DECISION_REFRESH_COLUMNS);
+  if (fence && fence.callLogId && fence.processingToken) {
+    query.whereRaw(
+      'EXISTS (SELECT 1 FROM call_log WHERE call_log.id = ? AND call_log.processing_token = ?)',
+      [fence.callLogId, fence.processingToken],
+    );
+  }
+  return query;
+}
 
 function buildRouteDecision({
   callLogId,
@@ -406,14 +432,13 @@ function buildRouteDecision({
   action,
   mode = 'enforce',
   recordingSid = null,
-  decisionVersion = V2_DECISION_VERSION,
 }) {
   const scheduling = extraction?.scheduling || {};
   const confidence = extraction?.confidence || {};
 
   return {
     call_log_id: callLogId,
-    decision_version: decisionVersion,
+    decision_version: V2_DECISION_VERSION,
     mode,
     // The recording this decision was derived from is part of the audit
     // key: a replaced recording's pass writes its OWN row instead of
@@ -861,8 +886,9 @@ module.exports = {
   computeAddressHash,
   checkTcpaConsent,
   buildRouteDecision,
+  upsertRouteDecision,
+  ROUTE_DECISION_REFRESH_COLUMNS,
   buildTriageItem,
   V2_DECISION_VERSION,
   V2_DECISION_VERSIONS,
-  V2_DECISION_VERSION_UNCLEAR_SERVICE,
 };
