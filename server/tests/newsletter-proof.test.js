@@ -420,8 +420,9 @@ describe('maybeHandleProofApproval', () => {
     expect(sendsChain.where).toHaveBeenCalledWith({ id: 'send-1', proof_token: 'ab12cd34' });
     const release = sendsChain.update.mock.calls.find(([patch]) => patch && patch.proof_token === null && patch.proof_sent_at === null);
     expect(release).toBeTruthy();
-    // the refused reply's id stays on the row: durable evidence a proof was sent and refused
-    expect(release[0].proof_approval_email_id).toBe('email-1');
+    // a distinct durable refusal marker (proof_approval_email_id is not it: it survives a cancel)
+    expect(release[0].proof_refused_at).toEqual(expect.any(Date));
+    expect(release[0].proof_approval_email_id).toBeUndefined();
   });
 
   test('non-allowlisted sender cannot approve', async () => {
@@ -582,8 +583,8 @@ describe('maybeHandleProofApproval', () => {
     }));
     // stale proof invalidated (token-scoped clear)
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ proof_token: null, proof_sent_at: null }));
-    // the refused reply's id stays on the row, like every other release path
-    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ proof_token: null, proof_approval_email_id: 'email-1' }));
+    // the refusal marker is stamped here too, like every other refusal release
+    expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({ proof_token: null, proof_refused_at: expect.any(Date) }));
   });
 
   test('validation failure at approval time blocks the send and notifies', async () => {
@@ -645,6 +646,7 @@ describe('maybeHandleProofApproval', () => {
     expect(sendsChain.update).toHaveBeenCalledWith(expect.objectContaining({
       proof_approved_at: expect.any(Date),
       proof_approval_email_id: 'email-1',
+      proof_refused_at: null, // an approval clears any earlier refusal
       status: 'scheduled',
       scheduled_for: TARGET_SEND_AT,
     }));

@@ -670,6 +670,13 @@ describe('findUnverifiedClaims', () => {
       'Large patch thrives when temperatures are 85 degrees Fahrenheit.',
       // a hot range in a sentence that also has a cool phrase
       'Large patch thrives when temperatures are 85 to 95 degrees, and it is not active when temperatures are 80°F and below.',
+      // a figure that is a FLOOR or a peak, not a cap, stays hot
+      'Large patch is active when temperatures have a minimum of 85°F.',
+      'Large patch is active when temperatures have a minimum of 85 degrees.',
+      'Large patch is active when temperatures have a minimum temperature of 85°F.',
+      'Large patch is active when temperatures peak at 90°F.',
+      'Large patch is active when temperatures have a high of 90°F.',
+      'Large patch is active when temperatures are at least 85°F.',
     ])('a hot range, "and up", or adverb-fronted figure is still the claim: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(true);
     });
@@ -708,6 +715,29 @@ describe('findUnverifiedClaims', () => {
       'Large patch rings can reach 90 meters across.',
       // "rarely" recedes
       'Large patch is rarely a problem in summer.',
+      // ceiling-style downward bounds cap the temperature (one shared DOWNWARD_BOUND list)
+      'Large patch is active when temperatures have a maximum of 80°F.',
+      'Large patch is active when temperatures have a max of 80 degrees.',
+      'Large patch is active when temperatures have a maximum of about 80°F.',
+      'Large patch is active when temperatures have a max temperature of 80°F.',
+      'Large patch is active when temperatures have a maximum temperature of 75 degrees Fahrenheit.',
+      'Large patch is active when temperatures have a ceiling of 80°F.',
+      'Large patch is active when temperatures have a high of 80°F or less.',
+      'Large patch is active when temperatures are no higher than 80°F.',
+      'Large patch is active when temperatures are no warmer than 80 degrees.',
+      'Large patch is active when temperatures are not above 80°F.',
+      'Large patch is active when temperatures are not over 80 degrees.',
+      'Large patch is active when temperatures are not exceeding 80°F.',
+      'Large patch is active when temperatures never exceed 80°F.',
+      'Large patch is active when temperatures never go above 80°F.',
+      "Large patch is active when temperatures don't exceed 80°F.",
+      'Large patch is active when temperatures doesn\u2019t exceed 80°F.',
+      'Large patch is active when temperatures are capped at 80°F.',
+      'Large patch is active when temperatures top out at 80°F.',
+      'Large patch is active when temperatures max out at 80°F.',
+      'Large patch is active when the maximum temperature is 80°F.',
+      'Large patch is active when temperatures are at most 80°F.',
+      'Large patch is active when temperatures have an upper limit of 80°F.',
     ])('a cool-side or non-temperature phrase passes: %s', (sentence) => {
       expect(rule(sentence, 'large_patch_summer_disease')).toBe(false);
     });

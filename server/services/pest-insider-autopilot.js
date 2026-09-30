@@ -215,7 +215,7 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   // The day-10 cutoff keeps a stale, never-proofed draft from being proofed
   // late in the month. It does not apply to a CORRECTED draft: one whose
   // proof was sent and then released by a refused approval (proof_sent_at
-  // cleared, the refused reply's id kept on the row) and that passes
+  // cleared, proof_refused_at stamped) and that passes
   // validation now — without this it could never be
   // re-proofed after day 10 (codex #5187 follow-up). That draft is checked
   // below, once it is loaded.
@@ -264,13 +264,14 @@ async function retryPestInsiderProof({ now = new Date() } = {}) {
   return { skipped: false, sendId: draft.id, proofSent: proof.sent, reason: proof.reason };
 }
 
-// True when an approval reply was refused for this draft: the release that
-// clears proof_sent_at (newsletter-proof.js) leaves the rejected reply's id
-// in proof_approval_email_id, and proof_approved_at stays empty. That is
-// durable evidence on the row itself — not a best-effort audit row — that a
-// proof was sent and then invalidated.
+// True when an approval reply was refused for this draft: the releases in
+// newsletter-proof.js that clear proof_sent_at after a refused approval stamp
+// proof_refused_at. It is its own column — not proof_approval_email_id, which
+// survives a cancelled schedule — and cancel-schedule, the PATCH invalidation
+// and every scheduler/sender revert-to-draft clear it, so an approval the
+// owner cancelled can never look like a refusal.
 function approvalWasRefused(draft) {
-  return Boolean(draft?.proof_approval_email_id) && !draft.proof_approved_at;
+  return Boolean(draft?.proof_refused_at) && !draft.proof_approved_at;
 }
 
 function editedSince(draft, at) {

@@ -734,7 +734,16 @@ const isHotValue = (n) => n >= 80 && n <= 129;
 //   leading down "below 80°F", "under 85 degrees", "cooler than 90"    (cool)
 const TEMP_RANGE = new RegExp(`(?:\\b(?:between|from)\\s+)?(${TEMP_NUM})(${TEMP_UNIT})?\\s*(?:\\b(?:to|through|thru|until|and)\\b|[-–—])\\s*(${TEMP_NUM})(${TEMP_UNIT})?`, 'gi');
 const TEMP_TRAILING = new RegExp(`(${TEMP_NUM})(${TEMP_UNIT})?\\s*\\b(?:or|and)\\s+(?:(?:a\\s+)?(?:bit|little)\\s+)?(up(?:wards?)?(?!\\s+to\\b)|higher|hotter|warmer|above|more|greater|over|lower|below|less|under|cooler|colder|down(?:wards?)?)\\b${NOT_A_TEMPERATURE}`, 'gi');
-const TEMP_LEADING_DOWN = new RegExp(`\\b(?:below|under|beneath|less\\s+than|lower\\s+than|cooler\\s+than|colder\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+more\\s+than|at\\s+most|up\\s+to)\\s+(?:the\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
+// One shared list of phrases that CAP the temperature (the figure that follows
+// is a ceiling, so the claim is about the cool side): comparators ("below",
+// "no higher than", "not above", "doesn't exceed"), ceilings ("a maximum of",
+// "max temperature of", "a ceiling of", "capped at", "tops out at") and "at
+// most" / "up to". A phrase that merely NAMES a figure ("peaks at 90°F", "a
+// minimum of 85°F", "a high of 90°F") is not here: the lawn is active AT the
+// peak, so those stay hot through the bare temperature-unit trigger. "a high
+// of 80°F or less" is cool through the trailing "or less" fold.
+const DOWNWARD_BOUND = '(?:below|under|beneath|less\\s+than|lower\\s+than|cooler\\s+than|colder\\s+than|down\\s+to|drop(?:s|ped|ping)?\\s+(?:to|below)|fall(?:s|ing)?\\s+(?:to|below)|no\\s+(?:more|higher|warmer|hotter|greater)\\s+than|(?:is|are|was|were|be)\\s+not\\s+(?:above|over|past|exceeding|more\\s+than|higher\\s+than|warmer\\s+than|hotter\\s+than)|not\\s+(?:above|over|exceeding|to\\s+exceed)|(?:never|\\w+n[\'\u2019]t)\\s+(?:(?:go|get|rise|climb|reach|exceed)(?:es|s)?\\s+(?:above|over|past|beyond)|exceed(?:s|ing)?)|at\\s+most|up\\s+to|(?:a\\s+)?max(?:imum)?(?:\\s+(?:air|soil|daytime|daily|high))?(?:\\s+temp(?:erature)?s?)?\\s+(?:of|is|are)|(?:a|an|the)\\s+(?:upper\\s+)?(?:ceiling|cap|limit)\\s+of|cap(?:s|ped|ping)?\\s+(?:out\\s+)?at|(?:top(?:s|ped|ping)?|max(?:es|ed|ing)?)\\s+out\\s+at)';
+const TEMP_LEADING_DOWN = new RegExp(`\\b${DOWNWARD_BOUND}\\s+(?:the\\s+|(?:about|around|roughly|approximately|near|nearly)\\s+)?(?:${TEMP_NUM})(?:${TEMP_UNIT})?`, 'gi');
 const HOT_DIRECTION = /^(?:up|higher|hotter|warmer|above|more|greater|over)/i;
 
 function foldTemperatures(sentence) {

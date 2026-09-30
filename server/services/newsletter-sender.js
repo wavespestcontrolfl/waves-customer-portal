@@ -1416,7 +1416,7 @@ async function prepareResumeCampaign(sendId) {
         const reset = db('newsletter_sends').where({ id: send.id, status: send.status });
         if (reclaimingStaleSend) reset.where('updated_at', '<=', leaseCutoff);
         const returned = (await reset.update({
-          status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null,
+          status: 'draft', scheduled_for: null, proof_token: null, proof_sent_at: null, proof_approved_at: null, proof_refused_at: null,
           sending_claim_token: null, updated_at: new Date(),
         })) > 0;
         outcome = returned ? 'returned to draft for editing (nobody received it)' : 'it changed state meanwhile and was left as is';
@@ -1608,6 +1608,7 @@ async function processScheduledSends() {
             proof_token: null,
             proof_sent_at: null,
             proof_approved_at: null,
+            proof_refused_at: null,
             updated_at: new Date(),
           });
           if (reverted) {
@@ -1637,6 +1638,7 @@ async function processScheduledSends() {
             proof_token: null,
             proof_sent_at: null,
             proof_approved_at: null,
+            proof_refused_at: null,
             updated_at: new Date(),
           });
           if (!reverted) continue;
@@ -1681,6 +1683,7 @@ async function processScheduledSends() {
             proof_token: null,
             proof_sent_at: null,
             proof_approved_at: null,
+            proof_refused_at: null,
             updated_at: new Date(),
           });
           if (reverted) {

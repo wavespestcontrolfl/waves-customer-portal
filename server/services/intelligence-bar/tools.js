@@ -4126,6 +4126,9 @@ async function searchFieldIntelligence(input) {
       const extra = await db('knowledge_base')
         .whereIn('slug', missingKbSlugs)
         .where({ status: 'active' })
+        // A stale embedding can still name a row an admin has since switched
+        // off (active=false, status still 'active'); NULL counts as on.
+        .whereRaw('active IS NOT FALSE')
         .select('id', 'slug', 'title', 'category', 'confidence', 'updated_at', 'wiki_entry_id');
       claudeopedia.push(...extra.map((e) => ({ ...e, source: 'claudeopedia' })));
     } catch { /* vector recall is additive-only */ }

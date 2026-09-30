@@ -351,7 +351,7 @@ describe('pest-insider proof catch-up', () => {
     const LATE = new Date('2026-06-11T18:15:00Z');
     // A refused approval leaves the rejected reply's id on the row (durable),
     // with no proof on record and no approval.
-    const REFUSED = { id: 'send-pi-1', updated_at: new Date('2026-06-11T14:00:00Z'), proof_sent_at: null, proof_approved_at: null, proof_approval_email_id: 'email-9' };
+    const REFUSED = { id: 'send-pi-1', updated_at: new Date('2026-06-11T14:00:00Z'), proof_sent_at: null, proof_approved_at: null, proof_refused_at: new Date('2026-06-11T13:00:00Z'), proof_approval_email_id: null };
 
     test('a corrected draft whose approval was refused is re-proofed, from the row alone (codex #5187 follow-up)', async () => {
       process.env.GATE_PEST_INSIDER_PROOF = 'true';
@@ -379,7 +379,7 @@ describe('pest-insider proof catch-up', () => {
 
     test('…and a draft with no refused approval stays cut off, however clean it is', async () => {
       process.env.GATE_PEST_INSIDER_PROOF = 'true';
-      wireDb({ draft: { id: 'send-pi-1', proof_sent_at: null, proof_approved_at: null, proof_approval_email_id: null } });
+      wireDb({ draft: { id: 'send-pi-1', proof_sent_at: null, proof_approved_at: null, proof_refused_at: null, proof_approval_email_id: null } });
 
       const result = await retryPestInsiderProof({ now: LATE });
 
@@ -387,7 +387,18 @@ describe('pest-insider proof catch-up', () => {
       expect(mockSendProof).not.toHaveBeenCalled();
     });
 
-    test('an approved draft (approval id AND approved_at set) is never re-proofed', async () => {
+    test('a CANCELLED approved schedule is never re-proofed after day 10 (approval id survives a cancel; the refusal marker does not)', async () => {
+      process.env.GATE_PEST_INSIDER_PROOF = 'true';
+      // what cancel-schedule leaves behind: proof_token/sent/approved/refused cleared, the approving reply's id kept
+      wireDb({ draft: { id: 'send-pi-1', updated_at: new Date('2026-06-11T14:00:00Z'), proof_sent_at: null, proof_approved_at: null, proof_refused_at: null, proof_approval_email_id: 'email-9' } });
+
+      const result = await retryPestInsiderProof({ now: LATE });
+
+      expect(result.skipped).toBe(true);
+      expect(mockSendProof).not.toHaveBeenCalled();
+    });
+
+    test('an approved draft (approved_at set, even with a stale refusal marker) is never re-proofed', async () => {
       process.env.GATE_PEST_INSIDER_PROOF = 'true';
       wireDb({ draft: { ...REFUSED, proof_approved_at: new Date('2026-06-11T15:00:00Z') } });
 
