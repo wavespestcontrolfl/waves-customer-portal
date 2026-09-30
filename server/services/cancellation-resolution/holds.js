@@ -127,9 +127,11 @@ async function startAwayMode({ customerId, caseId, until = null }) {
 }
 
 // Undo startAwayMode for an accept that failed after it: the preference
-// returns to what it was (a row this accept created keeps a NULL date).
-async function restoreAwayMode(customerId, previousUntil) {
-  await db('property_preferences').where({ customer_id: customerId })
+// returns to what it was (a row this accept created keeps a NULL date) —
+// only while it still holds the date this accept wrote, so another accept's
+// later write is never overwritten.
+async function restoreAwayMode(customerId, previousUntil, writtenUntil) {
+  await db('property_preferences').where({ customer_id: customerId, away_mode_until: writtenUntil })
     .update({ away_mode_until: previousUntil || null, updated_at: new Date() });
 }
 
@@ -140,7 +142,12 @@ async function revertMoves(customerId, moved) {
     try {
       // A compensating move back is not a schedule change the tech should
       // hear about — the forward move it undoes was never announced either.
-      await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
+      // Fenced on the hold's own destination: a dispatch edit since the
+      // forward move wins (the office is belled below instead).
+      await SmartRebooker.reschedule(done.id, done.from, done.window, 'plan_hold_revert', 'customer', {
+        suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single',
+        expect: pinnedSchedule(done.to, done.window),
+      });
     } catch (revertErr) {
       logger.error(`[holds] revert of visit ${done.id} failed: ${revertErr.message}`);
       const { notifyAdmin } = require('../notification-service');
@@ -151,214 +158,217 @@ async function revertMoves(customerId, moved) {
   }
 }
 
-async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 180 }) {
+function validateHoldDates(familyKey, resumeOn, maxDays) {
   if (!HOLDABLE_FAMILIES.includes(familyKey)) throw codedError('hold_family_invalid', 'That service cannot be held');
   const today = etDateString();
   const resume = ymd(resumeOn);
   if (!resume || resume <= today) throw codedError('hold_date_invalid', 'Pick the date you are back');
   if (daysBetween(today, resume) > maxDays) throw codedError('hold_too_long', `A hold can run at most ${maxDays} days`);
+  return { today, resume };
+}
 
-  // Once per family per 12 months (rule 4) — a hold that was undone
-  // (status 'cancelled': compensated, obsolete, or churned) does not count.
-  const floor = new Date(Date.now() - 365 * 86400000);
-  const countedPrior = (q) => q.where({ customer_id: customerId, family_key: familyKey })
-    .whereIn('status', COUNTED_HOLD_STATUSES).where('created_at', '>=', floor).first('id');
-  const prior = await countedPrior(db('plan_holds'));
-  if (prior) throw codedError('hold_cooldown', 'This service was already held in the last 12 months');
+// Once per family per 12 months (rule 4) — a hold that was undone (status
+// 'cancelled': compensated, obsolete, or churned) does not count.
+function countedPriorHold(q, customerId, familyKey) {
+  return q.where({ customer_id: customerId, family_key: familyKey })
+    .whereIn('status', COUNTED_HOLD_STATUSES).where('created_at', '>=', new Date(Date.now() - 365 * 86400000)).first('id');
+}
 
-  // Money first (fail closed): a monthly-lane family we cannot attribute
-  // cannot promise "no charges". Lane via the canonical resolver (#3140) —
-  // the monthly dues charge the hold suspends only exists on the
-  // monthly_membership lane; the old rate>0 shortcut demanded attribution
-  // for prepay/per-visit rows the dues cron never bills (Codex #3669 r3 P2).
+/**
+ * Rule 2: no visit inside the away dates means nothing to pause — no hold,
+ * no suspended dues, no free month. Decided BEFORE the once-a-year limit and
+ * the billing checks (an away pairing takes it as success), and re-read
+ * under the writer lock the real hold path takes, so a visit booked into
+ * the pause meanwhile is never answered with "nothing to pause".
+ */
+async function notNeededOutcome({ customerId, familyKey, visits, today, resume }) {
+  if (visits.some((v) => inPauseVisit(v, today, resume))) return null;
+  const stillEmpty = await db.transaction(async (trx) => {
+    await lockCustomerComms(trx, customerId);
+    const live = await familyUpcomingVisits(customerId, familyKey, trx);
+    return !live.some((v) => inPauseVisit(v, today, resume));
+  });
+  if (!stillEmpty) throw codedError('hold_visits_changed', 'Your schedule just changed — please try again');
+  const next = visits
+    .map((v) => dateOnlyString(v.scheduled_date))
+    .filter((date) => date && date >= resume)
+    .sort()[0] || null;
+  return { notNeeded: true, familyKey, nextVisitOn: next, nextVisitDisplay: next ? displayDate(next) : null };
+}
+
+// Money first (fail closed): a monthly-lane family we cannot attribute
+// cannot promise "no charges". Lane via the canonical resolver (#3140) —
+// the monthly dues charge the hold suspends only exists on the
+// monthly_membership lane (Codex #3669 r3 P2). Re-read under the lock
+// before anything is written.
+async function assertHoldEligible(customerId, familyKey) {
+  if (await countedPriorHold(db('plan_holds'), customerId, familyKey)) {
+    throw codedError('hold_cooldown', 'This service was already held in the last 12 months');
+  }
   const customer = await db('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
-  const monthlyLane = resolveBillingLane(customer).mode === 'monthly_membership';
-  let heldRate = null;
-  if (monthlyLane) {
-    const component = await db('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey }).first('monthly_rate');
-    if (!component) throw codedError('hold_unattributed', 'We could not suspend billing for that service — call our office');
-    heldRate = Number(component.monthly_rate) || 0;
-  }
+  if (resolveBillingLane(customer).mode !== 'monthly_membership') return;
+  const component = await db('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey }).first('monthly_rate');
+  if (!component) throw codedError('hold_unattributed', 'We could not suspend billing for that service — call our office');
+}
 
-  // The visits the pause actually covers (rule 1): dated from today up to
-  // the day before the return date. A stale past-dated 'rescheduled'
-  // placeholder is not one of them — it anchors nothing and is left alone.
-  const visits = await familyUpcomingVisits(customerId, familyKey);
-  const inPause = visits.filter((v) => inPauseVisit(v, today, resume));
-  // Rule 2: no visit inside the away dates means nothing to pause — no
-  // hold, no suspended dues, no free month.
-  if (!inPause.length) {
-    // Re-read under the writer lock the real hold path takes: a visit
-    // booked or moved into the pause since the read above must not be
-    // answered with "nothing to pause" (an away pairing would take that
-    // as success).
-    const stillEmpty = await db.transaction(async (trx) => {
-      await lockCustomerComms(trx, customerId);
-      const live = await familyUpcomingVisits(customerId, familyKey, trx);
-      return !live.some((v) => inPauseVisit(v, today, resume));
-    });
-    if (!stillEmpty) throw codedError('hold_visits_changed', 'Your schedule just changed — please try again');
-    const next = visits
-      .map((v) => dateOnlyString(v.scheduled_date))
-      .filter((date) => date && date >= resume)
-      .sort()[0] || null;
-    return { notNeeded: true, familyKey, nextVisitOn: next, nextVisitDisplay: next ? displayDate(next) : null };
-  }
+// A visit's schedule as read, pinned in the rebooker's CAS (`expect`): a
+// dispatch edit or grouping since the read makes the move miss instead of
+// moving a changed row. visit_id null makes visitPolicy 'single' safe —
+// the row is provably not part of a stop.
+function pinnedSchedule(date, window, status) {
+  return {
+    scheduled_date: date, window_start: window.start, window_end: window.end, visit_id: null,
+    ...(status ? { status } : {}),
+  };
+}
 
-  // A prepaid visit is never lost to a pause (rule 1): money already held
-  // for it (canonical reader — annual prepay term, hand-collected prepay,
-  // a paying invoice, a card fee rail) moves it to after the return date.
-  // Every other visit inside the pause is skipped once the hold stands.
-  const { findBillingCoveredVisits } = require('../../routes/admin-schedule');
-  const covered = await findBillingCoveredVisits(db, inPause);
-  const toMove = inPause.filter((v) => covered.has(v.id));
-  const toSkip = inPause.filter((v) => !covered.has(v.id));
-  // A prepaid visit sharing a stop (visit group) cannot move alone: the
-  // rebooker moves a grouped row as its whole stop, dragging the other
-  // services with it, and "just this service" is the office's split
-  // action. Refused before anything is written.
+/**
+ * Move the prepaid visits inside the pause to after the return date (rule
+ * 1: never lost). First lands on the return date, the rest keep their
+ * spacing. Moves go FIRST (codex r1 P1) because they are reversible: one
+ * that will not move reverts the others and refuses the hold.
+ */
+async function movePrepaidVisits(customerId, familyKey, toMove, resume) {
+  const moved = [];
+  // Holder on each COMMITTED move, for the tech notices sent only once the
+  // whole accept stands — kept off the persisted moved_visits shape.
+  const movedTechIds = new Map();
+  if (!toMove.length) return { moved, movedTechIds };
+  // A prepaid visit sharing a stop cannot move alone ("just this service"
+  // is the office's split action): refused before anything is written.
   if (toMove.some((v) => v.visit_id)) {
     throw codedError('hold_visits_unmovable', 'One of your prepaid visits shares a stop with another service — call our office and we will set the hold up by hand');
   }
-
-  // Moves FIRST (codex r1 P1): if a prepaid visit will not move, revert the
-  // ones that did and refuse the hold instead of suspending billing around
-  // a visit that can still dispatch. Moves are reversible; skips are not,
-  // so skips wait until every write of the accept stands (applyHoldSkips).
-  const moved = [];
-  // Holder on each COMMITTED move (rebooker result), for the tech notices
-  // sent only once the whole hold stands — kept off the persisted
-  // moved_visits shape.
-  const movedTechIds = new Map();
-  if (toMove.length) {
-    const SmartRebooker = require('../rebooker');
-    // The first prepaid visit lands on the return date and the rest keep
-    // their spacing — always forward, never earlier than they were.
-    const delta = daysBetween(dateOnlyString(toMove[0].scheduled_date), resume);
-    for (const visit of toMove) {
-      const from = dateOnlyString(visit.scheduled_date);
-      const to = addDays(from, delta);
-      try {
-        // suppressTechNotice: a later visit in this loop, or the hold write
-        // below, can still fail and revert every move made so far — the
-        // tech must never act on a schedule change that gets rolled back.
-        // seriesPolicy 'single': collective move is on, and a series move
-        // would carry the regular visits after the return date along.
-        const moveResult = await SmartRebooker.reschedule(visit.id, to, {
-          start: visit.window_start || null, end: visit.window_end || null,
-        }, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
-        moved.push({ id: visit.id, from, to, window: { start: visit.window_start || null, end: visit.window_end || null } });
-        movedTechIds.set(String(visit.id), moveResult?.technicianId || null);
-      } catch (err) {
-        logger.error(`[holds] visit ${visit.id} did not move for a ${familyKey} hold: ${err.message}`);
-        await revertMoves(customerId, moved);
-        throw codedError('hold_visits_unmovable', 'One of your prepaid visits could not be moved — call our office and we will set the hold up by hand');
-      }
+  const SmartRebooker = require('../rebooker');
+  const delta = daysBetween(dateOnlyString(toMove[0].scheduled_date), resume);
+  for (const visit of toMove) {
+    const from = dateOnlyString(visit.scheduled_date);
+    const to = addDays(from, delta);
+    const window = { start: visit.window_start || null, end: visit.window_end || null };
+    try {
+      // suppressTechNotice: a later move or the hold write can still fail
+      // and revert this. seriesPolicy 'single': a series move would carry
+      // the regular visits after the return date along.
+      const moveResult = await SmartRebooker.reschedule(visit.id, to, window, 'plan_hold', 'customer', {
+        suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single',
+        expect: pinnedSchedule(from, window, visit.status),
+      });
+      moved.push({ id: visit.id, from, to, window });
+      movedTechIds.set(String(visit.id), moveResult?.technicianId || null);
+    } catch (err) {
+      logger.error(`[holds] visit ${visit.id} did not move for a ${familyKey} hold: ${err.message}`);
+      await revertMoves(customerId, moved);
+      throw codedError('hold_visits_unmovable', 'One of your prepaid visits could not be moved — call our office and we will set the hold up by hand');
     }
   }
+  return { moved, movedTechIds };
+}
 
-  // Hold + billing suspension + tier protection land ATOMICALLY (codex
-  // P0): if any write fails, the transaction rolls back and every moved
-  // visit is compensated back to its original date before the error
-  // reaches the customer.
-  let holdId = null;
-  try {
-    await db.transaction(async (trx) => {
-      // Rung 6 (scheduling/occupancy.js ORDERING CONTRACT): a hold rewrites
-      // the plan ledger and the customer's rate — the writes the scoped
-      // cancellation wind-down serializes on under the same key. The money
-      // facts are RE-READ under the lock: the pre-lock reads above only
-      // decided eligibility, and a wind-down or ledger writer committing
-      // during the visit moves would otherwise leave the hold recording
-      // (and later restoring) a stale rate. A family that lost its
-      // component in the gap fails the hold (rolled back, visits
-      // compensated) instead of suspending billing it can no longer prove.
-      await lockCustomerComms(trx, customerId);
-      // Eligibility is re-validated under the lock too: a concurrent hold
-      // on the same family (both passed the cooldown read above) or a
-      // scoped wind-down that cancelled the family's visits in the gap
-      // must not leave an active hold — and tier protection — on a family
-      // the customer no longer owns.
-      const priorUnderLock = await countedPrior(trx('plan_holds'));
-      if (priorUnderLock) throw new Error('a hold for this family was written concurrently');
-      // The visits still inside the pause must be exactly the ones to skip,
-      // by identity: a skip target cancelled or moved in the gap, or a
-      // visit booked into the pause in the gap, refuses the hold. The
-      // moved prepaid visits must all still be live.
-      const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
-      const liveInPause = liveVisits.filter((v) => inPauseVisit(v, today, resume)).map((v) => String(v.id)).sort();
-      const skipIds = toSkip.map((v) => String(v.id)).sort();
-      if (liveInPause.length !== skipIds.length || liveInPause.some((id, i) => id !== skipIds[i])) {
-        throw new Error(`${familyKey} visits inside the pause changed before the hold could be written (live ${liveInPause.join(',')} vs planned ${skipIds.join(',')})`);
-      }
-      const liveIds = new Set(liveVisits.map((v) => String(v.id)));
-      const lostMove = moved.find((m) => !liveIds.has(String(m.id)));
-      if (lostMove) throw new Error(`moved prepaid visit ${lostMove.id} is no longer live`);
-      const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
-      if (!live) throw new Error('customer vanished before the hold could be written');
-      if (resolveBillingLane(live).mode === 'monthly_membership') {
-        const liveComponent = await trx('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey }).first('monthly_rate');
-        if (!liveComponent) throw new Error(`${familyKey} lost its monthly component before the hold could be written`);
-        heldRate = Number(liveComponent.monthly_rate) || 0;
-      } else {
-        heldRate = null;
-      }
-      const [hold] = await trx('plan_holds').insert({
-        customer_id: customerId,
-        cancellation_case_id: caseId || null,
-        family_key: familyKey,
-        starts_on: today,
-        resume_on: resume,
-        held_monthly_rate: heldRate,
-        moved_visits: JSON.stringify({ moved, toSkip: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })), skipped: [], skipsFinal: false, acceptCommitted: false }),
-        status: 'active',
-      }).returning(['id']);
-      holdId = hold?.id || hold;
-      if (heldRate != null) {
-        await trx('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey })
-          .update({ monthly_rate: 0, source: 'plan_hold', effective_at: new Date(), updated_at: new Date() });
-        const rows = await trx('customer_plan_rates').where({ customer_id: customerId }).select('monthly_rate');
-        const scalar = Math.round(rows.reduce((sum, r) => sum + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
-        await trx('customers').where({ id: customerId }).update({ monthly_rate: scalar, updated_at: new Date() });
-      }
-      const protectedUntil = live.tier_protected_until && dateOnlyString(live.tier_protected_until) > resume
-        ? live.tier_protected_until
-        : resume;
-      await trx('customers').where({ id: customerId }).update({ tier_protected_until: protectedUntil, updated_at: new Date() });
-    });
-  } catch (err) {
-    logger.error(`[holds] hold write failed for ${customerId}/${familyKey} — compensating moved visits: ${err.message}`);
-    await revertMoves(customerId, moved);
-    throw codedError('hold_setup_failed', 'We could not set the hold up — nothing changed. Call our office and we will do it by hand');
+/**
+ * The hold row, the billing suspension and tier protection, ATOMICALLY
+ * (codex P0), under rung 6 (scheduling/occupancy.js ORDERING CONTRACT: the
+ * lock the scoped wind-down takes for the same ledger writes). Every fact
+ * is re-read under the lock: a concurrent hold, a visit booked into or
+ * moved out of the pause, a moved visit gone, or a lost monthly component
+ * refuses the hold. Returns { holdId, heldRate }.
+ */
+async function writeHold(trx, { customerId, caseId, familyKey, today, resume, toSkip, moved }) {
+  await lockCustomerComms(trx, customerId);
+  if (await countedPriorHold(trx('plan_holds'), customerId, familyKey)) throw new Error('a hold for this family was written concurrently');
+  const liveVisits = await familyUpcomingVisits(customerId, familyKey, trx);
+  const liveInPause = liveVisits.filter((v) => inPauseVisit(v, today, resume)).map((v) => String(v.id)).sort();
+  const skipIds = toSkip.map((v) => String(v.id)).sort();
+  if (liveInPause.length !== skipIds.length || liveInPause.some((id, i) => id !== skipIds[i])) {
+    throw new Error(`${familyKey} visits inside the pause changed before the hold could be written (live ${liveInPause.join(',')} vs planned ${skipIds.join(',')})`);
   }
+  const liveIds = new Set(liveVisits.map((v) => String(v.id)));
+  const lostMove = moved.find((m) => !liveIds.has(String(m.id)));
+  if (lostMove) throw new Error(`moved prepaid visit ${lostMove.id} is no longer live`);
+  const live = await trx('customers').where({ id: customerId }).first('monthly_rate', 'billing_mode', 'waveguard_tier', 'tier_protected_until');
+  if (!live) throw new Error('customer vanished before the hold could be written');
+  let heldRate = null;
+  if (resolveBillingLane(live).mode === 'monthly_membership') {
+    const liveComponent = await trx('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey }).first('monthly_rate');
+    if (!liveComponent) throw new Error(`${familyKey} lost its monthly component before the hold could be written`);
+    heldRate = Number(liveComponent.monthly_rate) || 0;
+  }
+  const [hold] = await trx('plan_holds').insert({
+    customer_id: customerId,
+    cancellation_case_id: caseId || null,
+    family_key: familyKey,
+    starts_on: today,
+    resume_on: resume,
+    held_monthly_rate: heldRate,
+    moved_visits: JSON.stringify({ moved, toSkip: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })), skipped: [], skipsFinal: false, acceptCommitted: false }),
+    status: 'active',
+  }).returning(['id']);
+  if (heldRate != null) {
+    await trx('customer_plan_rates').where({ customer_id: customerId, family_key: familyKey })
+      .update({ monthly_rate: 0, source: 'plan_hold', effective_at: new Date(), updated_at: new Date() });
+    const rows = await trx('customer_plan_rates').where({ customer_id: customerId }).select('monthly_rate');
+    const scalar = Math.round(rows.reduce((sum, r) => sum + (Number(r.monthly_rate) || 0), 0) * 100) / 100;
+    await trx('customers').where({ id: customerId }).update({ monthly_rate: scalar, updated_at: new Date() });
+  }
+  const protectedUntil = live.tier_protected_until && dateOnlyString(live.tier_protected_until) > resume
+    ? live.tier_protected_until
+    : resume;
+  await trx('customers').where({ id: customerId }).update({ tier_protected_until: protectedUntil, updated_at: new Date() });
+  return { holdId: hold?.id || hold, heldRate };
+}
 
-  // The hold stands, but the ENCLOSING action may not yet: a later family
-  // in a multi-family hold, or the Away Mode write paired with it, can
-  // still fail and cancelHold(compensateVisits) every hold this accept
-  // made — and those compensating moves are silent. So the per-visit
-  // notices are RETURNED, not emitted; the action emits them
-  // (emitHoldTechNotices) once every family and Away Mode succeeded.
-  const techNotices = moved
+// The hold stands, but the ENCLOSING accept may not yet (a later family or
+// the paired Away Mode can still undo it, silently): the per-visit notices
+// are RETURNED for the action to emit once everything stands.
+function moveTechNotices(moved, movedTechIds) {
+  return moved
     .map((m) => ({
       visitId: m.id, technicianId: movedTechIds.get(String(m.id)) || null, actorId: 'customer',
       previous: { date: m.from, windowStart: m.window.start, windowEnd: m.window.end },
       snapshot: { date: m.to, windowStart: m.window.start, windowEnd: m.window.end },
     }))
     .filter((n) => n.technicianId);
+}
+
+async function startHold({ customerId, caseId, familyKey, resumeOn, maxDays = 180 }) {
+  const { today, resume } = validateHoldDates(familyKey, resumeOn, maxDays);
+  // The visits the pause covers (rule 1): dated from today up to the day
+  // before the return date, rebook placeholders aside.
+  const visits = await familyUpcomingVisits(customerId, familyKey);
+  const notNeeded = await notNeededOutcome({ customerId, familyKey, visits, today, resume });
+  if (notNeeded) return notNeeded;
+  await assertHoldEligible(customerId, familyKey);
+
+  // Prepaid (canonical reader: annual prepay term, hand-collected prepay, a
+  // paying invoice, a card fee rail) moves; everything else is skipped once
+  // the whole accept stands (applyHoldSkips) — a skip is one-way.
+  const inPause = visits.filter((v) => inPauseVisit(v, today, resume));
+  const { findBillingCoveredVisits } = require('../../routes/admin-schedule');
+  const covered = await findBillingCoveredVisits(db, inPause);
+  const toSkip = inPause.filter((v) => !covered.has(v.id));
+  const { moved, movedTechIds } = await movePrepaidVisits(customerId, familyKey, inPause.filter((v) => covered.has(v.id)), resume);
+
+  let written;
+  try {
+    written = await db.transaction((trx) => writeHold(trx, { customerId, caseId, familyKey, today, resume, toSkip, moved }));
+  } catch (err) {
+    logger.error(`[holds] hold write failed for ${customerId}/${familyKey} — compensating moved visits: ${err.message}`);
+    await revertMoves(customerId, moved);
+    throw codedError('hold_setup_failed', 'We could not set the hold up — nothing changed. Call our office and we will do it by hand');
+  }
 
   try {
     await db('customer_interactions').insert({
       customer_id: customerId,
       interaction_type: 'note',
       subject: `${familyKey} on hold until ${resume} (cancel flow)`,
-      body: `Case ${caseId || '—'}. ${toSkip.length} visit(s) inside the pause to skip; ${moved.length} prepaid visit(s) moved to after ${resume}; monthly component ${heldRate == null ? 'n/a' : `$${heldRate} suspended`}; tier protected until ${resume}.`,
+      body: `Case ${caseId || '—'}. ${toSkip.length} visit(s) inside the pause to skip; ${moved.length} prepaid visit(s) moved to after ${resume}; monthly component ${written.heldRate == null ? 'n/a' : `$${written.heldRate} suspended`}; tier protected until ${resume}.`,
     });
   } catch (err) { logger.warn(`[holds] hold note failed for ${customerId}: ${err.message}`); }
 
   return {
-    holdId, familyKey, startsOn: today, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length,
+    holdId: written.holdId, familyKey, startsOn: today, resumeOn: resume, resumeDisplay: displayDate(resume), moved: moved.length,
     pendingSkips: toSkip.map((v) => ({ id: v.id, status: v.status, from: dateOnlyString(v.scheduled_date) })),
-    techNotices,
+    techNotices: moveTechNotices(moved, movedTechIds),
   };
 }
 
@@ -637,7 +647,26 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
   if (claim === 'already') return 'already_sent';
   if (claim === 'stale') return 'not_due';
 
-  let sent = false;
+  const sent = await deliverRestartText(hold, customer, next, nextOn);
+  const row = await db('plan_holds').where({ id: hold.id }).first('moved_visits');
+  const record = readRecord(row?.moved_visits);
+  if (sent) {
+    await db('plan_holds').where({ id: hold.id }).update({
+      moved_visits: JSON.stringify({ ...record, reminderClaim: { ...(record.reminderClaim || {}), delivered: true } }),
+      updated_at: new Date(),
+    });
+    return 'sent';
+  }
+  // Give the claim back so tomorrow's run retries.
+  const { reminderClaim: _released, ...rest } = record;
+  await db('plan_holds').where({ id: hold.id, reminder_sent_at: claimAt }).update({
+    reminder_sent_at: null, moved_visits: JSON.stringify(rest), updated_at: new Date(),
+  });
+  return unsentRestartText(hold, next, nextOn, today);
+}
+
+// Render and send the restart text; true only when the provider accepted it.
+async function deliverRestartText(hold, customer, next, nextOn) {
   try {
     const { renderRequiredSmsTemplate } = require('../sms-template-renderer');
     const { sendCustomerMessage } = require('../messaging/send-customer-message');
@@ -658,25 +687,11 @@ async function sendRestartTextIfDue(hold, { today = etDateString() } = {}) {
       customerId: hold.customer_id, identityTrustLevel: 'system', entryPoint: 'plan_hold_reminder',
       metadata: { original_message_type: 'plan_hold_resume_reminder', plan_hold_id: hold.id, visit_id: next.id },
     });
-    sent = !!smsResult.sent;
+    return !!smsResult.sent;
   } catch (err) {
     logger.error(`[holds] restart text send threw for hold ${hold.id}: ${err.message}`);
+    return false;
   }
-  const row = await db('plan_holds').where({ id: hold.id }).first('moved_visits');
-  const record = readRecord(row?.moved_visits);
-  if (sent) {
-    await db('plan_holds').where({ id: hold.id }).update({
-      moved_visits: JSON.stringify({ ...record, reminderClaim: { ...(record.reminderClaim || {}), delivered: true } }),
-      updated_at: new Date(),
-    });
-    return 'sent';
-  }
-  // Give the claim back so tomorrow's run retries.
-  const { reminderClaim: _released, ...rest } = record;
-  await db('plan_holds').where({ id: hold.id, reminder_sent_at: claimAt }).update({
-    reminder_sent_at: null, moved_visits: JSON.stringify(rest), updated_at: new Date(),
-  });
-  return unsentRestartText(hold, next, nextOn, today);
 }
 
 // A restart text that did not go out: retried tomorrow; when the visit is
@@ -707,16 +722,47 @@ async function sendDueRestartTexts(holdIds) {
   }
 }
 
-/**
- * Daily lifecycle (scheduler). The restart text goes out 7 days before the
- * first visit back, naming its date — at once when it is closer (rule 3);
- * the dues restart on the return date (rule 2). Both idempotent — the
- * reminder stamps reminder_sent_at, the resume flips status under the
- * live-unique index. Nothing is ever moved to make room for the notice.
- */
-async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
-  const out = { reminded: 0, resumed: 0, skipsRecovered: 0, errors: [] };
+// An accept that died before all its writes stood: undo this hold rather
+// than skip visits for an accept the customer was never told succeeded.
+async function undoInterruptedAccept(hold, record) {
+  // Claim the undo under the row lock markHoldsAccepted takes: an
+  // accept that marked the hold since the bulk read wins, and one
+  // marking after this claim is refused (and compensates itself).
+  const claimed = await db.transaction(async (trx) => {
+    const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('status', 'moved_visits');
+    const liveRecord = readRecord(live?.moved_visits);
+    if (!live || live.status !== 'active' || liveRecord.acceptCommitted !== false) return false;
+    await trx('plan_holds').where({ id: hold.id }).update({
+      moved_visits: JSON.stringify({ ...liveRecord, compensating: true }), updated_at: new Date(),
+    });
+    return true;
+  });
+  if (!claimed) return;
+  // The accept died before all its writes stood: undo this hold
+  // (rate restored, prepaid moves reverted) rather than skip visits
+  // for an accept the customer was never told succeeded.
+  // A paired accept's Away Mode goes back too — only while the
+  // preference still holds the date this accept wrote. Restored
+  // BEFORE the hold is cancelled: a run stopped in between finds the
+  // hold still active and retries (the restore is a no-op then).
+  if (record.awayPairing?.until) {
+    await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: record.awayPairing.until })
+      .update({ away_mode_until: record.awayPairing.previousUntil || null, updated_at: new Date() });
+  }
+  await cancelHold(hold.id, { compensateVisits: true });
+  // Nothing of the accept stands once its last hold is undone: release
+  // its case so the pause card is offered again.
+  if (hold.cancellation_case_id) {
+    await require('./index').releaseUnappliedCase({ caseId: hold.cancellation_case_id, customerId: hold.customer_id, code: 'accept_interrupted' })
+      .catch((err) => logger.warn(`[holds] case ${hold.cancellation_case_id} not released: ${err.message}`));
+  }
+  const { notifyAdmin } = require('../notification-service');
+  await notifyAdmin('service', 'Plan hold undone: the accept did not finish', `Hold ${hold.id} (${hold.family_key}) was written by a cancel-flow accept that stopped before it finished — it has been undone. Check with the customer whether they still want the pause.`, {
+    bell: true, dedupeKey: `plan_hold_accept_interrupted:${hold.id}`, metadata: { kind: 'plan_hold_accept_interrupted', holdId: hold.id, customerId: hold.customer_id },
+  }).catch(() => {});
+}
 
+async function recoverUnfinishedSkips(out) {
   // Recovery: an accept that committed its hold but died before its skips
   // ran (restart, deploy) leaves visits booked inside the pause. Holds past
   // the in-flight window whose skip plan never finished are carried out
@@ -731,41 +777,7 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
       if (record.skipsFinal !== false || !Array.isArray(record.toSkip)) continue;
       if (record.acceptCommitted !== true) {
         if (hold.status !== 'active') continue;
-        // Claim the undo under the row lock markHoldsAccepted takes: an
-        // accept that marked the hold since the bulk read wins, and one
-        // marking after this claim is refused (and compensates itself).
-        const claimed = await db.transaction(async (trx) => {
-          const live = await trx('plan_holds').where({ id: hold.id }).forUpdate().first('status', 'moved_visits');
-          const liveRecord = readRecord(live?.moved_visits);
-          if (!live || live.status !== 'active' || liveRecord.acceptCommitted !== false) return false;
-          await trx('plan_holds').where({ id: hold.id }).update({
-            moved_visits: JSON.stringify({ ...liveRecord, compensating: true }), updated_at: new Date(),
-          });
-          return true;
-        });
-        if (!claimed) continue;
-        // The accept died before all its writes stood: undo this hold
-        // (rate restored, prepaid moves reverted) rather than skip visits
-        // for an accept the customer was never told succeeded.
-        // A paired accept's Away Mode goes back too — only while the
-        // preference still holds the date this accept wrote. Restored
-        // BEFORE the hold is cancelled: a run stopped in between finds the
-        // hold still active and retries (the restore is a no-op then).
-        if (record.awayPairing?.until) {
-          await db('property_preferences').where({ customer_id: hold.customer_id, away_mode_until: record.awayPairing.until })
-            .update({ away_mode_until: record.awayPairing.previousUntil || null, updated_at: new Date() });
-        }
-        await cancelHold(hold.id, { compensateVisits: true });
-        // Nothing of the accept stands once its last hold is undone: release
-        // its case so the pause card is offered again.
-        if (hold.cancellation_case_id) {
-          await require('./index').releaseUnappliedCase({ caseId: hold.cancellation_case_id, customerId: hold.customer_id, code: 'accept_interrupted' })
-            .catch((err) => logger.warn(`[holds] case ${hold.cancellation_case_id} not released: ${err.message}`));
-        }
-        const { notifyAdmin } = require('../notification-service');
-        await notifyAdmin('service', 'Plan hold undone: the accept did not finish', `Hold ${hold.id} (${hold.family_key}) was written by a cancel-flow accept that stopped before it finished — it has been undone. Check with the customer whether they still want the pause.`, {
-          bell: true, dedupeKey: `plan_hold_accept_interrupted:${hold.id}`, metadata: { kind: 'plan_hold_accept_interrupted', holdId: hold.id, customerId: hold.customer_id },
-        }).catch(() => {});
+        await undoInterruptedAccept(hold, record);
         continue;
       }
       const done = new Set((record.skipped || []).map(String));
@@ -780,6 +792,9 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
     }
   }
 
+}
+
+async function flagUnconfirmedRestartTexts(out) {
   // A claim whose send never confirmed (the process stopped mid-send) is
   // ambiguous — the text may or may not have gone out, and re-sending
   // could double it. The office checks the thread instead; once.
@@ -803,6 +818,9 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
     }
   }
 
+}
+
+async function remindDueHolds(out, today) {
   // A resumed hold still owes its text when the first visit back comes
   // after the return date.
   const toRemind = await db('plan_holds').whereIn('status', ['active', 'resumed']).whereNull('reminder_sent_at').select('*');
@@ -817,6 +835,9 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
     }
   }
 
+}
+
+async function resumeDueHolds(out, today) {
   const toResume = await db('plan_holds').where({ status: 'active' }).where('resume_on', '<=', today).select('*');
   for (const hold of toResume) {
     try {
@@ -876,6 +897,20 @@ async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
       logger.error(`[holds] resume failed for hold ${hold.id}: ${err.message}`);
     }
   }
+}
+
+/**
+ * Daily lifecycle (scheduler), four phases in order: finish or undo
+ * interrupted accepts, flag restart texts whose send never confirmed, send
+ * the restart texts that are due (rule 3), and restart dues on the return
+ * date (rule 2). Each is idempotent.
+ */
+async function runPlanHoldLifecycle({ today = etDateString() } = {}) {
+  const out = { reminded: 0, resumed: 0, skipsRecovered: 0, errors: [] };
+  await recoverUnfinishedSkips(out);
+  await flagUnconfirmedRestartTexts(out);
+  await remindDueHolds(out, today);
+  await resumeDueHolds(out, today);
   return out;
 }
 

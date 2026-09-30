@@ -297,7 +297,7 @@ async function executeAwayPairing(ctx) {
   } catch (err) {
     // The holds are undone; Away Mode goes back too, so a failed accept
     // really changed nothing.
-    try { await holds.restoreAwayMode(ctx.customerId, away.previousUntil); } catch (undoErr) {
+    try { await holds.restoreAwayMode(ctx.customerId, away.previousUntil, away.until); } catch (undoErr) {
       logger.error(`[cancel-actions] away-mode restore failed for ${ctx.customerId}: ${undoErr.message}`);
     }
     throw err;

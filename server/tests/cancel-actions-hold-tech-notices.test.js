@@ -180,7 +180,7 @@ test('away pairing: a marking failure after Away Mode was written undoes the hol
     customerId: 'c1', caseRow, action: { type: 'away_pairing' }, params: { resumeDate: '2026-11-01' }, families: ['lawn_care'],
   })).rejects.toThrow('db down');
   expect(mockCancelHold).toHaveBeenCalledWith('h-lawn_care', { compensateVisits: true });
-  expect(mockRestoreAway).toHaveBeenCalledWith('c1', '2026-08-01');
+  expect(mockRestoreAway).toHaveBeenCalledWith('c1', '2026-08-01', '2026-11-01');
   expect(mockEmit).not.toHaveBeenCalled();
   expect(mockSkips).not.toHaveBeenCalled();
 });

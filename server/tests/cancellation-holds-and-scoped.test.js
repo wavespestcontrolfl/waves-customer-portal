@@ -157,6 +157,7 @@ describe('startHold (ruling C-4)', () => {
   });
 
   test('a monthly-lane family with no ledger component fails closed', async () => {
+    seed({ customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }], components: [], visits: [lawnVisit('l1', daysOut(10))] });
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(60) })).rejects.toMatchObject({ code: 'hold_unattributed' });
   });
 
@@ -211,6 +212,16 @@ describe('startHold (ruling C-4)', () => {
     expect(mockState.tables.plan_holds).toHaveLength(0);
   });
 
+  test('"nothing to pause" is answered before the once-a-year limit and the billing checks: no new hold, no free month either way', async () => {
+    seed({
+      customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'monthly_membership' }], components: [],
+      holds: [{ id: 'h0', customer_id: 'c1', family_key: 'lawn_care', status: 'resumed', created_at: new Date() }],
+      visits: [lawnVisit('back', daysOut(45))],
+    });
+    expect(await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) })).toMatchObject({ notNeeded: true, nextVisitOn: daysOut(45) });
+    expect(mockState.tables.plan_holds).toHaveLength(1);
+  });
+
   test('a prepaid visit inside the pause is MOVED (first to the return date, spacing kept, single-visit), never skipped', async () => {
     seed({
       customers: [{ id: 'c1', monthly_rate: 150, billing_mode: 'annual_prepay', tier_protected_until: null }],
@@ -220,8 +231,8 @@ describe('startHold (ruling C-4)', () => {
     const window = { start: '08:00', end: '10:00' };
     const result = await startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) });
     expect(mockReschedule).toHaveBeenCalledTimes(2);
-    expect(mockReschedule).toHaveBeenCalledWith('p1', daysOut(30), window, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
-    expect(mockReschedule).toHaveBeenCalledWith('p2', daysOut(45), window, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
+    expect(mockReschedule).toHaveBeenCalledWith('p1', daysOut(30), window, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(5), window_start: '08:00', window_end: '10:00', visit_id: null, status: 'confirmed' } });
+    expect(mockReschedule).toHaveBeenCalledWith('p2', daysOut(45), window, 'plan_hold', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(20), window_start: '08:00', window_end: '10:00', visit_id: null, status: 'confirmed' } });
     expect(result.moved).toBe(2);
     expect(result.pendingSkips.map((v) => v.id)).toEqual(['s1']);
   });
@@ -234,7 +245,7 @@ describe('startHold (ruling C-4)', () => {
     mockCovered.mockResolvedValue(new Set(['p1', 'p2']));
     mockReschedule.mockImplementationOnce(async () => ({ ok: true })).mockRejectedValueOnce(new Error('slot taken'));
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(30) })).rejects.toMatchObject({ code: 'hold_visits_unmovable' });
-    expect(mockReschedule).toHaveBeenLastCalledWith('p1', daysOut(5), { start: '08:00', end: '10:00' }, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
+    expect(mockReschedule).toHaveBeenLastCalledWith('p1', daysOut(5), { start: '08:00', end: '10:00' }, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(30), window_start: '08:00', window_end: '10:00', visit_id: null } });
     expect(mockState.tables.plan_holds).toHaveLength(0);
     expect(mockState.tables.customers[0].tier_protected_until).toBeNull();
     expect(mockTransition).not.toHaveBeenCalled();
@@ -465,6 +476,17 @@ describe('runPlanHoldLifecycle', () => {
     expect(mockTransition).not.toHaveBeenCalled();
     expect(mockState.tables.plan_holds[0].status).toBe('resumed');
     expect(bells('plan_hold_accept_interrupted')).toHaveLength(0);
+  });
+
+  test('a failed paired accept restores Away Mode only while the row still holds the date it wrote', async () => {
+    const { restoreAwayMode } = require('../services/cancellation-resolution/holds');
+    seed({});
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(30) }];
+    await restoreAwayMode('c1', daysOut(5), daysOut(30));
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(5));
+    mockState.tables.property_preferences = [{ id: 'pp1', customer_id: 'c1', away_mode_until: daysOut(60) }];
+    await restoreAwayMode('c1', daysOut(5), daysOut(30));
+    expect(mockState.tables.property_preferences[0].away_mode_until).toBe(daysOut(60));
   });
 
   test('undoing an unfinished paired accept also puts Away Mode back — unless the preference changed since', async () => {
@@ -839,7 +861,7 @@ test('a hold is refused under the lock when a visit to skip was cancelled in the
   try {
     await expect(startHold({ customerId: 'c1', caseId: 'k', familyKey: 'lawn_care', resumeOn: daysOut(90) })).rejects.toMatchObject({ code: 'hold_setup_failed' });
   } finally { db.transaction = openTrx; }
-  expect(mockReschedule).toHaveBeenLastCalledWith('p1', daysOut(5), { start: '08:00', end: '10:00' }, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single' });
+  expect(mockReschedule).toHaveBeenLastCalledWith('p1', daysOut(5), { start: '08:00', end: '10:00' }, 'plan_hold_revert', 'customer', { suppressTechNotice: true, seriesPolicy: 'single', visitPolicy: 'single', expect: { scheduled_date: daysOut(90), window_start: '08:00', window_end: '10:00', visit_id: null } });
   expect(mockState.tables.plan_holds || []).toHaveLength(0);
 
   // A concurrent hold for the same family committed first.
