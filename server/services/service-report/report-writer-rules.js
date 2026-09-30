@@ -180,7 +180,7 @@ const COMMON_ACTIVE_INGREDIENTS = Object.freeze([
   'cyantraniliprole', 'metaflumizone', 'sulfluramid', 'boric acid', 'orthoboric acid', 'octaborate',
   'bromadiolone', 'brodifacoum', 'difethialone', 'diphacinone', 'chlorophacinone', 'bromethalin',
   'cholecalciferol', 'bendiocarb', 'carbaryl', 'propoxur', 'chlorpyrifos', 'malathion', 'naled',
-  'temephos',
+  'temephos', 'bacillus thuringiensis', 'bti', 'bacillus sphaericus', 'lysinibacillus sphaericus',
 ]);
 
 const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -256,7 +256,8 @@ const PRICE_RE = /\$\s?\d|\b(?:dollars?|bucks|cents|usd|costs?|costing|price[ds]
 // ("4/5 stations", "3/4 of the yard") is not a date.
 const NUMERIC_DATE_RE = /\b(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\/\d{1,2}(?:\/\d{2,4})?(?!\s+(?:of\b|[a-z]{2,}s\b)))\b/g;
 const MONTH_DAY_RE = /\b(?:[Jj]an(?:uary)?|[Ff]eb(?:ruary)?|[Mm]ar(?:ch)?|[Aa]pr(?:il)?|May|[Jj]une?|[Jj]uly?|[Aa]ug(?:ust)?|[Ss]ept?(?:ember)?|[Oo]ct(?:ober)?|[Nn]ov(?:ember)?|[Dd]ec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/g;
-const FUTURE_CUE_BEFORE_RE = /\b(?:next|upcoming|scheduled|appointment|return(?:ing)?|back|see\s+you|will|until|by|coming)\b/i;
+// "Came back on Tuesday" is history; "we'll be back Tuesday" is not.
+const FUTURE_CUE_BEFORE_RE = /\b(?:next|upcoming|scheduled|appointment|return(?:ing)?|be\s+back|come\s+back|see\s+you|will|shall|(?:we|you|i)['’]ll|going\s+to|plan(?:s|ned)?\s+to|until|by|coming)\b/i;
 const FUTURE_CUE_AFTER_RE = /^[^.!?]{0,30}\b(?:next|upcoming)\s+(?:visit|appointment|service|check)\b/i;
 // A clock time is refused on the same terms, plus an arrival cue ("we'll
 // arrive between 8 and 10 AM", "your window is 10 AM"); an observation
@@ -272,22 +273,41 @@ function forwardMention(copy, pattern, extraCue = null) {
   return false;
 }
 // Forward words only: "you texted us on Monday" is a past fact.
-const WEEKDAY_RE = /\b(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day\b/i;
+// "Tomorrow" and "next week" are always ahead; a bare weekday ("we will
+// return Tuesday") takes the date cues.
+const WEEKDAY_RE = /\b(?:(?:next|this|coming|by|until)\s+(?:mon|tues|wednes|thurs|fri|satur|sun)day|tomorrow|next\s+week(?:end)?|later\s+this\s+week)\b/i;
+const BARE_WEEKDAY_RE = /\b(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b/gi;
 // A property-wide absence (rule 4): "no pest activity was observed today",
-// "found no active pests during the visit", "none were observed", "nothing
-// was found". An absence tied to a place or set ("no activity at the lanai",
-// "within the assessed areas", "none of the stations") passes.
-// Judged per sentence: the place can come before or after ("You mentioned
-// ants near the dishwasher; none were seen there today").
-const ABSENCE_RE = /\b(?:no\s+(?:(?:visible|active|live|signs?\s+of)\s+)?(?:pest\s+)?(?:activity|pests|insects|bugs|termites|rodents|mosquitoes|ants|roaches)|none|nothing)\b/gi;
-// "on this visit", "in today's inspection", "at today's service" name the
-// visit, not a place.
-const VISIT_PHRASE_RE = /\b(?:on|in|at|during|for|of)\s+(?:this|today'?s|today’s|the|our|your|each|every)\s+(?:visit|inspection|service|appointment|trip|check|stop|treatment)s?\b/gi;
-const PLACE_RE = /\b(?:at|in|on|of|near|along|around|under|inside|outside|by|within|behind|across|there|here)\b/i;
+// "found no active pests during the visit", "none were observed", "no
+// activity of any kind", "none seen by the technician". An absence passes
+// only when its sentence names a place or set that was checked ("no
+// activity at the lanai", "the other 10 stations showed no termite
+// activity", "within the assessed areas"), or points back at one with
+// "there" ("You mentioned ants near the dishwasher; none were seen there
+// today"). "Your home", "the property", "inside", an existential "there
+// was" and "on this visit" name no place checked.
+const ABSENCE_RE = /\bno\s+(?:[\w-]+\s+){0,2}?(?:activity|pests?|insects?|bugs?|termites?|rodents?|mosquito(?:e?s)?|ants?|roach(?:es)?|spiders?|fleas?|ticks?|wasps?|bees?|feeding|captures?|droppings|evidence|signs?|mud\s+tubes?|damage)\b|\bnone\b|\bnothing\b/gi;
+const PLACE_NOUNS = [
+  'kitchens?', 'bath(?:room)?s?', 'bedrooms?', 'closets?', 'pantr(?:y|ies)', 'laundry', 'garages?', 'attics?',
+  'crawl\\s*spaces?', 'basements?', 'hallways?', 'stair(?:s|wells?)', 'offices?', 'rooms?',
+  'lanais?', 'patios?', 'porch(?:es)?', 'decks?', 'pools?', 'cages?', 'enclosures?', 'carports?', 'docks?', 'seawalls?',
+  'ponds?', 'yards?', 'lawns?', 'beds?', 'mulch', 'shrubs?', 'hedges?', 'trees?', 'palms?', 'plants?', 'pots?', 'planters?',
+  'saucers?', 'buckets?', 'containers?', 'birdbaths?', 'tires?', 'gardens?', 'fences?', 'fence\\s*lines?', 'gates?', 'sheds?',
+  'foundations?', 'perimeter', 'walls?', 'baseboards?', 'floors?', 'ceilings?', 'windows?', 'sills?', 'doors?', 'doorways?',
+  'thresholds?', 'entr(?:y|ies)', 'entryways?', 'sliders?', 'tracks?', 'screens?', 'eaves?', 'soffits?', 'fascia',
+  'roof(?:line)?s?', 'gutters?', 'downspouts?', 'vents?', 'siding', 'stucco', 'trim', 'cracks?', 'crevices?', 'voids?',
+  'outlets?', 'sinks?', 'cabinets?', 'counter(?:top)?s?', 'dishwashers?', 'stoves?', 'ovens?', 'fridges?',
+  'refrigerators?', 'appliances?', 'drains?', 'pipes?', 'plumbing', 'water\\s+heaters?', 'a\\/c', 'ac\\s+units?',
+  'air\\s+handlers?', 'driveways?', 'sidewalks?', 'walkways?', 'pavers?', 'slabs?', 'stations?', 'traps?', 'monitors?',
+  'devices?', 'corners?', 'edges?', 'the\\s+(?:front|back|side|rear)',
+  '(?:treated|assessed|inspected|checked|baited|monitored|listed|problem|target(?:ed)?|nesting|feeding)\\s+(?:areas?|spots?|places?|locations?|zones?|sites?)',
+  'there(?!\\s+(?:is|was|were|are|has|have|had|seems?|seemed|appears?|appeared|remains?|remained)\\b)',
+];
+const PLACE_RE = new RegExp(`\\b(?:${PLACE_NOUNS.join('|')})\\b`, 'i');
 function unscopedAbsence(copy) {
   return copy.split(/(?<=[.!?])\s+/).some((sentence) => {
     const rest = sentence.replace(ABSENCE_RE, ' ');
-    return rest !== sentence && !PLACE_RE.test(rest.replace(VISIT_PHRASE_RE, ' '));
+    return rest !== sentence && !PLACE_RE.test(rest);
   });
 }
 // Aftercare told to the customer (rule 7): an instruction, at the start of
@@ -331,6 +351,7 @@ const WRITER_RULE_SCREENS = Object.freeze([
   [(copy) => forwardMention(copy, MONTH_DAY_RE), 'date'],
   [(copy) => forwardMention(copy, NUMERIC_DATE_RE), 'date'],
   [WEEKDAY_RE, 'date'],
+  [(copy) => forwardMention(copy, BARE_WEEKDAY_RE), 'date'],
   [(copy) => forwardMention(copy, CLOCK_RE, ARRIVAL_CUE_RE), 'time'],
 ]);
 

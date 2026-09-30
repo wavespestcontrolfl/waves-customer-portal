@@ -34,7 +34,7 @@ const logger = require('./logger');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
-const { stripQuotedAndSignature } = require('./email/email-strip');
+const { stripQuotedAndSignature, emailPlainText } = require('./email/email-strip');
 const ContextAggregator = require('./context-aggregator');
 const { etDateString } = require('../utils/datetime-et');
 const { isSmsReaction } = require('./sms-intent');
@@ -309,20 +309,19 @@ function credentialShaped(token) {
 // code, lockbox, keypad, alarm, "for entry") is dropped whole, since a
 // lowercase code ("blue", "open sesame") looks like any other word.
 const ACCESS_SENTENCE_RE = /\b(?:codes?|lock\s*box(?:es)?|keypad|alarm|pins?|pass(?:code|word)s?|combo|combination|for\s+entry|entry\s+code|to\s+get\s+in|let\s+(?:yourself|you|them)\s+in)\b/i;
+// And a sentence reaches the writer only when it talks about pests or the
+// signs they leave: scheduling, thanks, a bare reply, and any other way of
+// phrasing an access detail ("blue works at the side gate") never do.
+// Common Spanish pest words count too.
+const PEST_TALK_RE = /\b(?:pests?|bugs?|insects?|critters?|wildlife|animals?|ants?|roach(?:es)?|cockroach(?:es)?|spiders?|webs?|cobwebs?|webbing|rodents?|rats?|mice|mouse|squirrels?|raccoons?|o?possums?|armadillos?|iguanas?|bats?|birds?|snakes?|lizards?|geckos?|frogs?|toads?|termites?|swarm(?:ers?|ing|s)?|wings?|mud\s+tubes?|mosquito(?:e?s)?|no-?see-?ums?|bites?|bitten|itch(?:y|ing)?|fleas?|ticks?|bed\s*bugs?|bees?|wasps?|hornets?|yellow\s*jackets?|nests?|hives?|stings?|stung|silverfish|earwigs?|crickets?|centipedes?|millipedes?|scorpions?|beetles?|moths?|fl(?:y|ies)|gnats?|weevils?|pill\s*bugs?|stink\s*bugs?|love\s*bugs?|whitefl(?:y|ies)|aphids?|mealybugs?|chinch\s*bugs?|grubs?|droppings?|poop|feces|urine|smells?|smelly|odou?rs?|stench|noises?|scratch(?:ing|es)?|chew(?:ed|ing)?|gnaw(?:ed|ing)?|holes?|gaps?|openings?|damaged?|frass|sawdust|eggs?|larvae?|activity|infest\w*|traps?|bait(?:s|ed)?|stations?|dead|crawling|trails?|trailing|hormigas?|cucarachas?|ratas?|ratones?|ara[nñ]as?|termitas?|pulgas?|garrapatas?|chinches?|avispas?|abejas?|bichos?|plagas?)\b/i;
 function scrub(text) {
   return redactAccessCodes(String(text || '')).trim().split(/(?<=[.!?])\s+/)
-    .filter((sentence) => !ACCESS_SENTENCE_RE.test(sentence))
+    .filter((sentence) => !ACCESS_SENTENCE_RE.test(sentence) && PEST_TALK_RE.test(sentence))
     .join(' ')
     .replace(/\S+/g, (word) => {
       const [, lead, token, trail] = /^([("'“‘]*)(.*?)([.,!?;:)"'”’]*)$/.exec(word);
       return credentialShaped(token) ? `${lead}[redacted]${trail}` : word;
     });
-}
-// A customer's reply (a text, an email body) of one to three words answers
-// a Waves question left out here, and may be the code it asked for
-// ("blue", "open sesame"): it is left out.
-function scrubReply(text) {
-  return String(text || '').trim().split(/\s+/).length <= 3 ? '' : scrub(text);
 }
 // The communication's calendar day in Eastern time (an 8 PM text is still
 // that day in Florida).
@@ -338,11 +337,13 @@ function wavesSentEmail(email) {
   return labels.includes('SENT') || /@wavespestcontrol\.com\s*>?\s*$/i.test(String(email?.from_address || ''));
 }
 
-// Only what the customer wrote (quoted history and signature stripped, so a
-// quoted Waves promise is never read as theirs), scrubbed before the preview
-// is cut.
+// Only what the customer wrote: the body (an HTML-only body converted, its
+// quoted blocks dropped), quoted history and signature stripped so a quoted
+// Waves promise is never read as theirs, and scrubbed before the preview is
+// cut. Never Gmail's snippet, which can run the quoted thread into the reply
+// without the markers the stripper needs.
 function customerEmailText(email) {
-  return compactText(scrubReply(stripQuotedAndSignature(String(email.body_text || '').trim() || String(email.snippet || ''))), 260);
+  return compactText(scrub(stripQuotedAndSignature(emailPlainText(email))), 260);
 }
 
 const CALLER = { inbound: 'the customer called', outbound: 'Waves called the customer' };
@@ -390,7 +391,7 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
     keep: (row) => row.direction === 'inbound' && row.message_type !== 'sms_reaction' && !isSmsReaction(row.message_body),
     max: 8,
     line: (row) => {
-      const summary = compactText(scrubReply(row.message_body), 260);
+      const summary = compactText(scrub(row.message_body), 260);
       return summary && `Customer text ${etDay(row.created_at)}: ${summary}`;
     },
     ts: (row) => row.created_at,
@@ -402,9 +403,11 @@ const CUSTOMER_WORDS_CHANNELS = Object.freeze([
       .where('received_at', '>=', floor)
       .whereRaw("NOT (COALESCE(label_ids, '[]'::jsonb) @> '[\"SENT\"]'::jsonb)")
       .whereRaw("COALESCE(from_address, '') NOT ILIKE '%@wavespestcontrol.com%'")
-      .select('received_at', 'snippet', 'body_text', 'from_address', 'label_ids')
+      .select('received_at', 'body_text', 'body_html', 'from_address', 'label_ids')
       .orderBy('received_at', 'desc')
-      .limit(6),
+      // Over-fetch: quoted-only and off-topic mail is dropped below before
+      // six are kept.
+      .limit(24),
     keep: (row) => !wavesSentEmail(row),
     max: 6,
     // The body only: a reply's subject keeps what Waves wrote ("Re:

@@ -211,6 +211,14 @@ describe('writerRulesRejection', () => {
     ['We will not charge for the follow-up.', 'price'],
     ['Your next visit is scheduled for 10/7.', 'date'],
     ['We will be back on 2026-10-07.', 'date'],
+    ['No pest activity was observed by the technician today.', 'unscoped_absence'],
+    ['No pest activity of any kind was found.', 'unscoped_absence'],
+    ['There was no pest activity today.', 'unscoped_absence'],
+    ['No activity was found at your home.', 'unscoped_absence'],
+    ['We will return Tuesday.', 'date'],
+    ["We'll be back tomorrow.", 'date'],
+    ['See you next week.', 'date'],
+    ['Bacillus thuringiensis israelensis went into the pond.', 'active_ingredient'],
   ])('rejects %j (%s)', (copy, reason) => {
     expect(writerRulesRejection(copy)).toBe(reason);
   });
@@ -231,6 +239,9 @@ describe('writerRulesRejection', () => {
     expect(writerRulesRejection('We will recheck 4/5 stations at the next visit.')).toBeNull();
     expect(writerRulesRejection('On 9/15 you mentioned ants by the sink.')).toBeNull();
     expect(writerRulesRejection('The technician in charge of your route checked the lanai.')).toBeNull();
+    expect(writerRulesRejection('The other 10 stations showed no termite activity.')).toBeNull();
+    expect(writerRulesRejection('We saw none at the front.')).toBeNull();
+    expect(writerRulesRejection('You mentioned ants came back on Tuesday.')).toBeNull();
     expect(writerRulesRejection('On September 15, we noted activity near the sink.')).toBeNull();
     expect(writerRulesRejection('September 15 at your last visit showed ants at the slider.')).toBeNull();
     expect(writerRulesRejection('The station was covered by mulch.')).toBeNull();
@@ -263,6 +274,10 @@ describe('writerRulesRejection', () => {
   test('a dry cabinet or a note about rain is not re-entry wording', () => {
     expect(writerRulesRejection('The cabinet under the sink was dry.')).toBeNull();
     expect(writerRulesRejection('About 1.4 inches of rain fell after the rain dried up the week before.')).toBeNull();
+  });
+
+  test("the catalog's taxonomic Bti name still screens the Bti alias", () => {
+    expect(writerRulesRejection('We placed Bti larvicide in the pond.', { activeIngredients: ['Bacillus thuringiensis subsp. israelensis solids'] })).toBe('active_ingredient');
   });
 
   test("this visit's catalog actives are screened as well", () => {
